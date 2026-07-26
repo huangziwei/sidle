@@ -27,7 +27,7 @@ use crate::formats::epub::edit::{EpubPackage, escape_attr, escape_text};
 use crate::formats::epub::nav_doc::{
     depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav,
 };
-use crate::formats::epub::page_shape::single_image_source;
+use crate::formats::epub::page_shape::image_only_source;
 use crate::formats::epub::structure::{
     MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, relativize, resolve_href,
     spine_documents, strip_fragment,
@@ -384,12 +384,14 @@ fn unlink_outside(content: &[u8], doc_dir: &str, kept: &HashSet<&str>) -> Option
     Some(out.into_bytes())
 }
 
-/// The image a volume's cover page shows, as an absolute zip path.
+/// The image a volume's cover page shows, as an absolute zip path. A page that
+/// runs the cover together with a frontispiece or a title plate shows the cover
+/// first, so the first image is the one that stands for the volume.
 fn cover_image(pkg: &EpubPackage, cut: &Cut) -> Option<String> {
     let page = cut.cover.as_deref()?;
     let bytes = pkg.get(page)?;
     let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
-    let src = single_image_source(&xhtml)?;
+    let src = image_only_source(&xhtml)?;
     let abs = resolve_href(&dir_of(page), src);
     pkg.contains(&abs).then_some(abs)
 }
@@ -536,23 +538,53 @@ struct Candidate<'a> {
     label: &'a str,
 }
 
+/// A chosen volume start: the candidate it is, and the number its label stated
+/// if the evidence that chose it read one.
+struct Start {
+    candidate: usize,
+    number: Option<f64>,
+}
+
+impl Start {
+    /// A start chosen by the shape of its page, which says nothing about which
+    /// volume it is.
+    fn unnumbered(candidate: usize) -> Self {
+        Start {
+            candidate,
+            number: None,
+        }
+    }
+}
+
 fn cuts(pkg: &EpubPackage, opf: &OpfData, opf_base: &str, toc: &[TocEntry]) -> Vec<Cut> {
     let spine = spine_documents(opf, opf_base);
     let spine_files: HashSet<&str> = spine.iter().map(|(_, b)| b.as_str()).collect();
     let candidates = candidates(toc, &spine);
-    let starts = volume_starts(pkg, &spine, &spine_files, &candidates);
+    let starts = volume_starts(
+        pkg,
+        &spine,
+        &spine_files,
+        &candidates,
+        toc,
+        &opf.metadata.title,
+        &opf.metadata.authors,
+    );
     if starts.len() < 2 {
         // One volume is not a collection, and neither is none.
         return Vec::new();
     }
 
-    let first = volume_first_documents(pkg, &spine, &candidates, &starts);
+    let at: Vec<usize> = starts
+        .iter()
+        .map(|s| candidates[s.candidate].spine_index)
+        .collect();
+    let first = volume_first_documents(pkg, &spine, &at);
     let mut cuts: Vec<Cut> = Vec::new();
-    for (n, &start) in starts.iter().enumerate() {
-        let label = candidates[start].label;
+    for (n, start) in starts.iter().enumerate() {
+        let label = candidates[start.candidate].label;
         let from = first[n];
         let to = first.get(n + 1).copied().unwrap_or(spine.len());
-        let (number, numbering) = number_after(cuts.last(), label, n);
+        let (number, numbering) = number_after(cuts.last(), label, n, start.number);
         cuts.push(Cut {
             spine_index: from,
             documents: to - from,
@@ -583,12 +615,10 @@ fn cuts(pkg: &EpubPackage, opf: &OpfData, opf_base: &str, toc: &[TocEntry]) -> V
 fn volume_first_documents(
     pkg: &EpubPackage,
     spine: &[(String, String)],
-    candidates: &[Candidate<'_>],
-    starts: &[usize],
+    named: &[usize],
 ) -> Vec<usize> {
-    let named: Vec<usize> = starts.iter().map(|&n| candidates[n].spine_index).collect();
     let mut fronted: Vec<usize> = Vec::with_capacity(named.len());
-    for &i in &named {
+    for &i in named {
         // Never back into the volume before — its own first document is the
         // floor — and never onto the collection's first document, which is the
         // collection's whatever shape it has.
@@ -605,11 +635,11 @@ fn volume_first_documents(
         }
         fronted.push(first);
     }
-    let moved = fronted.iter().zip(&named).filter(|(f, i)| f < i).count();
+    let moved = fronted.iter().zip(named).filter(|(f, i)| f < i).count();
     if moved * 2 > named.len() {
         fronted
     } else {
-        named
+        named.to_vec()
     }
 }
 
@@ -657,25 +687,33 @@ fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candid
     out
 }
 
-/// Which candidates are volume starts, as indices into `candidates`.
+/// Which candidates are volume starts.
 ///
-/// A volume announces itself with its own front matter, and the two forms that
-/// takes are not equally telling:
+/// A volume announces itself either by the page it opens on or by what the
+/// chapter list calls it, and the three forms are not equally telling — each is
+/// read only where the one before it found nothing:
 ///
-/// - **Its own cover** — a full-bleed image page. Strong, because in an ordinary
+/// - **Its own cover** — a page of pictures. Strong, because in an ordinary
 ///   book nothing but a cover looks like that; but the collection as a whole
 ///   still has to hold up ([`reads_as_a_collection`]), since plenty of books are
 ///   pictures from end to end.
 /// - **Its own Contents page** — a page listing what follows it. Weaker, because
 ///   any chapter carrying a few cross-references looks the same from outside, so
-///   it is held to a stricter test ([`contents_page_starts`]) and read only
-///   where the cover signal found nothing.
+///   it is held to a stricter test ([`contents_page_starts`]).
+/// - **What the list calls it** ([`named_as_a_series`]) — for the collections
+///   whose volumes open on neither: a text title page shows nothing, and a
+///   publisher who draws a volume's Contents page as a picture leaves no links
+///   to count. Weakest, because an ordinary novel's chapters are numbered and
+///   share a stem too, so it leans hardest on what each entry has under it.
 fn volume_starts(
     pkg: &EpubPackage,
     spine: &[(String, String)],
     spine_files: &HashSet<&str>,
     candidates: &[Candidate<'_>],
-) -> Vec<usize> {
+    toc: &[TocEntry],
+    title: &str,
+    authors: &[String],
+) -> Vec<Start> {
     let covers: Vec<usize> = candidates
         .iter()
         .enumerate()
@@ -683,9 +721,295 @@ fn volume_starts(
         .map(|(n, _)| n)
         .collect();
     if reads_as_a_collection(pkg, spine, spine_files, candidates, &covers) {
-        return covers;
+        return covers.into_iter().map(Start::unnumbered).collect();
     }
-    contents_page_starts(pkg, spine, spine_files, candidates)
+    let contents = contents_page_starts(pkg, spine, spine_files, candidates);
+    if contents.len() >= 2 {
+        return contents.into_iter().map(Start::unnumbered).collect();
+    }
+    named_as_a_series(spine, candidates, toc, title, authors)
+}
+
+/// The candidates the chapter list names as a series, with the numbers it
+/// states — read when neither the page a volume opens on nor a Contents page of
+/// its own told the volumes from the matter listed beside them.
+///
+/// Two ways a list names a series, and a collection uses one or the other:
+///
+/// - **A running count.** The labels share a stem and differ by a number that
+///   climbs: `BOOK 1: …`, `BOOK 2: …`. The stem is whatever precedes the first
+///   digit, so `第3巻` and `Vol. 3` read as readily as `BOOK 3` — and the number
+///   is stated rather than counted, which is worth keeping.
+/// - **The work's own name, repeated.** Each volume's label opens with the name
+///   the book gives itself and its own subtitle follows. Held to the book's
+///   `dc:title` rather than to a stem the labels merely share: twelve labels
+///   reading exactly `目次` share a stem too, and none of them is the work.
+///
+/// Both are then held to the same thing, per entry: an entry that names a
+/// volume has a volume under it ([`carries_a_volume`]). Labels alone would read
+/// an ordinary novel's chapters as a series — numbered, sharing a stem — and
+/// what separates them is that a chapter lists no chapters of its own.
+fn named_as_a_series(
+    spine: &[(String, String)],
+    candidates: &[Candidate<'_>],
+    toc: &[TocEntry],
+    title: &str,
+    authors: &[String],
+) -> Vec<Start> {
+    let entries = entry_positions(toc, spine);
+    // A count of two is the commonest shape in publishing — every novel with a
+    // Book One and a Book Two — so a count has to reach three before it reads
+    // as a series. A work's name repeated needs no such margin: a book does not
+    // name its own halves after itself unless they were published that way.
+    for (chosen, least) in [
+        (counted_labels(candidates), 3),
+        (title_bearing_labels(candidates, title, authors), 2),
+    ] {
+        let kept = carries_a_volume(spine, candidates, &entries, chosen);
+        if kept.len() >= least {
+            return kept;
+        }
+    }
+    Vec::new()
+}
+
+/// Every chapter-list entry as a spine index, its children included and in no
+/// particular order — how much of the book an entry has under it is a count,
+/// not a sequence.
+fn entry_positions(toc: &[TocEntry], spine: &[(String, String)]) -> Vec<usize> {
+    let at: std::collections::HashMap<&str, usize> = spine
+        .iter()
+        .enumerate()
+        .map(|(i, (abs, _))| (abs.as_str(), i))
+        .collect();
+    let mut out = Vec::new();
+    let mut stack: Vec<&TocEntry> = toc.iter().collect();
+    while let Some(entry) = stack.pop() {
+        if let Some(&i) = at.get(strip_fragment(&entry.href)) {
+            out.push(i);
+        }
+        stack.extend(entry.children.iter());
+    }
+    out
+}
+
+/// The starts with a volume under them: the chapter list names entries inside
+/// the span each one opens, beyond the start's own document.
+///
+/// This is what makes a label signal usable at all. A chapter is one document
+/// the list names once; a volume is a run of them the list names throughout.
+/// Dropping an entry only ever lengthens its neighbours' spans, so what
+/// survives one pass survives.
+fn carries_a_volume(
+    spine: &[(String, String)],
+    candidates: &[Candidate<'_>],
+    entries: &[usize],
+    chosen: Vec<Start>,
+) -> Vec<Start> {
+    let at = |s: &Start| candidates[s.candidate].spine_index;
+    chosen
+        .iter()
+        .enumerate()
+        .filter(|(n, start)| {
+            let from = at(start);
+            let to = chosen.get(n + 1).map_or(spine.len(), at);
+            entries.iter().filter(|&&i| i > from && i < to).count() >= MIN_SECTION_CONTENTS_LINKS
+        })
+        .map(|(_, start)| Start {
+            candidate: start.candidate,
+            number: start.number,
+        })
+        .collect()
+}
+
+/// The largest run of candidates whose labels count volumes up from a shared
+/// stem, in the book's own order.
+fn counted_labels(candidates: &[Candidate<'_>]) -> Vec<Start> {
+    let mut stems: Vec<(&str, Vec<Start>)> = Vec::new();
+    for (n, c) in candidates.iter().enumerate() {
+        let Some((stem, number)) = counted_volume(c.label) else {
+            continue;
+        };
+        let start = Start {
+            candidate: n,
+            number: Some(number),
+        };
+        match stems.iter_mut().find(|(s, _)| *s == stem) {
+            Some((_, group)) => group.push(start),
+            None => stems.push((stem, vec![start])),
+        }
+    }
+    stems
+        .into_iter()
+        .map(|(_, group)| group)
+        // A count only counts if it climbs: a stem shared by labels whose
+        // numbers wander is a coincidence of wording, not a numbering.
+        .filter(|group| group.windows(2).all(|w| w[0].number < w[1].number))
+        .max_by_key(Vec::len)
+        .unwrap_or_default()
+}
+
+/// The words a Latin-script label numbers *volumes* with. `part`, `chapter`,
+/// `section` and `act` are deliberately absent for exactly the reason 章 and 話
+/// are absent from [`VOLUME_COUNTERS`]: they number the divisions of one book,
+/// which is what a volume contains. This vocabulary is the whole of the
+/// signal's precision — a novel in four `PART n`s and a textbook in ten `第n章`s
+/// are otherwise shaped exactly like a ten-volume set.
+const VOLUME_WORDS: [&str; 3] = ["book", "volume", "vol"];
+
+/// What a label reads as a counted volume: the stem it counts from, and the
+/// number. `None` unless the stem says it is counting volumes.
+fn counted_volume(label: &str) -> Option<(&str, f64)> {
+    // A CJK counter construction names its own counter, and `counted_number`
+    // already holds it to one that counts volumes. Every such label shares a
+    // stem by construction — they are all `第…`.
+    if let Some(number) = counted_number(label) {
+        return Some(("第", number));
+    }
+    let at = label.char_indices().find(|&(_, c)| is_digit(c))?.0;
+    let stem = &label[..at];
+    let word = stem.trim_matches(|c: char| !c.is_alphanumeric());
+    if !VOLUME_WORDS.iter().any(|v| word.eq_ignore_ascii_case(v)) {
+        return None;
+    }
+    let len: usize = label[at..]
+        .chars()
+        .take_while(|&c| is_numeral(c))
+        .map(char::len_utf8)
+        .sum();
+    Some((stem, read_numerals(&label[at..at + len])?))
+}
+
+fn is_digit(c: char) -> bool {
+    c.is_ascii_digit() || ('０'..='９').contains(&c)
+}
+
+/// Candidates whose labels open with the name the book gives itself.
+///
+/// The shortest stem that can name a work is four characters — below that a
+/// stem is an article or a particle, and every label starts with one.
+const MIN_WORK_NAME: usize = 4;
+
+fn title_bearing_labels(
+    candidates: &[Candidate<'_>],
+    title: &str,
+    authors: &[String],
+) -> Vec<Start> {
+    let named_by = |stem: &str| {
+        candidates
+            .iter()
+            .filter(|c| c.label.starts_with(stem))
+            .count()
+    };
+    // The stem that names the most entries, not the longest one. A collection's
+    // own 目次 and 奥付 are labelled with the whole of its title — banner, volume
+    // count and all — which is a longer stem than the volumes carry and names
+    // two entries that are not volumes.
+    let Some(stem) = candidates
+        .iter()
+        .filter_map(|c| title_borne_prefix(c.label, title))
+        .filter(|stem| !names_the_author(stem, authors) && tells_volumes_apart(candidates, stem))
+        .max_by_key(|stem| (named_by(stem), stem.len()))
+    else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.label.starts_with(stem))
+        .map(|(n, _)| Start::unnumbered(n))
+        .collect()
+}
+
+/// Whether a stem is the author's name rather than the work's. A book titled
+/// for whoever wrote it — an interview collection, a companion volume — puts
+/// that name at the head of its own title and at the head of every section, and
+/// nothing about that is a series.
+fn names_the_author(stem: &str, authors: &[String]) -> bool {
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let stem = squash(stem);
+    authors.iter().any(|a| squash(a).starts_with(&stem))
+}
+
+/// Whether `stem` picks out entries a reader could tell apart: at least two of
+/// them, each saying something of its own after it.
+///
+/// Volumes are distinguished by what follows the work's name — a subtitle, a
+/// number, an 上/下. An entry with nothing after it *is* the work rather than a
+/// volume of it, and two entries saying the same thing are one thing listed
+/// twice; both are what a book holding a story of its own name looks like from
+/// here.
+fn tells_volumes_apart(candidates: &[Candidate<'_>], stem: &str) -> bool {
+    let mut rest: Vec<&str> = candidates
+        .iter()
+        .filter_map(|c| c.label.strip_prefix(stem))
+        .collect();
+    let found = rest.len();
+    rest.sort_unstable();
+    rest.dedup();
+    found >= 2 && rest.len() == found && rest.iter().all(|r| !r.trim().is_empty())
+}
+
+/// The longest prefix `label` shares with the name the book gives itself.
+///
+/// Shares with the *head* of the title, not found anywhere inside it. A work's
+/// name is what its title opens on; a noun from the middle of a title is a
+/// coincidence, and a book whose sections are all phrased around its subject
+/// will have several of them starting with that noun.
+fn title_borne_prefix<'a>(label: &'a str, title: &str) -> Option<&'a str> {
+    let head = title_head(title);
+    let mut longest = None;
+    for (i, c) in label.char_indices() {
+        let prefix = &label[..i + c.len_utf8()];
+        if !head.starts_with(prefix) {
+            break;
+        }
+        longest = Some(prefix);
+    }
+    longest.filter(|p| names_a_work(p.trim()))
+}
+
+/// Whether a stem is long enough to be a work's name.
+///
+/// Four characters, in a script that runs them together. A script that
+/// separates words needs two of them instead: four characters is one short
+/// word there, and the word a title opens on is as often an article or an
+/// interrogative — which every section of a book phrased as questions also
+/// opens on.
+fn names_a_work(name: &str) -> bool {
+    if name.chars().count() < MIN_WORK_NAME {
+        return false;
+    }
+    !name.chars().any(|c| c.is_ascii_alphabetic()) || name.split_whitespace().count() >= 2
+}
+
+/// The brackets a title's opening banner is written in.
+const BANNER_BRACKETS: [(char, char); 6] = [
+    ('【', '】'),
+    ('［', '］'),
+    ('[', ']'),
+    ('（', '）'),
+    ('(', ')'),
+    ('＜', '＞'),
+];
+
+/// A title with the banners it opens on taken off — a bracketed `合本版`, a
+/// volume count, a `[Boxed Set]`. A collection labels itself in front of its
+/// own name, and the name is what its volumes carry.
+fn title_head(title: &str) -> &str {
+    let mut head = title.trim_start();
+    loop {
+        let Some(&(_, close)) = BANNER_BRACKETS
+            .iter()
+            .find(|(open, _)| head.starts_with(*open))
+        else {
+            return head;
+        };
+        let Some(at) = head.find(close) else {
+            return head;
+        };
+        head = head[at + close.len_utf8()..].trim_start();
+    }
 }
 
 /// Whether cover-shaped starts really divide a collection: most of them own a
@@ -771,12 +1095,12 @@ fn linked_documents(
         .collect()
 }
 
-/// The document's own zip path when it is a full-bleed image page — a volume's
-/// cover — and `None` when it is anything else.
+/// The document's own zip path when it is a page of pictures — how a volume's
+/// cover is authored — and `None` when it is anything else.
 fn cover_page(pkg: &EpubPackage, abs: &str) -> Option<String> {
     let bytes = pkg.get(abs)?;
     let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
-    single_image_source(&xhtml)?;
+    image_only_source(&xhtml)?;
     Some(abs.to_string())
 }
 
@@ -786,15 +1110,25 @@ fn cover_page(pkg: &EpubPackage, abs: &str) -> Option<String> {
 
 /// The number to give the volume `label` names, following `previous`.
 ///
+/// `stated` is a number the evidence that chose this volume already read off
+/// the label — [`named_as_a_series`] reads one to find the volumes at all — and
+/// it stands in for what [`volume_number`] would find. Both are labels stating
+/// their own number; which of them read it is not a difference worth keeping.
+///
 /// A label is believed only where it continues the numbering: an index that goes
 /// backwards is not this volume's place in the series, it is a number that
 /// happens to be in its title. A collection that runs its main line to
 /// twenty-seven and then ships side stories numbered from one again is counting
 /// two different things, and the volume's place in the collection is the one
 /// being asked for.
-fn number_after(previous: Option<&Cut>, label: &str, index: usize) -> (f64, Numbering) {
+fn number_after(
+    previous: Option<&Cut>,
+    label: &str,
+    index: usize,
+    stated: Option<f64>,
+) -> (f64, Numbering) {
     let previous = previous.map(|c| c.number);
-    match volume_number(label) {
+    match stated.or_else(|| volume_number(label)) {
         Some(n) if previous.is_none_or(|p| n > p) => (n, Numbering::Label),
         // Counting on from the volume before rather than from the position, so
         // a collection that starts at volume ten keeps counting from ten.
@@ -1291,7 +1625,7 @@ mod tests {
                 number: previous,
                 numbering: Numbering::Label,
             };
-            number_after(Some(&cut), label, index)
+            number_after(Some(&cut), label, index, None)
         };
         // A side story numbered 1, shipped as the twenty-ninth volume, is the
         // twenty-ninth volume.
@@ -1302,6 +1636,66 @@ mod tests {
         // A collection that starts at ten keeps counting from ten.
         assert_eq!(after(10.0, "無題", 1), (11.0, Numbering::Sequence));
         // With nothing before it, an unnumbered volume takes its position.
-        assert_eq!(number_after(None, "無題", 0), (1.0, Numbering::Sequence));
+        assert_eq!(
+            number_after(None, "無題", 0, None),
+            (1.0, Numbering::Sequence)
+        );
+    }
+
+    /// A number the detection already read off the label is the label stating
+    /// it, and is held to the same rule: believed where it climbs, dropped
+    /// where it does not.
+    #[test]
+    fn a_number_read_while_finding_the_volume_counts_as_the_label_stating_it() {
+        let previous = Cut {
+            spine_index: 0,
+            documents: 1,
+            label: String::new(),
+            cover: None,
+            number: 4.0,
+            numbering: Numbering::Label,
+        };
+        // The label alone says nothing; the counter the detector read does.
+        assert_eq!(
+            number_after(Some(&previous), "BOOK 5: THE SUBTITLE", 4, Some(5.0)),
+            (5.0, Numbering::Label)
+        );
+        assert_eq!(volume_number("BOOK 5: THE SUBTITLE"), None);
+        assert_eq!(
+            number_after(Some(&previous), "BOOK 2: THE SUBTITLE", 4, Some(2.0)),
+            (5.0, Numbering::Sequence)
+        );
+    }
+
+    /// A label counts volumes only where its own words say it is counting
+    /// volumes. Everything numbers something; a part, a chapter and an act
+    /// number the insides of one book.
+    #[test]
+    fn only_a_label_that_counts_volumes_is_read_as_counting_them() {
+        assert_eq!(counted_volume("BOOK 1: THE SUBTITLE"), Some(("BOOK ", 1.0)));
+        assert_eq!(counted_volume("Vol. 10.5"), Some(("Vol. ", 10.5)));
+        assert_eq!(counted_volume("Volume 2"), Some(("Volume ", 2.0)));
+        assert_eq!(counted_volume("第３巻"), Some(("第", 3.0)));
+
+        // The divisions of one book, however they are spelled.
+        assert_eq!(counted_volume("PART 1 THE SUBTITLE"), None);
+        assert_eq!(counted_volume("Chapter 4"), None);
+        assert_eq!(counted_volume("第1章　概要"), None);
+        assert_eq!(counted_volume("About the Author"), None);
+    }
+
+    /// A stem is the work's name only if the book calls itself that. Every
+    /// volume of a collection carries a 目次, so twelve labels reading exactly
+    /// `目次` share a stem perfectly — and none of them is a volume.
+    #[test]
+    fn a_stem_names_the_work_only_where_the_books_own_title_carries_it() {
+        let title = "【合本版】異世界の物語　全12巻 (文庫)";
+        assert_eq!(
+            title_borne_prefix("異世界の物語　ウサギが呼びました", title),
+            Some("異世界の物語　")
+        );
+        assert_eq!(title_borne_prefix("目次", title), None);
+        // Too short to be a name: the title contains it, but so would anything.
+        assert_eq!(title_borne_prefix("全1巻のこと", title), None);
     }
 }

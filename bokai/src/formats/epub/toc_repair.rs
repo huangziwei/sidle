@@ -197,14 +197,15 @@ struct VolumeGroup {
 /// The volume groupings a book declares about itself, in spine order.
 ///
 /// Deliberately narrow, because the signals are individually weak. A volume
-/// start must be all three of: a full-bleed image page, a page the TOC actually
+/// start must be all three of: a page of pictures, a page the TOC actually
 /// points at (`targets` — an illustration plate is an image page too, and a
 /// light novel carries hundreds), and not the first spine document (the book's
 /// own cover starts no volume). A start then only forms a group if a Contents
-/// page within its span names its chapters. A book with fewer than two such
-/// starts, or a volume whose span has no Contents page, yields nothing — so a
-/// book with no volume structure is never invented one, and back matter that no
-/// volume's Contents page lists is never swallowed by the volume in front of it.
+/// page within its span names its chapters, and fewer than two groups is no
+/// collection — one volume never was one, and a book that forms exactly one has
+/// found its own front matter rather than a volume. So a book with no volume
+/// structure is never invented one, and back matter that no volume's Contents
+/// page lists is never swallowed by the volume in front of it.
 fn volume_groups(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -225,7 +226,7 @@ fn volume_groups(
         .skip(1)
         .filter(|(_, (abs, _))| {
             targets.contains(abs.as_str())
-                && read(abs).is_some_and(|x| super::page_shape::is_single_image_page(&x))
+                && read(abs).is_some_and(|x| super::page_shape::is_image_only_page(&x))
         })
         .map(|(i, _)| i)
         .collect();
@@ -255,7 +256,7 @@ fn volume_groups(
             break;
         }
     }
-    groups
+    if groups.len() < 2 { Vec::new() } else { groups }
 }
 
 /// Re-parent a flat entry list into the volumes [`volume_groups`] found: an
@@ -1557,6 +1558,114 @@ mod tests {
     fn a_single_volume_book_is_left_flat() {
         let proposed = propose_toc(&flat_omnibus_epub(1)).unwrap();
         assert_eq!(flat_count(&proposed), proposed.len());
+        assert!(proposed.iter().all(|e| e.children.is_empty()));
+    }
+
+    /// An ordinary novel: a title page of two publisher logos and a plate, both
+    /// pages of pictures the TOC points at, and a back-matter list of the
+    /// author's other books that reads as link-dense as any Contents page. Two
+    /// starts, but only the title page's span holds that list, so only one
+    /// group can form — and a book is not a collection of one. Counting starts
+    /// instead of groups nested the whole novel under its own title page.
+    fn novel_with_a_pictorial_title_page() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let mut add = |name: &str, body: &str| {
+                zip.start_file(name, stored).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            };
+            add("mimetype", "application/epub+zip");
+            add(
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            let page = |body: &str| {
+                format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>A Novel</title></head><body>{body}</body></html>"#
+                )
+            };
+            let docs: Vec<(&str, String, Option<&str>)> = vec![
+                (
+                    "cover.xhtml",
+                    page(r#"<img src="cover.jpg" alt=""/>"#),
+                    None,
+                ),
+                (
+                    "title.xhtml",
+                    page(
+                        r#"<p><img src="logo.jpg" alt=""/></p><p><img src="press.jpg" alt=""/></p>"#,
+                    ),
+                    Some("Title Page"),
+                ),
+                (
+                    "alsoby.xhtml",
+                    page(
+                        r#"<a href="c1.xhtml">A Novel</a><a href="c2.xhtml">Another Novel</a><a href="c3.xhtml">A Third</a>"#,
+                    ),
+                    Some("Also by the Author"),
+                ),
+                ("c1.xhtml", page("<p>One.</p>"), Some("1 The First")),
+                ("c2.xhtml", page("<p>Two.</p>"), Some("2 The Second")),
+                (
+                    "plate.xhtml",
+                    page(r#"<img src="map.jpg" alt=""/>"#),
+                    Some("Map"),
+                ),
+                ("c3.xhtml", page("<p>Three.</p>"), Some("3 The Third")),
+            ];
+            let mut manifest = String::new();
+            let mut spine = String::new();
+            let mut navpoints = String::new();
+            for (order, (file, body, label)) in docs.iter().enumerate() {
+                add(&format!("OEBPS/{file}"), body);
+                manifest.push_str(&format!(
+                    r#"<item id="d{order}" href="{file}" media-type="application/xhtml+xml"/>"#
+                ));
+                spine.push_str(&format!(r#"<itemref idref="d{order}"/>"#));
+                if let Some(label) = label {
+                    navpoints.push_str(&format!(
+                        r#"<navPoint id="np{order}" playOrder="{order}"><navLabel><text>{label}</text></navLabel><content src="{file}"/></navPoint>"#
+                    ));
+                }
+            }
+            add(
+                "OEBPS/content.opf",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>A Novel</dc:title><dc:language>en</dc:language><dc:identifier id="uid">urn:uuid:novel</dc:identifier></metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>{manifest}</manifest><spine toc="ncx">{spine}</spine></package>"#
+                ),
+            );
+            add(
+                "OEBPS/toc.ncx",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="urn:uuid:novel"/></head><docTitle><text>A Novel</text></docTitle><navMap>{navpoints}</navMap></ncx>"#
+                ),
+            );
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn a_book_that_forms_a_single_group_is_left_flat() {
+        let proposed = propose_toc(&novel_with_a_pictorial_title_page()).unwrap();
+        assert_eq!(
+            proposed
+                .iter()
+                .map(|e| e.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Title Page",
+                "Also by the Author",
+                "1 The First",
+                "2 The Second",
+                "Map",
+                "3 The Third",
+            ],
+            "a novel is not nested under its own title page"
+        );
         assert!(proposed.iter().all(|e| e.children.is_empty()));
     }
 
