@@ -1,48 +1,120 @@
 //! What kind of page a content document is, judged from its markup alone.
 //!
-//! A page of pictures and no text is a structural marker in real books: it is
-//! how a cover is authored, and how each volume of a 合本版 or a boxed set
-//! announces itself. Two questions are asked of that shape, and they are not the
-//! same question, so they are two predicates here rather than one shared by
-//! callers who mean different things:
+//! A full-bleed plate is a structural marker in real books: it is how a cover is
+//! authored, and how each volume of a 合本版 or a boxed set announces itself.
+//! Three questions are asked of that shape, and they are not the same question,
+//! so they are three predicates here rather than one shared by callers who mean
+//! different things:
 //!
-//! - **Where does a volume begin?** — [`image_only_source`]. Any page of
-//!   pictures qualifies, however many it holds: a publisher is free to run a
-//!   volume's cover, frontispiece and title plate together on one page, and it
-//!   is still the page the volume opens on.
+//! - **Does a volume open here?** — [`opening_plate_source`]. The page opens on
+//!   a plate, and whatever follows it is the publisher's business: a title
+//!   plate, a dedication, the work's own copyright notice.
+//! - **Is this page nothing but plates?** — [`is_image_only_page`], for a caller
+//!   stepping over pages rather than landing on one. A page carrying text
+//!   carries content, and content belongs to whichever volume it was set in.
 //! - **Is this document nothing but the cover?** — [`single_image_source`],
 //!   which the EPUB exporter uses to drop a source cover page it is about to
 //!   emit a second time. One image, because a page carrying a title plate as
 //!   well is not a duplicate of anything and dropping it would lose the plate.
+//!
+//! Images count in both shapes throughout, raster (`<img src>`) and SVG-wrapped
+//! (`<image href>` / `xlink:href`), and text is judged on the body alone, so a
+//! `<head><title>` never counts against a page.
+//!
+//! One page is read for what it says rather than how it looks —
+//! [`states_own_rights`], the copyright notice a separately published book is
+//! bound with. That is a fact about publication, not about layout, and there is
+//! no shape it can be recognized by.
 
-/// The source of the first image on a page of pictures — a document whose body
-/// holds at least one image and renders no text of its own — or `None` when the
-/// document is anything else.
+/// The plate a page opens on — the source of its first image, when the body
+/// renders no text in front of it — or `None` for a page that opens on text.
 ///
-/// Images count in both shapes, raster (`<img src>`) and SVG-wrapped
-/// (`<image href>` / `xlink:href`), and the first in document order is the one
-/// that names the page: on a volume's opening page that is its cover, with the
-/// title plate behind it. Text is judged on the body only, so a
-/// `<head><title>` never counts against a page.
-pub(crate) fn image_only_source(html: &str) -> Option<&str> {
+/// This is what marks the start of a volume, and the plate is its cover: a book
+/// bound into a collection keeps the front matter it was published with, and
+/// that front matter opens on the cover. What comes after the plate is set
+/// however the publisher liked. Some run the cover alone on the page, some run
+/// the title plate behind it, and some carry straight on into the work's own
+/// copyright notice — all three are one book beginning, and only the plate in
+/// front is common to them.
+pub(crate) fn opening_plate_source(html: &str) -> Option<&str> {
     let body = body_of(html);
-    renders_no_text(body).then(|| first_image_source(body))?
+    let (at, src) = first_image(body)?;
+    renders_no_text(&body[..at]).then_some(src)
 }
 
 /// The image source of a single-image, text-free document, or `None` when the
-/// document is anything else — [`image_only_source`] held to exactly one image.
+/// document is anything else — [`is_image_only_page`] held to exactly one image.
 pub(crate) fn single_image_source(html: &str) -> Option<&str> {
     let body = body_of(html);
     // `<img` is not a prefix of `<image`, so the two counts never overlap.
     if body.matches("<img").count() + body.matches("<image").count() != 1 {
         return None;
     }
-    image_only_source(html)
+    let (_, src) = first_image(body)?;
+    renders_no_text(body).then_some(src)
 }
 
-/// Whether a document is a page of pictures — see [`image_only_source`].
+/// Whether a document is a page of pictures and nothing else: at least one
+/// image, and no text anywhere in the body.
 pub(crate) fn is_image_only_page(html: &str) -> bool {
-    image_only_source(html).is_some()
+    let body = body_of(html);
+    first_image(body).is_some() && renders_no_text(body)
+}
+
+/// The copyright sign, and the references markup writes it with instead. The
+/// last two are one reference spelled two ways; both are in the wild.
+const COPYRIGHT_SIGN: &str = "\u{a9}";
+const COPYRIGHT_REFERENCES: [&str; 4] = ["&copy;", "&#169;", "&#xa9;", "&#x00a9;"];
+
+/// How far from the sign the year may sit and still be part of the same notice.
+/// Wide enough for the rights holder's name to come between them — `© Tom
+/// Doherty Associates, LLC 2001` — and no wider.
+const NOTICE_SPAN: usize = 48;
+
+/// Whether a page carries a work's own rights statement.
+///
+/// This is the one thing only a separately published book has. A part of a book
+/// has a title, a cover plate and chapters under it exactly as a book does, and
+/// nothing in its shape says which it is — but nobody sets a copyright notice at
+/// the head of chapter seven. So where a collection's volumes carry one each,
+/// that is the fact that they were published apart, stated by the publisher.
+///
+/// Read from the notice's own form rather than from any wording: the copyright
+/// sign, beside a four-digit year. The Berne convention fixed that form, and it
+/// is written the same in every language a book is set in — where the words
+/// around it ("all rights reserved", 「無断複製を禁じます」) are not. A sign
+/// with no year beside it is a credit line, not a notice: an illustrator's
+/// `© Christopher Michel` under a photograph says nothing about who published
+/// the book it is in.
+pub(crate) fn states_own_rights(html: &str) -> bool {
+    // References are folded back into the sign first, so the scan below has one
+    // thing to look for however the document happened to spell it.
+    let mut body = body_of(html).to_ascii_lowercase();
+    for reference in COPYRIGHT_REFERENCES {
+        if body.contains(reference) {
+            body = body.replace(reference, COPYRIGHT_SIGN);
+        }
+    }
+    body.match_indices(COPYRIGHT_SIGN).any(|(at, sign)| {
+        let after = at + sign.len();
+        states_a_year(&body[after..window_end(&body, after)])
+    })
+}
+
+/// The end of a [`NOTICE_SPAN`]-long window from `at`, on a character boundary.
+fn window_end(text: &str, at: usize) -> usize {
+    let mut end = (at + NOTICE_SPAN).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Whether `text` holds a four-digit run that reads as a year — exactly four, so
+/// that the digits of an ISBN or a street address are not mistaken for one.
+fn states_a_year(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_digit())
+        .any(|run| run.len() == 4 && matches!(run.as_bytes()[0], b'1' | b'2'))
 }
 
 /// The document's body, or the whole of it when it declares none.
@@ -56,8 +128,10 @@ fn body_of(html: &str) -> &str {
     }
 }
 
-/// The source of the first image in `body`, in document order.
-fn first_image_source(body: &str) -> Option<&str> {
+/// The first image in `body` in document order, as `(where its tag opens, its
+/// source)` — the offset is what tells a plate a page opens on from one set
+/// partway down it.
+fn first_image(body: &str) -> Option<(usize, &str)> {
     // Searching bare `href="` also finds the `xlink:href="` an SVG wrapper uses.
     let at = |tag: &str, attr| body.find(tag).map(|i| (i, attr));
     let (from, attr) = match (at("<img", "src=\""), at("<image", "href=\"")) {
@@ -67,7 +141,7 @@ fn first_image_source(body: &str) -> Option<&str> {
     body[from..]
         .split_once(attr)
         .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(src, _)| src)
+        .map(|(src, _)| (from, src))
 }
 
 /// Whether a body renders no text of its own: with every tag stripped, nothing
@@ -102,8 +176,8 @@ mod tests {
             "<html><body><svg><image xlink:href=\"images/cover.jpeg\"/></svg></body></html>";
         assert_eq!(single_image_source(raster), Some("images/cover.jpeg"));
         assert_eq!(single_image_source(vector), Some("images/cover.jpeg"));
-        assert_eq!(image_only_source(raster), Some("images/cover.jpeg"));
-        assert_eq!(image_only_source(vector), Some("images/cover.jpeg"));
+        assert_eq!(opening_plate_source(raster), Some("images/cover.jpeg"));
+        assert_eq!(opening_plate_source(vector), Some("images/cover.jpeg"));
         // The head title is not body text.
         let titled =
             "<html><head><title>Cover</title></head><body><img src=\"cover.jpeg\"/></body></html>";
@@ -118,22 +192,95 @@ mod tests {
     fn a_cover_run_together_with_a_title_plate_is_still_a_page_of_pictures() {
         let pair = "<html><body><div><img src=\"cover.jpg\"/></div>\
                     <div><img src=\"title.jpg\"/></div></body></html>";
-        assert_eq!(image_only_source(pair), Some("cover.jpg"));
+        assert_eq!(opening_plate_source(pair), Some("cover.jpg"));
+        assert!(is_image_only_page(pair));
         assert_eq!(single_image_source(pair), None);
         // Whichever shape comes first names the page.
         let svg_first = "<html><body><svg><image href=\"plate.jpg\"/></svg>\
                          <img src=\"title.jpg\"/></body></html>";
-        assert_eq!(image_only_source(svg_first), Some("plate.jpg"));
+        assert_eq!(opening_plate_source(svg_first), Some("plate.jpg"));
+    }
+
+    /// The shape a Western collection sets a volume's opening on: the cover, the
+    /// title plate, and then the work's own copyright notice, all one document.
+    /// A volume opens there; but the page carries text, so nothing may step back
+    /// over it as if it were a plate.
+    #[test]
+    fn a_plate_run_into_the_works_own_front_matter_still_opens_a_volume() {
+        let html = "<html><body><figure><img src=\"Woolcover.jpg\"/></figure>\
+                    <figure><img src=\"Wooltitle.jpg\"/></figure>\
+                    <div><p>Copyright © 2012 by Hugh Howey</p></div></body></html>";
+        assert_eq!(opening_plate_source(html), Some("Woolcover.jpg"));
+        assert!(!is_image_only_page(html));
+        assert_eq!(single_image_source(html), None);
+    }
+
+    /// The notice is read by its own form — sign beside year — however the
+    /// document spelled the sign, and in whatever language the words around it
+    /// are set.
+    #[test]
+    fn a_copyright_notice_is_read_by_the_sign_beside_a_year() {
+        for sign in ["©", "&copy;", "&#169;", "&#xA9;", "&#x00a9;"] {
+            let html = format!(
+                "<html><body><p>Copyright {sign} 2012 by Hugh Howey</p>\
+                                <p>All rights reserved</p></body></html>"
+            );
+            assert!(states_own_rights(&html), "{sign} spells the sign");
+        }
+        // The rights holder may come between the sign and the year.
+        assert!(states_own_rights(
+            "<body><p>&#169; Tom Doherty Associates, LLC 2001</p></body>"
+        ));
+        // Neither the words nor the script they are set in is what is read.
+        assert!(states_own_rights(
+            "<body><p>© 2018 鴨志田一／KADOKAWA　無断複製を禁じます</p></body>"
+        ));
+    }
+
+    /// A sign with no year beside it credits a photograph; a year with no sign
+    /// is a date. Neither says who published anything.
+    #[test]
+    fn a_credit_line_is_not_a_rights_notice() {
+        assert!(!states_own_rights(
+            "<body><figcaption>© Christopher Michel</figcaption></body>"
+        ));
+        assert!(!states_own_rights(
+            "<body><p>First published in 1999 by Bantam Books</p></body>"
+        ));
+        // Nor is a year far enough past the sign to belong to another sentence.
+        assert!(!states_own_rights(
+            "<body><p>© the author. This edition was set in Bembo and printed \
+             in Great Britain in 1999.</p></body>"
+        ));
+        // A run of digits that is not four long is not a year.
+        assert!(!states_own_rights(
+            "<body><p>© ISBN 9780765310026</p></body>"
+        ));
+    }
+
+    /// Text in front of the image is a chapter that happens to be illustrated,
+    /// not a volume opening on its cover.
+    #[test]
+    fn a_page_that_opens_on_text_opens_no_volume() {
+        let html = "<html><body><h1>Chapter One</h1><img src=\"scene.jpg\"/></body></html>";
+        assert_eq!(opening_plate_source(html), None);
+        assert!(!is_image_only_page(html));
     }
 
     #[test]
     fn text_or_no_image_at_all_disqualifies_a_page() {
-        let with_text = "<html><body><img src=\"cover.jpeg\"/><p>Chapter One</p></body></html>";
         let none = "<html><body><p>Chapter One</p></body></html>";
         let empty = "<html><body></body></html>";
-        for html in [with_text, none, empty] {
+        for html in [none, empty] {
             assert!(!is_image_only_page(html));
             assert_eq!(single_image_source(html), None);
+            assert_eq!(opening_plate_source(html), None);
         }
+        // An image with text behind it is a page of pictures to nobody, but the
+        // volume that opens on it opens on it all the same.
+        let with_text = "<html><body><img src=\"cover.jpeg\"/><p>Chapter One</p></body></html>";
+        assert!(!is_image_only_page(with_text));
+        assert_eq!(single_image_source(with_text), None);
+        assert_eq!(opening_plate_source(with_text), Some("cover.jpeg"));
     }
 }

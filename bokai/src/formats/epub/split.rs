@@ -27,7 +27,9 @@ use crate::formats::epub::edit::{EpubPackage, escape_attr, escape_text};
 use crate::formats::epub::nav_doc::{
     depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav,
 };
-use crate::formats::epub::page_shape::image_only_source;
+use crate::formats::epub::page_shape::{
+    is_image_only_page, opening_plate_source, states_own_rights,
+};
 use crate::formats::epub::structure::{
     MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, relativize, resolve_href,
     spine_documents, strip_fragment,
@@ -50,8 +52,8 @@ pub struct Cut {
     /// What the collection's own navigation calls this volume.
     pub label: String,
     /// The volume's own cover page, as an absolute zip path — the document the
-    /// cut lands on, when that document is a full-bleed image. `None` for a
-    /// volume that opens on text.
+    /// cut lands on, when that document opens on a full-bleed plate. `None` for
+    /// a volume that opens on text.
     pub cover: Option<String>,
     /// The volume's number within the collection. Fractional because publishers
     /// number that way: a 5.5 shipped between volumes 5 and 6 is a real volume
@@ -391,7 +393,7 @@ fn cover_image(pkg: &EpubPackage, cut: &Cut) -> Option<String> {
     let page = cut.cover.as_deref()?;
     let bytes = pkg.get(page)?;
     let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
-    let src = image_only_source(&xhtml)?;
+    let src = opening_plate_source(&xhtml)?;
     let abs = resolve_href(&dir_of(page), src);
     pkg.contains(&abs).then_some(abs)
 }
@@ -624,12 +626,17 @@ fn volume_first_documents(
         // collection's whatever shape it has.
         let floor = fronted.last().map_or(1, |&previous| previous + 1);
         let mut first = i;
-        // Only a volume named by something other than a cover can be missing
-        // one. Where the chapter list already names a full-bleed page it has
+        // Only a volume named by something other than a plate can be missing
+        // one. Where the chapter list already names a page opening on one it has
         // named the volume's start, and the pages before it are the previous
         // volume's however they look.
+        //
+        // What the walk steps back over is held to more than what it lands on: a
+        // page carrying any text carries content, and content belongs to the
+        // volume it was set in — only a page of nothing but plates is loose
+        // enough to move.
         if cover_page(pkg, &spine[i].0).is_none() {
-            while first > floor && cover_page(pkg, &spine[first - 1].0).is_some() {
+            while first > floor && plates_only(pkg, &spine[first - 1].0) {
                 first -= 1;
             }
         }
@@ -690,7 +697,7 @@ fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candid
 /// Which candidates are volume starts.
 ///
 /// A volume announces itself either by the page it opens on or by what the
-/// chapter list calls it, and the three forms are not equally telling — each is
+/// chapter list calls it, and the four forms are not equally telling — each is
 /// read only where the one before it found nothing:
 ///
 /// - **Its own cover** — a page of pictures. Strong, because in an ordinary
@@ -700,11 +707,19 @@ fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candid
 /// - **Its own Contents page** — a page listing what follows it. Weaker, because
 ///   any chapter carrying a few cross-references looks the same from outside, so
 ///   it is held to a stricter test ([`contents_page_starts`]).
+/// - **Its own rights notice** ([`rights_page_starts`]) — the copyright page the
+///   work was published under, for a collection that binds its volumes whole and
+///   lists all their chapters on one Contents page. Weaker again, because the
+///   collection states rights of its own too.
 /// - **What the list calls it** ([`named_as_a_series`]) — for the collections
-///   whose volumes open on neither: a text title page shows nothing, and a
-///   publisher who draws a volume's Contents page as a picture leaves no links
-///   to count. Weakest, because an ordinary novel's chapters are numbered and
-///   share a stem too, so it leans hardest on what each entry has under it.
+///   whose volumes open on none of the three: a text title page shows nothing,
+///   and a publisher who draws a volume's Contents page as a picture leaves no
+///   links to count. Weakest, because an ordinary novel's chapters are numbered
+///   and share a stem too, so it leans hardest on what each entry has under it.
+///
+/// The last two are held per entry to *having a volume under them*
+/// ([`carries_a_volume`]) — the page they key on says a book begins, and what
+/// says a book begins *here* is that the chapter list goes on naming this one.
 fn volume_starts(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -714,10 +729,12 @@ fn volume_starts(
     title: &str,
     authors: &[String],
 ) -> Vec<Start> {
+    // A page of nothing but plates, not merely one opening on a plate: a
+    // copyright page set under the imprint's logo opens on a picture too.
     let covers: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| cover_page(pkg, &spine[c.spine_index].0).is_some())
+        .filter(|(_, c)| plates_only(pkg, &spine[c.spine_index].0))
         .map(|(n, _)| n)
         .collect();
     if reads_as_a_collection(pkg, spine, spine_files, candidates, &covers) {
@@ -727,7 +744,56 @@ fn volume_starts(
     if contents.len() >= 2 {
         return contents.into_iter().map(Start::unnumbered).collect();
     }
-    named_as_a_series(spine, candidates, toc, title, authors)
+    let entries = entry_positions(toc, spine);
+    let rights = carries_a_volume(
+        spine,
+        candidates,
+        &entries,
+        rights_page_starts(pkg, spine, candidates),
+    );
+    if rights.len() >= MIN_PUBLISHED_APART {
+        return rights;
+    }
+    named_as_a_series(spine, candidates, &entries, title, authors)
+}
+
+/// How many entries must carry rights of their own before the book reads as
+/// several publications bound together.
+///
+/// Three, and for the same reason a counted label needs three: two is the
+/// ordinary shape of *one* book. Every book states its rights once at the front,
+/// and a great many state them a second time at the back — the photo
+/// acknowledgements, the permissions, the list of illustrations, each crediting
+/// its sources by year. Measured over the library, that pair is what two rights
+/// notices almost always is. Three is where a second publication starts to be
+/// the simpler explanation, and it costs the two-volume set found by nothing
+/// else, which is the same price the label signal pays.
+const MIN_PUBLISHED_APART: usize = 3;
+
+/// The candidates whose own document states the rights the work was published
+/// under.
+///
+/// A copyright notice is the one thing only a separately published book has.
+/// Everything else about a volume — a title of its own, a cover plate, chapters
+/// under it — a part of a book has too, and no shape tells them apart; but
+/// nobody sets a copyright notice at the head of chapter seven. Where several
+/// entries of one book each carry one, the publisher has said in the only way
+/// there is that they were published apart.
+///
+/// The collection states rights of its own as well, which is why this is held to
+/// [`carries_a_volume`] by the caller: the collection's notice opens nothing but
+/// itself.
+fn rights_page_starts(
+    pkg: &EpubPackage,
+    spine: &[(String, String)],
+    candidates: &[Candidate<'_>],
+) -> Vec<Start> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| states_rights(pkg, &spine[c.spine_index].0))
+        .map(|(n, _)| Start::unnumbered(n))
+        .collect()
 }
 
 /// The candidates the chapter list names as a series, with the numbers it
@@ -752,11 +818,10 @@ fn volume_starts(
 fn named_as_a_series(
     spine: &[(String, String)],
     candidates: &[Candidate<'_>],
-    toc: &[TocEntry],
+    entries: &[usize],
     title: &str,
     authors: &[String],
 ) -> Vec<Start> {
-    let entries = entry_positions(toc, spine);
     // A count of two is the commonest shape in publishing — every novel with a
     // Book One and a Book Two — so a count has to reach three before it reads
     // as a series. A work's name repeated needs no such margin: a book does not
@@ -765,7 +830,7 @@ fn named_as_a_series(
         (counted_labels(candidates), 3),
         (title_bearing_labels(candidates, title, authors), 2),
     ] {
-        let kept = carries_a_volume(spine, candidates, &entries, chosen);
+        let kept = carries_a_volume(spine, candidates, entries, chosen);
         if kept.len() >= least {
             return kept;
         }
@@ -1095,13 +1160,31 @@ fn linked_documents(
         .collect()
 }
 
-/// The document's own zip path when it is a page of pictures — how a volume's
-/// cover is authored — and `None` when it is anything else.
+/// The document's own zip path when it opens on a full-bleed plate — how a
+/// volume's cover is authored — and `None` when it opens on text.
 fn cover_page(pkg: &EpubPackage, abs: &str) -> Option<String> {
     let bytes = pkg.get(abs)?;
     let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
-    image_only_source(&xhtml)?;
+    opening_plate_source(&xhtml)?;
     Some(abs.to_string())
+}
+
+/// Whether the document at `abs` is a page of plates and nothing else — how a
+/// cover is authored, and a page anything else may step back over, since it
+/// carries no content of its own.
+fn plates_only(pkg: &EpubPackage, abs: &str) -> bool {
+    reads(pkg, abs).is_some_and(|xhtml| is_image_only_page(&xhtml))
+}
+
+/// Whether the document at `abs` carries a rights notice of its own.
+fn states_rights(pkg: &EpubPackage, abs: &str) -> bool {
+    reads(pkg, abs).is_some_and(|xhtml| states_own_rights(&xhtml))
+}
+
+/// A document's markup as text, decoded however it declares itself.
+fn reads(pkg: &EpubPackage, abs: &str) -> Option<String> {
+    let bytes = pkg.get(abs)?;
+    Some(decode_text(bytes, extract_xml_encoding(bytes)).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1339,12 @@ mod tests {
 
     fn image_page(src: &str) -> String {
         format!(r#"<img src="{src}" alt=""/>"#)
+    }
+
+    /// A copyright notice as a publisher sets one: the sign, the year, and the
+    /// reserved-rights line.
+    fn rights_page(year: u32) -> String {
+        format!("<p>Copyright &#169; {year} by A. Author</p><p>All rights reserved</p>")
     }
 
     fn contents_page(targets: &[&str]) -> String {
@@ -1564,6 +1653,106 @@ mod tests {
             ],
             "the page listing the volumes is the collection's, not a volume's"
         );
+    }
+
+    /// A boxed set the Western way: every volume keeps the copyright page it
+    /// was published under, run onto the same document as its cover plate, and
+    /// the set lists all their chapters on one Contents page of its own. No
+    /// volume owns a Contents page, and no volume's opening is a page of
+    /// pictures, so the rights notice is the only thing left saying where one
+    /// book ends and the next begins.
+    #[test]
+    fn a_boxed_set_cuts_where_each_work_states_its_own_rights() {
+        let works = [
+            ("wool", "Wool", "wool.jpg"),
+            ("shift", "Shift", "shift.jpg"),
+            ("dust", "Dust", "dust.jpg"),
+        ];
+        let mut docs: Vec<Doc<'static>> = vec![
+            ("titlepage.xhtml", image_page("title.jpg"), None),
+            (
+                "contents.xhtml",
+                contents_page(&[
+                    "wool.xhtml",
+                    "wool1.xhtml",
+                    "wool2.xhtml",
+                    "shift.xhtml",
+                    "shift1.xhtml",
+                    "shift2.xhtml",
+                    "dust.xhtml",
+                    "dust1.xhtml",
+                    "dust2.xhtml",
+                ]),
+                None,
+            ),
+            // The collection's own notice, which opens nothing but itself.
+            ("copyright.xhtml", rights_page(2020), None),
+        ];
+        let mut rows = String::from(
+            r#"<li><a href="contents.xhtml">Contents</a></li>
+               <li><a href="copyright.xhtml">Copyright</a></li>"#,
+        );
+        for (n, (stem, label, plate)) in works.iter().enumerate() {
+            docs.push((
+                ["wool.xhtml", "shift.xhtml", "dust.xhtml"][n],
+                format!("{}{}", image_page(plate), rights_page(2012 + n as u32)),
+                None,
+            ));
+            let chapters = [
+                ["wool1.xhtml", "wool2.xhtml"],
+                ["shift1.xhtml", "shift2.xhtml"],
+                ["dust1.xhtml", "dust2.xhtml"],
+            ][n];
+            for c in chapters {
+                docs.push((c, "<p>text</p>".into(), None));
+            }
+            rows.push_str(&format!(
+                r#"<li><a href="{stem}.xhtml">{label}</a><ol>
+                   <li><a href="{}">One</a></li><li><a href="{}">Two</a></li></ol></li>"#,
+                chapters[0], chapters[1]
+            ));
+        }
+
+        let cuts = propose_cuts(&epub_with_nav(&docs, &rows)).expect("propose");
+        assert_eq!(
+            cuts.iter()
+                .map(|c| (c.label.as_str(), c.number, c.cover.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("Wool", 1.0, Some("OEBPS/wool.xhtml")),
+                ("Shift", 2.0, Some("OEBPS/shift.xhtml")),
+                ("Dust", 3.0, Some("OEBPS/dust.xhtml")),
+            ],
+            "the set's own copyright page opens no volume, and each volume's \
+             cover is the plate its opening page runs before the notice"
+        );
+    }
+
+    /// Two rights notices is the ordinary shape of one book: the copyright page
+    /// at the front, and the picture credits at the back crediting their sources
+    /// by year. Neither says anything was published apart.
+    #[test]
+    fn a_books_own_copyright_page_and_its_picture_credits_are_not_two_works() {
+        let mut docs: Vec<Doc<'static>> = vec![
+            ("cover.xhtml", image_page("cover.jpg"), None),
+            ("copyright.xhtml", rights_page(2011), Some("Copyright")),
+        ];
+        for name in ["c1.xhtml", "c2.xhtml", "c3.xhtml"] {
+            docs.push((name, "<p>text</p>".into(), Some("Chapter")));
+        }
+        docs.push((
+            "credits.xhtml",
+            rights_page(2009),
+            Some("Photo Acknowledgements"),
+        ));
+        docs.push(("index.xhtml", "<p>text</p>".into(), Some("Index")));
+        docs.push((
+            "series.xhtml",
+            "<p>text</p>".into(),
+            Some("Also in the series"),
+        ));
+
+        assert!(propose_cuts(&epub(&docs)).expect("propose").is_empty());
     }
 
     /// An ordinary book is not a collection, and the answer for one is nothing
