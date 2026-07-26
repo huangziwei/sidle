@@ -51,7 +51,7 @@ pub struct Cut {
     pub label: String,
     /// The volume's own cover page, as an absolute zip path — the document the
     /// cut lands on, when that document is a full-bleed image. `None` for a
-    /// collection whose volumes open with a Contents page instead.
+    /// volume that opens on text.
     pub cover: Option<String>,
     /// The volume's number within the collection. Fractional because publishers
     /// number that way: a 5.5 shipped between volumes 5 and 6 is a real volume
@@ -546,21 +546,71 @@ fn cuts(pkg: &EpubPackage, opf: &OpfData, opf_base: &str, toc: &[TocEntry]) -> V
         return Vec::new();
     }
 
+    let first = volume_first_documents(pkg, &spine, &candidates, &starts);
     let mut cuts: Vec<Cut> = Vec::new();
     for (n, &start) in starts.iter().enumerate() {
-        let candidate = &candidates[start];
-        let span = span(spine.len(), &candidates, &starts, n);
-        let (number, numbering) = number_after(cuts.last(), candidate.label, n);
+        let label = candidates[start].label;
+        let from = first[n];
+        let to = first.get(n + 1).copied().unwrap_or(spine.len());
+        let (number, numbering) = number_after(cuts.last(), label, n);
         cuts.push(Cut {
-            spine_index: candidate.spine_index,
-            documents: span.len(),
-            label: candidate.label.to_string(),
-            cover: cover_page(pkg, &spine[candidate.spine_index].0),
+            spine_index: from,
+            documents: to - from,
+            label: label.to_string(),
+            cover: cover_page(pkg, &spine[from].0),
             number,
             numbering,
         });
     }
     cuts
+}
+
+/// Where each volume's own pages begin, as spine indices in reading order.
+///
+/// Almost always that is the document the chapter list names. The exception is
+/// a collection whose volumes open with a cover *and* name their own Contents
+/// page: a cover carries no text, so a chapter list has nothing to call it and
+/// points the entry at the page after it, leaving every cover outside every
+/// entry. Read literally, such a volume opens on its Contents page — and its
+/// cover becomes the last page of the volume before, or, for the first volume,
+/// stays behind with the collection.
+///
+/// Which cover goes where is asked once about the book, never per volume: one
+/// volume that happens to end on a picture is an illustration, and reading it
+/// as the next volume's cover would move a page out of the book it belongs to.
+/// A publisher that fronts its volumes this way does it for all of them, so the
+/// walk stands only if most volumes gain something by it.
+fn volume_first_documents(
+    pkg: &EpubPackage,
+    spine: &[(String, String)],
+    candidates: &[Candidate<'_>],
+    starts: &[usize],
+) -> Vec<usize> {
+    let named: Vec<usize> = starts.iter().map(|&n| candidates[n].spine_index).collect();
+    let mut fronted: Vec<usize> = Vec::with_capacity(named.len());
+    for &i in &named {
+        // Never back into the volume before — its own first document is the
+        // floor — and never onto the collection's first document, which is the
+        // collection's whatever shape it has.
+        let floor = fronted.last().map_or(1, |&previous| previous + 1);
+        let mut first = i;
+        // Only a volume named by something other than a cover can be missing
+        // one. Where the chapter list already names a full-bleed page it has
+        // named the volume's start, and the pages before it are the previous
+        // volume's however they look.
+        if cover_page(pkg, &spine[i].0).is_none() {
+            while first > floor && cover_page(pkg, &spine[first - 1].0).is_some() {
+                first -= 1;
+            }
+        }
+        fronted.push(first);
+    }
+    let moved = fronted.iter().zip(&named).filter(|(f, i)| f < i).count();
+    if moved * 2 > named.len() {
+        fronted
+    } else {
+        named
+    }
 }
 
 /// The spine range the `n`th of `starts` covers: from its own document up to
@@ -1007,6 +1057,74 @@ mod tests {
         assert_eq!(
             cuts.iter().map(|c| c.documents).sum::<usize>(),
             15 - cuts[0].spine_index
+        );
+    }
+
+    /// The same book, named one page later. A cover has no text to name it by,
+    /// so plenty of collections point each entry at the volume's Contents page
+    /// and leave the cover in front of it, named by nothing. The volume still
+    /// begins at its cover: taken at face value the first volume's cover would
+    /// stay with the collection and every other one would end up as the last
+    /// page of the volume before it.
+    #[test]
+    fn a_volume_named_by_its_contents_page_still_begins_at_its_cover() {
+        let mut docs: Vec<Doc<'static>> = vec![
+            ("cover.xhtml", image_page("cover.jpg"), Some("表紙")),
+            (
+                "toc.xhtml",
+                contents_page(&["v1toc.xhtml", "v2toc.xhtml", "v3toc.xhtml"]),
+                Some("目次"),
+            ),
+        ];
+        for (v, label) in [(1, "物語"), (2, "物語2"), (3, "物語3")] {
+            let mut volume = volume(v);
+            // The label sits on the Contents page, not on the cover before it.
+            volume[1].2 = Some(label);
+            docs.extend(volume);
+        }
+        docs.push(("colophon.xhtml", "<p>奥付</p>".into(), Some("奥付")));
+
+        let cuts = propose_cuts(&epub(&docs)).expect("propose");
+        assert_eq!(
+            cuts.iter()
+                .map(|c| (
+                    c.spine_index,
+                    c.documents,
+                    c.label.as_str(),
+                    c.cover.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (2, 4, "物語", Some("OEBPS/v1.xhtml")),
+                (6, 4, "物語2", Some("OEBPS/v2.xhtml")),
+                (10, 5, "物語3", Some("OEBPS/v3.xhtml")),
+            ],
+            "the same cuts a collection naming its covers gives"
+        );
+    }
+
+    /// The walk back onto a cover is a fact about the collection, not about one
+    /// volume. A book whose volumes are named by their own cover already starts
+    /// them in the right place, and a picture at the end of one volume is that
+    /// volume's — a plate, a map, an afterword illustration — not the next
+    /// volume's cover.
+    #[test]
+    fn a_picture_ending_a_volume_is_not_the_next_volumes_cover() {
+        let mut docs = collection_documents();
+        // A plate closing volume 1, immediately before volume 2's own cover.
+        let at = docs
+            .iter()
+            .position(|(name, _, _)| *name == "v2.xhtml")
+            .expect("volume 2 starts with a cover");
+        docs.insert(at, ("plate.xhtml", image_page("plate.jpg"), None));
+
+        let cuts = propose_cuts(&epub(&docs)).expect("propose");
+        assert_eq!(
+            cuts.iter()
+                .map(|c| (c.spine_index, c.documents, c.label.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, 5, "物語"), (7, 4, "物語2"), (11, 5, "物語3")],
+            "the plate stays with the volume it closes"
         );
     }
 
