@@ -476,14 +476,7 @@
         });
         menu.appendChild(li);
       }
-      menu.hidden = false;
-      menu.style.left = `${e.clientX}px`;
-      menu.style.top = `${e.clientY}px`;
-      requestAnimationFrame(() => {
-        const r = menu.getBoundingClientRect();
-        if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
-        if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
-      });
+      window.ActionMenu.placeAt(e.clientX, e.clientY);
     }
 
     _onResizerDown(e, resizer, idx) {

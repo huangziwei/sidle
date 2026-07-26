@@ -3103,8 +3103,138 @@ function updateQueueRowProgress(bookId) {
 }
 
 // ---------------------------------------------------------------------------
-// Context menu
+// Book actions
 // ---------------------------------------------------------------------------
+//
+// Every action a book, a multi-selection, or a whole series collection can be
+// put through, declared once. Both surfaces that offer actions — the right-click
+// menu and the selection bar — render from this one list (see actions.js), so an
+// action added here reaches both of them, and neither can drift into offering
+// something the other doesn't.
+//
+// actions.js documents an entry's fields. `group` both orders the list and draws
+// the menu's separators, so the five groups below are the menu's five sections,
+// in this order: open it, change it, put it somewhere else, rebuild it, destroy
+// it. A new action belongs to whichever of those it does.
+
+const BOOK_ACTIONS = [
+  {
+    id: "read",
+    group: "open",
+    scopes: ["book"],
+    label: () => "Read",
+    run: (c) => openReader(c.book),
+  },
+  {
+    id: "open-series",
+    group: "open",
+    scopes: ["series"],
+    label: () => "Open series",
+    run: (c) => enterSeries(c.series),
+  },
+  {
+    id: "edit-metadata",
+    group: "modify",
+    scopes: ["book", "books", "series"],
+    bar: true,
+    label: (c) => ActionMenu.counted("Edit metadata…", c),
+    run: (c) =>
+      c.eligible.length === 1
+        ? openMetadataModal(c.eligible[0])
+        : openMetadataModal(c.eligible, { bulk: true }),
+  },
+  {
+    // The full editor writes the source artifact (metadata/cover/TOC), not just
+    // the DB row. All three source formats; the editor's rail gates the panels
+    // each one can actually back.
+    id: "edit-book",
+    group: "modify",
+    scopes: ["book"],
+    when: (c) =>
+      ["kfx", "epub", "pdf"].includes(sourceFormat(c.book)) && c.book.status === "done",
+    label: () => "Edit book…",
+    run: (c) => openEditor(c.book),
+  },
+  {
+    // Splitting reads the EPUB side, so it's offered as soon as that side
+    // exists — a KFX-sourced book qualifies once kfx→epub has run, without
+    // waiting on anything else. Whether the book is actually a collection is
+    // the proposal's answer, not something to guess from the title here.
+    id: "split",
+    group: "modify",
+    scopes: ["book"],
+    when: (c) => Boolean(c.book.epub_path) && formatStatusFor("epub", c.book) === "done",
+    label: () => "Split into a series…",
+    run: (c) => openSplitModal(c.book),
+  },
+  {
+    id: "send",
+    group: "transfer",
+    scopes: ["book", "books"],
+    bar: true,
+    when: () => Boolean(state.device),
+    eligible: (b) => b.status === "done" && !state.sentSet.has(b.sha256),
+    label: (c) => ActionMenu.counted("Send to Kindle", c),
+    run: (c) => sendBooks(c.eligible.map((b) => b.id)),
+  },
+  {
+    id: "unsend",
+    group: "transfer",
+    scopes: ["book", "books"],
+    bar: true,
+    when: () => Boolean(state.device),
+    eligible: (b) => state.sentSet.has(b.sha256),
+    label: (c) => ActionMenu.counted("Remove from Kindle", c),
+    run: (c) => unsendBooks(c.eligible),
+  },
+  {
+    id: "export",
+    group: "transfer",
+    scopes: ["book", "books", "series"],
+    bar: true,
+    label: (c) => (c.surface === "bar" ? "Export…" : "Export to folder"),
+    submenu: (c) => exportMenuItems(c.items),
+  },
+  {
+    id: "finder",
+    group: "transfer",
+    scopes: ["book"],
+    label: () => "Open in Finder",
+    run: (c) => openInFinder(c.book.id),
+  },
+  {
+    id: "recrawl",
+    group: "rebuild",
+    scopes: ["book", "books", "series"],
+    eligible: (b) => Boolean(b.asin) && looksLikeRealAsin(b.asin),
+    label: (c) =>
+      ActionMenu.counted(c.items.length > 1 ? "Re-fetch covers" : "Re-fetch cover", c),
+    // One book and many are two different backend calls, not one called twice:
+    // the single fetch reports per-book why it failed, the batch streams
+    // progress and reports a summary.
+    run: (c) =>
+      c.eligible.length === 1 ? recrawlCover(c.eligible[0]) : recrawlCovers(c.eligible),
+  },
+  {
+    // Always full color — the JXR encoder auto-collapses genuinely-grayscale
+    // pages to `8bppGray`, so color is a strict superset with no size cost on
+    // B&W books. There's no grayscale/color choice to offer.
+    id: "reconvert",
+    group: "rebuild",
+    scopes: ["book", "books", "series"],
+    label: (c) => ActionMenu.counted("Force re-convert", c),
+    run: (c) => retryConvertAll(c.eligible),
+  },
+  {
+    id: "remove",
+    group: "destroy",
+    scopes: ["book", "books"],
+    bar: true,
+    danger: true,
+    label: (c) => ActionMenu.counted("Remove from library", c),
+    run: (c) => removeBooks(c.eligible),
+  },
+];
 
 function wireContextMenu() {
   // Suppress the WebView's native right-click menu (Reload, Open Frame in New
@@ -3123,173 +3253,37 @@ function wireContextMenu() {
       t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
     if (!inField) e.preventDefault();
   });
-  document.addEventListener("click", () => ($("#ctx-menu").hidden = true));
+  document.addEventListener("click", () => ActionMenu.close());
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") $("#ctx-menu").hidden = true;
+    if (e.key === "Escape") ActionMenu.close();
   });
+}
+
+// What a right-click acts on: the whole selection when the clicked book is part
+// of a multi-selection (`onItemContext` has already reset it to just this book
+// otherwise), and the book alone when it isn't.
+function bookContext(b) {
+  if (booksSelection.count() > 1) return { kind: "books", items: selectedBooks() };
+  return { kind: "book", items: [b], book: b };
 }
 
 function openContextMenu(x, y, b) {
-  const menu = $("#ctx-menu");
-  menu.innerHTML = "";
-
-  if (booksSelection.count() > 1) {
-    // Multi-selection menu — bulk actions.
-    const sel = selectedBooks();
-    const send = sel.filter(
-      (s) => s.status === "done" && !state.sentSet.has(s.sha256),
-    );
-    const unsend = sel.filter((s) => state.sentSet.has(s.sha256));
-    if (state.device && send.length) {
-      add(menu, `Send to Kindle (${send.length})`, () => bulkSend());
-    }
-    if (state.device && unsend.length) {
-      add(menu, `Remove from Kindle (${unsend.length})`, () => bulkUnsend());
-    }
-    add(menu, `Edit metadata (${sel.length})…`, () =>
-      openMetadataModal(sel, { bulk: true }),
-    );
-    addReconvertItem(menu, `Force re-convert (${sel.length})`, sel);
-    const recrawlable = sel.filter((s) => s.asin && looksLikeRealAsin(s.asin));
-    if (recrawlable.length) {
-      add(menu, `Re-fetch covers (${recrawlable.length})`, () =>
-        bulkRecrawlCovers(sel),
-      );
-    }
-    addExportItem(menu, sel);
-    add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
-  } else {
-    // Single-item menu.
-    add(menu, "Read", () => openReader(b));
-    if (state.device && b.status === "done") {
-      if (state.sentSet.has(b.sha256)) {
-        const row = state.sent.find(
-          (r) => r.kind === "sent" && r.sha256 === b.sha256,
-        );
-        const filename = row ? row.filename : null;
-        if (filename) {
-          add(menu, "Remove from Kindle", () =>
-            deleteFromDevice([filename], [b.title]),
-          );
-        }
-      } else {
-        add(menu, "Send to Kindle", () => sendBooks([b.id]));
-      }
-    }
-    add(menu, "Edit metadata…", () => openMetadataModal(b));
-    // Full "Edit book…" editor — writes the source artifact (metadata/cover/TOC),
-    // not just the DB row. All three source formats; the editor's rail gates the
-    // panels each one can actually back.
-    if (["kfx", "epub", "pdf"].includes(sourceFormat(b)) && b.status === "done") {
-      add(menu, "Edit book…", () => openEditor(b));
-    }
-    // Splitting reads the EPUB side, so it's offered as soon as that side
-    // exists — a KFX-sourced book qualifies once kfx→epub has run, without
-    // waiting on anything else. Whether the book is actually a collection is
-    // the proposal's answer, not something to guess from the title here.
-    if (b.epub_path && formatStatusFor("epub", b) === "done") {
-      add(menu, "Split into a series…", () => openSplitModal(b));
-    }
-    add(menu, "Open in Finder", () => openInFinder(b.id));
-    add(menu, "Re-fetch cover", () => recrawlCover(b));
-    // Force re-convert is always full color now — the JXR encoder auto-collapses
-    // genuinely-grayscale pages to `8bppGray`, so color is a strict superset with
-    // no size cost on B&W books. No grayscale/color choice anymore.
-    add(menu, "Force re-convert", () => retryConvert(b.id));
-    addExportItem(menu, [b]);
-    add(menu, "Remove from library", () => removeBook(b), true);
-  }
-
-  placeMenu(x, y);
+  ActionMenu.open(x, y, BOOK_ACTIONS, bookContext(b));
 }
 
 // Right-click on a series collection tile/row (grouped top level). A collection
-// is navigate-only for selection, but the menu gives it the bulk actions that
-// make sense for a whole series — at minimum editing the metadata of every book
-// in it (e.g. fix the author or rename the series across all volumes at once).
+// is navigate-only for selection, but it gets every action that makes sense for
+// a whole series — at minimum editing the metadata of every book in it (e.g. fix
+// the author or rename the series across all volumes at once).
 function openSeriesContextMenu(x, y, entry) {
-  const menu = $("#ctx-menu");
-  menu.innerHTML = "";
-  // Edit EVERY book in the series from the full library — not just the
-  // post-filter members this tile happens to show — so a series rename / author
-  // fix never splits the series by touching only a filtered fragment.
-  const members = membersOfSeries(state.books, entry.name);
-  add(menu, "Open series", () => enterSeries(entry.name));
-  add(menu, `Edit metadata (${members.length})…`, () =>
-    openMetadataModal(members, { bulk: true }),
-  );
-  addReconvertItem(menu, `Force re-convert all (${members.length})`, members);
-  const recrawlable = members.filter((b) => b.asin && looksLikeRealAsin(b.asin));
-  if (recrawlable.length) {
-    add(menu, `Re-fetch covers (${recrawlable.length})`, () =>
-      bulkRecrawlCovers(members),
-    );
-  }
-  addExportItem(menu, members);
-  placeMenu(x, y);
-}
-
-// Show #ctx-menu at (x, y), then nudge it back on-screen if it overflows.
-// Shared by the book and series context menus.
-function placeMenu(x, y) {
-  const menu = $("#ctx-menu");
-  menu.hidden = false;
-  menu.classList.remove("flip-sub"); // default: submenus open to the right
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-  requestAnimationFrame(() => {
-    let r = menu.getBoundingClientRect();
-    if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
-    if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
-    // A submenu opens to the right (`left: 100%`). When the menu sits at the
-    // right edge — common for the last column of cards, and after the nudge
-    // above — that flies the submenu (e.g. Force re-convert ▸) off-screen. Flip
-    // it to the left side of the parent when the right has no room.
-    r = menu.getBoundingClientRect();
-    const SUBMENU_WIDTH = 170;
-    menu.classList.toggle("flip-sub", r.right + SUBMENU_WIDTH > window.innerWidth);
+  ActionMenu.open(x, y, BOOK_ACTIONS, {
+    kind: "series",
+    series: entry.name,
+    // EVERY book in the series from the full library — not just the post-filter
+    // members this tile happens to show — so a series rename / author fix never
+    // splits the series by touching only a filtered fragment.
+    items: membersOfSeries(state.books, entry.name),
   });
-}
-
-function add(menu, label, fn, danger = false) {
-  const li = document.createElement("li");
-  li.textContent = label;
-  if (danger) li.className = "danger";
-  li.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    menu.hidden = true;
-    fn();
-  });
-  menu.appendChild(li);
-}
-
-// A parent item that reveals a nested submenu on hover. `items` is a list of
-// `[label, fn]` pairs.
-function addSub(menu, label, items) {
-  const li = document.createElement("li");
-  li.className = "has-sub";
-  li.textContent = label;
-  const sub = document.createElement("ul");
-  sub.className = "ctx-submenu";
-  for (const [subLabel, fn] of items) {
-    const sli = document.createElement("li");
-    sli.textContent = subLabel;
-    sli.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      menu.hidden = true;
-      fn();
-    });
-    sub.appendChild(sli);
-  }
-  li.appendChild(sub);
-  menu.appendChild(li);
-}
-
-// "Force re-convert" for a SET of books (multi-selection or a whole series).
-// Always full color (the grayscale option is retired — see the single-book
-// menu), so a plain item, no submenu.
-function addReconvertItem(menu, label, books) {
-  add(menu, label, () => bulkRetryConvert(books));
 }
 
 // ---------------------------------------------------------------------------
@@ -3348,19 +3342,6 @@ function exportMenuItems(books) {
   ]);
 }
 
-// Append an "Export to folder ▸ <format>" submenu to a context menu, or a plain
-// hint when nothing in `books` is ready to export yet.
-function addExportItem(menu, books) {
-  const items = exportMenuItems(books);
-  if (items.length) {
-    addSub(menu, "Export to folder", items);
-  } else {
-    add(menu, "Export to folder (nothing ready)", () =>
-      showToast("no exportable file is ready yet", true),
-    );
-  }
-}
-
 // Pick a destination folder, then copy each eligible book's `fmt` file into it
 // (the backend groups them into per-author subfolders). Reports a one-line
 // summary; per-book skips are logged to the console.
@@ -3395,23 +3376,6 @@ async function doExport(books, fmt) {
   const parts = [`exported ${summary.exported} ${fmt.toUpperCase()}`];
   if (summary.skipped) parts.push(`${summary.skipped} skipped`);
   showToast(`${parts.join(" · ")} → ${dir}`, summary.exported === 0);
-}
-
-// Open the export format menu at (x, y). Used by the selection-bar button, which
-// has no context-menu host of its own; the format items are top-level here
-// rather than a submenu.
-function openExportMenuAt(x, y, books) {
-  const menu = $("#ctx-menu");
-  menu.innerHTML = "";
-  const items = exportMenuItems(books);
-  if (items.length) {
-    for (const [label, fn] of items) add(menu, label, fn);
-  } else {
-    add(menu, "Nothing ready to export", () =>
-      showToast("no exportable file is ready yet", true),
-    );
-  }
-  placeMenu(x, y);
 }
 
 // ---------------------------------------------------------------------------
@@ -3466,26 +3430,12 @@ function paintSeriesSelection() {
 // ---------------------------------------------------------------------------
 
 function wireSelection() {
-  $("#sel-send").addEventListener("click", bulkSend);
-  $("#sel-unsend").addEventListener("click", bulkUnsend);
-  $("#sel-edit").addEventListener("click", () => {
-    const sel = selectedBooks();
-    if (sel.length === 1) openMetadataModal(sel[0]);
-    else if (sel.length > 1) openMetadataModal(sel, { bulk: true });
-  });
-  $("#sel-recrawl").addEventListener("click", () => bulkRecrawlCovers(selectedBooks()));
-  // Export opens a format menu anchored to the button. stopPropagation so the
-  // document-level "click closes #ctx-menu" handler doesn't fire on this click
-  // and immediately re-hide the menu we just opened.
-  $("#sel-export").addEventListener("click", (e) => {
-    e.stopPropagation();
-    const sel = selectedBooks();
-    if (!sel.length) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    openExportMenuAt(r.left, r.bottom, sel);
-  });
-  $("#sel-delete").addEventListener("click", bulkRemove);
+  // The bar's action buttons are rendered, not wired — see renderSelectionBar.
+  // Clear isn't an action on the books, it's an action on the bar itself.
   $("#sel-clear").addEventListener("click", clearSelection);
+  // How many actions fit on the bar depends on how wide the window is, so a
+  // resize re-renders it; what doesn't fit moves under More…, never disappears.
+  window.addEventListener("resize", renderSelectionBar);
 
   // Lasso + click-to-clear behavior on empty area of main. We use mousedown
   // (rather than click) so we can distinguish a drag (→ lasso) from a tap
@@ -3817,6 +3767,10 @@ function handleBooksNavKey(e) {
   }
 }
 
+// The selection bar is a view of BOOK_ACTIONS on the current selection — the
+// same list the right-click menu renders, laid out for a bar: the few actions
+// marked `bar`, then More…, which opens the rest. Nothing about which actions
+// exist is decided here, so the bar can't fall behind the menu.
 function renderSelectionBar() {
   const bar = $("#selection-bar");
   const n = booksSelection.count();
@@ -3826,53 +3780,36 @@ function renderSelectionBar() {
   }
   bar.hidden = false;
   $("#selection-count").textContent = `${n} selected`;
-
-  const sel = selectedBooks();
-  const eligibleSend = sel.filter(
-    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
-  );
-  const eligibleUnsend = sel.filter((b) => state.sentSet.has(b.sha256));
-
-  const send = $("#sel-send");
-  send.disabled = !state.device || eligibleSend.length === 0;
-  send.textContent =
-    eligibleSend.length && eligibleSend.length !== n
-      ? `Send to Kindle (${eligibleSend.length})`
-      : "Send to Kindle";
-
-  const unsend = $("#sel-unsend");
-  unsend.disabled = !state.device || eligibleUnsend.length === 0;
-  unsend.textContent =
-    eligibleUnsend.length && eligibleUnsend.length !== n
-      ? `Remove from Kindle (${eligibleUnsend.length})`
-      : "Remove from Kindle";
-
-  // Only books with a real Amazon ASIN can be re-fetched; show the count when
-  // it's a strict subset of the selection so the user knows some are skipped.
-  const eligibleRecrawl = sel.filter((b) => b.asin && looksLikeRealAsin(b.asin));
-  const recrawl = $("#sel-recrawl");
-  recrawl.disabled = eligibleRecrawl.length === 0;
-  recrawl.textContent =
-    eligibleRecrawl.length && eligibleRecrawl.length !== n
-      ? `Re-fetch covers (${eligibleRecrawl.length})`
-      : "Re-fetch covers";
+  const items = selectedBooks();
+  // One selected book is a book, not a one-book batch: it gets the single-book
+  // actions (Read, Split, Open in Finder), same as right-clicking it would.
+  const ctx =
+    items.length === 1
+      ? { kind: "book", items, book: items[0] }
+      : { kind: "books", items };
+  ActionMenu.renderBar($("#selection-actions"), BOOK_ACTIONS, ctx);
 }
 
-async function bulkSend() {
-  const eligible = selectedBooks().filter(
-    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
+// Delete every one of `books` from the attached Kindle. The device is addressed
+// by FILENAME, so a book whose `sent` row can't name its file is skipped.
+async function unsendBooks(books) {
+  const filenameOf = new Map(
+    state.sent.filter((r) => r.kind === "sent").map((r) => [r.sha256, r.filename]),
   );
-  if (eligible.length === 0) {
-    showToast("nothing to send");
-    return;
-  }
-  await sendBooks(eligible.map((b) => b.id));
+  const pairs = books
+    .map((b) => ({ filename: filenameOf.get(b.sha256), title: b.title }))
+    .filter((p) => p.filename);
+  if (pairs.length === 0) return;
+  await deleteFromDevice(
+    pairs.map((p) => p.filename),
+    pairs.map((p) => p.title),
+  );
 }
 
-// Queue a forced re-convert for every book in `books` (multi-select / whole
-// series). Always full color (grayscale retired). Invokes the command directly
-// rather than `retryConvert` so the batch shows ONE summary toast, not one per book.
-async function bulkRetryConvert(books) {
+// Queue a forced re-convert for every book in `books`. Always full color
+// (grayscale retired). Invokes the command directly rather than `retryConvert`
+// so the batch shows ONE summary toast, not one per book.
+async function retryConvertAll(books) {
   if (!books.length) return;
   let failed = 0;
   for (const b of books) {
@@ -3888,21 +3825,16 @@ async function bulkRetryConvert(books) {
   if (ok) showToast(`re-converting ${ok} book${ok === 1 ? "" : "s"}…`);
 }
 
-// Re-fetch color covers for every book in `books` that has a real Amazon ASIN
-// (selection bar, multi-select menu, or a whole series). The backend runs them
+// Re-fetch color covers for every book in `books`. The backend runs them
 // sequentially — one Amazon round-trip + EPUB/KFX cover rewrite per book — and
 // streams `library:recrawl-progress`; we refresh the gallery once at the end.
 // Overwrites each book's current cover (including a manually-set one), so we
 // confirm first. Guarded against re-entry while a run is in flight.
 let recrawlInFlight = false;
-async function bulkRecrawlCovers(books) {
+async function recrawlCovers(books) {
   if (recrawlInFlight) return;
-  const eligible = books.filter((b) => b.asin && looksLikeRealAsin(b.asin));
-  if (eligible.length === 0) {
-    showToast("no selected book has an Amazon ASIN to re-fetch", true);
-    return;
-  }
-  const n = eligible.length;
+  const n = books.length;
+  if (n === 0) return;
   if (
     !confirm(
       `Re-fetch ${n === 1 ? "this cover" : `${n} covers`} from Amazon?\n\n` +
@@ -3913,9 +3845,7 @@ async function bulkRecrawlCovers(books) {
   }
 
   recrawlInFlight = true;
-  const btn = $("#sel-recrawl");
   const prog = $("#sel-recrawl-progress");
-  if (btn) btn.disabled = true;
   if (prog) {
     prog.hidden = false;
     prog.textContent = `Fetching covers 0/${n}…`;
@@ -3923,7 +3853,7 @@ async function bulkRecrawlCovers(books) {
   let summary;
   try {
     summary = await window.api.invoke("library_recrawl_covers", {
-      bookIds: eligible.map((b) => b.id),
+      bookIds: books.map((b) => b.id),
     });
   } catch (e) {
     showToast(`cover fetch error: ${e}`, true);
@@ -3931,7 +3861,6 @@ async function bulkRecrawlCovers(books) {
   } finally {
     recrawlInFlight = false;
     if (prog) prog.hidden = true;
-    if (btn) btn.disabled = false;
   }
 
   // Covers landed at the same sidecar paths, so each <img> src is unchanged;
@@ -3957,31 +3886,12 @@ function subscribeRecrawlProgress() {
   });
 }
 
-async function bulkUnsend() {
-  const eligible = selectedBooks().filter((b) => state.sentSet.has(b.sha256));
-  if (eligible.length === 0) return;
-  const byKind = new Map(
-    state.sent
-      .filter((r) => r.kind === "sent")
-      .map((r) => [r.sha256, r.filename]),
-  );
-  const pairs = eligible
-    .map((b) => ({ filename: byKind.get(b.sha256), title: b.title }))
-    .filter((p) => p.filename);
-  if (pairs.length === 0) return;
-  await deleteFromDevice(
-    pairs.map((p) => p.filename),
-    pairs.map((p) => p.title),
-  );
-}
-
-async function bulkRemove() {
-  const sel = selectedBooks();
-  if (sel.length === 0) return;
+async function removeBooks(books) {
+  if (books.length === 0) return;
   const msg =
-    sel.length === 1
-      ? `Remove "${sel[0].title}" from the library?`
-      : `Remove ${sel.length} books from the library?`;
+    books.length === 1
+      ? `Remove "${books[0].title}" from the library?`
+      : `Remove ${books.length} books from the library?`;
   if (
     !confirm(
       `${msg}\n\nThis deletes the cached EPUB and KFX. The Kindle is untouched.`,
@@ -3990,7 +3900,7 @@ async function bulkRemove() {
     return;
   }
   let failed = 0;
-  for (const b of sel) {
+  for (const b of books) {
     try {
       await window.api.invoke("library_remove", { bookId: b.id });
     } catch (e) {
@@ -4005,7 +3915,7 @@ async function bulkRemove() {
   }
   // One VACUUM for the whole batch (not one per book), and only if something
   // was actually removed.
-  if (failed < sel.length) await compactLibrary();
+  if (failed < books.length) await compactLibrary();
   booksSelection.selected.clear();
   booksSelection.lastClicked = null;
   await refresh();
@@ -4013,7 +3923,7 @@ async function bulkRemove() {
 
 // Reclaim DB file space freed by deletions (VACUUM). Best-effort: a transient
 // failure shouldn't surface as a delete error, so we only log it. Called once
-// per delete operation — see removeBook / bulkRemove.
+// per delete operation — see removeBooks.
 async function compactLibrary() {
   try {
     await window.api.invoke("library_compact");
@@ -4101,20 +4011,6 @@ async function recrawlCover(b) {
   // kind === "updated" — re-pull brings this book's new `cover_rev`, busting
   // just its tile.
   showToast(`cover updated: ${b.title}`);
-  await refresh();
-}
-
-async function removeBook(b) {
-  if (!confirm(`Remove "${b.title}" from the library?\n\nThis deletes the cached EPUB and KFX.`)) {
-    return;
-  }
-  try {
-    await window.api.invoke("library_remove", { bookId: b.id });
-  } catch (e) {
-    showToast(`remove failed: ${e}`, true);
-    return;
-  }
-  await compactLibrary();
   await refresh();
 }
 

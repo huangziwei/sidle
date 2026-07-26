@@ -457,14 +457,7 @@
 
       menu.append(rename, exportItem, remove);
     }
-    menu.hidden = false;
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-    requestAnimationFrame(() => {
-      const r = menu.getBoundingClientRect();
-      if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
-      if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
-    });
+    window.ActionMenu.placeAt(x, y);
 
     // Dismiss on the next outside interaction / Escape.
     const onDocDown = (ev) => {

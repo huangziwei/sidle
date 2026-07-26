@@ -995,22 +995,25 @@ button {
   margin-left: auto;
 }
 
-.selection-actions .btn-link {
+.selection-bar .btn-link {
   padding: 4px 10px;
   border-radius: 4px;
 }
 
-.selection-actions .btn-link:hover:not(:disabled) {
+.selection-bar .btn-link:hover:not(:disabled) {
   background: rgba(0, 0, 0, 0.08);
 }
 
-.selection-actions .btn-link:disabled {
+.selection-bar .btn-link:disabled {
   color: var(--muted);
   cursor: not-allowed;
 }
 
-.selection-actions .sel-danger {
+/* Set apart from the actions it sits beside, so a destructive button is never
+   the one next to the button you meant to press. */
+.selection-bar .sel-danger {
   color: var(--accent);
+  margin-left: 12px;
 }
 
 .view {
@@ -1795,7 +1798,31 @@ kbd {
   color: var(--accent);
 }
 
-/* Nested submenu (e.g. Force re-convert ▸ Grayscale / Full color). */
+/* An action with nowhere to go — an Export with no converted side ready yet.
+   Shown rather than hidden so the menu still says where the action lives. */
+.ctx-menu li.disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.ctx-menu li.disabled:hover {
+  background: transparent;
+}
+
+/* Drawn between groups (see BOOK_ACTIONS), never first or last. */
+.ctx-menu .ctx-sep {
+  height: 1px;
+  margin: 4px 8px;
+  padding: 0;
+  background: var(--border);
+  cursor: default;
+}
+
+.ctx-menu .ctx-sep:hover {
+  background: var(--border);
+}
+
+/* Nested submenu (e.g. Export to folder ▸ EPUB / KFX). */
 .ctx-menu li.has-sub {
   position: relative;
   padding-right: 24px;
@@ -1824,7 +1851,8 @@ kbd {
   display: block;
 }
 /* When the menu sits at the right edge of the window, open submenus to the LEFT
-   of the parent instead, so they don't fly off-screen (set by `placeMenu`). */
+   of the parent instead, so they don't fly off-screen (set when the menu is
+   placed — see actions.js). */
 .ctx-menu.flip-sub .ctx-submenu {
   left: auto;
   right: 100%;
@@ -2407,16 +2435,15 @@ kbd {
   animation: none;
 }
 
+/* In flow in the page's flex column, so opening it shrinks the view above
+   rather than painting over it (it used to be `position: fixed` at the foot of
+   the window, which hid the selection bar underneath it). */
 .queue-drawer {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 32px;
+  flex: 0 0 auto;
   max-height: 50vh;
   background: var(--surface);
   border-top: 1px solid var(--border-strong);
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
-  z-index: 90;
   display: flex;
   flex-direction: column;
   overflow: hidden;

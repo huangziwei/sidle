@@ -284,15 +284,9 @@
     <div id="selection-bar" class="selection-bar" hidden>
       <span id="selection-count" class="selection-count">0 selected</span>
       <span id="sel-recrawl-progress" class="selection-progress" hidden></span>
-      <div class="selection-actions">
-        <button type="button" id="sel-send" class="btn-link" disabled>Send to Kindle</button>
-        <button type="button" id="sel-unsend" class="btn-link" disabled>Remove from Kindle</button>
-        <button type="button" id="sel-edit" class="btn-link">Edit metadata</button>
-        <button type="button" id="sel-recrawl" class="btn-link" disabled>Re-fetch covers</button>
-        <button type="button" id="sel-export" class="btn-link">Export…</button>
-        <button type="button" id="sel-delete" class="btn-link sel-danger">Remove from library</button>
-        <button type="button" id="sel-clear" class="btn-link">Clear</button>
-      </div>
+      <!-- Rendered from BOOK_ACTIONS on every selection change; see library.js. -->
+      <div id="selection-actions" class="selection-actions"></div>
+      <button type="button" id="sel-clear" class="btn-link">Clear</button>
     </div>
 
     <div id="notebook-selection-bar" class="selection-bar" hidden>
@@ -304,15 +298,9 @@
       </div>
     </div>
 
-    <footer id="status-bar" class="status-bar">
-      <button id="status-bar-toggle" class="status-bar-toggle" type="button">
-        <span class="dot" id="status-bar-dot"></span>
-        <span id="status-bar-summary">No conversions running</span>
-      </button>
-      <button id="btn-settings" class="status-bar-gear" type="button"
-              title="Library settings" aria-label="Library settings">⚙</button>
-    </footer>
-
+    <!-- In the page's flex column, between the selection bars and the status
+         bar it belongs to, so it shrinks the view instead of covering whatever
+         is at the foot of the window. -->
     <aside id="queue-drawer" class="queue-drawer" hidden aria-label="Queue">
       <header class="queue-drawer-header">
         <strong>Queue</strong>
@@ -321,6 +309,15 @@
       <ul id="queue-list" class="queue-list"></ul>
       <div id="queue-empty" class="queue-empty">Nothing in flight.</div>
     </aside>
+
+    <footer id="status-bar" class="status-bar">
+      <button id="status-bar-toggle" class="status-bar-toggle" type="button">
+        <span class="dot" id="status-bar-dot"></span>
+        <span id="status-bar-summary">No conversions running</span>
+      </button>
+      <button id="btn-settings" class="status-bar-gear" type="button"
+              title="Library settings" aria-label="Library settings">⚙</button>
+    </footer>
 
     <div id="lasso" class="lasso" hidden aria-hidden="true"></div>
 
@@ -875,6 +872,7 @@
 
     <script src="api.js"></script>
     <script src="selection.js"></script>
+    <script src="actions.js"></script>
     <script src="table.js"></script>
     <script src="library.js"></script>
     <script src="notebooks.js"></script>
