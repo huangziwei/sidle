@@ -898,8 +898,9 @@ impl Book {
     /// Like [`Book::export`], but reports coarse conversion progress to
     /// `on_progress` as `(phase_key, current, total, human_label)` — enough for
     /// a caller's conversion queue to drive a determinate progress bar. KFX
-    /// export and the normalized EPUB export (the two slow directions) emit
-    /// phases; the raw EPUB passthrough (epub/azw3→epub) ignores the callback.
+    /// export emits `survey → chapters → images → finalize`; both EPUB routes
+    /// emit `content → resources → …  → finalize`. The remaining targets are
+    /// fast enough to report nothing.
     pub fn export_with_progress<W: Write + Seek>(
         &mut self,
         format: Format,

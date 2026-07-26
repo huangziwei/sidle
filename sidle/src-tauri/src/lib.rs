@@ -3,6 +3,7 @@
 mod commands;
 mod cover_fetch;
 mod device;
+mod progress;
 mod queue;
 mod server;
 mod state;

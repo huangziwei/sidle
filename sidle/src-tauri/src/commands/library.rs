@@ -43,22 +43,91 @@ pub async fn library_list(state: State<'_, AppState>) -> Result<Vec<BookRow>, St
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
+/// A live tick from an import in flight. Keyed by the source path (there is no
+/// book row yet — that is the last thing an import does), with `index`/`total`
+/// placing this file in a multi-file drop. `fraction` and `label` mean what
+/// they do for a conversion: how full the bar is, and the step it is on.
+#[derive(Clone, Serialize)]
+struct ImportProgress<'a> {
+    path: &'a str,
+    index: usize,
+    total: usize,
+    fraction: f32,
+    label: &'a str,
+}
+
+fn emit_import_progress(
+    app: &AppHandle,
+    path: &str,
+    index: usize,
+    total: usize,
+    fraction: f32,
+    label: &str,
+) {
+    let _ = app.emit(
+        "library:import-progress",
+        ImportProgress {
+            path,
+            index,
+            total,
+            fraction,
+            label,
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn library_import(
+    app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
 ) -> Result<Vec<ImportResult>, String> {
-    let mut out = Vec::with_capacity(paths.len());
+    let file_count = paths.len();
+    let mut out = Vec::with_capacity(file_count);
 
-    for raw in paths {
+    for (index, raw) in paths.into_iter().enumerate() {
         let path = PathBuf::from(&raw);
         let db_handle = state.db.clone();
         let paths_handle = state.paths.clone();
         let raw_for_err = raw.clone();
+        let app_handle = app.clone();
 
+        // Three phases, two of them short-lived under the database lock and the
+        // slow one — the azw3/mobi/aozora conversion, minutes on a big book —
+        // outside it entirely. Holding the app's one connection across that
+        // would stall every reader and every running conversion behind a single
+        // drop.
         let result = tokio::task::spawn_blocking(move || {
+            let kind = import::detect_kind(&path)?;
+            let identity = import::identify_file(&path)?;
+            {
+                let conn = db_handle.blocking_lock();
+                if let Some(existing) = db::find_by_sha(&conn, &identity.0)? {
+                    return Ok(ImportOutcome::Duplicate(existing));
+                }
+            }
+
+            // Every file opens with a tick, whatever its format: it names the
+            // file being worked on, and it clears what the file before it left
+            // on the bar — a fast `.epub` behind a slow `.azw3` would otherwise
+            // sit under the azw3's finished bar for as long as it took.
+            emit_import_progress(&app_handle, &raw, index, file_count, 0.0, "");
+
+            let pipeline = crate::progress::import_pipeline(kind);
+            let throttle = crate::progress::Throttle::new();
+            let on_progress = |phase: &str, cur: usize, total: usize, label: &str| {
+                // The formats stored as they arrive land too fast for the steps
+                // to be worth naming; their opening tick is the whole report.
+                let Some(pipeline) = pipeline else { return };
+                let fraction = crate::progress::fraction(pipeline, phase, cur, total);
+                if throttle.worth_emitting(fraction) {
+                    emit_import_progress(&app_handle, &raw, index, file_count, fraction, label);
+                }
+            };
+            let staged = import::stage_file(&paths_handle, &path, identity, &on_progress)?;
+
             let conn = db_handle.blocking_lock();
-            import::import_file(&conn, &paths_handle, &path)
+            import::record(&conn, staged)
         })
         .await
         .map_err(|e| e.to_string())?;

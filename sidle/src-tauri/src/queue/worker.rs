@@ -62,15 +62,11 @@ pub async fn run_job(
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
         // Map bokai's per-phase reports → a monotonic 0–1 fraction (weighted per
-        // direction) and emit a throttled `conversion:progress` event. `last`
-        // suppresses sub-1% churn so an image-heavy EPUB doesn't fire hundreds
-        // of events; the 100% tick always gets through. `Cell` gives the `Fn`
-        // closure interior mutability without needing `FnMut`.
-        let last = std::cell::Cell::new(-1.0_f32);
+        // direction) and emit a throttled `conversion:progress` event.
+        let throttle = crate::progress::Throttle::new();
         let on_progress = |phase: &str, cur: usize, total: usize, label: &str| {
-            let f = progress_fraction(&kind_owned, phase, cur, total);
-            if f >= 1.0 || f >= last.get() + 0.01 {
-                last.set(f);
+            let f = crate::progress::fraction(&kind_owned, phase, cur, total);
+            if throttle.worth_emitting(f) {
                 emit_progress(&app_owned, book_id, f, label);
             }
         };
@@ -301,50 +297,6 @@ fn run_direction(
         "kfx_to_pdf" => convert_kfx_to_pdf(paths, book, on_progress),
         other => Err(anyhow::anyhow!("unknown job kind: {other}")),
     }
-}
-
-/// Map a bokai/worker phase report to a monotonic 0.0–1.0 progress-bar fraction.
-/// Bands are per-direction heuristics (the slow phase gets the widest span);
-/// within a band we interpolate by `cur/total`. Not wall-clock-exact — the live
-/// label names the precise step — but always forward-moving, so the bar never
-/// snaps backward between phases.
-fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
-    let (lo, hi): (f32, f32) = match (kind, phase) {
-        ("epub_to_kfx", "survey") => (0.00, 0.08),
-        ("epub_to_kfx", "chapters") => (0.08, 0.40),
-        ("epub_to_kfx", "images") => (0.40, 0.92),
-        ("epub_to_kfx", "finalize") => (0.92, 1.00),
-
-        // IR route emission order: `load` (Book::from_bytes container parse) →
-        // `content` (per-chapter storyline→IR) → `resources` (image transcode,
-        // real per-chunk counts) → `nav` → `finalize`. `resources` gets the
-        // widest band (it's 95%+ of the wall time on image-heavy books).
-        // `resources` sits before the (cheap) `nav` resolution because images
-        // transcode inline, before the manifest needs each image's MIME.
-        ("kfx_to_epub", "load") => (0.00, 0.08),
-        ("kfx_to_epub", "content") => (0.08, 0.24),
-        ("kfx_to_epub", "resources") => (0.24, 0.92),
-        ("kfx_to_epub", "nav") => (0.92, 0.96),
-        ("kfx_to_epub", "finalize") => (0.96, 1.00),
-
-        ("pdf_to_kfx", "probe") => (0.00, 0.05),
-        ("pdf_to_kfx", "cover") => (0.05, 0.15),
-        ("pdf_to_kfx", "text") => (0.15, 0.55),
-        ("pdf_to_kfx", "build") => (0.55, 0.90),
-        ("pdf_to_kfx", "geom") => (0.90, 1.00),
-
-        ("kfx_to_pdf", _) => (0.00, 1.00),
-
-        // Unrecognized (shouldn't happen): span the whole bar so cur/total still
-        // reads as a plain fraction rather than snapping to a band edge.
-        _ => (0.00, 1.00),
-    };
-    let within = if total == 0 {
-        1.0
-    } else {
-        (cur as f32 / total as f32).clamp(0.0, 1.0)
-    };
-    (lo + (hi - lo) * within).clamp(0.0, 1.0)
 }
 
 fn convert_epub_to_kfx(

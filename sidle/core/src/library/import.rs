@@ -50,6 +50,12 @@
 //! a name in for the file it never had.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
+//! Only steps 1 and 6 touch the library database, and the conversions in step 2
+//! can run for minutes, so a caller that shares one connection behind a lock
+//! should run the phases separately — [`identify_file`], then [`stage_file`]
+//! with the lock released, then [`record`]. [`stage_file`] also reports what it
+//! is doing, which is the only way an import of a converting format can show
+//! progress.
 
 use std::fs;
 use std::io::{Cursor, Read};
@@ -83,15 +89,27 @@ pub fn import_file(
     paths: &LibraryPaths,
     src: &Path,
 ) -> Result<ImportOutcome> {
-    let src_kind = SourceKind::detect(src);
-    if matches!(src_kind, SourceKind::Unknown) {
+    let src_kind = detect_kind(src)?;
+    import_one(conn, paths, Source::File(src), src_kind, &no_progress)
+}
+
+/// The extension-detected format of a file the user is importing, or an error
+/// naming what this app accepts. Exposed so a caller running the phases of an
+/// import separately (see [`stage_file`]) can reject an unsupported drop before
+/// hashing it.
+pub fn detect_kind(src: &Path) -> Result<SourceKind> {
+    let kind = SourceKind::detect(src);
+    if matches!(kind, SourceKind::Unknown) {
         bail!(
             "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, .mobi, or .pdf)",
             src.display()
         );
     }
-    import_one(conn, paths, Source::File(src), src_kind)
+    Ok(kind)
 }
+
+/// A progress callback that reports nothing, for the callers that don't watch.
+fn no_progress(_: &str, _: usize, _: usize, _: &str) {}
 
 /// Import a book that exists only in memory — a volume carved out of a
 /// collection, say. `name` stands in for a filename: its extension picks the
@@ -110,7 +128,55 @@ pub fn import_bytes(
     if matches!(src_kind, SourceKind::Unknown) {
         bail!("unsupported file type: {name} (expected .epub, .kfx, or .pdf)");
     }
-    import_one(conn, paths, Source::Memory { name, bytes }, src_kind)
+    import_one(
+        conn,
+        paths,
+        Source::Memory { name, bytes },
+        src_kind,
+        &no_progress,
+    )
+}
+
+/// The dedupe identity of a file about to be imported: the hash of its bytes as
+/// they arrived (before any conversion) and their size. Cheap — a few tens of
+/// milliseconds even for a large book — and needs no database, so a caller can
+/// run it before taking a lock and hand the result to [`stage_file`].
+pub fn identify_file(src: &Path) -> Result<(String, i64)> {
+    Source::File(src).identity()
+}
+
+/// Everything an import does that does *not* touch the library database:
+/// convert the source to its canonical format, read the metadata out of it, and
+/// write both sides into the library slot. The row this produced is inserted
+/// separately by [`record`].
+///
+/// Split out because the conversion an `.azw3`, `.mobi` or `.zip` runs inline
+/// can take minutes, and an app that holds one connection behind a lock must
+/// not hold it for that long — every other reader would stall behind a single
+/// import. `identity` is what [`identify_file`] returned, the caller having
+/// already checked it against the dedupe index.
+///
+/// `on_progress` receives `(phase_key, current, total, human_label)`, the same
+/// shape bokai's exporters report in. The keys are:
+///
+///  - `merge` — merging the parts of a `.kfx-zip` bundle
+///  - `epub/parse`, then bokai's own EPUB-export phases under `epub/` —
+///    building the canonical EPUB side
+///  - `kfx/parse`, then bokai's own KFX-export phases under `kfx/` — building
+///    the KFX side an `.azw3` derives at import
+///  - `store` — metadata, cover sidecar, and writing into the library slot
+///
+/// Namespacing the two legs keeps the sequence unambiguous: both exporters end
+/// in a phase called `finalize`, and a caller mapping phases to a bar needs to
+/// know which one it just saw.
+pub fn stage_file(
+    paths: &LibraryPaths,
+    src: &Path,
+    identity: (String, i64),
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<StagedImport> {
+    let src_kind = detect_kind(src)?;
+    stage(paths, Source::File(src), src_kind, identity, on_progress)
 }
 
 /// Where an import's bytes come from: a file the user dropped, or bytes the
@@ -167,7 +233,7 @@ impl Source<'_> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum SourceKind {
+pub enum SourceKind {
     Epub,
     Kfx,
     KfxZip,
@@ -263,18 +329,31 @@ fn import_one(
     paths: &LibraryPaths,
     src: Source<'_>,
     src_kind: SourceKind,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<ImportOutcome> {
+    // 1. Hash + dedupe before doing expensive normalization (a `.kfx-zip`
+    //    merge can be tens of ms; stream-hashing the source is microseconds).
+    //    `record` checks again; this one is what saves the conversion.
+    let identity = src.identity()?;
+
+    if let Some(existing) = db::find_by_sha(conn, &identity.0)? {
+        return Ok(ImportOutcome::Duplicate(existing));
+    }
+
+    record(conn, stage(paths, src, src_kind, identity, on_progress)?)
+}
+
+fn stage(
+    paths: &LibraryPaths,
+    src: Source<'_>,
+    src_kind: SourceKind,
+    identity: (String, i64),
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<StagedImport> {
     let canonical = src_kind.canonical();
     let label = src.label();
     let stem = src.stem();
-
-    // 1. Hash + dedupe before doing expensive normalization (a `.kfx-zip`
-    //    merge can be tens of ms; stream-hashing the source is microseconds).
-    let (sha, file_size) = src.identity()?;
-
-    if let Some(existing) = db::find_by_sha(conn, &sha)? {
-        return Ok(ImportOutcome::Duplicate(existing));
-    }
+    let (sha, file_size) = identity;
 
     // 2. Normalize → canonical bytes. An `.azw3` additionally derives its KFX
     //    sibling here (both exports come straight from the azw3's IR), carried
@@ -290,21 +369,27 @@ fn import_one(
                 bail!("{label}: this format can only be imported from a file");
             };
             match src_kind {
-                SourceKind::KfxZip => bokai::formats::kfx::merge::merge_kfx_zip(path)
-                    .with_context(|| format!("merge kfx-zip {label}"))?,
+                SourceKind::KfxZip => {
+                    on_progress("merge", 0, 1, "Merging KFX bundle");
+                    bokai::formats::kfx::merge::merge_kfx_zip(path)
+                        .with_context(|| format!("merge kfx-zip {label}"))?
+                }
                 SourceKind::Azw3 => {
-                    let derived = convert_azw3(path).with_context(|| format!("azw3 {label}"))?;
+                    let derived =
+                        convert_azw3(path, on_progress).with_context(|| format!("azw3 {label}"))?;
                     direct_kfx = Some(derived.kfx);
                     derived.epub
                 }
-                SourceKind::Mobi => convert_mobi(path).with_context(|| format!("mobi {label}"))?,
-                SourceKind::AozoraZip => {
-                    convert_aozora_zip(path).with_context(|| format!("aozora zip {label}"))?
+                SourceKind::Mobi => {
+                    convert_mobi(path, on_progress).with_context(|| format!("mobi {label}"))?
                 }
+                SourceKind::AozoraZip => convert_aozora_zip(path, on_progress)
+                    .with_context(|| format!("aozora zip {label}"))?,
                 _ => unreachable!("handled above"),
             }
         }
     };
+    on_progress("store", 0, 1, "Storing in the library");
 
     // 2b. Repair EPUBs whose producer (e.g. ScribdMpubToEpubConverter) wrote
     //     spurious ZIP64 extra fields the `zip` crate rejects. Doing it here —
@@ -400,7 +485,8 @@ fn import_one(
         Canonical::Pdf => None,
     };
 
-    // 6. Insert book row + job.
+    // 6. Describe what the row will say. Every field is settled here; only the
+    //    INSERT is left, and that is `record`'s job.
     let other_ready = other_dest.exists();
     // Record the KFX byte-hash whenever a KFX is on disk (canonical or the
     // already-present partner). That hash drives the on-device filename infix;
@@ -414,27 +500,77 @@ fn import_one(
     // Which sides are on disk now: the canonical always, the partner only on an
     // idempotent re-import where it already existed.
     let has = |c: Canonical| canonical == c || (partner == c && other_ready);
+    Ok(StagedImport {
+        sha,
+        file_size,
+        meta,
+        epub_path: has(Canonical::Epub).then_some(dest_epub),
+        cover_path,
+        kfx_path: has(Canonical::Kfx).then_some(dest_kfx),
+        pdf_path: has(Canonical::Pdf).then_some(dest_pdf),
+        kfx_sha256: kfx_bytes_sha,
+        job_kind: job_kind(canonical, partner),
+        other_ready,
+    })
+}
+
+/// A finished import waiting for its row: the files are already in the library
+/// slot, and everything the row will say is settled. Opaque to the caller —
+/// hand it straight to [`record`].
+pub struct StagedImport {
+    sha: String,
+    file_size: i64,
+    meta: BookMeta,
+    epub_path: Option<PathBuf>,
+    cover_path: Option<PathBuf>,
+    kfx_path: Option<PathBuf>,
+    pdf_path: Option<PathBuf>,
+    kfx_sha256: Option<String>,
+    /// The conversion that fills in the side this import didn't produce.
+    job_kind: &'static str,
+    /// Whether that side is already on disk — a direct-derived sibling, or an
+    /// idempotent re-import that found it there. The job lands `done` if so.
+    other_ready: bool,
+}
+
+/// Insert the book row and its conversion job for a staged import. The only
+/// part of an import that needs the database, and it is a few milliseconds of
+/// it — see [`stage_file`] for why the two are separable.
+pub fn record(conn: &rusqlite::Connection, staged: StagedImport) -> Result<ImportOutcome> {
+    // The dedupe probe that cleared this import ran before the conversion, which
+    // for a large `.azw3` is minutes ago — long enough for the LAN server or a
+    // device autopull to have landed the same book. Re-check inside the window
+    // the insert will use: `books.sha256` is UNIQUE, so the alternative is a
+    // constraint error where "already in the library" is the honest answer.
+    if let Some(existing) = db::find_by_sha(conn, &staged.sha)? {
+        return Ok(ImportOutcome::Duplicate(existing));
+    }
+
     let book_id = insert_row(
         conn,
-        &sha,
-        &meta,
-        file_size,
+        &staged.sha,
+        &staged.meta,
+        staged.file_size,
         &Persisted {
-            epub_path: has(Canonical::Epub).then_some(dest_epub.as_path()),
-            cover_path: cover_path.as_deref(),
-            kfx_path: has(Canonical::Kfx).then_some(dest_kfx.as_path()),
-            pdf_path: has(Canonical::Pdf).then_some(dest_pdf.as_path()),
-            kfx_sha256: kfx_bytes_sha.as_deref(),
+            epub_path: staged.epub_path.as_deref(),
+            cover_path: staged.cover_path.as_deref(),
+            kfx_path: staged.kfx_path.as_deref(),
+            pdf_path: staged.pdf_path.as_deref(),
+            kfx_sha256: staged.kfx_sha256.as_deref(),
         },
     )?;
 
-    let job_status = if other_ready { "done" } else { "pending" };
-    db::insert_job(conn, book_id, job_status, job_kind(canonical, partner))?;
+    let job_status = if staged.other_ready {
+        "done"
+    } else {
+        "pending"
+    };
+    db::insert_job(conn, book_id, job_status, staged.job_kind)?;
 
     let row = db::get_book(conn, book_id)?.expect("just inserted");
     Ok(ImportOutcome::Imported {
         book: row,
-        needs_enqueue: !other_ready,
+        needs_enqueue: !staged.other_ready,
     })
 }
 
@@ -759,22 +895,23 @@ struct Azw3Derived {
 /// is exported from a fresh parse of the same bytes — not the handle the EPUB
 /// export ran on — keeping it the same artifact as `bokai convert <azw3> <kfx>`
 /// produces.
-fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
-    use bokai::Exporter as _;
+fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Azw3Derived> {
     let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
 
+    on_progress("epub/parse", 0, 1, "Reading AZW3");
     let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
     bokai::EpubExporter::new()
-        .export(&mut book, &mut buf)
+        .export_with_progress(&mut book, &mut buf, &leg("epub/", on_progress))
         .context("azw3 -> epub export")?;
     let epub_bytes = buf.into_inner();
 
+    on_progress("kfx/parse", 0, 1, "Reading AZW3");
     let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut kfx_buf = Cursor::new(Vec::<u8>::new());
-    book.export(bokai::Format::Kfx, &mut kfx_buf)
+    book.export_with_progress(bokai::Format::Kfx, &mut kfx_buf, &leg("kfx/", on_progress))
         .context("azw3 -> kfx export")?;
     let asin = bokai::formats::kfx::metadata::resolve_export_asin(book.metadata());
     Ok(Azw3Derived {
@@ -791,16 +928,26 @@ fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
 /// import is still filled by the background `epub_to_kfx` job from the
 /// exported EPUB (mobi→kfx direct hasn't been through the fidelity harness
 /// the azw3 pairs have).
-fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
-    use bokai::Exporter as _;
+fn convert_mobi(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Vec<u8>> {
     let mobi_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
+    on_progress("epub/parse", 0, 1, "Reading MOBI");
     let mut book = bokai::Book::from_bytes(&mobi_bytes, bokai::Format::Mobi)
         .with_context(|| format!("parse mobi {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
     bokai::EpubExporter::new()
-        .export(&mut book, &mut buf)
+        .export_with_progress(&mut book, &mut buf, &leg("epub/", on_progress))
         .context("mobi -> epub export")?;
     Ok(buf.into_inner())
+}
+
+/// Re-report an exporter's phases under a leg of this import, so that
+/// `finalize` from the EPUB export and `finalize` from the KFX export stay
+/// distinguishable to whoever is drawing the bar.
+fn leg<'a>(
+    prefix: &'a str,
+    on_progress: &'a dyn Fn(&str, usize, usize, &str),
+) -> impl Fn(&str, usize, usize, &str) + 'a {
+    move |phase, cur, total, label| on_progress(&format!("{prefix}{phase}"), cur, total, label)
 }
 
 /// Open an Aozora Bunko `.zip`, sniff for the markers, run the
@@ -810,7 +957,11 @@ fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
 ///
 /// Pipeline mirrors `aozora_dispatch` in `bokai/src/main.rs:1602` so
 /// the CLI and the GUI produce byte-identical EPUBs from the same input.
-fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
+fn convert_aozora_zip(
+    src: &Path,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<Vec<u8>> {
+    on_progress("epub/parse", 0, 1, "Reading Aozora archive");
     let file = fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("not a valid zip archive")?;
 
@@ -853,8 +1004,10 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     }
 
     let doc = bokai::formats::aozora::parse_txt(&text);
+    on_progress("epub/cover", 0, 1, "Rendering cover");
     let cover = bokai::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
         .context("aozora cover render")?;
+    on_progress("epub/finalize", 1, 1, "Packaging");
     // EPUB validity is not gated here (see `convert_azw3`): the import always
     // produces a book; an invalid one is a converter bug or a source defect to
     // repair, not a reason to drop the import.
@@ -974,6 +1127,65 @@ pub(crate) mod tests {
             Path::new(book.pdf_path.as_ref().unwrap()).exists(),
             "bytes landed in the library slot"
         );
+    }
+
+    #[test]
+    fn running_the_phases_apart_files_the_same_book() {
+        use crate::library::db;
+        use crate::library::paths::LibraryPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let conn = db::open(&paths.db()).unwrap();
+
+        let src = minimal_input_in(tmp.path());
+        let identity = identify_file(&src).unwrap();
+        let staged = stage_file(&paths, &src, identity, &no_progress).unwrap();
+        let ImportOutcome::Imported {
+            book,
+            needs_enqueue,
+        } = record(&conn, staged).unwrap()
+        else {
+            panic!("expected a fresh import, got a duplicate");
+        };
+
+        // Identical to what `import_file` produces in one call — the phases are
+        // a seam for the lock, not a different pipeline.
+        assert_eq!(book.kind.as_deref(), Some("pdf_to_kfx"));
+        assert!(needs_enqueue);
+        assert!(Path::new(book.pdf_path.as_ref().unwrap()).exists());
+    }
+
+    #[test]
+    fn a_book_that_landed_mid_conversion_is_not_filed_twice() {
+        use crate::library::db;
+        use crate::library::paths::LibraryPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let conn = db::open(&paths.db()).unwrap();
+
+        // Two importers clear the dedupe check on the same file, then convert.
+        // Whoever finishes second must report the book as already here — the
+        // alternative is a UNIQUE violation surfacing as an import failure.
+        let src = minimal_input_in(tmp.path());
+        let first = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();
+        let second = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();
+
+        let ImportOutcome::Imported { book, .. } = record(&conn, first).unwrap() else {
+            panic!("the first one in files the book");
+        };
+        let ImportOutcome::Duplicate(existing) = record(&conn, second).unwrap() else {
+            panic!("the second one must find the book already there");
+        };
+        assert_eq!(existing.id, book.id);
+        assert_eq!(db::list_books(&conn).unwrap().len(), 1);
     }
 
     // The azw3 arm — deriving both sides up front, so the job lands `done` with

@@ -52,8 +52,12 @@ const state = {
   // clobber the autopull line with the queue summary.
   autopull: null,
   // When non-null, a foreground import (user-initiated drop / add) is in
-  // flight. `{ message, failed }` — shown in the status bar with priority
-  // over the autopull and queue summary lines.
+  // flight. `{ message, failed, name, fraction, label, index, total }` — shown
+  // in the status bar with priority over the autopull and queue summary lines,
+  // and as a determinate row in the queue drawer. The last four arrive on
+  // `library:import-progress` and are only present for the formats converted
+  // during the import (azw3 / mobi / aozora zip / kfx-zip); the ones stored as
+  // they arrive finish before a bar would mean anything.
   importing: null,
   // The in-flight send-to-Kindle batch: one task per book, surfaced in the
   // queue drawer (like conversions) AND the status-bar summary. Each is
@@ -322,6 +326,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireLibraryShortcuts();
   await refresh();
   subscribeStatus();
+  subscribeImportProgress();
   subscribeDeviceStatus();
   setupKualSection();
   refreshServerStatus();
@@ -888,43 +893,17 @@ function hideImportErrorReport() {
   if (panel) panel.hidden = true;
 }
 
-// Two-phase reveal for the aozora pipeline: the slow step is the
-// parse → cover render → build_epub inside library_import. Without an
-// event from Rust we can't tell exactly when it kicks in, but in
-// practice the file-IO prefix is microseconds, so a short timer is a
-// good-enough approximation.
-let importPhaseTimer = null;
-
 function startImportStatus(paths) {
   state.importing = { message: importInitialMessage(paths), failed: false };
-  if (importPhaseTimer) clearTimeout(importPhaseTimer);
-  // Only aozora gets a phase-2 message — for EPUB / KFX the import
-  // returns almost instantly anyway.
-  if (paths.length === 1 && paths[0].toLowerCase().endsWith(".zip")) {
-    importPhaseTimer = setTimeout(() => {
-      if (state.importing && !state.importing.failed) {
-        state.importing.message = "Converting Aozora zip to EPUB…";
-        render();
-      }
-    }, 300);
-  }
   render();
 }
 
 function clearImportStatus() {
-  if (importPhaseTimer) {
-    clearTimeout(importPhaseTimer);
-    importPhaseTimer = null;
-  }
   state.importing = null;
   render();
 }
 
 function showImportFailure() {
-  if (importPhaseTimer) {
-    clearTimeout(importPhaseTimer);
-    importPhaseTimer = null;
-  }
   state.importing = { message: "Import failed", failed: true };
   render();
   // Linger briefly so the user notices, then fall back to queue summary.
@@ -937,17 +916,49 @@ function showImportFailure() {
 }
 
 function importInitialMessage(paths) {
-  if (paths.length === 1) {
-    const lower = paths[0].toLowerCase();
-    if (lower.endsWith(".zip")) return "Importing Aozora zip…";
-    if (lower.endsWith(".epub")) return "Importing EPUB…";
-    if (lower.endsWith(".kfx-zip")) return "Importing KFX bundle…";
-    if (lower.endsWith(".kfx")) return "Importing KFX…";
-    if (lower.endsWith(".azw3")) return "Importing AZW3…";
-    if (lower.endsWith(".mobi")) return "Importing MOBI…";
-    if (lower.endsWith(".pdf")) return "Importing PDF…";
-  }
+  if (paths.length === 1) return `Importing ${importFormatName(paths[0])}…`;
   return `Importing ${paths.length} file${paths.length === 1 ? "" : "s"}…`;
+}
+
+// What to call the format at `path` while it's being imported. The extension is
+// all we have — the backend dispatches on it too.
+function importFormatName(path) {
+  const lower = (path || "").toLowerCase();
+  if (lower.endsWith(".zip")) return "Aozora zip";
+  if (lower.endsWith(".epub")) return "EPUB";
+  if (lower.endsWith(".kfx-zip")) return "KFX bundle";
+  if (lower.endsWith(".kfx")) return "KFX";
+  if (lower.endsWith(".azw3")) return "AZW3";
+  if (lower.endsWith(".mobi")) return "MOBI";
+  if (lower.endsWith(".pdf")) return "PDF";
+  return "book";
+}
+
+// Live progress for the file currently being imported. Only the formats
+// converted during the import report these — see the `importing` state comment.
+// The event carries the source path, so the row is named after the file even
+// before the book has a title.
+function subscribeImportProgress() {
+  window.api.listen("library:import-progress", (e) => {
+    const { path, index, total, fraction, label } = e.payload || {};
+    // A tick that outlives its import (the command already resolved) must not
+    // resurrect the status line.
+    if (!state.importing || state.importing.failed) return;
+    const batch = total > 1 ? ` (${(index ?? 0) + 1}/${total})` : "";
+    state.importing = {
+      ...state.importing,
+      message: `Importing ${importFormatName(path)}${batch}`,
+      name: fileNameOf(path),
+      fraction: fraction ?? 0,
+      label: label || "",
+    };
+    if (!updateImportRowProgress()) renderQueue();
+  });
+}
+
+// The last path segment, for naming an import row after the file it came from.
+function fileNameOf(path) {
+  return (path || "").split(/[\\/]/).pop() || path || "";
 }
 
 // ---------------------------------------------------------------------------
@@ -2785,6 +2796,26 @@ function renderQueue() {
     (b) => b.status === "pending" || b.status === "converting" || b.status === "error",
   );
 
+  renderStatusSummary(active);
+
+  const ul = $("#queue-list");
+  ul.innerHTML = "";
+  // The import that's running now sits at the top: it's the newest thing in
+  // flight, and it's the one holding the user's attention. Only the imports
+  // that report their steps get a row — a bar stuck at zero for an import with
+  // nothing to report says less than the status line already does, and the
+  // device-orphan path writes `importing` with no fraction at all.
+  const importRow = state.importing?.label ? importQueueRow() : null;
+  if (importRow) ul.appendChild(importRow);
+  for (const t of state.sendQueue) ul.appendChild(sendQueueRow(t));
+  for (const b of active) ul.appendChild(queueRow(b));
+  $("#queue-empty").hidden =
+    active.length > 0 || state.sendQueue.length > 0 || importRow != null;
+}
+
+// The single status-bar line. Split out from `renderQueue` because the frequent
+// in-place progress patches repaint it without rebuilding the drawer list.
+function renderStatusSummary(active) {
   const counts = {
     converting: active.filter((b) => b.status === "converting").length,
     pending: active.filter((b) => b.status === "pending").length,
@@ -2807,8 +2838,13 @@ function renderQueue() {
     summary.textContent = `Opening ${state.opening}…`;
     toggle.classList.add("active");
   } else if (state.importing) {
-    summary.textContent = state.importing.message;
-    if (state.importing.failed) toggle.classList.add("errors");
+    // A converting import (azw3 / mobi / zip) reports its step and how far in
+    // it is; the ones stored as they arrive have only the opening message.
+    const imp = state.importing;
+    summary.textContent = imp.label
+      ? `${imp.message} — ${imp.label} · ${convFillPct(imp)}%`
+      : imp.message;
+    if (imp.failed) toggle.classList.add("errors");
     else toggle.classList.add("active");
   } else if (state.sendQueue.length) {
     const q = state.sendQueue;
@@ -2862,12 +2898,69 @@ function renderQueue() {
       else if (counts.converting) toggle.classList.add("active");
     }
   }
+}
 
-  const ul = $("#queue-list");
-  ul.innerHTML = "";
-  for (const t of state.sendQueue) ul.appendChild(sendQueueRow(t));
-  for (const b of active) ul.appendChild(queueRow(b));
-  $("#queue-empty").hidden = active.length > 0 || state.sendQueue.length > 0;
+// A queue-drawer row for the import in flight. Same shape as a conversion row —
+// an import of an azw3 or mobi *is* a conversion, just one that runs before the
+// book has a row to hang a job off. Reuses the `converting` classes so the bar
+// and status text match the queue below it.
+function importQueueRow() {
+  const imp = state.importing;
+  const li = document.createElement("li");
+  li.dataset.importRow = "1";
+
+  const main = document.createElement("div");
+  main.className = "queue-row-main";
+  const title = document.createElement("div");
+  title.className = "queue-title";
+  title.textContent = imp.name || imp.message;
+  const status = document.createElement("div");
+  status.className = "queue-status converting";
+  status.textContent = importStatusText(imp);
+  main.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "queue-meta";
+  meta.textContent = "Importing";
+
+  const bar = document.createElement("div");
+  bar.className = "queue-progress converting";
+  const fill = document.createElement("div");
+  fill.className = "queue-progress-fill";
+  fill.style.width = `${convFillPct(imp)}%`;
+  bar.appendChild(fill);
+
+  li.append(main, meta, bar);
+  return li;
+}
+
+// "Step · NN%" for an import that reports phases; a plain word for one that
+// finishes too fast to have any.
+function importStatusText(imp) {
+  return imp.label ? `${imp.label} · ${convFillPct(imp)}%` : "Importing…";
+}
+
+// Patch the import row in place for a progress tick — same reason as
+// `updateQueueRowProgress`: these fire per image. Returns false when the row
+// isn't mounted (the drawer hasn't rendered since the import started).
+function updateImportRowProgress() {
+  const li = document.querySelector("#queue-list li[data-import-row]");
+  if (!li) return false;
+  const imp = state.importing;
+  const fill = li.querySelector(".queue-progress-fill");
+  if (fill) fill.style.width = `${convFillPct(imp)}%`;
+  const status = li.querySelector(".queue-status.converting");
+  if (status) status.textContent = importStatusText(imp);
+  const title = li.querySelector(".queue-title");
+  if (title) title.textContent = imp.name || imp.message;
+  // The status bar carries the same numbers and is always visible, unlike the
+  // drawer.
+  renderStatusSummary(
+    state.books.filter(
+      (b) => b.status === "pending" || b.status === "converting" || b.status === "error",
+    ),
+  );
+  return true;
 }
 
 function queueRow(b) {

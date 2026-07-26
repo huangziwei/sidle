@@ -226,10 +226,11 @@ impl Exporter for EpubExporter {
 impl EpubExporter {
     /// Like [`Exporter::export`], but reports coarse phase progress to
     /// `on_progress` as `(phase_key, current, total, human_label)` — see
-    /// [`crate::Book::export_with_progress`]. Only the normalized path (KFX→EPUB)
-    /// emits phases (`content → resources → nav → finalize`, with real per-chunk
-    /// counts on the image-transcode `resources` phase); the raw passthrough
-    /// (epub/azw3→epub) is fast and ignores the callback.
+    /// [`crate::Book::export_with_progress`]. Both routes emit the same phase
+    /// sequence, `content → resources → nav → finalize`, so a caller's bar needs
+    /// one band table either way; what each phase spends its time on differs
+    /// (the normalized route transcodes images under `resources`, the raw one
+    /// deflates the source's own files there).
     pub fn export_with_progress<W: Write + Seek>(
         &self,
         book: &mut Book,
@@ -241,12 +242,17 @@ impl EpubExporter {
         if self.config.normalize || book.requires_normalized_export() {
             self.export_normalized(book, writer, on_progress)
         } else {
-            self.export_raw(book, writer)
+            self.export_raw(book, writer, on_progress)
         }
     }
 
     /// Export with passthrough mode (preserves original HTML/CSS).
-    fn export_raw<W: Write + Seek>(&self, book: &mut Book, writer: &mut W) -> io::Result<()> {
+    fn export_raw<W: Write + Seek>(
+        &self,
+        book: &mut Book,
+        writer: &mut W,
+        on_progress: &dyn Fn(&str, usize, usize, &str),
+    ) -> io::Result<()> {
         // Resolve TOC fragments first (AZW3/MOBI backends refine NCX byte
         // positions into `#id` anchors; a no-op elsewhere). The
         // materialization path gets this via `resolve_links()`, but the raw
@@ -283,6 +289,7 @@ impl EpubExporter {
         // and step 7 writes the same bytes.
         let mut chapter_bytes: Vec<Vec<u8>> = Vec::with_capacity(spine.len());
         for (i, entry) in spine.iter().enumerate() {
+            on_progress("content", i + 1, spine.len(), "Reading chapters");
             let source_path = book
                 .source_id(entry.id)
                 .unwrap_or("unknown.xhtml")
@@ -464,6 +471,16 @@ impl EpubExporter {
         // and pre-EPUB-3 source content (e.g. a Sigil-authored book carried
         // through AZW3: XHTML 1.1 DOCTYPE, empty <title>) is otherwise emitted
         // verbatim and fails epubcheck. Rendered content is untouched.
+        //
+        // Steps 7 and 8 are one `resources` phase to the caller: both deflate a
+        // container entry, they cost the same per byte, and on an image-heavy
+        // book they are together the whole of the export's wall time. Counting
+        // them separately would run the bar to full twice. The nav write above
+        // is microseconds on this route (passthrough hrefs need no resolution),
+        // so it reports nothing and the phase order stays the one every EPUB
+        // export promises: content → resources → finalize.
+        let entries = spine.len() + assets.len();
+        let mut written = 0usize;
         let book_title = book.metadata().title.clone();
         for (entry, content) in spine.iter().zip(&chapter_bytes) {
             let source_path = book
@@ -475,6 +492,8 @@ impl EpubExporter {
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(&doc)?;
+            written += 1;
+            on_progress("resources", written, entries, "Writing files");
         }
 
         // 8. Write assets
@@ -484,8 +503,11 @@ impl EpubExporter {
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(&content)?;
+            written += 1;
+            on_progress("resources", written, entries, "Writing files");
         }
 
+        on_progress("finalize", 1, 1, "Packaging");
         zip.finish().map_err(io_error)?;
         Ok(())
     }
