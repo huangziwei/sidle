@@ -147,7 +147,8 @@ enum Command {
     /// collects. Prints the proposed cuts; with `--out`, writes one EPUB per
     /// volume into that directory.
     Split {
-        /// Input EPUB file.
+        /// Input book. EPUB is split directly; an AZW3/MOBI/KFX is converted
+        /// to EPUB first, the same route the split's own design takes.
         input: String,
 
         /// Directory to write the volume EPUBs into. Omit for a dry run.
@@ -219,7 +220,7 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
 fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(), String> {
     use bokai::formats::epub::split::{Numbering, propose_cuts, split};
 
-    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    let bytes = as_epub(input)?;
     let cuts = propose_cuts(&bytes).map_err(|e| e.to_string())?;
     if cuts.is_empty() {
         println!("no volumes: this book evidences no collection to split");
@@ -270,6 +271,30 @@ fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(),
         println!("  {:>10}  {name}  ({verdict})", human_size(epub.len()));
     }
     Ok(())
+}
+
+/// Read a book as EPUB bytes, converting first when it is one of the other
+/// importable formats. Splitting is defined over the EPUB container — spine,
+/// manifest and nav are explicit there — so an AZW3 or KFX collection takes the
+/// same route the library does: import it, export an EPUB, split that.
+fn as_epub(input: &str) -> Result<Vec<u8>, String> {
+    use bokai::Exporter as _;
+
+    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    let format =
+        Format::from_path(input).ok_or_else(|| format!("{input}: not a format bokai can read"))?;
+    if format == Format::Epub {
+        return Ok(bytes);
+    }
+    if !format.can_import() {
+        return Err(format!("{input}: {format:?} can't be read as a book"));
+    }
+    let mut book = Book::from_bytes(&bytes, format).map_err(|e| format!("read {input}: {e}"))?;
+    let mut epub = std::io::Cursor::new(Vec::new());
+    bokai::EpubExporter::new()
+        .export(&mut book, &mut epub)
+        .map_err(|e| format!("{input} -> epub: {e}"))?;
+    Ok(epub.into_inner())
 }
 
 fn human_size(bytes: usize) -> String {

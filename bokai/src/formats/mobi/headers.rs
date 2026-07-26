@@ -233,6 +233,10 @@ pub struct ExthHeader {
     pub thumbnail_offset: Option<u32>,
     pub language: Option<String>,
     pub kf8_boundary: Option<u32>,
+    /// The series the book belongs to, as EXTH 503 states it: the store writes
+    /// it inside the title, in ASCII angle brackets. See
+    /// [`split_series_annotation`].
+    pub series: Option<String>,
     /// EXTH 508 — title pronunciation (katakana yomigana on Amazon JP
     /// books; the sort key the Kindle library uses).
     pub title_pronunciation: Option<String>,
@@ -340,7 +344,11 @@ impl ExthHeader {
                         exth.thumbnail_offset = Some(val);
                     }
                 }
-                503 => exth.title = Some(decode(content).trim().to_string()),
+                503 => {
+                    let (title, series) = split_series_annotation(decode(content).trim());
+                    exth.title = Some(title);
+                    exth.series = series;
+                }
                 508 => exth.title_pronunciation = Some(decode(content).trim().to_string()),
                 517 => exth
                     .author_pronunciations
@@ -363,9 +371,68 @@ impl ExthHeader {
     }
 }
 
+/// Separate an EXTH-503 title from the series annotation the store embeds in
+/// it: `A Work 全20冊収録<A Series> (imprint)` → `("A Work 全20冊収録 (imprint)",
+/// Some("A Series"))`.
+///
+/// The annotation is how a Kindle store title states series membership — the
+/// format carries no field for it — and it is always written in ASCII angle
+/// brackets, which nothing else in a title uses: an edition marker in a
+/// Japanese title takes the fullwidth 〈…〉 or ＜…＞ instead. A title without
+/// the annotation comes back unchanged and series-less.
+fn split_series_annotation(title: &str) -> (String, Option<String>) {
+    let Some(open) = title.find('<') else {
+        return (title.to_string(), None);
+    };
+    let Some(close) = title[open..].find('>').map(|i| open + i) else {
+        return (title.to_string(), None);
+    };
+    let series = title[open + 1..close].trim();
+    if series.is_empty() {
+        return (title.to_string(), None);
+    }
+    let mut rest = String::with_capacity(title.len());
+    rest.push_str(title[..open].trim_end());
+    let tail = title[close + 1..].trim_start();
+    if !rest.is_empty() && !tail.is_empty() {
+        rest.push(' ');
+    }
+    rest.push_str(tail);
+    (rest.trim().to_string(), Some(series.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_title_states_its_series_in_angle_brackets() {
+        // The shape a store writes. The titles are invented; the annotation is
+        // the point.
+        let (title, series) =
+            split_series_annotation("星降る庭の物語 全20冊収録<星降る庭の物語> (架空文庫)");
+        assert_eq!(title, "星降る庭の物語 全20冊収録 (架空文庫)");
+        assert_eq!(series.as_deref(), Some("星降る庭の物語"));
+
+        // The annotation can sit at the very end.
+        let (title, series) = split_series_annotation("灯台守の日々 3<灯台守の日々>");
+        assert_eq!(title, "灯台守の日々 3");
+        assert_eq!(series.as_deref(), Some("灯台守の日々"));
+    }
+
+    #[test]
+    fn a_title_without_the_annotation_keeps_every_character() {
+        for title in [
+            "湖畔の事件＜完全改訂版＞",
+            "架空太郎全集",
+            "半端な <",
+            "空の annotation <>",
+        ] {
+            let (out, series) = split_series_annotation(title);
+            assert_eq!(out, title);
+            assert_eq!(series, None);
+        }
+    }
 
     #[test]
     fn test_compression_types() {

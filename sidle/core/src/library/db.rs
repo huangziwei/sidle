@@ -846,6 +846,31 @@ pub fn find_by_sha(conn: &Connection, sha: &str) -> rusqlite::Result<Option<Book
     .optional()
 }
 
+/// The book already sitting at `index` in series `name`, if any.
+pub fn find_in_series(
+    conn: &Connection,
+    name: &str,
+    index: f64,
+) -> rusqlite::Result<Option<BookRow>> {
+    let root = conn_root(conn);
+    conn.query_row(
+        SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION,
+        params![name, index],
+        |row| row_to_book(row, root.as_deref()),
+    )
+    .optional()
+}
+
+/// How many books other than `book_id` are in series `name` — whether that
+/// series already exists as more than the one book asking.
+pub fn others_in_series(conn: &Connection, name: &str, book_id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM books WHERE series_name = ?1 AND id <> ?2",
+        params![name, book_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
     let root = conn_root(conn);
     let mut stmt = conn.prepare(SELECT_BOOKS_WITH_JOBS)?;
@@ -1463,6 +1488,27 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
+"#;
+
+/// A position in a series is held by one book: the volume numbered 3 of a
+/// series is *the* volume 3. Lets an operation that fills a series (an omnibus
+/// split) recognize a place it has already filled instead of stacking a second
+/// book on it.
+const SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION: &str = r#"
+    SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
+           b.epub_path, b.cover_path, b.kfx_path,
+           b.file_size, b.imported_at, b.asin,
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
+    FROM books b
+    LEFT JOIN conversion_jobs j ON j.book_id = b.id
+    WHERE b.series_name = ?1 AND b.series_index = ?2
+    ORDER BY b.id
+    LIMIT 1
 "#;
 
 const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"

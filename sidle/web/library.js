@@ -318,6 +318,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireFilterBar();
   wireSortPopover();
   wireMetadataModal();
+  wireSplitModal();
   wireLibraryShortcuts();
   await refresh();
   subscribeStatus();
@@ -3089,6 +3090,13 @@ function openContextMenu(x, y, b) {
     if (["kfx", "epub", "pdf"].includes(sourceFormat(b)) && b.status === "done") {
       add(menu, "Edit book…", () => openEditor(b));
     }
+    // Splitting reads the EPUB side, so it's offered as soon as that side
+    // exists — a KFX-sourced book qualifies once kfx→epub has run, without
+    // waiting on anything else. Whether the book is actually a collection is
+    // the proposal's answer, not something to guess from the title here.
+    if (b.epub_path && formatStatusFor("epub", b) === "done") {
+      add(menu, "Split into a series…", () => openSplitModal(b));
+    }
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
     // Force re-convert is always full color now — the JXR encoder auto-collapses
@@ -5014,6 +5022,232 @@ async function onAsinSearchClick() {
   } catch (e) {
     showToast(`couldn't open Amazon: ${e}`, true);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Split a collection into a series
+// ---------------------------------------------------------------------------
+//
+// A 合本版 / 全集 / boxed set is N books in one file. `omnibus_propose` reads
+// where they divide and what to call them; the modal below is the form the user
+// corrects before anything is written, because a machine reading of a volume
+// title's number is a suggestion and the series name is guessed from prose.
+// `omnibus_split` then writes each volume, imports it, and puts the omnibus in
+// the series alongside its volumes.
+
+let splitBook = null;
+
+async function openSplitModal(book) {
+  splitBook = book;
+  const modal = $("#split-modal");
+  $("#split-source").textContent = book.title;
+  $("#split-series").value = "";
+  $("#split-rows").innerHTML = "";
+  $("#split-note").hidden = true;
+  $("#split-progress").hidden = true;
+  setSplitBusy(true, "Reading the book…");
+  modal.hidden = false;
+
+  let proposal;
+  try {
+    proposal = await window.api.invoke("omnibus_propose", { bookId: book.id });
+  } catch (e) {
+    closeSplitModal();
+    showToast(`${e}`, true);
+    return;
+  }
+  // The modal may have been dismissed while the read was in flight.
+  if (splitBook?.id !== book.id) return;
+
+  if (!proposal.volumes.length) {
+    closeSplitModal();
+    showToast("this book shows no volumes to split into");
+    return;
+  }
+
+  $("#split-series").value = proposal.series_name;
+  renderSplitRows(proposal.volumes);
+  if (proposal.existing_in_series > 0) {
+    const n = proposal.existing_in_series;
+    const note = $("#split-note");
+    note.textContent = `${n} book${n === 1 ? "" : "s"} already in “${proposal.series_name}”. A volume whose number is taken there is left alone.`;
+    note.hidden = false;
+  }
+  setSplitBusy(false);
+  setTimeout(() => $("#split-series").focus(), 0);
+}
+
+// One row per proposed volume: keep it or not, its number, its title, and how
+// many of the collection's pages it spans (which the user can't change — the
+// spans tile the book by construction).
+function renderSplitRows(volumes) {
+  const tbody = $("#split-rows");
+  tbody.innerHTML = "";
+  for (const v of volumes) {
+    const tr = document.createElement("tr");
+    tr.dataset.spineIndex = String(v.spine_index);
+    tr.dataset.documents = String(v.documents);
+    tr.dataset.cover = v.cover || "";
+
+    const keep = document.createElement("td");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.className = "split-keep-box";
+    keep.className = "split-keep";
+    keep.appendChild(box);
+
+    const num = document.createElement("td");
+    num.className = "split-num";
+    const numInput = document.createElement("input");
+    numInput.type = "number";
+    numInput.step = "any";
+    numInput.min = "0";
+    numInput.value = String(v.number);
+    // A number the splitter counted rather than read off the volume's own
+    // label is the one worth a second look.
+    if (v.counted) {
+      numInput.classList.add("counted");
+      numInput.title = "counted from the volume before — this book didn't say";
+    }
+    num.appendChild(numInput);
+
+    const title = document.createElement("td");
+    const titleInput = document.createElement("input");
+    titleInput.type = "text";
+    titleInput.className = "split-title-input";
+    titleInput.value = v.title;
+    title.appendChild(titleInput);
+
+    const docs = document.createElement("td");
+    docs.className = "split-docs";
+    docs.textContent = String(v.documents);
+
+    tr.append(keep, num, title, docs);
+    tbody.appendChild(tr);
+  }
+  updateSplitFootnote();
+}
+
+// The volumes as the form now reads: the plan `omnibus_split` is handed.
+function splitPlanFromForm() {
+  const volumes = [];
+  for (const tr of $("#split-rows").querySelectorAll("tr")) {
+    if (!tr.querySelector(".split-keep-box").checked) continue;
+    volumes.push({
+      spine_index: Number(tr.dataset.spineIndex),
+      documents: Number(tr.dataset.documents),
+      cover: tr.dataset.cover || null,
+      number: Number(tr.querySelector(".split-num input").value),
+      title: tr.querySelector(".split-title-input").value.trim(),
+      counted: false,
+    });
+  }
+  return { series_name: $("#split-series").value.trim(), volumes };
+}
+
+function updateSplitFootnote() {
+  const n = $("#split-rows").querySelectorAll(".split-keep-box:checked").length;
+  $("#split-submit").textContent = n === 1 ? "Split into 1 book" : `Split into ${n} books`;
+  $("#split-submit").disabled = n === 0;
+}
+
+async function submitSplit() {
+  if (!splitBook) return;
+  const plan = splitPlanFromForm();
+  if (!plan.series_name) {
+    showToast("the series needs a name — every volume is grouped by it", true);
+    $("#split-series").focus();
+    return;
+  }
+  if (plan.volumes.some((v) => !v.title)) {
+    showToast("every volume needs a title", true);
+    return;
+  }
+
+  const book = splitBook;
+  setSplitBusy(true, `Writing ${plan.volumes.length} volumes…`);
+  showSplitProgress(0, plan.volumes.length, "");
+  let summary;
+  try {
+    summary = await window.api.invoke("omnibus_split", {
+      bookId: book.id,
+      plan,
+    });
+  } catch (e) {
+    setSplitBusy(false);
+    $("#split-progress").hidden = true;
+    showToast(`${e}`, true);
+    return;
+  }
+
+  closeSplitModal();
+  await refresh();
+  // Land on the series that was just made, which means grouping by series
+  // whether or not the user was already.
+  setGroup("series");
+  enterSeries(summary.series_name);
+
+  const failed = summary.volumes.filter((v) => v.error);
+  const skipped = summary.volumes.filter((v) => v.duplicate);
+  const made = summary.volumes.length - failed.length - skipped.length;
+  let msg = `${made} volume${made === 1 ? "" : "s"} added to “${summary.series_name}”`;
+  if (skipped.length) msg += `, ${skipped.length} already there`;
+  if (failed.length) msg += `, ${failed.length} failed: ${failed[0].error}`;
+  showToast(msg, failed.length > 0);
+}
+
+function showSplitProgress(done, total, title) {
+  const wrap = $("#split-progress");
+  wrap.hidden = false;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  $("#split-bar-fill").style.width = `${pct}%`;
+  $("#split-progress-label").textContent = title
+    ? `${done + 1} of ${total} · ${title}`
+    : `preparing ${total} volumes…`;
+}
+
+// Disable the form while the backend is working; `label` (when given) says what
+// it is doing.
+function setSplitBusy(busy, label) {
+  const panel = $("#split-modal .split-panel");
+  panel.classList.toggle("busy", busy);
+  $("#split-submit").disabled = busy;
+  $("#split-series").disabled = busy;
+  for (const el of $("#split-rows").querySelectorAll("input")) el.disabled = busy;
+  if (label) $("#split-submit").textContent = label;
+  else updateSplitFootnote();
+}
+
+function closeSplitModal() {
+  $("#split-modal").hidden = true;
+  splitBook = null;
+}
+
+function wireSplitModal() {
+  $("#split-cancel").addEventListener("click", closeSplitModal);
+  $("#split-submit").addEventListener("click", submitSplit);
+  // Delegated so the row list can be rebuilt on every open without stacking
+  // listeners on the tbody.
+  $("#split-rows").addEventListener("change", updateSplitFootnote);
+  $("#split-modal .modal-backdrop").addEventListener("click", () => {
+    // A split in flight must not be dismissed out from under itself.
+    if (!$("#split-submit").disabled) closeSplitModal();
+  });
+  $("#split-modal").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      if (!$("#split-submit").disabled) closeSplitModal();
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submitSplit();
+    }
+  });
+  window.api.listen("library:split-progress", (e) => {
+    const p = e.payload;
+    if (splitBook?.id !== p.book_id) return;
+    showSplitProgress(p.done, p.total, p.title);
+  });
 }
 
 // ---------------------------------------------------------------------------

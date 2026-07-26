@@ -441,6 +441,51 @@
       </form>
     </div>
 
+    <div id="split-modal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-panel split-panel" role="dialog" aria-labelledby="split-title">
+        <header class="modal-header">
+          <h2 id="split-title">Split into a series</h2>
+        </header>
+
+        <div class="modal-body split-body">
+          <p class="split-source" id="split-source"></p>
+          <label class="field">
+            <span>Series name</span>
+            <input id="split-series" autocomplete="off" spellcheck="false" />
+          </label>
+          <p class="split-note" id="split-note" hidden></p>
+
+          <div class="split-volumes">
+            <table class="split-table">
+              <thead>
+                <tr>
+                  <th class="split-keep"><span class="sr-only">Include</span></th>
+                  <th class="split-num">#</th>
+                  <th>Volume title</th>
+                  <th class="split-docs">Pages</th>
+                </tr>
+              </thead>
+              <tbody id="split-rows"></tbody>
+            </table>
+          </div>
+
+          <div class="split-progress" id="split-progress" hidden>
+            <div class="split-bar"><span id="split-bar-fill"></span></div>
+            <small id="split-progress-label"></small>
+          </div>
+        </div>
+
+        <footer class="modal-footer">
+          <small class="split-footnote">
+            The collection itself joins the series, listed after its volumes.
+          </small>
+          <button type="button" class="btn-link" id="split-cancel">Cancel</button>
+          <button type="button" class="btn" id="split-submit">Split</button>
+        </footer>
+      </div>
+    </div>
+
     <div id="settings-modal" class="modal" hidden>
       <div class="modal-backdrop"></div>
       <div class="modal-panel settings-panel" role="dialog" aria-labelledby="settings-title">

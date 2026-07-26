@@ -11,6 +11,7 @@ pub mod kfx_cover;
 pub mod lang;
 pub mod merge;
 pub mod notebook;
+pub mod omnibus;
 pub mod paths;
 pub mod pdf_geom;
 pub mod relocate;

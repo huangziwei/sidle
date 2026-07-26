@@ -4,6 +4,7 @@ pub mod fonts;
 mod headers;
 pub mod huffcdic;
 pub(crate) mod index;
+pub mod metadata;
 pub mod palmdoc;
 pub mod parser;
 pub mod skeleton;

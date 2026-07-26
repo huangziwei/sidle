@@ -239,7 +239,7 @@ impl MobiImporter {
         let exth = parse_exth(&record0, &mobi);
 
         // Build metadata
-        let mut metadata = build_metadata(&pdb, &mobi, &exth);
+        let mut metadata = crate::formats::mobi::metadata::from_headers(&pdb, &mobi, &exth);
 
         // Discover assets to get cover image path with correct extension
         let assets = discover_assets_from_source(&source, &pdb, &mobi, file_len);
@@ -1010,81 +1010,6 @@ fn discover_assets_from_source(
     }
 
     assets
-}
-
-fn build_metadata(
-    pdb: &PdbInfo,
-    mobi: &MobiHeader,
-    exth: &Option<crate::formats::mobi::ExthHeader>,
-) -> Metadata {
-    let title = exth
-        .as_ref()
-        .and_then(|e| e.title.clone())
-        .or_else(|| {
-            if !mobi.title.is_empty() {
-                Some(mobi.title.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| pdb.name.clone());
-
-    let mut metadata = Metadata {
-        title,
-        ..Default::default()
-    };
-
-    if let Some(exth) = exth {
-        metadata.authors = exth.authors.clone();
-        metadata.title_sort = exth.title_pronunciation.clone();
-        metadata.author_sorts = exth.author_pronunciations.clone();
-        metadata.publisher = exth.publisher.clone();
-        metadata.description = exth.description.clone();
-        metadata.subjects = exth.subjects.clone();
-        metadata.date = exth.pub_date.clone();
-        metadata.rights = exth.rights.clone();
-        metadata.language = exth.language.clone().unwrap_or_default();
-        metadata.identifier = exth
-            .isbn
-            .clone()
-            .or_else(|| exth.asin.clone())
-            .or_else(|| exth.source.clone())
-            .unwrap_or_default();
-        // EXTH 113 nominally holds an ASIN, but calibre's MOBI exporter
-        // writes a freshly-minted UUID there. Only promote to
-        // `metadata.asin` when the value actually looks like an Amazon
-        // ASIN (10-char alphanumeric starting with B for ebooks).
-        metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
-        // Writing-mode signals (EXTH 525 / 527). Both calibre-exported MOBIs
-        // and native Amazon MOBIs carry these; no fallback to inline HTML
-        // class needed. Calibre's `reader/headers.py:96-108` is the spec.
-        metadata.primary_writing_mode = exth.primary_writing_mode.clone();
-        metadata.page_progression_direction = exth
-            .page_progression_direction
-            .clone()
-            // Calibre derives PPD from writing-mode when EXTH 527 is absent:
-            // anything ending `-rl` is RTL pagination.
-            .or_else(|| {
-                exth.primary_writing_mode.as_deref().and_then(|pwm| {
-                    if pwm.ends_with("-rl") {
-                        Some("rtl".to_string())
-                    } else if pwm.ends_with("-lr") {
-                        Some("ltr".to_string())
-                    } else {
-                        None
-                    }
-                })
-            });
-    }
-
-    metadata
-}
-
-/// Amazon ASIN format: exactly 10 ASCII alphanumeric characters, typically
-/// starting with `B` for ebook listings. Used to disambiguate EXTH 113 from
-/// the UUID calibre's MOBI exporter occasionally writes into the same slot.
-fn looks_like_asin(s: &str) -> bool {
-    s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Wrap raw text as HTML.

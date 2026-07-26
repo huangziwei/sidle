@@ -45,6 +45,10 @@
 //!     is marked `done`; otherwise it's `pending` and the caller enqueues
 //!     it.
 //!
+//! A book the app produced rather than found — a volume carved out of a
+//! collection — enters by the same steps through [`import_bytes`], which stands
+//! a name in for the file it never had.
+//!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
 use std::fs;
@@ -86,7 +90,80 @@ pub fn import_file(
             src.display()
         );
     }
-    import_one(conn, paths, src, src_kind)
+    import_one(conn, paths, Source::File(src), src_kind)
+}
+
+/// Import a book that exists only in memory — a volume carved out of a
+/// collection, say. `name` stands in for a filename: its extension picks the
+/// format, and its stem is the title fallback for a book whose own metadata
+/// carries none.
+///
+/// Only the formats stored as they arrive (`.epub`, `.kfx`, `.pdf`) can be
+/// imported this way; the converted ones read their source off disk.
+pub fn import_bytes(
+    conn: &rusqlite::Connection,
+    paths: &LibraryPaths,
+    bytes: Vec<u8>,
+    name: &str,
+) -> Result<ImportOutcome> {
+    let src_kind = SourceKind::detect(Path::new(name));
+    if matches!(src_kind, SourceKind::Unknown) {
+        bail!("unsupported file type: {name} (expected .epub, .kfx, or .pdf)");
+    }
+    import_one(conn, paths, Source::Memory { name, bytes }, src_kind)
+}
+
+/// Where an import's bytes come from: a file the user dropped, or bytes the
+/// app produced. Everything downstream of the normalize step works on bytes
+/// either way, so the two differ only in how the source is identified and read.
+enum Source<'a> {
+    File(&'a Path),
+    Memory { name: &'a str, bytes: Vec<u8> },
+}
+
+impl Source<'_> {
+    /// How to name the source in an error message.
+    fn label(&self) -> String {
+        match self {
+            Self::File(p) => p.display().to_string(),
+            Self::Memory { name, .. } => (*name).to_string(),
+        }
+    }
+
+    /// The filename without its extension — the title fallback for a book whose
+    /// metadata declares none.
+    fn stem(&self) -> Option<String> {
+        let name = match self {
+            Self::File(p) => *p,
+            Self::Memory { name, .. } => Path::new(*name),
+        };
+        name.file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+    }
+
+    /// The dedupe key and the size to record: the hash of the source as it
+    /// arrived, before any conversion.
+    fn identity(&self) -> Result<(String, i64)> {
+        match self {
+            Self::File(p) => {
+                let sha = sha256_of_file(p).with_context(|| format!("hash {}", p.display()))?;
+                let size = fs::metadata(p)
+                    .with_context(|| format!("stat {}", p.display()))?
+                    .len() as i64;
+                Ok((sha, size))
+            }
+            Self::Memory { bytes, .. } => Ok((sha256_of_bytes(bytes), bytes.len() as i64)),
+        }
+    }
+
+    /// The source's own bytes, for the formats stored as they arrive.
+    fn read(self) -> Result<Vec<u8>> {
+        match self {
+            Self::File(p) => fs::read(p).with_context(|| format!("read {}", p.display())),
+            Self::Memory { bytes, .. } => Ok(bytes),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -184,17 +261,16 @@ fn job_kind(from: Canonical, to: Canonical) -> &'static str {
 fn import_one(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
-    src: &Path,
+    src: Source<'_>,
     src_kind: SourceKind,
 ) -> Result<ImportOutcome> {
     let canonical = src_kind.canonical();
+    let label = src.label();
+    let stem = src.stem();
 
     // 1. Hash + dedupe before doing expensive normalization (a `.kfx-zip`
     //    merge can be tens of ms; stream-hashing the source is microseconds).
-    let sha = sha256_of_file(src).with_context(|| format!("hash {}", src.display()))?;
-    let file_size = fs::metadata(src)
-        .with_context(|| format!("stat {}", src.display()))?
-        .len() as i64;
+    let (sha, file_size) = src.identity()?;
 
     if let Some(existing) = db::find_by_sha(conn, &sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
@@ -205,21 +281,29 @@ fn import_one(
     //    to the persist step below.
     let mut direct_kfx: Option<DirectKfx> = None;
     let canonical_bytes: Vec<u8> = match src_kind {
-        SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => {
-            fs::read(src).with_context(|| format!("read {}", src.display()))?
+        SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => src.read()?,
+        // The converting formats all read their source off disk, so an
+        // in-memory import of one has nothing to hand them. `import_bytes`
+        // rejects those kinds up front; this is the belt-and-braces arm.
+        _ => {
+            let Source::File(path) = src else {
+                bail!("{label}: this format can only be imported from a file");
+            };
+            match src_kind {
+                SourceKind::KfxZip => bokai::formats::kfx::merge::merge_kfx_zip(path)
+                    .with_context(|| format!("merge kfx-zip {label}"))?,
+                SourceKind::Azw3 => {
+                    let derived = convert_azw3(path).with_context(|| format!("azw3 {label}"))?;
+                    direct_kfx = Some(derived.kfx);
+                    derived.epub
+                }
+                SourceKind::Mobi => convert_mobi(path).with_context(|| format!("mobi {label}"))?,
+                SourceKind::AozoraZip => {
+                    convert_aozora_zip(path).with_context(|| format!("aozora zip {label}"))?
+                }
+                _ => unreachable!("handled above"),
+            }
         }
-        SourceKind::KfxZip => bokai::formats::kfx::merge::merge_kfx_zip(src)
-            .with_context(|| format!("merge kfx-zip {}", src.display()))?,
-        SourceKind::Azw3 => {
-            let derived = convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?;
-            direct_kfx = Some(derived.kfx);
-            derived.epub
-        }
-        SourceKind::Mobi => convert_mobi(src).with_context(|| format!("mobi {}", src.display()))?,
-        SourceKind::AozoraZip => {
-            convert_aozora_zip(src).with_context(|| format!("aozora zip {}", src.display()))?
-        }
-        SourceKind::Unknown => unreachable!("filtered above"),
     };
 
     // 2b. Repair EPUBs whose producer (e.g. ScribdMpubToEpubConverter) wrote
@@ -240,13 +324,13 @@ fn import_one(
     let mut meta = match canonical {
         Canonical::Pdf => {
             let doc = bokai::import::probe_pdf(canonical_bytes.clone())
-                .with_context(|| format!("probe pdf {}", src.display()))?;
-            extract_meta_from_pdf(&doc, src.file_stem().and_then(|s| s.to_str()))
+                .with_context(|| format!("probe pdf {label}"))?;
+            extract_meta_from_pdf(&doc, stem.as_deref())
         }
         _ => {
             let book = bokai::Book::from_bytes(&canonical_bytes, canonical.bokai_format())
-                .with_context(|| format!("read metadata from {}", src.display()))?;
-            extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
+                .with_context(|| format!("read metadata from {label}"))?;
+            extract_meta(book.metadata(), stem.as_deref())
         }
     };
     // The row must carry the ASIN actually stamped inside the produced KFX —
@@ -453,6 +537,12 @@ struct BookMeta {
     /// Yomigana for the first author — the first entry of bokai's per-author
     /// `Metadata.author_sorts`. Only used when the book has a single creator.
     author_reading: Option<String>,
+    /// The series the source declares it belongs to, and its position in it —
+    /// bokai's `Metadata.collection` (EPUB `belongs-to-collection` +
+    /// `group-position`). A volume produced by an omnibus split carries this,
+    /// which is what lands it in the same collection as its siblings with no
+    /// further plumbing.
+    series: Option<(String, Option<f64>)>,
 }
 
 fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
@@ -480,6 +570,10 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
         title_reading: m.title_sort.clone(),
         author_reading: m.author_sorts.first().cloned(),
+        series: m.collection.as_ref().and_then(|c| {
+            let name = c.name.trim();
+            (!name.is_empty()).then(|| (name.to_string(), c.position))
+        }),
     }
 }
 
@@ -509,6 +603,8 @@ fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str
         // PDF `/Info` carries no yomi — romaji renders from the raw fields.
         title_reading: None,
         author_reading: None,
+        // `/Info` has no series field.
+        series: None,
     }
 }
 
@@ -599,10 +695,12 @@ fn insert_row(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
-            // Series and tags aren't populated from source format yet —
-            // they're set via the metadata editor (a follow-up).
-            series_name: None,
-            series_index: None,
+            // The series the source declares, verbatim — grouping is by the
+            // exact string, so a set of books that agree on it lands as one
+            // collection. Tags aren't populated from the source format; they're
+            // set via the metadata editor.
+            series_name: meta.series.as_ref().map(|(name, _)| name.as_str()),
+            series_index: meta.series.as_ref().and_then(|(_, index)| *index),
             tags: &[],
         },
     )?;

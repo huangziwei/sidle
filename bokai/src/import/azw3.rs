@@ -467,7 +467,7 @@ impl Azw3Importer {
         }
 
         // Build metadata
-        let mut metadata = build_metadata(&pdb, &mobi, &exth);
+        let mut metadata = crate::formats::mobi::metadata::from_headers(&pdb, &mobi, &exth);
 
         // Parse KF8 indices (without reading text content)
         let codec = match mobi.encoding {
@@ -996,107 +996,6 @@ fn detect_format(
 
     Ok(MobiFormat::Mobi6)
 }
-
-/// Parse a KF8 `original-resolution` value (`"1444x2048"`) into `(w, h)`.
-fn parse_resolution(s: &str) -> Option<(u32, u32)> {
-    let (w, h) = s.trim().split_once(['x', 'X'])?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-}
-
-fn build_metadata(
-    pdb: &PdbInfo,
-    mobi: &MobiHeader,
-    exth: &Option<crate::formats::mobi::ExthHeader>,
-) -> Metadata {
-    let title = exth
-        .as_ref()
-        .and_then(|e| e.title.clone())
-        .or_else(|| {
-            if !mobi.title.is_empty() {
-                Some(mobi.title.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| pdb.name.clone());
-
-    let mut metadata = Metadata {
-        title,
-        ..Default::default()
-    };
-
-    if let Some(exth) = exth {
-        metadata.authors = exth.authors.clone();
-        metadata.title_sort = exth.title_pronunciation.clone();
-        metadata.author_sorts = exth.author_pronunciations.clone();
-        metadata.publisher = exth.publisher.clone();
-        metadata.description = exth.description.clone();
-        metadata.subjects = exth.subjects.clone();
-        metadata.date = exth.pub_date.clone();
-        metadata.rights = exth.rights.clone();
-        metadata.language = exth.language.clone().unwrap_or_default();
-        metadata.identifier = exth
-            .isbn
-            .clone()
-            .or_else(|| exth.asin.clone())
-            .or_else(|| exth.source.clone())
-            .unwrap_or_default();
-        // EXTH 113 nominally holds an ASIN, but calibre's AZW3 exporter
-        // writes a freshly-minted UUID there. Only promote to
-        // `metadata.asin` when the value actually looks like an Amazon
-        // ASIN (10-char alphanumeric starting with B for ebooks).
-        metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
-        // Writing-mode signals (EXTH 525 / 527). Both calibre-exported AZW3s
-        // and native Amazon AZW3s carry these; no fallback to inline HTML
-        // class needed. Calibre's `reader/headers.py:96-108` is the spec.
-        metadata.primary_writing_mode = exth.primary_writing_mode.clone();
-        metadata.page_progression_direction = exth
-            .page_progression_direction
-            .clone()
-            // Calibre derives PPD from writing-mode when EXTH 527 is absent:
-            // anything ending `-rl` is RTL pagination.
-            .or_else(|| {
-                exth.primary_writing_mode.as_deref().and_then(|pwm| {
-                    if pwm.ends_with("-rl") {
-                        Some("rtl".to_string())
-                    } else if pwm.ends_with("-lr") {
-                        Some("ltr".to_string())
-                    } else {
-                        None
-                    }
-                })
-            });
-
-        // KF8 fixed-layout (comic / picture book): any of the three FXL EXTH
-        // records marks the book as pre-paginated so it round-trips as a
-        // fixed-layout EPUB instead of being flattened to reflowable.
-        let book_type = exth.book_type.clone().filter(|s| !s.is_empty());
-        let is_comic = book_type.as_deref() == Some("comic");
-        metadata.fixed_layout = exth.fixed_layout.as_deref() == Some("true")
-            || book_type.is_some()
-            || exth.original_resolution.is_some();
-        metadata.book_type = book_type;
-        metadata.default_viewport = exth
-            .original_resolution
-            .as_deref()
-            .and_then(parse_resolution);
-        // KF8 has no explicit `rendition:spread`; a comic implies facing-page
-        // (landscape) spreads, which is how the Kindle renders `book-type:comic`.
-        if metadata.fixed_layout && is_comic {
-            metadata.rendition_spread = Some("landscape".to_string());
-        }
-    }
-
-    metadata
-}
-
-/// Amazon ASIN format: exactly 10 ASCII alphanumeric characters, typically
-/// starting with `B` for ebook listings. Used to disambiguate EXTH 113 from
-/// the UUID calibre's AZW3 exporter occasionally writes into the same slot.
-fn looks_like_asin(s: &str) -> bool {
-    s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
 /// True when a flow's first kilobyte holds an SVG document (after any
 /// `<?xml-stylesheet?>` PI calibre's `mobi8.py` also peers past). Mirrors
 /// the sniff in `transform::inline_svg_flows`.

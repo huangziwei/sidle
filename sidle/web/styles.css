@@ -2170,6 +2170,190 @@ kbd {
   padding: 0 0.2em;
 }
 
+/* A label for assistive tech only — the visible column is a checkbox. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Split a collection into a series (#split-modal) — one row per volume the
+   book evidences, with the series name above them. Everything editable, because
+   a proposal is a filled-in form, not a decision. */
+
+.split-panel {
+  width: min(720px, 100%);
+}
+
+.split-panel .modal-body {
+  display: block;
+}
+
+.split-panel.busy {
+  cursor: progress;
+}
+
+.split-source {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.split-body .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.split-body .field > span {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.split-body input {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  outline: none;
+  transition: border-color 80ms ease;
+}
+
+.split-body input:focus {
+  border-color: var(--accent);
+}
+
+.split-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #d4a957;
+}
+
+.split-volumes {
+  margin-top: 16px;
+  max-height: min(46vh, 420px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.split-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.split-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 7px 10px;
+  text-align: start;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.split-table td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.split-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.split-table .split-keep {
+  width: 34px;
+  text-align: center;
+}
+
+.split-table .split-num {
+  width: 84px;
+}
+
+.split-table .split-docs {
+  width: 64px;
+  text-align: end;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.split-table input {
+  width: 100%;
+  padding: 4px 8px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.split-table input:hover {
+  border-color: var(--border);
+}
+
+.split-table input:focus {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
+/* A number nothing in the book stated — counted on from the volume before, so
+   it is the one to check. */
+.split-table input.counted {
+  color: #d4a957;
+}
+
+/* An unchecked row stays readable but visibly out of the split. */
+.split-table tr:has(.split-keep-box:not(:checked)) td {
+  opacity: 0.45;
+}
+
+.split-progress {
+  margin-top: 14px;
+}
+
+.split-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.split-bar > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: #549acb;
+  transition: width 0.2s linear;
+}
+
+#split-progress-label {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.split-footnote {
+  margin-inline-end: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 /* Status bar + queue drawer */
 
 .status-bar {
