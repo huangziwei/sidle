@@ -4022,8 +4022,16 @@ kbd {
   color: var(--accent);
   border-color: var(--accent);
 }
-/* Re-parenting an entry. Disabled means the move has nowhere to go: the first
-   entry has nothing to nest under, a top-level one nothing to nest out of. */
+/* Re-shaping an entry, on both axes: ↑ ↓ order it among its siblings, ⇤ ⇥
+   re-parent it. Disabled means that particular move has nowhere to go — the
+   first child can't move up, a top-level entry can't nest out, the first entry
+   of all has nothing to nest under. */
+.toc-ops {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .toc-nudge {
   font-size: 13px;
 }

@@ -1031,6 +1031,48 @@ function canShift(rows, index, delta) {
   return index > 0 && rows[index].depth <= rows[index - 1].depth;
 }
 
+// Where `index`'s previous sibling starts, or -1 when it is the first child.
+// Everything between two rows of equal depth belongs to the earlier one, so the
+// nearest preceding row at this depth IS the previous sibling; meeting a
+// shallower row first means we've reached the parent and there is no sibling
+// above to trade places with.
+function prevSibling(rows, index) {
+  const depth = rows[index].depth;
+  for (let j = index - 1; j >= 0; j--) {
+    if (rows[j].depth === depth) return j;
+    if (rows[j].depth < depth) return -1;
+  }
+  return -1;
+}
+
+// Where `index`'s next sibling starts, or -1 when it is the last child. The row
+// after this subtree is either the next sibling (equal depth) or an ancestor's
+// continuation (shallower) — `subtreeEnd` guarantees it can't be deeper.
+function nextSibling(rows, index) {
+  const end = subtreeEnd(rows, index);
+  return end < rows.length && rows[end].depth === rows[index].depth ? end : -1;
+}
+
+// Move entry `index` (and its sub-entries) past the sibling above or below it.
+// Movement is sibling-only on purpose: the block keeps every depth it had and
+// lands somewhere its parent is the same one, so no move can orphan an entry or
+// invent a level — the same property `rebuildTree` guarantees for indent. To
+// carry an entry to a different parent, outdent it, move it, then indent.
+function moveTocEntry(index, delta, pageCount) {
+  const rows = flattenTree(session.tocTree);
+  if (!rows[index]) return;
+  const target = delta < 0 ? prevSibling(rows, index) : nextSibling(rows, index);
+  if (target < 0) return;
+  const block = rows.splice(index, subtreeEnd(rows, index) - index);
+  // Moving up, the target sits above the cut and its index still stands.
+  // Moving down, the next sibling has slid into the vacated slot, and the block
+  // belongs after the whole of it — sub-entries included.
+  const at = delta < 0 ? target : subtreeEnd(rows, index);
+  rows.splice(at, 0, ...block);
+  session.tocTree = rebuildTree(rows);
+  renderProposedTree(pageCount, at);
+}
+
 // Render #toc-tree from session.tocTree, indenting by depth so the book's
 // Part → chapter structure is visible. A full re-render after every edit keeps
 // each row's closure bound to the right flat index. `pageCount > 0` puts rows in
@@ -1045,8 +1087,12 @@ function renderProposedTree(pageCount = 0, focusIndex = -1) {
       tocRow(node, depth, pageCount, {
         canIndent: canShift(rows, i, +1),
         canOutdent: canShift(rows, i, -1),
+        canMoveUp: prevSibling(rows, i) >= 0,
+        canMoveDown: nextSibling(rows, i) >= 0,
         onIndent: () => shiftTocDepth(i, +1, pageCount),
         onOutdent: () => shiftTocDepth(i, -1, pageCount),
+        onMoveUp: () => moveTocEntry(i, -1, pageCount),
+        onMoveDown: () => moveTocEntry(i, +1, pageCount),
         onRemove: () => {
           rows.splice(i, subtreeEnd(rows, i) - i);
           session.tocTree = rebuildTree(rows);
@@ -1060,8 +1106,9 @@ function renderProposedTree(pageCount = 0, focusIndex = -1) {
 
 // One editable row bound to its model node: a label input (writes back to the
 // node), a page input for PDF (the only user-editable target — KFX eids and EPUB
-// hrefs round-trip opaquely), indent/outdent buttons, and a remove button
-// (drops the node and its sub-entries).
+// hrefs round-trip opaquely), move and indent/outdent buttons, and a remove
+// button (drops the node and its sub-entries). Re-shaping an outline takes both
+// axes: order among siblings, and level.
 function tocRow(node, depth, pageCount, ops) {
   const row = el("div", "toc-row");
   if (depth) {
@@ -1074,15 +1121,24 @@ function tocRow(node, depth, pageCount, ops) {
   input.addEventListener("input", () => {
     node.label = input.value;
   });
-  // Tab / Shift+Tab are how an outline is re-shaped; the buttons beside the row
-  // do the same thing for anyone who'd rather click.
+  // Tab / Shift+Tab change an entry's level, Alt+↑ / Alt+↓ its order among its
+  // siblings; the buttons beside the row do the same for anyone who'd rather
+  // click. Alt is what carries the arrows here — bare arrows still move the
+  // caret through the label being typed.
   input.addEventListener("keydown", (e) => {
-    if (e.key !== "Tab") return;
-    const shift = e.shiftKey ? ops.onOutdent : ops.onIndent;
-    const allowed = e.shiftKey ? ops.canOutdent : ops.canIndent;
-    if (!allowed) return; // fall through to normal focus movement
+    if (e.key === "Tab") {
+      const shift = e.shiftKey ? ops.onOutdent : ops.onIndent;
+      const allowed = e.shiftKey ? ops.canOutdent : ops.canIndent;
+      if (!allowed) return; // fall through to normal focus movement
+      e.preventDefault();
+      shift();
+      return;
+    }
+    if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    const up = e.key === "ArrowUp";
+    if (!(up ? ops.canMoveUp : ops.canMoveDown)) return;
     e.preventDefault();
-    shift();
+    (up ? ops.onMoveUp : ops.onMoveDown)();
   });
   row.append(input);
 
@@ -1105,6 +1161,19 @@ function tocRow(node, depth, pageCount, ops) {
     row.append(el("span", "toc-page-label", "p."), page);
   }
 
+  const sub = node.children && node.children.length ? " and its sub-entries" : "";
+  const moveUp = el("button", "toc-nudge", "↑");
+  moveUp.type = "button";
+  moveUp.title = `Move this entry${sub} up (Alt+↑)`;
+  moveUp.disabled = !ops.canMoveUp;
+  moveUp.addEventListener("click", ops.onMoveUp);
+
+  const moveDown = el("button", "toc-nudge", "↓");
+  moveDown.type = "button";
+  moveDown.title = `Move this entry${sub} down (Alt+↓)`;
+  moveDown.disabled = !ops.canMoveDown;
+  moveDown.addEventListener("click", ops.onMoveDown);
+
   const outdent = el("button", "toc-nudge", "⇤");
   outdent.type = "button";
   outdent.title = "Move out one level (Shift+Tab)";
@@ -1119,11 +1188,14 @@ function tocRow(node, depth, pageCount, ops) {
 
   const remove = el("button", "toc-remove", "×");
   remove.type = "button";
-  remove.title = node.children && node.children.length
-    ? "Remove this entry and its sub-entries"
-    : "Remove this entry";
+  remove.title = `Remove this entry${sub}`;
   remove.addEventListener("click", ops.onRemove);
-  row.append(outdent, indent, remove);
+
+  // One cluster, so five controls read as the row's toolbar rather than as five
+  // things competing with the label for width.
+  const toolbar = el("div", "toc-ops");
+  toolbar.append(moveUp, moveDown, outdent, indent, remove);
+  row.append(toolbar);
   return row;
 }
 
