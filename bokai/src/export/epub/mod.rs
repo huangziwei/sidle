@@ -164,7 +164,9 @@ pub struct EpubPackage {
     pub css: String,
     /// Assets in manifest registration order, post-transcode.
     pub assets: Vec<PackageAsset>,
-    /// The resolved TOC tree, hrefs pointing into [`Self::documents`].
+    /// The resolved TOC tree, hrefs pointing into [`Self::documents`], in the
+    /// order the source declares its navigation — which is not necessarily
+    /// spine order, and is not the order [`Self::nav`] emits.
     pub toc: Vec<NavPoint>,
     /// The document's CSS writing mode (`horizontal-tb`, `vertical-rl`,
     /// `vertical-lr`) — the value [`Self::css`] writes into its body rule.
@@ -989,7 +991,9 @@ pub fn build_package(
             )
         });
         // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
-        // calibre sorts, so sort identically.
+        // calibre sorts, so sort identically. Kept for the *container* only —
+        // the package hands a renderer the book's own order (see `package_toc`).
+        let authored_toc = toc_points.clone();
         let file_rank: HashMap<String, usize> = chapter_files
             .iter()
             .enumerate()
@@ -1114,20 +1118,20 @@ pub fn build_package(
         // it a TOC row that navigates nowhere. Fragments come back here too:
         // they were dropped because the SVG wrapper carries no ids, which is
         // not true of the page the renderer actually shows.
+        //
+        // It also keeps the source's OWN entry order, unsorted. The
+        // reading-order sort above buys epubcheck's NAV-011 for a shipped
+        // container; a renderer instead has to show the chapter list the book
+        // declares, because that is the list every other reader of the same
+        // source shows. The two only diverge when a publisher's spine
+        // disagrees with its own navigation — a collection whose spine is
+        // ordered by filename rather than by chapter, say — and there the sort
+        // scrambles the chapter list rather than fixing it.
         let mut package_toc = match cover_section_idx {
-            None => toc_points.clone(),
-            Some(_) => {
-                let mut points = toc_to_navpoints(book.toc(), &|href| {
-                    resolve_nav_href(book, href, &chapter_pos, &document_files, false, None)
-                });
-                let rank: HashMap<String, usize> = document_files
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| (f.clone(), i))
-                    .collect();
-                nav::sort_toc_reading_order(&mut points, &rank);
-                points
-            }
+            None => authored_toc,
+            Some(_) => toc_to_navpoints(book.toc(), &|href| {
+                resolve_nav_href(book, href, &chapter_pos, &document_files, false, None)
+            }),
         };
         if let Some(cover) = cover_nav_point(book, cover_section_idx, &document_files, &package_toc)
         {

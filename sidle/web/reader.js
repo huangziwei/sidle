@@ -1499,8 +1499,12 @@ function renderTocPanel() {
   $("#reader-toc-empty").hidden = rows.length > 0;
 }
 
-// Highlight the TOC entry we're currently reading. Across sections, that's the
-// last entry in an earlier section (or landing in this one). WITHIN a section
+// Highlight the TOC entry we're currently reading: the one whose target is the
+// last we've passed in READING order — the nearest section at or before the
+// current one, not the last such row in the list. The TOC is in the book's
+// declared order, which a publisher is free to write against the grain of its
+// own spine (a collection whose spine sorts by filename lists chapter nine
+// after the appendices), so list order is not section order. WITHIN a section
 // that holds several entries — e.g. a chapter split into scenes, all sharing one
 // `cN.xhtml` — section granularity can't tell them apart, so we resolve each
 // same-section entry's `#fragment` to its element and compare document order
@@ -1511,11 +1515,14 @@ function markTocActive(currentIndex, doc, range) {
   if (typeof currentIndex !== "number" || !tocEntries.length) return;
   const top = range?.startContainer || null;
   let active = -1;
+  let activeSection = -1; // section of `active`, so a nearer one can outrank it
   for (let i = 0; i < tocEntries.length; i++) {
     const e = tocEntries[i];
     if (e.sectionIndex < 0) continue;
+    if (e.sectionIndex > currentIndex || e.sectionIndex < activeSection) continue;
     if (e.sectionIndex < currentIndex) {
-      active = i; // any entry in an earlier section is behind us
+      active = i; // an entry in an earlier section is behind us
+      activeSection = e.sectionIndex;
     } else if (e.sectionIndex === currentIndex) {
       let behind = true;
       if (doc && top && e.frag) {
@@ -1537,8 +1544,11 @@ function markTocActive(currentIndex, doc, range) {
           }
         }
       }
-      if (behind) active = i;
-      // No early break: TOC order is usually monotonic, but don't assume it.
+      if (behind) {
+        active = i;
+        activeSection = e.sectionIndex;
+      }
+      // No early break: a later row may still target this same section.
     }
   }
   tocEntries.forEach(({ li }, i) => li.classList.toggle("active", i === active));
