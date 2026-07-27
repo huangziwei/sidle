@@ -83,8 +83,10 @@ function removeKeys() {
 
 // Metadata, Cover, Images and Table of Contents are live for every editable
 // source (KFX, EPUB, PDF); a book whose source file is missing gets none of
-// them. Text (in-place typo fixes) needs the surgical text-replace primitive
-// that isn't built yet, so it stays gated with an explanatory tooltip.
+// them. Reading Order is EPUB-only — reordering an EPUB's spine is a
+// permutation, while a KFX's reading order carries every position in the book
+// with it. Text (in-place typo fixes) needs the surgical text-replace primitive
+// that isn't built yet. Both gated items say why rather than sitting dark.
 function configureRail() {
   const editable = session.data.editable;
   // The backend reports which panels this source format can actually back, so
@@ -93,10 +95,15 @@ function configureRail() {
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
     item.disabled = !(editable && panels.has(p));
-    if (p === "text") {
-      item.title = editable
-        ? "In-place text editing is coming in a later tier."
-        : "";
+    if (!editable || panels.has(p)) {
+      item.title = "";
+    } else if (p === "text") {
+      item.title = "In-place text editing is coming in a later tier.";
+    } else if (p === "spine") {
+      item.title =
+        session.data.format === "pdf"
+          ? "A PDF's reading order is its page order, which this editor doesn't rearrange."
+          : "A Kindle file's reading order carries every reading position with it, so reordering it is a rebuild rather than a reorder — not built yet.";
     } else {
       item.title = "";
     }
@@ -134,6 +141,10 @@ function selectPanel(panel) {
     $("#editor-save").disabled = true;
     $("#editor-revert").disabled = true;
     renderTocPanel();
+  } else if (panel === "spine") {
+    $("#editor-save").disabled = true;
+    $("#editor-revert").disabled = true;
+    renderSpinePanel();
   }
 }
 
@@ -1253,6 +1264,198 @@ async function runTocWrite(invoke) {
     );
   } catch (err) {
     toast(`Couldn't write the TOC: ${err}`, true);
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+// --- reading order (spine) panel -------------------------------------------
+//
+// The order the book is *read* in, as against the order its table of contents
+// lists — two things an EPUB states separately and a few publishers state
+// differently. Where the TOC panel repairs the navigation, this repairs the
+// reading order, and it is the one editor write that moves reading positions:
+// every location in a book is numbered along its spine.
+//
+// So nothing here is automatic. The panel opens on the order the book's own
+// navigation implies, and the user reorders from there before committing.
+
+async function renderSpinePanel() {
+  const center = $("#editor-center");
+  center.replaceChildren(
+    el("div", "editor-panel editor-muted", "Reading the book's reading order…"),
+  );
+  let detail;
+  try {
+    detail = await window.api.invoke("editor_spine", { bookId: session.bookId });
+  } catch (err) {
+    center.replaceChildren(
+      wrapPanel(el("div", "editor-notice", `Couldn't read the reading order: ${err}`)),
+    );
+    return;
+  }
+  if (session.panel !== "spine") return; // navigated away while loading
+  session.spineDetail = detail;
+  paintSpinePanel(detail);
+}
+
+function paintSpinePanel(detail) {
+  // A deep copy, so reordering and Reset don't mutate the cached detail.
+  session.spineOrder = JSON.parse(JSON.stringify(detail.proposed || []));
+
+  const panel = el("div", "editor-panel");
+  const wrong = detail.verdict === "MISORDERED";
+
+  const head = el("div", "toc-summary");
+  const chip = el("span", "editor-chip", wrong ? "Order wrong" : "Order OK");
+  chip.dataset.verdict = wrong ? "SUSPECT" : "OK";
+  head.append(chip);
+  head.append(el("p", "editor-muted", spineSummary(detail)));
+  panel.append(head);
+
+  // The consequence, stated before the controls rather than after the click.
+  panel.append(
+    el(
+      "div",
+      "editor-notice",
+      "Reading positions are numbered along the reading order, so changing it " +
+        "renumbers them. Bookmarks, highlights and how far through the book you " +
+        "are will shift for this book.",
+    ),
+  );
+
+  panel.append(el("div", "field-group-title", "Reading order"));
+  panel.append(
+    el(
+      "p",
+      "editor-muted",
+      "Entries the table of contents names are listed by their chapter title. " +
+        "The rest — plates, blanks, pages no chapter list mentions — show their " +
+        "filename, and travel with the document above them unless you move them.",
+    ),
+  );
+  const list = el("div", "toc-proposed");
+  list.id = "spine-list";
+  panel.append(list);
+
+  const actions = el("div", "toc-actions");
+  const apply = el("button", "btn btn-primary", "Apply reading order");
+  apply.type = "button";
+  apply.id = "spine-apply";
+  apply.addEventListener("click", applySpine);
+  const reset = el("button", "btn", "Reset");
+  reset.type = "button";
+  reset.title = "Back to the order the book's navigation implies";
+  reset.addEventListener("click", () => paintSpinePanel(session.spineDetail));
+  actions.append(apply, reset);
+  panel.append(actions);
+
+  $("#editor-center").replaceChildren(panel);
+  renderSpineList();
+}
+
+function spineSummary(detail) {
+  if (detail.verdict !== "MISORDERED") {
+    return "This book reads its chapters in the order its table of contents lists them.";
+  }
+  const late = detail.first_out_of_order
+    ? `, starting with ${detail.first_out_of_order}`
+    : "";
+  const sorted = detail.machine_sorted
+    ? " Its reading order is its own file list in alphabetical order — a packaging" +
+      " artifact rather than an order anyone chose."
+    : "";
+  return (
+    `This book reads its chapters out of the order its table of contents lists` +
+    ` them, in ${detail.descents} place${detail.descents === 1 ? "" : "s"}${late}.` +
+    ` The order below moves ${detail.moved} document${detail.moved === 1 ? "" : "s"}.` +
+    sorted
+  );
+}
+
+// Full re-render after every move, so each row's closure is bound to the right
+// index — the same rule the TOC tree follows.
+function renderSpineList(focusIndex = -1) {
+  const list = $("#spine-list");
+  if (!list) return;
+  const order = session.spineOrder;
+  list.replaceChildren(
+    ...order.map((doc, i) =>
+      spineRow(doc, {
+        canMoveUp: i > 0,
+        canMoveDown: i < order.length - 1,
+        onMoveUp: () => moveSpineDoc(i, -1),
+        onMoveDown: () => moveSpineDoc(i, +1),
+      }),
+    ),
+  );
+  const apply = $("#spine-apply");
+  if (apply) {
+    // Writing an order the book already has would re-hash the file and renumber
+    // every position for nothing — the backend refuses it, so don't offer it.
+    const current = (session.spineDetail.current || []).map((d) => d.idref);
+    apply.disabled = order.every((d, i) => d.idref === current[i]);
+    apply.title = apply.disabled
+      ? "This is the order the book already reads in"
+      : "";
+  }
+  if (focusIndex >= 0) {
+    list.querySelectorAll(".toc-nudge")[focusIndex * 2]?.focus();
+  }
+}
+
+// One row: the document's name (not editable — a document's identity isn't a
+// label the reader gets to change) and the two controls that move it.
+function spineRow(doc, ops) {
+  const row = el("div", "toc-row");
+  const name = el("span", doc.named ? "spine-label" : "spine-label spine-unnamed", doc.label);
+  name.title = doc.named
+    ? `Listed in the table of contents as “${doc.label}”`
+    : `${doc.label} — no table-of-contents entry names this document`;
+  row.append(name);
+
+  const moveUp = el("button", "toc-nudge", "↑");
+  moveUp.type = "button";
+  moveUp.title = "Move earlier in the book";
+  moveUp.disabled = !ops.canMoveUp;
+  moveUp.addEventListener("click", ops.onMoveUp);
+
+  const moveDown = el("button", "toc-nudge", "↓");
+  moveDown.type = "button";
+  moveDown.title = "Move later in the book";
+  moveDown.disabled = !ops.canMoveDown;
+  moveDown.addEventListener("click", ops.onMoveDown);
+
+  const ops_ = el("div", "toc-ops");
+  ops_.append(moveUp, moveDown);
+  row.append(ops_);
+  return row;
+}
+
+// A spine is flat, so a move is a swap with the neighbour — no subtree to carry
+// and no level to preserve.
+function moveSpineDoc(index, delta) {
+  const order = session.spineOrder;
+  const to = index + delta;
+  if (to < 0 || to >= order.length) return;
+  [order[index], order[to]] = [order[to], order[index]];
+  renderSpineList(to);
+}
+
+async function applySpine() {
+  const order = session.spineOrder.map((d) => d.idref);
+  const buttons = $("#editor-center").querySelectorAll(".toc-actions button");
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const detail = await window.api.invoke("editor_set_spine", {
+      bookId: session.bookId,
+      order,
+    });
+    session.spineDetail = detail;
+    paintSpinePanel(detail);
+    const derived = session.data.format === "kfx" ? "EPUB" : "Kindle file";
+    toast(`Reading order written — regenerating the derived ${derived}…`);
+  } catch (err) {
+    toast(`Couldn't write the reading order: ${err}`, true);
     buttons.forEach((b) => (b.disabled = false));
   }
 }

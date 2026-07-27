@@ -34,6 +34,12 @@ pub(super) fn evidence(book: &BookData) -> TocEvidence {
         // Flattened-volume detection is EPUB-only so far; a KFX 合本版 reads as
         // unflattened until the KFX proposer learns the same grouping.
         flattened: Default::default(),
+        // Reading-order drift is EPUB-only too, and for a harder reason:
+        // reordering a KFX reading order moves every position with it, so the
+        // repair isn't a permutation of a list but a rebuild of the position,
+        // location and auxiliary maps. Reporting a defect there is nothing to
+        // offer until that exists.
+        misordered: Default::default(),
     }
 }
 

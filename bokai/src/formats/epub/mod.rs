@@ -13,6 +13,7 @@ pub(crate) mod nav_doc;
 pub(crate) mod opf_meta;
 pub(crate) mod page_shape;
 pub(crate) mod parser;
+pub mod spine_repair;
 pub mod split;
 pub(crate) mod structure;
 pub mod toc_repair;

@@ -115,6 +115,10 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
         // there can never disagree.
         flattened: crate::formats::epub::toc_repair::declared_toc_flattening(epub_bytes)
             .unwrap_or_default(),
+        // Whether the spine reads those entries in the order the TOC lists
+        // them. Same contract: the repair module owns the rule.
+        misordered: crate::formats::epub::spine_repair::declared_spine_misordering(epub_bytes)
+            .unwrap_or_default(),
     })
 }
 

@@ -42,6 +42,7 @@ use tokio::sync::oneshot;
 
 use bokai::formats::epub::image_extract as epub_image;
 use bokai::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
+use bokai::formats::epub::spine_repair as epub_spine;
 use bokai::formats::epub::toc_repair as epub_toc;
 use bokai::formats::kfx::image_extract;
 use bokai::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
@@ -62,7 +63,7 @@ use crate::state::AppState;
 /// reader/device file itself; EPUB rewrites the OPF/nav/NCX source; PDF appends
 /// an incremental update to the source. EPUB and PDF then re-derive the KFX via
 /// reconvert.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     Kfx,
     Epub,
@@ -97,15 +98,22 @@ fn require_editable_source(row: &BookRow) -> Result<(SourceKind, String), String
 /// Which editor panels an editable source can back, so the UI gates the rail on
 /// capability rather than hardcoding format names.
 ///
-/// All three source formats now back all four, though they get there by
+/// All three source formats back the first four, though they get there by
 /// different routes — a PDF's `cover` is its first page rather than a swappable
-/// resource (see the module docs). The rail's fifth item, `text`, is deliberately
-/// absent: no format has the surgical text-replace primitive behind it.
-fn editor_panels() -> Vec<String> {
-    ["metadata", "toc", "cover", "images"]
+/// resource (see the module docs). `spine` is EPUB-only: reordering an EPUB's
+/// reading order is a permutation of `<itemref>`s, while a KFX's reading order
+/// carries every position in the book with it and a PDF's is its page order.
+/// The rail's last item, `text`, is deliberately absent for everything: no
+/// format has the surgical text-replace primitive behind it.
+fn editor_panels(kind: SourceKind) -> Vec<String> {
+    let mut panels: Vec<String> = ["metadata", "toc", "cover", "images"]
         .into_iter()
         .map(str::to_string)
-        .collect()
+        .collect();
+    if kind == SourceKind::Epub {
+        panels.push("spine".to_string());
+    }
+    panels
 }
 
 /// Fetch a book row and resolve its editable source (kind + path) — the shared
@@ -192,10 +200,9 @@ pub async fn editor_open(state: State<'_, AppState>, book_id: i64) -> Result<Edi
     let format = source_format(row.kind.as_deref());
     let source = require_editable_source(&row).ok();
     let editable = source.is_some();
-    let panels = if editable {
-        editor_panels()
-    } else {
-        Vec::new()
+    let panels = match &source {
+        Some((kind, _)) => editor_panels(*kind),
+        None => Vec::new(),
     };
 
     // TOC verdict from the *source* bytes. Off the async thread — it's a full
@@ -721,6 +728,149 @@ pub async fn editor_repair_toc(
     tokio::task::spawn_blocking(move || read_toc_detail(&p, kind))
         .await
         .map_err(|e| e.to_string())?
+}
+
+// --- reading order (spine) --------------------------------------------------
+
+/// One spine document as the reading-order panel lists it.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SpineDocDto {
+    /// The manifest id — the panel's handle and the only thing a write sends
+    /// back, so a reorder can't accidentally re-target a document.
+    pub idref: String,
+    /// What to call it: the declared TOC's label for this document, falling back
+    /// to its filename for the parts no TOC names (a plate, a blank, a colophon
+    /// the publisher left out).
+    pub label: String,
+    /// True when the label came from the TOC rather than from the filename, so
+    /// the panel can show the unnamed rows as the passengers they are — they
+    /// travel with the document above them unless the user says otherwise.
+    pub named: bool,
+}
+
+/// Full state for the reading-order panel: what the spine reads today, what the
+/// book's own navigation implies it should read, and the measurement between.
+#[derive(Serialize)]
+pub struct EditorSpineDetail {
+    /// `"OK"` | `"MISORDERED"`.
+    pub verdict: String,
+    /// Places where the spine reads the declared TOC's entries out of order.
+    pub descents: usize,
+    /// How many documents the proposal would move.
+    pub moved: usize,
+    /// The spine is its own manifest sorted lexicographically — a packaging
+    /// artifact rather than an authored order, and on its own enough to say
+    /// which of the two orders is the broken one.
+    pub machine_sorted: bool,
+    /// The first entry the spine reads late, for the panel's one-line summary.
+    pub first_out_of_order: Option<String>,
+    /// The spine as the book declares it today.
+    pub current: Vec<SpineDocDto>,
+    /// The panel's starting point: the order the book's own navigation implies.
+    /// Identical to `current` on a book whose two orders agree, which is what
+    /// makes the panel safe to open on any EPUB.
+    pub proposed: Vec<SpineDocDto>,
+}
+
+/// Read the reading-order panel state. EPUB-only, and the rail only offers the
+/// panel for an EPUB source ([`editor_panels`]); this is the belt-and-braces
+/// arm for anything that calls it anyway.
+#[tauri::command]
+pub async fn editor_spine(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<EditorSpineDetail, String> {
+    let (kind, path) = editor_source(&state, book_id).await?;
+    tokio::task::spawn_blocking(move || read_spine_detail(&path, kind))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Write a reviewed reading order (`order`, a list of manifest ids) into the
+/// source EPUB and re-derive the KFX.
+///
+/// This is the one editor write that moves reading positions: every location in
+/// the book is numbered along the spine, so a permuted spine renumbers them all.
+/// The panel says so before it calls this; the command itself only enforces that
+/// the order is a permutation, which bokai's writer does and reports.
+#[tauri::command]
+pub async fn editor_set_spine(
+    state: State<'_, AppState>,
+    book_id: i64,
+    order: Vec<String>,
+) -> Result<EditorSpineDetail, String> {
+    let (kind, path) = editor_source(&state, book_id).await?;
+    if kind != SourceKind::Epub {
+        return Err(spine_unsupported(kind).to_string());
+    }
+    if order.is_empty() {
+        return Err("a reading order needs at least one document".into());
+    }
+
+    let src = path.clone();
+    let new_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
+        epub_spine::set_spine(&bytes, &order).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    commit_edited_source(&state, book_id, kind, &path, new_bytes).await?;
+    let _ = state.queue.enqueue_reconvert(book_id).await;
+    crate::commands::reader::evict_reader(&state, book_id).await;
+
+    let p = path.clone();
+    tokio::task::spawn_blocking(move || read_spine_detail(&p, kind))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Why a source format has no reading order to permute.
+fn spine_unsupported(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Kfx => {
+            "a KFX's reading order carries every reading position \
+                            in the book with it, so reordering it is a rebuild \
+                            rather than a reorder — not built yet"
+        }
+        SourceKind::Pdf => {
+            "a PDF's reading order is its page order, which this \
+                            editor doesn't rearrange"
+        }
+        SourceKind::Epub => "",
+    }
+}
+
+fn read_spine_detail(source_path: &str, kind: SourceKind) -> Result<EditorSpineDetail, String> {
+    if kind != SourceKind::Epub {
+        return Err(spine_unsupported(kind).to_string());
+    }
+    let bytes = std::fs::read(source_path).map_err(|e| format!("read {source_path}: {e}"))?;
+    let m = epub_spine::declared_spine_misordering(&bytes).map_err(|e| e.to_string())?;
+    let dto = |d: epub_spine::SpineDoc| SpineDocDto {
+        named: d.label.is_some(),
+        label: d
+            .label
+            .unwrap_or_else(|| d.href.rsplit('/').next().unwrap_or(&d.href).to_string()),
+        idref: d.idref,
+    };
+    Ok(EditorSpineDetail {
+        verdict: if m.contradicts() { "MISORDERED" } else { "OK" }.to_string(),
+        descents: m.descents,
+        moved: m.moved,
+        machine_sorted: m.machine_sorted,
+        first_out_of_order: m.first_out_of_order.clone(),
+        current: epub_spine::current_spine(&bytes)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(dto)
+            .collect(),
+        proposed: epub_spine::propose_spine(&bytes)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(dto)
+            .collect(),
+    })
 }
 
 // --- images ---------------------------------------------------------------
@@ -1486,14 +1636,34 @@ mod tests {
     /// but this list keeps it dark.
     #[test]
     fn panels_cover_every_built_capability_but_not_text() {
-        let p = editor_panels();
-        for want in ["metadata", "toc", "cover", "images"] {
-            assert!(p.contains(&want.to_string()), "{want} panel is backed");
+        for kind in [SourceKind::Kfx, SourceKind::Epub, SourceKind::Pdf] {
+            let p = editor_panels(kind);
+            for want in ["metadata", "toc", "cover", "images"] {
+                assert!(p.contains(&want.to_string()), "{want} panel is backed");
+            }
+            assert!(
+                !p.contains(&"text".to_string()),
+                "no text-edit primitive yet"
+            );
         }
-        assert!(
-            !p.contains(&"text".to_string()),
-            "no text-edit primitive yet"
-        );
+    }
+
+    /// Reordering a reading order is a permutation only in EPUB. The other two
+    /// formats must not offer the panel, because the write behind it doesn't
+    /// exist for them — and each says why rather than failing silently.
+    #[test]
+    fn only_epub_backs_the_reading_order_panel() {
+        assert!(editor_panels(SourceKind::Epub).contains(&"spine".to_string()));
+        for kind in [SourceKind::Kfx, SourceKind::Pdf] {
+            assert!(
+                !editor_panels(kind).contains(&"spine".to_string()),
+                "{kind:?} has no spine permutation behind the panel"
+            );
+            assert!(
+                !spine_unsupported(kind).is_empty(),
+                "{kind:?} must explain why, not just refuse"
+            );
+        }
     }
 
     /// The PDF DTO boundary: the panel speaks 1-based page numbers, the primitive

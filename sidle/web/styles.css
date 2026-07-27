@@ -4032,6 +4032,22 @@ kbd {
   align-items: center;
   gap: 4px;
 }
+/* A reading-order row names a document rather than labelling it: what it is
+   called is the book's fact, not the reader's, so the name is read-only where a
+   TOC row's is an input. */
+.spine-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  overflow-wrap: anywhere;
+}
+/* A document no table-of-contents entry names — shown by filename, and set back
+   so the chapters it sits between stay the thing you read down the list. */
+.spine-unnamed {
+  color: var(--muted);
+  font-size: 12px;
+}
 .toc-nudge {
   font-size: 13px;
 }

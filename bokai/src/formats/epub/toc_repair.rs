@@ -360,7 +360,11 @@ fn declared_toc_documents(
 }
 
 /// The book's declared TOC: the richer of its two nav documents.
-fn existing_declared_toc(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<TocEntry> {
+pub(super) fn existing_declared_toc(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+) -> Vec<TocEntry> {
     let (ncx, nav) = declared_toc_documents(pkg, opf, opf_base);
     if flat_count(&ncx) >= flat_count(&nav) {
         ncx

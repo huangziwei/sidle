@@ -44,12 +44,23 @@ pub struct TocEvidence {
     /// Both zero for a book that declares its structure or has none. EPUB only
     /// so far — the KFX extractor leaves them zero.
     pub flattened: Flattening,
+    /// How far the book's reading order has drifted from the order its own TOC
+    /// lists. Zero when the two agree, which is the ordinary case. EPUB only so
+    /// far — reordering a KFX reading order moves every position with it, so
+    /// the KFX extractor leaves this zero rather than report what it can't yet
+    /// offer to fix.
+    pub misordered: Misordering,
 }
 
 /// The structure a flat declared TOC is hiding — see
 /// [`crate::formats::epub::toc_repair::declared_toc_flattening`], whose rule
 /// this is, so the diagnosis and the repair can never disagree.
 pub type Flattening = crate::formats::epub::toc_repair::Flattening;
+
+/// How far a book's reading order has drifted from its own navigation — see
+/// [`crate::formats::epub::spine_repair::declared_spine_misordering`], whose
+/// rule this is, on the same terms as [`Flattening`].
+pub type Misordering = crate::formats::epub::spine_repair::Misordering;
 
 /// The validation report for one book's TOC.
 #[derive(Debug, Clone)]
@@ -77,6 +88,8 @@ pub struct TocAudit {
     pub has_toc_landmark: bool,
     /// The volume structure the declared TOC flattened away, if any.
     pub flattened: Flattening,
+    /// The disagreement between the book's reading order and its own TOC, if any.
+    pub misordered: Misordering,
     pub verdict: Verdict,
 }
 
@@ -91,6 +104,11 @@ pub enum Verdict {
     /// depth, though the book itself evidences the levels. Not chapterless —
     /// deficient in *shape* — and the same confirm-then-fix repair restores it.
     Flattened,
+    /// The book's reading order contradicts its own TOC: the TOC lists chapters
+    /// in an order the spine does not read them in. Here the TOC is the sound
+    /// side and the *spine* is the defect, so the repair reorders the spine —
+    /// the one repair in this family that moves reading positions.
+    Misordered,
     /// Declared TOC is chapterless and there's no machine-readable in-book chapter
     /// list either. May be a genuinely flat book, or chapters that no signal
     /// caught. Left alone until a human looks.
@@ -103,6 +121,7 @@ impl Verdict {
             Verdict::Ok => "OK",
             Verdict::Suspect => "SUSPECT",
             Verdict::Flattened => "FLATTENED",
+            Verdict::Misordered => "MISORDERED",
             Verdict::Sparse => "SPARSE",
         }
     }
@@ -154,7 +173,14 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
 
     // Ground-truth chapter count = the strongest of the three in-book signals.
     let evidence = ev.contents_links.max(ev.headings).max(ev.section_heads);
-    let verdict = if ev.flattened.misplaced > 0 {
+    // MISORDERED leads, ahead of FLATTENED and of the chapter-rich OK gate: it
+    // is the only defect here that the reader meets while *reading* rather than
+    // while browsing, and it is measured rather than inferred — the book states
+    // two orders and they differ. A book can carry more than one of these
+    // defects; the verdict is the headline and `into_findings` reports them all.
+    let verdict = if ev.misordered.contradicts() {
+        Verdict::Misordered
+    } else if ev.flattened.misplaced > 0 {
         Verdict::Flattened
     } else if nav_chapters > MAX_NAV_CHAPTERS_TO_FLAG {
         Verdict::Ok
@@ -176,16 +202,22 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
         section_heads: ev.section_heads,
         has_toc_landmark: ev.has_toc_landmark,
         flattened: ev.flattened,
+        misordered: ev.misordered,
         verdict,
     }
 }
 
 impl TocAudit {
-    /// A validation pass = the declared TOC is not deficient, in either sense:
-    /// chapterless (SUSPECT) or shapeless (FLATTENED). SPARSE (no chapter
-    /// evidence found) is inconclusive, not a failure.
+    /// A validation pass = the book's navigation is not deficient, in any of
+    /// the three senses: chapterless (SUSPECT), shapeless (FLATTENED), or
+    /// contradicted by the book's own reading order (MISORDERED). SPARSE (no
+    /// chapter evidence found) is inconclusive, not a failure.
     pub fn is_clean(&self) -> bool {
-        !matches!(self.verdict, Verdict::Suspect | Verdict::Flattened)
+        !matches!(
+            self.verdict,
+            Verdict::Suspect | Verdict::Flattened | Verdict::Misordered
+        ) && !self.misordered.contradicts()
+            && self.flattened.misplaced == 0
     }
 
     pub fn print_summary(&self) {
@@ -206,6 +238,29 @@ impl TocAudit {
                 self.flattened.volumes, self.flattened.misplaced,
             );
         }
+        if self.misordered.contradicts() {
+            println!(
+                "  misordered: the spine reads the TOC's entries out of order in {} place{} ({} document{} would move{}){}",
+                self.misordered.descents,
+                if self.misordered.descents == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                self.misordered.moved,
+                if self.misordered.moved == 1 { "" } else { "s" },
+                if self.misordered.machine_sorted {
+                    "; the spine is its own manifest sorted lexicographically"
+                } else {
+                    ""
+                },
+                self.misordered
+                    .first_out_of_order
+                    .as_deref()
+                    .map(|l| format!(", first: {l}"))
+                    .unwrap_or_default(),
+            );
+        }
         if !self.nav_labels.is_empty() {
             let shown: Vec<&str> = self
                 .nav_labels
@@ -218,16 +273,54 @@ impl TocAudit {
     }
 
     /// Lower this TOC audit into the unified
-    /// [`Finding`](crate::validate::Finding) model. Two defects are reported,
-    /// each fixed by the same confirm-then-rebuild repair: `Suspect` (the
-    /// declared TOC is chapterless while the book itself lists chapters) and
-    /// `Flattened` (a multi-work book listed at one depth). `Ok` and `Sparse`
-    /// are clean / inconclusive and yield nothing. Consumed by
+    /// [`Finding`](crate::validate::Finding) model. Three defects are reported,
+    /// and a book can carry more than one, so each is tested on its own
+    /// measurement rather than on the headline verdict: `Misordered` (the spine
+    /// contradicts the declared TOC), `Flattened` (a multi-work book listed at
+    /// one depth) and `Suspect` (the declared TOC is chapterless while the book
+    /// itself lists chapters). The first is fixed by reordering the spine, the
+    /// other two by rebuilding the TOC. `Ok` and `Sparse` are clean /
+    /// inconclusive and yield nothing. Consumed by
     /// [`crate::validate::source::validate`].
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {
         use crate::validate::{Finding, FixHint, Severity};
-        if self.verdict == Verdict::Flattened {
-            return vec![Finding {
+        let mut out = Vec::new();
+
+        if self.misordered.contradicts() {
+            let late = self
+                .misordered
+                .first_out_of_order
+                .as_deref()
+                .map(|l| format!(", starting at {l}"))
+                .unwrap_or_default();
+            out.push(Finding {
+                check: "toc",
+                rule: "spine-misordered".to_string(),
+                severity: Severity::Warning,
+                location: "<spine>".to_string(),
+                message: format!(
+                    "the spine reads the declared TOC's entries out of order in {} place{}{late}{}",
+                    self.misordered.descents,
+                    if self.misordered.descents == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    if self.misordered.machine_sorted {
+                        " — the spine is its own manifest sorted lexicographically"
+                    } else {
+                        ""
+                    },
+                ),
+                fix: Some(FixHint::new(
+                    "reorder-spine",
+                    "reorder the spine to the order the book's own navigation reads",
+                )),
+            });
+        }
+
+        if self.flattened.misplaced > 0 {
+            out.push(Finding {
                 check: "toc",
                 rule: "toc-flattened".to_string(),
                 severity: Severity::Warning,
@@ -242,30 +335,31 @@ impl TocAudit {
                     "rebuild-toc",
                     "re-nest the declared TOC under the volumes the book evidences",
                 )),
-            }];
+            });
         }
-        if self.verdict != Verdict::Suspect {
-            return Vec::new();
+
+        if self.verdict == Verdict::Suspect {
+            let in_book = self
+                .contents_links
+                .max(self.headings)
+                .max(self.section_heads);
+            out.push(Finding {
+                check: "toc",
+                rule: "toc-deficient".to_string(),
+                severity: Severity::Warning,
+                location: "<toc>".to_string(),
+                message: format!(
+                    "declared TOC lists {} chapter entr{} but the book has {in_book} in-book chapters",
+                    self.nav_chapters,
+                    if self.nav_chapters == 1 { "y" } else { "ies" },
+                ),
+                fix: Some(FixHint::new(
+                    "rebuild-toc",
+                    "rebuild the declared TOC from the book's in-book chapter list",
+                )),
+            });
         }
-        let in_book = self
-            .contents_links
-            .max(self.headings)
-            .max(self.section_heads);
-        vec![Finding {
-            check: "toc",
-            rule: "toc-deficient".to_string(),
-            severity: Severity::Warning,
-            location: "<toc>".to_string(),
-            message: format!(
-                "declared TOC lists {} chapter entr{} but the book has {in_book} in-book chapters",
-                self.nav_chapters,
-                if self.nav_chapters == 1 { "y" } else { "ies" },
-            ),
-            fix: Some(FixHint::new(
-                "rebuild-toc",
-                "rebuild the declared TOC from the book's in-book chapter list",
-            )),
-        }]
+        out
     }
 }
 

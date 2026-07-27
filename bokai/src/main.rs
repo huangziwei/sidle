@@ -143,6 +143,18 @@ enum Command {
         output: Option<String>,
     },
 
+    /// Reorder an EPUB's spine to the order its own navigation reads, for a
+    /// book whose spine contradicts its TOC. Prints the proposed reading order;
+    /// with `output`, writes the reordered book. Reading positions move with a
+    /// spine — review the dry run first.
+    ReorderSpine {
+        /// Input EPUB file.
+        input: String,
+
+        /// Output path. Omit to only print the proposed order (dry run).
+        output: Option<String>,
+    },
+
     /// Split a collection (合本版 / 全集 / boxed set) into the volumes it
     /// collects. Prints the proposed cuts; with `--out`, writes one EPUB per
     /// volume into that directory.
@@ -209,6 +221,73 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
             bokai::formats::kfx::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
         std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
         println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
+    }
+    Ok(())
+}
+
+/// `bokai reorder-spine <input> [output]` — show the reading order the book's
+/// own navigation implies against the one its spine declares, and with `output`
+/// write the reordered book. The dry run prints both orders side by side because
+/// this repair is the one a human has to adjudicate: it moves every reading
+/// position downstream, and where an unlisted document belongs is a judgement
+/// the book gives no evidence for.
+fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
+    use bokai::formats::epub::spine_repair as spine;
+
+    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    if !bytes.starts_with(b"PK") {
+        return Err("reorder-spine reads EPUB; a KFX reading order moves every \
+                    position with it and is not a permutation"
+            .to_string());
+    }
+
+    let m = spine::declared_spine_misordering(&bytes).map_err(|e| e.to_string())?;
+    if !m.contradicts() {
+        println!("in order: the spine reads this book's TOC entries in the order it lists them");
+        return Ok(());
+    }
+    println!(
+        "misordered: {} place(s) where the spine reads the TOC out of order; {} document(s) would move{}",
+        m.descents,
+        m.moved,
+        if m.machine_sorted {
+            "\n  the spine is its own manifest sorted lexicographically — a packaging artifact, not an authored order"
+        } else {
+            ""
+        },
+    );
+
+    // The proposed order, one column, with each moved document's old position
+    // beside it. Everything fixed-width sits on the left: a CJK title is twice
+    // as wide as the column count says, so a title in the middle of a row would
+    // pull every following column out of true.
+    let current = spine::current_spine(&bytes).map_err(|e| e.to_string())?;
+    let proposed = spine::propose_spine(&bytes).map_err(|e| e.to_string())?;
+    let was: std::collections::HashMap<&str, usize> = current
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.idref.as_str(), i))
+        .collect();
+    println!("\nproposed reading order:");
+    for (i, d) in proposed.iter().enumerate() {
+        let from = was.get(d.idref.as_str()).copied().unwrap_or(i);
+        let mark = if from == i {
+            "        ".to_string()
+        } else {
+            format!("  ← {:<3} ", from + 1)
+        };
+        println!(
+            "  {:>3}{mark}{}",
+            i + 1,
+            d.label.clone().unwrap_or_else(|| d.href.clone())
+        );
+    }
+
+    if let Some(out) = output {
+        let repaired = spine::repair_spine(&bytes).map_err(|e| e.to_string())?;
+        std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
+        println!("\nwrote reordered EPUB → {out} ({} bytes)", repaired.len());
+        report_edit_regressions(&bytes, &repaired, "EPUB spine reorder");
     }
     Ok(())
 }
@@ -594,6 +673,7 @@ fn main() -> ExitCode {
             },
         },
         Command::RepairToc { input, output } => repair_toc_cmd(&input, output.as_deref()),
+        Command::ReorderSpine { input, output } => reorder_spine_cmd(&input, output.as_deref()),
         Command::Split { input, out, series } => {
             split_cmd(&input, out.as_deref(), series.as_deref())
         }
@@ -1223,27 +1303,40 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     } else {
         audit.print_summary();
     }
-    // A deficient TOC fails validation — chapterless, or flattened (a
-    // multi-work book listed at one depth). SPARSE is inconclusive, not a
-    // failure. In --json mode the verdict is in the payload, so don't also emit
-    // a process-level error (batch tools read stdout).
+    // A deficient TOC fails validation — chapterless, flattened (a multi-work
+    // book listed at one depth), or contradicted by the book's own reading
+    // order. SPARSE is inconclusive, not a failure. In --json mode the verdict
+    // is in the payload, so don't also emit a process-level error (batch tools
+    // read stdout). Each defect states itself: a book can carry more than one,
+    // and reporting the wrong one is worse than reporting none.
+    use bokai::validate::source::toc::Verdict;
     if json || audit.is_clean() {
-        Ok(())
-    } else if audit.verdict == bokai::validate::source::toc::Verdict::Flattened {
-        Err(format!(
+        return Ok(());
+    }
+    let mut problems = Vec::new();
+    if audit.misordered.contradicts() {
+        problems.push(format!(
+            "spine misordered: it reads the declared TOC out of order in {} place(s), {} document(s) out of position",
+            audit.misordered.descents, audit.misordered.moved,
+        ));
+    }
+    if audit.flattened.misplaced > 0 {
+        problems.push(format!(
             "TOC flattened: {} volumes and their chapters are listed at one depth ({} entries belong under a volume)",
             audit.flattened.volumes, audit.flattened.misplaced,
-        ))
-    } else {
-        Err(format!(
+        ));
+    }
+    if audit.verdict == Verdict::Suspect {
+        problems.push(format!(
             "TOC deficient: declared {} chapter entries, but the book has {} in-book chapters",
             audit.nav_chapters,
             audit
                 .contents_links
                 .max(audit.headings)
                 .max(audit.section_heads),
-        ))
+        ));
     }
+    Err(problems.join("; "))
 }
 
 fn validate_source(path: &str, json: bool) -> Result<(), String> {
