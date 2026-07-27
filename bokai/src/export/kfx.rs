@@ -1457,35 +1457,13 @@ fn build_book_navigation_fragment_with_positions(book: &Book, ctx: &ExportContex
     //    `build_cover_toc_entry`), pointing at the cover's first *content*
     //    position (NOT the page-template section root, which isn't in the
     //    position map and wedges the firmware).
-    // Drop any cover entry the source TOC carries itself (合本 editions / round
-    // -tripped Amazon books list 表紙 at a content eid), then prepend the
-    // canonical cover → section root, so the cover appears exactly once and
+    // Drop any cover entry the source TOC carries itself (合本 editions, round
+    // -tripped Amazon books listing 表紙 at a content eid, and every volume a
+    // collection was split into) while keeping what sat under it, then prepend
+    // the canonical cover → section root, so the cover appears exactly once and
     // shares the `cover_page` landmark's id (which is what makes it jump
     // on-device — the firmware merges same-id TOC + landmark).
-    let cover_eids = cover_section_eids(ctx);
-    let cov_label = cover_label(book);
-    let src_toc: Vec<crate::model::TocEntry> = book
-        .toc()
-        .iter()
-        .filter(|e| {
-            // By title: a 表紙 / Cover entry is the source's own cover — catches a
-            // round-tripped entry whose href mis-resolves outside the cover
-            // section. (Real publisher EPUBs never list the cover in the TOC.)
-            let title = e.title.trim();
-            if title == cov_label
-                || title.eq_ignore_ascii_case("cover")
-                || title.eq_ignore_ascii_case("cover page")
-            {
-                return false;
-            }
-            // By position: an entry landing in the cover section is the cover.
-            match resolve_toc_target(&e.target, &e.href, ctx) {
-                Some((fid, _)) => !cover_eids.contains(&fid),
-                None => true,
-            }
-        })
-        .cloned()
-        .collect();
+    let src_toc = strip_cover_entries(book.toc(), &cover_section_eids(ctx), cover_label(book), ctx);
     let mut toc_entries = build_toc_entries_with_positions(&src_toc, ctx);
     if let Some(cover_entry) = build_cover_toc_entry(book, ctx) {
         toc_entries.insert(0, cover_entry);
@@ -1805,52 +1783,112 @@ fn cover_section_eids(ctx: &ExportContext) -> Vec<u64> {
     eids
 }
 
+/// The source TOC with its own cover entry removed — and whatever sat under it
+/// kept, at the level the removed entry held.
+///
+/// Promoting the children is the whole point. A collection split into volumes
+/// leaves each volume a chapter list rooted at the volume's own title, and that
+/// title points at the volume's cover page — so a cover entry is not always a
+/// leaf, and discarding its subtree left such a book with no table of contents
+/// at all. A dropped entry hands its children up, the same rule
+/// [`crate::formats::epub::split`]'s carve applies to an out-of-range one.
+fn strip_cover_entries(
+    entries: &[crate::model::TocEntry],
+    cover_eids: &[u64],
+    cover_label: &str,
+    ctx: &ExportContext,
+) -> Vec<crate::model::TocEntry> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let children = strip_cover_entries(&entry.children, cover_eids, cover_label, ctx);
+        if is_cover_entry(entry, cover_eids, cover_label, ctx) {
+            out.extend(children);
+        } else {
+            out.push(crate::model::TocEntry {
+                children,
+                ..entry.clone()
+            });
+        }
+    }
+    out
+}
+
+/// Whether a source TOC entry is the book's own cover, by either of the two
+/// things that identify one.
+fn is_cover_entry(
+    entry: &crate::model::TocEntry,
+    cover_eids: &[u64],
+    cover_label: &str,
+    ctx: &ExportContext,
+) -> bool {
+    // By title: a 表紙 / Cover entry is the source's own cover — catches a
+    // round-tripped entry whose href mis-resolves outside the cover section.
+    // (Real publisher EPUBs never list the cover in the TOC.)
+    let title = entry.title.trim();
+    if title == cover_label
+        || title.eq_ignore_ascii_case("cover")
+        || title.eq_ignore_ascii_case("cover page")
+    {
+        return true;
+    }
+    // By position: an entry landing in the cover section is the cover.
+    match resolve_toc_target(&entry.target, &entry.href, ctx) {
+        Some((fid, _)) => cover_eids.contains(&fid),
+        None => false,
+    }
+}
+
 /// Build TOC entries recursively with anchor entity IDs.
 ///
 /// TOC entries point to content fragment IDs (with offset 0) rather than
 /// anchor entities. The `entry.target` field is pre-resolved by `resolve_links()`.
+///
+/// An entry whose own target won't resolve is dropped but its children are not:
+/// they take its place in the list, so an unnavigable heading costs the reader
+/// one row rather than the chapters underneath it.
 fn build_toc_entries_with_positions(
     entries: &[crate::model::TocEntry],
     ctx: &ExportContext,
 ) -> Vec<IonValue> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            // Use pre-resolved target to look up position
-            let (fragment_id, offset) = resolve_toc_target(&entry.target, &entry.href, ctx)?;
+    let mut out = Vec::new();
+    for entry in entries {
+        let child_entries = build_toc_entries_with_positions(&entry.children, ctx);
 
-            let mut fields = Vec::new();
+        // Use pre-resolved target to look up position
+        let Some((fragment_id, offset)) = resolve_toc_target(&entry.target, &entry.href, ctx)
+        else {
+            out.extend(child_entries);
+            continue;
+        };
 
-            // Add representation with label
-            let representation = IonValue::Struct(vec![(
-                KfxSymbol::Label as u64,
-                IonValue::String(entry.title.clone()),
-            )]);
-            fields.push((KfxSymbol::Representation as u64, representation));
+        let mut fields = Vec::new();
 
-            // Target position points directly to content fragment
-            let target = IonValue::Struct(vec![
-                (KfxSymbol::Id as u64, IonValue::Int(fragment_id as i64)),
-                (KfxSymbol::Offset as u64, IonValue::Int(offset as i64)),
-            ]);
-            fields.push((KfxSymbol::TargetPosition as u64, target));
+        // Add representation with label
+        let representation = IonValue::Struct(vec![(
+            KfxSymbol::Label as u64,
+            IonValue::String(entry.title.clone()),
+        )]);
+        fields.push((KfxSymbol::Representation as u64, representation));
 
-            // Add children if present
-            if !entry.children.is_empty() {
-                let child_entries = build_toc_entries_with_positions(&entry.children, ctx);
-                if !child_entries.is_empty() {
-                    fields.push((KfxSymbol::Entries as u64, IonValue::List(child_entries)));
-                }
-            }
+        // Target position points directly to content fragment
+        let target = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(fragment_id as i64)),
+            (KfxSymbol::Offset as u64, IonValue::Int(offset as i64)),
+        ]);
+        fields.push((KfxSymbol::TargetPosition as u64, target));
 
-            let nav_unit = IonValue::Struct(fields);
-            // Annotate with nav_unit::
-            Some(IonValue::Annotated(
-                vec![KfxSymbol::NavUnit as u64],
-                Box::new(nav_unit),
-            ))
-        })
-        .collect()
+        if !child_entries.is_empty() {
+            fields.push((KfxSymbol::Entries as u64, IonValue::List(child_entries)));
+        }
+
+        let nav_unit = IonValue::Struct(fields);
+        // Annotate with nav_unit::
+        out.push(IonValue::Annotated(
+            vec![KfxSymbol::NavUnit as u64],
+            Box::new(nav_unit),
+        ));
+    }
+    out
 }
 
 /// Resolve a TOC entry's pre-resolved target to (fragment_id, offset).

@@ -1,6 +1,6 @@
 //! Regression: EPUB 3 nav TOC handling across EPUB→KFX and back.
 //!
-//! Two failure modes seen on real retail EPUBs:
+//! Three failure modes seen on real retail EPUBs:
 //!
 //!  1. A book ships BOTH a full EPUB 3 nav doc and a stub EPUB 2 NCX (or vice
 //!     versa). The importer must validate against — and convert — the *richer*
@@ -12,6 +12,12 @@
 //!     no internal `$266` anchor for them. Reading that KFX back must still
 //!     produce one distinct, resolvable `#fragment` per entry; otherwise every
 //!     nested entry collapses to the top of its chapter file.
+//!
+//!  3. The whole chapter list hangs off one entry that points at the cover page
+//!     — what a collection's own list leaves behind in each volume it is split
+//!     into, and what plenty of light novels ship as their nav. The KFX export
+//!     drops a cover entry the source carries itself, and taking the subtree
+//!     with it left those books a one-row TOC reading "Cover".
 
 use std::io::{Cursor, Write};
 
@@ -263,6 +269,110 @@ fn nested_nav_anchors_survive_the_epub_kfx_epub_round_trip() {
         "the three scenes must map to distinct anchors"
     );
 }
+
+/// A chapter list rooted at an entry that points at the cover page must survive
+/// the KFX export.
+///
+/// This is the shape every volume of a split collection has: the collection
+/// named the volume by its title and pointed that entry at the volume's own
+/// cover, so carving the volume out leaves its whole chapter list nested under
+/// one cover-targeting row. The exporter drops the source's own cover entry —
+/// it synthesizes the canonical one — and dropping the subtree with it left the
+/// volume with a table of contents of exactly one row, "Cover", on the device
+/// and in the reader alike.
+#[test]
+fn a_toc_rooted_at_the_cover_page_keeps_its_chapters_through_kfx() {
+    let opf = br#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Volume One</dc:title>
+    <dc:identifier id="bookid">urn:uuid:33333333-0000-0000-0000-000000000000</dc:identifier>
+    <dc:language>en</dc:language>
+    <meta name="cover" content="img"/>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="cov" href="cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="cover.jpg" media-type="image/jpeg"/>
+  </manifest>
+  <spine>
+    <itemref idref="cov"/>
+    <itemref idref="c1"/>
+    <itemref idref="c2"/>
+  </spine>
+</package>"#;
+
+    // The volume's title is the sole top-level row, and it targets the cover.
+    let nav = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>Nav</title></head>
+<body>
+<nav epub:type="toc"><ol>
+  <li><a href="cover.xhtml">Volume One</a>
+    <ol>
+      <li><a href="c1.xhtml">Chapter One</a></li>
+      <li><a href="c2.xhtml">Chapter Two</a></li>
+    </ol>
+  </li>
+</ol></nav>
+</body></html>"#;
+
+    let page = |body: &str| {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>p</title></head><body>{body}</body></html>"
+        )
+        .into_bytes()
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let epub = zip_epub(
+        dir.path(),
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER),
+            ("OEBPS/content.opf", opf),
+            ("OEBPS/nav.xhtml", nav),
+            (
+                "OEBPS/cover.xhtml",
+                &page(r#"<img src="cover.jpg" alt=""/>"#),
+            ),
+            ("OEBPS/c1.xhtml", &page("<h2>Chapter One</h2><p>a</p>")),
+            ("OEBPS/c2.xhtml", &page("<h2>Chapter Two</h2><p>b</p>")),
+            ("OEBPS/cover.jpg", JPEG),
+        ],
+    );
+
+    let mut book = Book::open(&epub).expect("open volume epub");
+    let mut kfx = Cursor::new(Vec::new());
+    book.export(Format::Kfx, &mut kfx).expect("export kfx");
+
+    let kfx = Book::from_bytes(&kfx.into_inner(), Format::Kfx).expect("import the exported kfx");
+    let mut names = Vec::new();
+    titles(kfx.toc(), &mut names);
+
+    for chap in ["Chapter One", "Chapter Two"] {
+        assert!(
+            names.iter().any(|t| t == chap),
+            "{chap} sat under the cover-targeting root and must survive it — got {names:?}"
+        );
+    }
+}
+
+/// Smallest JPEG the image pipeline will accept: a 1×1 baseline grey pixel.
+const JPEG: &[u8] = &[
+    0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+    0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0xc4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x08,
+    0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x54, 0xdf, 0xff, 0xd9,
+];
 
 /// Every text entry of an EPUB, as `(name, contents)`. Binary entries decode
 /// lossily — nothing here inspects them.
