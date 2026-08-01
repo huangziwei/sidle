@@ -170,22 +170,30 @@ where
     order.into_iter().find(|&face| has_glyph(face, ch))
 }
 
-/// Zero-width / formatting code points that carry no glyph: the BOM and
-/// zero-width space family, bidi marks, the word joiner and invisible
-/// operators, and the soft hyphen.
+/// Code points that carry no glyph: the C0/C1 controls, plus the zero-width
+/// and formatting family — the BOM and zero-width spaces, bidi marks, the word
+/// joiner and invisible operators, and the soft hyphen.
 ///
-/// They must never reach the rasterizer. A face has no glyph for most of
-/// them, and a font answers "no glyph" by handing back `.notdef` — so a
-/// character that is invisible everywhere else in the product turns into a
-/// visible box here. They are also collation-ignorable, which is why
-/// [`crate::api`] drops them from the fields the picker sorts on.
+/// They must never reach the rasterizer. No face has a glyph for them, and a
+/// font answers "no glyph" by handing back `.notdef` — so a character that is
+/// invisible everywhere else in the product turns into a visible box here.
+/// Worse, one of them in a run also costs every *other* character its face:
+/// coverage is decided per string, and a character no face has drops the whole
+/// run to per-character resolution. The zero-width family is also
+/// collation-ignorable, which is why [`crate::api`] drops it from the fields
+/// the picker sorts on.
+///
+/// A control is skipped, never interpreted. `\n` in particular is a layout
+/// instruction that whoever owns the layout has to consume first — see
+/// [`crate::ui::toast`], which lays a message out one row per line.
 pub fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{00AD}'                  // soft hyphen
-        | '\u{200B}'..='\u{200F}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
-        | '\u{2060}'..='\u{2064}'   // word joiner + invisible operators
-        | '\u{FEFF}'                // BOM / zero-width no-break space
-    )
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}'                  // soft hyphen
+            | '\u{200B}'..='\u{200F}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | '\u{2060}'..='\u{2064}'   // word joiner + invisible operators
+            | '\u{FEFF}'                // BOM / zero-width no-break space
+        )
 }
 
 /// An ordered set of faces: the first usable candidate, read up front, plus
@@ -423,6 +431,26 @@ mod tests {
         );
         assert!(is_invisible('\u{FEFF}'));
         assert!(!is_invisible('あ'));
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_rasterizer() {
+        // A banner message joins its clauses with `\n`. No face has U+000A, so
+        // a newline that got this far both drew the missing-glyph box and, by
+        // missing everywhere, dropped the rest of the line to per-character
+        // resolution. The layout consumes it; the renderer skips whatever is
+        // left, here and for any other control that rides in on metadata.
+        for c in ['\n', '\r', '\t', '\u{0}', '\u{7F}', '\u{85}'] {
+            assert!(is_invisible(c), "{c:?} would draw as a box");
+        }
+        // Nothing in the chain has one, which is the whole damage: the box got
+        // drawn, and the miss also pushed the rest of the run off its face.
+        let faces = ["Synced 3", "汉字"];
+        assert_eq!(face_with('\n', unhinted(&faces), repertoires(&faces)), None);
+        assert_eq!(
+            covering_face("Synced 3\nSynced 3", unhinted(&faces), repertoires(&faces)),
+            Some(0)
+        );
     }
 
     #[test]

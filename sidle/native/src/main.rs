@@ -2074,8 +2074,8 @@ fn decrypt_all_flow(
     ));
 
     // A token mismatch means the decrypts landed but nothing synced — point the
-    // user at the re-provision step (the toast is one line, so no `\n` here: the
-    // renderer draws it as a stray glyph, not a break). The books are on disk;
+    // user at the re-provision step. Short enough to read on one line; the
+    // toast breaks on `\n` when a message needs more. The books are on disk;
     // the DRM Sync button re-pushes them once the token is refreshed.
     if token_bad {
         return Ok(format!(

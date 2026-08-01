@@ -1,8 +1,11 @@
 //! Modal status overlay.
 //!
-//! Black banner centered on the panel with a single line of white text —
-//! used during downloads ("Downloading…", "Downloaded", "Failed").
-//! Returns the dirty rect so the caller can refresh just that area.
+//! Black banner centered on the panel with white text — used during downloads
+//! ("Downloading…", "Downloaded", "Failed"). A message is laid out one row per
+//! `\n`-delimited line: callers compose results by joining clauses with `\n`,
+//! and a newline handed to the renderer instead would draw as the
+//! missing-glyph box (no face has U+000A). Returns the dirty rect so the
+//! caller can refresh just that area.
 //!
 //! [`draw_download`] is the taller live variant: a title line, a
 //! `transferred / total` progress line, and a tappable Cancel button.
@@ -14,6 +17,11 @@ use crate::ui::text::TextRenderer;
 
 const BANNER_HEIGHT: u32 = 140;
 const BANNER_MARGIN_X: u32 = 80;
+/// Breathing room above and below the text block, and so the least height a
+/// banner may take beyond the block it holds. Only a message taller than
+/// [`BANNER_HEIGHT`] is affected: everything shorter keeps the one-line
+/// footprint, which is what lets one plain toast overwrite another exactly.
+const BANNER_PAD_Y: u32 = 20;
 
 /// Taller banner for the live download overlay — fits title + progress + the
 /// Cancel button with breathing room.
@@ -32,24 +40,55 @@ const CANCEL_W: u32 = 320;
 const CANCEL_H: u32 = 84;
 
 pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) -> MxcfbRect {
+    // At least the one-line footprint, so the ordinary toast still overwrites
+    // the overlay it replaces exactly; taller only when the text needs it,
+    // which beats spilling white rows outside the black box.
+    let banner_h = BANNER_HEIGHT.max(block_height(renderer, message) + BANNER_PAD_Y * 2);
     let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
     let banner_x = (fb.var.xres - banner_w) / 2;
-    let banner_y = (fb.var.yres - BANNER_HEIGHT) / 2;
+    let banner_y = fb.var.yres.saturating_sub(banner_h) / 2;
 
-    fb.fill_rect(banner_y, banner_x, banner_w, BANNER_HEIGHT, 0x00);
-
-    let text_w = renderer.measure_width(message);
-    let text_x = banner_x as i32 + ((banner_w as i32 - text_w as i32) / 2).max(0);
-    // Baseline ~ 70% down the banner — leaves headroom for ascenders +
-    // a little descender clearance.
-    let baseline = (banner_y + (BANNER_HEIGHT * 70 / 100)) as i32;
-    renderer.draw(fb, text_x, baseline, message, true);
+    fb.fill_rect(banner_y, banner_x, banner_w, banner_h, 0x00);
+    draw_message_block(
+        fb, renderer, banner_x, banner_y, banner_w, banner_h, message,
+    );
 
     MxcfbRect {
         top: banner_y,
         left: banner_x,
         width: banner_w,
-        height: BANNER_HEIGHT,
+        height: banner_h,
+    }
+}
+
+/// Height of `message` laid out one row per line, never less than one row so
+/// an empty message still reserves the line it would have drawn on.
+fn block_height(renderer: &TextRenderer, message: &str) -> u32 {
+    renderer.line_height() * message.lines().count().max(1) as u32
+}
+
+/// Center `message` as a block inside the banner, one row per `\n`-delimited
+/// line, each row centered on its own width. White-on-black, matching every
+/// banner here. Shared so the plain toast and the download overlay's terminal
+/// banner lay text out identically and differ only in footprint.
+fn draw_message_block(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    banner_x: u32,
+    banner_y: u32,
+    banner_w: u32,
+    banner_h: u32,
+    message: &str,
+) {
+    let lh = renderer.line_height();
+    let block_top = banner_y + banner_h.saturating_sub(block_height(renderer, message)) / 2;
+    for (i, line) in message.lines().enumerate() {
+        let text_w = renderer.measure_width(line);
+        let text_x = banner_x as i32 + ((banner_w as i32 - text_w as i32) / 2).max(0);
+        // Baseline ~72% down each line's slot — headroom for ascenders, and a
+        // little descender clearance.
+        let baseline = (block_top + lh * i as u32 + lh * 72 / 100) as i32;
+        renderer.draw(fb, text_x, baseline, line, true);
     }
 }
 
@@ -124,20 +163,15 @@ pub fn draw_download_done(
     let banner_y = (fb.var.yres.saturating_sub(DL_BANNER_HEIGHT)) / 2;
 
     fb.fill_rect(banner_y, banner_x, banner_w, DL_BANNER_HEIGHT, 0x00);
-
-    // Center the (possibly multi-line) message vertically as a block, each row
-    // horizontally centered. White-on-black, matching the live overlay.
-    let lines: Vec<&str> = message.lines().collect();
-    let lh = renderer.line_height();
-    let block_h = lh * lines.len().max(1) as u32;
-    let block_top = banner_y + DL_BANNER_HEIGHT.saturating_sub(block_h) / 2;
-    for (i, line) in lines.iter().enumerate() {
-        let w = renderer.measure_width(line);
-        let x = banner_x as i32 + ((banner_w as i32 - w as i32) / 2).max(0);
-        // Baseline ~72% down each line's slot — headroom for ascenders.
-        let baseline = (block_top + lh * i as u32 + lh * 72 / 100) as i32;
-        renderer.draw(fb, x, baseline, line, true);
-    }
+    draw_message_block(
+        fb,
+        renderer,
+        banner_x,
+        banner_y,
+        banner_w,
+        DL_BANNER_HEIGHT,
+        message,
+    );
 
     MxcfbRect {
         top: banner_y,
