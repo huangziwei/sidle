@@ -10,6 +10,7 @@ use zip::ZipArchive;
 use crate::formats::epub::{
     parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc, parse_ncx,
     parse_opf, parse_opf_guide,
+    structure::{dir_of, resolve_href},
 };
 use crate::html::Stylesheet;
 use crate::import::{
@@ -291,7 +292,7 @@ impl EpubImporter {
         //    reference, so percent-decode it to the literal zip entry name.
         let container_bytes = read_entry(&source, &zip_index, "META-INF/container.xml")?;
         let opf_path = percent_decode(&parse_container_xml(&container_bytes)?);
-        let opf_base = archive_dir_base(&opf_path);
+        let opf_base = dir_of(&opf_path);
 
         // 3. Parse OPF
         let opf_bytes = read_entry(&source, &zip_index, &opf_path)?;
@@ -306,9 +307,11 @@ impl EpubImporter {
         for (i, spine_id) in opf.spine_ids.iter().enumerate() {
             if let Some((href, _media_type)) = opf.manifest.get(spine_id) {
                 // Manifest hrefs are URI references (calibre escapes `!` in
-                // `CR!….html` as `CR%21….html`); decode so the resolved path
-                // matches the literal zip entry name.
-                let full_path = format!("{}{}", opf_base, percent_decode(href));
+                // `CR!….html` as `CR%21….html`), and they are only *relative*
+                // to the OPF's directory — Sigil writes `../nav.xhtml` for a
+                // resource kept above it. Resolving (not concatenating) both
+                // decodes and collapses `.`/`..` to the literal zip entry name.
+                let full_path = resolve_href(&opf_base, href);
                 let size_estimate = zip_index
                     .get(&full_path)
                     .map(|loc| loc.compressed_size as usize)
@@ -337,14 +340,8 @@ impl EpubImporter {
         {
             let spine_set: std::collections::HashSet<&str> =
                 spine_paths.iter().map(|s| s.as_str()).collect();
-            let ncx_path = opf
-                .ncx_href
-                .as_ref()
-                .map(|h| format!("{}{}", opf_base, percent_decode(h)));
-            let nav_path = opf
-                .nav_href
-                .as_ref()
-                .map(|h| format!("{}{}", opf_base, percent_decode(h)));
+            let ncx_path = opf.ncx_href.as_ref().map(|h| resolve_href(&opf_base, h));
+            let nav_path = opf.nav_href.as_ref().map(|h| resolve_href(&opf_base, h));
             assets.retain(|p| {
                 // Bind `&str` explicitly rather than leaning on `as_ref()`
                 // inference: a dependency contributing another `AsRef`/`Borrow`
@@ -370,7 +367,7 @@ impl EpubImporter {
         // the TOC is empty (a headings-only book is handled downstream).
         let read_toc = |href: Option<&String>, parse: fn(&str) -> io::Result<Vec<TocEntry>>| {
             let href = href?;
-            let path = format!("{}{}", opf_base, percent_decode(href));
+            let path = resolve_href(&opf_base, href);
             let bytes = read_entry(&source, &zip_index, &path).ok()?;
             let hint_encoding = crate::util::extract_xml_encoding(&bytes);
             let text = crate::util::decode_text(&bytes, hint_encoding);
@@ -381,7 +378,7 @@ impl EpubImporter {
             // OPF+NCX at the archive root and the nav doc in a subdir (e.g.
             // `xhtml/nav.xhtml`) resolve against different bases — prepending
             // opf_base there leaves every fragment-less chapter href unmatched.
-            let doc_base = archive_dir_base(&path);
+            let doc_base = dir_of(&path);
             (!entries.is_empty()).then(|| prepend_base_to_toc(&entries, &doc_base))
         };
         let toc = {
@@ -409,20 +406,21 @@ impl EpubImporter {
 
         // 6. Parse landmarks from EPUB 3 nav document
         let mut landmarks = if let Some(nav_href) = &opf.nav_href {
-            let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
+            let nav_path = resolve_href(&opf_base, nav_href);
             // Landmark hrefs are relative to the nav doc's directory, not the
             // OPF's (see the TOC note above).
-            let nav_base = archive_dir_base(&nav_path);
+            let nav_base = dir_of(&nav_path);
             if let Ok(nav_bytes) = read_entry(&source, &zip_index, &nav_path) {
                 let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
                 let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
                 let mut parsed = parse_nav_landmarks(&nav_str)?;
-                // Prepend base path to hrefs (nav uses relative paths) and
-                // percent-decode so the targets match decoded chapter paths.
+                // Resolve against the nav doc's directory so the targets match
+                // decoded chapter paths.
                 for landmark in &mut parsed {
-                    landmark.href = percent_decode(&landmark.href);
                     if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
-                        landmark.href = format!("{}{}", nav_base, landmark.href);
+                        landmark.href = resolve_href(&nav_base, &landmark.href);
+                    } else {
+                        landmark.href = percent_decode(&landmark.href);
                     }
                 }
                 parsed
@@ -442,9 +440,10 @@ impl EpubImporter {
         // still gets the union.
         if let Ok(mut guide_marks) = parse_opf_guide(&opf_str) {
             for landmark in &mut guide_marks {
-                landmark.href = percent_decode(&landmark.href);
                 if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
-                    landmark.href = format!("{}{}", opf_base, landmark.href);
+                    landmark.href = resolve_href(&opf_base, &landmark.href);
+                } else {
+                    landmark.href = percent_decode(&landmark.href);
                 }
             }
             for g in guide_marks {
@@ -464,13 +463,14 @@ impl EpubImporter {
 
         // Resolve cover_image to an absolute (zip-relative) path so it matches
         // asset keys downstream. The OPF parser leaves it as a manifest href
-        // relative to opf_base; percent-decode it the same way as every other
-        // href so a cover whose filename contains escaped characters resolves.
+        // relative to opf_base; resolve it the same way as every other href so
+        // a cover whose filename is escaped, or which sits outside the OPF's
+        // directory, still lands on its zip entry.
         let mut metadata = opf.metadata;
         if let Some(ref href) = metadata.cover_image
             && !href.is_empty()
         {
-            metadata.cover_image = Some(format!("{}{}", opf_base, percent_decode(href)));
+            metadata.cover_image = Some(resolve_href(&opf_base, href));
         }
 
         Ok(Self {
@@ -774,22 +774,12 @@ fn count_toc_entries(entries: &[TocEntry]) -> usize {
         .sum()
 }
 
-/// Directory portion of an archive path, with a trailing `/` (empty string when
-/// the path sits at the archive root). Archive entry names are always
-/// `/`-delimited, so this splits on `/` rather than going through `Path` (whose
-/// separator is platform-dependent). Used to resolve a document's relative
-/// hrefs against the directory that document lives in.
-fn archive_dir_base(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/"),
-        None => String::new(),
-    }
-}
-
-/// Prepend base path to TOC entry hrefs (NCX uses relative paths).
+/// Resolve TOC entry hrefs against `base` (NCX and nav use relative paths).
 ///
-/// TOC hrefs are URI references, so they are percent-decoded here to match the
-/// decoded chapter paths and anchor-map keys they resolve against.
+/// TOC hrefs are URI references, so they are percent-decoded and their `.`/`..`
+/// segments collapsed, to match the chapter paths and anchor-map keys they
+/// resolve against. An anchor-only href addresses the TOC document itself and
+/// stays as it is.
 fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
     entries
         .iter()
@@ -798,7 +788,7 @@ fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
             let href = if decoded.starts_with('#') || decoded.is_empty() {
                 decoded
             } else {
-                format!("{}{}", base, decoded)
+                resolve_href(base, &entry.href)
             };
             TocEntry {
                 title: entry.title.clone(),
@@ -849,6 +839,88 @@ mod tests {
         buf.into_inner()
     }
 
+    /// A Sigil-authored EPUB whose OPF sits in `OEBPS/` but keeps a spine doc,
+    /// the nav, and the NCX at the archive root, referencing each with a `../`
+    /// href. Real books ship this shape.
+    fn epub_with_parent_escaping_hrefs() -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opt = SimpleFileOptions::default();
+            let mut put = |name: &str, body: &[u8]| {
+                zip.start_file(name, opt).unwrap();
+                zip.write_all(body).unwrap();
+            };
+            put("mimetype", b"application/epub+zip");
+            put(
+                "META-INF/container.xml",
+                br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            put(
+                "OEBPS/content.opf",
+                br#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="../ch2.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="../nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ncx" href="../toc.ncx" media-type="application/x-dtbncx+xml"/><item id="cov" href="../cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest><spine toc="ncx"><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+            );
+            put(
+                "OEBPS/Text/ch1.xhtml",
+                br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c1</title></head><body><p>one</p></body></html>"#,
+            );
+            put(
+                "ch2.xhtml",
+                br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c2</title></head><body><p>two</p></body></html>"#,
+            );
+            // Root-level nav: its own hrefs are written relative to the root,
+            // so they resolve against the nav's directory, not the OPF's.
+            put(
+                "nav.xhtml",
+                br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="OEBPS/Text/ch1.xhtml">One</a></li><li><a href="ch2.xhtml">Two</a></li></ol></nav></body></html>"#,
+            );
+            put(
+                "toc.ncx",
+                br#"<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap><navPoint id="n1" playOrder="1"><navLabel><text>One</text></navLabel><content src="OEBPS/Text/ch1.xhtml"/></navPoint></navMap></ncx>"#,
+            );
+            put("cover.jpg", b"\xFF\xD8\xFFnot-really-a-jpeg");
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn manifest_hrefs_that_escape_the_opf_directory_resolve() {
+        // Regression: joining `opf_base` to the href by concatenation produced
+        // `OEBPS/../ch2.xhtml`, which names no zip entry — the whole conversion
+        // died with "File not found in ZIP". `..` has to be collapsed.
+        let bytes = epub_with_parent_escaping_hrefs();
+        let mut importer =
+            EpubImporter::from_source(Arc::new(MemorySource::new(bytes))).expect("opens");
+
+        assert_eq!(importer.spine().len(), 2);
+        assert_eq!(
+            importer.source_id(ChapterId(0)),
+            Some("OEBPS/Text/ch1.xhtml")
+        );
+        assert_eq!(importer.source_id(ChapterId(1)), Some("ch2.xhtml"));
+        // Every spine doc must actually read back — the failure mode was a path
+        // that resolved to nothing.
+        for id in 0..2u32 {
+            assert!(
+                importer.load_raw(ChapterId(id)).is_ok(),
+                "spine doc {id} unreadable"
+            );
+        }
+        // The nav doc lives at the root, so its own hrefs resolve against the
+        // root — not against `OEBPS/`.
+        let toc = importer.toc();
+        assert_eq!(toc.len(), 2, "nav doc at `../nav.xhtml` was not read");
+        assert_eq!(toc[0].href, "OEBPS/Text/ch1.xhtml");
+        assert_eq!(toc[1].href, "ch2.xhtml");
+        assert_eq!(
+            importer.metadata().cover_image.as_deref(),
+            Some("cover.jpg")
+        );
+    }
+
     #[test]
     fn directory_entries_are_not_treated_as_assets() {
         let bytes = epub_with_directory_entry();
@@ -872,16 +944,16 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_dir_base() {
+    fn test_dir_of() {
         // Root-level document → empty base.
-        assert_eq!(archive_dir_base("9781668011799.opf"), "");
-        assert_eq!(archive_dir_base("toc.ncx"), "");
+        assert_eq!(dir_of("9781668011799.opf"), "");
+        assert_eq!(dir_of("toc.ncx"), "");
         // Subdirectory document → its directory, trailing slash.
         assert_eq!(
-            archive_dir_base("e9781668011799/xhtml/nav.xhtml"),
+            dir_of("e9781668011799/xhtml/nav.xhtml"),
             "e9781668011799/xhtml/"
         );
-        assert_eq!(archive_dir_base("OEBPS/content.opf"), "OEBPS/");
+        assert_eq!(dir_of("OEBPS/content.opf"), "OEBPS/");
     }
 
     #[test]
@@ -891,7 +963,7 @@ mod tests {
         // against the nav doc's own directory, not the OPF's. Prepending the
         // OPF base (empty here) once dropped every chapter from the KFX TOC.
         let nav_path = "e9781668011799/xhtml/nav.xhtml";
-        let doc_base = archive_dir_base(nav_path);
+        let doc_base = dir_of(nav_path);
         let entries = vec![
             TocEntry::new("Chapter One", "ch01.xhtml"),
             TocEntry::new("Copyright", "copyright.xhtml"),

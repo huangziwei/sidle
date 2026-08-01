@@ -8,6 +8,7 @@
 //! converted KFX. Structural EPUB conformance is a separate concern owned by
 //! [`crate::validate::source::epub`]; this is a TOC-*completeness* check.
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::HashSet;
 use std::io::{Cursor, Read, Seek};
 
@@ -78,7 +79,7 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
         let Some((href, _)) = opf.manifest.get(id) else {
             continue;
         };
-        let Some(bytes) = read_entry(&mut archive, &format!("{opf_base}{href}")) else {
+        let Some(bytes) = read_entry(&mut archive, &resolve_href(&opf_base, href)) else {
             continue;
         };
         let xhtml = decode_text(&bytes, extract_xml_encoding(&bytes));
@@ -135,7 +136,7 @@ fn load_toc<R: Read + Seek>(
     href: &str,
     f: fn(&str) -> std::io::Result<Vec<TocEntry>>,
 ) -> Option<Vec<TocEntry>> {
-    let bytes = read_entry(a, &format!("{base}{href}"))?;
+    let bytes = read_entry(a, &resolve_href(base, href))?;
     let entries = f(&decode_text(&bytes, extract_xml_encoding(&bytes))).ok()?;
     (!entries.is_empty()).then_some(entries)
 }
@@ -158,7 +159,7 @@ fn toc_landmark_href<R: Read + Seek>(
             .map(|l| basename(&l.href))
     };
     if let Some(nav_href) = &opf.nav_href
-        && let Some(bytes) = read_entry(a, &format!("{opf_base}{nav_href}"))
+        && let Some(bytes) = read_entry(a, &resolve_href(opf_base, nav_href))
         && let Ok(lms) = parse_nav_landmarks(&decode_text(&bytes, extract_xml_encoding(&bytes)))
         && let Some(h) = find(&lms)
     {

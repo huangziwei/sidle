@@ -47,6 +47,10 @@ const state = {
   // seeded on `converting`, and dropped on `done`/`error`. Drives the
   // determinate queue bar in `queueRow`.
   convProgress: {},
+  // Book ids whose conversion failed since the failure report was last
+  // dismissed, so a batch of failures reads as one list. Cleared by
+  // `hideErrorReport`; the books keep their `error` regardless.
+  convFailures: [],
   // When non-null, an autopull from /dedrm is in progress. `{ done, total }`
   // — surfaced in the status bar and used by renderQueue to know it shouldn't
   // clobber the autopull line with the queue summary.
@@ -420,7 +424,7 @@ function wireToolbar() {
   $("#btn-notes-import").addEventListener("click", () => {
     if (window.Notebooks) window.Notebooks.importDevice();
   });
-  $("#import-error-close").addEventListener("click", hideImportErrorReport);
+  $("#error-report-close").addEventListener("click", hideErrorReport);
 
   $("#btn-settings").addEventListener("click", openSettings);
   $("#settings-close").addEventListener("click", closeSettings);
@@ -850,7 +854,7 @@ async function importPaths(paths) {
   if (failed > 0) {
     showImportErrorReport(failures);
   } else {
-    hideImportErrorReport();
+    hideErrorReport();
   }
 
   const parts = [];
@@ -860,37 +864,76 @@ async function importPaths(paths) {
   if (parts.length) showToast(parts.join(" · "), failed > 0);
 }
 
-// Per-file import failure report. The detailed `error` from Rust (the full
-// anyhow context chain, e.g. "read metadata from …: invalid Zip archive: …")
-// is captured per file and rendered here so a failed drop is diagnosable
-// instead of just "import failed". Persists until dismissed — an error is
-// worth reading, unlike the 4-second toast.
-function showImportErrorReport(failures) {
-  const panel = $("#import-error-report");
-  const list = $("#import-error-list");
-  const title = $("#import-error-title");
+// Persistent failure report. The detailed `error` from Rust (the full anyhow
+// context chain, e.g. "read metadata from …: invalid Zip archive: …") is what
+// makes a failure diagnosable instead of just "failed", so it gets a panel that
+// stays until dismissed rather than a 4-second toast. Shared by the import and
+// conversion paths: each `entry` is `{ name, reason, onRetry? }`.
+function showErrorReport(title, entries) {
+  const panel = $("#error-report");
+  const list = $("#error-report-list");
+  const heading = $("#error-report-title");
   if (!panel || !list) return;
 
-  title.textContent =
-    failures.length === 1 ? "Import failed" : `${failures.length} imports failed`;
+  heading.textContent = title;
   list.innerHTML = "";
-  for (const f of failures) {
+  for (const entry of entries) {
     const li = document.createElement("li");
     const name = document.createElement("div");
-    name.className = "import-error-file";
-    name.textContent = (f.path || "").split(/[\\/]/).pop() || f.path || "(unknown file)";
+    name.className = "error-report-item";
+    name.textContent = entry.name || "(unknown)";
     const reason = document.createElement("pre");
-    reason.className = "import-error-reason";
-    reason.textContent = f.error || "Unknown error";
+    reason.className = "error-report-reason";
+    reason.textContent = entry.reason || "Unknown error";
     li.append(name, reason);
+    if (entry.onRetry) {
+      const retry = document.createElement("button");
+      retry.className = "error-report-retry";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => {
+        entry.onRetry();
+        hideErrorReport();
+      });
+      li.appendChild(retry);
+    }
     list.appendChild(li);
   }
   panel.hidden = false;
 }
 
-function hideImportErrorReport() {
-  const panel = $("#import-error-report");
+function hideErrorReport() {
+  const panel = $("#error-report");
   if (panel) panel.hidden = true;
+  state.convFailures = [];
+}
+
+function showImportErrorReport(failures) {
+  showErrorReport(
+    failures.length === 1 ? "Import failed" : `${failures.length} imports failed`,
+    failures.map((f) => ({
+      name: (f.path || "").split(/[\\/]/).pop() || f.path || "(unknown file)",
+      reason: f.error,
+    })),
+  );
+}
+
+// Why a conversion failed, with its Retry one click away. Reached from the
+// failed format badge, the queue drawer's "Failed", and automatically when a
+// `conversion:status` error arrives — the reason is the point, and a book that
+// silently sits at "failed" is the bug this replaces.
+function showConversionErrorReport(bookIds) {
+  const books = bookIds
+    .map((id) => state.books.find((b) => b.id === id))
+    .filter(Boolean);
+  if (!books.length) return;
+  showErrorReport(
+    books.length === 1 ? "Conversion failed" : `${books.length} conversions failed`,
+    books.map((b) => ({
+      name: b.title || "Untitled",
+      reason: b.error,
+      onRetry: () => retryConvert(b.id),
+    })),
+  );
 }
 
 function startImportStatus(paths) {
@@ -1776,9 +1819,12 @@ function formatBadge(format, b, compact) {
   span.textContent = formatLabel(format, status, compact);
   span.title = formatTooltip(format, status, b);
   if (status === "error") {
+    // Show why before offering the retry: a click that silently re-ran the
+    // conversion gave no way to read the reason, so the same failure just
+    // repeated.
     span.addEventListener("click", (e) => {
       e.stopPropagation();
-      retryConvert(b.id);
+      showConversionErrorReport([b.id]);
     });
     span.style.cursor = "pointer";
   }
@@ -1812,6 +1858,14 @@ function subscribeStatus() {
       state.convProgress[book_id] = { fraction: 0, label: "Starting…" };
     } else {
       delete state.convProgress[book_id];
+    }
+    // A failure surfaces its reason on its own — the book is otherwise left
+    // sitting at "failed" with the cause only reachable by hovering a badge.
+    // Accumulate so a batch of failures reads as one list, not a panel that
+    // rerenders down to whichever book failed last.
+    if (status === "error") {
+      if (!state.convFailures.includes(book_id)) state.convFailures.push(book_id);
+      showConversionErrorReport(state.convFailures);
     }
     // When a conversion finishes, re-pull rows to pick up kfx_path — and the
     // fresh `cover_rev`: the worker may have just overwritten the grayscale
@@ -2976,9 +3030,11 @@ function queueRow(b) {
   const status = document.createElement("div");
   status.className = `queue-status ${b.status}`;
   if (b.status === "error") {
-    const label = document.createElement("span");
+    const label = document.createElement("button");
+    label.className = "queue-why";
     label.textContent = "Failed";
     label.title = b.error || "";
+    label.addEventListener("click", () => showConversionErrorReport([b.id]));
     status.appendChild(label);
     const retry = document.createElement("button");
     retry.className = "queue-retry";

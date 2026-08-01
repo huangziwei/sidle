@@ -1959,18 +1959,28 @@ kbd {
   border-top: 1px solid var(--border);
 }
 
-.import-error-file {
+.error-report-item {
   font-weight: 600;
   word-break: break-all;
 }
 
-.import-error-reason {
+.error-report-reason {
   margin: 4px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.error-report-retry {
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 /* Metadata editor modal */
@@ -2585,6 +2595,19 @@ kbd {
   padding: 2px 8px;
   font-size: 11px;
   margin-left: 6px;
+}
+
+/* "Failed" in the queue drawer — a button, because it opens the reason. Styled
+   as the text it replaced so the row reads the same. */
+.queue-why {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 
 /* ---- Reader -------------------------------------------------------------- */

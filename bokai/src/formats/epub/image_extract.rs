@@ -13,7 +13,7 @@
 
 use crate::formats::epub::edit::EpubPackage;
 use crate::formats::epub::parse_opf;
-use crate::util::percent_decode;
+use crate::formats::epub::structure::{dir_of, resolve_href};
 
 /// One image recovered from an EPUB.
 #[derive(Debug)]
@@ -48,7 +48,7 @@ pub struct ExtractedImage {
 pub fn epub_extract_images(epub_bytes: &[u8]) -> std::io::Result<Vec<ExtractedImage>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
-    let opf_base = opf_dir_base(&opf_path);
+    let opf_base = dir_of(&opf_path);
     let opf_raw = pkg.opf_bytes()?;
     let hint = crate::util::extract_xml_encoding(opf_raw);
     let opf_str = crate::util::decode_text(opf_raw, hint);
@@ -62,11 +62,11 @@ pub fn epub_extract_images(epub_bytes: &[u8]) -> std::io::Result<Vec<ExtractedIm
         .cover_image
         .as_deref()
         .filter(|h| !h.is_empty())
-        .map(|href| format!("{opf_base}{}", percent_decode(href)));
+        .map(|href| resolve_href(&opf_base, href));
 
     let mut out: Vec<ExtractedImage> = Vec::new();
     for (id, (href, media_type)) in &opf.manifest {
-        let path = format!("{opf_base}{}", percent_decode(href));
+        let path = resolve_href(&opf_base, href);
         let Some(bytes) = pkg.get(&path) else {
             continue; // manifest references a member the zip doesn't contain
         };
@@ -93,16 +93,6 @@ pub fn epub_extract_images(epub_bytes: &[u8]) -> std::io::Result<Vec<ExtractedIm
 
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
-}
-
-/// Directory portion of a zip member path, with a trailing `/` (empty at the
-/// archive root). Member names are always `/`-delimited. Mirrors the importer's
-/// `archive_dir_base`, used to resolve manifest hrefs against the OPF's dir.
-fn opf_dir_base(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/"),
-        None => String::new(),
-    }
 }
 
 /// The export extension for a manifest item, or `None` when it isn't an image.

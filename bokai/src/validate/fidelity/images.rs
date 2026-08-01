@@ -27,6 +27,7 @@
 //! filters by `format` symbol to image formats only (Png/Jpg/Gif/Webp/Bmp/
 //! Svg) so it doesn't flag fonts.
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::HashSet;
 use std::io::Cursor;
 
@@ -474,7 +475,7 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };

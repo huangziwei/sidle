@@ -27,6 +27,7 @@
 //! 3. **Reachability** — every `target_position.id` (headings and TOC)
 //!    must resolve to an element ID present in some storyline.
 
+use crate::formats::epub::structure::{dir_of, rebase_toc, resolve_href};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -385,7 +386,7 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };
@@ -397,25 +398,23 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     // Build the set of spine paths so we can identify TOC entries that
     // point at non-spine manifest items (calibre puts a "Beginning" landmark
     // file in manifest+guide but not spine; the NCX still references it).
+    // Absolute zip paths, the one vocabulary in which two references to the
+    // same file compare equal. A nav doc and the OPF need not share a
+    // directory — comparing the hrefs as written makes every entry of a
+    // root-level nav look like it points outside the spine.
     let spine_paths: HashSet<String> = opf
         .spine_ids
         .iter()
-        .filter_map(|id| {
-            opf.manifest.get(id).map(|(href, _)| {
-                // NCX hrefs are relative to OPF; spine items live in manifest with the same form.
-                // Normalise to opf_base-prefixed for comparison with NCX (which is also opf_base-relative).
-                href.clone()
-            })
-        })
+        .filter_map(|id| opf.manifest.get(id))
+        .map(|(href, _)| resolve_href(&opf_base, href))
         .collect();
 
-    // Set of all manifest paths (relative to opf_base, like NCX hrefs).
-    // Used to flag NCX `<content src>` entries that don't resolve to any
-    // file in the manifest.
+    // Every manifest item as an absolute zip path, to flag NCX `<content src>`
+    // / nav `<a href>` entries that resolve to no file in the manifest.
     let manifest_paths: HashSet<String> = opf
         .manifest
         .values()
-        .map(|(href, _)| href.clone())
+        .map(|(href, _)| resolve_href(&opf_base, href))
         .collect();
 
     // 2. TOC — parse both the EPUB 2 NCX and the EPUB 3 nav doc, and validate
@@ -426,11 +425,15 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     let mut load_toc = |href: Option<&String>,
                         parse: fn(&str) -> std::io::Result<Vec<TocEntry>>| {
         let href = href?;
-        let path = format!("{}{}", opf_base, href);
+        let path = resolve_href(&opf_base, href);
         let bytes = read_zip_entry(&mut archive, &path).ok()?;
         let enc = crate::util::extract_xml_encoding(&bytes);
         let text = crate::util::decode_text(&bytes, enc);
         let entries = parse(&text).ok()?;
+        // A TOC's own hrefs are relative to the TOC document, not to the OPF —
+        // they only coincide when the two share a directory. Rebase to
+        // absolute so they compare against the spine and manifest sets above.
+        let entries = rebase_toc(&entries, &dir_of(&path));
         (!entries.is_empty()).then_some(entries)
     };
     let ncx_entries = load_toc(opf.ncx_href.as_ref(), parse_ncx);

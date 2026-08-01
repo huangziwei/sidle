@@ -26,8 +26,8 @@ use crate::formats::epub::nav_doc::{
     depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav,
 };
 use crate::formats::epub::structure::{
-    MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, relativize, resolve_href,
-    spine_documents, split_fragment, strip_fragment,
+    MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, rebase_toc, relativize,
+    resolve_href, spine_documents, split_fragment, strip_fragment,
 };
 use crate::formats::epub::{OpfData, parse_nav_landmarks, parse_opf, parse_opf_guide};
 use crate::model::toc_shape::{TocTree, merge_by_document_order, nest_by_label_indent};
@@ -337,14 +337,14 @@ fn declared_toc_documents(
     opf_base: &str,
 ) -> (Vec<TocEntry>, Vec<TocEntry>) {
     let read = |href: &str, parse: fn(&str) -> io::Result<Vec<TocEntry>>| -> Vec<TocEntry> {
-        let abs = format!("{opf_base}{}", percent_decode(href));
+        let abs = resolve_href(opf_base, href);
         let Some(bytes) = pkg.get(&abs) else {
             return Vec::new();
         };
         let text = decode_text(bytes, extract_xml_encoding(bytes));
         let entries = parse(&text).unwrap_or_default();
         // NCX/nav hrefs are relative to that document's own directory.
-        rebase_to_absolute(&entries, &dir_of(&abs))
+        rebase_toc(&entries, &dir_of(&abs))
     };
     let ncx = opf
         .ncx_href
@@ -371,23 +371,6 @@ pub(super) fn existing_declared_toc(
     } else {
         nav
     }
-}
-
-/// Resolve every entry's (doc-relative) href to an absolute zip path, recursively.
-fn rebase_to_absolute(entries: &[TocEntry], base_dir: &str) -> Vec<TocEntry> {
-    entries
-        .iter()
-        .map(|e| {
-            let href = if e.href.starts_with('#') || e.href.is_empty() {
-                e.href.clone()
-            } else {
-                resolve_href(base_dir, &e.href)
-            };
-            let mut t = TocEntry::new(e.title.clone(), href);
-            t.children = rebase_to_absolute(&e.children, base_dir);
-            t
-        })
-        .collect()
 }
 
 /// Count entries whose label is a real chapter (not front-matter boilerplate),

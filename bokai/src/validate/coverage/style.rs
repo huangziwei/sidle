@@ -15,6 +15,7 @@
 //! parsed property (e.g. an unsupported `font-size` keyword would parse
 //! to nothing without us noticing).
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
@@ -275,7 +276,7 @@ fn collect_class_richness(epub_bytes: &[u8]) -> Result<ClassRichness, String> {
         if !is_css {
             continue;
         }
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         if !seen_css.insert(full_path.clone()) {
             continue;
         }
@@ -292,7 +293,7 @@ fn collect_class_richness(epub_bytes: &[u8]) -> Result<ClassRichness, String> {
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };
@@ -554,7 +555,7 @@ fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, Stri
         if !is_css {
             continue;
         }
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         if !seen_css.insert(full_path.clone()) {
             continue;
         }
@@ -571,7 +572,7 @@ fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, Stri
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };

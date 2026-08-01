@@ -316,7 +316,12 @@ fn convert_epub_to_kfx(
     let out_path = dir.join(format!("{base}.kfx"));
     let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
-    let mut handle = bokai::Book::open(source_path)?;
+    // Every step names itself and the file it was working on: this message is
+    // what the failure report shows the user, and a bare io error ("File not
+    // found in ZIP: …") doesn't say which book or which half of the conversion
+    // produced it.
+    let mut handle = bokai::Book::open(source_path)
+        .map_err(|e| anyhow::anyhow!("bokai epub→kfx (load {}): {e}", source_path.display()))?;
     // Bake the library's (possibly user-edited) metadata into the KFX without
     // rewriting the source EPUB: clone the parsed metadata, overlay the DB
     // fields, and install it as an override the KFX exporter reads. A first
@@ -327,11 +332,24 @@ fn convert_epub_to_kfx(
     // grayscale source pages auto-collapse to `8bppGray` in the encoder, so this
     // costs nothing on B&W books. Cover stays JPEG either way (bokai handles that).
     handle.set_image_color_mode(jxr::ColorMode::Color);
-    let mut writer = File::create(&tmp_path)?;
-    handle.export_with_progress(bokai::Format::Kfx, &mut writer, on_progress)?;
+    let mut writer = File::create(&tmp_path)
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
+    let exported = handle.export_with_progress(bokai::Format::Kfx, &mut writer, on_progress);
     writer.sync_all().ok();
     drop(writer);
-    std::fs::rename(&tmp_path, &out_path)?;
+    if let Err(e) = exported {
+        // Don't leave the half-written `.partial` behind for a book that may
+        // never be retried; the next attempt truncates it anyway.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(anyhow::anyhow!("bokai epub→kfx: {e}"));
+    }
+    std::fs::rename(&tmp_path, &out_path).map_err(|e| {
+        anyhow::anyhow!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            out_path.display()
+        )
+    })?;
 
     // The KFX export stamps an ASIN — either the source's (if real) or a
     // fabricated 32-char value derived from the publication identifier.

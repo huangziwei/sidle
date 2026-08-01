@@ -23,6 +23,7 @@
 //!   `metadata.reading_orders[0].page_progression_direction`
 //!   (`$rtl` / `$ltr` / omitted)
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -553,7 +554,7 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         let Some((href, _)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let chapter_dir = full_path.rfind('/').map(|i| &full_path[..i]).unwrap_or("");
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;

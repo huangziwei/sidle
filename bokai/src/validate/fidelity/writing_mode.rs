@@ -15,6 +15,7 @@
 //! reports the multiset. The "book writing mode" is the most-cited non-default
 //! value, falling back to `horizontal-tb` if nothing is declared.
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -214,7 +215,7 @@ fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, St
         if !media_type.eq_ignore_ascii_case("text/css") {
             continue;
         }
-        let full = format!("{}{}", opf_base, href);
+        let full = resolve_href(&opf_base, href);
         if let Ok(css_bytes) = read_zip_entry(&mut archive, &full) {
             let enc = crate::util::extract_xml_encoding(&css_bytes);
             let css = crate::util::decode_text(&css_bytes, enc);
@@ -227,7 +228,7 @@ fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, St
         let Some((href, _)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };

@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 use crate::formats::epub::OpfData;
 use crate::formats::epub::edit::attr_value;
+use crate::model::TocEntry;
 use crate::util::{percent_decode, strip_tags};
 
 /// The spine in reading order, as `(absolute zip path, lowercase filename)`.
@@ -72,7 +73,11 @@ pub(crate) fn internal_links(
     out
 }
 
-/// The directory portion of a zip path, with a trailing `/` (empty at root).
+/// The directory portion of a zip path, with a trailing `/` (empty at root) —
+/// the base that document's own relative references resolve against.
+///
+/// Zip entry names are always `/`-delimited, so this splits on `/` rather than
+/// going through `Path`, whose separator is platform-dependent.
 pub(crate) fn dir_of(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/"),
@@ -104,6 +109,11 @@ pub(crate) fn strip_fragment(href: &str) -> &str {
 
 /// Resolve `href` (relative to `base_dir`) to an absolute zip path, collapsing
 /// `.`/`..` and percent-decoding. A pure-fragment href resolves to itself.
+///
+/// Concatenating instead is the recurring bug this exists to prevent: an OPF in
+/// `OEBPS/` may reference `../nav.xhtml` at the archive root, and `OEBPS/` +
+/// `../nav.xhtml` names no zip entry at all. A `..` that would climb past the
+/// root is clamped there, so no href can address outside the archive.
 pub(crate) fn resolve_href(base_dir: &str, href: &str) -> String {
     let (path, frag) = split_fragment(href);
     if path.is_empty() {
@@ -121,6 +131,30 @@ pub(crate) fn resolve_href(base_dir: &str, href: &str) -> String {
         }
     }
     format!("{}{frag}", stack.join("/"))
+}
+
+/// Resolve every entry's href against `base_dir`, recursively — the TOC in
+/// absolute zip paths, so its targets compare against spine and manifest.
+///
+/// `base_dir` is the directory of the *TOC document itself*, not the OPF's:
+/// an NCX or nav doc writes its hrefs relative to where it sits, and the two
+/// only coincide when they share a directory. An anchor-only href addresses
+/// that same document and is left alone.
+pub(crate) fn rebase_toc(entries: &[TocEntry], base_dir: &str) -> Vec<TocEntry> {
+    entries
+        .iter()
+        .map(|e| TocEntry {
+            title: e.title.clone(),
+            href: if e.href.starts_with('#') || e.href.is_empty() {
+                percent_decode(&e.href)
+            } else {
+                resolve_href(base_dir, &e.href)
+            },
+            children: rebase_toc(&e.children, base_dir),
+            play_order: e.play_order,
+            target: None,
+        })
+        .collect()
 }
 
 /// Rewrite an absolute zip path as an href relative to `from_dir`.

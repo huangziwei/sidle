@@ -21,9 +21,12 @@ pub fn element_to_role(local_name: &LocalName) -> Role {
 /// source, falling back to generic Container."
 pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
     Some(match local_name.as_ref() {
-        // Block containers
+        // Block containers. `center` is the deprecated presentational one —
+        // the UA stylesheet gives it `display: block; text-align: center`, so
+        // it is an element this pipeline knows, and the tag-coverage validator
+        // should not report it as an unhandled fallthrough.
         "div" | "section" | "article" | "nav" | "header" | "footer" | "main" | "address"
-        | "details" | "summary" | "hgroup" => Role::Container,
+        | "details" | "summary" | "hgroup" | "center" => Role::Container,
 
         // Line break (leaf node, not a container)
         "br" => Role::Break,

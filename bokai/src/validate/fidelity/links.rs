@@ -26,6 +26,7 @@
 //!    `path#frag`) whose fragment has no `id="frag"` anywhere in the source.
 //!    Reported for visibility; not counted as a bokai bug.
 
+use crate::formats::epub::structure::resolve_href;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
@@ -465,7 +466,7 @@ pub fn extract_hrefs_and_ids_from_epub(
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
             continue;
         };
-        let full_path = format!("{}{}", opf_base, href);
+        let full_path = resolve_href(&opf_base, href);
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };
