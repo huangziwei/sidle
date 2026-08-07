@@ -20,7 +20,7 @@ exclude = ["jxr/fuzz"]
 # into the on-device config.xml. bokai is deliberately NOT here — it is an
 # independent crate and versions on its own line.
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 # sidle's own crates are AGPL-3.0-or-later. bokai is deliberately excluded
 # (it sets its own GPL-3.0-or-later directly, matching its upstream fork), so
 # adding this here does not touch it. The two are link-compatible: GPLv3 §13

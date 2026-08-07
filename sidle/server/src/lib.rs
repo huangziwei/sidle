@@ -161,13 +161,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         // Reads only, token-gated like the rest — no new write surface.
         .route("/device/manifest.json", get(get_dist_manifest))
         .route("/device/file/{*name}", get(get_dist_file))
-        // Compat alias for the pre-rename `/kual/...` paths. A picker already
-        // installed in the field asks for these, and it can only learn the new
-        // paths by self-updating — which is exactly what these serve. Remove
-        // once no device can still be running a build older than this rename;
-        // dropping them early costs those devices a USB re-push.
-        .route("/kual/manifest.json", get(get_dist_manifest))
-        .route("/kual/file/{*name}", get(get_dist_file))
         .with_state(state)
 }
 
@@ -748,7 +741,6 @@ fn read_dist_manifest(dist_dir: &StdPath) -> Option<DistManifest> {
 
 /// `GET /device/manifest.json` → the staged manifest verbatim (token-gated).
 /// 404 when nothing's been staged yet; the picker reads that as "no update".
-/// Also reachable at the legacy `/kual/manifest.json` — see the router.
 async fn get_dist_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -760,7 +752,6 @@ async fn get_dist_manifest(
 }
 
 /// `GET /device/file/{*name}` → bytes from `device-dist/<name>` (token-gated).
-/// Also reachable at the legacy `/kual/file/{*name}` — see the router.
 ///
 /// `name` is whitelisted against the manifest's entries: only a file the
 /// manifest declares is servable. That's both the access bound (just the staged
@@ -1379,30 +1370,6 @@ mod tests {
             bin_bytes.as_slice(),
             "served == staged binary"
         );
-    }
-
-    /// The pre-rename `/kual/...` paths must keep serving the same bytes: a
-    /// picker installed before the rename asks for them, and self-updating is
-    /// the only way it learns the new paths. Delete this test only when the
-    /// alias routes go.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn legacy_kual_routes_still_serve_the_same_bytes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, token, bin_bytes) = staged_state(tmp.path());
-
-        let resp = build_router(state.clone())
-            .oneshot(get_request("/kual/manifest.json", Some(&token)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "legacy manifest route");
-
-        let resp = build_router(state)
-            .oneshot(get_request("/kual/file/bin/sidle", Some(&token)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "legacy file route");
-        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(body.as_ref(), bin_bytes.as_slice());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
