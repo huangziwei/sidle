@@ -294,33 +294,30 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                     continue;
                 };
 
-                // Get symbol names if available
-                // Note: These are raw symbol IDs from the container. The display
-                // is for debugging purposes only.
-                let id_name = if (id_idnum as usize) < KFX_SYMBOL_TABLE.len() {
-                    KFX_SYMBOL_TABLE[id_idnum as usize]
-                } else {
-                    "?"
-                };
-                let type_name = if (type_idnum as usize) < KFX_SYMBOL_TABLE.len() {
-                    KFX_SYMBOL_TABLE[type_idnum as usize]
-                } else {
-                    "?"
-                };
+                // An entity's id is usually doc-local (that's where fragment
+                // names live), so resolve both through the container's own
+                // base rather than indexing the static table — otherwise every
+                // named entity reports a base-table tail name.
+                let id_name = resolve_symbol(id_idnum as u64, &extended_symbols, base_symbol_count);
+                let type_name =
+                    resolve_symbol(type_idnum as u64, &extended_symbols, base_symbol_count);
 
                 eprintln!("=== Entity {} ===", i);
                 // Show resolved info if available
-                if let Some(info) = maps.entity_map.get(&(id_idnum as u64)) {
-                    if let Some(name) = &info.name {
-                        eprintln!(
-                            "  ID: ${} ({}) [{}:{}]",
-                            id_idnum, id_name, info.entity_type, name
-                        );
-                    } else {
-                        eprintln!("  ID: ${} ({}) [{}]", id_idnum, id_name, info.entity_type);
-                    }
-                } else {
-                    eprintln!("  ID: ${} ({})", id_idnum, id_name);
+                // The payload's own name field, shown only when it disagrees
+                // with the index id's symbol. The recorded entry is keyed by id
+                // alone and several fragment types share one id (KFX names a
+                // section, its position map and its storyline with the same
+                // symbol), so its `entity_type` may describe a sibling — the
+                // Type: line below is what states this entity's type.
+                match maps
+                    .entity_map
+                    .get(&(id_idnum as u64))
+                    .and_then(|info| info.name.as_deref())
+                    .filter(|name| *name != id_name)
+                {
+                    Some(name) => eprintln!("  ID: ${} ({}) [{}]", id_idnum, id_name, name),
+                    None => eprintln!("  ID: ${} ({})", id_idnum, id_name),
                 }
                 eprintln!("  Type: ${} ({})", type_idnum, type_name);
                 eprintln!(
@@ -334,7 +331,13 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                 let abs_offset = header_len + entity_offset;
                 if abs_offset + entity_len <= data.len() {
                     let entity_data = &data[abs_offset..abs_offset + entity_len];
-                    dump_entity(entity_data, &extended_symbols, &maps, resolve)?;
+                    dump_entity(
+                        entity_data,
+                        &extended_symbols,
+                        base_symbol_count,
+                        &maps,
+                        resolve,
+                    )?;
                 }
                 eprintln!();
             }
@@ -2060,12 +2063,10 @@ fn build_maps(
             continue;
         };
 
-        // Get entity type name
-        let entity_type = if (type_idnum as usize) < KFX_SYMBOL_TABLE.len() {
-            KFX_SYMBOL_TABLE[type_idnum as usize].to_string()
-        } else {
-            format!("${}", type_idnum)
-        };
+        // Get entity type name. Fragment types are format-defined base
+        // symbols, but resolve through the container's base like every other
+        // id so the two never drift apart.
+        let entity_type = resolve_symbol(type_idnum as u64, extended_symbols, base_symbol_count);
 
         // Parse entity to extract name field and fragment IDs
         let abs_offset = header_len + entity_offset;
@@ -2214,16 +2215,10 @@ fn ion_value_to_string(
 
     match value {
         IonValue::String(s) => Some(s.clone()),
-        IonValue::Symbol(id) => {
-            let id = *id as usize;
-            if id < KFX_SYMBOL_TABLE.len() {
-                Some(KFX_SYMBOL_TABLE[id].to_string())
-            } else if id >= base_symbol_count && id - base_symbol_count < extended_symbols.len() {
-                Some(extended_symbols[id - base_symbol_count].clone())
-            } else {
-                Some(format!("${}", id))
-            }
-        }
+        // The container's declared base decides which table an id belongs to;
+        // testing the static table first would swallow every doc-local id
+        // below its length.
+        IonValue::Symbol(id) => Some(resolve_symbol(*id, extended_symbols, base_symbol_count)),
         IonValue::Int(i) => Some(i.to_string()),
         _ => None,
     }
@@ -2233,6 +2228,7 @@ fn ion_value_to_string(
 fn dump_entity(
     data: &[u8],
     extended_symbols: &[String],
+    base_symbol_count: usize,
     maps: &ResolutionMaps,
     resolve: bool,
 ) -> IonResult<()> {
@@ -2247,7 +2243,13 @@ fn dump_entity(
         // Maybe it's raw Ion?
         if data[0..4] == ION_BVM {
             eprintln!("  Raw Ion data:");
-            return dump_ion_data_extended(data, extended_symbols, maps, resolve);
+            return dump_ion_data_extended(
+                data,
+                extended_symbols,
+                base_symbol_count,
+                maps,
+                resolve,
+            );
         }
         return Ok(());
     }
@@ -2270,7 +2272,7 @@ fn dump_entity(
     if entity_header_len < data.len() {
         let ion_data = &data[entity_header_len..];
         eprintln!("  Ion data ({} bytes):", ion_data.len());
-        dump_ion_data_extended(ion_data, extended_symbols, maps, resolve)?;
+        dump_ion_data_extended(ion_data, extended_symbols, base_symbol_count, maps, resolve)?;
     }
 
     Ok(())
@@ -2282,13 +2284,23 @@ fn dump_ion_data(data: &[u8]) -> IonResult<()> {
         entity_map: HashMap::new(),
         fragment_map: HashMap::new(),
     };
-    dump_ion_data_extended(data, &[], &empty_maps, false)
+    // No doc symbols in play, so the base is the whole static table.
+    dump_ion_data_extended(data, &[], KFX_SYMBOL_TABLE.len(), &empty_maps, false)
 }
 
 /// Dump Ion data using the KFX symbol table plus extended document symbols
+///
+/// `base_symbol_count` is the container's declared import size (the id of its
+/// first doc-local symbol), not the static table's length — see
+/// [`SymbolTable`], which resolves through the same base. A container built
+/// against an older YJ_symbols declares fewer imports than our table carries,
+/// and seating its doc symbols at the static length renders every doc-local id
+/// as a base-table tail name (section names coming out as `snap_block`,
+/// `end_x`, …).
 fn dump_ion_data_extended(
     data: &[u8],
     extended_symbols: &[String],
+    base_symbol_count: usize,
     maps: &ResolutionMaps,
     resolve: bool,
 ) -> IonResult<()> {
@@ -2301,14 +2313,19 @@ fn dump_ion_data_extended(
     // For SID $413 to resolve to "bcIndexTabLength" (our table[413]):
     //   SID $413 → SST[403] → we need SST[403] = table[413]
     // So we skip our first 10 entries: SST[N] = table[N+10].
-    let mut all_symbols: Vec<&str> = KFX_SYMBOL_TABLE[10..].to_vec();
+    //
+    // Doc-local symbols follow at `base_symbol_count`, so the base slice stops
+    // there: SST[base_symbol_count - 10 + k] = extended_symbols[k] → SID
+    // $(base_symbol_count + k), which is where the container put them.
+    let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
+    let mut all_symbols: Vec<&str> = KFX_SYMBOL_TABLE[10..base_end].to_vec();
     for sym in extended_symbols {
         all_symbols.push(sym.as_str());
     }
 
-    // max_id for import: base symbols (0-851) plus extended document symbols
-    use bokai::formats::kfx::symbols::KFX_MAX_SYMBOL_ID;
-    let max_id = (KFX_MAX_SYMBOL_ID + extended_symbols.len()) as i64;
+    // The import allocates exactly as many ids as the table defines, so every
+    // id in range has text and none is left undefined.
+    let max_id = all_symbols.len() as i64;
 
     // Create catalog with extended symbol table
     let mut catalog = MapCatalog::new();
