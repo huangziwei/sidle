@@ -626,10 +626,10 @@ pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
 /// `<extensions/sidle>/<name>` and `sidle-server` serves it from
 /// `<device-dist>/<name>`, so the one string keys the staged file, the served
 /// route, and the on-device destination. It is deliberately NOT the slot's
-/// mount-relative `device_rel` — this string is a wire contract with pickers
-/// already installed in the field, and changing it would break their in-app
-/// Update (they would save to `EXT/extensions/sidle/bin/sidle`). Keep it
-/// bundle-relative unless you are willing to force a USB re-push.
+/// mount-relative `device_rel`: a picker resolves `name` against the bundle
+/// dir, so a mount-relative value would land the binary at
+/// `EXT/extensions/sidle/bin/sidle`. Changing it means the currently-installed
+/// picker can't self-update and needs a USB push to recover.
 ///
 /// `sha256` is computed with the same [`sha256_file_opt`]/[`sha256_bytes`] the
 /// USB push uses, so a LAN pull and a USB push report identical hashes (the
