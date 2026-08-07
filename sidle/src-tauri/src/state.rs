@@ -241,18 +241,6 @@ impl AppState {
             }
         };
 
-        // The staging dir was named `kual-dist/` before the on-device app stopped
-        // being a KUAL extension. Nothing reads the old path any more, so a library
-        // that predates the rename would keep an orphaned copy of the picker binary
-        // forever. Best-effort removal; absent is the norm on any fresh install.
-        let legacy_dist = paths.root.join("kual-dist");
-        if legacy_dist.is_dir() {
-            match std::fs::remove_dir_all(&legacy_dist) {
-                Ok(()) => eprintln!("[sidle/bootstrap] removed legacy kual-dist/"),
-                Err(e) => eprintln!("[sidle/bootstrap] could not remove legacy kual-dist/: {e}"),
-            }
-        }
-
         // Stage the LAN self-update bundle so a detached `sidle-server` can serve
         // the current picker binary over `/device/...` without a cable. mtime-gated
         // (a no-op once warm); `SourceMissing` (binary not cross-built yet) and IO
