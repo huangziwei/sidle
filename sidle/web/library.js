@@ -332,7 +332,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeStatus();
   subscribeImportProgress();
   subscribeDeviceStatus();
-  setupKualSection();
+  setupDeviceAppSection();
   refreshServerStatus();
   subscribeSendProgress();
   subscribeSendActive();
@@ -537,7 +537,7 @@ function setSection(s) {
     else window.Misc.hide();
   }
   if (s === "device") {
-    // Entering the Kindle page: re-pull device / KUAL / LAN state. Lives here
+    // Entering the Kindle page: re-pull device / deploy / LAN state. Lives here
     // (not the pill handler) so the `\` shortcut refreshes too.
     refreshDevicePage();
   } else if (s === "books") {
@@ -1918,19 +1918,19 @@ function coverUrlFor(b, { thumb = false } = {}) {
 // ---------------------------------------------------------------------------
 
 // Re-pull everything the Kindle page shows. Fired on entering the device section
-// (pill click or `\`). KUAL staleness + LAN-server state change out-of-band
+// (pill click or `\`). Deploy staleness + LAN-server state change out-of-band
 // (server token rotates, native rebuilt, sakabar/CLI start-stop), so this always
 // re-probes rather than trusting cached state.
 function refreshDevicePage() {
   refreshDeviceList();
-  refreshKualStatus();
+  refreshDeviceAppStatus();
   // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
   // serves the latest cross-built picker: the dev loop is "rebuild armv7 → open
   // the Kindle page → device pulls", no cable, no app restart. Fire-and-forget +
   // mtime-gated (a no-op once warm); non-fatal on error.
   window.api
-    .invoke("kual_stage_dist")
-    .catch((err) => console.warn("kual_stage_dist failed:", err));
+    .invoke("device_app_stage_dist")
+    .catch((err) => console.warn("device_app_stage_dist failed:", err));
   refreshServerStatus();
 }
 
@@ -2103,14 +2103,14 @@ function subscribeDeviceStatus() {
   window.api.invoke("device_status").then(updateDeviceUI).catch(() => {});
 }
 
-// ----- KUAL deploy section ---------------------------------------------------
+// ----- On-device app deploy section -------------------------------------------
 
-function setupKualSection() {
+function setupDeviceAppSection() {
   // Per-file progress event from the install command. Surfaces a live
   // count next to the button so a multi-file push doesn't look frozen.
-  window.api.listen("kual:install-progress", (e) => {
+  window.api.listen("device-app:install-progress", (e) => {
     const r = e.payload;
-    const prog = $("#kual-install-progress");
+    const prog = $("#device-app-install-progress");
     if (!prog) return;
     const path = r.device_path || "";
     let line;
@@ -2122,14 +2122,14 @@ function setupKualSection() {
     prog.hidden = false;
   });
 
-  $("#btn-kual-install").addEventListener("click", async () => {
-    const btn = $("#btn-kual-install");
-    const prog = $("#kual-install-progress");
+  $("#btn-device-app-install").addEventListener("click", async () => {
+    const btn = $("#btn-device-app-install");
+    const prog = $("#device-app-install-progress");
     btn.disabled = true;
     prog.hidden = false;
     prog.textContent = "pushing…";
     try {
-      const report = await window.api.invoke("kual_install");
+      const report = await window.api.invoke("device_app_install");
       const wrote = report.results.filter((r) => r.kind === "wrote").length;
       const skipped = report.results.filter((r) => r.kind === "skipped").length;
       const failed = report.results.filter((r) => r.kind === "failed");
@@ -2145,26 +2145,26 @@ function setupKualSection() {
     } finally {
       // Re-pull status; that'll re-enable/disable the button based on
       // the new state.
-      await refreshKualStatus();
+      await refreshDeviceAppStatus();
     }
   });
 }
 
-async function refreshKualStatus() {
+async function refreshDeviceAppStatus() {
   try {
-    const status = await window.api.invoke("kual_status");
-    renderKualStatus(status);
+    const status = await window.api.invoke("device_app_status");
+    renderDeviceAppStatus(status);
   } catch (err) {
-    console.error("kual_status failed:", err);
+    console.error("device_app_status failed:", err);
   }
 }
 
-function renderKualStatus(status) {
-  const section = $("#kual-section");
-  const label = $("#kual-status-label");
-  const btn = $("#btn-kual-install");
-  const tip = $("#kual-tip");
-  const list = $("#kual-file-list");
+function renderDeviceAppStatus(status) {
+  const section = $("#device-app-section");
+  const label = $("#device-app-status-label");
+  const btn = $("#btn-device-app-install");
+  const tip = $("#device-app-tip");
+  const list = $("#device-app-file-list");
 
   if (!status || status.overall.kind === "device_disconnected") {
     // Hide the whole section when no Kindle is connected (or MTP-only).
@@ -2175,12 +2175,12 @@ function renderKualStatus(status) {
   section.hidden = false;
 
   const overall = status.overall.kind;
-  label.className = "kual-status-label " + overallClass(overall);
+  label.className = "device-app-status-label " + overallClass(overall);
   label.textContent = overallLabel(status.overall);
 
   if (overall === "binary_not_built") {
     btn.disabled = true;
-    btn.textContent = "Install KUAL";
+    btn.textContent = "Install on Kindle";
     tip.textContent =
       "Run `cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native`, then click again.";
     tip.hidden = false;
@@ -2188,10 +2188,10 @@ function renderKualStatus(status) {
     btn.disabled = false;
     btn.textContent =
       overall === "in_sync"
-        ? "Re-push KUAL"
+        ? "Re-push to Kindle"
         : overall === "not_installed"
-          ? "Install KUAL"
-          : "Update KUAL";
+          ? "Install on Kindle"
+          : "Update on Kindle";
     // Show "binary older than source" hint only when nothing else is wrong.
     if (
       overall === "in_sync" &&
@@ -2216,7 +2216,7 @@ function renderKualStatus(status) {
       const name = document.createElement("span");
       name.textContent = f.device_path;
       const state = document.createElement("span");
-      state.className = "kual-file-state " + fileStateClass(f.state.kind);
+      state.className = "device-app-file-state " + fileStateClass(f.state.kind);
       state.textContent = fileStateLabel(f.state.kind);
       li.appendChild(name);
       li.appendChild(state);
@@ -2324,7 +2324,7 @@ function updateDeviceUI(info) {
     // Always load sent state when device connects so the list-view "On Kindle"
     // column reflects reality without the user having to open the Kindle page.
     refreshDeviceList();
-    refreshKualStatus();
+    refreshDeviceAppStatus();
   } else {
     dot.className = "device-dot disconnected";
     label.textContent = "No Kindle";
@@ -2342,9 +2342,9 @@ function updateDeviceUI(info) {
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
-    // Hide KUAL section when no device is connected.
-    const kualSection = $("#kual-section");
-    if (kualSection) kualSection.hidden = true;
+    // Hide the deploy section when no device is connected.
+    const deviceAppSection = $("#device-app-section");
+    if (deviceAppSection) deviceAppSection.hidden = true;
     // Hide eject button on disconnect — nothing to eject.
     const ejectBtn = $("#btn-device-eject");
     if (ejectBtn) ejectBtn.hidden = true;

@@ -1,7 +1,7 @@
 //! LAN self-update — pull the picker's own next binary from sidle-server.
 //!
 //! The desktop app stages the freshly cross-built `bin/sidle` into
-//! `<data-dir>/kual-dist/` and the server serves it over `/kual/...`. This
+//! `<data-dir>/device-dist/` and the server serves it over `/device/...`. This
 //! module is the device-side client: fetch the manifest, skip any file whose
 //! on-device copy already matches, download the rest, **sha256-verify each
 //! download before staging it** as `<name>.new`, and let the launcher
@@ -25,28 +25,28 @@ use sha2::{Digest, Sha256};
 use crate::api::Result;
 use crate::config::ServerConfig;
 
-/// One file in the server's `kual-dist/manifest.json`. Mirrors the desktop's
-/// `KualManifestEntry` (serde drops any extra fields). `name` is the
-/// device-relative path (e.g. `bin/sidle`) — it's the `/kual/file/<name>` route
+/// One file in the server's `device-dist/manifest.json`. Mirrors the desktop's
+/// `DistManifestEntry` (serde drops any extra fields). `name` is the
+/// bundle-relative path (e.g. `bin/sidle`) — it's the `/device/file/<name>` route
 /// AND the destination under the on-device bundle dir. `sha256` is hex, matching
 /// the desktop's `hex::encode`, so an on-device hash compares equal byte-for-byte.
 #[derive(Debug, Clone, Deserialize)]
-pub struct KualManifestEntry {
+pub struct DistManifestEntry {
     pub name: String,
     pub sha256: String,
     pub size: u64,
     /// Unix seconds the served file was built (`build.sh`'s `BUILD_TS`, also
     /// baked into the picker binary). `0` when the manifest predates build
     /// stamping. The device stages this only if `built_at` is strictly newer
-    /// than its own build time — the guard that stops a stale `kual-dist` from
+    /// than its own build time — the guard that stops a stale `device-dist` from
     /// downgrading the picker over Wi-Fi (see [`should_stage`]).
     #[serde(default)]
     pub built_at: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct KualManifest {
-    pub files: Vec<KualManifestEntry>,
+pub struct DistManifest {
+    pub files: Vec<DistManifestEntry>,
 }
 
 /// What a pull did, for the result toast.
@@ -57,7 +57,7 @@ pub enum UpdateOutcome {
     /// Staged one or more `<name>.new` files (the names), pending a relaunch.
     Staged(Vec<String>),
     /// The manifest offered differing bytes, but none were strictly newer than
-    /// what's installed — refused so a stale `kual-dist` can't downgrade us. The
+    /// what's installed — refused so a stale `device-dist` can't downgrade us. The
     /// device keeps its current (newer-or-equal) binary. Carries the file names.
     RefusedOlder(Vec<String>),
 }
@@ -80,25 +80,25 @@ const BINARY_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// KFX cap rationale in `api.rs`).
 const BINARY_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// `GET /kual/manifest.json`. 401/403 → [`crate::api::SidleError::TokenMismatch`]
+/// `GET /device/manifest.json`. 401/403 → [`crate::api::SidleError::TokenMismatch`]
 /// (via `get_with_token`), so the caller shows the "plug into sidle" toast.
-pub fn fetch_manifest(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<KualManifest> {
-    let url = format!("http://{}:{}/kual/manifest.json", cfg.host, cfg.port);
+pub fn fetch_manifest(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<DistManifest> {
+    let url = format!("http://{}:{}/device/manifest.json", cfg.host, cfg.port);
     let res = crate::api::get_with_token(agent, &url, &cfg.token, MANIFEST_TIMEOUT)?;
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
-    let manifest: KualManifest =
+    let manifest: DistManifest =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     Ok(manifest)
 }
 
-/// `GET /kual/file/<name>` → the file's bytes (capped). `name` carries literal
+/// `GET /device/file/<name>` → the file's bytes (capped). `name` carries literal
 /// `/` (e.g. `bin/sidle`) and is passed through unencoded so the server's
 /// catch-all `{*name}` reassembles the path — percent-encoding the slash would
 /// break the route. v1 manifest names are ASCII path-safe.
 pub fn download_file(agent: &ureq::Agent, cfg: &ServerConfig, name: &str) -> Result<Vec<u8>> {
-    let url = format!("http://{}:{}/kual/file/{}", cfg.host, cfg.port, name);
+    let url = format!("http://{}:{}/device/file/{}", cfg.host, cfg.port, name);
     let res = crate::api::get_with_token(agent, &url, &cfg.token, BINARY_DOWNLOAD_TIMEOUT)?;
     let mut bytes = Vec::new();
     res.into_reader()
@@ -114,7 +114,7 @@ fn short(hex: &str) -> &str {
     &hex[..hex.len().min(8)]
 }
 
-/// Hex sha256 of `bytes`. Same recipe as the desktop's `kual::sha256_bytes`
+/// Hex sha256 of `bytes`. Same recipe as the desktop's `deploy::sha256_bytes`
 /// (`Sha256` + `hex::encode`), so a device-computed hash equals the manifest's
 /// — the equality the "LAN deploy == USB deploy" gate hinges on.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -125,7 +125,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Whether the on-device bytes must be replaced to match `entry`: missing →
 /// yes; present but hash-mismatched → yes; hash-equal → no (skip the download).
-pub fn needs_update(on_device: Option<&[u8]>, entry: &KualManifestEntry) -> bool {
+pub fn needs_update(on_device: Option<&[u8]>, entry: &DistManifestEntry) -> bool {
     match on_device {
         None => true,
         Some(b) => sha256_hex(b) != entry.sha256,
@@ -140,7 +140,7 @@ pub enum StageDecision {
     /// Download, verify, and stage as `<name>.new`.
     Stage,
     /// Bytes differ, but the manifest's build is not strictly newer than ours —
-    /// refuse, so a stale `kual-dist` can't downgrade the device.
+    /// refuse, so a stale `device-dist` can't downgrade the device.
     RefuseOlder,
 }
 
@@ -152,7 +152,7 @@ pub enum StageDecision {
 /// build`), fall back to the sha-only rule so updates still flow.
 pub fn should_stage(
     on_device: Option<&[u8]>,
-    entry: &KualManifestEntry,
+    entry: &DistManifestEntry,
     self_build_ts: u64,
 ) -> StageDecision {
     if !needs_update(on_device, entry) {
@@ -175,14 +175,14 @@ pub fn should_stage(
 /// and sha256. The gate before staging: the launcher swaps `.new` in
 /// unconditionally, so a truncated or corrupt download must never become the
 /// next binary.
-pub fn verify_download(bytes: &[u8], entry: &KualManifestEntry) -> bool {
+pub fn verify_download(bytes: &[u8], entry: &DistManifestEntry) -> bool {
     bytes.len() as u64 == entry.size && sha256_hex(bytes) == entry.sha256
 }
 
 /// Append `.<suffix>` to a path's filename (`bin/sidle` + `new` →
 /// `bin/sidle.new`). Appends rather than replacing any extension so the
 /// launcher's exact `bin/sidle.new` lookup matches regardless of the file's own
-/// extension. Mirrors the desktop `kual::with_suffix`.
+/// extension. Mirrors the desktop `deploy::with_suffix`.
 pub fn with_dot_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".");
@@ -294,12 +294,12 @@ pub fn run_pull(
 mod tests {
     use super::*;
 
-    fn entry_for(bytes: &[u8]) -> KualManifestEntry {
+    fn entry_for(bytes: &[u8]) -> DistManifestEntry {
         entry_for_ts(bytes, 0)
     }
 
-    fn entry_for_ts(bytes: &[u8], built_at: u64) -> KualManifestEntry {
-        KualManifestEntry {
+    fn entry_for_ts(bytes: &[u8], built_at: u64) -> DistManifestEntry {
+        DistManifestEntry {
             name: "bin/sidle".into(),
             sha256: sha256_hex(bytes),
             size: bytes.len() as u64,
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn sha256_hex_matches_known_vector() {
-        // sha256("") — the SAME vector `kual::sha256_bytes`'s test asserts, so the
+        // sha256("") — the SAME vector `deploy::sha256_bytes`'s test asserts, so the
         // device and desktop hashers are provably identical (the LAN==USB gate).
         assert_eq!(
             sha256_hex(b""),
@@ -348,7 +348,7 @@ mod tests {
             should_stage(Some(installed), &entry_for_ts(newer, 200), 100),
             StageDecision::Stage,
         );
-        // Older build → refuse (the bug we're guarding: stale kual-dist).
+        // Older build → refuse (the bug we're guarding: stale device-dist).
         assert_eq!(
             should_stage(Some(installed), &entry_for_ts(older, 50), 100),
             StageDecision::RefuseOlder,

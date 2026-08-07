@@ -17,7 +17,7 @@ exclude = ["jxr/fuzz"]
 # product in lockstep: the desktop app (+ tauri.conf.json, which falls back to
 # the crate version), the LAN server, and the on-device picker binary (whose
 # `CARGO_PKG_VERSION` is what `--update` logs). build.sh stamps the same value
-# into the KUAL config.xml. bokai is deliberately NOT here — it is an
+# into the on-device config.xml. bokai is deliberately NOT here — it is an
 # independent crate and versions on its own line.
 [workspace.package]
 version = "0.1.7"

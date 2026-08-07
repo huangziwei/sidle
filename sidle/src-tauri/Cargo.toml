@@ -29,7 +29,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "fs", "time"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
-# Hex-encode sha256 digests for the KUAL deploy staleness check, where
+# Hex-encode sha256 digests for the on-device deploy staleness check, where
 # source-vs-device hashes are surfaced to the frontend as strings.
 hex = "0.4"
 thiserror = "2"
@@ -88,7 +88,7 @@ tempfile = "3"
 # macOS App Nap suppression. When the app window is backgrounded (the user is
 # reading on the Kindle), App Nap throttles the whole process — the tokio
 # reactor/timers get coalesced by tens of seconds, so the embedded LAN server
-# answers too late for the KUAL picker's 3s timeout and the Kindle shows
+# answers too late for the picker's 3s timeout and the Kindle shows
 # "can't reach server". We hold a process-lifetime NSProcessInfo activity
 # assertion to opt out (see lib.rs::disable_app_nap). objc2-foundation is
 # already in the tree via Tauri; declared directly with just the two classes

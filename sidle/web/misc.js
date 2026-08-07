@@ -1,4 +1,4 @@
-// Misc. section: screenshots + KUAL logs backed up off the Kindle on Sync.
+// Misc. section: screenshots + picker logs backed up off the Kindle on Sync.
 //
 // Classic script loaded AFTER library.js. Self-contained IIFE exposing
 // `window.Misc` ({ refresh, show, hide, invalidate }); library.js's section

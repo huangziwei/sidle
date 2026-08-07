@@ -52,7 +52,7 @@ const LOG_PATH: &str = "/mnt/us/sidle-native.log";
 /// **Update** button (inline in `run`) and the `--update` recovery launch.
 const UPDATE_LOG_PATH: &str = "/mnt/us/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
-/// On-device KUAL bundle root. `--update` stages its pulled binary under here as
+/// On-device extension bundle root. `--update` stages its pulled binary under here as
 /// `bin/sidle.new` (manifest names are relative to this dir), and the launcher
 /// swaps it in. Parent of [`CONFIG_PATH`]'s `etc/`.
 const BUNDLE_DIR: &str = "/mnt/us/extensions/sidle";
@@ -67,7 +67,7 @@ const TOP_MARGIN: u32 = 190;
 /// our books are grouped and easy to find in the library.
 const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
 /// USB-drive root — the base for the misc backup scan: screenshots live in
-/// `screenshots/` (and the root itself on KOA2 stock firmware), KUAL logs at the
+/// `screenshots/` (and the root itself on KOA2 stock firmware), picker logs at the
 /// root. See [`api::push_misc`].
 const MNT_US: &str = "/mnt/us";
 /// On-device cover thumbnail cache, under the extension dir (not documents/,
@@ -170,8 +170,8 @@ fn main() {
     // is the in-app **Update** button (inline in `run`); this flag is the
     // break-glass twin — invokable from a shell when the gallery itself won't
     // boot (a crash in its list/grid logic), since it does the same pull with
-    // only the minimal device setup, dodging that failing code. No KUAL tile
-    // points at it anymore (the button replaced the old "Update Sidle" entry).
+    // only the minimal device setup, dodging that failing code. No launcher entry
+    // points at it anymore (the in-app button replaced the old "Update Sidle" tile).
     if std::env::args().any(|a| a == "--update") {
         let result = run_update();
         update_log(format!("--update done: {result:?}"));
@@ -222,7 +222,7 @@ fn update_result_message(result: api::Result<selfupdate::UpdateOutcome>) -> Stri
         }
         // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
         Err(api::SidleError::TokenMismatch) => {
-            "Plug Kindle into sidle, click Update KUAL".to_string()
+            "Plug Kindle into sidle, click Update on Kindle".to_string()
         }
         Err(e) => {
             update_log(format!("FAILED: {e}"));
@@ -361,8 +361,8 @@ fn run() -> anyhow::Result<()> {
     let mut current_orient = orient;
 
     // Fetch the library, retrying through the Diagnostics screen on
-    // failure. The old behavior here was draw_boot_toast + return (KUAL
-    // flashes back, no recourse). Now a failure renders diag::run, which
+    // failure. The old behavior here was draw_boot_toast + return (the home
+    // screen flashes back, no recourse). Now a failure renders diag::run, which
     // blocks on a Retry/Exit tap: Retry re-runs list_books (server may now
     // be up), Exit returns cleanly (window torn down on drop → WM recomposites
     // the home + status bar). diag::run is
@@ -819,7 +819,7 @@ fn run() -> anyhow::Result<()> {
                                                 "annotation sync ok in {:?}: {summary}",
                                                 sync_t0.elapsed()
                                             ));
-                                            // Same Sync tap also backs up screenshots + KUAL
+                                            // Same Sync tap also backs up screenshots + picker
                                             // logs over WiFi. Best-effort: annotations already
                                             // landed, so a misc failure only adds a note — it
                                             // never turns the sync into a failure.
@@ -884,7 +884,7 @@ fn run() -> anyhow::Result<()> {
                                             log(
                                                 "token rejected during sync — resync via sidle desktop app",
                                             );
-                                            "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                                            "Token mismatch.\nPlug Kindle into sidle and click Update on Kindle."
                                                 .to_string()
                                         }
                                         Err(api::SidleError::Other(err)) => {
@@ -1809,7 +1809,7 @@ fn sync_decrypted(
                 }
             }
             Err(api::SidleError::TokenMismatch) => {
-                return "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                return "Token mismatch.\nPlug Kindle into sidle and click Update on Kindle."
                     .to_string();
             }
             Err(api::SidleError::Other(err)) => {
@@ -2079,7 +2079,7 @@ fn decrypt_all_flow(
     // the DRM Sync button re-pushes them once the token is refreshed.
     if token_bad {
         return Ok(format!(
-            "Decrypted {decrypted}; sync blocked — plug into sidle, Update KUAL"
+            "Decrypted {decrypted}; sync blocked — plug into sidle, Update on Kindle"
         ));
     }
     Ok(format!(
@@ -2127,7 +2127,7 @@ fn download_flow(
         Err(api::SidleError::TokenMismatch) => {
             log("token rejected during download — resync via sidle desktop app");
             return Ok((
-                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string(),
+                "Token mismatch.\nPlug Kindle into sidle and click Update on Kindle.".to_string(),
                 false,
             ));
         }

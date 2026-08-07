@@ -42,7 +42,7 @@ use sidle_core::library::{
 
 /// Runtime configuration assembled by either the CLI or the embedded
 /// caller. The token is loaded/generated outside and passed in so the same
-/// secret can also be written into the KUAL bundle's `etc/server.conf` at
+/// secret can also be written into the on-device app's `etc/server.conf` at
 /// install time (Phase 6).
 pub struct Config {
     pub paths: LibraryPaths,
@@ -123,7 +123,7 @@ const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// before it's handed to the importer. Generous for an image-heavy purchase;
 /// single-user LAN, so the transient RAM is fine.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
-/// Body cap on `POST /sync/misc` — the Kindle's screenshots + KUAL logs, base64
+/// Body cap on `POST /sync/misc` — the Kindle's screenshots + picker logs, base64
 /// in one JSON bundle. Screenshots are small grayscale PNGs; a healthy backlog
 /// fits with headroom, and a 413 on an absurd volume is a clear error (never a
 /// silent drop). The picker re-pushes each Sync; the server dedups screenshots.
@@ -149,23 +149,30 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/sync/book",
             post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
         )
-        // The Kindle pushes its screenshots + KUAL logs here on Sync — a WiFi
+        // The Kindle pushes its screenshots + picker logs here on Sync — a WiFi
         // backup, stored under `device-backup/<serial>/` (no DB, view-only in the
         // desktop "Misc." tab). Token-gated + body-limited like the rest.
         .route(
             "/sync/misc",
             post(sync_misc).layer(DefaultBodyLimit::max(MISC_BODY_LIMIT)),
         )
-        // KUAL self-update pull: the picker fetches its own next binary from the
-        // staged `kual-dist/` bundle (written by the desktop app). Reads only,
-        // token-gated like the rest — no new write surface.
-        .route("/kual/manifest.json", get(get_kual_manifest))
-        .route("/kual/file/{*name}", get(get_kual_file))
+        // On-device app self-update pull: the picker fetches its own next binary
+        // from the staged `device-dist/` bundle (written by the desktop app).
+        // Reads only, token-gated like the rest — no new write surface.
+        .route("/device/manifest.json", get(get_dist_manifest))
+        .route("/device/file/{*name}", get(get_dist_file))
+        // Compat alias for the pre-rename `/kual/...` paths. A picker already
+        // installed in the field asks for these, and it can only learn the new
+        // paths by self-updating — which is exactly what these serve. Remove
+        // once no device can still be running a build older than this rename;
+        // dropping them early costs those devices a USB re-push.
+        .route("/kual/manifest.json", get(get_dist_manifest))
+        .route("/kual/file/{*name}", get(get_dist_file))
         .with_state(state)
 }
 
 /// Reads `data_dir/.server-token`, generating + persisting a fresh 32-byte
-/// hex token on first run. The KUAL bundle's `etc/server.conf` will carry
+/// hex token on first run. The on-device app's `etc/server.conf` will carry
 /// the same value after Phase 6 wires up the install flow.
 pub fn load_or_generate_token(data_dir: &StdPath) -> Result<String> {
     let path = data_dir.join(".server-token");
@@ -197,7 +204,7 @@ pub(crate) fn check_token(
     query: &HashMap<String, String>,
     expected: &str,
 ) -> Result<(), StatusCode> {
-    // Header takes precedence (programmatic callers — KUAL helper, curl
+    // Header takes precedence (programmatic callers — the picker, curl
     // scripts), then `?token=` fallback for browser navigations on `/kindle`
     // / `/dl/{id}` where setting a custom header isn't possible from a click.
     let got = headers
@@ -279,7 +286,7 @@ struct BookListEntry {
     // would collide with the flattened key).
     /// Content revision of the served KFX: the file's ms mtime. `kfx_sha256` is
     /// a frozen device identity, so a reconvert that rewrites the bytes doesn't
-    /// change the on-device filename — the KUAL client compares this against the
+    /// change the on-device filename — the picker compares this against the
     /// rev it last downloaded and re-pulls a stale book in place. 0 when the row
     /// has no `kfx_path` (not downloadable anyway). Distinct sibling key, so no
     /// collision with the flattened `row`.
@@ -335,7 +342,7 @@ async fn get_book(
         .ok_or(StatusCode::NOT_FOUND)?;
     let kfx_path = book.kfx_path.ok_or(StatusCode::NOT_FOUND)?;
     // The on-device name has to match the `<basename>.<sha8>.kfx` shape
-    // sidle-tauri's USB push uses, so that a book downloaded via KUAL is
+    // sidle-tauri's USB push uses, so that a book downloaded via the picker is
     // recognized by `device_list_ours` / `delete_one` and not flagged as
     // foreign. The bootstrap backfill (`state.rs`) populates `kfx_sha256`
     // for every row before the server takes requests; the fallback only
@@ -557,10 +564,10 @@ async fn sync_book(
 }
 
 // ---------------------------------------------------------------------------
-// P3 write surface — POST /sync/misc (screenshots + KUAL logs)
+// P3 write surface — POST /sync/misc (screenshots + picker logs)
 // ---------------------------------------------------------------------------
 
-/// The push bundle the Kindle picker sends on Sync: each screenshot / KUAL log,
+/// The push bundle the Kindle picker sends on Sync: each screenshot / picker log,
 /// base64 in JSON (same no-multipart-dep reason as `/sync/annotations`). The
 /// server classifies each by name — it does not trust a client-sent kind.
 #[derive(serde::Deserialize)]
@@ -588,7 +595,7 @@ struct MiscSyncResult {
     logs: usize,
 }
 
-/// Store the Kindle's pushed screenshots + KUAL logs under `device-backup/<serial>/`
+/// Store the Kindle's pushed screenshots + picker logs under `device-backup/<serial>/`
 /// — the WiFi backup the desktop "Misc." tab views. Token-gated, then base64-decode
 /// and hand each file to the shared [`device_backup::store_misc_file`] policy
 /// (identical to the desktop's USB pull). No DB touch — these are files, not
@@ -719,54 +726,56 @@ fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     }
 }
 
-/// Minimal `Deserialize` view of `kual-dist/manifest.json`: the server only
+/// Minimal `Deserialize` view of `device-dist/manifest.json`: the server only
 /// needs each entry's `name` to whitelist the served files. Mirrors the
-/// desktop's `KualManifest` (which also carries `sha256`/`size`) rather than
+/// desktop's `DistManifest` (which also carries `sha256`/`size`) rather than
 /// sharing the type across the crate boundary — the same mirror-struct
 /// convention the sync DTOs use; serde drops the extra fields.
 #[derive(serde::Deserialize)]
-struct KualManifest {
-    files: Vec<KualManifestEntry>,
+struct DistManifest {
+    files: Vec<DistManifestEntry>,
 }
 
 #[derive(serde::Deserialize)]
-struct KualManifestEntry {
+struct DistManifestEntry {
     name: String,
 }
 
-fn read_kual_manifest(dist_dir: &StdPath) -> Option<KualManifest> {
+fn read_dist_manifest(dist_dir: &StdPath) -> Option<DistManifest> {
     let bytes = std::fs::read(dist_dir.join("manifest.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-/// `GET /kual/manifest.json` → the staged manifest verbatim (token-gated). 404
-/// when nothing's been staged yet; the picker reads that as "no update".
-async fn get_kual_manifest(
+/// `GET /device/manifest.json` → the staged manifest verbatim (token-gated).
+/// 404 when nothing's been staged yet; the picker reads that as "no update".
+/// Also reachable at the legacy `/kual/manifest.json` — see the router.
+async fn get_dist_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_token(&headers, &query, &state.token)?;
-    let path = state.paths.kual_dist().join("manifest.json");
+    let path = state.paths.device_dist().join("manifest.json");
     serve_file(path, "application/json", None).await
 }
 
-/// `GET /kual/file/{*name}` → bytes from `kual-dist/<name>` (token-gated).
+/// `GET /device/file/{*name}` → bytes from `device-dist/<name>` (token-gated).
+/// Also reachable at the legacy `/kual/file/{*name}` — see the router.
 ///
 /// `name` is whitelisted against the manifest's entries: only a file the
 /// manifest declares is servable. That's both the access bound (just the staged
 /// set) and the path-traversal guard — a `name` like `../library.db` isn't a
 /// manifest entry, so it 404s before any path join. The catch-all `{*name}` is
 /// needed because entries carry a `/` (e.g. `bin/sidle`).
-async fn get_kual_file(
+async fn get_dist_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_token(&headers, &query, &state.token)?;
-    let dist = state.paths.kual_dist();
-    let manifest = read_kual_manifest(&dist).ok_or(StatusCode::NOT_FOUND)?;
+    let dist = state.paths.device_dist();
+    let manifest = read_dist_manifest(&dist).ok_or(StatusCode::NOT_FOUND)?;
     if !manifest.files.iter().any(|f| f.name == name) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -1300,7 +1309,7 @@ mod tests {
         assert!(import_changed_anything(&r), "a new annotation → pulse");
     }
 
-    // --- GET /kual/... (LAN self-update pull) ------------------------------
+    // --- GET /device/... (LAN self-update pull) ----------------------------
 
     /// A `GET` request with an optional `x-sidle-token` header.
     fn get_request(uri: &str, token: Option<&str>) -> Request<Body> {
@@ -1311,10 +1320,10 @@ mod tests {
         b.body(Body::empty()).unwrap()
     }
 
-    /// Stage a `kual-dist/` bundle (one binary + manifest) under `paths`,
+    /// Stage a `device-dist/` bundle (one binary + manifest) under `paths`,
     /// mirroring what the desktop app's `stage_dist` writes. Returns the bytes.
     fn stage_fake_dist(paths: &LibraryPaths) -> Vec<u8> {
-        let dist = paths.kual_dist();
+        let dist = paths.device_dist();
         std::fs::create_dir_all(dist.join("bin")).unwrap();
         let bytes = b"\x7fELF-fake-armv7-picker".to_vec();
         std::fs::write(dist.join("bin/sidle"), &bytes).unwrap();
@@ -1344,12 +1353,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kual_manifest_and_file_serve_staged_bytes() {
+    async fn dist_manifest_and_file_serve_staged_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token, bin_bytes) = staged_state(tmp.path());
 
         let resp = build_router(state.clone())
-            .oneshot(get_request("/kual/manifest.json", Some(&token)))
+            .oneshot(get_request("/device/manifest.json", Some(&token)))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1360,7 +1369,7 @@ mod tests {
         // The catch-all `{*name}` captures the `bin/sidle` path and the bytes
         // come back byte-identical to what was staged.
         let resp = build_router(state)
-            .oneshot(get_request("/kual/file/bin/sidle", Some(&token)))
+            .oneshot(get_request("/device/file/bin/sidle", Some(&token)))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1372,14 +1381,38 @@ mod tests {
         );
     }
 
+    /// The pre-rename `/kual/...` paths must keep serving the same bytes: a
+    /// picker installed before the rename asks for them, and self-updating is
+    /// the only way it learns the new paths. Delete this test only when the
+    /// alias routes go.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kual_file_404s_names_absent_from_manifest() {
+    async fn legacy_kual_routes_still_serve_the_same_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token, bin_bytes) = staged_state(tmp.path());
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request("/kual/manifest.json", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "legacy manifest route");
+
+        let resp = build_router(state)
+            .oneshot(get_request("/kual/file/bin/sidle", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "legacy file route");
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), bin_bytes.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dist_file_404s_names_absent_from_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token, _) = staged_state(tmp.path());
         // Real bundle files that the v1 manifest deliberately does NOT list —
         // the whitelist is what keeps the token + other device files unreachable
         // (and, by the same check, blocks any traversal name).
-        for uri in ["/kual/file/etc/server.conf", "/kual/file/bin/sidle.sh"] {
+        for uri in ["/device/file/etc/server.conf", "/device/file/bin/sidle.sh"] {
             let resp = build_router(state.clone())
                 .oneshot(get_request(uri, Some(&token)))
                 .await
@@ -1393,10 +1426,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kual_endpoints_reject_missing_token() {
+    async fn dist_endpoints_reject_missing_token() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, _, _) = staged_state(tmp.path());
-        for uri in ["/kual/manifest.json", "/kual/file/bin/sidle"] {
+        for uri in ["/device/manifest.json", "/device/file/bin/sidle"] {
             let resp = build_router(state.clone())
                 .oneshot(get_request(uri, None))
                 .await
@@ -1410,7 +1443,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kual_manifest_404_when_nothing_staged() {
+    async fn dist_manifest_404_when_nothing_staged() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths {
             root: tmp.path().to_path_buf(),
@@ -1422,7 +1455,7 @@ mod tests {
             token: Arc::from(token.as_str()),
         };
         let resp = build_router(state)
-            .oneshot(get_request("/kual/manifest.json", Some(&token)))
+            .oneshot(get_request("/device/manifest.json", Some(&token)))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

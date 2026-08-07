@@ -536,7 +536,7 @@ button {
    Promoted from the old upper-right device popover, which had outgrown a 380px
    panel. The pill in the header is the entry point; this is a full-width `.view`
    inside #main (same show/hide system as #gallery / #notes). The inner blocks
-   below — .device-fields, .device-actions, .device-sent-list, .kual-section,
+   below — .device-fields, .device-actions, .device-sent-list, .device-app-section,
    .server-section — are reused verbatim from the popover; a few popover-era
    dividers are neutralised once each block is boxed inside a card.
    --------------------------------------------------------------------------- */
@@ -606,13 +606,13 @@ button {
 
 /* Neutralise popover-era dividers now that each block is boxed by its card: the
    card draws the edge, so drop the actions/sent-list bottom rules and the
-   KUAL/LAN-server top rules (which existed to separate stacked popover blocks). */
+   deploy/LAN-server top rules (which existed to separate stacked popover blocks). */
 .device-card .device-actions,
 .device-card .device-sent-list {
   border-bottom: 0;
 }
 
-.device-card.kual-section,
+.device-card.device-app-section,
 .device-card.server-section {
   border-top: 0;
 }
@@ -691,7 +691,7 @@ button {
   padding: 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  /* Internal scroll, capped so a long list doesn't push the KUAL +
+  /* Internal scroll, capped so a long list doesn't push the deploy +
      LAN-server sections off the popover. The popover itself also
      scrolls if total content exceeds 80vh, so the user always reaches
      everything either way. */
@@ -863,38 +863,38 @@ button {
   color: var(--accent);
 }
 
-/* KUAL extension — mirrors .server-section chrome. */
+/* On-device app deploy — mirrors .server-section chrome. */
 
-.kual-section {
+.device-app-section {
   border-top: 1px solid var(--border);
 }
 
-.kual-section-header {
+.device-app-section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 10px 14px 4px;
 }
 
-.kual-status-label {
+.device-app-status-label {
   font-size: 11px;
   color: var(--muted);
 }
 
-.kual-status-label.in-sync {
+.device-app-status-label.in-sync {
   color: #6fb361;
 }
 
-.kual-status-label.stale,
-.kual-status-label.not-installed {
+.device-app-status-label.stale,
+.device-app-status-label.not-installed {
   color: #d8a05a;
 }
 
-.kual-status-label.binary-not-built {
+.device-app-status-label.binary-not-built {
   color: #d86a5a;
 }
 
-.kual-actions {
+.device-app-actions {
   padding: 4px 14px 6px;
   font-size: 12px;
   display: flex;
@@ -902,12 +902,12 @@ button {
   gap: 10px;
 }
 
-.kual-install-progress {
+.device-app-install-progress {
   font-size: 11px;
   color: var(--muted);
 }
 
-.kual-tip {
+.device-app-tip {
   margin: 0;
   padding: 0 14px 6px;
   font-size: 11px;
@@ -915,11 +915,11 @@ button {
   line-height: 1.4;
 }
 
-.kual-tip[hidden] {
+.device-app-tip[hidden] {
   display: none;
 }
 
-.kual-file-list {
+.device-app-file-list {
   list-style: none;
   margin: 0;
   padding: 0 14px 12px;
@@ -928,7 +928,7 @@ button {
   row-gap: 4px;
 }
 
-.kual-file-list li {
+.device-app-file-list li {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -936,16 +936,16 @@ button {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.kual-file-list li .kual-file-state.synced {
+.device-app-file-list li .device-app-file-state.synced {
   color: #6fb361;
 }
 
-.kual-file-list li .kual-file-state.stale,
-.kual-file-list li .kual-file-state.missing {
+.device-app-file-list li .device-app-file-state.stale,
+.device-app-file-list li .device-app-file-state.missing {
   color: #d8a05a;
 }
 
-.kual-file-list li .kual-file-state.source-missing {
+.device-app-file-list li .device-app-file-state.source-missing {
   color: #d86a5a;
 }
 
@@ -3592,7 +3592,7 @@ kbd {
   padding: 1px 4px;
 }
 
-/* ── Misc. tab: screenshots + KUAL logs backed up on Sync ─────────────────── */
+/* ── Misc. tab: screenshots + picker logs backed up on Sync ─────────────────── */
 
 .misc-group {
   margin-bottom: 28px;

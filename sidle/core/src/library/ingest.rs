@@ -369,7 +369,7 @@ pub struct DeviceImportReport {
     /// → `device-backup/<serial>/screenshots/`). Populated by the app layer's
     /// `device::misc::backup_device_misc`; 0 on the pure-core import paths.
     pub misc_screenshots: usize,
-    /// KUAL native-app logs refreshed off the device this sync (`*.log` at the
+    /// picker logs refreshed off the device this sync (`*.log` at the
     /// USB root → `device-backup/<serial>/logs/`). App-populated, like
     /// [`misc_screenshots`](Self::misc_screenshots).
     pub misc_logs: usize,

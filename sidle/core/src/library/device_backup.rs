@@ -1,11 +1,11 @@
 //! Shared storage policy for the Kindle's "misc" backup artifacts — screenshots
-//! and KUAL logs — landed under `device-backup/<serial>/` (see
+//! and picker logs — landed under `device-backup/<serial>/` (see
 //! [`LibraryPaths::device_backup_screenshots`](crate::library::LibraryPaths::device_backup_screenshots)
 //! / [`device_backup_logs`](crate::library::LibraryPaths::device_backup_logs)).
 //!
 //! Two callers feed this with the same policy, so a screenshot backed up over
 //! WiFi is byte-identical to one backed up over USB:
-//! - `sidle-server`'s WiFi receive (`POST /sync/misc`), which the on-device KUAL
+//! - `sidle-server`'s WiFi receive (`POST /sync/misc`), which the on-device picker
 //!   picker pushes to when the user taps **Sync** — the primary path.
 //! - the desktop app's USB pull (`device::misc`), when a Kindle is plugged in.
 
@@ -25,7 +25,7 @@ pub enum MiscKind {
 /// Classify a device filename, or `None` if it isn't an artifact we back up.
 /// Screenshots match the `screenshot` prefix (stock firmware and Sidle's own
 /// two-corner capture both write `screenshot_<unix>.png`); logs match the `.log`
-/// suffix (the KUAL app's `sidle-native.log` / `sidle-update.log`).
+/// suffix (the picker's `sidle-native.log` / `sidle-update.log`).
 /// Case-insensitive; an in-flight `.partial` write is not yet a screenshot.
 pub fn classify_misc(name: &str) -> Option<MiscKind> {
     let lower = name.to_ascii_lowercase();

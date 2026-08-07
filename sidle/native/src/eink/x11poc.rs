@@ -9,7 +9,7 @@
 //! Run via `sidle --x11-poc`: maps a fullscreen window with an unmistakable
 //! test pattern, waits for a tap, then destroys it. Success criteria:
 //!   1. the test pattern actually appears (WM shows our window), and
-//!   2. tapping exits to a cleanly-repainted home/KUAL screen — no stuck frame,
+//!   2. tapping exits to a cleanly-repainted home screen — no stuck frame,
 //!      status bar back — proving the WM recomposited on teardown.
 
 use anyhow::{Context, Result};

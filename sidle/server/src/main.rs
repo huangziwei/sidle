@@ -14,7 +14,7 @@ use sidle_core::library::LibraryPaths;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "sidle LAN HTTP server — read-only library access for KUAL pulls"
+    about = "sidle LAN HTTP server — read-only library access for on-device app pulls"
 )]
 struct Cli {
     /// Override sidle's data directory. Without this flag, resolves the same

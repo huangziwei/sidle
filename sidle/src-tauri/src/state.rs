@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use crate::device::Transport;
-use crate::device::kual::{self, KualSource};
+use crate::device::deploy::{self, DeploySource};
 use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
@@ -74,10 +74,10 @@ pub struct AppState {
     /// The shared device IO handle. See [`SharedTransport`].
     pub transport: SharedTransport,
     pub server: ServerHandle,
-    /// Source-of-truth paths for the KUAL deploy button (binary +
-    /// bundle dir). Resolved once at startup by walking up from
+    /// Source-of-truth paths for the on-device app deploy button (binary +
+    /// `device/` mirror). Resolved once at startup by walking up from
     /// `CARGO_MANIFEST_DIR` to the workspace Cargo.toml.
-    pub kual_source: KualSource,
+    pub device_app_source: DeploySource,
     /// Reader search's per-session `TextIndex` cache (see [`ReaderSearchCache`]).
     pub reader_search_cache: ReaderSearchCache,
     /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
@@ -88,7 +88,7 @@ pub struct AppState {
 /// we hit a `Cargo.toml` declaring `[workspace]` — that's the repo
 /// root. Robust to layout changes that don't move the workspace
 /// manifest. If the desktop app is ever shipped packaged (outside the
-/// dev workspace), this returns Err and KualSource paths will report
+/// dev workspace), this returns Err and DeploySource paths will report
 /// `SourceMissing` to the UI.
 pub(crate) fn find_workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -126,7 +126,7 @@ impl AppState {
         let _ = std::fs::write("/tmp/sidle-bootstrap.log", "bootstrap: paths ensured\n");
 
         // Capture the bundle resource dir while `app` is still ours — it's moved
-        // into the device monitor below, but the KUAL source resolution further
+        // into the device monitor below, but the deploy source resolution further
         // down (packaged builds) needs it. `None` in dev / if Tauri can't resolve.
         let resource_dir = app.path().resource_dir().ok();
 
@@ -211,43 +211,55 @@ impl AppState {
             queue.clone(),
         );
 
-        // Dev reads the KUAL source straight from the checkout (a live `cargo
+        // Dev reads the deploy source straight from the checkout (a live `cargo
         // build`/armv7 cross-build shows up, and the staleness hint works);
         // a packaged build carries the assets as bundle resources. `resource_dir`
         // is captured above because `app` is moved into the monitor before this.
-        let kual_source = if cfg!(debug_assertions) {
+        let device_app_source = if cfg!(debug_assertions) {
             match find_workspace_root() {
-                Ok(root) => KualSource::from_workspace_root(&root),
+                Ok(root) => DeploySource::from_workspace_root(&root),
                 Err(e) => {
                     eprintln!(
-                        "[sidle/bootstrap] kual: workspace root not found ({e}); \
-                         KUAL deploy section will show SourceMissing for all files"
+                        "[sidle/bootstrap] device-app: workspace root not found ({e}); \
+                         the deploy section will show SourceMissing for all files"
                     );
                     // Synthesize a path that won't resolve — compute_status
                     // handles missing source files gracefully.
-                    KualSource::from_workspace_root(Path::new("/__no_workspace__"))
+                    DeploySource::from_workspace_root(Path::new("/__no_workspace__"))
                 }
             }
         } else {
             match resource_dir {
-                Some(dir) => KualSource::from_resource_root(&dir),
+                Some(dir) => DeploySource::from_resource_root(&dir),
                 None => {
                     eprintln!(
-                        "[sidle/bootstrap] kual: bundle resource dir unavailable; \
-                         KUAL deploy section will show SourceMissing for all files"
+                        "[sidle/bootstrap] device-app: bundle resource dir unavailable; \
+                         the deploy section will show SourceMissing for all files"
                     );
-                    KualSource::from_resource_root(Path::new("/__no_resources__"))
+                    DeploySource::from_resource_root(Path::new("/__no_resources__"))
                 }
             }
         };
 
+        // The staging dir was named `kual-dist/` before the on-device app stopped
+        // being a KUAL extension. Nothing reads the old path any more, so a library
+        // that predates the rename would keep an orphaned copy of the picker binary
+        // forever. Best-effort removal; absent is the norm on any fresh install.
+        let legacy_dist = paths.root.join("kual-dist");
+        if legacy_dist.is_dir() {
+            match std::fs::remove_dir_all(&legacy_dist) {
+                Ok(()) => eprintln!("[sidle/bootstrap] removed legacy kual-dist/"),
+                Err(e) => eprintln!("[sidle/bootstrap] could not remove legacy kual-dist/: {e}"),
+            }
+        }
+
         // Stage the LAN self-update bundle so a detached `sidle-server` can serve
-        // the current picker binary over `/kual/...` without a cable. mtime-gated
+        // the current picker binary over `/device/...` without a cable. mtime-gated
         // (a no-op once warm); `SourceMissing` (binary not cross-built yet) and IO
         // errors are non-fatal — they must never block app launch.
-        match kual::stage_dist(&kual_source, &paths.kual_dist()) {
-            Ok(outcome) => eprintln!("[sidle/bootstrap] kual-dist: {outcome:?}"),
-            Err(e) => eprintln!("[sidle/bootstrap] kual-dist staging failed: {e:#}"),
+        match deploy::stage_dist(&device_app_source, &paths.device_dist()) {
+            Ok(outcome) => eprintln!("[sidle/bootstrap] device-dist: {outcome:?}"),
+            Err(e) => eprintln!("[sidle/bootstrap] device-dist staging failed: {e:#}"),
         }
 
         Ok(Self {
@@ -257,7 +269,7 @@ impl AppState {
             device,
             transport,
             server: ServerHandle::default(),
-            kual_source,
+            device_app_source,
             reader_search_cache: Arc::new(Mutex::new(None)),
             reader_store: Arc::new(Mutex::new(None)),
         })

@@ -169,7 +169,7 @@ pub fn import_device_annotations(
         }
     }?;
 
-    // Additive backup of the device's screenshots + KUAL logs, over whichever
+    // Additive backup of the device's screenshots + picker logs, over whichever
     // transport this Kindle uses. Best-effort: a misc-backup failure must never
     // fail the annotation sync it rides along with — log it and move on with the
     // counts we did get. Runs on every Sync (manual button + auto-on-connect).

@@ -6,7 +6,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
-use crate::device::kual::{self, KualInstallReport, KualOverall, KualStatus, ServerConfRender};
+use crate::device::deploy::{
+    self, DeployInstallReport, DeployOverall, DeployStatus, ServerConfRender,
+};
 use crate::device::monitor::{ensure_transport, evict_transport, refresh_free_space};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::{db, ingest};
@@ -621,18 +623,18 @@ pub async fn device_import_orphan(
 }
 
 // ----------------------------------------------------------------------------
-// KUAL deploy (Install / Update KUAL button)
+// On-device app deploy (the Install / Update on Kindle button)
 // ----------------------------------------------------------------------------
 
 /// Resolve the live `ServerConfRender` from app state. Same shape used
-/// by both `kual_status` and `kual_install` — keeping it in one place
+/// by both `device_app_status` and `device_app_install` — keeping it in one place
 /// guarantees the staleness check and the actual install agree on
 /// what `server.conf` *should* contain. `serial` is the connected device's
 /// USB iSerial, threaded in from the same `DeviceInfo` snapshot the mount came
 /// from (the picker pushes it back as `device_serial`).
 async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRender> {
     let server_status = state.server.status(&state.paths).await;
-    let host = kual::detect_lan_ipv4()?.to_string();
+    let host = deploy::detect_lan_ipv4()?.to_string();
     let token = server_status.token?;
     let port = server_status.port.unwrap_or(server_status.default_port);
     Some(ServerConfRender {
@@ -644,14 +646,14 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
 }
 
 #[tauri::command]
-pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, String> {
+pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatus, String> {
     let device = state.device.lock().await.clone();
     // No Kindle connected at all → the UI hides the section on DeviceDisconnected.
     // A connected device — mass-storage OR MTP — gets a real status; the deploy
     // runs over either transport.
     let Some(device) = device else {
-        return Ok(KualStatus {
-            overall: KualOverall::DeviceDisconnected,
+        return Ok(DeployStatus {
+            overall: DeployOverall::DeviceDisconnected,
             files: Vec::new(),
             binary_mtime_ms: None,
             native_source_mtime_ms: None,
@@ -672,13 +674,13 @@ pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, Strin
             token: String::new(),
         });
 
-    let source = state.kual_source.clone();
+    let source = state.device_app_source.clone();
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || {
-        kual::compute_status(&source, &conf, transport.as_ref())
+        deploy::compute_status(&source, &conf, transport.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -694,10 +696,10 @@ pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, Strin
 }
 
 #[tauri::command]
-pub async fn kual_install(
+pub async fn device_app_install(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<KualInstallReport, String> {
+) -> Result<DeployInstallReport, String> {
     let device = state.device.lock().await.clone();
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
 
@@ -709,23 +711,23 @@ pub async fn kual_install(
             .to_string()
     })?;
 
-    let source = state.kual_source.clone();
+    let source = state.device_app_source.clone();
     let app_handle = app.clone();
-    let dist_dir = state.paths.kual_dist();
+    let dist_dir = state.paths.device_dist();
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<KualInstallReport, String> {
-        let report = kual::install_all(&source, &conf, transport.as_ref(), |progress| {
-            let _ = app_handle.emit("kual:install-progress", progress);
+    let result = tokio::task::spawn_blocking(move || -> Result<DeployInstallReport, String> {
+        let report = deploy::install_all(&source, &conf, transport.as_ref(), |progress| {
+            let _ = app_handle.emit("device-app:install-progress", progress);
         })
         .map_err(|e| format!("{e:#}"))?;
         // Refresh the LAN dist so an untethered in-app Update pull gets the
         // exact binary this push just wrote. Non-fatal — a staging miss
         // doesn't undo a successful device install.
-        if let Err(e) = kual::stage_dist(&source, &dist_dir) {
-            eprintln!("[sidle/kual_install] kual-dist staging failed: {e:#}");
+        if let Err(e) = deploy::stage_dist(&source, &dist_dir) {
+            eprintln!("[sidle/device_app_install] device-dist staging failed: {e:#}");
         }
         Ok(report)
     })
@@ -738,19 +740,19 @@ pub async fn kual_install(
     result
 }
 
-/// Re-stage the LAN self-update bundle (`<data-dir>/kual-dist/`) when the
+/// Re-stage the LAN self-update bundle (`<data-dir>/device-dist/`) when the
 /// freshly cross-built picker binary is newer than the staged copy. Called on
-/// the device-popover-open path alongside [`kual_status`], so the dev loop is
+/// the device-popover-open path alongside [`device_app_status`], so the dev loop is
 /// "rebuild armv7 → open the popover → device pulls" — no cable, no app restart.
 /// mtime-gated (a near-instant no-op once warm) and device-independent (it
 /// stages the repo binary into the data dir), so it works whether or not a
 /// Kindle is plugged in. Errors are surfaced but the frontend treats them as
 /// non-fatal.
 #[tauri::command]
-pub async fn kual_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
-    let source = state.kual_source.clone();
-    let dist_dir = state.paths.kual_dist();
-    tokio::task::spawn_blocking(move || kual::stage_dist(&source, &dist_dir))
+pub async fn device_app_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
+    let source = state.device_app_source.clone();
+    let dist_dir = state.paths.device_dist();
+    tokio::task::spawn_blocking(move || deploy::stage_dist(&source, &dist_dir))
         .await
         .map_err(|e| e.to_string())?
         .map(|_| ())

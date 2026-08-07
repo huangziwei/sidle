@@ -9,9 +9,9 @@ Sideload/dump books in and out of a (jailbroken) Kindle.
 Sidle contains two main parts:
 
 1. a Rust/Tauri app for managing books, converting various formats to EPUB and KFX, and reading them on macOS;
-2. a KUAL app to pull books from the library and sync annotations back to the library via WIFI.
+2. a native Kindle app to pull books from the library and sync annotations back to the library via WIFI.
 
-The Tauri app doesn't require the Kindle to be jailbroken, but the KUAL app does (to begin with, you need to jailbreak to install KUAL itself). 
+The Tauri app doesn't require the Kindle to be jailbroken, but the Kindle app does. It installs as a home-screen tile (a jailbreak-hotfix scriptlet) with a KUAL menu entry as an optional second way in — KUAL itself is not required.
 
 There's also a bonus: a [pure rust JPEG XR encoder/decoder](./jxr/README.md) as a standalone crate.
 
@@ -20,7 +20,7 @@ There's also a bonus: a [pure rust JPEG XR encoder/decoder](./jxr/README.md) as 
 <p align="center">
   <img src=".github/assets/Sidle-Tauri.png" height="300" />
   <img src=".github/assets/Sidle-Reader.png" height="300" />
-  <img src=".github/assets/Sidle-KUAL.png" height="300" />
+  <img src=".github/assets/Sidle-Kindle.png" height="300" />
 </p>
 
 ## Build
@@ -34,7 +34,7 @@ The app will be built and put into `/Applications/Sidle`
 
 Book data and library database will be stored in `~/Library/Application Support/Sidle/`, and can be changed to other locations.
 
-To install the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, then click `push KUAL`. 
+To install the Kindle app, plug in the Kindle via USB, then in the Kindle tab, open `Kindle app` and click `Install on Kindle`.
 
 Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 15.16.2.1.1) and Kindle Colorsoft (1th Gen; 15.8.0.2) 
 
@@ -50,8 +50,8 @@ I want a faster, more streamlined process to manage my books:
 2. imported EPUB will be auto-converted to KFX;
 3. imported AZW3 and MOBI will be auto-converted to EPUB then KFX;
 4. (bonus) imported ZIP from [Aozora/青空文庫](https://www.aozora.gr.jp) will be auto-converted to EPUB then KFX;
-5. while mounted, the desktop app can push a KUAL app to Kindle, which can be used to view the library and download the KFX from the host within the same network (after the first push, the KUAL app can now be updated over WIFI);
-6. annotations (highlights, notes and bookmarks) of all books sideloaded by Sidle will be synced back to Sidle Tauri when mounted, or manually synced in the KUAL app;
+5. while mounted, the desktop app can push a native app to the Kindle, which can be used to view the library and download the KFX from the host within the same network (after the first push, the Kindle app updates itself over WIFI);
+6. annotations (highlights, notes and bookmarks) of all books sideloaded by Sidle will be synced back to Sidle Tauri when mounted, or manually synced in the Kindle app;
 7. and most importantly, all format conversion should have full support for CJK text (vertical writing mode, page progression direction, etc.), which is made possible with `boko-kai`, a [fork of boko](./boko-kai/README.md).
 
 This is basically what Sidle does for now.

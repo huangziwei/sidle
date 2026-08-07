@@ -59,7 +59,7 @@ impl Default for ServerHandle {
 pub struct ServerStatus {
     pub running: bool,
     pub port: Option<u16>,
-    /// Bearer secret the KUAL bundle (or curl tests) must send as `X-Sidle-Token`.
+    /// Bearer secret the on-device app (or curl tests) must send as `X-Sidle-Token`.
     /// Loaded/generated lazily so the UI can show it even while the server is off
     /// (it lives in `.server-token`, persistent across runs).
     pub token: Option<String>,

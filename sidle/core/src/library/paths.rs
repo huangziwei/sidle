@@ -199,13 +199,14 @@ impl LibraryPaths {
         self.root.join("cover-thumb.fmt")
     }
 
-    /// Directory the desktop app stages the KUAL self-update bundle into, and
-    /// `sidle-server` serves over `/kual/...` for an untethered LAN pull. Keyed
-    /// off the active library root so the app (writer) and the server (reader)
-    /// agree on one location even after a relocate — the same way both already
-    /// share [`db`](Self::db). Holds `bin/sidle` + `manifest.json`.
-    pub fn kual_dist(&self) -> PathBuf {
-        self.root.join("kual-dist")
+    /// Directory the desktop app stages the on-device app's self-update bundle
+    /// into, and `sidle-server` serves over `/device/...` for an untethered LAN
+    /// pull. Keyed off the active library root so the app (writer) and the
+    /// server (reader) agree on one location even after a relocate — the same
+    /// way both already share [`db`](Self::db). Holds `bin/sidle` +
+    /// `manifest.json`.
+    pub fn device_dist(&self) -> PathBuf {
+        self.root.join("device-dist")
     }
 
     /// Ensure base subdirectories exist.
@@ -278,7 +279,7 @@ impl LibraryPaths {
         }
     }
 
-    // ── Misc device backup (screenshots + KUAL logs) ────────────────────────
+    // ── Misc device backup (screenshots + picker logs) ────────────────────────
     // Layout: `device-backup/<serial>/{screenshots/*.png, logs/*.log}` — the
     // diagnostic artifacts pulled off a Kindle on Sync (see
     // `device::misc::backup_device_misc`). Keyed by device serial because logs
@@ -297,7 +298,7 @@ impl LibraryPaths {
             .join("screenshots")
     }
 
-    /// KUAL native-app logs pulled off one device (`sidle-native.log`, …).
+    /// picker logs pulled off one device (`sidle-native.log`, …).
     pub fn device_backup_logs(&self, serial: &str) -> PathBuf {
         self.device_backup_dir()
             .join(sanitize_device_id(serial))

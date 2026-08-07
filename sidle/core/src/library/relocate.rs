@@ -43,10 +43,10 @@ pub fn copy_library(src_conn: &Connection, src_books: &Path, dest_root: &Path) -
 
 /// Move the library to `dest_root` (must be empty/new): snapshot + verify the DB
 /// there, then relocate EVERY other root entry — `books/`, `notebooks/`, the
-/// staged `kual-dist/`, `.server-token`, derived markers like `cover-thumb.fmt`,
+/// staged `device-dist/`, `.server-token`, derived markers like `cover-thumb.fmt`,
 /// and anything added later — by `rename` (instant, same volume) or copy
 /// (cross-volume). Moving only `books/` used to strand notebooks (data loss) and
-/// leave `kual-dist/`/`.server-token` behind as cruft that also blocked a clean
+/// leave `device-dist/`/`.server-token` behind as cruft that also blocked a clean
 /// re-move. Returns the source paths that were COPIED (cross-volume), for the
 /// caller to delete via [`finish_move`]; renamed entries are already gone.
 ///
@@ -319,12 +319,12 @@ mod tests {
         }
 
         // Other root contents must move too: notebooks (real data!), the staged
-        // kual-dist bundle, and the server token. Only library.db* stays behind
+        // device-dist bundle, and the server token. Only library.db* stays behind
         // for finish_move.
         std::fs::create_dir_all(src_root.join("notebooks/nb-1/pages")).unwrap();
         std::fs::write(src_root.join("notebooks/nb-1/pages/page-0.svg"), "<svg/>").unwrap();
-        std::fs::create_dir_all(src_root.join("kual-dist")).unwrap();
-        std::fs::write(src_root.join("kual-dist/manifest.json"), "{}").unwrap();
+        std::fs::create_dir_all(src_root.join("device-dist")).unwrap();
+        std::fs::write(src_root.join("device-dist/manifest.json"), "{}").unwrap();
         std::fs::write(src_root.join(".server-token"), "tok").unwrap();
 
         // Same volume (same tempdir) → rename path; nothing is copied.
@@ -338,12 +338,12 @@ mod tests {
             std::fs::read_to_string(dest_root.join("books/aaa/book.epub")).unwrap(),
             "e-aaa"
         );
-        // notebooks / kual-dist / token relocated, not stranded.
+        // notebooks / device-dist / token relocated, not stranded.
         assert_eq!(
             std::fs::read_to_string(dest_root.join("notebooks/nb-1/pages/page-0.svg")).unwrap(),
             "<svg/>",
         );
-        assert!(dest_root.join("kual-dist/manifest.json").is_file());
+        assert!(dest_root.join("device-dist/manifest.json").is_file());
         assert!(dest_root.join(".server-token").is_file());
         assert!(
             !src_root.join("books").exists(),
@@ -354,8 +354,8 @@ mod tests {
             "notebooks renamed out of source"
         );
         assert!(
-            !src_root.join("kual-dist").exists(),
-            "kual-dist renamed out of source"
+            !src_root.join("device-dist").exists(),
+            "device-dist renamed out of source"
         );
         assert!(
             !src_root.join(".server-token").exists(),

@@ -1,4 +1,4 @@
-//! Tauri commands backing the "Misc." tab — the screenshots + KUAL logs pulled
+//! Tauri commands backing the "Misc." tab — the screenshots + picker logs pulled
 //! off the Kindle on Sync (see [`crate::device::misc`]). Read-only surface over
 //! the on-disk `device-backup/<serial>/{screenshots,logs}/` tree: list them,
 //! read a log's text for the in-app viewer, reveal one in Finder.

@@ -5,7 +5,7 @@
 //! `draw_boot_toast` path). It shows what the picker tried — host, token
 //! prefix, the actual error, a class-specific hint — and offers two tap
 //! zones, **Retry** and **Exit**, so the user has an on-device recourse
-//! (start the server, then Retry) without relaunching from KUAL.
+//! (start the server, then Retry) without relaunching the picker.
 //!
 //! Modeled on `ui/pager.rs` (a bottom button strip + a pure `hit`
 //! geometry fn) and `ui/toast.rs` (a centered panel). Page-button events
@@ -24,7 +24,7 @@ use crate::ui::text::TextRenderer;
 pub enum Action {
     /// Re-run `list_books` — the server may now be reachable.
     Retry,
-    /// Leave the picker, back to KUAL.
+    /// Leave the picker, back to the home screen.
     Exit,
 }
 
@@ -76,7 +76,7 @@ fn rows_for(cfg: &ServerConfig, err: &SidleError) -> (String, String) {
     match err {
         SidleError::TokenMismatch => (
             "token rejected (401/403)".to_string(),
-            "Plug Kindle into sidle, click Update KUAL".to_string(),
+            "Plug Kindle into sidle, click Update on Kindle".to_string(),
         ),
         SidleError::Other(e) => (
             format!("{e:#}"),

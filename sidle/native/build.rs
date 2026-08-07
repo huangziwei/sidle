@@ -1,7 +1,7 @@
 //! Bake the build timestamp into the picker so a running binary knows its own
 //! age. The LAN self-update (`selfupdate.rs`) compares this against the
 //! manifest's `built_at` and refuses anything not strictly newer — so a stale
-//! `kual-dist` can no longer downgrade the device over Wi-Fi.
+//! `device-dist` can no longer downgrade the device over Wi-Fi.
 //!
 //! `build.sh` exports `SIDLE_BUILD_TS` (unix seconds) for the cross-compile and
 //! writes a matching `sidle.build-ts` sidecar that the server reads into the

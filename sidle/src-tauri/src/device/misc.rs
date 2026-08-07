@@ -1,5 +1,5 @@
 //! Additive backup of a Kindle's "misc" diagnostic artifacts — screenshots and
-//! our KUAL native-app logs — pulled through the [`Transport`] abstraction on
+//! our picker logs — pulled through the [`Transport`] abstraction on
 //! every Sync, so one path covers mass-storage (KOA2 etc.) and MTP (Scribe/2024+).
 //!
 //! Screenshots live in different places by device generation: newer firmware
@@ -7,7 +7,7 @@
 //! capture also lands — see native `eink/screenshot.rs`), while older devices
 //! (KOA2) leave the *stock* firmware's captures loose in the USB root. We scan
 //! both directories shallowly and match `screenshot*` by name. Logs are the
-//! KUAL app's root-level `sidle-native.log` / `sidle-update.log` (plus any other
+//! picker's root-level `sidle-native.log` / `sidle-update.log` (plus any other
 //! root `*.log` worth having for diagnostics — see native `main.rs` LOG_PATH).
 //!
 //! Additive, like the annotation sync (Sidle never mutates the device): a
@@ -31,7 +31,7 @@ pub struct MiscBackupReport {
     pub logs_updated: usize,
 }
 
-/// Back up the connected device's screenshots + KUAL logs into
+/// Back up the connected device's screenshots + picker logs into
 /// `device-backup/<serial>/` under the library root — the USB twin of the WiFi
 /// `POST /sync/misc` the picker pushes, sharing the exact same
 /// [`store_misc_file`] policy. Best-effort per file: an unreadable screenshot or
@@ -58,7 +58,7 @@ pub fn backup_device_misc(
     }
 
     // USB root — shallow, listed once. KOA2's *stock* firmware drops its
-    // captures loose here (not under `screenshots/`); our KUAL logs sit here too.
+    // captures loose here (not under `screenshots/`); our picker logs sit here too.
     for entry in list_or_warn(transport, &TPath::new()) {
         pull_and_store(transport, &TPath::new(), &entry, serial, paths, &mut report);
     }
@@ -145,7 +145,7 @@ mod tests {
         std::fs::write(shots.join("screenshot_200.png"), b"PNG-B").unwrap();
         // KOA2-style: a stock capture loose in the root.
         std::fs::write(device.path().join("Screenshot_root.png"), b"PNG-ROOT").unwrap();
-        // Our KUAL logs in the root, plus an unrelated root file to ignore.
+        // Our picker logs in the root, plus an unrelated root file to ignore.
         std::fs::write(device.path().join("sidle-native.log"), b"log lines\n").unwrap();
         std::fs::write(device.path().join("sidle-update.log"), b"update lines\n").unwrap();
         std::fs::write(device.path().join("version.txt"), b"5.16.2").unwrap();
@@ -157,7 +157,7 @@ mod tests {
 
         let report = backup_device_misc(&transport, "G000TESTSERIAL", &paths).unwrap();
         assert_eq!(report.screenshots_added, 3, "2 in screenshots/ + 1 in root");
-        assert_eq!(report.logs_updated, 2, "both KUAL logs");
+        assert_eq!(report.logs_updated, 2, "both picker logs");
 
         let backed = paths.device_backup_screenshots("G000TESTSERIAL");
         assert!(backed.join("screenshot_100.png").is_file());

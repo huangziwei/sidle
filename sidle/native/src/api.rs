@@ -39,7 +39,7 @@ pub enum SidleError {
     /// Server returned 401 or 403 — the bearer token in our
     /// `etc/server.conf` no longer matches the one sidle-server is
     /// validating against (rotated `.server-token`, fresh install).
-    /// User action is to re-deploy via the desktop app's KUAL button.
+    /// User action is to re-deploy via the desktop app's Install on Kindle button.
     TokenMismatch,
     Other(anyhow::Error),
 }
@@ -378,7 +378,7 @@ pub fn stream_download(dl: Download, target: &std::path::Path) -> Result<u64> {
 /// `device_filename`. The server computes it with the same
 /// `kfx_device_filename` rule sidle-tauri's USB push uses, so a LAN download
 /// and a USB push land under byte-identical names — which is what lets the
-/// USB-side delete recognize a KUAL-downloaded file instead of treating it
+/// USB-side delete recognize a picker-downloaded file instead of treating it
 /// as foreign (`NotOurs`).
 ///
 /// We deliberately do NOT read this off the `/get/{id}` `Content-Disposition`
@@ -404,7 +404,7 @@ fn device_filename(book: &Book) -> Result<String> {
         .into()),
         None => Err(anyhow!(
             "server did not provide device_filename for \"{}\" (id {}) — \
-             update sidle-server (Update KUAL in the desktop app)",
+             update sidle-server (Update on Kindle in the desktop app)",
             book.title,
             book.id,
         )
@@ -522,7 +522,7 @@ pub fn push_annotations(
 ) -> Result<SyncReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
-            "server.conf has no SERIAL= — re-run Update KUAL in the desktop app \
+            "server.conf has no SERIAL= — re-run Update on Kindle in the desktop app \
              (annotations are keyed per device)"
         )
         .into());
@@ -686,10 +686,10 @@ pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Misc backup push — POST /sync/misc (screenshots + KUAL logs, the WiFi backup)
+// Misc backup push — POST /sync/misc (screenshots + picker logs, the WiFi backup)
 // ---------------------------------------------------------------------------
 
-/// The push bundle: each screenshot / KUAL log, base64 in JSON. Mirrors
+/// The push bundle: each screenshot / picker log, base64 in JSON. Mirrors
 /// `sidle-server`'s `MiscSyncRequest`. `device_serial` comes from `server.conf`.
 #[derive(Serialize)]
 struct MiscRequest {
@@ -736,7 +736,7 @@ impl MiscReport {
     }
 }
 
-/// Push the Kindle's screenshots + KUAL logs to `POST /sync/misc` — the WiFi
+/// Push the Kindle's screenshots + picker logs to `POST /sync/misc` — the WiFi
 /// backup the desktop "Misc." tab views. `us_root` is `/mnt/us`. On a successful
 /// push the screenshots are **deleted from the device** (they're safely backed
 /// up now, and a Kindle's screenshot folder is scratch space) — logs stay, since
@@ -746,7 +746,7 @@ impl MiscReport {
 pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Result<MiscReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
-            "server.conf has no SERIAL= — re-run Update KUAL in the desktop app \
+            "server.conf has no SERIAL= — re-run Update on Kindle in the desktop app \
              (backups are keyed per device)"
         )
         .into());
@@ -800,7 +800,7 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
 }
 
 /// Read every screenshot (`screenshot*` under `screenshots/` and the USB root)
-/// and KUAL log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
+/// and picker log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
 /// filename so a screenshot in both `screenshots/` and the root is sent once.
 /// Best-effort per file: an unreadable / empty one is skipped. Returns the push
 /// bundle plus the on-device paths of the screenshots in it — those get deleted
@@ -817,7 +817,7 @@ fn collect_misc_files(us_root: &Path) -> (Vec<MiscFile>, Vec<std::path::PathBuf>
         &mut screenshot_paths,
         &mut seen,
     );
-    // USB root — KOA2's stock screenshots live loose here; so do our KUAL logs.
+    // USB root — KOA2's stock screenshots live loose here; so do our picker logs.
     gather_misc(us_root, false, &mut files, &mut screenshot_paths, &mut seen);
     (files, screenshot_paths)
 }
@@ -876,7 +876,7 @@ fn is_screenshot(name: &str) -> bool {
     lower.starts_with("screenshot") && !lower.ends_with(".partial")
 }
 
-/// A KUAL log filename (`*.log`), case-insensitive. Mirrors core's `classify_misc`.
+/// A picker log filename (`*.log`), case-insensitive. Mirrors core's `classify_misc`.
 fn is_log(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".log")
 }
@@ -1028,7 +1028,7 @@ mod tests {
         // Newer-style screenshots under screenshots/.
         std::fs::write(us.join("screenshots/screenshot_100.png"), b"A").unwrap();
         std::fs::write(us.join("screenshots/screenshot_200.png"), b"B").unwrap();
-        // KOA2 stock capture loose in the root + a KUAL log; and one name that
+        // KOA2 stock capture loose in the root + a picker log; and one name that
         // appears in BOTH screenshots/ and the root (must be sent only once).
         std::fs::write(us.join("Screenshot_root.png"), b"C").unwrap();
         std::fs::write(us.join("sidle-native.log"), b"log\n").unwrap();

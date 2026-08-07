@@ -1593,7 +1593,7 @@ fn mtime_millis(meta: &std::fs::Metadata) -> i64 {
 /// content-revision token for a served KFX (`/list.json` `kfx_rev`), the same
 /// role `cover_rev` plays for the cover image: `kfx_sha256` is a FROZEN device
 /// identity (the on-device filename embeds it and can't change), so a reconvert
-/// that rewrites the bytes is invisible in the name — the KUAL client detects
+/// that rewrites the bytes is invisible in the name — the picker detects
 /// it by this mtime bump and re-downloads in place over the same filename.
 pub fn path_mtime_millis(path: &str) -> i64 {
     std::fs::metadata(path)

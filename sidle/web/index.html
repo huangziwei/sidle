@@ -167,7 +167,7 @@
         </div>
       </section>
 
-      <!-- Misc.: screenshots + KUAL logs backed up off the Kindle on Sync
+      <!-- Misc.: screenshots + picker logs backed up off the Kindle on Sync
            (device::misc). Two groups — a screenshot thumbnail grid and a log
            list — both populated by misc.js (window.Misc), which owns its own
            in-app viewers (lightbox / log <pre>). -->
@@ -175,7 +175,7 @@
         <div id="misc-empty" class="empty" hidden>
           <p>Nothing backed up yet.</p>
           <p class="empty-hint">
-            Screenshots and KUAL logs are pulled off your Kindle each time you Sync.
+            Screenshots and picker logs are pulled off your Kindle each time you Sync.
           </p>
         </div>
         <div id="misc-content" hidden>
@@ -200,7 +200,7 @@
            popover (it had outgrown a 380px panel). The pill in the header is the
            entry point; this is a full-width section like #gallery / #notes. Every
            id here is preserved from the popover so the device JS
-           (updateDeviceUI / refreshDeviceList / refreshKualStatus /
+           (updateDeviceUI / refreshDeviceList / refreshDeviceAppStatus /
            refreshServerStatus) populates it unchanged. -->
       <section id="device-page" class="view device-page" aria-label="Kindle" hidden>
         <header class="device-page-header">
@@ -246,19 +246,19 @@
             </div>
           </section>
 
-          <section class="device-card kual-section" id="kual-section" aria-label="KUAL extension" hidden>
-            <header class="kual-section-header">
-              <strong>KUAL extension</strong>
-              <span id="kual-status-label" class="kual-status-label unknown">—</span>
+          <section class="device-card device-app-section" id="device-app-section" aria-label="Kindle app" hidden>
+            <header class="device-app-section-header">
+              <strong>Kindle app</strong>
+              <span id="device-app-status-label" class="device-app-status-label unknown">—</span>
             </header>
-            <div class="kual-actions">
-              <button type="button" id="btn-kual-install" class="btn-link" disabled>
-                Install KUAL
+            <div class="device-app-actions">
+              <button type="button" id="btn-device-app-install" class="btn-link" disabled>
+                Install on Kindle
               </button>
-              <span id="kual-install-progress" class="kual-install-progress" hidden></span>
+              <span id="device-app-install-progress" class="device-app-install-progress" hidden></span>
             </div>
-            <p id="kual-tip" class="kual-tip" hidden></p>
-            <ul id="kual-file-list" class="kual-file-list" aria-label="KUAL files" hidden></ul>
+            <p id="device-app-tip" class="device-app-tip" hidden></p>
+            <ul id="device-app-file-list" class="device-app-file-list" aria-label="Kindle app files" hidden></ul>
           </section>
 
           <section class="device-card server-section" aria-label="LAN server">

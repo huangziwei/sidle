@@ -1206,7 +1206,7 @@ pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, Strin
 }
 
 /// Move the library to `dest`: snapshot + verify the DB there, relocate every
-/// other root entry — `books/`, `notebooks/`, `kual-dist/`, `.server-token` —
+/// other root entry — `books/`, `notebooks/`, `device-dist/`, `.server-token` —
 /// (rename when same-volume, else copy), repoint, delete the old remnants, and
 /// relaunch — nothing is left behind except the tiny `config.json` pointer in the
 /// app state dir. Refuses when a conversion is in flight (its

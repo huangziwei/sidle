@@ -19,9 +19,9 @@ use serde::Serialize;
 
 pub mod annotations;
 pub mod dedrm;
+pub mod deploy;
 pub mod detect;
 pub mod ink;
-pub mod kual;
 pub mod mass_storage;
 pub mod misc;
 pub mod monitor;

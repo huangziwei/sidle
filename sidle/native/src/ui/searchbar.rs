@@ -64,7 +64,7 @@ pub enum Tap {
     /// grid view.
     Sync,
     /// The right-hand button in the **library** view: pull the picker's next
-    /// binary from sidle-server (the LAN self-update that used to be its own KUAL
+    /// binary from sidle-server (the LAN self-update that used to be its own launcher
     /// tile). Drawn only in the grid view; the keyboard overlay leaves the slot
     /// empty, so a tap there is a harmless no-op (its handler acts only on
     /// `Clear`).
