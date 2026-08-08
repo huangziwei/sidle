@@ -30,6 +30,7 @@ use super::anchor::BookIndex;
 use super::db::{self, AnnotationRow};
 use super::ingest::{self, CollectedYjr};
 use super::yjr::{Anchor, Annotation, Kind, Store};
+use bokai::formats::krds::DEFAULT_COLOR;
 
 /// A sidecar ready to write, and what changed about it.
 #[derive(Debug, Clone)]
@@ -38,6 +39,9 @@ pub struct Composed {
     pub bytes: Vec<u8>,
     /// Annotations added that the device didn't already hold.
     pub added: usize,
+    /// Records already in the device's file that were repaired in place — today
+    /// only a highlight missing the colour its device needs to be selectable.
+    pub repaired: usize,
     /// Annotations that had no anchor, or no known slot, and were left behind.
     pub skipped: usize,
 }
@@ -78,12 +82,22 @@ pub fn compose(
     };
 
     let added = store.merge_annotations(&records);
-    if added == 0 {
+    // A colour-capable device needs one on every highlight, including records
+    // already in its file — a colourless one there is stuck, since the thing it
+    // has lost is the ability to be selected and acted on. Repairing it is the
+    // only route back, and it converges: once filled, later syncs find nothing.
+    let repaired = if colors {
+        store.fill_missing_highlight_colors(DEFAULT_COLOR)
+    } else {
+        0
+    };
+    if added == 0 && repaired == 0 {
         return Ok(None);
     }
     Ok(Some(Composed {
         bytes: store.encode(),
         added,
+        repaired,
         skipped,
     }))
 }
@@ -248,18 +262,43 @@ fn to_record(row: &AnnotationRow, index: &BookIndex, colors: bool) -> Option<Ann
         .unwrap_or(0);
 
     Some(Annotation {
+        color: color_for(row, &kind, colors),
         kind,
         anchors: vec![start, end],
         body: row.note_body.clone().filter(|b| !b.is_empty()),
-        // Empty means "no colour recorded" — a monochrome device writes no
-        // colour rather than naming a default, so pass absence through as
-        // absence. And a device that cannot read colours is sent none at all:
-        // to that firmware a colour is not a field it ignores, it is a value
-        // that invalidates the file.
-        color: row.color.clone().filter(|c| colors && !c.is_empty()),
         created_ms: Some(created),
         modified_ms: Some(created),
     })
+}
+
+/// The colour value to write for one record, if any.
+///
+/// The two device families want opposite things, and getting either wrong is
+/// visible on the device:
+///
+/// - **Monochrome**: no colour value, ever. Its parser has no slot for one and
+///   rejects the whole sidecar on meeting it, losing every highlight in the book.
+/// - **Colour-capable**: a colour on every highlight, including one Sidle has
+///   none recorded for. Such a device names a colour on everything it marks, and
+///   a highlight record without one displays but cannot be *selected* — no
+///   toolbar, so it can't be recoloured, annotated or deleted on the device.
+///   Observed on a Colorsoft, 2026-08-09.
+///
+/// A row with no colour is one captured on a monochrome device, where the user
+/// never chose one; [`DEFAULT_COLOR`] is what a Kindle marks with by default, so
+/// it is the least surprising thing to give the passage.
+///
+/// Only highlights. A note carries no colour on a colour-capable device either —
+/// it is read through the highlight it hangs on.
+fn color_for(row: &AnnotationRow, kind: &Kind, colors: bool) -> Option<String> {
+    if !colors {
+        return None;
+    }
+    let recorded = row.color.clone().filter(|c| !c.is_empty());
+    match kind {
+        Kind::Highlight => Some(recorded.unwrap_or_else(|| DEFAULT_COLOR.to_string())),
+        _ => recorded,
+    }
 }
 
 /// An ISO-8601 timestamp as epoch milliseconds, which is how the format stamps
@@ -561,6 +600,112 @@ mod tests {
                 .color
                 .as_deref(),
             Some("orange"),
+        );
+    }
+
+    /// The repair path. A colourless highlight already sitting in the device's
+    /// file is exactly the one the user cannot fix themselves — being unable to
+    /// select it is the whole symptom — so writing future records correctly is
+    /// not enough on its own.
+    #[test]
+    fn a_colourless_highlight_already_on_the_device_is_repaired() {
+        let conn = mem_db();
+        let book = add_book(&conn);
+        add_annotation(&conn, book, "h", "highlight", Some(10), None, None, false);
+
+        // The device's file, holding that same highlight with no colour — the
+        // shape a monochrome-origin push left on a Colorsoft.
+        let mut device = Store::empty();
+        device.merge_annotations(&[Annotation::highlight(
+            Anchor::new(10, 0, 100),
+            Anchor::new(10, 4, 104),
+            1,
+            None,
+        )]);
+        let before = device.encode();
+        assert!(
+            Store::parse(&before).unwrap().annotations()[0]
+                .color
+                .is_none()
+        );
+
+        let out = compose(&conn, book, Some(&before), &index(), true)
+            .unwrap()
+            .expect("a repair is worth a write even with nothing new to add");
+        assert_eq!(out.added, 0, "the span is already there");
+        assert_eq!(out.repaired, 1);
+        assert_eq!(
+            Store::parse(&out.bytes).unwrap().annotations()[0]
+                .color
+                .as_deref(),
+            Some(DEFAULT_COLOR),
+        );
+
+        // Converges: composing again against the repaired file writes nothing.
+        assert!(
+            compose(&conn, book, Some(&out.bytes), &index(), true)
+                .unwrap()
+                .is_none(),
+            "the repair must not re-trigger on every sync",
+        );
+    }
+
+    /// The mirror of the monochrome rule, and the second half of getting colour
+    /// right: a colour-capable device wants a colour on *every* highlight. One
+    /// written without it displays on the device but cannot be selected — no
+    /// toolbar, so it can't be recoloured, annotated or deleted there. A row
+    /// captured on a monochrome Kindle has no colour recorded, and that is
+    /// exactly the row this would strand.
+    #[test]
+    fn a_colour_device_gets_a_colour_on_every_highlight() {
+        let conn = mem_db();
+        let book = add_book(&conn);
+        // No colour recorded — captured on a monochrome device.
+        add_annotation(
+            &conn,
+            book,
+            "plain",
+            "highlight",
+            Some(10),
+            None,
+            None,
+            false,
+        );
+        // A note, which carries no colour on any device.
+        add_annotation(
+            &conn,
+            book,
+            "n",
+            "note",
+            Some(20),
+            None,
+            Some("a thought"),
+            false,
+        );
+
+        let out = compose(&conn, book, None, &index(), true).unwrap().unwrap();
+        let anns = Store::parse(&out.bytes).unwrap().annotations();
+        let hl = anns.iter().find(|a| a.kind == Kind::Highlight).unwrap();
+        assert_eq!(
+            hl.color.as_deref(),
+            Some(DEFAULT_COLOR),
+            "an uncoloured highlight would be inert on the device",
+        );
+        let note = anns.iter().find(|a| a.kind == Kind::Note).unwrap();
+        assert_eq!(note.color, None, "a note is read through its highlight");
+
+        // And the monochrome side is unchanged: still no colour at all, since
+        // one there costs the user the whole file.
+        let mono = compose(&conn, book, None, &index(), false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            Store::parse(&mono.bytes)
+                .unwrap()
+                .annotations()
+                .iter()
+                .all(|a| a.color.is_none()),
+            "a monochrome device must never receive a colour value",
         );
     }
 

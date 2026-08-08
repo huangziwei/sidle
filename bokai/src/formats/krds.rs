@@ -500,6 +500,15 @@ const DEFAULT_TEMPLATE: &str = "0\u{FFFC}0";
 /// absence means "the device had nothing to say", not "yellow".
 pub const COLORS: [&str; 4] = ["yellow", "blue", "pink", "orange"];
 
+/// The colour to give a highlight when writing one for a colour-capable device
+/// and none is recorded.
+///
+/// Such a device names a colour on **every** highlight it makes, and a record
+/// without one is not merely uncoloured — its reader can display the marked text
+/// but cannot select it, so the highlight can't be recoloured, annotated or
+/// deleted on the device. Yellow is what a Kindle marks with by default.
+pub const DEFAULT_COLOR: &str = COLORS[0];
+
 /// Whether a trailing string is a colour rather than a note body.
 ///
 /// The two occupy the same shape — an untyped string after the template — so
@@ -697,6 +706,35 @@ impl Store {
             write_slots(cache, &slots);
         }
         added
+    }
+
+    /// Give every highlight that carries no colour the colour `default`,
+    /// returning how many were changed.
+    ///
+    /// For a device that needs one on each. Such a reader can display a
+    /// colourless highlight but cannot *select* it, so the mark is stuck: no
+    /// toolbar, and no way to recolour, annotate or delete it on the device.
+    /// Repairing the file is the only way out, because the very thing that is
+    /// broken is the ability to act on it.
+    ///
+    /// Deliberately narrow — it only ever fills an absent colour, and never
+    /// touches one already written or any other value in the record.
+    pub fn fill_missing_highlight_colors(&mut self, default: &str) -> usize {
+        let cache = self.cache_object_mut();
+        let mut slots = read_slots(cache);
+        let mut filled = 0;
+        for (_, list) in &mut slots {
+            for ann in list.iter_mut() {
+                if ann.kind == Kind::Highlight && ann.color.is_none() {
+                    ann.color = Some(default.to_string());
+                    filled += 1;
+                }
+            }
+        }
+        if filled > 0 {
+            write_slots(cache, &slots);
+        }
+        filled
     }
 
     /// The annotation cache, created empty if the file has none.
