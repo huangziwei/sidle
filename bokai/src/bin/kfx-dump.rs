@@ -4793,7 +4793,8 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
 
 /// Report position maps from a KFX file
 fn report_positions(data: &[u8]) -> IonResult<()> {
-    use bokai::formats::kfx::ion::IonParser;
+    use bokai::formats::kfx::ion::{IonParser, IonValue};
+    use bokai::formats::kfx::position::PositionFragments;
     use bokai::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
@@ -4844,7 +4845,12 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let position_map_type = KfxSymbol::PositionMap as u32;
-    let position_id_map_type = KfxSymbol::PositionIdMap as u32;
+    // The eid→pid chain has two container shapes — a reflowable `{eid, pid}`
+    // list, or per-section runs replayed from `section_position_id_map` — and
+    // the location scale sits on top of it. Collect the whole family and let
+    // `PositionFragments` resolve it, so this reports the same axis the
+    // importer reads rather than a second partial parse of one shape.
+    let mut chain: Vec<(u32, IonValue)> = Vec::new();
 
     println!("=== Position Maps ===\n");
 
@@ -4865,8 +4871,7 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
         };
 
         let is_position_map = type_idnum == position_map_type;
-        let is_position_id_map = type_idnum == position_id_map_type;
-        if !is_position_map && !is_position_id_map {
+        if !is_position_map && !PositionFragments::wants(type_idnum) {
             continue;
         }
 
@@ -4891,6 +4896,11 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
         let mut parser = IonParser::new(ion_data);
 
         if let Ok(value) = parser.parse() {
+            if !is_position_map {
+                chain.push((type_idnum, value));
+                continue;
+            }
+
             let resolve_sym_inner = |id: u64| -> String {
                 if id < base_symbol_count {
                     KFX_SYMBOL_TABLE
@@ -4913,133 +4923,116 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
                 _ => &value,
             };
 
-            if is_position_map {
-                println!("--- position_map ---");
-                println!("Maps sections to the EIDs they contain.\n");
-                // position_map is a List of section structs: { section_name: symbol, contains: [eid, ...] }
-                if let bokai::formats::kfx::ion::IonValue::List(sections) = inner {
-                    let mut total_refs = 0usize;
-                    for section in sections.iter() {
-                        if let bokai::formats::kfx::ion::IonValue::Struct(sec_fields) = section {
-                            let mut section_name = String::new();
-                            let mut contains: Vec<i64> = Vec::new();
-                            for (sid, sval) in sec_fields {
-                                let sname = resolve_sym_inner(*sid);
-                                match sname.as_str() {
-                                    "section_name" => {
-                                        // section_name is a symbol reference
-                                        if let bokai::formats::kfx::ion::IonValue::Symbol(sym_id) =
-                                            sval
-                                        {
-                                            section_name = resolve_sym_inner(*sym_id);
-                                        }
+            println!("--- position_map ---");
+            println!("Maps sections to the EIDs they contain.\n");
+            // position_map is a List of section structs: { section_name: symbol, contains: [eid, ...] }
+            if let bokai::formats::kfx::ion::IonValue::List(sections) = inner {
+                let mut total_refs = 0usize;
+                for section in sections.iter() {
+                    if let bokai::formats::kfx::ion::IonValue::Struct(sec_fields) = section {
+                        let mut section_name = String::new();
+                        let mut contains: Vec<i64> = Vec::new();
+                        for (sid, sval) in sec_fields {
+                            let sname = resolve_sym_inner(*sid);
+                            match sname.as_str() {
+                                "section_name" => {
+                                    // section_name is a symbol reference
+                                    if let bokai::formats::kfx::ion::IonValue::Symbol(sym_id) = sval
+                                    {
+                                        section_name = resolve_sym_inner(*sym_id);
                                     }
-                                    "contains" => {
-                                        if let bokai::formats::kfx::ion::IonValue::List(refs) = sval
-                                        {
-                                            for r in refs {
-                                                if let bokai::formats::kfx::ion::IonValue::Int(
-                                                    eid,
-                                                ) = r
-                                                {
-                                                    contains.push(*eid);
-                                                }
+                                }
+                                "contains" => {
+                                    if let bokai::formats::kfx::ion::IonValue::List(refs) = sval {
+                                        for r in refs {
+                                            if let bokai::formats::kfx::ion::IonValue::Int(eid) = r
+                                            {
+                                                contains.push(*eid);
                                             }
                                         }
                                     }
-                                    _ => {}
                                 }
-                            }
-                            total_refs += contains.len();
-                            // Show section with EID range
-                            if !contains.is_empty() {
-                                let min_eid = contains.iter().min().copied().unwrap_or(0);
-                                let max_eid = contains.iter().max().copied().unwrap_or(0);
-                                println!(
-                                    "Section {} ({} EIDs: {}..{})",
-                                    section_name,
-                                    contains.len(),
-                                    min_eid,
-                                    max_eid
-                                );
-                                // Show first few and last few EIDs
-                                if contains.len() <= 10 {
-                                    println!("  EIDs: {:?}", contains);
-                                } else {
-                                    println!("  first 5: {:?}", &contains[..5]);
-                                    println!("  last 5:  {:?}", &contains[contains.len() - 5..]);
-                                }
-                                println!();
+                                _ => {}
                             }
                         }
-                    }
-                    println!("Total sections: {}", sections.len());
-                    println!("Total EID refs: {}", total_refs);
-                }
-                println!();
-            } else if is_position_id_map {
-                println!("--- position_id_map ---");
-                println!("Maps cumulative positions (PIDs) to EID + offset.\n");
-                // position_id_map is a List of {pid, eid, offset} structs
-                if let bokai::formats::kfx::ion::IonValue::List(entries) = inner {
-                    let mut mappings: Vec<(i64, i64, i64)> = Vec::new();
-                    for entry in entries {
-                        if let bokai::formats::kfx::ion::IonValue::Struct(fields) = entry {
-                            let mut pid = 0i64;
-                            let mut eid = 0i64;
-                            let mut offset = 0i64;
-                            for (fid, fval) in fields {
-                                let fname = resolve_sym_inner(*fid);
-                                match fname.as_str() {
-                                    "pid" => {
-                                        if let bokai::formats::kfx::ion::IonValue::Int(v) = fval {
-                                            pid = *v;
-                                        }
-                                    }
-                                    "eid" => {
-                                        if let bokai::formats::kfx::ion::IonValue::Int(v) = fval {
-                                            eid = *v;
-                                        }
-                                    }
-                                    "offset" => {
-                                        if let bokai::formats::kfx::ion::IonValue::Int(v) = fval {
-                                            offset = *v;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            mappings.push((pid, eid, offset));
-                        }
-                    }
-
-                    println!("Total entries: {}", mappings.len());
-                    if !mappings.is_empty() {
-                        let min_pid = mappings.iter().map(|(p, _, _)| *p).min().unwrap_or(0);
-                        let max_pid = mappings.iter().map(|(p, _, _)| *p).max().unwrap_or(0);
-                        let min_eid = mappings.iter().map(|(_, e, _)| *e).min().unwrap_or(0);
-                        let max_eid = mappings.iter().map(|(_, e, _)| *e).max().unwrap_or(0);
-                        let nonzero_offsets = mappings.iter().filter(|(_, _, o)| *o != 0).count();
-                        println!("PID range: {}..{}", min_pid, max_pid);
-                        println!("EID range: {}..{}", min_eid, max_eid);
-                        println!("Entries with non-zero offset: {}", nonzero_offsets);
-                        println!();
-                        // Show sample mappings
-                        println!("Sample mappings (first 15):");
-                        for (pid, eid, offset) in mappings.iter().take(15) {
-                            if *offset == 0 {
-                                println!("  pid {:>6} → eid {}", pid, eid);
+                        total_refs += contains.len();
+                        // Show section with EID range
+                        if !contains.is_empty() {
+                            let min_eid = contains.iter().min().copied().unwrap_or(0);
+                            let max_eid = contains.iter().max().copied().unwrap_or(0);
+                            println!(
+                                "Section {} ({} EIDs: {}..{})",
+                                section_name,
+                                contains.len(),
+                                min_eid,
+                                max_eid
+                            );
+                            // Show first few and last few EIDs
+                            if contains.len() <= 10 {
+                                println!("  EIDs: {:?}", contains);
                             } else {
-                                println!("  pid {:>6} → eid {}:{}", pid, eid, offset);
+                                println!("  first 5: {:?}", &contains[..5]);
+                                println!("  last 5:  {:?}", &contains[contains.len() - 5..]);
                             }
-                        }
-                        if mappings.len() > 15 {
-                            println!("  ...");
+                            println!();
                         }
                     }
                 }
-                println!();
+                println!("Total sections: {}", sections.len());
+                println!("Total EID refs: {}", total_refs);
             }
+            println!();
+            println!();
+        }
+    }
+
+    // The eid→pid chain and the location scale on top of it, resolved through the
+    // same assembler the importer uses — so both container shapes report, and a
+    // container that carries the fragments never reports silence.
+    let mut fragments = PositionFragments::default();
+    for (type_id, value) in &chain {
+        fragments.push(*type_id, value);
+    }
+
+    println!("--- position_id_map ---");
+    println!("Maps each EID to its cumulative position (PID).\n");
+    let pid_of = fragments.pid_map();
+    if pid_of.is_empty() {
+        println!("No eid→pid mapping in this container.\n");
+    } else {
+        let mut pairs: Vec<(i64, i64)> = pid_of.into_iter().collect();
+        pairs.sort_unstable();
+        let pid_min = pairs.iter().map(|(_, p)| *p).min().unwrap_or(0);
+        let pid_max = pairs.iter().map(|(_, p)| *p).max().unwrap_or(0);
+        println!("Total entries: {}", pairs.len());
+        println!("EID range: {}..{}", pairs[0].0, pairs[pairs.len() - 1].0);
+        println!("PID range: {pid_min}..{pid_max}\n");
+        println!("Sample mappings (first 15 by EID):");
+        for (eid, pid) in pairs.iter().take(15) {
+            println!("  eid {eid:>6} → pid {pid}");
+        }
+        if pairs.len() > 15 {
+            println!("  ...");
+        }
+        println!();
+    }
+
+    println!("--- location scale ---");
+    match fragments.build() {
+        None => println!("No position map could be assembled.\n"),
+        Some(map) => {
+            println!("Positioned elements: {}", map.len());
+            println!("Axis extent: {}", map.max_position());
+            if map.has_locations() {
+                println!("Locations: {}", map.location_count());
+                println!(
+                    "Last position is Location {}",
+                    map.location_for(map.max_position())
+                );
+            } else {
+                println!("Locations: none in the container (device spacing applies)");
+            }
+            println!();
         }
     }
 
