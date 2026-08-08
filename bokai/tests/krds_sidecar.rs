@@ -71,6 +71,16 @@ fn the_reading_state_sidecar_carries_a_last_read_position() {
     assert!(lpr.eid > 0 && lpr.position > 0);
     assert!(store.position("fpr").is_some());
     assert!(store.position("no.such.record").is_none());
+
+    // The same record's timestamp, which is what orders a library by when each
+    // book was last read. Sanity-bounded rather than pinned: it is a real
+    // device clock reading, and only its magnitude is a contract.
+    let ms = store.position_time("lpr").expect("a last-read timestamp");
+    assert!(
+        (1_400_000_000_000..4_000_000_000_000).contains(&ms),
+        "epoch milliseconds, got {ms}",
+    );
+    assert!(store.position_time("no.such.record").is_none());
 }
 
 /// The push path's core promise: adding a highlight changes the annotation

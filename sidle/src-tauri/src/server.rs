@@ -5,9 +5,14 @@
 //!
 //! start/stop/status mirror what sakabar does, so both can manage one shared
 //! daemon and agree on a single instance:
-//! - **start** health-probes `/` and ADOPTS an already-running instance (sakabar-,
-//!   CLI-, or previously-app-started) instead of double-spawning; otherwise spawns
-//!   the binary detached (new session, stdio → `<root>/server.log`).
+//! - **start** health-probes `/` and REPLACES an already-running instance,
+//!   then spawns the binary detached (new session, stdio → `<root>/server.log`).
+//!   Because the daemon outlives the GUI, the one a launching app finds is
+//!   usually its own predecessor, still running whatever code was on disk when it
+//!   started; replacing it is what keeps "the app and the server were built from
+//!   the same tree" true without anyone having to check. A daemon with no PID
+//!   file is still adopted — there is nothing to signal, and it belongs to
+//!   someone else.
 //! - **stop** SIGTERMs the daemon via its `<root>/server.pid` file (the daemon
 //!   writes it on start, removes it on graceful exit), then reaps the child if we
 //!   were the one who spawned it.
@@ -81,6 +86,23 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
+/// How long to let a replaced daemon drain before giving up and adopting it.
+/// Generous: it finishes in-flight requests first, and a Kindle sync mid-flight
+/// is exactly the request worth waiting for.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Poll until nothing answers on `port`. `true` if it went quiet in time.
+async fn wait_for_port_free(port: u16, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !probe(port).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    !probe(port).await
+}
+
 /// "Up" = the liveness page answers (any HTTP response — mirrors sakabar's
 /// "healthy = any HTTPURLResponse"). A down port fails fast (connection refused),
 /// so this is cheap to poll.
@@ -97,10 +119,18 @@ impl ServerHandle {
         paths.root.join("server.pid")
     }
 
+    /// The daemon's PID, if the file names a plausible one.
+    ///
+    /// **Only strictly positive values.** `kill(2)` reads non-positive PIDs as
+    /// broadcasts: `0` signals every process in the caller's own process group
+    /// and `-1` every process the user may signal. A truncated or corrupt PID
+    /// file must never turn a routine `stop` into that — so anything that isn't
+    /// a real process id is treated as no PID at all.
     fn read_pid(paths: &LibraryPaths) -> Option<i32> {
         std::fs::read_to_string(Self::pid_path(paths))
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
+            .filter(|pid| *pid > 0)
     }
 
     pub async fn status(&self, paths: &LibraryPaths) -> ServerStatus {
@@ -119,10 +149,33 @@ impl ServerHandle {
     pub async fn start(&self, paths: LibraryPaths, port: u16) -> Result<ServerStatus> {
         self.inner.lock().await.port = port;
 
-        // Adopt an already-running daemon — never double-spawn. Mirrors sakabar,
-        // and avoids a port-bind race against a concurrent sakabar/CLI start.
+        // Replace a running daemon rather than adopt it. The server deliberately
+        // outlives the GUI, so the daemon found here is typically one an earlier
+        // app run left behind — and it is running whatever code was on disk when
+        // it started, which after a rebuild is not what this app expects. A
+        // launching app always gets a server built from the same tree it was.
+        //
+        // Unconditional, with no freshness comparison: the version string does
+        // not change between builds of the same release, so there is nothing
+        // cheap to compare that would actually be right. Restarting always is
+        // both simpler and stricter than any test for staleness.
+        //
+        // The exception is a daemon we cannot name — no PID file, so nothing to
+        // signal. That is a server someone else is running; adopt it rather than
+        // fail, exactly as before.
         if probe(port).await {
-            return Ok(self.status(&paths).await);
+            if Self::read_pid(&paths).is_none() {
+                return Ok(self.status(&paths).await);
+            }
+            self.stop(&paths).await;
+            // The daemon drains in-flight requests before releasing the port, so
+            // binding before it lets go would fail the spawn below. If it never
+            // lets go, adopt what is there instead of erroring — a working server
+            // beats a failed launch.
+            if !wait_for_port_free(port, DRAIN_TIMEOUT).await {
+                tracing::warn!("sidle-server did not release :{port}; adopting it");
+                return Ok(self.status(&paths).await);
+            }
         }
 
         // Resolving the binary (and a dev build-on-demand) plus the spawn syscall
@@ -149,6 +202,24 @@ impl ServerHandle {
         Err(anyhow!(
             "sidle-server spawned but never became reachable on :{port} — see server.log"
         ))
+    }
+
+    /// Bring a daemon left running by an earlier app run in line with this one.
+    ///
+    /// The server deliberately survives the GUI closing, so the next launch can
+    /// find one serving code built before the app that just started. Restarting
+    /// it here is what makes "the running server was built from the same tree as
+    /// the app" true by construction, instead of something anyone has to notice
+    /// and fix by toggling the server off and on.
+    ///
+    /// **Only ever restarts; never starts.** The LAN server is opt-in, and a
+    /// user who left it off must not find it switched on because they opened the
+    /// app. Nothing running means nothing to realign.
+    pub async fn realign_on_launch(&self, paths: LibraryPaths, port: u16) -> Result<()> {
+        if !probe(port).await {
+            return Ok(());
+        }
+        self.start(paths, port).await.map(|_| ())
     }
 
     pub async fn stop(&self, paths: &LibraryPaths) {
@@ -178,12 +249,11 @@ impl ServerHandle {
 ///
 /// **Dev** (`debug_assertions`): `<workspace>/target/debug/sidle-server`,
 /// **rebuilt unconditionally before every spawn**. `cargo run -p sidle` recompiles
-/// the `sidle_server` *lib* but not this *binary*, and the supervisor adopts an
-/// already-running server — so without an unconditional rebuild the app silently
-/// spawns/adopts stale server code (a pre-route binary once 404'd
-/// `/sync/annotations`). cargo is incremental, so this is a fast freshness check when
-/// nothing changed. Note: a *running* instance is still adopted, not replaced —
-/// toggle the server off→on to pick up an edit.
+/// the `sidle_server` *lib* but not this *binary*, so without an unconditional
+/// rebuild the app spawns stale server code (a pre-route binary once 404'd
+/// `/sync/annotations`). cargo is incremental, so this is a fast freshness check
+/// when nothing changed. Together with a launch replacing whatever daemon it
+/// finds, this is what keeps the running server and the app the same vintage.
 ///
 /// **Packaged** (release): the daemon rides along as a Tauri sidecar, copied into
 /// `Sidle.app/Contents/MacOS/sidle-server` next to our own binary (build.sh stages
@@ -295,14 +365,25 @@ mod tests {
         assert_eq!(ServerHandle::read_pid(&paths), Some(4321));
         std::fs::write(ServerHandle::pid_path(&paths), "not-a-pid").unwrap();
         assert_eq!(ServerHandle::read_pid(&paths), None);
+
+        // `kill(2)` treats these as broadcasts — 0 hits our own process group,
+        // -1 every process the user owns. A corrupt PID file must not be able to
+        // turn `stop` into that, so they are not PIDs as far as this is concerned.
+        for broadcast in ["0", "-1", "-4321"] {
+            std::fs::write(ServerHandle::pid_path(&paths), broadcast).unwrap();
+            assert_eq!(
+                ServerHandle::read_pid(&paths),
+                None,
+                "{broadcast} is a kill(2) broadcast, not a process id",
+            );
+        }
     }
 
-    /// `start` must ADOPT an already-healthy server (any HTTP response on `/`)
-    /// rather than spawn a duplicate — so an app start finds a sakabar/CLI-started
-    /// daemon. The real spawn path is covered by the live gate (it needs the
-    /// actual binary).
+    /// A healthy server with no PID file is someone else's — there is nothing to
+    /// signal, so it is adopted rather than replaced or duplicated. (The replace
+    /// path needs the real binary and is covered by the live gate.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn start_adopts_already_running_without_spawning() {
+    async fn start_adopts_a_running_server_it_cannot_name() {
         let port = dummy_http_server();
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths {
@@ -316,7 +397,48 @@ mod tests {
         assert_eq!(s.port, Some(port));
         assert!(
             handle.inner.lock().await.child.is_none(),
-            "an already-running server must be adopted, not re-spawned"
+            "a server we cannot signal must be adopted, not re-spawned"
         );
+    }
+
+    /// A daemon that ignores the stop — here, a PID file naming a process that
+    /// isn't the one serving — must not fail the launch or leave the app trying
+    /// to bind an occupied port. Falling back to adoption keeps a working server.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_falls_back_to_adopting_a_daemon_that_will_not_release_the_port() {
+        let port = dummy_http_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        // A PID far above the system maximum: nameable, so a replace is
+        // attempted, but no process to actually receive it — the dummy server
+        // keeps the port and the drain wait runs out.
+        std::fs::write(ServerHandle::pid_path(&paths), i32::MAX.to_string()).unwrap();
+
+        let handle = ServerHandle::default();
+        let s = tokio::time::timeout(
+            DRAIN_TIMEOUT + Duration::from_secs(5),
+            handle.start(paths.clone(), port),
+        )
+        .await
+        .expect("start must give up on the drain, not hang")
+        .unwrap();
+        assert!(s.running, "the surviving server is reported as running");
+        assert!(
+            handle.inner.lock().await.child.is_none(),
+            "never spawn a second server onto an occupied port"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_for_port_free_returns_promptly_on_a_dead_port() {
+        // Bind and drop, so the port is known-free without racing a live server.
+        let port = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert!(wait_for_port_free(port, Duration::from_secs(2)).await);
     }
 }

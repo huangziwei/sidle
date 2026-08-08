@@ -843,11 +843,24 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let tx = conn.unchecked_transaction()?;
+
+    // Duplicates go first, before any survivor is rewritten. A sync that ran
+    // after the code changed but before this migration inserted the new rule's
+    // hash as a fresh row — so the hash a survivor is about to take may still be
+    // held by the very row it absorbs, and `dedup_hash` is UNIQUE. Rewriting
+    // first fails the whole migration, and `open()` migrates: that is a locked
+    // library, not a stray duplicate.
     for row in &rows {
         let survivor = winner[row.new.as_str()];
-        if survivor.id != row.id {
-            // A duplicate: hand its device-presence records to the survivor
-            // before dropping it, so "this Kindle has it" isn't lost.
+        if survivor.id == row.id {
+            continue;
+        }
+        // Hand device presence to the survivor before dropping the row, so
+        // "this Kindle has it" isn't lost. When the duplicate already carries
+        // the final hash, its presence records are already keyed correctly and
+        // must be left where they are — moving them would be a no-op and the
+        // delete that follows would destroy them.
+        if row.old != survivor.new {
             tx.execute(
                 "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
                 params![survivor.new, row.old],
@@ -856,35 +869,48 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
                 "DELETE FROM annotation_device WHERE dedup_hash = ?1",
                 params![row.old],
             )?;
-            tx.execute("DELETE FROM annotations WHERE id = ?1", params![row.id])?;
-        } else if row.old != row.new {
-            tx.execute(
-                "UPDATE annotations SET dedup_hash = ?1 WHERE id = ?2",
-                params![row.new, row.id],
-            )?;
-            tx.execute(
-                "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
-                params![row.new, row.old],
-            )?;
-            tx.execute(
-                "DELETE FROM annotation_device WHERE dedup_hash = ?1",
-                params![row.old],
-            )?;
         }
-        // Tombstones are keyed by hash and outlive their row, so re-key every
-        // old hash we saw — including a duplicate's, whose deletion intent
-        // applies to the passage, not to whichever row happened to carry it.
-        if row.old != row.new {
-            tx.execute(
-                "UPDATE OR IGNORE artifact_deletions SET key = ?1 WHERE kind = ?2 AND key = ?3",
-                params![row.new, DELETION_ANNOTATION, row.old],
-            )?;
-            tx.execute(
-                "DELETE FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
-                params![DELETION_ANNOTATION, row.old],
-            )?;
-        }
+        tx.execute("DELETE FROM annotations WHERE id = ?1", params![row.id])?;
     }
+
+    // Then the survivors. Nothing can collide now: a survivor's new hash is
+    // unique among survivors by construction, and any row that held it as a
+    // stored hash was a duplicate of this same passage and is gone.
+    for row in &rows {
+        if winner[row.new.as_str()].id != row.id || row.old == row.new {
+            continue;
+        }
+        tx.execute(
+            "UPDATE annotations SET dedup_hash = ?1 WHERE id = ?2",
+            params![row.new, row.id],
+        )?;
+        tx.execute(
+            "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
+            params![row.new, row.old],
+        )?;
+        tx.execute(
+            "DELETE FROM annotation_device WHERE dedup_hash = ?1",
+            params![row.old],
+        )?;
+    }
+
+    // Tombstones are keyed by hash and outlive their row, so re-key every old
+    // hash we saw — including a duplicate's, whose deletion intent applies to
+    // the passage, not to whichever row happened to carry it.
+    for row in &rows {
+        if row.old == row.new {
+            continue;
+        }
+        tx.execute(
+            "UPDATE OR IGNORE artifact_deletions SET key = ?1 WHERE kind = ?2 AND key = ?3",
+            params![row.new, DELETION_ANNOTATION, row.old],
+        )?;
+        tx.execute(
+            "DELETE FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
+            params![DELETION_ANNOTATION, row.old],
+        )?;
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -4282,6 +4308,87 @@ mod tests {
             .map(|r| r.dedup_hash.clone())
             .collect();
         assert_eq!(after, before);
+    }
+
+    /// The state a sync leaves behind when it lands *before* the re-key: the new
+    /// rule's hash is already on a row, and that row is newer than the one it
+    /// will collapse into.
+    ///
+    /// Re-keying the survivor in place would then set a hash a live row still
+    /// holds, and `dedup_hash` is UNIQUE — so the duplicates have to be dropped
+    /// before any survivor is rewritten. Getting this wrong fails the whole
+    /// migration, and since `open()` migrates, that locks the user out of their
+    /// library rather than merely leaving a duplicate behind.
+    #[test]
+    fn migrate_v12_rekeys_a_survivor_whose_hash_a_later_duplicate_already_holds() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-mid", "Fragments");
+        fn passage<'a>(book: i64, dedup: &'a str, loc: i64) -> NewAnnotation<'a> {
+            NewAnnotation {
+                dedup_hash: dedup,
+                book_id: Some(book),
+                kind: "highlight",
+                eid_start: Some(902),
+                off_start: Some(0),
+                eid_end: Some(902),
+                off_end: Some(104),
+                loc_start: Some(loc),
+                loc_end: Some(loc),
+                linear_pos: Some(loc),
+                text: "a pertinent question",
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "sidle",
+            }
+        }
+        // What the import path computes today — the hash the re-key will land on.
+        let canonical = crate::library::ingest::annotation_dedup_hash(
+            &crate::library::ingest::book_match_key("Fragments"),
+            "highlight",
+            Some(902),
+            Some(0),
+            Some(902),
+            Some(104),
+            "a pertinent question",
+            "",
+        );
+        // Captured under the old rule, then re-inserted by a sync running the new
+        // code against a library not yet re-keyed.
+        insert_annotation(&conn, &passage(book, "old-rule", 25)).unwrap();
+        insert_annotation(&conn, &passage(book, &canonical, 1586)).unwrap();
+        record_device_book_presence(
+            &conn,
+            "SERIAL1",
+            book,
+            std::slice::from_ref(&canonical),
+            "t",
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        migrate(&conn).expect("re-key must not collide with the row it absorbs");
+
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1, "the pair collapsed");
+        assert_eq!(rows[0].dedup_hash, canonical);
+        assert_eq!(
+            rows[0].loc_start,
+            Some(25),
+            "the earliest row survives, keeping the original capture",
+        );
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM annotation_device WHERE dedup_hash = ?1",
+                params![canonical],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1, "the device's presence record survives intact");
     }
 
     // ── book_ink (handwritten ink on a sideloaded doc) ──────────────────────

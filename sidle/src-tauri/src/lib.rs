@@ -54,6 +54,22 @@ pub fn run() {
         .setup(|app| {
             let state = AppState::bootstrap(app.handle().clone())
                 .map_err(|e| format!("failed to bootstrap app state: {e:#}"))?;
+
+            // Restart a daemon this app's predecessor left behind, so a rebuilt
+            // app never talks to a server built from older code. Backgrounded:
+            // the old daemon drains in-flight requests first, and the window has
+            // no reason to wait on that.
+            let server = state.server.clone();
+            let paths = state.paths.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = server
+                    .realign_on_launch(paths, crate::server::DEFAULT_PORT)
+                    .await
+                {
+                    tracing::warn!(error = %format!("{e:#}"), "could not restart the LAN server");
+                }
+            });
+
             app.manage(state);
             Ok(())
         })

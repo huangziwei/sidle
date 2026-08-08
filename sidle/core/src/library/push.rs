@@ -95,20 +95,25 @@ pub struct Outgoing {
 
 /// Decide what to write back to a device, from the sidecars just collected off it.
 ///
-/// ## The one book that is never written
+/// ## Losing to the device's own flush
 ///
 /// A Kindle keeps the open book's reader state in memory and rewrites both its
-/// sidecars when it resumes after eject — silently overwriting anything put
-/// there while it was mounted. The write isn't rejected, it simply loses, with
-/// no error and no trace. So the book the device read most recently, by its
-/// `.yjf` timestamp, is left alone; every other book is safe because only one
-/// book's state is live at a time.
+/// sidecars when it resumes — silently overwriting anything put there in the
+/// meantime. The write isn't rejected, it simply loses, with no error and no
+/// trace.
 ///
-/// Nothing is lost by skipping it. The push is driven off `yjr_sync`, so the
-/// next connect sees the device's file still missing our annotations and writes
-/// them then — by which time the user has almost certainly opened something
-/// else. A clobbered write is indistinguishable from a successful one at write
-/// time, which is why this is prevention rather than detection.
+/// Every book is still offered, including the one just read. The alternative —
+/// holding back the most recently read book — sounds safer and is in fact the
+/// worst possible rule: the book a user just highlighted in is *always* the one
+/// they read most recently, so the one book the feature exists for would be the
+/// only one never written.
+///
+/// Losing that race is cheap, because nothing about this push is destructive.
+/// Sidle holds the durable copy either way; [`compose`] merges into whatever the
+/// device currently has rather than replacing it; and the write is checkpointed
+/// in `yjr_sync`, so a sync that finds the device's file changed underneath
+/// simply composes and offers it again. The cost of a lost write is one round
+/// trip, and it heals itself without the user knowing there was a race.
 ///
 /// A `.sdr` with neither sidecar is skipped: the filename embeds a
 /// device-specific infix, and guessing it would litter the device with files no
@@ -123,13 +128,9 @@ pub fn plan(
     collected: &[CollectedYjr],
     index_for: &dyn Fn(&db::BookRow) -> BookIndex,
 ) -> Result<Vec<Outgoing>> {
-    let skip = currently_open(collected);
     let mut out = Vec::new();
 
     for item in collected {
-        if Some(item.sdr_name.as_str()) == skip.as_deref() {
-            continue;
-        }
         let Some(file_name) = sidecar_target(item) else {
             continue;
         };
@@ -150,24 +151,6 @@ pub fn plan(
         });
     }
     Ok(out)
-}
-
-/// The `.sdr` whose book the device read most recently — the one whose reader
-/// state is live, and so the one a write would lose to. `None` when no sidecar
-/// carries a timestamp, in which case nothing is skipped.
-fn currently_open(collected: &[CollectedYjr]) -> Option<String> {
-    collected
-        .iter()
-        .filter_map(|item| {
-            let yjf = item.yjf_bytes.as_deref()?;
-            let store = Store::parse(yjf).ok()?;
-            let ms = store
-                .position_time("lpr")
-                .or_else(|| store.position_time("fpr"))?;
-            Some((ms, item.sdr_name.clone()))
-        })
-        .max_by_key(|(ms, _)| *ms)
-        .map(|(_, name)| name)
 }
 
 /// The filename to write. The device's own `.yjr` name when it has one; else
@@ -526,10 +509,12 @@ mod tests {
         }
     }
 
-    /// The device rewrites the open book's sidecars from memory when it resumes,
-    /// so writing to that one book silently loses. It must be left out.
+    /// The book the device read most recently is the one the user was just
+    /// highlighting in, so it is the one that most needs writing. Holding it
+    /// back to dodge the device's flush would disable the feature exactly where
+    /// it is wanted; a lost write is retried on the next sync instead.
     #[test]
-    fn the_book_the_device_read_last_is_never_written() {
+    fn the_book_the_device_read_last_is_written_like_any_other() {
         let conn = mem_db();
         book_with_kfx_sha(&conn, "Older", &format!("aaaaaaaa{}", "0".repeat(56)));
         book_with_kfx_sha(&conn, "Newest", &format!("bbbbbbbb{}", "0".repeat(56)));
@@ -546,11 +531,14 @@ mod tests {
             ),
         ];
         let plan = plan(&conn, &items, &|_| index()).unwrap();
-        assert_eq!(plan.len(), 1, "the most recently read book is held back");
-        assert_eq!(plan[0].sdr_name, "Older.aaaaaaaa.sdr");
-        assert_eq!(plan[0].title, "Older");
-        assert_eq!(plan[0].file_name, "Older.aaaaaaaa1.yjr");
-        assert_eq!(plan[0].added, 1);
+        assert_eq!(plan.len(), 2, "no book is held back on a read timestamp");
+        let newest = plan
+            .iter()
+            .find(|o| o.sdr_name == "Newest.bbbbbbbb.sdr")
+            .expect("the most recently read book is planned too");
+        assert_eq!(newest.title, "Newest");
+        assert_eq!(newest.file_name, "Newest.bbbbbbbb1.yjr");
+        assert_eq!(newest.added, 1);
     }
 
     /// A book the `.sdr` infix can find, carrying one highlight to push.
