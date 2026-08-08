@@ -45,25 +45,34 @@ pub struct Composed {
 /// Compose the sidecar for `book_id` from `current` (the device's file, absent
 /// if the book has none yet).
 ///
+/// `colors` says whether the target device understands highlight colours; see
+/// [`device_uses_colors`]. A device that doesn't must not be sent one.
+///
 /// `Ok(None)` when the device already holds everything — the caller writes
 /// nothing, which keeps a sync that changes nothing from touching the device at
-/// all. Errors only on a DB read; an unreadable sidecar is treated as a book
-/// with no annotations yet, since refusing to push because the device's file is
-/// damaged would strand the library's copy.
+/// all — and also when the device's own file can't be read.
+///
+/// **An unreadable sidecar is never overwritten.** Composing fresh over it would
+/// replace every record the device holds — its own highlights, and the reader
+/// state we have no model for — with just our rows. A file we cannot parse is
+/// one we understand least, which makes it the last thing that should be
+/// rewritten from scratch. The library keeps its copy regardless, so nothing is
+/// stranded by declining; the device's own next write repairs the file.
 pub fn compose(
     conn: &Connection,
     book_id: i64,
     current: Option<&[u8]>,
     index: &BookIndex,
+    colors: bool,
 ) -> Result<Option<Composed>> {
     let rows = db::list_annotations_for_book(conn, book_id)?;
-    let (records, skipped) = to_records(&rows, index);
+    let (records, skipped) = to_records(&rows, index, colors);
 
     let mut store = match current.map(Store::parse) {
         Some(Ok(store)) => store,
         Some(Err(e)) => {
-            eprintln!("[sidle/push] device sidecar unreadable, composing fresh: {e}");
-            Store::empty()
+            eprintln!("[sidle/push] device sidecar unreadable, leaving it alone: {e}");
+            return Ok(None);
         }
         None => Store::empty(),
     };
@@ -128,6 +137,7 @@ pub fn plan(
     collected: &[CollectedYjr],
     index_for: &dyn Fn(&db::BookRow) -> BookIndex,
 ) -> Result<Vec<Outgoing>> {
+    let colors = device_uses_colors(collected);
     let mut out = Vec::new();
 
     for item in collected {
@@ -138,7 +148,8 @@ pub fn plan(
             continue; // not a library book — nothing of ours to contribute
         };
         let index = index_for(&book);
-        let Some(composed) = compose(conn, book.id, item.yjr_bytes.as_deref(), &index)? else {
+        let Some(composed) = compose(conn, book.id, item.yjr_bytes.as_deref(), &index, colors)?
+        else {
             continue; // the device already holds everything
         };
         out.push(Outgoing {
@@ -151,6 +162,32 @@ pub fn plan(
         });
     }
     Ok(out)
+}
+
+/// Whether this device understands highlight colours, judged by whether it has
+/// ever written one.
+///
+/// **A colour sent to a device that has no colours is not ignored — it is fatal
+/// to the whole file.** A monochrome Kindle's highlight record carries five
+/// values and its parser has no slot for a sixth: on meeting one it rejects the
+/// entire sidecar, renames it aside as `.bad_file`, and starts a new empty one.
+/// Every highlight in that book vanishes from the device. Learned by doing it to
+/// a real Oasis, 2026-08-08.
+///
+/// So the test is what the device itself writes, read off the sidecars it just
+/// handed us. A colour-capable Kindle names a colour on *every* highlight it
+/// makes, including the default yellow, so a single coloured record anywhere on
+/// the device settles it. A device holding no highlights at all reads as
+/// monochrome, which is the safe way to be wrong: the colour is dropped and the
+/// highlight still lands, where the opposite mistake costs the user their
+/// annotations.
+fn device_uses_colors(collected: &[CollectedYjr]) -> bool {
+    collected
+        .iter()
+        .filter_map(|item| item.yjr_bytes.as_deref())
+        .filter_map(|bytes| Store::parse(bytes).ok())
+        .flat_map(|store| store.annotations())
+        .any(|ann| ann.color.is_some())
 }
 
 /// The filename to write. The device's own `.yjr` name when it has one; else
@@ -166,11 +203,11 @@ fn sidecar_target(item: &CollectedYjr) -> Option<String> {
 
 /// Turn library rows into sidecar records, dropping what can't be expressed.
 /// Returns the records and how many rows were left behind.
-fn to_records(rows: &[AnnotationRow], index: &BookIndex) -> (Vec<Annotation>, usize) {
+fn to_records(rows: &[AnnotationRow], index: &BookIndex, colors: bool) -> (Vec<Annotation>, usize) {
     let mut out = Vec::with_capacity(rows.len());
     let mut skipped = 0;
     for row in rows {
-        match to_record(row, index) {
+        match to_record(row, index, colors) {
             Some(r) => out.push(r),
             None => skipped += 1,
         }
@@ -178,7 +215,7 @@ fn to_records(rows: &[AnnotationRow], index: &BookIndex) -> (Vec<Annotation>, us
     (out, skipped)
 }
 
-fn to_record(row: &AnnotationRow, index: &BookIndex) -> Option<Annotation> {
+fn to_record(row: &AnnotationRow, index: &BookIndex, colors: bool) -> Option<Annotation> {
     let kind = Kind::parse(&row.kind);
     // Ink is the device's to make; a kind with no known slot would have to be
     // filed by guesswork. Neither belongs in a file we hand to firmware.
@@ -216,8 +253,10 @@ fn to_record(row: &AnnotationRow, index: &BookIndex) -> Option<Annotation> {
         body: row.note_body.clone().filter(|b| !b.is_empty()),
         // Empty means "no colour recorded" — a monochrome device writes no
         // colour rather than naming a default, so pass absence through as
-        // absence.
-        color: row.color.clone().filter(|c| !c.is_empty()),
+        // absence. And a device that cannot read colours is sent none at all:
+        // to that firmware a colour is not a field it ignores, it is a value
+        // that invalidates the file.
+        color: row.color.clone().filter(|c| colors && !c.is_empty()),
         created_ms: Some(created),
         modified_ms: Some(created),
     })
@@ -342,7 +381,7 @@ mod tests {
             false,
         );
 
-        let out = compose(&conn, book, None, &index())
+        let out = compose(&conn, book, None, &index(), true)
             .unwrap()
             .expect("something to write");
         assert_eq!(out.added, 1);
@@ -363,10 +402,10 @@ mod tests {
         let book = add_book(&conn);
         add_annotation(&conn, book, "h1", "highlight", Some(10), None, None, false);
 
-        let first = compose(&conn, book, None, &index()).unwrap().unwrap();
+        let first = compose(&conn, book, None, &index(), true).unwrap().unwrap();
         // Composing again against what we just produced is a no-op.
         assert!(
-            compose(&conn, book, Some(&first.bytes), &index())
+            compose(&conn, book, Some(&first.bytes), &index(), true)
                 .unwrap()
                 .is_none(),
             "a device already holding everything must not be written to",
@@ -395,7 +434,7 @@ mod tests {
         });
         let before = device.encode();
 
-        let out = compose(&conn, book, Some(&before), &index())
+        let out = compose(&conn, book, Some(&before), &index(), true)
             .unwrap()
             .unwrap();
         assert_eq!(out.added, 1, "only ours is new");
@@ -463,23 +502,105 @@ mod tests {
             true,
         );
 
-        let out = compose(&conn, book, None, &index()).unwrap().unwrap();
+        let out = compose(&conn, book, None, &index(), true).unwrap().unwrap();
         assert_eq!(out.added, 1, "only the expressible one");
         assert_eq!(out.skipped, 4);
         assert_eq!(Store::parse(&out.bytes).unwrap().annotations().len(), 1);
     }
 
+    /// A file we can't parse is the one we understand least — replacing it with
+    /// a freshly composed one would throw away every record the device holds.
+    /// The library keeps its copy either way, so declining costs nothing.
     #[test]
-    fn a_damaged_device_sidecar_does_not_strand_the_librarys_copy() {
+    fn a_damaged_device_sidecar_is_left_alone_not_overwritten() {
         let conn = mem_db();
         let book = add_book(&conn);
         add_annotation(&conn, book, "h1", "highlight", Some(10), None, None, false);
 
-        let out = compose(&conn, book, Some(b"this is not a sidecar"), &index())
+        assert!(
+            compose(&conn, book, Some(b"this is not a sidecar"), &index(), true)
+                .unwrap()
+                .is_none(),
+            "a sidecar we cannot read must never be rewritten from scratch",
+        );
+    }
+
+    /// The incident this rule exists for: a colour written to a monochrome
+    /// Kindle is not ignored, it invalidates the entire sidecar. The device
+    /// quarantines the file as `.bad_file` and starts an empty one, so every
+    /// highlight in that book disappears from the device.
+    #[test]
+    fn a_monochrome_device_is_never_sent_a_colour() {
+        let conn = mem_db();
+        let book = add_book(&conn);
+        add_annotation(
+            &conn,
+            book,
+            "h1",
+            "highlight",
+            Some(10),
+            Some("orange"),
+            None,
+            false,
+        );
+
+        let out = compose(&conn, book, None, &index(), false)
             .unwrap()
-            .expect("composes anyway");
-        assert_eq!(out.added, 1);
-        assert_eq!(Store::parse(&out.bytes).unwrap().annotations().len(), 1);
+            .expect("the highlight still goes");
+        assert_eq!(
+            out.added, 1,
+            "the highlight is pushed, only the colour drops"
+        );
+        let anns = Store::parse(&out.bytes).unwrap().annotations();
+        assert_eq!(anns[0].color, None, "no colour value may reach the file");
+
+        // The same row against a colour-capable device keeps it.
+        let colored = compose(&conn, book, None, &index(), true).unwrap().unwrap();
+        assert_eq!(
+            Store::parse(&colored.bytes).unwrap().annotations()[0]
+                .color
+                .as_deref(),
+            Some("orange"),
+        );
+    }
+
+    /// Capability is read off what the device itself wrote. A colour-capable
+    /// Kindle names a colour on every highlight it makes, so one is enough; a
+    /// device with none reads as monochrome, which is the safe way to be wrong.
+    #[test]
+    fn colour_support_is_judged_by_what_the_device_has_written() {
+        let plain = |color: Option<&str>| {
+            let mut store = Store::empty();
+            store.merge_annotations(&[Annotation::highlight(
+                Anchor::new(10, 0, 100),
+                Anchor::new(10, 4, 104),
+                1,
+                color,
+            )]);
+            store.encode()
+        };
+        let with = |bytes: Option<Vec<u8>>| CollectedYjr {
+            sdr_name: "x.sdr".into(),
+            yjr_bytes: bytes,
+            yjf_bytes: None,
+            yjr_name: Some("x.yjr".into()),
+            yjf_name: None,
+        };
+
+        assert!(
+            !device_uses_colors(&[]),
+            "nothing known reads as monochrome"
+        );
+        assert!(!device_uses_colors(&[with(None)]));
+        assert!(!device_uses_colors(&[with(Some(plain(None)))]));
+        assert!(device_uses_colors(&[with(Some(plain(Some("pink"))))]));
+        // One coloured record anywhere on the device settles it.
+        assert!(device_uses_colors(&[
+            with(Some(plain(None))),
+            with(Some(plain(Some("blue")))),
+        ]));
+        // Unparseable files can't testify either way and must not crash it.
+        assert!(!device_uses_colors(&[with(Some(b"junk".to_vec()))]));
     }
 
     /// A `.yjf` whose `lpr` says when the book was last read.
@@ -639,7 +760,7 @@ mod tests {
         );
         add_annotation(&conn, book, "b", "bookmark", Some(20), None, None, false);
 
-        let out = compose(&conn, book, None, &index()).unwrap().unwrap();
+        let out = compose(&conn, book, None, &index(), true).unwrap().unwrap();
         assert_eq!(out.added, 2);
         let anns = Store::parse(&out.bytes).unwrap().annotations();
         let note = anns.iter().find(|a| a.kind == Kind::Note).unwrap();
