@@ -43,9 +43,9 @@ impl BookIndex {
     ///
     /// The two halves are taken independently: an image-only fixed-layout book
     /// carries element positions and no base text at all. Requiring both would
-    /// throw away its positions, and `loc_start` feeds `dedup_hash` — so every
-    /// annotation in such a book would hash differently and re-import as a
-    /// duplicate on the next sync.
+    /// throw away its positions, leaving every annotation in such a book with no
+    /// place on the reading scale — unorderable in the sidebar and unable to
+    /// name a Location.
     pub fn from_kfx(bytes: &[u8]) -> Option<Self> {
         let mut book = Book::from_bytes(bytes, Format::Kfx).ok()?;
         let positions = book.position_map().unwrap_or_default();
@@ -360,9 +360,9 @@ mod tests {
     }
 
     /// An image-only fixed-layout book carries element positions and no base
-    /// text. Its positions must survive: `loc_start` feeds `dedup_hash`, so
-    /// dropping them would make every annotation in such a book hash
-    /// differently and re-import as a duplicate on the next device sync.
+    /// text. Its positions must survive: they are what places an annotation on
+    /// the reading scale, and dropping them would leave every annotation in
+    /// such a book unordered and Location-less.
     #[test]
     fn positions_survive_a_book_with_no_base_text() {
         let idx =

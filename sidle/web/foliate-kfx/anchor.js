@@ -146,10 +146,22 @@ export function baseTextOf(doc, ann) {
   if (si < 0) return "";
   if (ei < si) ei = si;
   let out = "";
+  // [data-eid] elements nest — a heading wrapper holds the same words as the
+  // span inside it, and the source gives the wrapper a position but no text of
+  // its own. `baseString` reads through descendants, so visiting both repeats
+  // the passage verbatim (a two-element heading highlight stored its sentence
+  // twice). Take the outermost element of each nest and skip what it contains.
+  let outer = null;
   for (let i = si; i <= ei; i++) {
     const el = all[i];
+    if (outer && outer.contains(el)) continue;
+    outer = el;
     const text = baseString(el);
     const from = el === startEl ? (ann.off_start ?? 0) : 0;
+    // An end offset that lands inside a skipped descendant is measured in that
+    // descendant's frame, not this one's, so the range runs to the end of the
+    // container instead. Exact only when the two frames coincide, which is the
+    // case whenever the wrapper's text is entirely the nested element's.
     const to = el === endEl ? (ann.off_end ?? 0) + 1 : text.length;
     out += text.slice(from, Math.min(to, text.length));
   }

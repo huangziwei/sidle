@@ -132,6 +132,14 @@ pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<
 /// row). Keyed on book + kind + anchor + text + note body — NO timestamp, NO
 /// device id, NO source — so identity is content + anchor only. The byte sequence
 /// (each part NUL-terminated) is load-bearing; do not reorder.
+///
+/// **The linear position is deliberately absent.** It is *derived* from the
+/// anchor, which is already hashed here, and the two origins measure it on
+/// different scales — a device import stores the raw pid off the anchor handle,
+/// while the reader stores whatever axis its rendering route defined. Salting
+/// identity with it made one passage highlighted both ways hash twice, so a
+/// highlight pushed to a Kindle came back as a second row. The anchor is the
+/// identity; the position is a display coordinate.
 #[allow(clippy::too_many_arguments)]
 pub fn annotation_dedup_hash(
     book_key: &str,
@@ -140,7 +148,6 @@ pub fn annotation_dedup_hash(
     off_start: Option<i64>,
     eid_end: Option<i64>,
     off_end: Option<i64>,
-    loc_start: Option<i64>,
     text: &str,
     note_body: &str,
 ) -> String {
@@ -153,7 +160,6 @@ pub fn annotation_dedup_hash(
         &i(off_start),
         &i(eid_end),
         &i(off_end),
-        &i(loc_start),
         text,
         note_body,
     ] {
@@ -175,7 +181,6 @@ fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
         r.off_start,
         r.eid_end,
         r.off_end,
-        r.loc_start,
         &r.text,
         r.note_body.as_deref().unwrap_or(""),
     )
@@ -746,11 +751,62 @@ mod tests {
             r.off_start,
             r.eid_end,
             r.off_end,
-            r.loc_start,
             &r.text,
             "",
         );
         assert_eq!(device, native);
+    }
+
+    /// The round trip that broke: a highlight made in Sidle, pushed to a Kindle,
+    /// and re-imported comes back with the *device's* linear scale rather than
+    /// the reader's. Identity must not notice — the anchor is the same passage,
+    /// so it is the same annotation and must not land as a second row.
+    #[test]
+    fn identity_ignores_the_linear_scale() {
+        let anchored = |loc: Option<i64>| Resolved {
+            kind: Kind::Highlight,
+            eid_start: Some(902),
+            off_start: Some(0),
+            eid_end: Some(902),
+            off_end: Some(104),
+            loc_start: loc,
+            loc_end: loc,
+            linear_pos: loc,
+            text: "It's a pertinent question".to_string(),
+            note_body: None,
+        };
+        // Reader's synthesized axis vs the device's raw pid, same passage.
+        let from_sidle = dedup_hash("fragments", "highlight", &anchored(Some(25)));
+        let from_device = dedup_hash("fragments", "highlight", &anchored(Some(1586)));
+        assert_eq!(from_sidle, from_device);
+        // A book with no position scale at all still agrees with both.
+        assert_eq!(
+            from_sidle,
+            dedup_hash("fragments", "highlight", &anchored(None))
+        );
+    }
+
+    /// …but the anchor itself is still identity. Moving either endpoint is a
+    /// different passage and must hash differently, or extending a highlight
+    /// would silently overwrite the shorter one.
+    #[test]
+    fn identity_still_tracks_the_anchor() {
+        let span = |off_end: i64| Resolved {
+            kind: Kind::Highlight,
+            eid_start: Some(902),
+            off_start: Some(0),
+            eid_end: Some(902),
+            off_end: Some(off_end),
+            loc_start: Some(1586),
+            loc_end: Some(1586 + off_end),
+            linear_pos: Some(1586),
+            text: "It's a pertinent question".to_string(),
+            note_body: None,
+        };
+        assert_ne!(
+            dedup_hash("fragments", "highlight", &span(104)),
+            dedup_hash("fragments", "highlight", &span(140)),
+        );
     }
 
     #[test]

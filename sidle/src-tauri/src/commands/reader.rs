@@ -931,7 +931,6 @@ pub async fn annotation_create(
         off_start,
         eid_end,
         off_end,
-        loc_start,
         &text,
         note_body.as_deref().unwrap_or(""),
     );
@@ -999,7 +998,6 @@ pub async fn annotation_update(
         row.off_start,
         row.eid_end,
         row.off_end,
-        row.loc_start,
         &row.text,
         note_body.as_deref().unwrap_or(""),
     );

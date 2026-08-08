@@ -148,7 +148,11 @@ pub struct BookRow {
 /// romanization of title/author (see [`super::romaji`]). Backfilled from the raw
 /// fields via kakasi/pinyin; new imports render them yomigana-aware. Drives the
 /// picker's search.
-pub const SCHEMA_VERSION: i64 = 11;
+/// v12: dropped the linear position from annotation identity. `dedup_hash` no
+/// longer salts on `loc_start` (see [`super::ingest::annotation_dedup_hash`]);
+/// existing rows are rehashed and the duplicate pairs that split — one device
+/// copy, one Sidle copy of the same passage — collapse. Data-only.
+pub const SCHEMA_VERSION: i64 = 12;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -297,6 +301,10 @@ fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Res
 /// table) we drop the lot and rebuild fresh from the CREATE block below,
 /// which is the only source of truth.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    // The version this DB arrives at, before anything below touches it. Most
+    // steps are written to be idempotent and re-run harmlessly on every open;
+    // the few that rewrite existing rows in place gate on this instead.
+    let from_version = user_version(conn)?;
     let needs_reset =
         has_column(conn, "books", "source_epub_path")? || has_table(conn, "device_history")?;
     if needs_reset {
@@ -715,10 +723,142 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
+    // v12: re-key annotation identity without the linear position. `dedup_hash`
+    // used to be salted with `loc_start`, which the two origins measure on
+    // different scales — so one passage highlighted both in Sidle and on a
+    // Kindle hashed twice, and a highlight pushed to the device came back as a
+    // duplicate row. See [`super::ingest::annotation_dedup_hash`]. Rehashing
+    // collapses the pairs that split; the `annotation_device` presence records
+    // and the deletion tombstones are re-keyed with them, or they would point at
+    // hashes that no longer exist.
+    //
+    // Version-gated rather than idempotent-on-every-open. The hash is salted
+    // with the book's title, so recomputing unconditionally would also re-key
+    // any annotation whose book had been retitled since import — turning a
+    // metadata edit into a silent re-identification of its highlights. This
+    // migration re-keys the rule change and nothing else.
+    if from_version < 12 {
+        rekey_annotation_hashes(conn)?;
+    }
+
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
+    Ok(())
+}
+
+/// Recompute every annotation's `dedup_hash` under the current identity rule and
+/// carry its dependents across.
+///
+/// Two rows can now collapse onto one hash — that is the point, it means the
+/// same passage was recorded once from the device and once from Sidle's reader.
+/// The earliest row survives, keeping the original capture. Rows sharing a hash
+/// necessarily carry identical text (it is hashed), so there is nothing else to
+/// choose between them.
+///
+/// `annotation_device` (presence per Kindle) and `artifact_deletions` (Sidle-side
+/// tombstones) both key on the hash and are re-keyed here. Missing that would
+/// silently resurrect deleted highlights on the next sync.
+fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
+    struct Row {
+        id: i64,
+        old: String,
+        new: String,
+    }
+
+    let rows: Vec<Row> = {
+        let mut stmt = conn.prepare(
+            r#"SELECT a.id, a.dedup_hash, a.kind, a.eid_start, a.off_start, a.eid_end,
+                      a.off_end, a.text, COALESCE(a.note_body, ''),
+                      COALESCE(b.title, '')
+               FROM annotations a LEFT JOIN books b ON b.id = a.book_id
+               ORDER BY a.id"#,
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            let text: String = r.get(7)?;
+            let title: String = r.get(9)?;
+            // An orphan (no book yet) hashes against an empty key, exactly as
+            // the import path does for a device book not in the library.
+            let book_key = if title.is_empty() {
+                String::new()
+            } else {
+                super::ingest::book_match_key(&title)
+            };
+            let new = super::ingest::annotation_dedup_hash(
+                &book_key,
+                &r.get::<_, String>(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                &text,
+                &r.get::<_, String>(8)?,
+            );
+            Ok(Row {
+                id: r.get(0)?,
+                old: r.get(1)?,
+                new,
+            })
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+
+    if rows.iter().all(|r| r.old == r.new) {
+        return Ok(()); // already re-keyed; nothing to do
+    }
+
+    // One survivor per new hash — the earliest, since `rows` is ordered by id.
+    // Everything later sharing that hash is a duplicate of it.
+    let mut winner: std::collections::HashMap<&str, &Row> = std::collections::HashMap::new();
+    for row in &rows {
+        winner.entry(row.new.as_str()).or_insert(row);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for row in &rows {
+        let survivor = winner[row.new.as_str()];
+        if survivor.id != row.id {
+            // A duplicate: hand its device-presence records to the survivor
+            // before dropping it, so "this Kindle has it" isn't lost.
+            tx.execute(
+                "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
+                params![survivor.new, row.old],
+            )?;
+            tx.execute(
+                "DELETE FROM annotation_device WHERE dedup_hash = ?1",
+                params![row.old],
+            )?;
+            tx.execute("DELETE FROM annotations WHERE id = ?1", params![row.id])?;
+        } else if row.old != row.new {
+            tx.execute(
+                "UPDATE annotations SET dedup_hash = ?1 WHERE id = ?2",
+                params![row.new, row.id],
+            )?;
+            tx.execute(
+                "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
+                params![row.new, row.old],
+            )?;
+            tx.execute(
+                "DELETE FROM annotation_device WHERE dedup_hash = ?1",
+                params![row.old],
+            )?;
+        }
+        // Tombstones are keyed by hash and outlive their row, so re-key every
+        // old hash we saw — including a duplicate's, whose deletion intent
+        // applies to the passage, not to whichever row happened to carry it.
+        if row.old != row.new {
+            tx.execute(
+                "UPDATE OR IGNORE artifact_deletions SET key = ?1 WHERE kind = ?2 AND key = ?3",
+                params![row.new, DELETION_ANNOTATION, row.old],
+            )?;
+            tx.execute(
+                "DELETE FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
+                params![DELETION_ANNOTATION, row.old],
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -3943,6 +4083,111 @@ mod tests {
     fn migrate_stamps_schema_version() {
         let conn = fresh_db();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// One passage, recorded twice under the old rule because the two origins
+    /// measured its linear position differently — the exact shape a Sidle
+    /// highlight came back in after a round trip through a Kindle. v12 re-keys
+    /// both onto the anchor and collapses them.
+    #[test]
+    fn migrate_v12_collapses_annotations_that_differed_only_by_position() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-dup", "Fragments");
+        fn same_passage<'a>(
+            book: i64,
+            dedup: &'a str,
+            loc: i64,
+            text: &'a str,
+        ) -> NewAnnotation<'a> {
+            NewAnnotation {
+                dedup_hash: dedup,
+                book_id: Some(book),
+                kind: "highlight",
+                eid_start: Some(902),
+                off_start: Some(0),
+                eid_end: Some(902),
+                off_end: Some(104),
+                loc_start: Some(loc),
+                loc_end: Some(loc),
+                linear_pos: Some(loc),
+                text,
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "sidle",
+            }
+        }
+        // Same passage, same covered text — only the linear scale differs: the
+        // reader's synthesized axis vs the pid the device wrote.
+        insert_annotation(
+            &conn,
+            &same_passage(book, "old-sidle", 25, "a pertinent question"),
+        )
+        .unwrap();
+        insert_annotation(
+            &conn,
+            &same_passage(book, "old-device", 1586, "a pertinent question"),
+        )
+        .unwrap();
+        // A different passage, to prove the collapse is scoped.
+        let mut other = same_passage(book, "old-other", 99, "elsewhere");
+        other.eid_start = Some(1073);
+        insert_annotation(&conn, &other).unwrap();
+
+        // Presence on a Kindle, recorded against the doomed duplicate's hash.
+        record_device_book_presence(&conn, "SERIAL1", book, &["old-device".to_string()], "t")
+            .unwrap();
+        // A Sidle-side deletion of the other passage, keyed by its old hash.
+        record_deletion(&conn, DELETION_ANNOTATION, "old-other").unwrap();
+
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        migrate(&conn).unwrap();
+
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 2, "the duplicate pair collapsed to one row");
+        let kept = rows.iter().find(|r| r.eid_start == Some(902)).unwrap();
+        assert_eq!(kept.text, "a pertinent question");
+        assert_eq!(
+            kept.loc_start,
+            Some(25),
+            "the earliest row survives, keeping the original capture",
+        );
+        assert_ne!(kept.dedup_hash, "old-sidle", "re-keyed under the new rule");
+
+        // The device's presence record followed the survivor rather than dying
+        // with the row it was attached to.
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM annotation_device WHERE dedup_hash = ?1",
+                params![kept.dedup_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1, "presence re-keyed onto the survivor");
+
+        // The tombstone still names the passage it was written for, so the next
+        // device sync will not resurrect it.
+        let other_row = rows.iter().find(|r| r.eid_start == Some(1073)).unwrap();
+        assert!(
+            is_deleted(&conn, DELETION_ANNOTATION, &other_row.dedup_hash).unwrap(),
+            "tombstone re-keyed with its annotation",
+        );
+        assert!(!is_deleted(&conn, DELETION_ANNOTATION, "old-other").unwrap());
+
+        // Idempotent: a second open finds the version already stamped and the
+        // rows already keyed, and changes nothing.
+        let before: Vec<String> = rows.iter().map(|r| r.dedup_hash.clone()).collect();
+        migrate(&conn).unwrap();
+        let after: Vec<String> = list_annotations_for_book(&conn, book)
+            .unwrap()
+            .iter()
+            .map(|r| r.dedup_hash.clone())
+            .collect();
+        assert_eq!(after, before);
     }
 
     // ── book_ink (handwritten ink on a sideloaded doc) ──────────────────────

@@ -22,7 +22,7 @@ use crate::model::PositionMap;
 #[derive(Debug, Clone, Default)]
 pub struct SourceText {
     text_of: HashMap<i64, String>,
-    /// Elements that have both text and a position, in position order.
+    /// Every element the scale places, in position order — text-bearing or not.
     order: Vec<i64>,
     /// Element → its index in `order`.
     rank: HashMap<i64, usize>,
@@ -32,13 +32,20 @@ impl SourceText {
     /// Index the text against a position scale. Elements the scale does not
     /// place are kept for direct lookup but stay out of the ordered walk —
     /// nothing can be said about where they sit relative to the rest.
+    ///
+    /// The walk spans every *placed* element, including those carrying no text
+    /// of their own. A range endpoint is wherever the source put the boundary,
+    /// and structural elements — section wrappers, a heading whose text lives in
+    /// a child — are placed but textless. Keeping them out would make
+    /// [`Self::extract`] fail for the entire range whenever an endpoint landed
+    /// on one, discarding text sitting in the very next element.
     pub fn new(text_of: HashMap<i64, String>, positions: &PositionMap) -> Self {
-        let mut order: Vec<i64> = text_of
-            .keys()
-            .copied()
-            .filter(|e| positions.position(*e, 0).is_some())
-            .collect();
-        order.sort_by_key(|e| positions.position(*e, 0).unwrap_or(0));
+        let mut order: Vec<i64> = positions.positions().keys().copied().collect();
+        // Keyed `(position, element)`: a HashMap's iteration order is not
+        // stable, and two elements may share a position, so the element id
+        // breaks the tie. Reading order decides what a stored range covers —
+        // it has to come out the same on every run.
+        order.sort_unstable_by_key(|&e| (positions.position(e, 0).unwrap_or(0), e));
         let rank = order.iter().enumerate().map(|(i, &e)| (e, i)).collect();
         Self {
             text_of,
@@ -52,7 +59,8 @@ impl SourceText {
         self.text_of.get(&element).map(String::as_str)
     }
 
-    /// Positioned, text-bearing elements in reading order.
+    /// Every placed element in reading order. Callers wanting only the ones
+    /// with words filter on [`Self::text_of`].
     pub fn reading_order(&self) -> &[i64] {
         &self.order
     }
@@ -62,9 +70,11 @@ impl SourceText {
         self.order.len()
     }
 
-    /// Whether no element was both placed and text-bearing.
+    /// Whether no element carries text — an image-only book, or one whose
+    /// source text was unavailable. The ordered walk may still be populated:
+    /// positions exist independently of text.
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+        self.text_of.values().all(|t| t.is_empty())
     }
 
     /// The text a range spans: a reading-order walk from `start` to `end`
@@ -142,6 +152,52 @@ mod tests {
         assert_eq!(t.extract(30, 0, 30, 5).as_deref(), Some("alpha"));
         assert_eq!(t.extract(30, 4, 20, 2).as_deref(), Some("abe"));
         assert_eq!(t.extract(30, 0, 10, 5).as_deref(), Some("alphabetagamma"));
+    }
+
+    /// A Kindle anchors a highlight at whichever element holds the boundary,
+    /// and that is often a structural one carrying no text of its own. The
+    /// range must still yield the words it spans — this is the shape that lost
+    /// a real highlight's text: start on a placed-but-textless element, end on
+    /// the element actually holding the passage.
+    #[test]
+    fn a_range_starting_on_a_textless_element_still_yields_its_text() {
+        let positions = PositionMap::new(HashMap::from([(500, 0), (501, 1), (502, 103)]), vec![0]);
+        // 500 and 501 are placed section/heading wrappers with no text.
+        let text_of = HashMap::from([(502, "Q: How many voters?".to_string())]);
+        let t = SourceText::new(text_of, &positions);
+
+        assert_eq!(
+            t.reading_order(),
+            &[500, 501, 502],
+            "textless ones are placed"
+        );
+        assert_eq!(
+            t.extract(501, 0, 502, 19).as_deref(),
+            Some("Q: How many voters?"),
+            "a textless start contributes nothing, it does not void the range",
+        );
+        assert_eq!(
+            t.extract(500, 0, 501, 0).as_deref(),
+            Some(""),
+            "a range wholly inside textless elements is empty, not absent",
+        );
+    }
+
+    /// Equal positions must not leave reading order at the mercy of HashMap
+    /// iteration — a range's text would change between runs.
+    #[test]
+    fn ties_on_position_order_by_element_id() {
+        let positions = PositionMap::new(HashMap::from([(7, 5), (3, 5), (9, 5)]), vec![0]);
+        let text_of = HashMap::from([
+            (3, "a".to_string()),
+            (7, "b".to_string()),
+            (9, "c".to_string()),
+        ]);
+        for _ in 0..8 {
+            let t = SourceText::new(text_of.clone(), &positions);
+            assert_eq!(t.reading_order(), &[3, 7, 9]);
+            assert_eq!(t.extract(3, 0, 9, 1).as_deref(), Some("abc"));
+        }
     }
 
     #[test]
