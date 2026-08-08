@@ -154,7 +154,7 @@ pub struct BookRow {
 /// longer salts on `loc_start` (see [`super::ingest::annotation_dedup_hash`]);
 /// existing rows are rehashed and the duplicate pairs that split — one device
 /// copy, one Sidle copy of the same passage — collapse. Data-only.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -746,10 +746,128 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         rekey_annotation_hashes(conn)?;
     }
 
+    // v13: separate the highlight from the note the reader used to fuse into it.
+    if from_version < 13 {
+        split_fused_notes(conn)?;
+    }
+
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
+    Ok(())
+}
+
+/// Split a Sidle-written `note` row back into the highlight and the note it was
+/// fused from.
+///
+/// The reader used to record "highlight with a note" as a single row whose
+/// `kind` flipped to `note`. A Kindle keeps the two apart — a highlight record
+/// and a note record, grouped for display by span — so the fused row matched
+/// neither: the device's *highlight* record for the same passage had nothing to
+/// collide with and re-imported as a second row, and there was nowhere to put a
+/// second note on one highlight.
+///
+/// Each such row becomes a `highlight` (keeping the row, its id, its colour and
+/// its capture time, so nothing referring to it breaks) plus a new `note` row at
+/// the same span carrying the body. The pair then re-keys onto exactly the
+/// hashes the device's two records already compute to, which is what lets the
+/// duplicates collapse.
+///
+/// **Device-origin `note` rows are left alone.** Those are real note records the
+/// Kindle wrote; splitting one would invent a highlight the device never had and
+/// push it back on the next sync.
+fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
+    struct Fused {
+        id: i64,
+        title: String,
+    }
+
+    let rows: Vec<Fused> = {
+        let mut stmt = conn.prepare(
+            r#"SELECT a.id, COALESCE(b.title, '')
+               FROM annotations a LEFT JOIN books b ON b.id = a.book_id
+               WHERE a.kind = 'note' AND a.source = ?1
+                 AND a.note_body IS NOT NULL AND a.note_body <> ''
+               ORDER BY a.id"#,
+        )?;
+        let mapped = stmt.query_map(params![super::ingest::SOURCE_SIDLE], |r| {
+            Ok(Fused {
+                id: r.get(0)?,
+                title: r.get(1)?,
+            })
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for fused in &rows {
+        let Some(row) = get_annotation(&tx, fused.id)? else {
+            continue;
+        };
+        let book_key = if fused.title.is_empty() {
+            String::new()
+        } else {
+            super::ingest::book_match_key(&fused.title)
+        };
+
+        // The fused row already *is* the note, and is already keyed as one — the
+        // hash folds in `kind` and the body, so it needs no rewrite and keeps its
+        // id, its capture time, and anything referring to it. What the old model
+        // never stored is the highlight underneath.
+        let hl_hash = super::ingest::annotation_dedup_hash(
+            &book_key,
+            "highlight",
+            row.eid_start,
+            row.off_start,
+            row.eid_end,
+            row.off_end,
+            &row.text,
+            "",
+        );
+        match get_annotation_by_hash(&tx, &hl_hash)? {
+            // The device already synced that highlight back as its own row —
+            // the very duplicate this split resolves. It becomes the highlight
+            // the note hangs off, and inherits the colour the note was carrying
+            // if it has none of its own.
+            Some(existing) => {
+                if existing.color.as_deref().unwrap_or("").is_empty()
+                    && !row.color.as_deref().unwrap_or("").is_empty()
+                {
+                    tx.execute(
+                        "UPDATE annotations SET color = ?1 WHERE id = ?2",
+                        params![row.color, existing.id],
+                    )?;
+                }
+            }
+            // Nothing to attach to yet: mint the highlight from the note's own
+            // anchors, so the pair matches what a device would hold for it.
+            None => {
+                tx.execute(
+                    r#"INSERT INTO annotations
+                       (dedup_hash, book_id, kind, eid_start, off_start, eid_end, off_end,
+                        loc_start, loc_end, linear_pos, text, note_body, color,
+                        clip_title, clip_author, added_at, added_raw, imported_at, source)
+                       SELECT ?1, book_id, 'highlight', eid_start, off_start, eid_end, off_end,
+                              loc_start, loc_end, linear_pos, text, NULL, color,
+                              clip_title, clip_author, added_at, added_raw, imported_at, source
+                       FROM annotations WHERE id = ?2"#,
+                    params![hl_hash, fused.id],
+                )?;
+            }
+        }
+
+        // A colour describes the marked passage, so it lives on the highlight.
+        // Not part of the hash, so moving it off the note changes no identity.
+        tx.execute(
+            "UPDATE annotations SET color = NULL WHERE id = ?1",
+            params![fused.id],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -4389,6 +4507,203 @@ mod tests {
             )
             .unwrap();
         assert_eq!(present, 1, "the device's presence record survives intact");
+    }
+
+    /// The measured case: a highlight annotated in Sidle was stored as one
+    /// `note` row, so when the device synced its own *highlight* record for the
+    /// same passage back, it landed as a second row. Splitting the fused row
+    /// gives that record something to match, and the pair becomes one highlight
+    /// carrying one note.
+    #[test]
+    fn migrate_v13_splits_a_fused_note_and_absorbs_the_devices_highlight() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-note", "Perfect Insider");
+        let key = crate::library::ingest::book_match_key("Perfect Insider");
+        let hash = |kind: &str, body: &str| {
+            crate::library::ingest::annotation_dedup_hash(
+                &key,
+                kind,
+                Some(918),
+                Some(311),
+                Some(918),
+                Some(327),
+                "この余剰が",
+                body,
+            )
+        };
+        fn span<'a>(
+            book: i64,
+            dedup: &'a str,
+            kind: &'a str,
+            body: Option<&'a str>,
+            source: &'a str,
+        ) -> NewAnnotation<'a> {
+            NewAnnotation {
+                dedup_hash: dedup,
+                book_id: Some(book),
+                kind,
+                eid_start: Some(918),
+                off_start: Some(311),
+                eid_end: Some(918),
+                off_end: Some(327),
+                loc_start: Some(527),
+                loc_end: Some(543),
+                linear_pos: Some(527),
+                text: "この余剰が",
+                note_body: body,
+                color: Some("orange"),
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source,
+            }
+        }
+        // The fused row the old reader wrote...
+        insert_annotation(
+            &conn,
+            &span(book, "fused", "note", Some("test on sidle"), "sidle"),
+        )
+        .unwrap();
+        // ...and the device's highlight record for the same passage, which had
+        // nothing to collide with and so came back as its own row.
+        insert_annotation(
+            &conn,
+            &span(book, &hash("highlight", ""), "highlight", None, "yjr"),
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 12).unwrap();
+        migrate(&conn).unwrap();
+
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 2, "one highlight and one note, not three rows");
+        let hl = rows.iter().find(|r| r.kind == "highlight").unwrap();
+        let note = rows.iter().find(|r| r.kind == "note").unwrap();
+        assert_eq!(hl.dedup_hash, hash("highlight", ""), "matches the device");
+        assert_eq!(hl.note_body, None, "the body moved off the highlight");
+        assert_eq!(
+            note.dedup_hash, "fused",
+            "the note keeps its identity — nothing referring to it breaks",
+        );
+        assert_eq!(note.note_body.as_deref(), Some("test on sidle"));
+        assert_eq!(
+            hl.color.as_deref(),
+            Some("orange"),
+            "the colour describes the passage, so it moves to the highlight",
+        );
+        assert_eq!(note.color, None, "and off the note");
+        assert_eq!(
+            (note.eid_start, note.off_start, note.eid_end, note.off_end),
+            (hl.eid_start, hl.off_start, hl.eid_end, hl.off_end),
+            "the note keeps the highlight's span, which is what a device accepts",
+        );
+        // And they group, which is what the reader renders from.
+        assert_eq!(
+            crate::library::notes::attachments(&rows),
+            vec![(note.id, hl.id)],
+        );
+
+        // Idempotent: re-running finds the work done and changes nothing.
+        migrate(&conn).unwrap();
+        assert_eq!(list_annotations_for_book(&conn, book).unwrap().len(), 2);
+    }
+
+    /// The same split with nothing synced back yet: the highlight has to be
+    /// minted, and the note must survive it. The first version of this migration
+    /// lost the note here — the fused row already carries the note's canonical
+    /// hash, so "insert the note if absent" found the row itself and skipped,
+    /// after which the row was rewritten as the highlight and the body vanished.
+    #[test]
+    fn migrate_v13_mints_the_missing_highlight_without_losing_the_note() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-lone", "Perfect Insider");
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "fused-lone",
+                book_id: Some(book),
+                kind: "note",
+                eid_start: Some(918),
+                off_start: Some(311),
+                eid_end: Some(918),
+                off_end: Some(327),
+                loc_start: Some(527),
+                loc_end: Some(543),
+                linear_pos: Some(527),
+                text: "この余剰が",
+                note_body: Some("test on sidle"),
+                color: Some("orange"),
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "sidle",
+            },
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 12).unwrap();
+        migrate(&conn).unwrap();
+
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 2, "the highlight was minted alongside the note");
+        let note = rows.iter().find(|r| r.kind == "note").unwrap();
+        let hl = rows.iter().find(|r| r.kind == "highlight").unwrap();
+        assert_eq!(
+            note.note_body.as_deref(),
+            Some("test on sidle"),
+            "the note body must survive the split",
+        );
+        assert_eq!(hl.color.as_deref(), Some("orange"));
+        assert_eq!(hl.text, note.text, "same passage");
+        assert_eq!(
+            crate::library::notes::attachments(&rows),
+            vec![(note.id, hl.id)]
+        );
+    }
+
+    /// A `note` row a Kindle wrote is a real note record. Splitting one would
+    /// invent a highlight the device never had and push it back.
+    #[test]
+    fn migrate_v13_leaves_device_written_notes_alone() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-dev-note", "Perfect Insider");
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "device-note",
+                book_id: Some(book),
+                kind: "note",
+                eid_start: Some(918),
+                off_start: Some(327),
+                eid_end: Some(918),
+                off_end: Some(327),
+                loc_start: Some(543),
+                loc_end: Some(543),
+                linear_pos: Some(543),
+                text: "",
+                note_body: Some("Test"),
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "yjr",
+            },
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 12).unwrap();
+        migrate(&conn).unwrap();
+
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1, "no highlight invented");
+        assert_eq!(rows[0].kind, "note");
+        assert_eq!(rows[0].dedup_hash, "device-note", "identity untouched");
     }
 
     // ── book_ink (handwritten ink on a sideloaded doc) ──────────────────────

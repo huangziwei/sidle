@@ -229,7 +229,13 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
     let text = match &ann.kind {
         // Span-bearing kinds: walk the range. The device end offset is
         // inclusive, so pass `off_end + 1` to the half-open extractor.
+        //
+        // Unless the span is a point. A note a Kindle attaches to an existing
+        // highlight collapses to the highlight's end anchor, and covers no text
+        // at all — treating it as a span would quote the single character after
+        // it, which is neither what the user marked nor what the device shows.
         Kind::Highlight | Kind::Note | Kind::Other(_) => match (start, end) {
+            (Some(s), Some(e)) if (s.eid, s.offset) == (e.eid, e.offset) => String::new(),
             (Some(s), Some(e)) => idx
                 .extract(s.eid, s.offset as usize, e.eid, e.offset as usize + 1)
                 .unwrap_or_default(),
@@ -309,6 +315,33 @@ mod tests {
         assert_eq!(r.linear_pos, Some(503));
         assert!(r.note_body.is_none());
         assert!(r.has_text());
+    }
+
+    /// A note a Kindle attaches to an existing highlight is a zero-length point
+    /// on the highlight's end anchor. It quotes nothing — the words are the
+    /// highlight's, and this record only carries the body.
+    #[test]
+    fn a_point_note_quotes_no_text() {
+        let idx = index();
+        let r = resolve(
+            &Annotation {
+                kind: Kind::Note,
+                anchors: vec![handle(20, 3, 509), handle(20, 3, 509)],
+                body: Some("Test".to_string()),
+                color: None,
+                created_ms: None,
+                modified_ms: None,
+            },
+            &idx,
+        );
+        assert_eq!(r.text, "", "a point covers no text, not one character");
+        assert_eq!(r.note_body.as_deref(), Some("Test"));
+        assert_eq!(r.eid_start, Some(20));
+        assert_eq!(
+            r.off_start,
+            Some(3),
+            "the anchor is kept exactly as written"
+        );
     }
 
     #[test]

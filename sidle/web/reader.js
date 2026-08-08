@@ -50,8 +50,10 @@ let searchComposing = false; // true between compositionstart/end (JP IME)
 let lastPaintedCount = 0; // count from last search-paint, so `clearSearchPaint` knows how many keys to remove
 let selectedSearchIndex = -1; // -1 = none picked yet; otherwise the index of the row the user last clicked
 let pendingSelection = null; // { doc, anchor, text } for the live text selection — fuels createAnnotation
-let editingAnn = null; // the native annotation open in the editable note popover (null = read-only / closed)
+let editingAnn = null; // the annotation open in the editable note popover (null = closed)
 let editorColor = "yellow"; // the color currently chosen in the open editor
+let editorNotes = []; // every note attached to `editingAnn` — a highlight may carry several
+let editingNote = null; // which of them the textarea is editing (null = writing a new one)
 const DEFAULT_HL_COLOR = "yellow"; // a swatch-less highlight (e.g. from "Note") uses this
 
 function readSavedProgressMode() {
@@ -508,6 +510,10 @@ function paintAnnotations(doc, overlayer) {
   const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
     if (ann.hidden) continue; // hidden in Sidle — kept in the backup, not painted
+    // A note attached to a highlight is drawn by that highlight. Painting it too
+    // would double-ink the same words, and a Kindle's note covers no text at all
+    // (it anchors to a point), so there would be nothing to draw.
+    if (ann.attached_to != null) continue;
     if (ann.kind === "bookmark") {
       // PDF mode draws bookmarks as a page-corner marker (paintPdfPageBookmarks),
       // matching the Kindle's top-right corner ribbon — consistent whether the
@@ -689,9 +695,10 @@ function onDocClick(e, doc) {
   const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
   const px = fr.left + e.clientX;
   const py = fr.top + e.clientY;
-  if (ann.source === "sidle") openAnnotationEditor(ann, px, py);
-  else if (ann.note_body) showReadOnlyNote(ann, px, py);
-  else hideNotePopover();
+  // Every annotation is editable, whatever wrote it. A note lives in its own
+  // row, so annotating an imported highlight never rewrites the highlight — its
+  // content hash stays put and the device's record keeps matching it.
+  openAnnotationEditor(ann, px, py);
 }
 
 // Classify an in-content href as external (handed to the OS browser) vs internal
@@ -728,20 +735,6 @@ function positionPopover(pop, px, py) {
   pop.style.top = `${Math.max(8, top)}px`;
 }
 
-// Read-only popover for an IMPORTED note: quote + body, no controls.
-function showReadOnlyNote(ann, px, py) {
-  const pop = $("#reader-note-popover");
-  if (!pop) return;
-  editingAnn = null;
-  pop.classList.remove("editing");
-  $("#reader-note-quote").textContent = ann.text || "";
-  $("#reader-note-body").textContent = ann.note_body || "";
-  $("#reader-note-body").hidden = false;
-  $("#reader-note-edit").hidden = true;
-  $("#reader-note-edit-controls").hidden = true;
-  positionPopover(pop, px, py);
-}
-
 function renderEditorColors() {
   renderColorSwatches($("#reader-note-colors"), editorColor, setEditorColor);
 }
@@ -750,38 +743,118 @@ function setEditorColor(name) {
   renderEditorColors();
 }
 
-// Editor for a NATIVE annotation: quote + textarea + color swatches + Save/Delete.
+// The notes attached to a highlight, in the order they were made. A Kindle lets
+// one highlight carry several, so this is a list, not a field.
+function notesFor(ann) {
+  return annotations.filter((a) => a.attached_to === ann.id);
+}
+
+// Editor for an annotation: quote + textarea + color swatches + Save/Delete.
 // `px`/`py` are already in the parent document's coordinate space.
+//
+// Clicking a note that belongs to a highlight edits it through its highlight,
+// so the popover always shows the marked passage rather than a bare anchor —
+// the note a Kindle writes covers no text of its own.
 function openAnnotationEditor(ann, px, py) {
   const pop = $("#reader-note-popover");
   if (!pop) return;
+  if (ann.attached_to != null) {
+    const parent = annotations.find((a) => a.id === ann.attached_to);
+    if (parent) ann = parent;
+  }
   editingAnn = ann;
+  editorNotes = notesFor(ann);
+  // A note row carries no colour of its own; an unattached one edits in place.
+  editingNote = ann.kind === "note" ? ann : editorNotes[0] || null;
   editorColor = ann.color && COLORS[ann.color] ? ann.color : DEFAULT_HL_COLOR;
   pop.classList.add("editing");
   $("#reader-note-quote").textContent = ann.text || "";
-  $("#reader-note-body").hidden = true;
   const ta = $("#reader-note-edit");
   ta.hidden = false;
-  ta.value = ann.note_body || "";
+  ta.value = editingNote?.note_body || "";
   $("#reader-note-edit-controls").hidden = false;
+  renderEditorNotes();
   renderEditorColors();
   positionPopover(pop, px, py);
   ta.focus();
 }
 
+// The other notes on this highlight, as a switchable list. Only rendered when
+// there is more than one, so the ordinary single-note case looks unchanged.
+function renderEditorNotes() {
+  const box = $("#reader-note-others");
+  if (!box) return;
+  box.replaceChildren();
+  const others = editorNotes.filter((n) => n.id !== editingNote?.id);
+  box.hidden = others.length === 0;
+  if (box.hidden) return;
+  for (const note of others) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "reader-note-chip";
+    b.textContent = note.note_body || "";
+    b.title = note.note_body || "";
+    b.addEventListener("click", () => {
+      editingNote = note;
+      const ta = $("#reader-note-edit");
+      if (ta) ta.value = note.note_body || "";
+      renderEditorNotes();
+      ta?.focus();
+    });
+    box.append(b);
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "reader-note-chip reader-note-chip-add";
+  add.textContent = "+ note";
+  add.addEventListener("click", () => {
+    editingNote = null;
+    const ta = $("#reader-note-edit");
+    if (ta) ta.value = "";
+    renderEditorNotes();
+    ta?.focus();
+  });
+  box.append(add);
+}
+
 // Persist the editor: a non-empty body promotes a highlight to a note (and an
 // emptied note demotes back to a highlight) — the backend recomputes the hash.
+// Persist the editor. The colour belongs to the annotation; the body belongs to
+// a note row of its own, written at the annotation's span. Nothing here rewrites
+// the annotation's kind — a highlight stays a highlight for its whole life, so
+// its identity never moves and a device record for it keeps matching.
 async function saveEditor() {
   if (!editingAnn || bookId == null) return;
   const body = ($("#reader-note-edit")?.value || "").trim();
-  const kind = editingAnn.kind === "bookmark" ? "bookmark" : body ? "note" : "highlight";
+  const ann = editingAnn;
+  const note = editingNote;
   try {
-    await window.api.invoke("annotation_update", {
-      id: editingAnn.id,
-      kind,
-      noteBody: body || null,
-      color: editorColor,
-    });
+    // A note row edited directly (one that belongs to no highlight) has its own
+    // body; anything else attaches its note to the annotation.
+    if (ann.kind === "note") {
+      await window.api.invoke("annotation_update", {
+        id: ann.id,
+        kind: "note",
+        noteBody: body || null,
+        color: ann.color ?? null,
+      });
+    } else {
+      if (ann.color !== editorColor) {
+        await window.api.invoke("annotation_update", {
+          id: ann.id,
+          kind: ann.kind,
+          noteBody: null,
+          color: editorColor,
+        });
+      }
+      if (body || note) {
+        await window.api.invoke("annotation_set_note", {
+          highlightId: ann.id,
+          noteId: note?.id ?? null,
+          body: body || null,
+        });
+      }
+    }
   } catch (err) {
     toast(`Couldn't save: ${err}`, true);
     return;
@@ -790,12 +863,14 @@ async function saveEditor() {
   await reloadAnnotations(bookId);
 }
 
+// Delete the annotation, and with it any notes hanging off it — a note whose
+// highlight is gone has no passage left to be about.
 async function deleteEditor() {
   if (!editingAnn || bookId == null) return;
-  const id = editingAnn.id;
+  const ids = [editingAnn.id, ...notesFor(editingAnn).map((n) => n.id)];
   hideNotePopover();
   try {
-    await window.api.invoke("annotation_delete", { id });
+    for (const id of ids) await window.api.invoke("annotation_delete", { id });
   } catch (err) {
     toast(`Couldn't delete: ${err}`, true);
     return;
@@ -810,6 +885,8 @@ function hideNotePopover() {
     p.classList.remove("editing");
   }
   editingAnn = null;
+  editingNote = null;
+  editorNotes = [];
 }
 
 // --- bookmark: toggle on the current page (top-of-page eid) ---
@@ -1028,10 +1105,14 @@ function annotationRow(ann) {
   quote.className = "ann-quote";
   quote.textContent = ann.text || (ann.kind === "bookmark" ? "Bookmark" : "");
   body.appendChild(quote);
-  if (ann.note_body) {
+  // The row's own body, then every note attached to it. A highlight may carry
+  // several — one written here, others added on the Kindle — and they belong
+  // under the passage they annotate, not as separate entries in the list.
+  for (const text of [ann.note_body, ...notesFor(ann).map((n) => n.note_body)]) {
+    if (!text) continue;
     const note = document.createElement("div");
     note.className = "ann-note";
-    note.textContent = ann.note_body;
+    note.textContent = text;
     body.appendChild(note);
   }
 
@@ -1173,7 +1254,10 @@ function renderAnnotationsPanel() {
   const hiddenCount =
     annotations.filter((a) => a.hidden).length + inks.filter((k) => k.hidden).length;
   // Hidden items stay in the backup but are listed only when "Show hidden" is on.
-  const annShown = showHidden ? annotations : annotations.filter((a) => !a.hidden);
+  // A note attached to a highlight is listed inside that highlight's row, so it
+  // is not also an entry of its own.
+  const listable = annotations.filter((a) => a.attached_to == null);
+  const annShown = showHidden ? listable : listable.filter((a) => !a.hidden);
   const inkShown = showHidden ? inks : inks.filter((k) => !k.hidden);
   // Text annotations + handwritten-ink pages share one list, sorted by reading
   // position (both carry a device linear position).

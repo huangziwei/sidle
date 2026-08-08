@@ -14,6 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::library::db::{self, AnnotationRow};
 use crate::library::ingest;
+use crate::library::notes;
 use crate::state::AppState;
 
 /// One spine document in reading order. `html` carries `data-eid` attributes —
@@ -706,6 +707,13 @@ pub struct AnnotationDto {
     pub source: String,
     /// Reversible "hidden from the reader" flag (kept in the backup).
     pub hidden: bool,
+    /// For a `note`, the id of the highlight it annotates, when one encloses it.
+    ///
+    /// A Kindle stores a highlight and its note as two records and groups them
+    /// by span; Sidle does the same, so the reader paints the highlight and
+    /// shows the note against it rather than painting the note as its own mark.
+    /// `None` on a highlight, and on a note that stands alone.
+    pub attached_to: Option<i64>,
 }
 
 impl From<AnnotationRow> for AnnotationDto {
@@ -724,8 +732,26 @@ impl From<AnnotationRow> for AnnotationDto {
             color: a.color,
             source: a.source,
             hidden: a.hidden,
+            attached_to: None,
         }
     }
+}
+
+/// Annotation rows as the reader wants them: each note carrying the id of the
+/// highlight it annotates. Shared by every path that hands annotations to a UI,
+/// so the grouping is decided once.
+fn with_attachments(rows: Vec<db::AnnotationRow>) -> Vec<AnnotationDto> {
+    let attached: std::collections::HashMap<i64, i64> =
+        notes::attachments(&rows).into_iter().collect();
+    rows.into_iter()
+        .map(|row| {
+            let parent = attached.get(&row.id).copied();
+            AnnotationDto {
+                attached_to: parent,
+                ..AnnotationDto::from(row)
+            }
+        })
+        .collect()
 }
 
 /// List a book's stored annotations, ordered by reading position. The reader
@@ -737,7 +763,7 @@ pub async fn annotations_for_book(
 ) -> Result<Vec<AnnotationDto>, String> {
     let conn = state.db.lock().await;
     let rows = db::list_annotations_for_book(&conn, book_id).map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().map(AnnotationDto::from).collect())
+    Ok(with_attachments(rows))
 }
 
 /// One stored last-read position. `source` = `"sidle"` (the reader's own) or
@@ -1014,6 +1040,90 @@ pub async fn annotation_update(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "annotation missing after update".to_string())?;
     Ok(AnnotationDto::from(updated))
+}
+
+/// Write the note attached to `highlight_id`, creating, replacing or removing it.
+///
+/// The note is a row of its own at the highlight's span — the shape a device
+/// accepts and the one it hands back — so the highlight is never rewritten and
+/// its identity never moves. That is what makes this safe on an imported
+/// highlight: editing the highlight row itself would change its content hash,
+/// and the device's unchanged record would re-import as a duplicate on the next
+/// sync.
+///
+/// An empty `body` removes the note. `note_id` names the note being replaced
+/// when the highlight already carries one; leaving it `None` adds another, which
+/// is how a highlight comes to hold several — exactly as a Kindle allows.
+#[tauri::command]
+pub async fn annotation_set_note(
+    state: State<'_, AppState>,
+    highlight_id: i64,
+    note_id: Option<i64>,
+    body: Option<String>,
+) -> Result<Vec<AnnotationDto>, String> {
+    let conn = state.db.lock().await;
+    let hl = db::get_annotation(&conn, highlight_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no annotation with id {highlight_id}"))?;
+    let book_id = hl
+        .book_id
+        .ok_or_else(|| "annotation is not linked to a book".to_string())?;
+
+    if let Some(id) = note_id {
+        db::delete_annotation(&conn, id).map_err(|e| e.to_string())?;
+    }
+
+    let body = body.unwrap_or_default();
+    let body = body.trim();
+    if !body.is_empty() {
+        let title = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .map(|b| b.title)
+            .unwrap_or_default();
+        let book_key = ingest::book_match_key(&title);
+        let hash = ingest::annotation_dedup_hash(
+            &book_key,
+            "note",
+            hl.eid_start,
+            hl.off_start,
+            hl.eid_end,
+            hl.off_end,
+            &hl.text,
+            body,
+        );
+        let now = db::now_iso();
+        // Writing a note is explicit intent; clear any prior deletion of this
+        // exact note so a device sync won't suppress it.
+        db::clear_deletion(&conn, db::DELETION_ANNOTATION, &hash).map_err(|e| e.to_string())?;
+        db::insert_annotation(
+            &conn,
+            &db::NewAnnotation {
+                dedup_hash: &hash,
+                book_id: Some(book_id),
+                kind: "note",
+                eid_start: hl.eid_start,
+                off_start: hl.off_start,
+                eid_end: hl.eid_end,
+                off_end: hl.off_end,
+                loc_start: hl.loc_start,
+                loc_end: hl.loc_end,
+                linear_pos: hl.linear_pos,
+                text: &hl.text,
+                note_body: Some(body),
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: Some(&now),
+                added_raw: None,
+                imported_at: &now,
+                source: ingest::SOURCE_SIDLE,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let rows = db::list_annotations_for_book(&conn, book_id).map_err(|e| e.to_string())?;
+    Ok(with_attachments(rows))
 }
 
 /// Delete a native annotation by id.

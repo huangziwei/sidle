@@ -149,6 +149,7 @@ pub fn run() {
             commands::reader::annotation_create,
             commands::reader::annotation_update,
             commands::reader::annotation_delete,
+            commands::reader::annotation_set_note,
             commands::reader::book_ink_for_book,
             commands::reader::book_ink_delete,
             commands::reader::annotation_set_hidden,

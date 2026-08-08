@@ -3225,12 +3225,37 @@ kbd {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.reader-note-body {
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
+
+/* The other notes on this highlight — a Kindle lets one carry several, so they
+   sit as switchable chips above the editor rather than a single hidden field. */
+.reader-note-others {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
 }
-.reader-note-body[hidden] { display: none; }
+
+.reader-note-chip {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--reader-border, #d8d8d8);
+  background: transparent;
+  color: var(--reader-muted);
+  cursor: pointer;
+}
+
+.reader-note-chip:hover {
+  color: var(--reader-fg, inherit);
+}
+
+.reader-note-chip-add {
+  border-style: dashed;
+}
 
 /* Native annotations (T0): the page-bookmark toggle, the on-selection toolbar,
    and the editable note popover. All tinted with the --reader-* chrome vars so
