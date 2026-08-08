@@ -443,6 +443,20 @@ struct SyncSdr {
     yjr_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     yjf_b64: Option<String>,
+    /// The sidecars' own filenames, so the server can address a write-back
+    /// without inventing the device-specific infix they carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yjr_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yjf_name: Option<String>,
+}
+
+/// A sidecar the desktop wants written here, from the sync response.
+#[derive(Debug, Deserialize)]
+pub struct OutgoingSdr {
+    sdr_name: String,
+    file_name: String,
+    yjr_b64: String,
 }
 
 /// The server's import report, the subset the picker surfaces in a toast. serde
@@ -465,6 +479,14 @@ pub struct SyncReport {
     /// `#[serde(default)]`), so it survives even the "nothing to sync" early exit.
     #[serde(default)]
     pub pruned: usize,
+    /// Sidecars the desktop wants written onto this device — highlights made in
+    /// Sidle's reader coming the other way. Consumed by [`push_annotations`] and
+    /// replaced by [`Self::written`].
+    #[serde(default)]
+    pub write: Vec<OutgoingSdr>,
+    /// How many of those actually landed. Set locally, like `pruned`.
+    #[serde(default)]
+    pub written: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -489,6 +511,9 @@ impl SyncReport {
         }
         if self.pruned > 0 {
             parts.push(format!("{} stale removed", self.pruned));
+        }
+        if self.written > 0 {
+            parts.push(format!("{} sent here", self.written));
         }
         let mut s = if parts.is_empty() {
             "annotation sync: nothing new".to_string()
@@ -566,6 +591,11 @@ pub fn push_annotations(
     // `pruned` is device-side hygiene, not in the server's report — fold it in
     // so the sync toast can surface "N stale removed".
     report.pruned = pruned;
+    // The other direction: write the sidecars the desktop composed for us. This
+    // device owns the filesystem, so it does the writing; the desktop only
+    // decided what should be in them.
+    report.written = write_incoming_sidecars(sidle_dir, &report.write);
+    report.write = Vec::new();
     Ok(report)
 }
 
@@ -580,6 +610,41 @@ pub fn push_annotations(
 /// reason stale reconvert copies pile up — 裸命 had six). Those are removed and
 /// not synced: only a live book's reading-state belongs in the library. A live
 /// `.sdr` with neither sidecar (a pagination cache) is kept but not pushed.
+/// Write the sidecars the desktop sent back, returning how many landed.
+///
+/// Best-effort per file: a sidecar that fails to write is logged and skipped,
+/// never fatal — the pull half of this sync already succeeded, and the desktop
+/// will offer the same file again next time.
+///
+/// Only ever writes into an existing `.sdr`; it never creates one. A directory
+/// that isn't there means the device hasn't opened that book, and a sidecar
+/// sitting in a folder the reader never made is a file nothing will read.
+fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize {
+    let mut written = 0;
+    for item in outgoing {
+        let dir = sidle_dir.join(&item.sdr_name);
+        if !dir.is_dir() {
+            continue;
+        }
+        let bytes = match BASE64.decode(&item.yjr_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "[sidle] sync: bad sidecar payload for {}: {e}",
+                    item.sdr_name
+                );
+                continue;
+            }
+        };
+        let path = dir.join(&item.file_name);
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => written += 1,
+            Err(e) => eprintln!("[sidle] sync: write {} failed: {e}", path.display()),
+        }
+    }
+    written
+}
+
 fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
     let mut sdrs = Vec::new();
     let mut pruned = 0usize;
@@ -609,8 +674,10 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
                 .to_string();
             sdrs.push(SyncSdr {
                 sdr_name,
-                yjr_b64: yjr.map(|b| BASE64.encode(b)),
-                yjf_b64: yjf.map(|b| BASE64.encode(b)),
+                yjr_b64: yjr.as_ref().map(|(_, b)| BASE64.encode(b)),
+                yjf_b64: yjf.as_ref().map(|(_, b)| BASE64.encode(b)),
+                yjr_name: yjr.map(|(n, _)| n),
+                yjf_name: yjf.map(|(n, _)| n),
             });
         }
     }
@@ -620,19 +687,23 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
 
 /// The first file in `sdr_dir` whose name ends with `suffix` (e.g. `.yjr`),
 /// read into bytes — matching `find_sidecar`'s `ends_with` rule in sidle-core.
-fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<Vec<u8>>> {
+/// A sidecar's bytes *and* its filename. The name matters as much as the bytes:
+/// writing one back has to reuse it exactly, since it carries a device-specific
+/// infix no host can derive.
+fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)>> {
     let Ok(entries) = std::fs::read_dir(sdr_dir) else {
         return Ok(None);
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_match = path
+        let name = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(suffix));
-        if is_match {
+            .filter(|n| n.ends_with(suffix))
+            .map(str::to_string);
+        if let Some(name) = name {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            return Ok(Some(bytes));
+            return Ok(Some((name, bytes)));
         }
     }
     Ok(None)

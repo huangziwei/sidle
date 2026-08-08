@@ -109,7 +109,7 @@ pub fn import_ink(
     // container id (a note's inline body) → the host anchor that names it.
     let note_by_container: HashMap<&str, &Annotation> = notes
         .iter()
-        .filter_map(|n| n.note_body.as_deref().map(|body| (body, n)))
+        .filter_map(|n| n.body.as_deref().map(|body| (body, n)))
         .collect();
 
     let mut stats = InkImportStats::default();
@@ -127,8 +127,8 @@ pub fn import_ink(
             continue;
         }
         let anchor = note_by_container.get(cid).and_then(|n| n.start());
-        let host_eid = anchor.map(|h| h.eid as i64);
-        let host_linear = anchor.map(|h| h.linear as i64);
+        let host_eid = anchor.map(|h| h.eid);
+        let host_linear = anchor.map(|h| h.position);
         let host_page = host_eid
             .and_then(|e| eid_page.get(&e).copied())
             .map(|p| p as i64);

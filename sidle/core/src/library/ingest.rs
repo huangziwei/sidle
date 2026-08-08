@@ -246,7 +246,7 @@ pub fn import_yjr(
             linear_pos: r.linear_pos,
             text: &r.text,
             note_body: r.note_body.as_deref(),
-            color: None,
+            color: r.color.as_deref(),
             clip_title,
             clip_author,
             added_at: None,
@@ -378,6 +378,11 @@ pub struct DeviceImportReport {
     /// USB root → `device-backup/<serial>/logs/`). App-populated, like
     /// [`misc_screenshots`](Self::misc_screenshots).
     pub misc_logs: usize,
+    /// Books whose sidecar was written back with annotations made in Sidle.
+    /// App-populated (the write needs a transport); 0 on the pure-core paths.
+    pub pushed_books: usize,
+    /// Annotations added to device sidecars across those books.
+    pub pushed_annotations: usize,
 }
 
 /// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
@@ -389,12 +394,43 @@ pub struct DeviceImportReport {
 /// present (a `.sdr` with neither is a pagination cache, not collected):
 /// `.yjr` carries annotations, `.yjf` the last-read position — and a book read
 /// without highlighting has a `.yjf` but no `.yjr`.
+#[derive(Clone)]
 pub struct CollectedYjr {
     pub sdr_name: String,
     /// `<book>.yjr` bytes (annotations), if present.
     pub yjr_bytes: Option<Vec<u8>>,
     /// `<book>.yjf` bytes (last-read position `lpr`/`fpr`), if present.
     pub yjf_bytes: Option<Vec<u8>>,
+    /// The `.yjr`'s filename inside the `.sdr`. Carried because writing a
+    /// sidecar back has to name the exact file, and the name embeds a
+    /// device-specific infix we must never invent.
+    pub yjr_name: Option<String>,
+    /// The `.yjf`'s filename — the fallback source of that infix for a book the
+    /// device has read but never annotated, so it has no `.yjr` yet.
+    pub yjf_name: Option<String>,
+}
+
+/// Match a device `.sdr` directory name to a library book.
+///
+/// Prefers the exact identity — the `.sdr`'s `<sha8>` infix is the library
+/// `kfx_sha256` the Kindle bound the sidecar to — and falls back to the stem
+/// when that has drifted, which a desktop reconvert causes: the device filename
+/// is frozen (a Kindle won't re-bind a renamed `.sdr`), so the stem is the only
+/// stable link for a book fixed after it was pulled.
+pub fn match_collected_book(
+    conn: &Connection,
+    sdr_name: &str,
+) -> anyhow::Result<Option<db::BookRow>> {
+    let by_infix = match sdr_infix(sdr_name) {
+        Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
+            .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
+        None => None,
+    };
+    match by_infix {
+        Some(b) => Ok(Some(b)),
+        None => db::find_by_kfx_basename(conn, &sdr_stem(sdr_name))
+            .with_context(|| format!("stem lookup for {sdr_name}")),
+    }
 }
 
 /// Import device annotations a caller has already pulled off the device: match
@@ -432,6 +468,7 @@ pub fn import_collected_with_progress(
             sdr_name,
             yjr_bytes,
             yjf_bytes,
+            ..
         } = item;
         // Prefer the exact identity: the `.sdr`'s `<sha8>` infix is the library
         // `kfx_sha256` the Kindle bound this sidecar to. Fall back to the stem
@@ -440,16 +477,7 @@ pub fn import_collected_with_progress(
         // re-bind a renamed `.sdr`), so the stem is the only stable link for a
         // book fixed after it was pulled. Without this, every reconverted book's
         // highlights + reading position strand as "unmatched".
-        let book = match sdr_infix(&sdr_name) {
-            Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
-                .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
-            None => None,
-        };
-        let book = match book {
-            Some(b) => Some(b),
-            None => db::find_by_kfx_basename(conn, &sdr_stem(&sdr_name))
-                .with_context(|| format!("stem lookup for {sdr_name}"))?,
-        };
+        let book = match_collected_book(conn, &sdr_name)?;
 
         // Name what's syncing now — before the costly text-index build below.
         let label = book
@@ -465,14 +493,14 @@ pub fn import_collected_with_progress(
         // decode + single-row upsert, no text index. Lands in the `(book_id,
         // 'device')` row; never auto-applied (it's a Resume jump target).
         if let (Some(book), Some(yjf)) = (book.as_ref(), yjf_bytes.as_ref())
-            && let Some(h) = super::yjr::decode_position(yjf, "lpr")
+            && let Some(h) = super::yjr::position(yjf, "lpr")
         {
             db::set_reading_position(
                 conn,
                 book.id,
-                Some(i64::from(h.eid)),
-                Some(i64::from(h.offset)),
-                Some(h.linear as i64),
+                Some(h.eid),
+                Some(h.offset),
+                Some(h.position),
                 "device",
                 device_serial,
             )
@@ -505,7 +533,7 @@ pub fn import_collected_with_progress(
             continue;
         }
 
-        let idx = build_index(book.kfx_path.as_deref());
+        let idx = book_index(book.kfx_path.as_deref());
         let anns = super::yjr::parse(&yjr_bytes);
         let stats = import_yjr(
             conn,
@@ -568,10 +596,19 @@ pub fn import_from_device(
                 p.map(|p| std::fs::read(&p).with_context(|| format!("read {}", p.display())))
                     .transpose()
             };
+            let name_of = |p: &Option<PathBuf>| -> Option<String> {
+                p.as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            };
+            let (yjr_name, yjf_name) = (name_of(&yjr_path), name_of(&yjf_path));
             collected.push(CollectedYjr {
                 sdr_name,
                 yjr_bytes: read(yjr_path)?,
                 yjf_bytes: read(yjf_path)?,
+                yjr_name,
+                yjf_name,
             });
         }
     }
@@ -622,7 +659,9 @@ fn find_sidecar(sdr_dir: &Path, suffix: &str) -> Option<PathBuf> {
 /// A [`BookIndex`] over the library's readable KFX, or an empty one when the
 /// path is missing/unreadable — annotations still import with their anchors
 /// (text backfillable once the KFX exists).
-fn build_index(kfx_path: Option<&str>) -> BookIndex {
+/// A book's anchoring index, read from the library's own KFX. Shared with the
+/// push path, which needs the same positions it resolves imports against.
+pub fn book_index(kfx_path: Option<&str>) -> BookIndex {
     kfx_path
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|bytes| BookIndex::from_kfx(&bytes))
@@ -633,7 +672,7 @@ fn build_index(kfx_path: Option<&str>) -> BookIndex {
 mod tests {
     use super::*;
     use crate::library::db::{self, NewBook};
-    use crate::library::yjr::Handle;
+    use crate::library::yjr::Anchor;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -670,33 +709,46 @@ mod tests {
         .unwrap()
     }
 
+    /// A `.yjr` carrying these annotations, encoded exactly as a device writes
+    /// one — through the format's own codec, so a change to the container can
+    /// never leave these tests passing against bytes no Kindle would produce.
+    fn device_yjr(anns: &[Annotation]) -> Vec<u8> {
+        let mut store = crate::library::yjr::Store::empty();
+        store.merge_annotations(anns);
+        store.encode()
+    }
+
+    /// A `.yjf` carrying a last-read position and nothing else — the shape of a
+    /// book that was read but never marked.
+    fn device_yjf(eid: i64, offset: i64, position: i64) -> Vec<u8> {
+        use crate::library::yjr::{Object, Store, Value};
+        Store {
+            version: 1,
+            roots: vec![Object {
+                name: "lpr".into(),
+                values: vec![
+                    Value::Byte(2),
+                    Value::Utf8(Some(Anchor::new(eid, offset, position).encode())),
+                    Value::Long(1),
+                ],
+            }],
+        }
+        .encode()
+    }
+
     fn idx() -> BookIndex {
         let text_of: HashMap<i64, String> = [(10, "Hello world".to_string())].into_iter().collect();
         let pid_of: HashMap<i64, i64> = [(10, 100)].into_iter().collect();
         BookIndex::from_parts(text_of, pid_of)
     }
 
-    fn highlight(eid: u32, os: u32, oe: u32) -> Annotation {
-        Annotation {
-            kind: Kind::Highlight,
-            handles: vec![
-                Handle {
-                    type_byte: 1,
-                    eid,
-                    offset: os,
-                    linear: 100 + os as u64,
-                    b64: String::new(),
-                },
-                Handle {
-                    type_byte: 1,
-                    eid,
-                    offset: oe,
-                    linear: 100 + oe as u64,
-                    b64: String::new(),
-                },
-            ],
-            note_body: None,
-        }
+    fn highlight(eid: i64, os: i64, oe: i64) -> Annotation {
+        Annotation::highlight(
+            Anchor::new(eid, os, 100 + os),
+            Anchor::new(eid, oe, 100 + oe),
+            0,
+            None,
+        )
     }
 
     #[test]
@@ -742,6 +794,7 @@ mod tests {
             linear_pos: Some(12937),
             text: "走れメロス".to_string(),
             note_body: None,
+            color: None,
         };
         let device = dedup_hash("メロス", "highlight", &r);
         let native = annotation_dedup_hash(
@@ -774,6 +827,7 @@ mod tests {
             linear_pos: loc,
             text: "It's a pertinent question".to_string(),
             note_body: None,
+            color: None,
         };
         // Reader's synthesized axis vs the device's raw pid, same passage.
         let from_sidle = dedup_hash("fragments", "highlight", &anchored(Some(25)));
@@ -802,6 +856,7 @@ mod tests {
             linear_pos: Some(1586),
             text: "It's a pertinent question".to_string(),
             note_body: None,
+            color: None,
         };
         assert_ne!(
             dedup_hash("fragments", "highlight", &span(104)),
@@ -967,14 +1022,11 @@ mod tests {
             highlight(10, 0, 4),
             Annotation {
                 kind: Kind::Handwritten,
-                handles: vec![Handle {
-                    type_byte: 1,
-                    eid: 10,
-                    offset: 0,
-                    linear: 9782,
-                    b64: String::new(),
-                }],
-                note_body: Some("cC9KkbR1zStWRzxfccUugsw0".to_string()),
+                anchors: vec![Anchor::new(10, 0, 9782)],
+                body: Some("cC9KkbR1zStWRzxfccUugsw0".to_string()),
+                color: None,
+                created_ms: None,
+                modified_ms: None,
             },
         ];
         let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
@@ -1009,23 +1061,11 @@ mod tests {
         let mut anns = vec![highlight(10, 0, 4)];
         anns.push(Annotation {
             kind: Kind::Note,
-            handles: vec![
-                Handle {
-                    type_byte: 1,
-                    eid: 10,
-                    offset: 6,
-                    linear: 106,
-                    b64: String::new(),
-                },
-                Handle {
-                    type_byte: 1,
-                    eid: 10,
-                    offset: 10,
-                    linear: 110,
-                    b64: String::new(),
-                },
-            ],
-            note_body: Some("a thought".to_string()),
+            anchors: vec![Anchor::new(10, 6, 106), Anchor::new(10, 10, 110)],
+            body: Some("a thought".to_string()),
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         });
         import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
         let md = export_book_markdown(&conn, book).unwrap();
@@ -1055,26 +1095,14 @@ mod tests {
     /// the expensive text-index rebuild that precedes it.)
     #[test]
     fn device_import_skips_unchanged_yjr() {
-        use base64::Engine as _;
-
-        // `.yjr` token = [marker][len:3 BE][payload]; one bookmark record is a
-        // key followed by a single anchor-handle string value.
-        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
-            let len = payload.len();
-            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
-            v.extend_from_slice(payload);
-            v
-        }
-        fn handle(eid: u32, off: u32, linear: u64) -> String {
-            let mut raw = vec![1u8];
-            raw.extend_from_slice(&eid.to_le_bytes());
-            raw.extend_from_slice(&off.to_le_bytes());
-            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
-            format!("{b64}:{linear}")
-        }
-        let mut yjr = Vec::new();
-        yjr.extend(token(0xfe, b"annotation.personal.bookmark"));
-        yjr.extend(token(0x03, handle(1492, 0, 9).as_bytes()));
+        let yjr = device_yjr(&[Annotation {
+            kind: Kind::Bookmark,
+            anchors: vec![Anchor::new(1492, 0, 9)],
+            body: None,
+            color: None,
+            created_ms: Some(0),
+            modified_ms: Some(0),
+        }]);
 
         // Device tree: documents/Sidle/<stem>.<sha8>.sdr/<file>.yjr
         let root = tempfile::tempdir().unwrap();
@@ -1136,25 +1164,9 @@ mod tests {
 
     #[test]
     fn device_import_pulls_yjf_last_position() {
-        use base64::Engine as _;
-        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
-            let len = payload.len();
-            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
-            v.extend_from_slice(payload);
-            v
-        }
-        fn handle(eid: u32, off: u32, linear: u64) -> String {
-            let mut raw = vec![1u8];
-            raw.extend_from_slice(&eid.to_le_bytes());
-            raw.extend_from_slice(&off.to_le_bytes());
-            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
-            format!("{b64}:{linear}")
-        }
         // A `.yjf` carrying an `lpr` position (eid 978, off 170) — and NO `.yjr`,
         // i.e. a book read but never highlighted. Its position must still import.
-        let mut yjf = Vec::new();
-        yjf.extend(token(0xfe, b"lpr"));
-        yjf.extend(token(0x03, handle(978, 170, 12345).as_bytes()));
+        let yjf = device_yjf(978, 170, 12345);
 
         let root = tempfile::tempdir().unwrap();
         let sdr = root.path().join("documents/Sidle/book.deadbeef.sdr");
@@ -1219,23 +1231,7 @@ mod tests {
 
     #[test]
     fn device_import_stem_fallback_relinks_reconverted_book() {
-        use base64::Engine as _;
-        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
-            let len = payload.len();
-            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
-            v.extend_from_slice(payload);
-            v
-        }
-        fn handle(eid: u32, off: u32, linear: u64) -> String {
-            let mut raw = vec![1u8];
-            raw.extend_from_slice(&eid.to_le_bytes());
-            raw.extend_from_slice(&off.to_le_bytes());
-            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
-            format!("{b64}:{linear}")
-        }
-        let mut yjf = Vec::new();
-        yjf.extend(token(0xfe, b"lpr"));
-        yjf.extend(token(0x03, handle(978, 170, 12345).as_bytes()));
+        let yjf = device_yjf(978, 170, 12345);
 
         // The on-device `.sdr` is frozen at the sha8 the book had when it was
         // pulled (`faf30ffb`); the Kindle binds its highlights + position to that

@@ -32,6 +32,7 @@ use sidle_core::library::{
     import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
     paths::kfx_device_filename,
+    push,
 };
 
 // We call `db::open` per request (rather than holding a long-lived `Arc<
@@ -417,6 +418,34 @@ struct SyncSdr {
     /// `<book>.yjf` bytes (last-read position), base64.
     #[serde(default)]
     yjf_b64: Option<String>,
+    /// The sidecars' own filenames. A write-back has to reuse the exact name —
+    /// it carries a device-specific infix — so the device tells us what it is
+    /// rather than the server guessing.
+    #[serde(default)]
+    yjr_name: Option<String>,
+    #[serde(default)]
+    yjf_name: Option<String>,
+}
+
+/// A sidecar the device should write, returned alongside the import report so
+/// one round trip covers both directions.
+#[derive(serde::Serialize)]
+struct OutgoingSdr {
+    sdr_name: String,
+    file_name: String,
+    /// The whole `.yjr` to write, base64.
+    yjr_b64: String,
+}
+
+/// The LAN sync's answer: what came in, and what should go back out.
+///
+/// The report is flattened so the fields the picker already reads stay where
+/// they were; `write` is additive.
+#[derive(serde::Serialize)]
+struct SyncResponse {
+    #[serde(flatten)]
+    report: DeviceImportReport,
+    write: Vec<OutgoingSdr>,
 }
 
 /// Ingest pushed annotations — the LAN twin of the USB import. Token-gated, then
@@ -432,7 +461,7 @@ async fn sync_annotations(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Json(req): Json<SyncRequest>,
-) -> Result<Json<DeviceImportReport>, StatusCode> {
+) -> Result<Json<SyncResponse>, StatusCode> {
     check_token(&headers, &query, &state.token)?;
 
     // Decode every base64 blob up front: a malformed one is a 400 (client bug),
@@ -443,6 +472,8 @@ async fn sync_annotations(
             sdr_name: sdr.sdr_name,
             yjr_bytes: decode_b64_opt(sdr.yjr_b64.as_deref())?,
             yjf_bytes: decode_b64_opt(sdr.yjf_b64.as_deref())?,
+            yjr_name: sdr.yjr_name,
+            yjf_name: sdr.yjf_name,
         });
     }
 
@@ -452,16 +483,58 @@ async fn sync_annotations(
     // rusqlite is blocking; run the whole import (and the pulse write) off the
     // async executor. Per-request `db::open` is the server's existing pattern;
     // the `busy_timeout` it sets serializes this writer against the GUI's.
-    let report = tokio::task::spawn_blocking(move || -> Result<DeviceImportReport, StatusCode> {
+    let response = tokio::task::spawn_blocking(move || -> Result<SyncResponse, StatusCode> {
         let conn = db::open(&paths.db()).map_err(|err| {
             tracing::error!(?err, "sync: open library.db failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+        // Plan the write-back from the sidecars as they arrived, before the
+        // import folds them into the library — the plan compares the device's
+        // file against what the library holds, and that comparison is the same
+        // either way. Cloned because the import consumes them.
+        let for_push = collected.clone();
         let report = ingest::import_collected(&conn, collected, &device_serial, &db::now_iso())
             .map_err(|err| {
                 tracing::error!(?err, "sync: import_collected failed");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+
+        // The device writes these itself — it is the one holding the filesystem.
+        // Same planner as USB, so both routes agree on what a sidecar should
+        // contain and which book to leave alone.
+        let write = match push::plan(&conn, &for_push, &|book| {
+            ingest::book_index(book.kfx_path.as_deref())
+        }) {
+            Ok(plan) => {
+                let mut out = Vec::with_capacity(plan.len());
+                for item in plan {
+                    // Checkpoint the bytes we are handing over, so the next sync
+                    // can tell whether the device kept them.
+                    let sha = import::sha256_of_bytes(&item.bytes);
+                    if let Err(err) = db::set_yjr_sync_sha(
+                        &conn,
+                        &device_serial,
+                        item.book_id,
+                        &sha,
+                        &db::now_iso(),
+                    ) {
+                        tracing::error!(?err, "sync: yjr checkpoint failed");
+                    }
+                    out.push(OutgoingSdr {
+                        sdr_name: item.sdr_name,
+                        file_name: item.file_name,
+                        yjr_b64: encode_b64(&item.bytes),
+                    });
+                }
+                out
+            }
+            Err(err) => {
+                // A push that can't be planned must never fail the import that
+                // already succeeded.
+                tracing::error!(?err, "sync: annotation push planning failed");
+                Vec::new()
+            }
+        };
         // Live-repaint signal — only when the import changed annotation state worth
         // repainting an open reader for. The GUI watches this file (sidle-reader.md
         // P3) and re-emits the `annotations:sync-done` event the USB path already
@@ -469,7 +542,7 @@ async fn sync_annotations(
         if import_changed_anything(&report) {
             write_sync_pulse(&paths, &device_serial, &report);
         }
-        Ok(report)
+        Ok(SyncResponse { report, write })
     })
     .await
     .map_err(|err| {
@@ -477,7 +550,7 @@ async fn sync_annotations(
         StatusCode::INTERNAL_SERVER_ERROR
     })??;
 
-    Ok(Json(report))
+    Ok(Json(response))
 }
 
 /// What `POST /sync/book` reports back, so the Kindle can toast imported-vs-
@@ -641,6 +714,13 @@ async fn sync_misc(
     })??;
 
     Ok(Json(result))
+}
+
+/// Base64-encode a blob for the wire (standard alphabet, with padding) — the
+/// same shape the device sends its sidecars in.
+fn encode_b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Base64-decode a required blob (standard alphabet, with padding); a decode
@@ -912,24 +992,20 @@ mod tests {
     /// A synthetic bookmark `.yjr`: `[marker][len:3 BE][payload]` tokens — the
     /// same recipe `sidle-core`'s ingest tests use. One bookmark = the marker
     /// key followed by a single anchor-handle string value.
-    fn yjr_bookmark(eid: u32, off: u32, linear: u64) -> Vec<u8> {
-        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
-            let len = payload.len();
-            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
-            v.extend_from_slice(payload);
-            v
-        }
-        let mut raw = vec![1u8];
-        raw.extend_from_slice(&eid.to_le_bytes());
-        raw.extend_from_slice(&off.to_le_bytes());
-        let handle = format!(
-            "{}:{linear}",
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw)
-        );
-        let mut yjr = Vec::new();
-        yjr.extend(token(0xfe, b"annotation.personal.bookmark"));
-        yjr.extend(token(0x03, handle.as_bytes()));
-        yjr
+    /// A `.yjr` holding one bookmark, encoded through the format's own codec so
+    /// this fixture is bytes a real Kindle would produce.
+    fn yjr_bookmark(eid: i64, off: i64, position: i64) -> Vec<u8> {
+        use sidle_core::library::yjr::{Anchor, Annotation, Kind, Store};
+        let mut store = Store::empty();
+        store.merge_annotations(&[Annotation {
+            kind: Kind::Bookmark,
+            anchors: vec![Anchor::new(eid, off, position)],
+            body: None,
+            color: None,
+            created_ms: Some(0),
+            modified_ms: Some(0),
+        }]);
+        store.encode()
     }
 
     /// A fresh library root + one book whose `kfx_sha256` the `book.deadbeef.sdr`
@@ -1031,6 +1107,8 @@ mod tests {
                 sdr_name: sdr_name.to_string(),
                 yjr_bytes: Some(yjr.clone()),
                 yjf_bytes: None,
+                yjr_name: None,
+                yjf_name: None,
             }],
             device_serial,
             "now",
@@ -1058,9 +1136,20 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let report_http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut report_http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         // LAN == USB: identical report ...
+        //
+        // Minus `write`, which has no USB counterpart: over LAN the device does
+        // its own writing, so the sidecars to push travel in the response, while
+        // the USB path writes them itself and reports only counts. What is being
+        // compared here is the *import* result, which must not differ by route.
+        let write = report_http
+            .as_object_mut()
+            .expect("a JSON object")
+            .remove("write")
+            .expect("the response carries a write list");
+        assert_eq!(write, serde_json::json!([]), "nothing to push back here");
         assert_eq!(report_http, serde_json::to_value(&report_ref).unwrap());
 
         // ... and identical stored rows (compare the content hash + text, not the

@@ -21,6 +21,15 @@ const EPUB: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 /// Two facts ride on this digest and neither is cosmetic: the characters an
 /// element contributes, and the order elements are visited in. Change either
 /// and the same stored `(element, offset)` pair slices different words.
+///
+/// The element count and the character count move independently, which is what
+/// makes them worth asserting separately. The walk spans every element the
+/// position scale *places*, including ones carrying no text of their own —
+/// section wrappers, and headings whose words sit in a child. Those have to be
+/// in it: a device anchors a highlight at whichever element holds the boundary,
+/// and a walk that skipped them returned nothing at all for such a range. They
+/// contribute no characters, so a change in their number is structural, while
+/// any change in the character count means stored highlights have moved.
 fn base_text(kfx: &[u8]) -> (usize, usize, u64) {
     let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let text = book.source_text().expect("source text");
@@ -52,9 +61,10 @@ fn reflowable_kfx_base_text_is_pinned() {
         return; // fixture not present in this checkout
     };
     let (elements, chars, digest) = base_text(&kfx);
-    assert_eq!((elements, chars), (1600, 288763), "index shape");
+    assert_eq!(chars, 288763, "the words a highlight can cover moved");
+    assert_eq!(elements, 1918, "placed elements in the walk");
     assert_eq!(
-        digest, 0x135e_f222_c849_e2a8,
+        digest, 0x85ad_0cb4_771f_3629,
         "base text or reading order moved"
     );
 }
@@ -65,9 +75,10 @@ fn short_kfx_base_text_is_pinned() {
         return;
     };
     let (elements, chars, digest) = base_text(&kfx);
-    assert_eq!((elements, chars), (839, 74025), "index shape");
+    assert_eq!(chars, 74025, "the words a highlight can cover moved");
+    assert_eq!(elements, 881, "placed elements in the walk");
     assert_eq!(
-        digest, 0x9fc5_2943_437e_ddee,
+        digest, 0x24c3_1720_7bc8_95b2,
         "base text or reading order moved"
     );
 }

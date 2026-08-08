@@ -14,7 +14,7 @@ use crate::device::ink;
 use crate::device::misc;
 use crate::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
-use crate::library::{LibraryPaths, db};
+use crate::library::{LibraryPaths, db, import, push};
 use crate::state::DbHandle;
 
 /// Per-item sync progress for the status bar, emitted as `annotations:sync-progress`.
@@ -56,19 +56,75 @@ pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>
     Ok(pulled
         .into_iter()
         .map(|(sdr_name, files)| {
-            let pick = |suffix: &str| {
-                files
-                    .iter()
-                    .find(|(n, _)| n.ends_with(suffix))
-                    .map(|(_, b)| b.clone())
-            };
+            let pick = |suffix: &str| files.iter().find(|(n, _)| n.ends_with(suffix));
+            let (yjr, yjf) = (pick(".yjr"), pick(".yjf"));
             CollectedYjr {
                 sdr_name,
-                yjr_bytes: pick(".yjr"),
-                yjf_bytes: pick(".yjf"),
+                yjr_bytes: yjr.map(|(_, b)| b.clone()),
+                yjf_bytes: yjf.map(|(_, b)| b.clone()),
+                // The filenames are what a write-back has to aim at: they carry
+                // a device-specific infix that must be reused, never invented.
+                yjr_name: yjr.map(|(n, _)| n.clone()),
+                yjf_name: yjf.map(|(n, _)| n.clone()),
             }
         })
         .collect())
+}
+
+/// Write Sidle's annotations back into the device's own sidecars.
+///
+/// The other half of the sync: [`import_device_annotations`] pulls what the
+/// Kindle marked, this contributes what was marked in Sidle's reader. Each write
+/// is the device's own `.yjr` with our records merged in, so the device keeps
+/// everything it had — see [`push::plan`] for what is deliberately left out,
+/// including the one book a write would silently lose to.
+///
+/// The DB lock is taken twice and never held across a device write: planning
+/// reads the library, the writes are USB-slow, and the checkpoint is a single
+/// row. A write that fails is logged and skipped — its book simply has no
+/// checkpoint, so the next sync plans it again.
+fn push_device_annotations(
+    transport: &dyn Transport,
+    db: &DbHandle,
+    collected: &[CollectedYjr],
+    device_serial: &str,
+    now: &str,
+    report: &mut DeviceImportReport,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<()> {
+    let plan = {
+        let conn = db.blocking_lock();
+        push::plan(&conn, collected, &|book| {
+            ingest::book_index(book.kfx_path.as_deref())
+        })?
+    };
+    if plan.is_empty() {
+        return Ok(());
+    }
+
+    let sidle = TPath::parse("documents/Sidle");
+    let total = plan.len();
+    for (i, outgoing) in plan.iter().enumerate() {
+        on_progress("push", i + 1, total, &outgoing.title);
+        let path = sidle.join(&outgoing.sdr_name).join(&outgoing.file_name);
+        if let Err(e) = transport.write_atomic(&path, &outgoing.bytes) {
+            eprintln!(
+                "[sidle/annsync] sidecar write failed for {}: {e:#}",
+                outgoing.sdr_name
+            );
+            continue;
+        }
+        // Checkpoint what we wrote. The next connect compares the device's file
+        // against this: matching means the write survived, differing means
+        // either the device added something of its own or it overwrote us from
+        // memory — both of which are handled by importing and planning again.
+        let sha = import::sha256_of_bytes(&outgoing.bytes);
+        let conn = db.blocking_lock();
+        db::set_yjr_sync_sha(&conn, device_serial, outgoing.book_id, &sha, now)?;
+        report.pushed_books += 1;
+        report.pushed_annotations += outgoing.added;
+    }
+    Ok(())
 }
 
 /// Import annotations off any connected Kindle into the library — mass-storage
@@ -103,8 +159,27 @@ pub fn import_device_annotations(
             // the `std::fs` scanner so the USB scan + DB import can happen
             // under one lock (the volume IO is local-fast). No ink: handwriting
             // is a Scribe (MTP) feature.
-            let conn = db.blocking_lock();
-            ingest::import_from_device(&conn, &mount, &device.serial, &now)
+            let imported = {
+                let conn = db.blocking_lock();
+                ingest::import_from_device(&conn, &mount, &device.serial, &now)
+            };
+            // Push back over the transport, which for mass-storage is the same
+            // local volume — a second walk here is cheap, and it keeps one push
+            // implementation for both kinds of device.
+            let mut imported = imported?;
+            let collected = collect_device_yjr(transport)?;
+            if let Err(e) = push_device_annotations(
+                transport,
+                db,
+                &collected,
+                &device.serial,
+                &now,
+                &mut imported,
+                on_progress,
+            ) {
+                eprintln!("[sidle/annsync] annotation push failed (non-fatal): {e:#}");
+            }
+            Ok::<_, anyhow::Error>(imported)
         }
         None => {
             // The library's content_ids — so the ink walk knows which
@@ -135,6 +210,10 @@ pub fn import_device_annotations(
             // The handwritten-ink anchors live in the same `.yjr`s we just pulled.
             let notes = ink::handwritten_notes(&collected);
 
+            // The push plans off the same sidecars the import just read, so the
+            // slow device walk happens once.
+            let for_push = collected.clone();
+
             let report = {
                 let t = std::time::Instant::now();
                 let conn = db.blocking_lock();
@@ -164,7 +243,20 @@ pub fn import_device_annotations(
 
             // No on-device cleanup: Sidle never deletes data on the device (a
             // backup must not mutate its source). Stranded `.notebooks/<id>!!PDOC!!`
-            // dirs are the device owner's to clear.
+            // dirs are the device owner's to clear. The push below only ever
+            // *adds* to a sidecar, never removes.
+            let mut report = report;
+            if let Err(e) = push_device_annotations(
+                transport,
+                db,
+                &for_push,
+                &device.serial,
+                &now,
+                &mut report,
+                on_progress,
+            ) {
+                eprintln!("[sidle/annsync] annotation push failed (non-fatal): {e:#}");
+            }
             Ok(report)
         }
     }?;

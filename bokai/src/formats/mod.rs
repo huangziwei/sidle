@@ -9,6 +9,7 @@
 pub mod aozora;
 pub mod epub;
 pub mod kfx;
+pub mod krds;
 pub mod markdown;
 pub mod mobi;
 #[cfg(feature = "nbk")]

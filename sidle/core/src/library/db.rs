@@ -148,7 +148,9 @@ pub struct BookRow {
 /// romanization of title/author (see [`super::romaji`]). Backfilled from the raw
 /// fields via kakasi/pinyin; new imports render them yomigana-aware. Drives the
 /// picker's search.
-/// v12: dropped the linear position from annotation identity. `dedup_hash` no
+/// v12: annotation identity no longer salts on the linear position, and a
+/// highlight colour an earlier sidecar reader filed as a note body is moved to
+/// `color`. Dropped the linear position from annotation identity. `dedup_hash` no
 /// longer salts on `loc_start` (see [`super::ingest::annotation_dedup_hash`]);
 /// existing rows are rehashed and the duplicate pairs that split — one device
 /// copy, one Sidle copy of the same passage — collapse. Data-only.
@@ -738,6 +740,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // metadata edit into a silent re-identification of its highlights. This
     // migration re-keys the rule change and nothing else.
     if from_version < 12 {
+        // Order matters: the colour repair rewrites `note_body`, which the hash
+        // is computed over, so it has to land before the re-key.
+        repair_colors_read_as_notes(conn)?;
         rekey_annotation_hashes(conn)?;
     }
 
@@ -745,6 +750,28 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
+    Ok(())
+}
+
+/// Move a highlight colour out of `note_body`, where an earlier sidecar reader
+/// filed it, and into `color` where it belongs.
+///
+/// A colour-capable Kindle writes the colour as a bare string after the
+/// annotation's template — the same shape a note body takes, which is how it
+/// came to be read as one. The visible damage was highlights painting yellow
+/// with their colour showing as a note beside them.
+///
+/// Scoped hard: only a row whose `note_body` is *exactly* one of the colours a
+/// Kindle names and whose `color` is empty. A note that happens to say "blue"
+/// and anything already carrying a colour are both left alone.
+fn repair_colors_read_as_notes(conn: &Connection) -> rusqlite::Result<()> {
+    for color in bokai::formats::krds::COLORS {
+        conn.execute(
+            "UPDATE annotations SET color = ?1, note_body = NULL \
+             WHERE note_body = ?1 AND COALESCE(color, '') = ''",
+            params![color],
+        )?;
+    }
     Ok(())
 }
 
@@ -4083,6 +4110,73 @@ mod tests {
     fn migrate_stamps_schema_version() {
         let conn = fresh_db();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// A Colorsoft names a highlight's colour with a bare string in the slot a
+    /// note body also uses, so an earlier reader filed it as the note. The
+    /// repair must move it and leave a genuine note alone.
+    #[test]
+    fn migrate_v12_moves_a_highlight_colour_out_of_the_note_body() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-color", "透明な夜");
+        let row = |dedup: &str, eid: i64, note: Option<&str>, color: Option<&str>| {
+            insert_annotation(
+                &conn,
+                &NewAnnotation {
+                    dedup_hash: dedup,
+                    book_id: Some(book),
+                    kind: "highlight",
+                    eid_start: Some(eid),
+                    off_start: Some(0),
+                    eid_end: Some(eid),
+                    off_end: Some(5),
+                    loc_start: Some(eid),
+                    loc_end: Some(eid),
+                    linear_pos: Some(eid),
+                    text: "窓辺には花が飾られていた。",
+                    note_body: note,
+                    color,
+                    clip_title: None,
+                    clip_author: None,
+                    added_at: None,
+                    added_raw: None,
+                    imported_at: "t",
+                    source: "yjr",
+                },
+            )
+            .unwrap()
+        };
+        row("a", 1, Some("pink"), None); // colour mistaken for a note
+        row("b", 2, Some("orange"), Some("")); // same, empty-string colour
+        row("c", 3, Some("a real thought"), None); // a genuine note
+        row("d", 4, Some("blue"), Some("yellow")); // already coloured — hands off
+
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        migrate(&conn).unwrap();
+
+        let by_eid: std::collections::HashMap<i64, AnnotationRow> =
+            list_annotations_for_book(&conn, book)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.eid_start.unwrap(), r))
+                .collect();
+
+        assert_eq!(by_eid[&1].color.as_deref(), Some("pink"));
+        assert_eq!(by_eid[&1].note_body, None, "no longer a note");
+        assert_eq!(by_eid[&2].color.as_deref(), Some("orange"));
+        assert_eq!(by_eid[&2].note_body, None);
+        assert_eq!(
+            by_eid[&3].note_body.as_deref(),
+            Some("a real thought"),
+            "a genuine note is untouched",
+        );
+        assert_eq!(by_eid[&3].color.as_deref().unwrap_or(""), "");
+        assert_eq!(
+            by_eid[&4].color.as_deref(),
+            Some("yellow"),
+            "a row that already had a colour keeps it",
+        );
+        assert_eq!(by_eid[&4].note_body.as_deref(), Some("blue"));
     }
 
     /// One passage, recorded twice under the old rule because the two origins

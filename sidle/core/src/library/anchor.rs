@@ -197,6 +197,10 @@ pub struct Resolved {
     /// bookmark it's the containing-element preview.
     pub text: String,
     pub note_body: Option<String>,
+    /// Highlight colour as the device named it (`yellow`/`blue`/`pink`/
+    /// `orange`), or `None` from a monochrome Kindle — which writes no colour
+    /// rather than meaning yellow.
+    pub color: Option<String>,
 }
 
 impl Resolved {
@@ -213,32 +217,27 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
     let start = ann.start();
     let end = ann.end();
 
-    let eid_start = start.map(|h| h.eid as i64);
-    let off_start = start.map(|h| h.offset as i64);
-    let eid_end = end.map(|h| h.eid as i64);
-    let off_end = end.map(|h| h.offset as i64);
+    let eid_start = start.map(|h| h.eid);
+    let off_start = start.map(|h| h.offset);
+    let eid_end = end.map(|h| h.eid);
+    let off_end = end.map(|h| h.offset);
 
-    let loc_start = start.and_then(|h| idx.position(h.eid as i64, h.offset as i64));
-    let loc_end = end.and_then(|h| idx.position(h.eid as i64, h.offset as i64));
-    let linear_pos = start.map(|h| h.linear as i64);
+    let loc_start = start.and_then(|h| idx.position(h.eid, h.offset));
+    let loc_end = end.and_then(|h| idx.position(h.eid, h.offset));
+    let linear_pos = start.map(|h| h.position);
 
     let text = match &ann.kind {
         // Span-bearing kinds: walk the range. The device end offset is
         // inclusive, so pass `off_end + 1` to the half-open extractor.
         Kind::Highlight | Kind::Note | Kind::Other(_) => match (start, end) {
             (Some(s), Some(e)) => idx
-                .extract(
-                    s.eid as i64,
-                    s.offset as usize,
-                    e.eid as i64,
-                    e.offset as usize + 1,
-                )
+                .extract(s.eid, s.offset as usize, e.eid, e.offset as usize + 1)
                 .unwrap_or_default(),
             _ => String::new(),
         },
         // A point anchor: preview the containing element.
         Kind::Bookmark => start
-            .and_then(|h| idx.text_of(h.eid as i64))
+            .and_then(|h| idx.text_of(h.eid))
             .map(str::to_string)
             .unwrap_or_default(),
         // Handwritten ink covers no text — it's routed to the ink path and never
@@ -257,24 +256,19 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
         loc_end,
         linear_pos,
         text,
-        note_body: ann.note_body.clone(),
+        note_body: ann.body.clone(),
+        color: ann.color.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::yjr::Handle;
     use super::*;
+    use crate::library::yjr::Anchor;
     use std::collections::HashMap;
 
-    fn handle(eid: u32, offset: u32, linear: u64) -> Handle {
-        Handle {
-            type_byte: 1,
-            eid,
-            offset,
-            linear,
-            b64: String::new(),
-        }
+    fn handle(eid: i64, offset: i64, position: i64) -> Anchor {
+        Anchor::new(eid, offset, position)
     }
 
     /// Three elements in pid order 30→20→10, mirroring the multi-element walk.
@@ -297,8 +291,11 @@ mod tests {
         // contributes chars [0, 3) = "GGG" (2 inclusive → 3 exclusive).
         let ann = Annotation {
             kind: Kind::Highlight,
-            handles: vec![handle(30, 3, 503), handle(10, 2, 512)],
-            note_body: None,
+            anchors: vec![handle(30, 3, 503), handle(10, 2, 512)],
+            body: None,
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let r = resolve(&ann, &idx);
         assert_eq!(r.text, "BBBFULLGGG");
@@ -319,8 +316,11 @@ mod tests {
         let idx = index();
         let ann = Annotation {
             kind: Kind::Note,
-            handles: vec![handle(20, 0, 506), handle(20, 3, 509)],
-            note_body: Some("my thought".to_string()),
+            anchors: vec![handle(20, 0, 506), handle(20, 3, 509)],
+            body: Some("my thought".to_string()),
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let r = resolve(&ann, &idx);
         // Single element, [0, 4) (3 inclusive → 4) → whole "FULL".
@@ -334,8 +334,11 @@ mod tests {
         // Bookmarks repeat the start handle as the end.
         let ann = Annotation {
             kind: Kind::Bookmark,
-            handles: vec![handle(20, 0, 506), handle(20, 0, 506)],
-            note_body: None,
+            anchors: vec![handle(20, 0, 506), handle(20, 0, 506)],
+            body: None,
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let r = resolve(&ann, &idx);
         // Preview = the whole containing element, not a 1-char slice.
@@ -348,8 +351,11 @@ mod tests {
         let idx = index();
         let ann = Annotation {
             kind: Kind::Highlight,
-            handles: vec![handle(999, 0, 0), handle(999, 5, 0)],
-            note_body: None,
+            anchors: vec![handle(999, 0, 0), handle(999, 5, 0)],
+            body: None,
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let r = resolve(&ann, &idx);
         assert_eq!(r.text, "");
@@ -372,8 +378,11 @@ mod tests {
 
         let ann = Annotation {
             kind: Kind::Highlight,
-            handles: vec![handle(30, 4, 900), handle(20, 1, 906)],
-            note_body: None,
+            anchors: vec![handle(30, 4, 900), handle(20, 1, 906)],
+            body: None,
+            color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let r = resolve(&ann, &idx);
         assert_eq!(r.text, "", "nothing to extract");
