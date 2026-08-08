@@ -22,7 +22,9 @@ use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::schema::{SemanticTarget, schema};
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::formats::kfx::tokens::{ContentRef, ElementStart, KfxToken, SpanStart, TokenStream};
+use crate::formats::kfx::tokens::{
+    ColumnFormat, ContentRef, ElementStart, KfxToken, SpanStart, TokenStream,
+};
 use crate::formats::kfx::transforms::ImportContext;
 use crate::formats::kfx::yj_properties::{convert_yj_properties, partition_image_style};
 use crate::model::{Chapter, Node, NodeId, Role};
@@ -225,6 +227,16 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let (layout_hints, heading_level) =
         crate::formats::kfx::yj_properties::layout_hints_from_element_fields(fields);
 
+    // Cell spans. A span of 1 is the absent case, so it carries nothing.
+    let span_of = |field: u64| {
+        get_field(fields, field)
+            .and_then(|v| v.as_int())
+            .filter(|n| *n > 1)
+            .map(|n| n as u32)
+    };
+    let column_span = span_of(sym!(TableColumnSpan));
+    let row_span = span_of(sym!(TableRowSpan));
+
     // Emit StartElement token
     stream.push(KfxToken::StartElement(ElementStart {
         role,
@@ -244,7 +256,15 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         is_image: kfx_type_id == KfxSymbol::Image as u32,
         layout_hints,
         heading_level,
+        column_span,
+        row_span,
+        column_format: Vec::new(),
     }));
+
+    // A table's column geometry precedes its rows, as `<colgroup>` must.
+    if role == Role::Table {
+        tokenize_column_format(fields, ctx, stream);
+    }
 
     // Recurse into children
     if has_children && let Some(children) = get_field(fields, sym!(ContentList)) {
@@ -252,6 +272,59 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     }
 
     // Emit EndElement token
+    stream.push(KfxToken::EndElement);
+}
+
+/// Turn a table's `$152 column_format` list into a `<colgroup>` of `<col>`
+/// entries.
+///
+/// This is the only statement a KFX table makes about its proportions. Each
+/// entry describes one column — or `column_span` of them — and carries the
+/// width as an ordinary length property, so it converts through the same
+/// property table every other style uses. A list of bare `{is_empty: false}`
+/// placeholders says nothing and produces nothing.
+fn tokenize_column_format(
+    fields: &[(u64, IonValue)],
+    ctx: &TokenizeContext,
+    stream: &mut TokenStream,
+) {
+    let Some(entries) = get_field(fields, sym!(ColumnFormat)).and_then(|v| v.as_list()) else {
+        return;
+    };
+    // Every entry becomes a `<col>`, including the ones that say nothing:
+    // columns are positional, so skipping a bare `{is_empty: false}` in the
+    // middle would slide every stated width one column to the left.
+    let columns: Vec<ElementStart> = entries
+        .iter()
+        .map(|entry| {
+            let mut col = ElementStart::new(Role::Column);
+            let Some(entry_fields) = entry.unwrap_annotated().as_struct() else {
+                return col;
+            };
+            col.inline_style = crate::formats::kfx::yj_properties::convert_yj_properties(
+                entry_fields,
+                ctx.symbols,
+            )
+            .items;
+            col.column_span = get_field(entry_fields, sym!(ColumnSpan))
+                .and_then(|v| v.as_int())
+                .filter(|n| *n > 1)
+                .map(|n| n as u32);
+            col
+        })
+        .collect();
+    // A list of pure placeholders states no geometry at all.
+    if columns
+        .iter()
+        .all(|c| c.inline_style.is_empty() && c.column_span.is_none())
+    {
+        return;
+    }
+    stream.push(KfxToken::StartElement(ElementStart::new(Role::ColumnGroup)));
+    for col in columns {
+        stream.push(KfxToken::StartElement(col));
+        stream.push(KfxToken::EndElement);
+    }
     stream.push(KfxToken::EndElement);
 }
 
@@ -675,6 +748,23 @@ where
                     apply_semantics_to_node(&mut chapter, node_id, &rest);
                 } else {
                     apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
+                }
+
+                // Cell spans belong to the cell element, not to a link
+                // wrapper standing in front of it. Amazon states them in the
+                // cell's named style; accept the element field too, since
+                // nothing in the format forbids it there.
+                let (style_cols, style_rows) = elem
+                    .style_name
+                    .as_ref()
+                    .and_then(|name| styles?.get(name))
+                    .map(|props| cell_spans_from_style(props))
+                    .unwrap_or_default();
+                if let Some(n) = elem.column_span.or(style_cols) {
+                    chapter.semantics.set_col_span(node_id, n);
+                }
+                if let Some(n) = elem.row_span.or(style_rows) {
+                    chapter.semantics.set_row_span(node_id, n);
                 }
 
                 // Anchored element: stamp the html id registered at
@@ -1374,6 +1464,45 @@ fn split_text_run(chapter: &mut Chapter, node: NodeId, char_offset: i64) -> Node
     span
 }
 
+/// Emit a cell's `$148 table_column_span` / `$149 table_row_span` fields, and
+/// a table's `$152 column_format` list.
+///
+/// KFX gives a cell no element type of its own, so the span sits on whatever
+/// element occupies the row's content list. A span of 1 is the default and is
+/// left unwritten.
+fn push_cell_spans(fields: &mut Vec<(u64, IonValue)>, elem: &ElementStart) {
+    if let Some(n) = elem.column_span.filter(|n| *n > 1) {
+        fields.push((sym!(TableColumnSpan), IonValue::Int(n as i64)));
+    }
+    if let Some(n) = elem.row_span.filter(|n| *n > 1) {
+        fields.push((sym!(TableRowSpan), IonValue::Int(n as i64)));
+    }
+    if !elem.column_format.is_empty() {
+        let entries = elem
+            .column_format
+            .iter()
+            .map(|entry| {
+                let mut entry_fields: Vec<(u64, IonValue)> = entry
+                    .fields
+                    .iter()
+                    .map(|(sym, value)| (*sym, value.to_ion()))
+                    .collect();
+                if let Some(n) = entry.span.filter(|n| *n > 1) {
+                    entry_fields.push((sym!(ColumnSpan), IonValue::Int(n as i64)));
+                }
+                // A column that states nothing still holds its place, and
+                // Amazon spells that placeholder `{is_empty: false}` rather
+                // than an empty struct.
+                if entry_fields.is_empty() {
+                    entry_fields.push((sym!(IsEmpty), IonValue::Bool(false)));
+                }
+                IonValue::Struct(entry_fields)
+            })
+            .collect();
+        fields.push((sym!(ColumnFormat), IonValue::List(entries)));
+    }
+}
+
 /// Apply semantic attributes to a node from a generic map.
 ///
 /// This is the **only place** that knows about SemanticTarget → IR mapping.
@@ -1892,7 +2021,11 @@ fn walk_node_for_export(
     // identifiers like "bold" / "vrtl" survive into the KFX style symbol
     // table instead of becoming opaque `s<N>` names.
     let class_hint = chapter.semantics.class(node_id);
-    let style_symbol = ctx.register_style_id_with_hint(node.style, &chapter.styles, class_hint);
+    // A cell's span joins its style rather than its element — that is where
+    // Amazon writes it, and it is the only place the corpus attests.
+    let spans = cell_span_properties(chapter, node_id);
+    let style_symbol =
+        ctx.register_style_id_with_extras(node.style, &chapter.styles, class_hint, &spans);
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render
@@ -1990,6 +2123,12 @@ fn walk_node_for_export(
         elem.set_semantic(SemanticTarget::EpubType, epub_type.to_string());
     }
 
+    // A table states its column geometry on itself, so its `<colgroup>`
+    // collapses into a `column_format` field rather than becoming an element.
+    if node.role == Role::Table {
+        elem.column_format = collect_column_format(chapter, node_id, ctx);
+    }
+
     stream.push(KfxToken::StartElement(elem));
 
     // Emit text content if present
@@ -2000,12 +2139,109 @@ fn walk_node_for_export(
         }
     }
 
-    // Walk children
+    // Walk children. A column group is consumed by its table's
+    // `column_format`; walking it too would put stray empty elements in the
+    // content list, where a renderer reads them as rows.
     for child in chapter.children(node_id) {
+        if chapter
+            .node(child)
+            .is_some_and(|n| n.role == Role::ColumnGroup)
+        {
+            continue;
+        }
         walk_node_for_export(chapter, child, sch, ctx, stream);
     }
 
     stream.push(KfxToken::EndElement);
+}
+
+/// Read `$148 table_column_span` / `$149 table_row_span` out of a named
+/// style's properties. A span of one is the absent case.
+fn cell_spans_from_style(props: &[(u64, IonValue)]) -> (Option<u32>, Option<u32>) {
+    let span_of = |field: u64| {
+        get_field(props, field)
+            .and_then(|v| v.as_int())
+            .filter(|n| *n > 1)
+            .map(|n| n as u32)
+    };
+    (span_of(sym!(TableColumnSpan)), span_of(sym!(TableRowSpan)))
+}
+
+/// A cell's span as KFX style properties, empty for a node that spans one.
+fn cell_span_properties(
+    chapter: &Chapter,
+    node_id: NodeId,
+) -> Vec<(KfxSymbol, crate::formats::kfx::style_schema::KfxValue)> {
+    use crate::formats::kfx::style_schema::KfxValue;
+    let mut out = Vec::new();
+    if let Some(n) = chapter.semantics.col_span(node_id).filter(|n| *n > 1) {
+        out.push((KfxSymbol::TableColumnSpan, KfxValue::Integer(n as i64)));
+    }
+    if let Some(n) = chapter.semantics.row_span(node_id).filter(|n| *n > 1) {
+        out.push((KfxSymbol::TableRowSpan, KfxValue::Integer(n as i64)));
+    }
+    out
+}
+
+/// Find a table's column group. HTML puts it before the row sections, but a
+/// parser that infers a `<tbody>` can end up nesting it one level down, so
+/// look through the section wrappers too.
+fn find_column_group(chapter: &Chapter, table: NodeId) -> Option<NodeId> {
+    let is_group = |id: NodeId| {
+        chapter
+            .node(id)
+            .is_some_and(|n| n.role == Role::ColumnGroup)
+            .then_some(id)
+    };
+    chapter.children(table).find_map(|child| {
+        is_group(child).or_else(|| {
+            matches!(
+                chapter.node(child).map(|n| n.role),
+                Some(Role::TableHead | Role::TableBody)
+            )
+            .then(|| chapter.children(child).find_map(is_group))
+            .flatten()
+        })
+    })
+}
+
+/// Collect a table's `<col>` entries into KFX `column_format` entries.
+///
+/// A column's width is ordinary styling, so it arrives as the node's computed
+/// style and converts through the same export schema every other style uses;
+/// only the geometry properties belong in the entry, since a `<col>` inherits
+/// the rest from the table.
+fn collect_column_format(
+    chapter: &Chapter,
+    table: NodeId,
+    ctx: &ExportContext,
+) -> Vec<ColumnFormat> {
+    const GEOMETRY: &[KfxSymbol] = &[KfxSymbol::Width, KfxSymbol::SizingBounds];
+    let Some(group) = find_column_group(chapter, table) else {
+        return Vec::new();
+    };
+    // One entry per `<col>`, placeholders included — the list is read
+    // positionally at the other end too.
+    chapter
+        .children(group)
+        .map(|col| {
+            let fields = chapter
+                .node(col)
+                .and_then(|n| chapter.styles.get(n.style))
+                .map(|ir_style| {
+                    ctx.kfx_properties(ir_style)
+                        .into_iter()
+                        .filter(|(sym, _)| GEOMETRY.contains(sym))
+                        .map(|(sym, value)| (sym as u64, value))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ColumnFormat {
+                fields,
+                span: chapter.semantics.col_span(col),
+            }
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -2675,6 +2911,10 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         }
                     }
 
+                    // The span belongs to the cell box, which is the outer
+                    // container here — the inner text element is its content.
+                    push_cell_spans(&mut outer_fields, elem);
+
                     // Push outer container builder
                     stack.push(IonBuilder::with_fields(outer_fields, outer_id));
 
@@ -2872,6 +3112,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                             fields.push((*field_id, IonValue::String(value_str.clone())));
                         }
                     }
+
+                    push_cell_spans(&mut fields, elem);
 
                     let mut builder = IonBuilder::with_fields(fields, container_id);
                     builder.is_image = elem.role == Role::Image;
@@ -3301,6 +3543,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
 
@@ -3338,6 +3583,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
 
@@ -3382,6 +3630,9 @@ mod tests {
             // the "heading" hint must accompany it.
             layout_hints: vec!["heading".to_string()],
             heading_level: Some("2".to_string()),
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
 
@@ -3431,6 +3682,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
 
@@ -3495,6 +3749,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
         // Nested tate-chu-yoko run — its own text is 2 chars long but it
@@ -3520,6 +3777,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
         stream.push(KfxToken::Text("　お互いです".to_string()));
@@ -3596,6 +3856,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
         stream.push(KfxToken::StartElement(ElementStart {
@@ -3619,6 +3882,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
         stream.push(KfxToken::Text("　お互いです".to_string()));
@@ -4649,6 +4915,9 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
         stream.end_element();
 

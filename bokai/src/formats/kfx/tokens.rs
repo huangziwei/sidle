@@ -94,6 +94,28 @@ pub struct ElementStart {
     pub layout_hints: Vec<String>,
     /// `$790 yj.semantics.heading_level` from the element's own fields.
     pub heading_level: Option<String>,
+    /// `$148 table_column_span` / `$149 table_row_span` — how many grid
+    /// columns/rows this cell occupies. A cell carries no distinguishing
+    /// element type in KFX (it is whatever `type` its content wants, sitting
+    /// in a `table_row`'s content list), so the span rides on the element
+    /// itself. Absent means one; both directions leave `None` alone.
+    pub column_span: Option<u32>,
+    pub row_span: Option<u32>,
+    /// `$152 column_format` for a table: one entry per column. KFX states
+    /// column geometry on the table rather than in the row structure, so on
+    /// export the IR's `<colgroup>` collapses into this and emits no content
+    /// element of its own. Empty for every other element.
+    pub column_format: Vec<ColumnFormat>,
+}
+
+/// One column-geometry entry of a table's `column_format`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColumnFormat {
+    /// The column's geometry properties, already in KFX terms — in practice
+    /// a `width` and its sizing box.
+    pub fields: Vec<(u64, crate::formats::kfx::style_schema::KfxValue)>,
+    /// `$118 column_span` — how many columns this entry describes.
+    pub span: Option<u32>,
 }
 
 impl ElementStart {
@@ -117,6 +139,9 @@ impl ElementStart {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }
     }
 
@@ -249,6 +274,9 @@ impl TokenStream {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            column_span: None,
+            row_span: None,
+            column_format: Vec::new(),
         }));
     }
 

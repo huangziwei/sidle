@@ -1092,6 +1092,16 @@ impl ExportContext {
     /// can memoize it across a chapter; `register_with_hint` still owns dedup and
     /// usage counting, so the built style always flows through it and output is
     /// unchanged.
+    /// The KFX properties an IR style states, for the few callers that need
+    /// them outside a `$157 style` fragment — a table's `column_format`
+    /// states its geometry inline rather than through a named style.
+    pub fn kfx_properties(
+        &self,
+        ir_style: &crate::style::ComputedStyle,
+    ) -> Vec<(KfxSymbol, crate::formats::kfx::style_schema::KfxValue)> {
+        self.build_ir_style(ir_style).iter().cloned().collect()
+    }
+
     fn build_ir_style(
         &self,
         ir_style: &crate::style::ComputedStyle,
@@ -1182,6 +1192,35 @@ impl ExportContext {
         } else {
             return self.default_style_symbol;
         };
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+    }
+
+    /// Register an IR style with extra KFX properties the IR's own style
+    /// vocabulary has no room for.
+    ///
+    /// A table cell's `table_column_span` / `table_row_span` is such a
+    /// property: Amazon writes it into the cell's `$157 style` rather than
+    /// onto the content element, so it has to join the style at registration
+    /// — and because it participates in the style's identity, cells that span
+    /// differently correctly land on different styles.
+    pub fn register_style_id_with_extras(
+        &mut self,
+        style_id: StyleId,
+        style_pool: &crate::style::StylePool,
+        class_hint: Option<&str>,
+        extras: &[(KfxSymbol, crate::formats::kfx::style_schema::KfxValue)],
+    ) -> u64 {
+        if extras.is_empty() {
+            return self.register_style_id_with_hint(style_id, style_pool, class_hint);
+        }
+        let mut kfx_style = match style_pool.get(style_id) {
+            Some(ir_style) => self.build_ir_style(ir_style),
+            None => crate::formats::kfx::style_registry::ComputedStyle::new(),
+        };
+        for (symbol, value) in extras {
+            kfx_style.set(*symbol, value.clone());
+        }
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }

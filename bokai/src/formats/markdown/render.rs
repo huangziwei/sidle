@@ -577,6 +577,10 @@ impl<'a> RenderContext<'a> {
             Role::Root | Role::TableHead | Role::TableBody => {
                 self.walk_children(id);
             }
+
+            // Column geometry is presentational and markdown has no place to
+            // put it: the pipe table's columns come from the rows.
+            Role::ColumnGroup | Role::Column => {}
         }
     }
 

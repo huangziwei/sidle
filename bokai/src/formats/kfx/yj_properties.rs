@@ -94,6 +94,38 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
     out
 }
 
+/// The pseudo-class rules a KFX style carries for hyperlink states.
+///
+/// `link_unvisited_style` and `link_visited_style` hold a *nested* style
+/// struct that applies only while the styled element is a link in that state.
+/// A flat declaration list cannot express the condition, so each becomes its
+/// own rule — `.name:link { … }` — alongside the base rule.
+///
+/// Returns `(pseudo-class, declarations)` sorted by pseudo-class, so the
+/// output does not depend on the order the producer wrote the fields in.
+pub fn convert_yj_link_states(
+    fields: &[(u64, IonValue)],
+    symbols: &SymbolTable,
+) -> Vec<(&'static str, CssDecl)> {
+    let mut out: Vec<(&'static str, CssDecl)> = Vec::new();
+    for (k, v) in fields {
+        let pseudo = match symbols.resolve(*k) {
+            "link_unvisited_style" => "link",
+            "link_visited_style" => "visited",
+            _ => continue,
+        };
+        let Some(nested) = v.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let decl = convert_yj_properties(nested, symbols);
+        if !decl.is_empty() {
+            out.push((pseudo, decl));
+        }
+    }
+    out.sort_by_key(|(pseudo, _)| *pseudo);
+    out
+}
+
 /// Marker for KFX `box_align` between the property table and
 /// [`resolve_box_align`]. Never reaches a stylesheet.
 const BOX_ALIGN: &str = "-kfx-box-align";
@@ -1630,5 +1662,59 @@ mod tests {
         let (name, value) = out.first().expect("a declaration");
         assert_eq!(name, "text-decoration-color");
         assert!(!value.is_empty(), "colour should convert, got empty");
+    }
+
+    /// A style carrying link states: 0xFF0000FF unvisited, 0xFF800080 visited.
+    fn link_state_style() -> Vec<(u64, IonValue)> {
+        let nested = |argb: i64| {
+            IonValue::Struct(vec![(
+                symbol_id_for_name("text_color").unwrap(),
+                IonValue::Int(argb),
+            )])
+        };
+        vec![
+            (
+                symbol_id_for_name("link_visited_style").unwrap(),
+                nested(0xFF80_0080),
+            ),
+            (
+                symbol_id_for_name("link_unvisited_style").unwrap(),
+                nested(0xFF00_00FF),
+            ),
+        ]
+    }
+
+    /// The nested state styles are the *only* place a KFX book states its link
+    /// colours. Read as ordinary properties they would collapse into the base
+    /// rule and paint every element the link colour; skipped, the book loses
+    /// them entirely.
+    #[test]
+    fn link_states_become_pseudo_class_rules() {
+        let symbols = SymbolTable::from_fragment(None);
+        let fields = link_state_style();
+        let states = convert_yj_link_states(&fields, &symbols);
+        let names: Vec<&str> = states.iter().map(|(p, _)| *p).collect();
+        // Sorted, so the Ion field order above does not reach the output.
+        assert_eq!(names, vec!["link", "visited"]);
+        for (pseudo, decl) in &states {
+            let (prop, value) = decl.items.first().expect("a declaration");
+            assert_eq!(prop, "color", "{pseudo} should set a colour");
+            assert!(!value.is_empty());
+        }
+        assert_ne!(
+            states[0].1.items, states[1].1.items,
+            "the two states have different colours and must stay distinct"
+        );
+    }
+
+    /// The base rule is the unconditional half: a nested state style must not
+    /// leak into it.
+    #[test]
+    fn link_states_stay_out_of_the_base_rule() {
+        let symbols = SymbolTable::from_fragment(None);
+        assert!(
+            convert_yj_properties(&link_state_style(), &symbols).is_empty(),
+            "state styles are not base declarations"
+        );
     }
 }

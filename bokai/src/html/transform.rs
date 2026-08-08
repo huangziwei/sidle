@@ -302,6 +302,14 @@ impl<'a> TransformContext<'a> {
                                 self.chapter.semantics.set_col_span(ir_id, span);
                             }
                         }
+                        // `<col span>` / `<colgroup span>` is the same count
+                        // in its own spelling: how many columns this entry
+                        // describes.
+                        "span" if matches!(name.local.as_ref(), "col" | "colgroup") => {
+                            if let Ok(span) = attr.value.parse::<u32>() {
+                                self.chapter.semantics.set_col_span(ir_id, span);
+                            }
+                        }
                         // Class attribute: store verbatim so EPUB → KFX → EPUB
                         // round-trips can preserve source class names instead
                         // of synthesizing `sN`. For code/pre we also extract

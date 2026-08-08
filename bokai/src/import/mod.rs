@@ -80,6 +80,12 @@ pub struct CssProgram {
     /// `semantics.class` names an entry with a non-empty declaration gets a
     /// sanitized class attribute in synthesized XHTML.
     pub named: HashMap<String, CssDecl>,
+    /// Raw source style name → the state-conditional rules that style carries,
+    /// as `(pseudo-class, declarations)`. A source whose styling depends on
+    /// element state (a hyperlink's visited/unvisited colors) cannot fold
+    /// those declarations into `named`, which holds one unconditional rule
+    /// per name; they emit as extra `.name:<pseudo>` rules.
+    pub pseudo: HashMap<String, Vec<(String, CssDecl)>>,
     /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
     pub writing_mode: String,
     /// Image-based fixed-layout book (viewport-fit reset header).

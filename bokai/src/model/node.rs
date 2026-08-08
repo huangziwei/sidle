@@ -52,6 +52,16 @@ pub enum Role {
     ListItem,
     /// Table structure.
     Table,
+    /// Column-geometry group (`<colgroup>`). Holds [`Role::Column`] children
+    /// and must precede the row sections in a table's child list.
+    ColumnGroup,
+    /// One column-geometry entry (`<col>`) — a leaf carrying the column's
+    /// width as its style and, in `SemanticMap::col_span`, how many columns
+    /// it describes (HTML spells that `span` on a `<col>`). This is the only
+    /// place a table states its proportions; without it a grid the source
+    /// laid out in fixed fractions renders at whatever widths the content
+    /// happens to want.
+    Column,
     /// Table header section (`<thead>`).
     TableHead,
     /// Table body section (`<tbody>`).

@@ -552,22 +552,33 @@ impl Importer for KfxImporter {
     }
 
     fn stylesheet_program(&mut self) -> Option<CssProgram> {
+        use crate::formats::kfx::yj_properties::{convert_yj_link_states, convert_yj_properties};
         self.index_styles().ok()?;
         let named = self
             .styles
             .iter()
-            .map(|(name, fields)| {
-                (
-                    name.clone(),
-                    crate::formats::kfx::yj_properties::convert_yj_properties(
-                        fields,
-                        &self.symbols,
-                    ),
-                )
+            .map(|(name, fields)| (name.clone(), convert_yj_properties(fields, &self.symbols)))
+            .collect();
+        // `link_unvisited_style` / `link_visited_style` are nested styles that
+        // apply only in one link state, so they leave the flat rule above and
+        // become their own pseudo-class rules.
+        let pseudo = self
+            .styles
+            .iter()
+            .filter_map(|(name, fields)| {
+                let states = convert_yj_link_states(fields, &self.symbols);
+                (!states.is_empty()).then(|| {
+                    let rules = states
+                        .into_iter()
+                        .map(|(p, decl)| (p.to_string(), decl))
+                        .collect();
+                    (name.clone(), rules)
+                })
             })
             .collect();
         Some(CssProgram {
             named,
+            pseudo,
             writing_mode: self.css_writing_mode.clone(),
             fixed_layout: self.metadata.fixed_layout,
         })

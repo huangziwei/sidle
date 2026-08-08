@@ -86,6 +86,8 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
 
         // Tables
         "table" => Role::Table,
+        "colgroup" => Role::ColumnGroup,
+        "col" => Role::Column,
         "thead" => Role::TableHead,
         "tbody" => Role::TableBody,
         "tr" => Role::TableRow,

@@ -305,7 +305,14 @@ pub fn normalize_book_with(
             let named_attr: HashMap<String, Option<String>> = used
                 .iter()
                 .map(|name| {
-                    let has_decl = program.named.get(name).is_some_and(|d| !d.is_empty());
+                    // A style carrying only state rules still needs its class
+                    // on the element — otherwise the `:link` rule it exists
+                    // for has nothing to select.
+                    let has_decl = program.named.get(name).is_some_and(|d| !d.is_empty())
+                        || program
+                            .pseudo
+                            .get(name)
+                            .is_some_and(|r| r.iter().any(|(_, d)| !d.is_empty()));
                     (
                         name.clone(),
                         has_decl.then(|| super::dom_synth::safe_class_name(name)),
@@ -313,6 +320,21 @@ pub fn normalize_book_with(
                 })
                 .collect();
             for (_, decl) in &mut named_rules {
+                super::dom_synth::prune_default_decls(decl);
+            }
+            // State-conditional rules for the same used names. These prune
+            // like any other rule, but a state rule that prunes to empty is
+            // simply absent — it never suppresses the base rule.
+            let mut pseudo_rules: Vec<(String, String, CssDecl)> = used
+                .iter()
+                .filter_map(|name| program.pseudo.get(name).map(|rules| (name, rules)))
+                .flat_map(|(name, rules)| {
+                    rules
+                        .iter()
+                        .map(move |(pseudo, decl)| (name.clone(), pseudo.clone(), decl.clone()))
+                })
+                .collect();
+            for (_, _, decl) in &mut pseudo_rules {
                 super::dom_synth::prune_default_decls(decl);
             }
             let mut generated_classes = Vec::new();
@@ -337,6 +359,7 @@ pub fn normalize_book_with(
                 fixed_layout: program.fixed_layout,
                 writing_mode: program.writing_mode.clone(),
                 named_rules,
+                pseudo_rules,
                 generated_classes,
             };
             (doc.emit(), Some((named_attr, inline_attr)), None)

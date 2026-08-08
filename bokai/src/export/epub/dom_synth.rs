@@ -419,6 +419,26 @@ impl Builder<'_, '_> {
                 self.stamp_source_element(id, el);
                 self.stamp_id(id, el);
                 self.attach_block_style(id, el);
+                // A spanning cell keeps its geometry: dropping the attribute
+                // shifts every following cell in the row into the wrong
+                // column, which no amount of styling recovers. `<col>` states
+                // the same count under HTML's own name for it.
+                match tag {
+                    "td" | "th" => {
+                        if let Some(n) = self.ir.semantics.col_span(id) {
+                            self.dom.get_mut(el).set("colspan", n.to_string());
+                        }
+                        if let Some(n) = self.ir.semantics.row_span(id) {
+                            self.dom.get_mut(el).set("rowspan", n.to_string());
+                        }
+                    }
+                    "col" | "colgroup" => {
+                        if let Some(n) = self.ir.semantics.col_span(id) {
+                            self.dom.get_mut(el).set("span", n.to_string());
+                        }
+                    }
+                    _ => {}
+                }
                 match role {
                     Role::Heading(level) => {
                         self.hints
@@ -450,6 +470,8 @@ impl Builder<'_, '_> {
             Role::UnorderedList => "ul",
             Role::ListItem => "li",
             Role::Table => "table",
+            Role::ColumnGroup => "colgroup",
+            Role::Column => "col",
             Role::TableHead => "thead",
             Role::TableBody => "tbody",
             Role::TableRow => "tr",
@@ -578,6 +600,10 @@ pub struct StylesheetDoc {
     /// are skipped (a class attribute may still reference them — the rule is
     /// simply absent, which renders identically).
     pub named_rules: Vec<(String, CssDecl)>,
+    /// State-conditional rules: (raw source style name, pseudo-class,
+    /// declarations). Emitted as `.name:pseudo { … }` after the base rule of
+    /// the same name, which is the order the cascade reads them in.
+    pub pseudo_rules: Vec<(String, String, CssDecl)>,
     /// Auto-generated `g<N>` classes from [`promote_repeated_inline_styles`],
     /// emitted after the named rules in insertion order.
     pub generated_classes: Vec<(String, CssDecl)>,
@@ -611,17 +637,44 @@ impl StylesheetDoc {
             ));
         }
 
-        let mut named: Vec<&(String, CssDecl)> = self.named_rules.iter().collect();
-        named.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, decl) in named {
-            if decl.is_empty() {
-                continue;
+        // One pass over every style name that has anything to say, base rule
+        // or state rule. Taking the union rather than walking `named_rules`
+        // alone means a style whose only content is its link states still
+        // reaches the sheet.
+        let mut names: Vec<&str> = self
+            .named_rules
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .chain(self.pseudo_rules.iter().map(|(n, _, _)| n.as_str()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        for name in names {
+            if let Some((_, decl)) = self.named_rules.iter().find(|(n, _)| n == name)
+                && !decl.is_empty()
+            {
+                s.push_str(&format!(
+                    ".{} {{ {} }}\n",
+                    safe_class_name(name),
+                    decl.to_inline()
+                ));
             }
-            s.push_str(&format!(
-                ".{} {{ {} }}\n",
-                safe_class_name(name),
-                decl.to_inline()
-            ));
+            let mut states: Vec<&(String, String, CssDecl)> = self
+                .pseudo_rules
+                .iter()
+                .filter(|(n, _, _)| n == name)
+                .collect();
+            states.sort_by(|a, b| a.1.cmp(&b.1));
+            for (_, pseudo, decl) in states {
+                if !decl.is_empty() {
+                    s.push_str(&format!(
+                        ".{}:{} {{ {} }}\n",
+                        safe_class_name(name),
+                        pseudo,
+                        decl.to_inline()
+                    ));
+                }
+            }
         }
         for (class_name, decl) in &self.generated_classes {
             if decl.is_empty() {
@@ -645,6 +698,45 @@ mod tests {
         assert_eq!(safe_class_name("-"), "_-");
         assert_eq!(safe_class_name("a.b c"), "a_b_c");
         assert_eq!(safe_class_name(""), "_");
+    }
+
+    /// Each name's state rules follow its own base rule, and a name whose
+    /// only content is a state rule still reaches the sheet — otherwise a
+    /// style that exists purely to colour links would vanish.
+    #[test]
+    fn state_rules_follow_their_base_rule() {
+        let decl = |pairs: &[(&str, &str)]| {
+            let mut d = CssDecl::new();
+            for (k, v) in pairs {
+                d.set(*k, *v);
+            }
+            d
+        };
+        let doc = StylesheetDoc {
+            fixed_layout: false,
+            writing_mode: "horizontal-tb".into(),
+            named_rules: vec![
+                ("sB".into(), decl(&[("font-style", "italic")])),
+                ("sA".into(), CssDecl::new()),
+            ],
+            pseudo_rules: vec![
+                ("sB".into(), "visited".into(), decl(&[("color", "purple")])),
+                ("sA".into(), "link".into(), decl(&[("color", "blue")])),
+                ("sB".into(), "link".into(), decl(&[("color", "blue")])),
+            ],
+            generated_classes: Vec::new(),
+        };
+        let css = doc.emit();
+        let rules: Vec<&str> = css.lines().filter(|l| l.starts_with('.')).collect();
+        assert_eq!(
+            rules,
+            vec![
+                ".sA:link { color: blue }",
+                ".sB { font-style: italic }",
+                ".sB:link { color: blue }",
+                ".sB:visited { color: purple }",
+            ]
+        );
     }
 
     #[test]

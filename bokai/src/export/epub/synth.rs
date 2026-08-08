@@ -342,6 +342,12 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
             write!(attrs, " colspan=\"{}\"", colspan).unwrap();
         }
     }
+    // Column geometry states the same count under HTML's `span`.
+    if matches!(role, Role::Column | Role::ColumnGroup)
+        && let Some(span) = ctx.ir.semantics.col_span(id)
+    {
+        write!(attrs, " span=\"{}\"", span).unwrap();
+    }
 
     // Emit opening tag
     if is_block {
@@ -445,6 +451,7 @@ fn role_to_tag(role: Role) -> (&'static str, bool, bool) {
         // Default to figcaption; context-aware logic could choose caption for tables
         Role::Caption => ("figcaption", false, true),
         Role::Table => ("table", false, true),
+        Role::ColumnGroup => ("colgroup", false, true),
         Role::TableHead => ("thead", false, true),
         Role::TableBody => ("tbody", false, true),
         Role::TableRow => ("tr", false, true),
@@ -457,6 +464,7 @@ fn role_to_tag(role: Role) -> (&'static str, bool, bool) {
         Role::Image => ("img", true, false),
         Role::Break => ("br", true, false),
         Role::Rule => ("hr", true, true),
+        Role::Column => ("col", true, true),
 
         // Inline elements
         Role::Inline => ("span", false, false),
