@@ -1261,6 +1261,98 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
             values: Some(&[("false", Some("hidden")), ("true", Some("visible"))]),
         },
     ),
+    // ---- vertical alignment ----
+    // The export table (`style_schema`) has carried `vertical-align` both
+    // ways for a while; without the entries here the import direction dropped
+    // it, so a KFX's superscripts and subscripts — footnote markers, ordinals,
+    // formulae — arrived in the EPUB as ordinary text. `baseline_style` is set
+    // by roughly two thirds of shipped books.
+    //
+    // `normal` maps to nothing on purpose: `vertical-align` is not an
+    // inherited property, so an element that omits it already computes to
+    // `baseline`, and emitting the default on every style would only pad the
+    // stylesheet.
+    (
+        "baseline_style",
+        Prop {
+            name: "vertical-align",
+            values: Some(&[
+                ("normal", None),
+                ("text_baseline", None),
+                ("superscript", Some("super")),
+                ("subscript", Some("sub")),
+                ("center", Some("middle")),
+                ("top", Some("top")),
+                ("bottom", Some("bottom")),
+                ("text_top", Some("text-top")),
+                ("text_bottom", Some("text-bottom")),
+            ]),
+        },
+    ),
+    // The block-level spelling, used for table-cell alignment.
+    (
+        "yj.vertical_align",
+        Prop {
+            name: "vertical-align",
+            values: Some(&[
+                ("top", Some("top")),
+                ("center", Some("middle")),
+                ("bottom", Some("bottom")),
+            ]),
+        },
+    ),
+    // ---- line breaking ----
+    // `line-break` IS inherited, so unlike `vertical-align` above the initial
+    // value has to be emitted: a child resetting to `normal` under a `loose`
+    // ancestor means it.
+    (
+        "line_break",
+        Prop {
+            name: "line-break",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("loose", Some("loose")),
+                ("normal", Some("normal")),
+                ("strict", Some("strict")),
+            ]),
+        },
+    ),
+    // ---- backgrounds ----
+    (
+        "background_origin",
+        Prop {
+            name: "background-origin",
+            values: Some(&[
+                ("border_bounds", Some("border-box")),
+                ("padding_bounds", Some("padding-box")),
+                ("content_bounds", Some("content-box")),
+            ]),
+        },
+    ),
+    // ---- outline / decoration colours ----
+    // Colour-valued, so no enum table: the shared value converter turns the
+    // packed 32-bit ARGB integer into a CSS colour, as it does for `text_color`.
+    (
+        "underline_color",
+        Prop {
+            name: "text-decoration-color",
+            values: None,
+        },
+    ),
+    (
+        "outline_color",
+        Prop {
+            name: "outline-color",
+            values: None,
+        },
+    ),
+    (
+        "outline_weight",
+        Prop {
+            name: "outline-width",
+            values: None,
+        },
+    ),
 ];
 
 /// All YJ properties seen in the book — used for the validator scorecard.
@@ -1442,4 +1534,101 @@ pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
         img_decl.set("width", "100%");
     }
     Some((wrapper_decl, img_decl))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formats::kfx::container::symbol_id_for_name;
+
+    /// Build a style field list from `(property, value)` symbol names.
+    fn style(pairs: &[(&str, &str)]) -> Vec<(u64, IonValue)> {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    symbol_id_for_name(k).unwrap_or_else(|| panic!("unknown property {k}")),
+                    IonValue::Symbol(
+                        symbol_id_for_name(v).unwrap_or_else(|| panic!("unknown value {v}")),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn css(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        let symbols = SymbolTable::from_fragment(None);
+        convert_yj_properties(&style(pairs), &symbols).items
+    }
+
+    /// Superscript and subscript are the reason `baseline_style` matters:
+    /// dropped, a footnote marker or an ordinal arrives as ordinary text.
+    #[test]
+    fn baseline_style_carries_super_and_subscript() {
+        assert_eq!(
+            css(&[("baseline_style", "superscript")]),
+            vec![("vertical-align".to_string(), "super".to_string())]
+        );
+        assert_eq!(
+            css(&[("baseline_style", "subscript")]),
+            vec![("vertical-align".to_string(), "sub".to_string())]
+        );
+        assert_eq!(
+            css(&[("baseline_style", "text_bottom")]),
+            vec![("vertical-align".to_string(), "text-bottom".to_string())]
+        );
+    }
+
+    /// `vertical-align` does not inherit, so the initial value carries no
+    /// information and is not worth a declaration.
+    #[test]
+    fn baseline_style_normal_emits_nothing() {
+        assert!(css(&[("baseline_style", "normal")]).is_empty());
+    }
+
+    /// The block-level spelling uses CSS's `middle`, not KFX's `center`.
+    #[test]
+    fn yj_vertical_align_maps_center_to_middle() {
+        assert_eq!(
+            css(&[("yj.vertical_align", "center")]),
+            vec![("vertical-align".to_string(), "middle".to_string())]
+        );
+    }
+
+    /// `line-break` DOES inherit, so `normal` under a `loose` ancestor is a
+    /// real reset and must survive.
+    #[test]
+    fn line_break_keeps_its_initial_value() {
+        assert_eq!(
+            css(&[("line_break", "loose")]),
+            vec![("line-break".to_string(), "loose".to_string())]
+        );
+        assert_eq!(
+            css(&[("line_break", "normal")]),
+            vec![("line-break".to_string(), "normal".to_string())]
+        );
+    }
+
+    #[test]
+    fn background_origin_maps_bounds_to_box() {
+        assert_eq!(
+            css(&[("background_origin", "border_bounds")]),
+            vec![("background-origin".to_string(), "border-box".to_string())]
+        );
+    }
+
+    /// Colour-valued additions go through the shared value converter, the
+    /// same path `text_color` uses.
+    #[test]
+    fn underline_color_becomes_a_css_colour() {
+        let symbols = SymbolTable::from_fragment(None);
+        let fields = vec![(
+            symbol_id_for_name("underline_color").unwrap(),
+            IonValue::Int(4278190080), // opaque black
+        )];
+        let out = convert_yj_properties(&fields, &symbols).items;
+        let (name, value) = out.first().expect("a declaration");
+        assert_eq!(name, "text-decoration-color");
+        assert!(!value.is_empty(), "colour should convert, got empty");
+    }
 }
