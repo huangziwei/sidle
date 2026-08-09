@@ -183,7 +183,7 @@ fn main() {
     //
     // Headless — no framebuffer, no network, no device setup — since it runs
     // unattended with the reader closed.
-    if std::env::args().any(|a| a == "--archive-daemon") {
+    if std::env::args().any(|a| a == readinglog::DAEMON_FLAG) {
         readinglog::claim_archiver();
         log("archive daemon started");
         loop {
@@ -211,10 +211,28 @@ fn main() {
     // a reboot, or the first time it is ever installed. Detached, so the gallery
     // never waits on it: the first pass on a fresh device reads a month of dumps.
     // Safe from recursion, since both archive branches above return first.
-    if !readinglog::archiver_running() {
+    //
+    // An archiver left over from an older build is stopped rather than kept: it
+    // runs code this binary has replaced, and it is the only reason a current
+    // one would not be started.
+    let state = readinglog::archiver();
+    if let readinglog::Archiver::Outdated(pid) = state {
+        readinglog::stop_archiver(pid);
+        log(format!(
+            "stopped an archiver from an older build (pid {pid})"
+        ));
+    }
+    if state != readinglog::Archiver::Running {
+        // `arg0`, not just the flag: `pidof` matches a process by its command
+        // name *or* by the base name of its `argv[0]`, and the picker's own
+        // launcher refuses to open a second picker when either says `sidle`.
+        // The archiver names itself on the other half of that in
+        // `claim_archiver`.
         match std::env::current_exe().and_then(|exe| {
+            use std::os::unix::process::CommandExt;
             std::process::Command::new(exe)
-                .arg("--archive-daemon")
+                .arg0(readinglog::DAEMON_NAME)
+                .arg(readinglog::DAEMON_FLAG)
                 .spawn()
         }) {
             Ok(child) => log(format!("started archive daemon (pid {})", child.id())),

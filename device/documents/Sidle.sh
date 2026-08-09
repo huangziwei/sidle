@@ -11,6 +11,14 @@
 #
 # The body is hand-edited. Only the `# Icon:` line above is generated — rerun
 # device/make-tile.sh after changing assets/cover.svg.
+
+# Don't stack a second picker on a double tap: re-launching over a running one
+# can leave the framework SIGSTOP'd and the screen frozen.
+#
+# This asks only whether the name `sidle` is taken, so nothing else long-lived
+# started from that same binary may answer to it — the reading-log archiver
+# renames itself for exactly this reason. A background process wearing the
+# picker's name is a tile that silently does nothing for as long as it runs.
 if pidof sidle >/dev/null 2>&1; then
     exit 0
 fi

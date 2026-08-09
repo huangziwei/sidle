@@ -227,34 +227,130 @@ pub fn archive_watermark(us_root: &Path) -> String {
 /// is, not by how often we look, so a shorter interval buys coverage for nothing.
 pub const ARCHIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Where the running archiver records its pid, so a second one is never started.
-/// On the user partition, because that is the only thing we can write.
+/// Where the running archiver records its pid and the build it came from, so a
+/// second one is never started and an obsolete one never survives an update. On
+/// the user partition, because that is the only thing we can write.
 const DAEMON_PID: &str = "/mnt/us/extensions/sidle/archive.pid";
 
-/// Whether an archiver is already running.
+/// The flag that turns this binary into the archiver. Also how a process in
+/// `/proc` is recognised as one.
+pub const DAEMON_FLAG: &str = "--archive-daemon";
+
+/// What the archiver calls itself — in `argv[0]` and in the kernel's own process
+/// name, which are the two things `pidof` matches on.
 ///
-/// Checked against `/proc` rather than trusting the file: a pidfile survives a
-/// crash and a reboot, and a stale one that blocked every future start would
-/// silently end the archiving this whole feature exists for. The cmdline test
-/// guards the other direction, where the kernel has since reissued that pid to
-/// something unrelated.
-pub fn archiver_running() -> bool {
-    let Ok(text) = std::fs::read_to_string(DAEMON_PID) else {
-        return false;
-    };
-    let Ok(pid) = text.trim().parse::<u32>() else {
-        return false;
-    };
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|cmd| String::from_utf8_lossy(&cmd).contains("--archive-daemon"))
+/// It must not be the picker's name. The home-screen tile decides whether to
+/// launch by asking whether a process called `sidle` is already running, and a
+/// resident archiver answering to that name is a tile that does nothing, for as
+/// long as the archiver lives — which is indefinitely. Anything else long-lived
+/// ever started from this binary has the same obligation.
+pub const DAEMON_NAME: &str = "sidle-archive";
+
+/// What the pidfile and `/proc` together say about the archiver.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Archiver {
+    /// None is running: start one.
+    Absent,
+    /// This build's archiver is running: leave it alone.
+    Running,
+    /// An archiver from a different build is running, carrying its pid.
+    ///
+    /// It has to be replaced rather than left: a self-update swaps `bin/sidle`
+    /// underneath it, and nothing would ever start a current one, because the
+    /// pidfile it holds is the very thing that says one is already up.
+    Outdated(u32),
 }
 
-/// Record this process as the running archiver.
+/// What the archiver situation is right now.
+///
+/// Checked against `/proc` rather than trusting the file: a pidfile survives a
+/// crash and a reboot, and a stale one treated as live would silently end the
+/// archiving this whole feature exists for. The cmdline test guards the other
+/// direction, where the kernel has since reissued that pid to something
+/// unrelated.
+pub fn archiver() -> Archiver {
+    let Ok(text) = std::fs::read_to_string(DAEMON_PID) else {
+        return Archiver::Absent;
+    };
+    let mut fields = text.split_whitespace();
+    let Some(pid) = fields.next().and_then(|f| f.parse::<u32>().ok()) else {
+        return Archiver::Absent;
+    };
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    classify(pid, fields.next(), &cmdline)
+}
+
+/// The judgement itself, given a pid from the pidfile, the build stamp recorded
+/// beside it, and what `/proc` reports that pid is running.
+///
+/// A pidfile with no stamp is from a build that did not record one, so it is by
+/// definition not this one.
+fn classify(pid: u32, stamp: Option<&str>, cmdline: &[u8]) -> Archiver {
+    if !String::from_utf8_lossy(cmdline).contains(DAEMON_FLAG) {
+        return Archiver::Absent;
+    }
+    let mine = crate::selfupdate::self_build_ts().to_string();
+    if stamp == Some(mine.as_str()) {
+        Archiver::Running
+    } else {
+        Archiver::Outdated(pid)
+    }
+}
+
+/// Stop an archiver and drop its pidfile, so a fresh one can be started without
+/// waiting for this one to notice the signal.
+///
+/// `pid` must have come from [`archiver`], which confirms against `/proc` that
+/// it really is an archiver before naming it.
+pub fn stop_archiver(pid: u32) {
+    // SAFETY: `kill` sends a signal to a pid and touches nothing in this
+    // process. SIGTERM, not SIGKILL — the archiver holds no lock, but a default
+    // termination is still the polite one.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(DAEMON_PID);
+}
+
+/// Record this process as the running archiver, under a name of its own.
 pub fn claim_archiver() {
+    set_process_name(DAEMON_NAME);
     if let Some(dir) = Path::new(DAEMON_PID).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(DAEMON_PID, std::process::id().to_string());
+    let _ = std::fs::write(
+        DAEMON_PID,
+        format!(
+            "{} {}",
+            std::process::id(),
+            crate::selfupdate::self_build_ts()
+        ),
+    );
+}
+
+/// Set the name the kernel reports for this process — `/proc/<pid>/comm`, and
+/// the second field of `/proc/<pid>/stat` that `pidof` reads.
+///
+/// `argv[0]` is the other half of the same job and is set by whoever spawns us;
+/// `pidof` matches either, so both have to differ from the picker's name.
+fn set_process_name(name: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        // The kernel takes 16 bytes including the terminator and truncates
+        // silently, so the name is placed in a buffer of exactly that size.
+        let mut buf = [0u8; 16];
+        let n = name.len().min(buf.len() - 1);
+        buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+        // SAFETY: PR_SET_NAME reads 16 bytes from the pointer; `buf` is exactly
+        // that long and its terminator is inside it.
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, buf.as_ptr());
+        }
+    }
+    // Every other host builds the tests only, where there is no process table
+    // to appear in.
+    #[cfg(not(target_os = "linux"))]
+    let _ = name;
 }
 
 /// Delete archive files the library has confirmed it holds, and report how many
@@ -841,22 +937,33 @@ mod tests {
     /// A pidfile outlives the process that wrote it — every reboot leaves one —
     /// so treating its mere existence as "already running" would silently end
     /// the archiving after the first restart, which is the one failure this
-    /// feature cannot afford. On this host there is no `/proc/<pid>/cmdline` to
-    /// read at all, so every case below must come back false and let the caller
-    /// start one.
+    /// feature cannot afford.
     #[test]
-    fn a_stale_pidfile_never_blocks_the_archiver_from_starting() {
-        let dir = tempdir();
-        // No pidfile, junk in it, and a pid that is not ours — none may be read
-        // as a live archiver.
-        for content in ["", "not-a-pid", "999999"] {
-            std::fs::write(dir.join("archive.pid"), content).unwrap();
-            assert!(
-                !archiver_running(),
-                "must fall back to starting one for {content:?}"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+    fn a_pid_that_is_no_longer_an_archiver_never_blocks_one_from_starting() {
+        // The kernel reissued that pid to something else entirely.
+        assert_eq!(
+            classify(999, Some("0"), b"/usr/bin/something\0--else\0"),
+            Archiver::Absent
+        );
+        // Nothing is running under it at all, so there is no command line.
+        assert_eq!(classify(999, Some("0"), b""), Archiver::Absent);
+    }
+
+    /// An archiver that predates the running binary is replaced, not kept.
+    ///
+    /// A self-update leaves it executing code that has been swapped out from
+    /// under it, and the pidfile it holds is the one thing that would stop a
+    /// current one from starting — so believing it would freeze the archiver at
+    /// whatever version first happened to run.
+    #[test]
+    fn an_archiver_from_another_build_is_replaced() {
+        let cmdline = b"sidle-archive\0--archive-daemon\0";
+        // Written before the pidfile recorded a build at all.
+        assert_eq!(classify(42, None, cmdline), Archiver::Outdated(42));
+        assert_eq!(classify(42, Some("1"), cmdline), Archiver::Outdated(42));
+
+        let mine = crate::selfupdate::self_build_ts().to_string();
+        assert_eq!(classify(42, Some(&mine), cmdline), Archiver::Running);
     }
 
     /// A unique scratch dir. The picker's tests run on the host, and the crate
