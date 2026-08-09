@@ -4,6 +4,7 @@ pub mod backup;
 pub mod db;
 pub mod device_backup;
 pub mod epub_cover;
+pub mod extent;
 pub mod import;
 pub mod ingest;
 pub mod ink;

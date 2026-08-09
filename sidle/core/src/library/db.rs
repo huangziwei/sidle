@@ -154,7 +154,12 @@ pub struct BookRow {
 /// longer salts on `loc_start` (see [`super::ingest::annotation_dedup_hash`]);
 /// existing rows are rehashed and the duplicate pairs that split — one device
 /// copy, one Sidle copy of the same passage — collapse. Data-only.
-pub const SCHEMA_VERSION: i64 = 14;
+/// v15: added `books.max_position` — the cached exclusive end of the book's
+/// position axis. It is what lets a Kindle's own reading-session log, which
+/// redacts every title, be attributed to a book: the device reports the last
+/// valid position, exactly one less. Filled incrementally, never at migrate
+/// time, because computing it parses the KFX.
+pub const SCHEMA_VERSION: i64 = 15;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -453,6 +458,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // page-turn). NULL = Auto/derive, matching the old behaviour for every book.
     if !has_column(conn, "books", "writing_mode")? {
         conn.execute("ALTER TABLE books ADD COLUMN writing_mode TEXT", [])?;
+    }
+    // v15: the exclusive end of the book's position axis, cached because
+    // deriving it means parsing the whole KFX (seconds per book, minutes across
+    // a library). NULL means "not computed yet" — no book legitimately has a
+    // NULL extent — so [`books_missing_max_position`] can fill it incrementally
+    // and new imports need no change. Devices report the *last valid* position,
+    // one less than this; see `max_position_matches`.
+    if !has_column(conn, "books", "max_position")? {
+        conn.execute("ALTER TABLE books ADD COLUMN max_position INTEGER", [])?;
     }
     // v7: metadata last-edit time. Seed existing rows from `imported_at` so the
     // column is never NULL in practice (newest-wins reads still COALESCE as a
@@ -1270,6 +1284,63 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+// ---------------------------------------------------------------------------
+// Position extent (`books.max_position`).
+//
+// A Kindle's reading-session log names no book — every line reads
+// `Title:<private>` — but each carries the book's last valid position. That
+// integer identifies the book against this cache, so these three functions are
+// the whole join surface: find what still needs computing, store a result, and
+// look a device's number back up.
+
+/// Books that have a KFX but no cached extent yet, as `(id, absolute kfx path)`.
+/// The caller parses each and calls [`set_max_position`]; until then the row is
+/// simply unattributable, never wrong.
+pub fn books_missing_max_position(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let root = conn_root(conn);
+    let mut stmt = conn.prepare(
+        "SELECT id, kfx_path FROM books
+          WHERE kfx_path IS NOT NULL AND max_position IS NULL
+          ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    rows.map(|r| r.map(|(id, p)| (id, resolve_one(root.as_deref(), &p))))
+        .collect()
+}
+
+/// Cache one book's axis extent. `None` records "this file has no position map"
+/// so a book that cannot produce one is not retried on every pass; it is stored
+/// as 0, which no device can report as a last position.
+pub fn set_max_position(
+    conn: &Connection,
+    book_id: i64,
+    max_position: Option<i64>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET max_position = ?2 WHERE id = ?1",
+        params![book_id, max_position.unwrap_or(0)],
+    )?;
+    Ok(())
+}
+
+/// Books whose axis ends exactly where a device says the book's last position
+/// is. **Exact equality, never a tolerance:** two conversions of one title shift
+/// every position by a constant, so a near match means a superseded build, not
+/// this book — and a fingerprint that matches nothing means the file is gone.
+///
+/// Returns every candidate rather than one, because unrelated books of the same
+/// length do collide (a library of ~2 260 held 11 such pairs). More than one hit
+/// is an ambiguous attribution the caller must resolve or leave unattributed —
+/// picking arbitrarily would silently misfile the time.
+pub fn books_with_last_position(
+    conn: &Connection,
+    last_position: i64,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM books WHERE max_position = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([last_position + 1], |r| r.get::<_, i64>(0))?;
+    rows.collect()
 }
 
 /// Create or replace the job row for a book. `kind` is set on first insert
