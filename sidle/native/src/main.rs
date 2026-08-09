@@ -178,6 +178,11 @@ fn main() {
     // which measured ~80x smaller than the dumps, so keeping them indefinitely
     // costs about 13 MB a year.
     if std::env::args().any(|a| a == "--archive") {
+        // Re-checked here too, not only on a normal launch: cron is what keeps
+        // this running for weeks without anyone opening the picker, so if the
+        // entry is ever lost — a firmware update rewriting the crontab, say —
+        // the next run puts it back rather than waiting for a launch.
+        log(format!("--archive: cron {:?}", readinglog::ensure_cron()));
         let us = std::path::Path::new(MNT_US);
         let mark = readinglog::archive_watermark(us);
         // `seen` is empty: that list is the *desktop's* record of dumps it has
@@ -202,6 +207,25 @@ fn main() {
         let result = run_update();
         update_log(format!("--update done: {result:?}"));
         return;
+    }
+    // A normal launch is the other chance to get the archiver scheduled, and the
+    // one that follows a self-update — so a device picks this up by opening the
+    // picker once, with no USB deploy and nothing to type. Always logged, in all
+    // three outcomes: a silent no-op here is indistinguishable from a read-only
+    // rootfs, and that difference is the whole question when nothing archives.
+    let cron = readinglog::ensure_cron();
+    log(format!("reading-log archive cron: {cron:?}"));
+    // And archive once now, detached, whatever cron said. On a device where the
+    // crontab cannot be written this is the only thing that ever runs; where it
+    // can, it costs a fraction of a second and closes the gap between installing
+    // the picker and the first quarter-hour tick. Detached because the gallery
+    // must not wait on it — the first run on a fresh device reads a month of
+    // dumps. Safe from recursion: the `--archive` branch above returns before
+    // reaching this line.
+    if let Ok(exe) = std::env::current_exe()
+        && let Err(e) = std::process::Command::new(exe).arg("--archive").spawn()
+    {
+        log(format!("could not start archive pass: {e}"));
     }
     let result = run();
     log(format!("done: {result:?}"));
