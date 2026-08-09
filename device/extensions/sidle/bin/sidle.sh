@@ -13,9 +13,9 @@ echo "[$(date)] launch $(uname -m)" >> "$LOG"
 if [ -f "$EXT/bin/sidle.new" ]; then
     mv -f "$EXT/bin/sidle.new" "$EXT/bin/sidle" && echo "[$(date)] applied LAN self-update" >> "$LOG"
 fi
-# The reading-log archiver schedules itself from inside the binary, not from
-# here. This script only reaches a device through a USB deploy, while the LAN
-# self-update ships `bin/sidle` alone — so anything the launcher installs is
-# invisible to the update path people actually use. Learned the hard way.
+# The reading-log archiver starts itself from inside the binary, not from here:
+# this script reaches a device only through a USB deploy, while the LAN
+# self-update ships `bin/sidle` alone, so anything the launcher sets up would be
+# absent on a device updated over Wi-Fi.
 "$EXT/bin/sidle" "$@" 2>> "$LOG"
 echo "[$(date)] exit=$?" >> "$LOG"

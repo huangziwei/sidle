@@ -221,68 +221,40 @@ pub fn archive_watermark(us_root: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Where the firmware keeps per-user cron entries. Stock jobs (`tinyrot`,
-/// `loginfo`, `checkpmond`) live here, on `*/15` and hourly schedules.
-const CRONTAB: &str = "/etc/crontab/root";
+/// How often the archiver runs, matching stock `tinyrot`'s own cadence — it is
+/// what rotates the syslog we read, so running at the same rate means never
+/// being more than one rotation behind. The cost is set by how much log there
+/// is, not by how often we look, so a shorter interval buys coverage for nothing.
+pub const ARCHIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// How often the archiver runs. Matches stock `tinyrot`'s own cadence in this
-/// file — it is what rotates the syslog we read, so running at the same rate
-/// means never being more than one rotation behind. The cost is set by how much
-/// log there is, not by how often we look, so a shorter interval buys coverage
-/// for nothing.
-const CRON_SCHEDULE: &str = "*/15 * * * *";
+/// Where the running archiver records its pid, so a second one is never started.
+/// On the user partition, because that is the only thing we can write.
+const DAEMON_PID: &str = "/mnt/us/extensions/sidle/archive.pid";
 
-/// Ensure the archiver is scheduled, returning true if this call added it.
+/// Whether an archiver is already running.
 ///
-/// **In the binary, not the launcher.** `sidle.sh` looks like the natural home
-/// and is the wrong one: the LAN self-update ships `bin/sidle` and nothing else,
-/// so anything living in the launcher only reaches a device over a USB deploy.
-/// Putting it here means the update path people actually use delivers it.
-///
-/// Idempotent by searching for the flag rather than the whole line, so changing
-/// the schedule or the install path later does not strand a duplicate entry.
-/// Best-effort: the root filesystem is read-only on an unmodified device, and a
-/// picker that cannot write cron must still start.
-pub fn ensure_cron() -> CronState {
-    match std::env::current_exe() {
-        Ok(exe) => ensure_cron_at(Path::new(CRONTAB), &exe),
-        Err(_) => CronState::Failed,
-    }
+/// Checked against `/proc` rather than trusting the file: a pidfile survives a
+/// crash and a reboot, and a stale one that blocked every future start would
+/// silently end the archiving this whole feature exists for. The cmdline test
+/// guards the other direction, where the kernel has since reissued that pid to
+/// something unrelated.
+pub fn archiver_running() -> bool {
+    let Ok(text) = std::fs::read_to_string(DAEMON_PID) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return false;
+    };
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|cmd| String::from_utf8_lossy(&cmd).contains("--archive-daemon"))
 }
 
-/// What [`ensure_cron`] found or did. Three outcomes, not a bool, because
-/// "already scheduled" and "could not write the crontab" look identical from
-/// outside and mean opposite things — and the second is silent otherwise, which
-/// is a day lost to wondering why nothing archives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CronState {
-    Added,
-    Present,
-    /// Most likely a read-only root filesystem.
-    Failed,
-}
-
-/// [`ensure_cron`] against an explicit crontab and binary path.
-fn ensure_cron_at(crontab: &Path, exe: &Path) -> CronState {
-    let existing = std::fs::read_to_string(crontab).unwrap_or_default();
-    if existing.contains("--archive") {
-        return CronState::Present;
+/// Record this process as the running archiver.
+pub fn claim_archiver() {
+    if let Some(dir) = Path::new(DAEMON_PID).parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    // Rewritten whole rather than appended: appending to a file whose last line
-    // lacks a newline splices the two together, and cron would then lose both
-    // the stock job and ours.
-    let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(&format!(
-        "{CRON_SCHEDULE} {} --archive >/dev/null 2>&1\n",
-        exe.display()
-    ));
-    match std::fs::write(crontab, next) {
-        Ok(()) => CronState::Added,
-        Err(_) => CronState::Failed,
-    }
+    let _ = std::fs::write(DAEMON_PID, std::process::id().to_string());
 }
 
 /// Delete archive files the library has confirmed it holds, and report how many
@@ -864,47 +836,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Scheduling itself must be safe to attempt on every single launch, and
-    /// must never damage the stock jobs sharing the file.
+    /// The daemon guard must fail *open* on anything it cannot verify.
+    ///
+    /// A pidfile outlives the process that wrote it — every reboot leaves one —
+    /// so treating its mere existence as "already running" would silently end
+    /// the archiving after the first restart, which is the one failure this
+    /// feature cannot afford. On this host there is no `/proc/<pid>/cmdline` to
+    /// read at all, so every case below must come back false and let the caller
+    /// start one.
     #[test]
-    fn scheduling_is_idempotent_and_leaves_the_stock_jobs_intact() {
+    fn a_stale_pidfile_never_blocks_the_archiver_from_starting() {
         let dir = tempdir();
-        let crontab = dir.join("root");
-        let exe = Path::new("/mnt/us/extensions/sidle/bin/sidle");
-
-        // A real crontab, and deliberately without a trailing newline — appending
-        // blindly would splice our entry onto `loginfo`'s line and cost both.
-        std::fs::write(
-            &crontab,
-            "*/15 * * * * /usr/sbin/tinyrot\n0 * * * * /usr/sbin/loginfo",
-        )
-        .unwrap();
-
-        assert_eq!(ensure_cron_at(&crontab, exe), CronState::Added);
-        let after = std::fs::read_to_string(&crontab).unwrap();
-        assert_eq!(
-            after,
-            "*/15 * * * * /usr/sbin/tinyrot\n\
-             0 * * * * /usr/sbin/loginfo\n\
-             */15 * * * * /mnt/us/extensions/sidle/bin/sidle --archive >/dev/null 2>&1\n"
-        );
-
-        // Called again on every launch and every archive run: it must add nothing.
-        assert_eq!(ensure_cron_at(&crontab, exe), CronState::Present);
-        assert_eq!(std::fs::read_to_string(&crontab).unwrap(), after);
-
-        // A device with no crontab at all still gets one.
-        let fresh = dir.join("fresh");
-        assert_eq!(ensure_cron_at(&fresh, exe), CronState::Added);
-        assert!(std::fs::read_to_string(&fresh).unwrap().ends_with("2>&1\n"));
-
-        // A read-only rootfs is the normal state on an unmodified device. It must
-        // report failure rather than panic — and distinctly from `Present`, or a
-        // device that never archives looks exactly like one already scheduled.
-        assert_eq!(
-            ensure_cron_at(Path::new("/no/such/dir/root"), exe),
-            CronState::Failed
-        );
+        // No pidfile, junk in it, and a pid that is not ours — none may be read
+        // as a live archiver.
+        for content in ["", "not-a-pid", "999999"] {
+            std::fs::write(dir.join("archive.pid"), content).unwrap();
+            assert!(
+                !archiver_running(),
+                "must fall back to starting one for {content:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

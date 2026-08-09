@@ -167,34 +167,33 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
-    // `--archive`: copy any new reading events into our own archive and exit.
-    // Headless by design — no framebuffer, no network, no device setup — because
-    // this is what cron runs, several times a day, while the reader is asleep in
-    // a bag on the other side of the world.
+    // `--archive-daemon`: keep the reading-event archive current, forever.
     //
-    // It exists because the firmware keeps only ~30 daily dumps and prunes the
-    // oldest: a trip longer than a month loses its beginning before any sync can
-    // collect it. Our archive is the same event lines filtered to the marker,
-    // which measured ~80x smaller than the dumps, so keeping them indefinitely
-    // costs about 13 MB a year.
-    if std::env::args().any(|a| a == "--archive") {
-        // Re-checked here too, not only on a normal launch: cron is what keeps
-        // this running for weeks without anyone opening the picker, so if the
-        // entry is ever lost — a firmware update rewriting the crontab, say —
-        // the next run puts it back rather than waiting for a launch.
-        log(format!("--archive: cron {:?}", readinglog::ensure_cron()));
-        let us = std::path::Path::new(MNT_US);
-        let mark = readinglog::archive_watermark(us);
-        // `seen` is empty: that list is the *desktop's* record of dumps it has
-        // read, which says nothing about what this archive holds. Our own
-        // watermark is the only thing that decides here, and it also stops
-        // `collect` re-reading the archive it is about to extend.
-        let found = readinglog::collect(us, &mark, &[]);
-        match readinglog::archive(us, &found.lines) {
-            Ok(Some(name)) => log(format!("--archive: {} lines → {name}", found.lines.len())),
-            Ok(None) => log("--archive: nothing new"),
-            Err(e) => log(format!("--archive failed: {e}")),
+    // The firmware keeps ~30 daily log dumps and prunes the oldest, so reading
+    // older than about a month is gone before a sync can collect it. The archive
+    // holds the same event lines filtered to the marker — ~80x smaller than the
+    // dumps, about 13 MB a year — and this is what feeds it.
+    //
+    // A sleeping process rather than a cron entry, because the root filesystem is
+    // mounted read-only and `/etc/crontab/root` cannot be written even as root.
+    // Living on the user partition also means surviving firmware updates. It
+    // costs nothing while asleep: the kernel freezes it with everything else when
+    // the device suspends, so it never wakes the device on its own. It does not
+    // survive a reboot; opening the picker starts it again.
+    //
+    // Headless — no framebuffer, no network, no device setup — since it runs
+    // unattended with the reader closed.
+    if std::env::args().any(|a| a == "--archive-daemon") {
+        readinglog::claim_archiver();
+        log("archive daemon started");
+        loop {
+            archive_once(false);
+            std::thread::sleep(readinglog::ARCHIVE_INTERVAL);
         }
+    }
+    // `--archive`: a single pass, for running it by hand.
+    if std::env::args().any(|a| a == "--archive") {
+        archive_once(true);
         return;
     }
     // `--update`: the LAN self-update as a standalone launch. The everyday path
@@ -208,27 +207,45 @@ fn main() {
         update_log(format!("--update done: {result:?}"));
         return;
     }
-    // A normal launch is the other chance to get the archiver scheduled, and the
-    // one that follows a self-update — so a device picks this up by opening the
-    // picker once, with no USB deploy and nothing to type. Always logged, in all
-    // three outcomes: a silent no-op here is indistinguishable from a read-only
-    // rootfs, and that difference is the whole question when nothing archives.
-    let cron = readinglog::ensure_cron();
-    log(format!("reading-log archive cron: {cron:?}"));
-    // And archive once now, detached, whatever cron said. On a device where the
-    // crontab cannot be written this is the only thing that ever runs; where it
-    // can, it costs a fraction of a second and closes the gap between installing
-    // the picker and the first quarter-hour tick. Detached because the gallery
-    // must not wait on it — the first run on a fresh device reads a month of
-    // dumps. Safe from recursion: the `--archive` branch above returns before
-    // reaching this line.
-    if let Ok(exe) = std::env::current_exe()
-        && let Err(e) = std::process::Command::new(exe).arg("--archive").spawn()
-    {
-        log(format!("could not start archive pass: {e}"));
+    // Opening the picker is what (re)starts the archiver — after an update, after
+    // a reboot, or the first time it is ever installed. Detached, so the gallery
+    // never waits on it: the first pass on a fresh device reads a month of dumps.
+    // Safe from recursion, since both archive branches above return first.
+    if !readinglog::archiver_running() {
+        match std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .arg("--archive-daemon")
+                .spawn()
+        }) {
+            Ok(child) => log(format!("started archive daemon (pid {})", child.id())),
+            Err(e) => log(format!("could not start archive daemon: {e}")),
+        }
     }
     let result = run();
     log(format!("done: {result:?}"));
+}
+
+/// One archive pass: collect every reading event newer than what the archive
+/// already holds, and add it.
+///
+/// `verbose` distinguishes a hand-run pass, which should say what it did even
+/// when that is nothing, from a daemon tick. The daemon runs 96 times a day for
+/// months on end, so a line per tick would be ~3000 lines a month of "nothing
+/// new" burying everything else in the log. It reports only what it changed, and
+/// anything that went wrong.
+fn archive_once(verbose: bool) {
+    let us = std::path::Path::new(MNT_US);
+    // `seen` is empty: that list is the *desktop's* record of dumps it has read,
+    // which says nothing about what this archive holds. Our own watermark is the
+    // only thing that decides here, and it also stops `collect` re-reading the
+    // archive it is about to extend.
+    let found = readinglog::collect(us, &readinglog::archive_watermark(us), &[]);
+    match readinglog::archive(us, &found.lines) {
+        Ok(Some(name)) => log(format!("archived {} lines → {name}", found.lines.len())),
+        Ok(None) if verbose => log("archive: nothing new"),
+        Ok(None) => {}
+        Err(e) => log(format!("archive failed: {e}")),
+    }
 }
 
 /// Paint a clean centered banner panel: white-fill the screen, draw `message`,
