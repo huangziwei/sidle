@@ -381,7 +381,13 @@ pub enum Kind {
     /// Handwriting drawn on a sideloaded document. One record per drawn page:
     /// the anchor is the host page, the inline body the ink notebook's
     /// page-container id. It covers no text.
-    Handwritten,
+    ///
+    /// Devices write it under two names — `handwritten_note`, and
+    /// `handwritten_on_content_note` when the ink sits over the book's own
+    /// content rather than a blank page. Both carry the same anchor + container
+    /// id, so they are one kind here; the name is held so a record re-encodes
+    /// under the one it arrived with.
+    Handwritten(String),
     /// Any other `annotation.personal.<x>` — kept verbatim rather than dropped.
     Other(String),
 }
@@ -395,7 +401,9 @@ impl Kind {
             "highlight" => Self::Highlight,
             "note" => Self::Note,
             "bookmark" => Self::Bookmark,
-            "handwritten_note" => Self::Handwritten,
+            "handwritten_note" | "handwritten_on_content_note" => {
+                Self::Handwritten(suffix.to_string())
+            }
             other => Self::Other(other.to_string()),
         }
     }
@@ -406,8 +414,7 @@ impl Kind {
             Self::Highlight => "highlight",
             Self::Note => "note",
             Self::Bookmark => "bookmark",
-            Self::Handwritten => "handwritten_note",
-            Self::Other(s) => s,
+            Self::Handwritten(s) | Self::Other(s) => s,
         }
     }
 
@@ -423,7 +430,7 @@ impl Kind {
             Self::Bookmark => 0,
             Self::Highlight => 1,
             Self::Note => 2,
-            Self::Handwritten => 10,
+            Self::Handwritten(_) => 10,
             Self::Other(_) => return None,
         })
     }
@@ -1018,13 +1025,27 @@ mod tests {
         assert_eq!(Kind::Bookmark.cache_key(), Some(0));
         assert_eq!(Kind::Highlight.cache_key(), Some(1));
         assert_eq!(Kind::Note.cache_key(), Some(2));
-        assert_eq!(Kind::Handwritten.cache_key(), Some(10));
+        assert_eq!(
+            Kind::Handwritten("handwritten_note".into()).cache_key(),
+            Some(10)
+        );
         assert_eq!(Kind::Other("x".into()).cache_key(), None);
         assert_eq!(
             Kind::Highlight.record_name(),
             "annotation.personal.highlight"
         );
-        assert_eq!(Kind::parse("handwritten_note"), Kind::Handwritten);
+    }
+
+    /// Both names a device gives handwritten ink are one kind, and each keeps
+    /// the name it arrived with so a record re-encodes as the device wrote it.
+    #[test]
+    fn both_ink_record_names_read_as_handwriting() {
+        for name in ["handwritten_note", "handwritten_on_content_note"] {
+            let kind = Kind::parse(name);
+            assert!(matches!(kind, Kind::Handwritten(_)), "{name}");
+            assert_eq!(kind.as_str(), name, "{name} must re-encode under its name");
+            assert_eq!(kind.record_name(), format!("annotation.personal.{name}"));
+        }
     }
 
     #[test]

@@ -154,7 +154,7 @@ pub struct BookRow {
 /// longer salts on `loc_start` (see [`super::ingest::annotation_dedup_hash`]);
 /// existing rows are rehashed and the duplicate pairs that split — one device
 /// copy, one Sidle copy of the same passage — collapse. Data-only.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -659,12 +659,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM annotations WHERE source = 'clippings'", [])?;
 
     // v6: handwritten ink belongs in `book_ink`, never the text `annotations`
-    // table. An older build stored each `handwritten_note` as a `Kind::Other`
-    // text row (its body = the nbk container id, no covered text) — scrub those;
-    // import now routes them to the ink path. Unconditional + idempotent, like
-    // the clippings scrub above.
+    // table. An older build stored each ink record as a `Kind::Other` text row
+    // (its body = the nbk container id, no covered text) — scrub those; import
+    // now routes them to the ink path. Both record names a device writes, since
+    // `handwritten_on_content_note` went unrecognized for longer than the other.
+    // Unconditional + idempotent, like the clippings scrub above.
     conn.execute(
-        "DELETE FROM annotations WHERE kind = 'handwritten_note'",
+        "DELETE FROM annotations
+          WHERE kind IN ('handwritten_note', 'handwritten_on_content_note')",
         [],
     )?;
 
@@ -749,6 +751,25 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v13: separate the highlight from the note the reader used to fuse into it.
     if from_version < 13 {
         split_fused_notes(conn)?;
+    }
+
+    // v14: a bookmark's identity is its start alone. `dedup_hash` used to fold
+    // in the end anchor and the covered text, neither of which a bookmark
+    // carries: a device repeats the start as its end and the importer fills the
+    // text with a preview of the containing element, while the reader writes an
+    // empty end and no text. So a bookmark made in Sidle came back off a Kindle
+    // as a second row. See [`super::ingest::annotation_dedup_hash`]. The same
+    // re-key as v12 — the rule changed, so every row is recomputed under it and
+    // the pairs that split collapse.
+    if from_version < 14 {
+        rekey_annotation_hashes(conn)?;
+
+        // Ink drawn over book content is recorded as `handwritten_on_content_note`,
+        // which went unrecognized — so its host-page anchor never reached the ink
+        // join and those pages stored gallery-only. The nbk itself hasn't changed,
+        // and the sync skips an unchanged one, so drop the checkpoints: the next
+        // sync re-decodes and this time finds the anchors.
+        conn.execute("DELETE FROM ink_sync", [])?;
     }
 
     // §4c: stamp the schema version. migrate() always brings the DB up to the
@@ -4560,10 +4581,13 @@ mod tests {
                 source,
             }
         }
-        // The fused row the old reader wrote...
+        // The fused row the old reader wrote, carrying the hash a DB already at
+        // v12 holds for it — so what this test measures is the split, not a
+        // later re-key finding a placeholder.
+        let fused = hash("note", "test on sidle");
         insert_annotation(
             &conn,
-            &span(book, "fused", "note", Some("test on sidle"), "sidle"),
+            &span(book, &fused, "note", Some("test on sidle"), "sidle"),
         )
         .unwrap();
         // ...and the device's highlight record for the same passage, which had
@@ -4584,7 +4608,7 @@ mod tests {
         assert_eq!(hl.dedup_hash, hash("highlight", ""), "matches the device");
         assert_eq!(hl.note_body, None, "the body moved off the highlight");
         assert_eq!(
-            note.dedup_hash, "fused",
+            note.dedup_hash, fused,
             "the note keeps its identity — nothing referring to it breaks",
         );
         assert_eq!(note.note_body.as_deref(), Some("test on sidle"));
@@ -4671,10 +4695,22 @@ mod tests {
     fn migrate_v13_leaves_device_written_notes_alone() {
         let conn = fresh_db();
         let book = insert_minimal(&conn, "sha-dev-note", "Perfect Insider");
+        // The hash a DB already at v12 holds for this record, so the assertion
+        // below measures the split leaving it alone rather than a later re-key.
+        let device_note = crate::library::ingest::annotation_dedup_hash(
+            &crate::library::ingest::book_match_key("Perfect Insider"),
+            "note",
+            Some(918),
+            Some(327),
+            Some(918),
+            Some(327),
+            "",
+            "Test",
+        );
         insert_annotation(
             &conn,
             &NewAnnotation {
-                dedup_hash: "device-note",
+                dedup_hash: &device_note,
                 book_id: Some(book),
                 kind: "note",
                 eid_start: Some(918),
@@ -4703,7 +4739,7 @@ mod tests {
         let rows = list_annotations_for_book(&conn, book).unwrap();
         assert_eq!(rows.len(), 1, "no highlight invented");
         assert_eq!(rows[0].kind, "note");
-        assert_eq!(rows[0].dedup_hash, "device-note", "identity untouched");
+        assert_eq!(rows[0].dedup_hash, device_note, "identity untouched");
     }
 
     // ── book_ink (handwritten ink on a sideloaded doc) ──────────────────────

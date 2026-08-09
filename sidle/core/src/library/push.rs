@@ -233,7 +233,7 @@ fn to_record(row: &AnnotationRow, index: &BookIndex, colors: bool) -> Option<Ann
     let kind = Kind::parse(&row.kind);
     // Ink is the device's to make; a kind with no known slot would have to be
     // filed by guesswork. Neither belongs in a file we hand to firmware.
-    if kind == Kind::Handwritten || kind.cache_key().is_none() {
+    if matches!(kind, Kind::Handwritten(_)) || kind.cache_key().is_none() {
         return None;
     }
     // A hidden annotation is still the user's, and hiding is a Sidle-side view
@@ -886,6 +886,76 @@ mod tests {
         assert!(
             plan.is_empty(),
             "we contribute nothing to a book we don't have"
+        );
+    }
+
+    /// A mark made in Sidle, pushed to a device and read back off it, must stay
+    /// one row. The reader writes a bookmark as a bare point — no end anchor, no
+    /// covered text — while a device writes the point twice and the importer
+    /// previews the containing element. Three shapes of the same mark, and
+    /// identity has to see through all of them.
+    #[test]
+    fn a_native_bookmark_survives_a_round_trip_as_one_row() {
+        use crate::library::ingest;
+        let conn = mem_db();
+        let book = add_book(&conn);
+        let book_key = ingest::book_match_key("A Book");
+        // Exactly the row `annotation_create` stores for the reader's toggle.
+        let hash = ingest::annotation_dedup_hash(
+            &book_key,
+            "bookmark",
+            Some(20),
+            Some(0),
+            None,
+            None,
+            "",
+            "",
+        );
+        db::insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: &hash,
+                book_id: Some(book),
+                kind: "bookmark",
+                eid_start: Some(20),
+                off_start: Some(0),
+                eid_end: None,
+                off_end: None,
+                loc_start: Some(200),
+                loc_end: Some(200),
+                linear_pos: Some(200),
+                text: "",
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: Some("2026-08-08T10:24:49+00:00"),
+                added_raw: None,
+                imported_at: "2026-08-08T10:24:49+00:00",
+                source: "sidle",
+            },
+        )
+        .unwrap();
+
+        let out = compose(&conn, book, None, &index(), true).unwrap().unwrap();
+        let anns = crate::library::yjr::parse(&out.bytes);
+        ingest::import_yjr(
+            &conn,
+            &anns,
+            &index(),
+            Some(book),
+            Some("A Book"),
+            Some("Author"),
+            Some("DEV"),
+            "now",
+        )
+        .unwrap();
+
+        let rows = db::list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the bookmark came back as a second row: {rows:#?}"
         );
     }
 

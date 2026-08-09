@@ -136,3 +136,47 @@ fn merging_what_is_already_there_adds_nothing() {
         "an idempotent merge rewrites nothing"
     );
 }
+
+/// Adding one record must not rewrite the ones already in the cache. The merge
+/// rebuilds the whole cache from parsed records, so anything [`Annotation`]
+/// doesn't model would be dropped from the device's own highlights.
+#[test]
+fn merging_preserves_the_devices_existing_records_verbatim() {
+    let before = Store::parse(COLORED).unwrap();
+    let cache_before = before.root("annotation.cache.object").cloned().unwrap();
+
+    let mut store = Store::parse(COLORED).unwrap();
+    store.merge_annotations(&[Annotation::highlight(
+        Anchor::new(1200, 0, 5000),
+        Anchor::new(1200, 40, 5040),
+        1_786_188_500_000,
+        Some("orange"),
+    )]);
+    let cache_after = store.root("annotation.cache.object").cloned().unwrap();
+
+    // Every record the device wrote, still exactly as it wrote it.
+    let existing = |cache: &bokai::formats::krds::Object| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![cache.clone()];
+        while let Some(o) = stack.pop() {
+            if o.name.starts_with("annotation.personal.") {
+                out.push(format!("{:?}", o));
+            }
+            for v in &o.values {
+                if let Some(c) = v.as_object() {
+                    stack.push(c.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    let old = existing(&cache_before);
+    let new = existing(&cache_after);
+    for record in &old {
+        assert!(
+            new.contains(record),
+            "a record the device wrote was altered by the merge:\n{record}",
+        );
+    }
+}

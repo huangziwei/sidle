@@ -74,16 +74,17 @@ fn pdoc_asin(dir_name: &str) -> Option<String> {
         .map(|id| id.to_string())
 }
 
-/// Every `handwritten_note` record across the collected `.yjr`s (the union). The
-/// container-id join in [`ink::import_ink`] selects the right notes per nbk, so we
-/// needn't associate a note with a specific book here — a stray note from another
-/// book simply won't match this nbk's page containers.
+/// Every handwritten-ink record across the collected `.yjr`s (the union), under
+/// either name a device writes one. The container-id join in
+/// [`ink::import_ink`] selects the right notes per nbk, so we needn't associate a
+/// note with a specific book here — a stray note from another book simply won't
+/// match this nbk's page containers.
 pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
     collected
         .iter()
         .filter_map(|c| c.yjr_bytes.as_deref())
         .flat_map(yjr::parse)
-        .filter(|a| a.kind == yjr::Kind::Handwritten)
+        .filter(|a| matches!(a.kind, yjr::Kind::Handwritten(_)))
         .collect()
 }
 

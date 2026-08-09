@@ -140,6 +140,13 @@ pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<
 /// identity with it made one passage highlighted both ways hash twice, so a
 /// highlight pushed to a Kindle came back as a second row. The anchor is the
 /// identity; the position is a display coordinate.
+///
+/// **A bookmark is hashed on its start alone**, for the same reason. It marks a
+/// point, and the two values past that point are derived rather than marked: a
+/// device repeats the start as its end, and the importer fills `text` with a
+/// preview of the containing element. The reader, which has neither, writes an
+/// empty end and no text — so one bookmark made in Sidle hashed differently once
+/// it had been to a Kindle and back, and landed as a second row.
 #[allow(clippy::too_many_arguments)]
 pub fn annotation_dedup_hash(
     book_key: &str,
@@ -151,6 +158,14 @@ pub fn annotation_dedup_hash(
     text: &str,
     note_body: &str,
 ) -> String {
+    let point = kind == Kind::Bookmark.as_str();
+    let (eid_end, off_end) = if point {
+        (None, None)
+    } else {
+        (eid_end, off_end)
+    };
+    let text = if point { "" } else { text };
+
     let mut h = Sha256::new();
     let i = |x: Option<i64>| x.map(|v| v.to_string()).unwrap_or_default();
     for part in [
@@ -216,7 +231,7 @@ pub fn import_yjr(
         // would surface as a bodyless junk entry in the sidebar. The `.yjr`
         // carries the host-page anchor + the nbk page-container id, which the ink
         // importer consumes directly.
-        if ann.kind == Kind::Handwritten {
+        if matches!(ann.kind, Kind::Handwritten(_)) {
             continue;
         }
         let r = anchor::resolve(ann, idx);
@@ -1012,32 +1027,33 @@ mod tests {
         );
     }
 
+    /// Ink covers no text, so a row here would surface as a bodyless junk entry
+    /// in the sidebar. Both record names a device writes must be routed away —
+    /// ink drawn over book content is `handwritten_on_content_note`, and that
+    /// name reaching the text table is how three such rows got there.
     #[test]
-    fn handwritten_note_is_not_stored_as_text_annotation() {
-        let conn = mem_db();
-        let book = add_book(&conn, "B");
-        // A handwritten_note (ink) mixed with a real highlight: only the highlight
-        // lands in the text table; the ink is routed elsewhere (library::ink).
-        let anns = vec![
-            highlight(10, 0, 4),
-            Annotation {
-                kind: Kind::Handwritten,
-                anchors: vec![Anchor::new(10, 0, 9782)],
-                body: Some("cC9KkbR1zStWRzxfccUugsw0".to_string()),
-                color: None,
-                created_ms: None,
-                modified_ms: None,
-            },
-        ];
-        let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
-        assert_eq!(s.inserted, 1, "only the highlight is a text annotation");
-        let stored = db::list_annotations_for_book(&conn, book).unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].kind, "highlight");
-        assert!(
-            stored.iter().all(|a| a.kind != "handwritten_note"),
-            "no handwritten row in the text annotations table"
-        );
+    fn handwritten_notes_are_not_stored_as_text_annotations() {
+        for name in ["handwritten_note", "handwritten_on_content_note"] {
+            let conn = mem_db();
+            let book = add_book(&conn, "B");
+            let anns = vec![
+                highlight(10, 0, 4),
+                Annotation {
+                    kind: Kind::Handwritten(name.into()),
+                    anchors: vec![Anchor::new(10, 0, 9782)],
+                    body: Some("cC9KkbR1zStWRzxfccUugsw0".to_string()),
+                    color: None,
+                    created_ms: None,
+                    modified_ms: None,
+                },
+            ];
+            let s =
+                import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
+            assert_eq!(s.inserted, 1, "{name}: only the highlight is text");
+            let stored = db::list_annotations_for_book(&conn, book).unwrap();
+            assert_eq!(stored.len(), 1, "{name}");
+            assert_eq!(stored[0].kind, "highlight", "{name}");
+        }
     }
 
     #[test]
