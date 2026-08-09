@@ -22,16 +22,25 @@ pub struct ReadingDay {
     pub seconds: i64,
 }
 
-/// Everything the Reading Log page needs on open: the heatmap, the all-time
-/// per-book table, and the headline totals.
+/// Everything the Reading Log page needs on open: every day ever read, and the
+/// all-time headline totals.
+///
+/// The book grid is **not** here — it is scoped to whatever the heatmap is
+/// showing (a year, or one day of it) and comes from [`reading_log_books`],
+/// because a book's time within a window is a different number from its time
+/// ever and cannot be derived by filtering an all-time list.
 ///
 /// Every figure here covers books the library actually holds. Sessions whose
 /// book is gone are counted nowhere — see
 /// [`db::resolve_reading_sessions`].
 #[derive(Debug, Serialize)]
 pub struct ReadingOverview {
+    /// All of them, every year: the heatmap draws one year at a time, but which
+    /// years exist at all is what the year arrows navigate by.
     pub days: Vec<ReadingDay>,
-    pub books: Vec<db::ReadingEntry>,
+    /// Distinct books ever read — the headline count, which stays all-time
+    /// while the grid below it follows the selected window.
+    pub books_total: i64,
     pub total_seconds: i64,
     /// Days with any reading at all — the denominator behind "you read on N of
     /// the last M days".
@@ -55,8 +64,8 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
     let conn = state.db.lock().await;
     // An open range: the page decides which window to draw, and the whole
     // history is a few thousand rows at most.
-    let days = db::reading_days(&conn, "0000-00-00", "9999-99-99").map_err(|e| e.to_string())?;
-    let books = db::reading_books(&conn).map_err(|e| e.to_string())?;
+    let days = db::reading_days(&conn, ALL_TIME.0, ALL_TIME.1).map_err(|e| e.to_string())?;
+    let books_total = db::reading_book_count(&conn).map_err(|e| e.to_string())?;
 
     let total_seconds = days.iter().map(|(_, s)| s).sum();
     let (longest_streak, current_streak) = streaks(days.iter().map(|(d, _)| d.as_str()));
@@ -67,21 +76,28 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
             .into_iter()
             .map(|(day, seconds)| ReadingDay { day, seconds })
             .collect(),
-        books,
+        books_total,
         total_seconds,
         longest_streak,
         current_streak,
     })
 }
 
-/// What was read on one day, longest first.
+/// A range wide enough to mean "ever" against `YYYY-MM-DD` day keys.
+const ALL_TIME: (&str, &str) = ("0000-00-00", "9999-99-99");
+
+/// What was read over `[from, to]` (inclusive, `YYYY-MM-DD`), longest first.
+///
+/// The page's one book query, at whatever scope is selected: a year while the
+/// heatmap is showing one, a single day once a square is clicked.
 #[tauri::command]
-pub async fn reading_log_day(
+pub async fn reading_log_books(
     state: State<'_, AppState>,
-    day: String,
+    from: String,
+    to: String,
 ) -> Result<Vec<db::ReadingEntry>, String> {
     let conn = state.db.lock().await;
-    db::reading_day_detail(&conn, &day).map_err(|e| e.to_string())
+    db::reading_books(&conn, &from, &to).map_err(|e| e.to_string())
 }
 
 /// One book's reading history.
@@ -92,7 +108,7 @@ pub async fn reading_log_book(
 ) -> Result<ReadingBook, String> {
     let conn = state.db.lock().await;
     let days = db::reading_book_days(&conn, book_id).map_err(|e| e.to_string())?;
-    let entry = db::reading_books(&conn)
+    let entry = db::reading_books(&conn, ALL_TIME.0, ALL_TIME.1)
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|b| b.book_id == book_id);

@@ -212,7 +212,6 @@
           <header class="rl-head">
             <div id="rl-stats" class="rl-stats"></div>
             <div class="rl-head-actions">
-              <select id="rl-year" class="rl-year" aria-label="Year"></select>
               <button id="rl-import" class="btn"
                       title="Read logbackup files copied off a Kindle">Import…</button>
             </div>
@@ -241,6 +240,16 @@
 
           <div id="rl-body" hidden>
             <div class="rl-heatmap-wrap">
+              <!-- One year at a time. The arrows step to the next year that has
+                   reading in it, and are hidden when there is only one. -->
+              <header id="rl-year-nav" class="rl-nav">
+                <button id="rl-year-prev" class="btn btn-quiet"
+                        aria-label="Previous year">‹</button>
+                <strong id="rl-year-label"></strong>
+                <button id="rl-year-next" class="btn btn-quiet"
+                        aria-label="Next year">›</button>
+                <span id="rl-year-total" class="rl-muted"></span>
+              </header>
               <div id="rl-heatmap" class="rl-heatmap" role="img"
                    aria-label="Reading time per day"></div>
               <div class="rl-legend">
@@ -252,17 +261,14 @@
               </div>
             </div>
 
-            <section id="rl-day" class="rl-day" hidden>
-              <header class="rl-day-head">
-                <strong id="rl-day-title"></strong>
-                <span id="rl-day-total" class="rl-muted"></span>
-                <button id="rl-day-close" class="btn btn-quiet" aria-label="Close day">✕</button>
-              </header>
-              <div id="rl-day-list" class="rl-cards"></div>
-            </section>
-
+            <!-- The books of whatever the heatmap is showing: the whole year,
+                 or one day once a square is clicked. -->
             <section class="rl-books">
-              <header class="rl-group-head"><strong>Books</strong></header>
+              <header class="rl-group-head">
+                <strong id="rl-books-title"></strong>
+                <span id="rl-books-total" class="rl-muted"></span>
+                <button id="rl-day-clear" class="btn btn-quiet" hidden>Show the year</button>
+              </header>
               <div id="rl-book-list" class="rl-cards"></div>
             </section>
           </div>
@@ -280,7 +286,9 @@
           </header>
           <div id="rl-book-stats" class="rl-stats"></div>
           <div class="rl-month">
-            <header class="rl-month-head">
+            <!-- Bounded by this book's own reading: no arrow leads to a month
+                 it was never opened in. -->
+            <header id="rl-month-nav" class="rl-month-head rl-nav">
               <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
               <strong id="rl-month-label"></strong>
               <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>

@@ -168,7 +168,7 @@ pub fn run() {
             commands::misc::misc_reveal,
             commands::misc::misc_delete,
             commands::reading_log::reading_log_overview,
-            commands::reading_log::reading_log_day,
+            commands::reading_log::reading_log_books,
             commands::reading_log::reading_log_book,
             commands::reading_log::reading_log_import,
             commands::reading_log::reading_log_pick_folders,

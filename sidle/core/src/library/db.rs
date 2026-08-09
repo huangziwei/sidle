@@ -1489,14 +1489,6 @@ pub fn reading_days(
     rows.collect()
 }
 
-/// What was read on one day: one row per book, longest first.
-pub fn reading_day_detail(conn: &Connection, day: &str) -> rusqlite::Result<Vec<ReadingEntry>> {
-    let root = conn_root(conn);
-    let mut stmt = conn.prepare(&entry_query("WHERE s.day = ?1"))?;
-    let rows = stmt.query_map(params![day], |r| row_to_entry(r, root.as_deref()))?;
-    rows.collect()
-}
-
 /// Per-day totals for one book, oldest first — the book page's calendar.
 pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
@@ -1507,26 +1499,39 @@ pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Ve
     rows.collect()
 }
 
-/// Every book ever read, longest first. Drives the Reading Log's book list.
-pub fn reading_books(conn: &Connection) -> rusqlite::Result<Vec<ReadingEntry>> {
+/// Books read over `[from, to]` (inclusive, `YYYY-MM-DD`), longest first, with
+/// every figure summed **within that window** — a book's total for one day, or
+/// for one year, is a different number from its total ever.
+///
+/// One query for every scope the page offers: a single day is `from == to`, and
+/// all time is an open range. Aggregating in SQL rather than filtering an
+/// all-time list on the client is what keeps those per-window sums honest.
+pub fn reading_books(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<ReadingEntry>> {
     let root = conn_root(conn);
-    let mut stmt = conn.prepare(&entry_query(""))?;
-    let rows = stmt.query_map([], |r| row_to_entry(r, root.as_deref()))?;
-    rows.collect()
-}
-
-/// Sessions aggregated per book, narrowed by `filter` (a `WHERE` clause or
-/// empty). Shared so the day panel and the all-time list cannot drift in what
-/// they select — both feed the same card.
-fn entry_query(filter: &str) -> String {
-    format!(
+    let mut stmt = conn.prepare(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at)
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
-            {filter}
+            WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY s.book_id
-            ORDER BY SUM(s.seconds) DESC"#
+            ORDER BY SUM(s.seconds) DESC"#,
+    )?;
+    let rows = stmt.query_map(params![from, to], |r| row_to_entry(r, root.as_deref()))?;
+    rows.collect()
+}
+
+/// How many distinct books have ever been read. A count, not a list: the
+/// headline figure needs no titles and no cover stats.
+pub fn reading_book_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT book_id) FROM reading_sessions WHERE book_id IS NOT NULL",
+        [],
+        |r| r.get(0),
     )
 }
 
@@ -5466,11 +5471,16 @@ mod tests {
         // …but it is in no total, on no day, and in no list.
         let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
         assert_eq!(days, vec![("2026-08-01".to_string(), 3600)]);
-        assert!(reading_day_detail(&conn, "2026-08-02").unwrap().is_empty());
-        let books = reading_books(&conn).unwrap();
+        assert!(
+            reading_books(&conn, "2026-08-02", "2026-08-02")
+                .unwrap()
+                .is_empty()
+        );
+        let books = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_id, book);
         assert_eq!(books[0].title, "読んだ本");
+        assert_eq!(reading_book_count(&conn).unwrap(), 1);
     }
 
     #[test]
@@ -5480,15 +5490,45 @@ mod tests {
         // unattributed row is kept rather than dropped.
         insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
         assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-        assert!(reading_books(&conn).unwrap().is_empty());
+        assert!(
+            reading_books(&conn, "0000-00-00", "9999-99-99")
+                .unwrap()
+                .is_empty()
+        );
 
         let book = insert_minimal(&conn, "sha-late", "後から来た本");
         set_max_position(&conn, book, Some(1000)).unwrap();
         assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
 
-        let books = reading_books(&conn).unwrap();
+        let books = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].seconds, 3600);
+    }
+
+    #[test]
+    fn a_books_totals_are_summed_within_the_window_asked_for() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-window", "毎日読む本");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+        insert_reading_session(&conn, &session("2025-12-31", 999, 600)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-02", 999, 1800)).unwrap();
+        resolve_reading_sessions(&conn).unwrap();
+
+        // One book throughout, but the figure differs per window — which is why
+        // the client cannot filter an all-time list and get this right.
+        let day = reading_books(&conn, "2026-08-01", "2026-08-01").unwrap();
+        assert_eq!((day.len(), day[0].seconds, day[0].sessions), (1, 3600, 1));
+        let year = reading_books(&conn, "2026-01-01", "2026-12-31").unwrap();
+        assert_eq!(
+            (year.len(), year[0].seconds, year[0].sessions),
+            (1, 5400, 2)
+        );
+        let ever = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(
+            (ever.len(), ever[0].seconds, ever[0].sessions),
+            (1, 6000, 3)
+        );
     }
 
     #[test]

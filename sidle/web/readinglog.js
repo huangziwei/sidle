@@ -18,8 +18,10 @@
   const state = {
     overview: null,
     loaded: false,
-    year: null, // heatmap year; null = trailing 12 months
-    day: null, // selected YYYY-MM-DD, or null
+    year: null, // heatmap year, as a number; resolved on first render
+    day: null, // selected YYYY-MM-DD within that year, or null
+    books: [], // the grid: books of the selected day, else of the year
+    scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
     month: null, // Date anchoring the book page's calendar
   };
@@ -124,11 +126,28 @@
       q("#rl-stats").innerHTML = "";
       return;
     }
+    // The current year, which is what someone opening this page wants to see —
+    // falling back to the newest year that has any reading, so a library whose
+    // logs stop last year opens on data rather than on an empty grid.
+    const years = yearsWithData(o);
+    if (!years.includes(state.year)) {
+      const now = new Date().getFullYear();
+      state.year = years.includes(now) ? now : years[years.length - 1];
+      state.day = null;
+    }
     renderStats(o);
-    renderYearPicker(o);
+    renderYearNav(o, years);
     renderHeatmap(o);
-    renderBookList(o);
-    renderDay();
+    renderScope();
+  }
+
+  function yearsWithData(o) {
+    return [...new Set(o.days.map((d) => +d.day.slice(0, 4)))].sort((a, b) => a - b);
+  }
+
+  function daysOfYear(o, year) {
+    const p = `${year}-`;
+    return o.days.filter((d) => d.day.startsWith(p));
   }
 
   function statTile(value, label, hint) {
@@ -144,19 +163,45 @@
       statTile(fmtDuration(perDay), "per reading day"),
       statTile(`${o.current_streak}d`, "streak", "Consecutive days up to today"),
       statTile(`${o.longest_streak}d`, "longest streak"),
-      statTile(o.books.length, "books"),
+      statTile(o.books_total, "books"),
     ];
     q("#rl-stats").innerHTML = tiles.join("");
   }
 
-  function renderYearPicker(o) {
-    const years = [...new Set(o.days.map((d) => d.day.slice(0, 4)))].sort().reverse();
-    const sel = q("#rl-year");
-    const opts = [`<option value="">Last 12 months</option>`].concat(
-      years.map((y) => `<option value="${y}">${y}</option>`),
-    );
-    sel.innerHTML = opts.join("");
-    sel.value = state.year || "";
+  // The arrows step to the next year that *has* reading, never onto a blank
+  // grid; with a single year of history there is nowhere to go, so the pair is
+  // hidden rather than shown dead.
+  function renderYearNav(o, years) {
+    const i = years.indexOf(state.year);
+    const prev = i > 0 ? years[i - 1] : null;
+    const next = i >= 0 && i < years.length - 1 ? years[i + 1] : null;
+    q("#rl-year-nav").classList.toggle("rl-nav-fixed", years.length < 2);
+    q("#rl-year-label").textContent = state.year;
+    setStep("#rl-year-prev", prev, (y) => `Go to ${y}`);
+    setStep("#rl-year-next", next, (y) => `Go to ${y}`);
+    const secs = daysOfYear(o, state.year).reduce((a, d) => a + d.seconds, 0);
+    q("#rl-year-total").textContent = secs ? fmtDuration(secs) : "";
+  }
+
+  // A navigation arrow: disabled and unlabelled when there is nothing that way.
+  // `target` is stashed on the element so the click handler reads its
+  // destination rather than recomputing the bounds.
+  function setStep(sel, target, title) {
+    const btn = q(sel);
+    btn.disabled = target === null;
+    btn.dataset.target = target === null ? "" : String(target);
+    btn.title = target === null ? "" : title(target);
+  }
+
+  // Scale by the busiest day rather than fixed thresholds, so the range is
+  // meaningful whether the reader does 20 minutes or 4 hours a day.
+  function levelScale(days) {
+    const peak = Math.max(...days.map((d) => d.seconds), 1);
+    return (secs) => {
+      if (!secs) return 0;
+      const r = secs / peak;
+      return r > 0.66 ? 4 : r > 0.4 ? 3 : r > 0.15 ? 2 : 1;
+    };
   }
 
   // GitHub-style: one column per week, Sunday at the top. The grid is built
@@ -164,25 +209,13 @@
   // days keeps the weekday rows aligned instead of shearing by one.
   function renderHeatmap(o) {
     const totals = new Map(o.days.map((d) => [d.day, d.seconds]));
-    let start;
-    let end;
-    if (state.year) {
-      start = new Date(+state.year, 0, 1);
-      end = new Date(+state.year, 11, 31);
-    } else {
-      end = new Date();
-      start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 364);
-    }
+    const end = new Date(state.year, 11, 31);
+    let start = new Date(state.year, 0, 1);
     start = new Date(start.getFullYear(), start.getMonth(), start.getDate() - start.getDay());
 
-    // Scale by the busiest day rather than fixed thresholds, so the range is
-    // meaningful whether the reader does 20 minutes or 4 hours a day.
-    const peak = Math.max(...o.days.map((d) => d.seconds), 1);
-    const level = (secs) => {
-      if (!secs) return 0;
-      const r = secs / peak;
-      return r > 0.66 ? 4 : r > 0.4 ? 3 : r > 0.15 ? 2 : 1;
-    };
+    // Across all years, so a quiet year reads as quiet instead of being
+    // stretched to fill the same five shades as a heavy one.
+    const level = levelScale(o.days);
 
     const cols = [];
     let months = [];
@@ -190,15 +223,20 @@
       const week = [];
       for (let i = 0; i < 7; i++) {
         const cur = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i);
-        if (cur > end) {
+        // A week can start in December and run into January; only the days
+        // inside the year being shown belong to this grid.
+        if (cur > end || cur.getFullYear() !== state.year) {
           week.push(`<i class="rl-cell rl-pad"></i>`);
           continue;
         }
         const key = dayKey(cur);
         const secs = totals.get(key) || 0;
+        // Only a day with reading is clickable: selecting an empty one would
+        // filter the grid down to nothing.
+        const hit = secs ? ` data-day="${key}" role="button" tabindex="0"` : "";
         const sel = key === state.day ? " rl-sel" : "";
         week.push(
-          `<i class="rl-cell rl-l${level(secs)}${sel}" data-day="${key}" role="button" tabindex="0" ` +
+          `<i class="rl-cell rl-l${level(secs)}${sel}"${hit} ` +
             `title="${fmtDay(key)} — ${secs ? fmtDuration(secs) : "nothing"}"></i>`,
         );
       }
@@ -249,30 +287,38 @@
     );
   }
 
-  function renderBookList(o) {
-    q("#rl-book-list").innerHTML = o.books
-      .map((b) => entryCard(b, `${b.sessions} sessions · ${fmtWords(b.words)} words`))
-      .join("");
-  }
+  // The grid always shows exactly what the heatmap above it is showing: the
+  // whole year, or one day of it once a square is clicked. Its figures come
+  // from a windowed query rather than a filtered all-time list, because a
+  // book's hours *that day* are not its hours ever.
+  async function renderScope() {
+    const day = state.day;
+    const [from, to] = day ? [day, day] : [`${state.year}-01-01`, `${state.year}-12-31`];
+    q("#rl-books-title").textContent = day ? fmtDay(day) : `Books in ${state.year}`;
+    q("#rl-day-clear").hidden = !day;
 
-  async function renderDay() {
-    const panel = q("#rl-day");
-    if (!state.day) {
-      panel.hidden = true;
-      return;
-    }
-    panel.hidden = false;
-    q("#rl-day-title").textContent = fmtDay(state.day);
+    // A later click must win, however the replies happen to arrive back.
+    const token = ++state.scope;
     let rows = [];
     try {
-      rows = await api.invoke("reading_log_day", { day: state.day });
+      rows = await api.invoke("reading_log_books", { from, to });
     } catch (e) {
-      toast(`failed to load ${state.day}: ${e}`, true);
+      toast(`failed to load ${day || state.year}: ${e}`, true);
     }
+    if (token !== state.scope) return;
+
+    state.books = rows;
     const total = rows.reduce((a, r) => a + r.seconds, 0);
-    q("#rl-day-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
-    q("#rl-day-list").innerHTML = rows
-      .map((r) => entryCard(r, `from ${r.first_at.slice(11, 16)}`))
+    q("#rl-books-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
+    q("#rl-book-list").innerHTML = rows
+      .map((r) =>
+        entryCard(
+          r,
+          day
+            ? `from ${r.first_at.slice(11, 16)}`
+            : `${r.sessions} sessions · ${fmtWords(r.words)} words`,
+        ),
+      )
       .join("");
   }
 
@@ -334,29 +380,62 @@
     return Math.round((b - a) / 86400000) + 1;
   }
 
+  // Months as a single ordinal, so "the month before" is arithmetic and the
+  // bounds compare without date objects.
+  function monthIndex(y, m) {
+    return y * 12 + m;
+  }
+
+  function monthFromIndex(i) {
+    return new Date(Math.floor(i / 12), i % 12, 1);
+  }
+
+  // The calendar goes no further than the book's own reading. Unlike the year
+  // arrows it steps one month at a time and does not skip: a gap between two
+  // reading months is itself worth seeing.
+  function monthBounds(days) {
+    const idx = days.map((d) => {
+      const p = parseDay(d.day);
+      return monthIndex(p.getFullYear(), p.getMonth());
+    });
+    return [Math.min(...idx), Math.max(...idx)];
+  }
+
   function renderMonth() {
-    const totals = new Map(state.book.days.map((d) => [d.day, d.seconds]));
+    const { days } = state.book;
+    const totals = new Map(days.map((d) => [d.day, d.seconds]));
     const anchor = state.month;
     q("#rl-month-label").textContent = anchor.toLocaleDateString(undefined, {
       month: "long",
       year: "numeric",
     });
+
+    const here = monthIndex(anchor.getFullYear(), anchor.getMonth());
+    const [lo, hi] = days.length ? monthBounds(days) : [here, here];
+    const label = (i) =>
+      monthFromIndex(i).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    q("#rl-month-nav").classList.toggle("rl-nav-fixed", lo === hi);
+    setStep("#rl-prev", here > lo ? here - 1 : null, (i) => `Go to ${label(i)}`);
+    setStep("#rl-next", here < hi ? here + 1 : null, (i) => `Go to ${label(i)}`);
+
     const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
     const lead = first.getDay();
     const len = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
-    const peak = Math.max(...state.book.days.map((d) => d.seconds), 1);
+    // This book's own busiest day sets the scale, so its calendar shades the
+    // same way the year heatmap does — a day read is a day that looks read.
+    const level = levelScale(days);
 
     const cells = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
       (d) => `<span class="rl-mday-head">${d}</span>`,
     );
-    for (let i = 0; i < lead; i++) cells.push(`<span class="rl-mday rl-mpad"></span>`);
+    // Lead-in blanks carry no level class, which is the whole difference
+    // between "before the month started" and "a day with no reading".
+    for (let i = 0; i < lead; i++) cells.push(`<span class="rl-mday"></span>`);
     for (let day = 1; day <= len; day++) {
       const key = dayKey(new Date(anchor.getFullYear(), anchor.getMonth(), day));
       const secs = totals.get(key) || 0;
-      const r = secs / peak;
-      const lvl = !secs ? 0 : r > 0.66 ? 4 : r > 0.4 ? 3 : r > 0.15 ? 2 : 1;
       cells.push(
-        `<span class="rl-mday rl-l${lvl}" title="${secs ? fmtDuration(secs) : "nothing"}">` +
+        `<span class="rl-mday rl-l${level(secs)}" title="${secs ? fmtDuration(secs) : "nothing"}">` +
           `<b>${day}</b>${secs ? `<em>${fmtDuration(secs)}</em>` : ""}</span>`,
       );
     }
@@ -451,12 +530,19 @@
       btn.textContent = "Cancel";
     });
     api.listen("reading-log:import-progress", (e) => onProgress(e.payload));
-    q("#rl-year").addEventListener("change", (e) => {
-      state.year = e.target.value || null;
-      state.day = null;
-      render();
-    });
-    q("#rl-day-close").addEventListener("click", () => {
+    // Both navigations read their destination off the button, which the
+    // renderer set from the data — so an arrow can only ever go somewhere that
+    // exists, and a disabled one has nothing to go to.
+    for (const sel of ["#rl-year-prev", "#rl-year-next"]) {
+      q(sel).addEventListener("click", (e) => {
+        const target = e.currentTarget.dataset.target;
+        if (!target) return;
+        state.year = Number(target);
+        state.day = null;
+        render();
+      });
+    }
+    q("#rl-day-clear").addEventListener("click", () => {
       state.day = null;
       render();
     });
@@ -464,14 +550,14 @@
       state.book = null;
       render();
     });
-    q("#rl-prev").addEventListener("click", () => {
-      state.month = new Date(state.month.getFullYear(), state.month.getMonth() - 1, 1);
-      renderMonth();
-    });
-    q("#rl-next").addEventListener("click", () => {
-      state.month = new Date(state.month.getFullYear(), state.month.getMonth() + 1, 1);
-      renderMonth();
-    });
+    for (const sel of ["#rl-prev", "#rl-next"]) {
+      q(sel).addEventListener("click", (e) => {
+        const target = e.currentTarget.dataset.target;
+        if (!target) return;
+        state.month = monthFromIndex(Number(target));
+        renderMonth();
+      });
+    }
 
     // One delegated handler for the whole page: the heatmap and both lists are
     // re-rendered wholesale, so per-element listeners would leak on every draw.

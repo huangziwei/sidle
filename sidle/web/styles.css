@@ -4285,14 +4285,19 @@ kbd {
   gap: 8px;
 }
 
-.rl-year {
-  font: inherit;
-  padding: 5px 8px;
-  color: var(--fg);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
+/* Step-through navigation — the year above the heatmap, the month on a book's
+   calendar. Both are bounded by the data, so an arrow is disabled when there is
+   nothing that way and `.rl-nav-fixed` hides the pair outright when there is
+   only ever one step to show. */
+.rl-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
+
+.rl-nav .btn[disabled] { opacity: 0.3; cursor: default; }
+.rl-nav-fixed .btn { display: none; }
 
 .rl-muted { color: var(--muted); }
 
@@ -4412,11 +4417,11 @@ kbd {
 
 .rl-legend .rl-cell { cursor: default; }
 
-/* ── Lists (a day's books, and the all-time book list) ───────────────────── */
+/* ── The books of whatever the heatmap is showing ────────────────────────── */
 
-.rl-day, .rl-books { margin-top: 22px; }
+.rl-books { margin-top: 22px; }
 
-.rl-day-head, .rl-group-head {
+.rl-group-head {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -4425,7 +4430,7 @@ kbd {
   margin-bottom: 4px;
 }
 
-.rl-day-head .btn { margin-left: auto; }
+.rl-group-head .btn { margin-left: auto; }
 
 /* Books read are shown as covers, on the gallery's own `.book-card` / `.cover`
    primitives — the same book should look the same everywhere in the app. A
@@ -4496,6 +4501,10 @@ kbd {
   letter-spacing: 0.04em;
 }
 
+/* No `background` here. Every real cell carries an `.rl-l0`–`.rl-l4` class of
+   the same specificity, and this rule comes later in the sheet, so setting one
+   would win over all of them and flatten the calendar to a single shade. The
+   level classes are the only thing that colours a day. */
 .rl-mday {
   display: flex;
   flex-direction: column;
@@ -4504,11 +4513,9 @@ kbd {
   gap: 2px;
   min-height: 46px;
   border-radius: 6px;
-  background: var(--rl-0);
   font-variant-numeric: tabular-nums;
 }
 
-.rl-mday.rl-mpad { background: none; }
 .rl-mday b { font-size: 13px; font-weight: 500; }
 .rl-mday em { font-size: 10px; font-style: normal; opacity: 0.85; }
 
