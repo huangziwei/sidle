@@ -236,15 +236,17 @@ const DAEMON_PID: &str = "/mnt/us/extensions/sidle/archive.pid";
 /// `/proc` is recognised as one.
 pub const DAEMON_FLAG: &str = "--archive-daemon";
 
-/// What the archiver calls itself — in `argv[0]` and in the kernel's own process
-/// name, which are the two things `pidof` matches on.
+/// Where the archiver runs from: its own copy of this binary, under a name that
+/// shares no text with the picker's.
 ///
-/// It must not be the picker's name. The home-screen tile decides whether to
-/// launch by asking whether a process called `sidle` is already running, and a
-/// resident archiver answering to that name is a tile that does nothing, for as
-/// long as the archiver lives — which is indefinitely. Anything else long-lived
-/// ever started from this binary has the same obligation.
-pub const DAEMON_NAME: &str = "sidle-archive";
+/// The home-screen tile will not open a picker while `pidof sidle` matches
+/// anything, and that check reaches the executable behind a process, not only
+/// the name the process reports for itself — so an archiver running out of the
+/// picker's own `bin/sidle` is a tile that silently does nothing for as long as
+/// the archiver lives, which is indefinitely. A separate file is what settles
+/// it, and a copy rather than a link because the user partition is FAT, which
+/// has neither kind.
+const DAEMON_BIN: &str = "/mnt/us/extensions/sidle/bin/readinglogd";
 
 /// What the pidfile and `/proc` together say about the archiver.
 #[derive(Debug, PartialEq, Eq)]
@@ -312,9 +314,39 @@ pub fn stop_archiver(pid: u32) {
     let _ = std::fs::remove_file(DAEMON_PID);
 }
 
-/// Record this process as the running archiver, under a name of its own.
+/// Start an archiver and answer with its pid.
+///
+/// Runs [`DAEMON_BIN`], not this binary, having first put a current copy of
+/// this one there. The copy is rewritten on every start rather than compared:
+/// a start only happens when no current archiver is running — after an install,
+/// a reboot, or an update — and reading it to decide would cost what writing it
+/// costs.
+pub fn start_archiver() -> std::io::Result<u32> {
+    let bin = Path::new(DAEMON_BIN);
+    stage_binary(&std::env::current_exe()?, bin)?;
+    Ok(std::process::Command::new(bin)
+        .arg(DAEMON_FLAG)
+        .spawn()?
+        .id())
+}
+
+/// Copy `src` over `dst`, through a scratch name beside it.
+///
+/// Never a write straight to `dst`: that is a file something may be executing,
+/// and one cut short would be a binary a later launch tries to run. The rename
+/// is within the one FAT mount, so it stays a rename.
+fn stage_binary(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(src)?;
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let scratch = dst.with_extension("new");
+    std::fs::write(&scratch, &bytes)?;
+    std::fs::rename(&scratch, dst)
+}
+
+/// Record this process as the running archiver.
 pub fn claim_archiver() {
-    set_process_name(DAEMON_NAME);
     if let Some(dir) = Path::new(DAEMON_PID).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -326,31 +358,6 @@ pub fn claim_archiver() {
             crate::selfupdate::self_build_ts()
         ),
     );
-}
-
-/// Set the name the kernel reports for this process — `/proc/<pid>/comm`, and
-/// the second field of `/proc/<pid>/stat` that `pidof` reads.
-///
-/// `argv[0]` is the other half of the same job and is set by whoever spawns us;
-/// `pidof` matches either, so both have to differ from the picker's name.
-fn set_process_name(name: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        // The kernel takes 16 bytes including the terminator and truncates
-        // silently, so the name is placed in a buffer of exactly that size.
-        let mut buf = [0u8; 16];
-        let n = name.len().min(buf.len() - 1);
-        buf[..n].copy_from_slice(&name.as_bytes()[..n]);
-        // SAFETY: PR_SET_NAME reads 16 bytes from the pointer; `buf` is exactly
-        // that long and its terminator is inside it.
-        unsafe {
-            libc::prctl(libc::PR_SET_NAME, buf.as_ptr());
-        }
-    }
-    // Every other host builds the tests only, where there is no process table
-    // to appear in.
-    #[cfg(not(target_os = "linux"))]
-    let _ = name;
 }
 
 /// Delete archive files the library has confirmed it holds, and report how many
@@ -947,6 +954,45 @@ mod tests {
         );
         // Nothing is running under it at all, so there is no command line.
         assert_eq!(classify(999, Some("0"), b""), Archiver::Absent);
+    }
+
+    /// The archiver's executable may not be named anything `pidof sidle` could
+    /// match, by any rule such a check might use.
+    ///
+    /// The tile that opens the picker refuses to while that name is taken, and
+    /// the check reaches the executable behind a process rather than only the
+    /// name the process reports — so the file itself has to be unmistakable.
+    #[test]
+    fn the_archivers_binary_is_named_nothing_like_the_pickers() {
+        let name = Path::new(DAEMON_BIN)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("the archiver's binary has a name");
+        assert!(
+            !name.contains("sidle"),
+            "{name:?} could still be taken for the picker"
+        );
+    }
+
+    /// Staging must leave either the old binary or the whole new one, and no
+    /// scratch file for a later launch to trip over.
+    #[test]
+    fn staging_the_archivers_binary_replaces_it_whole() {
+        let dir = tempdir();
+        let src = dir.join("sidle");
+        let dst = dir.join("bin/readinglogd");
+        std::fs::write(&src, b"v1").unwrap();
+
+        stage_binary(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"v1");
+
+        // The update case: a copy is already there and is replaced in full.
+        std::fs::write(&src, b"v2-and-longer").unwrap();
+        stage_binary(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"v2-and-longer");
+        assert!(!dst.with_extension("new").exists(), "scratch left behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An archiver that predates the running binary is replaced, not kept.

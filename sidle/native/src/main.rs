@@ -223,19 +223,8 @@ fn main() {
         ));
     }
     if state != readinglog::Archiver::Running {
-        // `arg0`, not just the flag: `pidof` matches a process by its command
-        // name *or* by the base name of its `argv[0]`, and the picker's own
-        // launcher refuses to open a second picker when either says `sidle`.
-        // The archiver names itself on the other half of that in
-        // `claim_archiver`.
-        match std::env::current_exe().and_then(|exe| {
-            use std::os::unix::process::CommandExt;
-            std::process::Command::new(exe)
-                .arg0(readinglog::DAEMON_NAME)
-                .arg(readinglog::DAEMON_FLAG)
-                .spawn()
-        }) {
-            Ok(child) => log(format!("started archive daemon (pid {})", child.id())),
+        match readinglog::start_archiver() {
+            Ok(pid) => log(format!("started archive daemon (pid {pid})")),
             Err(e) => log(format!("could not start archive daemon: {e}")),
         }
     }
