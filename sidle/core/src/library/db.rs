@@ -665,6 +665,53 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // v15: reading sessions recovered from a Kindle's own system logs.
+    //
+    // `end_position` is the fingerprint the device logs instead of a title; it is
+    // stored permanently rather than resolved-and-discarded so a session that
+    // matches no book today can be attributed later, when the missing book is
+    // imported, without re-reading a single log file. `book_id` is therefore
+    // nullable by design and NULL means "not yet attributable", not "bad row".
+    //
+    // Times are **device-local wall clock with no offset** — that is all the
+    // syslog prefix carries, and it is also what the reader means by "what did I
+    // read on Tuesday". `day` is `started_at`'s date, denormalized because every
+    // view of this table groups by it; a session crossing midnight counts to the
+    // day it began.
+    //
+    // The uniqueness index is what makes re-importing safe: dumps overlap
+    // heavily and the same session arrives many times over. `device_serial` is
+    // `''` rather than NULL when unknown so those rows still collide instead of
+    // multiplying (SQLite treats NULLs as distinct in a UNIQUE).
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_sessions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_serial TEXT NOT NULL DEFAULT '',
+            started_at    TEXT NOT NULL,
+            ended_at      TEXT NOT NULL,
+            day           TEXT NOT NULL,
+            end_position  INTEGER NOT NULL,
+            book_id       INTEGER REFERENCES books(id) ON DELETE SET NULL,
+            seconds       INTEGER NOT NULL,
+            pages         INTEGER NOT NULL DEFAULT 0,
+            words         INTEGER NOT NULL DEFAULT 0
+        )"#,
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
+           ON reading_sessions (device_serial, started_at, end_position)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS reading_sessions_day ON reading_sessions (day)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS reading_sessions_book ON reading_sessions (book_id)",
+        [],
+    )?;
+
     // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
     // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
     // linked annotation. Idempotent: a no-op on a DB that never had any. Kept
@@ -1341,6 +1388,182 @@ pub fn books_with_last_position(
     let mut stmt = conn.prepare("SELECT id FROM books WHERE max_position = ?1 ORDER BY id")?;
     let rows = stmt.query_map([last_position + 1], |r| r.get::<_, i64>(0))?;
     rows.collect()
+}
+
+// ---------------------------------------------------------------------------
+// Reading sessions.
+
+/// Every device serial the library has ever recorded, from any sync surface.
+///
+/// Used to recognise a serial mentioned in passing inside a device log: matching
+/// only against serials already known is what stops an unrelated identifier
+/// being mistaken for one.
+pub fn known_device_serials(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT device_serial FROM annotation_device
+         UNION SELECT device_serial FROM yjr_sync
+         UNION SELECT device_serial FROM ink_sync
+         UNION SELECT device_serial FROM book_ink_device
+         UNION SELECT device_serial FROM reading_sessions
+          WHERE device_serial <> ''",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.filter(|s| s.as_ref().map(|v| !v.is_empty()).unwrap_or(true))
+        .collect()
+}
+
+/// One reading session as stored. `book_id` is `None` while the fingerprint
+/// matches no book in the library.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadingSession {
+    pub device_serial: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub day: String,
+    pub end_position: i64,
+    pub book_id: Option<i64>,
+    pub seconds: i64,
+    pub pages: i64,
+    pub words: i64,
+}
+
+/// Store one session, ignoring it if that (device, start, book) is already
+/// known. Returns whether a row was actually added, so an import can report how
+/// much of a re-imported archive was genuinely new.
+pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        r#"INSERT OR IGNORE INTO reading_sessions
+            (device_serial, started_at, ended_at, day, end_position, book_id, seconds, pages, words)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+        params![
+            s.device_serial,
+            s.started_at,
+            s.ended_at,
+            s.day,
+            s.end_position,
+            s.book_id,
+            s.seconds,
+            s.pages,
+            s.words,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// Seconds read per day over `[from, to]` (inclusive, `YYYY-MM-DD`), skipping
+/// days with nothing. Feeds the calendar heatmap.
+pub fn reading_days(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT day, SUM(seconds) FROM reading_sessions
+          WHERE day BETWEEN ?1 AND ?2 GROUP BY day ORDER BY day",
+    )?;
+    let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// What was read on one day: one row per book (or per unattributed
+/// fingerprint), longest first.
+pub fn reading_day_detail(conn: &Connection, day: &str) -> rusqlite::Result<Vec<ReadingEntry>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT s.book_id, b.title, b.author, s.end_position,
+                  SUM(s.seconds), SUM(s.pages), SUM(s.words), COUNT(*),
+                  MIN(s.started_at), MAX(s.ended_at)
+             FROM reading_sessions s LEFT JOIN books b ON b.id = s.book_id
+            WHERE s.day = ?1
+            GROUP BY COALESCE(s.book_id, -s.end_position)
+            ORDER BY SUM(s.seconds) DESC"#,
+    )?;
+    let rows = stmt.query_map(params![day], row_to_entry)?;
+    rows.collect()
+}
+
+/// Per-day totals for one book, oldest first — the book page's calendar.
+pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT day, SUM(seconds) FROM reading_sessions
+          WHERE book_id = ?1 GROUP BY day ORDER BY day",
+    )?;
+    let rows = stmt.query_map(params![book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Every book ever read, longest first. Drives the Reading Log's book list and
+/// doubles as the "unattributed" report when `book_id` is `None`.
+pub fn reading_books(conn: &Connection) -> rusqlite::Result<Vec<ReadingEntry>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT s.book_id, b.title, b.author, s.end_position,
+                  SUM(s.seconds), SUM(s.pages), SUM(s.words), COUNT(*),
+                  MIN(s.started_at), MAX(s.ended_at)
+             FROM reading_sessions s LEFT JOIN books b ON b.id = s.book_id
+            GROUP BY COALESCE(s.book_id, -s.end_position)
+            ORDER BY SUM(s.seconds) DESC"#,
+    )?;
+    let rows = stmt.query_map([], row_to_entry)?;
+    rows.collect()
+}
+
+/// An aggregate over sessions — a book on one day, or a book across all time.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadingEntry {
+    pub book_id: Option<i64>,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    /// The device's fingerprint, kept so an unattributed row is still nameable
+    /// once its book is imported.
+    pub end_position: i64,
+    pub seconds: i64,
+    pub pages: i64,
+    pub words: i64,
+    pub sessions: i64,
+    pub first_at: String,
+    pub last_at: String,
+}
+
+fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingEntry> {
+    Ok(ReadingEntry {
+        book_id: r.get(0)?,
+        title: r.get(1)?,
+        author: r.get(2)?,
+        end_position: r.get(3)?,
+        seconds: r.get(4)?,
+        pages: r.get(5)?,
+        words: r.get(6)?,
+        sessions: r.get(7)?,
+        first_at: r.get(8)?,
+        last_at: r.get(9)?,
+    })
+}
+
+/// Attach `book_id` to every session whose fingerprint now resolves to exactly
+/// one book, and return how many were newly attributed.
+///
+/// Run after any import — of logs *or* of books. A book imported today names the
+/// sessions that were logged before Sidle had ever seen it, which is why
+/// `end_position` is kept on the row. Fingerprints matching several books are
+/// deliberately left alone: an ambiguous attribution is worse than none.
+pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT end_position FROM reading_sessions WHERE book_id IS NULL")?;
+    let pending: Vec<i64> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let mut resolved = 0;
+    for position in pending {
+        let candidates = books_with_last_position(conn, position)?;
+        if let [book_id] = candidates[..] {
+            resolved += conn.execute(
+                "UPDATE reading_sessions SET book_id = ?2
+                  WHERE book_id IS NULL AND end_position = ?1",
+                params![position, book_id],
+            )?;
+        }
+    }
+    Ok(resolved)
 }
 
 /// Create or replace the job row for a book. `kind` is set on first insert

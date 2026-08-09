@@ -17,6 +17,10 @@ sha2 = "0.10"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
+# The Kindle gzips its own system logs; the reading-log import gunzips them.
+# Already in the lockfile via zip's deflate-flate2, declared directly because
+# `library::reading_log` names it.
+flate2 = "1"
 dirs = "6"
 
 # Romanization for the searchable `title_romaji`/`author_romaji` metadata + the

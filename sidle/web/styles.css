@@ -4255,3 +4255,278 @@ kbd {
   padding: 3px 8px;
   font-size: 12px;
 }
+
+/* ---------------------------------------------------------------------------
+   Reading Log — time read per day, recovered from the Kindle's system logs.
+
+   Two views share the section: the year heatmap (#rl-overview) and one book's
+   month calendar (#rl-book). Both colour days on a shared five-step scale whose
+   top step is the busiest day in view, so the ramp stays readable whether the
+   reader does twenty minutes a day or four hours.
+--------------------------------------------------------------------------- */
+
+.reading-log {
+  padding: 18px 22px 40px;
+  overflow-y: auto;
+}
+
+.rl-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.rl-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rl-year {
+  font: inherit;
+  padding: 5px 8px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.rl-muted { color: var(--muted); }
+
+/* Headline figures. Tabular numerals keep the row from twitching as values
+   re-render after an import. */
+.rl-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.rl-stat {
+  min-width: 92px;
+  padding: 9px 13px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rl-stat b {
+  display: block;
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-stat span {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Heatmap ─────────────────────────────────────────────────────────────── */
+
+.rl-heatmap-wrap {
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.rl-grid { display: flex; gap: 6px; }
+.rl-weeks { display: flex; gap: 3px; }
+.rl-week { display: flex; flex-direction: column; gap: 3px; }
+
+/* Weekday gutter and month strip are laid out on the same 13px rhythm as the
+   cells so the labels line up with the rows and columns they name. */
+.rl-dows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.rl-dows span { height: 13px; line-height: 13px; }
+
+.rl-months {
+  display: flex;
+  gap: 3px;
+  margin-left: 30px;
+  height: 14px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.rl-months span { width: 13px; flex: 0 0 13px; }
+
+.rl-cell {
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: var(--rl-0);
+  cursor: pointer;
+}
+
+.rl-cell.rl-pad { background: none; cursor: default; }
+.rl-cell:hover { outline: 1px solid var(--border-strong); }
+.rl-cell.rl-sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+:root {
+  --rl-0: #ebe6de;
+  --rl-1: #f2c9c9;
+  --rl-2: #e08d8d;
+  --rl-3: #cf5a5a;
+  --rl-4: #a92c2c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rl-0: #2e2a27;
+    --rl-1: #5c2f2f;
+    --rl-2: #8b3c3c;
+    --rl-3: #c04c4c;
+    --rl-4: #ff6b6b;
+  }
+}
+
+.rl-l0 { background: var(--rl-0); }
+.rl-l1 { background: var(--rl-1); }
+.rl-l2 { background: var(--rl-2); }
+.rl-l3 { background: var(--rl-3); }
+.rl-l4 { background: var(--rl-4); }
+
+.rl-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.rl-legend .rl-cell { cursor: default; }
+
+/* ── Lists (a day's books, and the all-time book list) ───────────────────── */
+
+.rl-day, .rl-books { margin-top: 22px; }
+
+.rl-day-head, .rl-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.rl-day-head .btn { margin-left: auto; }
+
+.rl-list { list-style: none; margin: 0; padding: 0; }
+
+.rl-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rl-row-book { cursor: pointer; }
+.rl-row-book:hover { background: var(--accent-soft); }
+
+/* The title takes the slack; meta and duration keep fixed columns so the
+   times form a readable right-hand edge. */
+.rl-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-row-title .rl-muted { font-size: 12px; margin-left: 6px; }
+.rl-row-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.rl-row-time { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* A book the log names but the library no longer holds. Dimmed and not
+   clickable — there is no book page to open. */
+.rl-row-unknown { color: var(--muted); font-style: italic; }
+
+/* ── One book's month calendar ───────────────────────────────────────────── */
+
+.rl-book-title { display: flex; flex-direction: column; }
+.rl-book-title .rl-muted { font-size: 12px; }
+
+.rl-month {
+  max-width: 620px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rl-month-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.rl-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.rl-mday-head {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rl-mday {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 46px;
+  border-radius: 6px;
+  background: var(--rl-0);
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-mday.rl-mpad { background: none; }
+.rl-mday b { font-size: 13px; font-weight: 500; }
+.rl-mday em { font-size: 10px; font-style: normal; opacity: 0.85; }
+
+/* Filled days carry white text on the two darkest steps, where the accent red
+   is dark enough that body colour would fail contrast. */
+.rl-mday.rl-l3, .rl-mday.rl-l4 { color: #fff; }
+
+/* The Reading Log entry point: a standalone pill at the far upper-left, the
+   mirror of the Kindle pill on the right. It is deliberately not a member of
+   the Books/Notes/Misc. tablist — those are three views of the library, this is
+   a separate page — so it keeps its own pressed state and stays visible on the
+   surfaces that collapse the rest of the toolbar. */
+.section-pill {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 80ms ease;
+}
+
+.section-pill:hover { background: var(--bg); }
+
+.section-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}

@@ -9,13 +9,19 @@
   <body>
     <header class="toolbar">
       <div class="toolbar-group">
+        <!-- Reading Log is a page of its own, not a third way to look at the
+             library, so it sits outside the Books/Notes/Misc. tablist and
+             carries its own state — the mirror of the Kindle pill on the right. -->
+        <button type="button" id="section-reading" class="section-pill"
+                title="What you read and for how long, recovered from your Kindle's own logs">Reading Log</button>
+        <div class="toolbar-sep" aria-hidden="true"></div>
         <div class="seg" role="tablist" aria-label="Section">
           <button id="section-books" class="seg-btn active" role="tab" aria-selected="true">Books</button>
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
           <button id="section-misc" class="seg-btn" role="tab" aria-selected="false"
                   title="Screenshots and logs backed up from your Kindle on Sync">Misc.</button>
         </div>
-        <div class="toolbar-sep" aria-hidden="true"></div>
+        <div class="toolbar-sep" id="section-view-sep" aria-hidden="true"></div>
         <div class="seg" id="view-seg" role="tablist" aria-label="View">
           <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
           <button id="view-list" class="seg-btn" role="tab" aria-selected="false">List</button>
@@ -193,6 +199,82 @@
             </header>
             <ul id="misc-logs-list" class="misc-logs-list"></ul>
           </section>
+        </div>
+      </section>
+
+      <!-- Reading Log: time read per day, recovered from the Kindle's own
+           system logs (library::reading_log). readinglog.js (window.ReadingLog)
+           owns everything inside; two views live here — the year heatmap with a
+           day breakdown, and a per-book page reached by clicking a book. -->
+      <section id="reading-log" class="view reading-log" aria-label="Reading Log" hidden>
+        <!-- Overview -->
+        <div id="rl-overview">
+          <header class="rl-head">
+            <div id="rl-stats" class="rl-stats"></div>
+            <div class="rl-head-actions">
+              <select id="rl-year" class="rl-year" aria-label="Year"></select>
+              <button id="rl-import" class="btn"
+                      title="Read logbackup files copied off a Kindle">Import…</button>
+            </div>
+          </header>
+
+          <div id="rl-empty" class="empty" hidden>
+            <p>No reading log yet.</p>
+            <p class="empty-hint">
+              Your Kindle keeps a dated record of every reading session in its own
+              system logs, under <code>system/logbackup/</code>. Copy that folder
+              off the device and import it here — roughly the last month or two of
+              reading comes back at once.
+            </p>
+          </div>
+
+          <div id="rl-body" hidden>
+            <div class="rl-heatmap-wrap">
+              <div id="rl-heatmap" class="rl-heatmap" role="img"
+                   aria-label="Reading time per day"></div>
+              <div class="rl-legend">
+                <span>Less</span>
+                <i class="rl-cell rl-l0"></i><i class="rl-cell rl-l1"></i>
+                <i class="rl-cell rl-l2"></i><i class="rl-cell rl-l3"></i>
+                <i class="rl-cell rl-l4"></i>
+                <span>More</span>
+              </div>
+            </div>
+
+            <section id="rl-day" class="rl-day" hidden>
+              <header class="rl-day-head">
+                <strong id="rl-day-title"></strong>
+                <span id="rl-day-total" class="rl-muted"></span>
+                <button id="rl-day-close" class="btn btn-quiet" aria-label="Close day">✕</button>
+              </header>
+              <ul id="rl-day-list" class="rl-list"></ul>
+            </section>
+
+            <section class="rl-books">
+              <header class="rl-group-head"><strong>Books</strong></header>
+              <ul id="rl-book-list" class="rl-list"></ul>
+            </section>
+          </div>
+        </div>
+
+        <!-- One book: a navigable month calendar + that book's statistics. -->
+        <div id="rl-book" hidden>
+          <header class="rl-head">
+            <button id="rl-back" class="btn btn-quiet">‹ Reading Log</button>
+            <div class="rl-book-title">
+              <strong id="rl-book-title"></strong>
+              <span id="rl-book-author" class="rl-muted"></span>
+            </div>
+          </header>
+          <div id="rl-book-stats" class="rl-stats"></div>
+          <div class="rl-month">
+            <header class="rl-month-head">
+              <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
+              <strong id="rl-month-label"></strong>
+              <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
+            </header>
+            <div id="rl-month-grid" class="rl-month-grid"></div>
+          </div>
         </div>
       </section>
 
@@ -878,6 +960,7 @@
     <script src="library.js"></script>
     <script src="notebooks.js"></script>
     <script src="misc.js"></script>
+    <script src="readinglog.js"></script>
     <script type="module" src="reader.js"></script>
     <script type="module" src="editor.js"></script>
   </body>

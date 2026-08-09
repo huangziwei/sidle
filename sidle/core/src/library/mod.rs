@@ -17,6 +17,7 @@ pub mod omnibus;
 pub mod paths;
 pub mod pdf_geom;
 pub mod push;
+pub mod reading_log;
 pub mod relocate;
 pub mod rename;
 pub mod romaji;

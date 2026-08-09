@@ -421,6 +421,7 @@ function wireToolbar() {
   $("#section-books").addEventListener("click", () => setSection("books"));
   $("#section-notes").addEventListener("click", () => setSection("notes"));
   $("#section-misc").addEventListener("click", () => setSection("misc"));
+  $("#section-reading").addEventListener("click", () => setSection("reading"));
   $("#btn-notes-import").addEventListener("click", () => {
     if (window.Notebooks) window.Notebooks.importDevice();
   });
@@ -536,6 +537,10 @@ function setSection(s) {
     if (s === "misc") window.Misc.show();
     else window.Misc.hide();
   }
+  if (window.ReadingLog) {
+    if (s === "reading") window.ReadingLog.show();
+    else window.ReadingLog.hide();
+  }
   if (s === "device") {
     // Entering the Kindle page: re-pull device / deploy / LAN state. Lives here
     // (not the pill handler) so the `\` shortcut refreshes too.
@@ -553,12 +558,13 @@ function setSection(s) {
 function applySection() {
   const notes = state.section === "notes";
   const misc = state.section === "misc";
+  const reading = state.section === "reading";
   const device = state.section === "device";
   const books = state.section === "books";
   // Neither the Gallery/List toggle nor a library filter belongs on the Kindle
   // page or the Misc tab (both are read-only surfaces, not a book library), so
   // they collapse the toolbar to just the section tabs.
-  const bare = device || misc;
+  const bare = device || misc || reading;
   // Section tabs light up for their own section. None of Books/Notes/Misc is
   // active on the Kindle page — the upper-right pill carries that state instead.
   $("#section-books").classList.toggle("active", books);
@@ -567,6 +573,10 @@ function applySection() {
   $("#section-books").setAttribute("aria-selected", String(books));
   $("#section-notes").setAttribute("aria-selected", String(notes));
   $("#section-misc").setAttribute("aria-selected", String(misc));
+  // Reading Log is a plain toggle button, not a tab in that list, so it carries
+  // `aria-pressed`; `aria-selected` is only meaningful on a `role="tab"`.
+  $("#section-reading").classList.toggle("active", reading);
+  $("#section-reading").setAttribute("aria-pressed", String(reading));
   // The pill doubles as the Kindle-page tab — mark it active there.
   $("#device-pill").classList.toggle("active", device);
   // Add… (Books only) and Import (Notes only); both gone elsewhere.
@@ -580,8 +590,9 @@ function applySection() {
   if (search) search.hidden = notes || bare;
   $("#view-seg").hidden = bare;
   $("#view-sep").hidden = bare;
-  // First .toolbar-sep in DOM order is the section↔view divider (no id of its own).
-  const sectionSep = document.querySelector(".toolbar-sep");
+  // Addressed by id: the Reading Log pill introduced a second .toolbar-sep
+  // ahead of this one, so "the first in DOM order" no longer identifies it.
+  const sectionSep = $("#section-view-sep");
   if (sectionSep) sectionSep.hidden = bare;
   // `#notes` / `#misc` / `#device-page` use the same `.view`/`.view.active`
   // system: the `active` class (not `hidden`) is what `display: block`s them.
@@ -590,6 +601,8 @@ function applySection() {
   $("#notes").hidden = !notes;
   $("#misc").classList.toggle("active", misc);
   $("#misc").hidden = !misc;
+  $("#reading-log").classList.toggle("active", reading);
+  $("#reading-log").hidden = !reading;
   $("#device-page").classList.toggle("active", device);
   $("#device-page").hidden = !device;
   applyView();

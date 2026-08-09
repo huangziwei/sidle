@@ -4620,6 +4620,7 @@ dependencies = [
  "bokai",
  "chrono",
  "dirs",
+ "flate2",
  "image",
  "kakasi",
  "pinyin",
