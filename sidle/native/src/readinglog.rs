@@ -129,18 +129,24 @@ fn line_stamp(line: &str) -> Option<&str> {
         .then_some(s)
 }
 
-/// Every reading event newer than `watermark`, from three sources: the dumps the
-/// desktop has not already read, the rotated syslog chunks, and the live log.
+/// Every reading event newer than `watermark`, from four sources: the dumps the
+/// desktop has not already read, the live log, the rotated syslog chunks, and
+/// our own archive.
+///
+/// Each covers what the others cannot. The live log and chunks are the present,
+/// with no wait for a daily snapshot. The dumps are the firmware's month of
+/// history, and the only thing available on a device that has never run this.
+/// The archive is everything older than the firmware keeps.
 ///
 /// `seen` names snapshots the desktop has read in full — including ones imported
 /// from a copy of this folder on the desktop, so a host-side backfill primes the
-/// device sync. `watermark` is `YYMMDD:HHMMSS` and filters the chunks and the
-/// live log, which have no stable names worth recording. Both empty means a
-/// Kindle the desktop has never seen, so everything is read once.
+/// device sync. `watermark` is `YYMMDD:HHMMSS` and filters the other three,
+/// which have no stable names worth recording. Both empty means a Kindle the
+/// desktop has never seen, so everything is read once.
 ///
-/// The three sources overlap heavily and that is intended — the desktop
-/// de-duplicates. What matters is that between them nothing is skipped, which
-/// the dumps alone do not achieve.
+/// The sources overlap heavily and that is intended — the desktop de-duplicates.
+/// What matters is that between them nothing is skipped, which the dumps alone
+/// demonstrably do not achieve.
 pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     let mut out = Collected::default();
     // Deliberately a plain Vec plus a sort: the desktop de-duplicates anyway
@@ -336,7 +342,13 @@ pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<Strin
     }
     let bytes = gz.finish()?;
 
-    let tmp = dir.join(format!("{name}.part"));
+    // The scratch name carries the pid: cron fires every half hour and the first
+    // run on a fresh device reads a month of dumps, so two runs can overlap. A
+    // shared scratch path would have them interleave writes into one file. With
+    // distinct paths the worst case is that the later rename wins and the other
+    // run's newest lines are missed — which the next run collects again, since
+    // the watermark it reads back did not advance past them.
+    let tmp = dir.join(format!("{name}.{}.part", std::process::id()));
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, dir.join(&name))?;
     if let Some(old) = existing
