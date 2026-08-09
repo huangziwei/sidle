@@ -17,11 +17,24 @@
 //!
 //! - a dump whose **filename** timestamp is at or before it is skipped unopened,
 //!   because a snapshot taken at time T contains nothing after T;
-//! - only the live `messages` file is ever read in the steady state, and only
+//! - only the recent tail of the syslog is read in the steady state, and only
 //!   its lines newer than the watermark are kept.
 //!
-//! With nothing new since the last sync that is one directory listing plus one
-//! scan of the live log, and an empty push that never leaves the device.
+//! With nothing new since the last sync that is two directory listings and a
+//! scan of the newest syslog chunks, and an empty push that never leaves the
+//! device.
+//!
+//! **The live file alone is nowhere near enough.** `tinyrot` rotates
+//! `/var/local/log/messages` on a size cap, and on a busy device that is roughly
+//! every ten minutes — one measured dump spanned 230 rotations in 38 hours. What
+//! it rotates away is not lost: it becomes
+//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz` beside it, and those
+//! chunks are exactly what the daily dump is built from. Reading only the live
+//! file would therefore see about ten minutes of history and leave the rest to
+//! arrive a day later in the next dump — or not at all, since `tinyrot` prunes
+//! chunks and the dumps demonstrably skip content when it does (a real archive
+//! lost 20 h of one day between two consecutive daily dumps). So the chunks are
+//! read too, filtered by the same watermark.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,6 +45,13 @@ const MARKER: &str = "ReadingTimerController";
 /// The live syslog the firmware appends to, and the source every dump is a
 /// snapshot of. Absolute: it is on the root filesystem, not under `/mnt/us`.
 const LIVE_LOG: &str = "/var/local/log/messages";
+
+/// The directory holding [`LIVE_LOG`] and its rotated chunks.
+const LOG_DIR: &str = "/var/local/log";
+
+/// What a rotated chunk's name begins with: `messages_00000807_20260807101501.gz`.
+/// The trailing `_` is what separates it from `messages` itself.
+const CHUNK_PREFIX: &str = "messages_";
 
 /// Where the firmware keeps its daily snapshots, relative to `/mnt/us`.
 const DUMP_DIR: &str = "system/logbackup";
@@ -79,14 +99,18 @@ fn line_stamp(line: &str) -> Option<&str> {
         .then_some(s)
 }
 
-/// Every reading event newer than `watermark`, from the live log and from any
-/// dump the desktop has not already read.
+/// Every reading event newer than `watermark`, from three sources: the dumps the
+/// desktop has not already read, the rotated syslog chunks, and the live log.
 ///
 /// `seen` names snapshots the desktop has read in full — including ones imported
 /// from a copy of this folder on the desktop, so a host-side backfill primes the
-/// device sync. `watermark` is `YYMMDD:HHMMSS` and filters the live log, which
-/// has no stable name. Both empty means a Kindle the desktop has never seen, so
-/// everything is read once.
+/// device sync. `watermark` is `YYMMDD:HHMMSS` and filters the chunks and the
+/// live log, which have no stable names worth recording. Both empty means a
+/// Kindle the desktop has never seen, so everything is read once.
+///
+/// The three sources overlap heavily and that is intended — the desktop
+/// de-duplicates. What matters is that between them nothing is skipped, which
+/// the dumps alone do not achieve.
 pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     let mut out = Collected::default();
     // Deliberately a plain Vec plus a sort: the desktop de-duplicates anyway
@@ -106,12 +130,77 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
             take_events(&dump.text, watermark, &mut out.lines);
         }
     }
-    if let Ok(text) = std::fs::read_to_string(LIVE_LOG) {
-        take_events(&text, watermark, &mut out.lines);
+    // The rotated chunks, then the live file. Together these are what the daily
+    // dump is made of, so reading them is what makes a sync independent of
+    // whether a dump was ever written for the period.
+    for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
+        if let Some(chunk) = read_maybe_gzip(&path) {
+            take_events(&chunk.text, watermark, &mut out.lines);
+        }
+    }
+    // Not `read_to_string`: the syslog carries bytes that are not valid UTF-8,
+    // and that returns `Err` for the whole file rather than for the offending
+    // line — which would silently drop every event since the last rotation.
+    if let Some(live) = read_maybe_gzip(Path::new(LIVE_LOG)) {
+        take_events(&live.text, watermark, &mut out.lines);
     }
     out.lines.sort();
     out.lines.dedup();
     out
+}
+
+/// The `YYMMDD:HHMMSS` a rotated chunk's name encodes, from its 14-digit
+/// `YYYYMMDDHHMMSS` field: `messages_00000807_20260807101501.gz` →
+/// `260807:101501`. The century is dropped so it compares directly against the
+/// stamp a syslog line carries.
+fn chunk_stamp(name: &str) -> Option<String> {
+    let digits: String = name
+        .strip_prefix(CHUNK_PREFIX)?
+        .rsplit_once('.')?
+        .0
+        .rsplit_once('_')?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (digits.len() == 14).then(|| format!("{}:{}", &digits[2..8], &digits[8..]))
+}
+
+/// The rotated syslog chunks worth opening, oldest first.
+///
+/// The stamp in a chunk's name is the rotation instant, and it is not documented
+/// which side of the content that is — the chunk closed then, or the next one
+/// opened then. So the filter is deliberately loose: everything stamped after the
+/// watermark, **plus the newest chunk stamped at or before it**, which is the one
+/// that can straddle. Correct under either reading, at the cost of one extra
+/// chunk. Line-level filtering in [`take_events`] is what actually guarantees
+/// nothing already held is sent, so a chunk read needlessly costs time only.
+fn chunks(dir: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dated: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // An unparseable name is read rather than skipped, on the same principle
+        // as the dumps: spend the gunzip instead of silently dropping a period.
+        match chunk_stamp(&name) {
+            Some(stamp) => dated.push((stamp, entry.path())),
+            None if name.starts_with(CHUNK_PREFIX) => dated.push((String::new(), entry.path())),
+            None => {}
+        }
+    }
+    dated.sort();
+    if watermark.is_empty() {
+        return dated.into_iter().map(|(_, p)| p).collect();
+    }
+    // The straddle chunk is the last one at or before the watermark.
+    let first = dated
+        .iter()
+        .rposition(|(stamp, _)| stamp.as_str() <= watermark)
+        .unwrap_or(0);
+    out.skipped += first;
+    dated.split_off(first).into_iter().map(|(_, p)| p).collect()
 }
 
 /// The dumps worth opening. Two independent reasons to skip one, both decided
@@ -319,6 +408,62 @@ mod tests {
         assert_eq!(full.truncated, 0);
         assert_eq!(full.read, vec![name.to_string()]);
         assert_eq!(full.lines.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rotated_chunks_name_states_when_it_was_rotated() {
+        assert_eq!(
+            chunk_stamp("messages_00000807_20260807101501.gz").as_deref(),
+            Some("260807:101501")
+        );
+        assert_eq!(chunk_stamp("messages"), None);
+        assert_eq!(chunk_stamp("log_backup_260809005124.txt.gz"), None);
+        assert_eq!(chunk_stamp("messages_00000807_2026080710.gz"), None);
+    }
+
+    /// The rotated chunks carry everything between the last dump and the last few
+    /// minutes, so the watermark filter must keep the chunk that straddles it.
+    ///
+    /// Whether a chunk's stamp marks the start or the end of its content is not
+    /// known, so dropping every chunk stamped at or before the watermark could
+    /// discard events the desktop has never seen. One extra chunk is the price of
+    /// not having to know.
+    #[test]
+    fn chunk_selection_keeps_the_one_that_straddles_the_watermark() {
+        let dir = tempdir();
+        for name in [
+            "messages", // the live file — not a chunk
+            "messages_00000805_20260809080000.gz",
+            "messages_00000806_20260809090000.gz",
+            "messages_00000807_20260809100000.gz",
+            "messages_00000808_20260809110000.gz",
+            "wpa_supplicant", // some other log entirely
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let mut out = Collected::default();
+        let keep = chunks(&dir, "260809:093000", &mut out);
+        let names: Vec<String> = keep
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "messages_00000806_20260809090000.gz".to_string(),
+                "messages_00000807_20260809100000.gz".to_string(),
+                "messages_00000808_20260809110000.gz".to_string(),
+            ],
+            "the 09:00 chunk straddles a 09:30 watermark and must be kept"
+        );
+        assert_eq!(out.skipped, 1, "only the 08:00 chunk is wholly behind");
+
+        // A Kindle the desktop has never seen reads every chunk it still has.
+        let mut fresh = Collected::default();
+        assert_eq!(chunks(&dir, "", &mut fresh).len(), 4);
+        assert_eq!(fresh.skipped, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
