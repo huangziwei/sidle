@@ -772,6 +772,16 @@ struct ReadingLogResult {
     sessions: usize,
     added: usize,
     attributed: usize,
+    /// How far this library now holds events for the pushing device, in the
+    /// `YYMMDD:HHMMSS` a log line carries — the same value a subsequent `GET`
+    /// would return.
+    ///
+    /// Returned so the device can drop its own archive of anything at or before
+    /// it. That archive exists only to survive a long gap between syncs, so the
+    /// moment the library confirms it holds the events, keeping them on a Kindle
+    /// is waste. Confirmed, not assumed: the device deletes against what this
+    /// says was stored, never against what it believes it sent.
+    watermark: String,
 }
 
 /// `GET /sync/reading-log?serial=…` — how far this library has already read.
@@ -854,10 +864,19 @@ async fn sync_reading_log(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         }
+        // Read back rather than derived from what arrived: a line that formed no
+        // storable session does not move this, and the device must only drop
+        // what the library can actually account for.
+        let watermark = db::reading_watermark(&conn, &req.device_serial)
+            .ok()
+            .flatten()
+            .and_then(|iso| reading_log::log_stamp(&iso))
+            .unwrap_or_default();
         Ok(ReadingLogResult {
             sessions: stored.sessions,
             added: stored.added,
             attributed: stored.attributed,
+            watermark,
         })
     })
     .await
@@ -1760,6 +1779,9 @@ mod tests {
             report["attributed"], 0,
             "no book in this library carries that end position"
         );
+        // The device deletes its own archive against this, so it must state what
+        // was stored rather than what arrived.
+        assert_eq!(report["watermark"], "260803:101000");
 
         // Now the device is told to skip the snapshot outright and to filter the
         // live log to what came after the last event stored.
@@ -1863,5 +1885,8 @@ mod tests {
         let report = json_body(resp).await;
         assert_eq!(report["sessions"], 0);
         assert_eq!(report["added"], 0);
+        // Nothing stored for this device, so nothing is confirmed — and the
+        // device must not read that as licence to delete its archive.
+        assert_eq!(report["watermark"], "");
     }
 }

@@ -167,6 +167,31 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
+    // `--archive`: copy any new reading events into our own archive and exit.
+    // Headless by design — no framebuffer, no network, no device setup — because
+    // this is what cron runs, several times a day, while the reader is asleep in
+    // a bag on the other side of the world.
+    //
+    // It exists because the firmware keeps only ~30 daily dumps and prunes the
+    // oldest: a trip longer than a month loses its beginning before any sync can
+    // collect it. Our archive is the same event lines filtered to the marker,
+    // which measured ~80x smaller than the dumps, so keeping them indefinitely
+    // costs about 13 MB a year.
+    if std::env::args().any(|a| a == "--archive") {
+        let us = std::path::Path::new(MNT_US);
+        let mark = readinglog::archive_watermark(us);
+        // `seen` is empty: that list is the *desktop's* record of dumps it has
+        // read, which says nothing about what this archive holds. Our own
+        // watermark is the only thing that decides here, and it also stops
+        // `collect` re-reading the archive it is about to extend.
+        let found = readinglog::collect(us, &mark, &[]);
+        match readinglog::archive(us, &found.lines) {
+            Ok(Some(name)) => log(format!("--archive: {} lines → {name}", found.lines.len())),
+            Ok(None) => log("--archive: nothing new"),
+            Err(e) => log(format!("--archive failed: {e}")),
+        }
+        return;
+    }
     // `--update`: the LAN self-update as a standalone launch. The everyday path
     // is the in-app **Update** button (inline in `run`); this flag is the
     // break-glass twin — invokable from a shell when the gallery itself won't

@@ -904,10 +904,17 @@ pub struct ReadingLogReport {
     pub added: usize,
     #[serde(default)]
     pub attributed: usize,
+    /// How far the library now holds this device's events, as `YYMMDD:HHMMSS`.
+    /// What the local archive is pruned against.
+    #[serde(default)]
+    pub watermark: String,
     /// Dumps skipped on their filename alone — not from the server, filled in
     /// locally so the log can show that the watermark did its job.
     #[serde(skip)]
     pub skipped: usize,
+    /// Archive files deleted because the library confirmed it holds them.
+    #[serde(skip)]
+    pub purged: usize,
 }
 
 impl ReadingLogReport {
@@ -998,6 +1005,11 @@ pub fn push_reading_log(
     let mut report: ReadingLogReport =
         serde_json::from_str(&text).with_context(|| format!("parse {base}"))?;
     report.skipped = found.skipped;
+    // Archive-then-purge, the same shape the misc sync uses: the local copy
+    // existed only to survive a gap between syncs, and the gap just closed.
+    // Against the library's own watermark, never against what was sent — the
+    // library is the one that knows what it managed to store.
+    report.purged = crate::readinglog::purge_archive(us_root, &report.watermark);
     Ok(report)
 }
 
