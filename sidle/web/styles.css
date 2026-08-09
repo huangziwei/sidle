@@ -4299,6 +4299,16 @@ kbd {
 .rl-nav .btn[disabled] { opacity: 0.3; cursor: default; }
 .rl-nav-fixed .btn { display: none; }
 
+.rl-device {
+  font: inherit;
+  max-width: 220px;
+  padding: 5px 8px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
 .rl-muted { color: var(--muted); }
 
 /* Headline figures. Tabular numerals keep the row from twitching as values

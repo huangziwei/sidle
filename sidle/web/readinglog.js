@@ -21,6 +21,7 @@
     year: null, // heatmap year, as a number; resolved on first render
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
+    devices: [], // Kindles the library knows, for the import picker and labels
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
@@ -425,11 +426,24 @@
         ),
         fact("First read", shortDay(entry.first_at)),
         fact("Last read", shortDay(entry.last_at)),
+        // Blank for sessions imported before Sidle was told which Kindle wrote
+        // them; a row saying nothing beats a row inventing a device.
+        entry.devices.length
+          ? fact("Read on", deviceNames(entry.devices), entry.devices.join(", "))
+          : "",
       ].join("");
     } else {
       q("#rl-book-stats").innerHTML = "";
     }
     renderMonth();
+  }
+
+  // Serials as shown: the model when this Kindle is the plugged-in one (the
+  // only time Sidle knows a model), otherwise the tail of the serial, which is
+  // what distinguishes two devices at a glance. The full serials are the tooltip.
+  function deviceNames(serials) {
+    const named = new Map(state.devices.map((d) => [d.serial, d.model]));
+    return serials.map((s) => named.get(s) || `…${s.slice(-4)}`).join(", ");
   }
 
   // One figure as a label/value row. A vertical list beside the calendar reads
@@ -537,6 +551,31 @@
     q("#rl-progress-label").textContent = `${step}${count} — ${p.label}`;
   }
 
+  // Which Kindles the archive could be from. Populated once per page load —
+  // the list only grows when a new device syncs, which needs an app restart to
+  // matter anyway.
+  async function loadDevices() {
+    let devices = [];
+    try {
+      devices = await api.invoke("reading_log_devices");
+    } catch (e) {
+      console.warn("reading_log_devices failed:", e);
+    }
+    state.devices = devices;
+    const sel = q("#rl-device");
+    sel.innerHTML = devices
+      .map((d) => {
+        const name = d.model || d.serial;
+        const tail = d.connected ? " (connected)" : "";
+        return `<option value="${esc(d.serial)}" title="${esc(d.serial)}">${esc(name)}${tail}</option>`;
+      })
+      .concat(`<option value="">Unknown device</option>`)
+      .join("");
+    // The plugged-in Kindle is sorted first and is almost always the one whose
+    // logs are being imported.
+    sel.value = devices.length ? devices[0].serial : "";
+  }
+
   async function doImport() {
     let paths;
     try {
@@ -549,7 +588,10 @@
 
     showProgress(true);
     try {
-      const r = await api.invoke("reading_log_import", { paths, deviceSerial: null });
+      const r = await api.invoke("reading_log_import", {
+        paths,
+        deviceSerial: q("#rl-device").value || null,
+      });
       if (r.cancelled) {
         // Both phases commit as they go, so a cancel keeps its work — say so,
         // or the user re-runs from scratch expecting to have lost it.
@@ -581,6 +623,7 @@
   // ── Wiring ─────────────────────────────────────────────────────────────────
 
   function init() {
+    loadDevices();
     q("#rl-import").addEventListener("click", doImport);
     q("#rl-cancel").addEventListener("click", async () => {
       const btn = q("#rl-cancel");

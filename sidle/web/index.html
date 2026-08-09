@@ -223,6 +223,10 @@
           <header class="rl-head">
             <div id="rl-stats" class="rl-stats"></div>
             <div class="rl-head-actions">
+              <!-- The logs never name the device that wrote them, so the import
+                   is told. Options are the Kindles Sidle has already seen. -->
+              <select id="rl-device" class="rl-device"
+                      aria-label="Device the logs came from"></select>
               <button id="rl-import" class="btn"
                       title="Read logbackup files copied off a Kindle">Import…</button>
             </div>

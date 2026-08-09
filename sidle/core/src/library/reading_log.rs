@@ -361,23 +361,6 @@ fn frombook_map<'a>(
     map
 }
 
-/// The device serial, if the logs happen to name one Sidle already knows.
-///
-/// Kindles mention their serial only incidentally — one archive did, another
-/// never did — so this is a courtesy, not a contract. A serial is accepted only
-/// when it matches a device the library has seen, which rules out matching some
-/// unrelated 16-character token.
-pub fn sniff_serial<'a>(events: impl IntoIterator<Item = &'a str>, known: &[String]) -> String {
-    for line in events {
-        for candidate in known {
-            if line.contains(candidate.as_str()) {
-                return candidate.clone();
-            }
-        }
-    }
-    String::new()
-}
-
 // ---------------------------------------------------------------------------
 // Import
 
@@ -386,6 +369,14 @@ pub fn sniff_serial<'a>(events: impl IntoIterator<Item = &'a str>, known: &[Stri
 ///
 /// Safe to run repeatedly over the same archive: identical sessions collide on
 /// the uniqueness index and are ignored, so a second pass reports 0 added.
+///
+/// `device_serial` is **stated, never inferred.** The logs do not identify the
+/// device that wrote them — not once in a 30-day archive — so the caller has to
+/// say: the device itself knows its own serial, and a host-side import of a
+/// copied archive is told which device it came from. An empty serial means
+/// genuinely unknown provenance, and such rows are later claimed by the first
+/// import that does name a device (see
+/// [`db::insert_reading_session`]).
 pub fn import(
     conn: &Connection,
     paths: &[impl AsRef<Path>],
@@ -403,12 +394,6 @@ pub fn import(
             ..Imported::default()
         });
     }
-    let serial = if device_serial.is_empty() {
-        let known = db::known_device_serials(conn)?;
-        sniff_serial(events.iter().map(String::as_str), &known)
-    } else {
-        device_serial.to_string()
-    };
     // Sessions are grouped by the fingerprint every page event carries, then
     // rekeyed to the one the library can actually be joined against.
     let identity = frombook_map(events.iter().map(String::as_str));
@@ -439,7 +424,7 @@ pub fn import(
             continue;
         }
         let row = ReadingSession {
-            device_serial: serial.clone(),
+            device_serial: device_serial.to_string(),
             day: s.started_at[..10].to_string(),
             started_at: s.started_at.clone(),
             ended_at: s.ended_at.clone(),

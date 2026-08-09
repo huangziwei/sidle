@@ -132,6 +132,49 @@ pub async fn reading_log_book(
     })
 }
 
+/// A Kindle the library has seen, offered as the source of an imported archive.
+#[derive(Debug, Serialize)]
+pub struct ReadingDevice {
+    pub serial: String,
+    /// The model, when this device happens to be plugged in right now — the
+    /// only place Sidle learns one. Otherwise the serial is all there is.
+    pub model: Option<String>,
+    pub connected: bool,
+}
+
+/// Which devices an imported archive could have come from.
+///
+/// The logs never say, so the user does. Every serial the library has recorded
+/// through any sync surface is offered, with the plugged-in one named and
+/// listed first because that is almost always the archive being imported.
+#[tauri::command]
+pub async fn reading_log_devices(state: State<'_, AppState>) -> Result<Vec<ReadingDevice>, String> {
+    let live = state.device.lock().await.clone();
+    let conn = state.db.lock().await;
+    let mut known = db::known_device_serials(&conn).map_err(|e| e.to_string())?;
+    if let Some(d) = &live
+        && !d.serial.is_empty()
+        && !known.contains(&d.serial)
+    {
+        known.push(d.serial.clone());
+    }
+    let mut out: Vec<ReadingDevice> = known
+        .into_iter()
+        .map(|serial| {
+            let connected = live.as_ref().is_some_and(|d| d.serial == serial);
+            ReadingDevice {
+                model: connected
+                    .then(|| live.as_ref().and_then(|d| d.model.clone()))
+                    .flatten(),
+                serial,
+                connected,
+            }
+        })
+        .collect();
+    out.sort_by_key(|d| (!d.connected, d.serial.clone()));
+    Ok(out)
+}
+
 /// A live tick from an import in flight. `phase` is the machine name of the
 /// step (`index` → `read` → `store`); `fraction` spans the whole job, not the
 /// phase, so the bar only ever moves forward.

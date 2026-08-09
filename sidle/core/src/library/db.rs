@@ -1410,9 +1410,9 @@ pub fn books_with_last_position(
 
 /// Every device serial the library has ever recorded, from any sync surface.
 ///
-/// Used to recognise a serial mentioned in passing inside a device log: matching
-/// only against serials already known is what stops an unrelated identifier
-/// being mistaken for one.
+/// The list a host-side reading-log import is chosen from: the logs never name
+/// the device that wrote them, so provenance is picked from the devices Sidle
+/// has actually seen rather than guessed at.
 pub fn known_device_serials(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT device_serial FROM annotation_device
@@ -1448,7 +1448,19 @@ pub struct ReadingSession {
 /// Store one session, ignoring it if that (device, start, book) is already
 /// known. Returns whether a row was actually added, so an import can report how
 /// much of a re-imported archive was genuinely new.
+///
+/// A session already held against **no** device is claimed rather than
+/// duplicated: the same reading, imported once from a copied archive of unknown
+/// provenance and again from the device that wrote it, is one session, and
+/// without this the serial in the identity would make it two.
 pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<bool> {
+    if !s.device_serial.is_empty() {
+        conn.execute(
+            "UPDATE reading_sessions SET device_serial = ?1
+              WHERE device_serial = '' AND started_at = ?2 AND end_position = ?3",
+            params![s.device_serial, s.started_at, s.end_position],
+        )?;
+    }
     let n = conn.execute(
         r#"INSERT OR IGNORE INTO reading_sessions
             (device_serial, started_at, ended_at, day, end_position, book_id,
@@ -1556,7 +1568,8 @@ pub fn reading_books(
     let mut stmt = conn.prepare(&format!(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
-                  MIN(s.started_at), MAX(s.ended_at)
+                  MIN(s.started_at), MAX(s.ended_at),
+                  GROUP_CONCAT(DISTINCT s.device_serial)
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY s.book_id
@@ -1598,12 +1611,17 @@ pub struct ReadingEntry {
     pub sessions: i64,
     pub first_at: String,
     pub last_at: String,
+    /// Which devices this reading happened on. Empty when the sessions predate
+    /// knowing — an archive imported without saying where it came from — never
+    /// a guess.
+    pub devices: Vec<String>,
 }
 
 fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<ReadingEntry> {
     let sha256: String = r.get(3)?;
     let cover_path = resolve_opt(root, r.get(4)?);
     let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
+    let devices: Option<String> = r.get(11)?;
     Ok(ReadingEntry {
         book_id: r.get(0)?,
         title: r.get(1)?,
@@ -1617,6 +1635,14 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
         sessions: r.get(8)?,
         first_at: r.get(9)?,
         last_at: r.get(10)?,
+        // The `''` a provenance-less row carries is not a device; drop it rather
+        // than render it as one.
+        devices: devices
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
     })
 }
 
@@ -5643,6 +5669,54 @@ mod tests {
         assert_eq!(shortest[0].book_id, new);
         let oldest = reading_books(&conn, f, t, ReadingSort::LastRead, true).unwrap();
         assert_eq!(oldest[0].book_id, old);
+    }
+
+    #[test]
+    fn the_device_claims_a_session_imported_before_it_was_named() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-claim", "本");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+
+        // The archive was copied off the device by hand and imported without
+        // saying which device it came from.
+        let mut anon = session("2026-08-01", 999, 3600);
+        anon.device_serial = String::new();
+        assert!(insert_reading_session(&conn, &anon).unwrap());
+
+        // The device later syncs the very same session, this time stating its
+        // serial. One session was read, so one row must remain.
+        let mut owned = session("2026-08-01", 999, 3600);
+        owned.device_serial = "GN43H2076045001X".into();
+        assert!(
+            !insert_reading_session(&conn, &owned).unwrap(),
+            "the device's copy is the same session, not a new one"
+        );
+
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT device_serial, seconds FROM reading_sessions")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![("GN43H2076045001X".to_string(), 3600)]);
+    }
+
+    #[test]
+    fn one_device_never_claims_another_devices_session() {
+        let conn = fresh_db();
+        let mut a = session("2026-08-01", 999, 3600);
+        a.device_serial = "DEVICE-A".into();
+        let mut b = session("2026-08-01", 999, 3600);
+        b.device_serial = "DEVICE-B".into();
+        assert!(insert_reading_session(&conn, &a).unwrap());
+        // Same instant, same book, different device: two devices, two sessions.
+        // Only a serial-less row is up for adoption.
+        assert!(insert_reading_session(&conn, &b).unwrap());
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     #[test]
