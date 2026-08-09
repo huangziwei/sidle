@@ -24,6 +24,10 @@ pub struct ReadingDay {
 
 /// Everything the Reading Log page needs on open: the heatmap, the all-time
 /// per-book table, and the headline totals.
+///
+/// Every figure here covers books the library actually holds. Sessions whose
+/// book is gone are counted nowhere — see
+/// [`db::resolve_reading_sessions`].
 #[derive(Debug, Serialize)]
 pub struct ReadingOverview {
     pub days: Vec<ReadingDay>,
@@ -37,10 +41,6 @@ pub struct ReadingOverview {
     /// streak).
     pub longest_streak: i64,
     pub current_streak: i64,
-    /// Seconds whose book could not be identified. Shown rather than hidden:
-    /// it is usually a book that was deleted or re-converted, and importing it
-    /// would name this time retroactively.
-    pub unattributed_seconds: i64,
 }
 
 /// One book's page: per-day totals plus the aggregate.
@@ -59,11 +59,6 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
     let books = db::reading_books(&conn).map_err(|e| e.to_string())?;
 
     let total_seconds = days.iter().map(|(_, s)| s).sum();
-    let unattributed_seconds = books
-        .iter()
-        .filter(|b| b.book_id.is_none())
-        .map(|b| b.seconds)
-        .sum();
     let (longest_streak, current_streak) = streaks(days.iter().map(|(d, _)| d.as_str()));
 
     Ok(ReadingOverview {
@@ -76,7 +71,6 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
         total_seconds,
         longest_streak,
         current_streak,
-        unattributed_seconds,
     })
 }
 
@@ -101,7 +95,7 @@ pub async fn reading_log_book(
     let entry = db::reading_books(&conn)
         .map_err(|e| e.to_string())?
         .into_iter()
-        .find(|b| b.book_id == Some(book_id));
+        .find(|b| b.book_id == book_id);
     Ok(ReadingBook {
         days: days
             .into_iter()

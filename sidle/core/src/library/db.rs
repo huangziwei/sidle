@@ -159,7 +159,11 @@ pub struct BookRow {
 /// redacts every title, be attributed to a book: the device reports the last
 /// valid position, exactly one less. Filled incrementally, never at migrate
 /// time, because computing it parses the KFX.
-pub const SCHEMA_VERSION: i64 = 15;
+/// v16: `reading_sessions.pages` → `page_turns`. The number was never a page
+/// count — a converted book has no such thing — but the count of forward page
+/// events the device logged, which depends on font size and screen. Renamed so
+/// nothing downstream can present it as a book's pagination.
+pub const SCHEMA_VERSION: i64 = 16;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -671,7 +675,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // stored permanently rather than resolved-and-discarded so a session that
     // matches no book today can be attributed later, when the missing book is
     // imported, without re-reading a single log file. `book_id` is therefore
-    // nullable by design and NULL means "not yet attributable", not "bad row".
+    // nullable by design and NULL means "not yet attributable", not "bad row" —
+    // but such a row counts towards nothing: every query below joins `books`, so
+    // an unattributed session is inert until the day it resolves.
     //
     // Times are **device-local wall clock with no offset** — that is all the
     // syslog prefix carries, and it is also what the reader means by "what did I
@@ -693,11 +699,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             end_position  INTEGER NOT NULL,
             book_id       INTEGER REFERENCES books(id) ON DELETE SET NULL,
             seconds       INTEGER NOT NULL,
-            pages         INTEGER NOT NULL DEFAULT 0,
+            page_turns    INTEGER NOT NULL DEFAULT 0,
             words         INTEGER NOT NULL DEFAULT 0
         )"#,
         [],
     )?;
+    // v16: the column was `pages`, which read as a book's pagination. It is the
+    // count of forward page events the device logged — a function of font size
+    // and screen, not of the book. Only a v15 table still carries the old name.
+    if has_column(conn, "reading_sessions", "pages")? {
+        conn.execute(
+            "ALTER TABLE reading_sessions RENAME COLUMN pages TO page_turns",
+            [],
+        )?;
+    }
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
            ON reading_sessions (device_serial, started_at, end_position)",
@@ -1413,7 +1428,8 @@ pub fn known_device_serials(conn: &Connection) -> rusqlite::Result<Vec<String>> 
 }
 
 /// One reading session as stored. `book_id` is `None` while the fingerprint
-/// matches no book in the library.
+/// matches no book in the library — such a session is reported nowhere; see
+/// [`resolve_reading_sessions`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadingSession {
     pub device_serial: String,
@@ -1423,7 +1439,9 @@ pub struct ReadingSession {
     pub end_position: i64,
     pub book_id: Option<i64>,
     pub seconds: i64,
-    pub pages: i64,
+    /// Forward page events the device logged. Not a page count: it moves with
+    /// font size and screen, and a converted book has no pagination to count.
+    pub page_turns: i64,
     pub words: i64,
 }
 
@@ -1433,7 +1451,8 @@ pub struct ReadingSession {
 pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<bool> {
     let n = conn.execute(
         r#"INSERT OR IGNORE INTO reading_sessions
-            (device_serial, started_at, ended_at, day, end_position, book_id, seconds, pages, words)
+            (device_serial, started_at, ended_at, day, end_position, book_id,
+             seconds, page_turns, words)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
         params![
             s.device_serial,
@@ -1443,7 +1462,7 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_position,
             s.book_id,
             s.seconds,
-            s.pages,
+            s.page_turns,
             s.words,
         ],
     )?;
@@ -1452,6 +1471,10 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
 
 /// Seconds read per day over `[from, to]` (inclusive, `YYYY-MM-DD`), skipping
 /// days with nothing. Feeds the calendar heatmap.
+///
+/// Unattributed sessions are excluded, as they are from every query here: time
+/// that cannot be traced to a book in the library is not reported as read. See
+/// [`resolve_reading_sessions`] for why the rows survive anyway.
 pub fn reading_days(
     conn: &Connection,
     from: &str,
@@ -1459,25 +1482,18 @@ pub fn reading_days(
 ) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT day, SUM(seconds) FROM reading_sessions
-          WHERE day BETWEEN ?1 AND ?2 GROUP BY day ORDER BY day",
+          WHERE day BETWEEN ?1 AND ?2 AND book_id IS NOT NULL
+          GROUP BY day ORDER BY day",
     )?;
     let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
 }
 
-/// What was read on one day: one row per book (or per unattributed
-/// fingerprint), longest first.
+/// What was read on one day: one row per book, longest first.
 pub fn reading_day_detail(conn: &Connection, day: &str) -> rusqlite::Result<Vec<ReadingEntry>> {
-    let mut stmt = conn.prepare(
-        r#"SELECT s.book_id, b.title, b.author, s.end_position,
-                  SUM(s.seconds), SUM(s.pages), SUM(s.words), COUNT(*),
-                  MIN(s.started_at), MAX(s.ended_at)
-             FROM reading_sessions s LEFT JOIN books b ON b.id = s.book_id
-            WHERE s.day = ?1
-            GROUP BY COALESCE(s.book_id, -s.end_position)
-            ORDER BY SUM(s.seconds) DESC"#,
-    )?;
-    let rows = stmt.query_map(params![day], row_to_entry)?;
+    let root = conn_root(conn);
+    let mut stmt = conn.prepare(&entry_query("WHERE s.day = ?1"))?;
+    let rows = stmt.query_map(params![day], |r| row_to_entry(r, root.as_deref()))?;
     rows.collect()
 }
 
@@ -1491,50 +1507,69 @@ pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Ve
     rows.collect()
 }
 
-/// Every book ever read, longest first. Drives the Reading Log's book list and
-/// doubles as the "unattributed" report when `book_id` is `None`.
+/// Every book ever read, longest first. Drives the Reading Log's book list.
 pub fn reading_books(conn: &Connection) -> rusqlite::Result<Vec<ReadingEntry>> {
-    let mut stmt = conn.prepare(
-        r#"SELECT s.book_id, b.title, b.author, s.end_position,
-                  SUM(s.seconds), SUM(s.pages), SUM(s.words), COUNT(*),
-                  MIN(s.started_at), MAX(s.ended_at)
-             FROM reading_sessions s LEFT JOIN books b ON b.id = s.book_id
-            GROUP BY COALESCE(s.book_id, -s.end_position)
-            ORDER BY SUM(s.seconds) DESC"#,
-    )?;
-    let rows = stmt.query_map([], row_to_entry)?;
+    let root = conn_root(conn);
+    let mut stmt = conn.prepare(&entry_query(""))?;
+    let rows = stmt.query_map([], |r| row_to_entry(r, root.as_deref()))?;
     rows.collect()
 }
 
+/// Sessions aggregated per book, narrowed by `filter` (a `WHERE` clause or
+/// empty). Shared so the day panel and the all-time list cannot drift in what
+/// they select — both feed the same card.
+fn entry_query(filter: &str) -> String {
+    format!(
+        r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
+                  SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
+                  MIN(s.started_at), MAX(s.ended_at)
+             FROM reading_sessions s JOIN books b ON b.id = s.book_id
+            {filter}
+            GROUP BY s.book_id
+            ORDER BY SUM(s.seconds) DESC"#
+    )
+}
+
 /// An aggregate over sessions — a book on one day, or a book across all time.
+///
+/// Always a real book: every query producing one joins `books`, so there is no
+/// nameless variant to render.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadingEntry {
-    pub book_id: Option<i64>,
-    pub title: Option<String>,
-    pub author: Option<String>,
-    /// The device's fingerprint, kept so an unattributed row is still nameable
-    /// once its book is imported.
-    pub end_position: i64,
+    pub book_id: i64,
+    pub title: String,
+    pub author: String,
+    /// Cover fields carry the same meaning as on [`BookRow`], so the Reading
+    /// Log's cards render through the gallery's own cover path.
+    pub cover_path: Option<String>,
+    pub cover_thumb_path: Option<String>,
+    pub cover_rev: i64,
     pub seconds: i64,
-    pub pages: i64,
+    /// See [`ReadingSession::page_turns`] — device page events, not pagination.
+    pub page_turns: i64,
     pub words: i64,
     pub sessions: i64,
     pub first_at: String,
     pub last_at: String,
 }
 
-fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingEntry> {
+fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<ReadingEntry> {
+    let sha256: String = r.get(3)?;
+    let cover_path = resolve_opt(root, r.get(4)?);
+    let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
     Ok(ReadingEntry {
         book_id: r.get(0)?,
         title: r.get(1)?,
         author: r.get(2)?,
-        end_position: r.get(3)?,
-        seconds: r.get(4)?,
-        pages: r.get(5)?,
-        words: r.get(6)?,
-        sessions: r.get(7)?,
-        first_at: r.get(8)?,
-        last_at: r.get(9)?,
+        cover_path,
+        cover_thumb_path,
+        cover_rev,
+        seconds: r.get(5)?,
+        page_turns: r.get(6)?,
+        words: r.get(7)?,
+        sessions: r.get(8)?,
+        first_at: r.get(9)?,
+        last_at: r.get(10)?,
     })
 }
 
@@ -1545,6 +1580,11 @@ fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingEntry> {
 /// sessions that were logged before Sidle had ever seen it, which is why
 /// `end_position` is kept on the row. Fingerprints matching several books are
 /// deliberately left alone: an ambiguous attribution is worse than none.
+///
+/// What never resolves is time on a book the library does not have, and that
+/// time is not reading Sidle knows about: it is reported in no total, no day, no
+/// list. The row is kept only as the seed for this function — import the book
+/// and the time appears — never as a nameless entry to be shown or summed.
 pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
     let mut stmt =
         conn.prepare("SELECT DISTINCT end_position FROM reading_sessions WHERE book_id IS NULL")?;
@@ -5389,5 +5429,102 @@ mod tests {
             get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(),
             Some("nbksha2")
         );
+    }
+
+    fn session(day: &str, end_position: i64, seconds: i64) -> ReadingSession {
+        ReadingSession {
+            device_serial: "DEV".into(),
+            started_at: format!("{day}T20:00:00"),
+            ended_at: format!("{day}T21:00:00"),
+            day: day.into(),
+            end_position,
+            book_id: None,
+            seconds,
+            page_turns: 40,
+            words: 9000,
+        }
+    }
+
+    #[test]
+    fn time_on_a_book_the_library_lacks_is_counted_nowhere() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-read", "読んだ本");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+
+        // One session on a book that is here, one on a fingerprint that matches
+        // nothing — a book deleted since the device logged it.
+        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-02", 555_555, 7200)).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+
+        // The orphan is still on disk, ready to be named if its book comes back…
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 2);
+
+        // …but it is in no total, on no day, and in no list.
+        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(days, vec![("2026-08-01".to_string(), 3600)]);
+        assert!(reading_day_detail(&conn, "2026-08-02").unwrap().is_empty());
+        let books = reading_books(&conn).unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_id, book);
+        assert_eq!(books[0].title, "読んだ本");
+    }
+
+    #[test]
+    fn importing_the_missing_book_names_time_already_logged() {
+        let conn = fresh_db();
+        // The log arrives before the book does — the whole reason an
+        // unattributed row is kept rather than dropped.
+        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
+        assert!(reading_books(&conn).unwrap().is_empty());
+
+        let book = insert_minimal(&conn, "sha-late", "後から来た本");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+
+        let books = reading_books(&conn).unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].seconds, 3600);
+    }
+
+    #[test]
+    fn the_v15_pages_column_is_renamed_without_losing_its_counts() {
+        // A v15 library, created before the column was called what it measures.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            r#"CREATE TABLE reading_sessions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_serial TEXT NOT NULL DEFAULT '',
+                started_at    TEXT NOT NULL,
+                ended_at      TEXT NOT NULL,
+                day           TEXT NOT NULL,
+                end_position  INTEGER NOT NULL,
+                book_id       INTEGER,
+                seconds       INTEGER NOT NULL,
+                pages         INTEGER NOT NULL DEFAULT 0,
+                words         INTEGER NOT NULL DEFAULT 0
+            )"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reading_sessions
+               (started_at, ended_at, day, end_position, seconds, pages, words)
+             VALUES ('t0', 't1', '2026-08-01', 999, 3600, 41, 9000)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let turns: i64 = conn
+            .query_row("SELECT page_turns FROM reading_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turns, 41);
+        assert!(!has_column(&conn, "reading_sessions", "pages").unwrap());
     }
 }

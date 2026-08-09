@@ -4427,31 +4427,42 @@ kbd {
 
 .rl-day-head .btn { margin-left: auto; }
 
-.rl-list { list-style: none; margin: 0; padding: 0; }
-
-.rl-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 8px 6px;
-  border-bottom: 1px solid var(--border);
+/* Books read are shown as covers, on the gallery's own `.book-card` / `.cover`
+   primitives — the same book should look the same everywhere in the app. A
+   little tighter than the gallery: these tiles are a reading list, not the
+   place you browse the library from. */
+.rl-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 14px;
 }
 
-.rl-row-book { cursor: pointer; }
-.rl-row-book:hover { background: var(--accent-soft); }
+.rl-card-time {
+  margin-top: 6px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
-/* The title takes the slack; meta and duration keep fixed columns so the
-   times form a readable right-hand edge. */
-.rl-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-row-title .rl-muted { font-size: 12px; margin-left: 6px; }
-.rl-row-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.rl-row-time { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
-
-/* A book the log names but the library no longer holds. Dimmed and not
-   clickable — there is no book page to open. */
-.rl-row-unknown { color: var(--muted); font-style: italic; }
+.rl-card-sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ── One book's month calendar ───────────────────────────────────────────── */
+
+/* The header's own cover: fixed height, width follows the art. */
+.rl-book-cover {
+  height: 92px;
+  width: auto;
+  aspect-ratio: 2 / 3;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.rl-book-cover .cover-placeholder { font-size: 10px; padding: 6px; }
 
 .rl-book-title { display: flex; flex-direction: column; }
 .rl-book-title .rl-muted { font-size: 12px; }

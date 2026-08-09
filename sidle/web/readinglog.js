@@ -8,9 +8,9 @@
 // The data behind this comes from the Kindle's own system logs, which name no
 // book: every session is identified by the book's end position and matched
 // against the library. Two consequences show up in the UI and are deliberate —
-// time can be unattributed (the book was deleted or re-converted since), and
-// nothing appears at all until the user imports an archive, because those logs
-// live wherever they were copied to.
+// time on a book the library no longer holds is counted nowhere (the backend
+// never sends it), and nothing appears at all until the user imports an archive,
+// because those logs live wherever they were copied to.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
@@ -43,6 +43,16 @@
     return `${m}m`;
   }
 
+  // Word counts come straight off the device's own `TotalWords` counter, which
+  // is why they can be shown at all — and why they, not any page figure, are the
+  // measure of how much of a book was read.
+  function fmtWords(n) {
+    if (!n) return "0";
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+    if (n >= 1000) return `${Math.round(n / 1000)}k`;
+    return String(n);
+  }
+
   function fmtDay(iso) {
     const d = parseDay(iso);
     if (!d) return iso;
@@ -67,11 +77,13 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
-  function titleOf(entry) {
-    if (entry.title) return entry.title;
-    // An unattributed row still deserves a stable identity in the list; the
-    // fingerprint is what would name it once its book is imported.
-    return `Unidentified book (position ${entry.end_position})`;
+  // Rows here are built as HTML strings, so anything from the library has to be
+  // escaped: a title is whatever the book's metadata said.
+  function esc(s) {
+    return String(s == null ? "" : s).replace(
+      /[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    );
   }
 
   // ── Public surface ─────────────────────────────────────────────────────────
@@ -132,17 +144,8 @@
       statTile(fmtDuration(perDay), "per reading day"),
       statTile(`${o.current_streak}d`, "streak", "Consecutive days up to today"),
       statTile(`${o.longest_streak}d`, "longest streak"),
-      statTile(o.books.filter((b) => b.book_id !== null).length, "books"),
+      statTile(o.books.length, "books"),
     ];
-    if (o.unattributed_seconds > 0) {
-      tiles.push(
-        statTile(
-          fmtDuration(o.unattributed_seconds),
-          "unidentified",
-          "Time on books no longer in the library — import them and this is named retroactively",
-        ),
-      );
-    }
     q("#rl-stats").innerHTML = tiles.join("");
   }
 
@@ -216,22 +219,39 @@
       `<div class="rl-weeks">${cols.join("")}</div></div>`;
   }
 
-  function entryRow(e, extra) {
-    const named = e.book_id !== null;
-    const cls = named ? "rl-row rl-row-book" : "rl-row rl-row-unknown";
-    const attr = named ? ` data-book="${e.book_id}" role="button" tabindex="0"` : "";
-    const author = e.author ? `<span class="rl-muted">${e.author}</span>` : "";
+  // The cover markup the gallery uses, so a book looks the same wherever it
+  // appears — and `coverUrlFor` (library.js) stays the one place that knows the
+  // thumb-vs-full choice and the cache-busting token. Split in two because the
+  // book page owns its own frame element and only fills it.
+  function coverInner(url, title) {
+    return url
+      ? `<img src="${esc(url)}" alt="" loading="lazy" draggable="false">`
+      : `<div class="cover-placeholder">${esc(title)}</div>`;
+  }
+
+  function coverHtml(e) {
+    const url = coverUrlFor(e, { thumb: true });
+    return `<div class="cover${url ? " has-image" : ""}">${coverInner(url, e.title)}</div>`;
+  }
+
+  // Every card is a book in the library, so every card opens its book page.
+  function entryCard(e, sub) {
     return (
-      `<li class="${cls}"${attr}>` +
-      `<span class="rl-row-title">${titleOf(e)} ${author}</span>` +
-      `<span class="rl-row-meta">${extra || ""}</span>` +
-      `<span class="rl-row-time">${fmtDuration(e.seconds)}</span></li>`
+      `<div class="book-card rl-card" data-book="${e.book_id}" role="button" tabindex="0" ` +
+      `title="${esc(e.title)}${e.author ? `\n${esc(e.author)}` : ""}">` +
+      coverHtml(e) +
+      `<div class="meta">` +
+      `<div class="t">${esc(e.title)}</div>` +
+      `<div class="a">${esc(e.author || "Unknown author")}</div>` +
+      `<div class="rl-card-time">${fmtDuration(e.seconds)}</div>` +
+      `<div class="rl-card-sub">${esc(sub || "")}</div>` +
+      `</div></div>`
     );
   }
 
   function renderBookList(o) {
     q("#rl-book-list").innerHTML = o.books
-      .map((b) => entryRow(b, `${b.pages} pages · ${b.sessions} sessions`))
+      .map((b) => entryCard(b, `${b.sessions} sessions · ${fmtWords(b.words)} words`))
       .join("");
   }
 
@@ -252,7 +272,7 @@
     const total = rows.reduce((a, r) => a + r.seconds, 0);
     q("#rl-day-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
     q("#rl-day-list").innerHTML = rows
-      .map((r) => entryRow(r, `${r.pages} pages · ${r.first_at.slice(11, 16)}`))
+      .map((r) => entryCard(r, `from ${r.first_at.slice(11, 16)}`))
       .join("");
   }
 
@@ -272,8 +292,12 @@
 
   function renderBook() {
     const { entry, days } = state.book;
-    q("#rl-book-title").textContent = entry ? titleOf(entry) : "Book";
+    q("#rl-book-title").textContent = entry ? entry.title : "Book";
     q("#rl-book-author").textContent = entry?.author || "";
+    const box = q("#rl-book-cover");
+    const cover = entry ? coverUrlFor(entry, { thumb: true }) : null;
+    box.className = `cover rl-book-cover${cover ? " has-image" : ""}`;
+    box.innerHTML = entry ? coverInner(cover, entry.title) : "";
 
     if (entry) {
       const span = spanDays(days);
@@ -285,9 +309,16 @@
         statTile(fmtDuration(entry.seconds), "total"),
         statTile(days.length, "days"),
         statTile(fmtDuration(perDay), "per day"),
-        statTile(entry.pages, "pages"),
+        statTile(fmtWords(entry.words), "words"),
         statTile(entry.sessions, "sessions"),
         wpm ? statTile(wpm, "words/min") : "",
+        // Deliberately not called "pages": a converted book has no pagination,
+        // and this counts forward taps at whatever font size the device was on.
+        statTile(
+          entry.page_turns,
+          "page turns",
+          "Forward page turns on the device — depends on font size, not a page count",
+        ),
         statTile(span, "days elapsed", "First to last day read"),
       ].join("");
     } else {
@@ -381,8 +412,16 @@
         toast("no reading events in those files — is this a logbackup folder?", true);
       } else if (!r.added) {
         toast(`already imported: ${r.sessions} sessions in ${r.files} files`);
+      } else if (!r.attributed) {
+        // Everything found is on books the library doesn't hold, so nothing was
+        // counted — say so, or a successful import looks like a broken page.
+        toast(`${r.added} sessions found, none on books in the library`, true);
       } else {
-        toast(`${r.added} new sessions from ${r.files} files`);
+        // `attributed`, not `added`: time on a missing book is stored inert and
+        // appears nowhere, so counting it here would promise rows that never show.
+        const skipped = Math.max(0, r.added - r.attributed);
+        const tail = skipped ? ` · ${skipped} on books not in the library` : "";
+        toast(`${r.attributed} sessions added from ${r.files} files${tail}`);
       }
       invalidate();
       await refresh();
@@ -443,12 +482,12 @@
         render();
         return;
       }
-      const row = e.target.closest(".rl-row-book[data-book]");
+      const row = e.target.closest(".rl-card[data-book]");
       if (row) openBook(Number(row.dataset.book));
     });
     q("#reading-log").addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
-      const hit = e.target.closest(".rl-cell[data-day], .rl-row-book[data-book]");
+      const hit = e.target.closest(".rl-cell[data-day], .rl-card[data-book]");
       if (!hit) return;
       e.preventDefault();
       hit.click();

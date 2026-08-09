@@ -57,6 +57,11 @@ pub struct Imported {
     /// Sessions actually new to the library (the rest were already held).
     pub added: usize,
     /// Sessions that now name a book, counted across the whole table.
+    ///
+    /// This, not `added`, is what the reading log gained: a session on a book
+    /// the library does not hold is stored but counted nowhere. The two differ
+    /// in both directions — an archive can carry time on deleted books, and a
+    /// pass can name rows an earlier pass left unresolved.
     pub attributed: usize,
     /// True when the pass stopped early. Sessions stored before that point
     /// stay stored; re-running is safe and picks up the rest.
@@ -70,7 +75,10 @@ pub struct Session {
     pub ended_at: String,
     pub end_position: i64,
     pub seconds: i64,
-    pub pages: i64,
+    /// `NextPage` events only — screens advanced, at whatever font size the
+    /// device was set to. Never a page count: nothing in a converted book is
+    /// paginated, and paging backwards is not reading a page again.
+    pub page_turns: i64,
     pub words: i64,
 }
 
@@ -271,7 +279,7 @@ struct Open {
     time_hi: i64,
     words_lo: Option<i64>,
     words_hi: i64,
-    pages: i64,
+    page_turns: i64,
 }
 
 impl Open {
@@ -284,14 +292,14 @@ impl Open {
             time_hi: 0,
             words_lo: None,
             words_hi: 0,
-            pages: 0,
+            page_turns: 0,
         }
     }
 
     fn observe(&mut self, line: &str, at: &str, k: &str) {
         self.ended_at = at.to_string();
         if k == "NextPage" {
-            self.pages += 1;
+            self.page_turns += 1;
         }
         if let Some(t) = field(line, "TotalTime") {
             self.time_lo = Some(self.time_lo.map_or(t, |lo| lo.min(t)));
@@ -311,7 +319,7 @@ impl Open {
             ended_at: self.ended_at,
             end_position: self.end_position,
             seconds: (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000,
-            pages: self.pages,
+            page_turns: self.page_turns,
             words: self.words_hi - self.words_lo.unwrap_or(self.words_hi),
         }
     }
@@ -444,7 +452,7 @@ pub fn import(
                 .unwrap_or(s.end_position),
             book_id: None,
             seconds: s.seconds,
-            pages: s.pages,
+            page_turns: s.page_turns,
             words: s.words,
         };
         if db::insert_reading_session(conn, &row)? {
@@ -486,7 +494,7 @@ mod tests {
         assert_eq!(out[0].seconds, 120);
         assert_eq!(out[0].end_position, 148_207);
         assert_eq!(out[0].words, 200);
-        assert_eq!(out[0].pages, 2);
+        assert_eq!(out[0].page_turns, 2);
         assert_eq!(out[0].started_at, "2026-08-03T10:00:00");
     }
 
