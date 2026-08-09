@@ -168,7 +168,10 @@ pub struct BookRow {
 /// having read it once is a fact, not an inference from timestamps; recording it
 /// is what lets a re-import (and a device sync) skip ~90 MB of gzip unopened
 /// instead of decompressing it to discover it holds nothing new.
-pub const SCHEMA_VERSION: i64 = 17;
+/// v18: clears `reading_log_dumps`. v17 recorded truncated and empty files as
+/// read, and a claim keyed by an immutable name is permanent — the complete copy
+/// arrives under the same name and would be skipped unopened. Data-only.
+pub const SCHEMA_VERSION: i64 = 18;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -880,6 +883,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // unchanged one is skipped. Drop those checkpoints so the next sync
         // reads each `.yjr` once more and the dates land.
         conn.execute("DELETE FROM yjr_sync", [])?;
+    }
+
+    // v18: the first version to record read snapshots did so for files it had
+    // only partly decoded — a truncated `.gz` yields its prefix, and that was
+    // taken for the whole file — and for 0-byte ones, which it read as empty
+    // text. Both then claimed a name that can never be re-read, since the claim
+    // is the name and the name never changes. Same remedy as v14's sync
+    // checkpoints: drop them all and let the next import re-read. Re-reading is
+    // idempotent and costs one pass; a false claim is permanent. The claims are
+    // not individually identifiable — which file was short is a fact about the
+    // filesystem, not about this table — so the whole table goes.
+    if from_version < 18 {
+        conn.execute("DELETE FROM reading_log_dumps", [])?;
     }
 
     // §4c: stamp the schema version. migrate() always brings the DB up to the

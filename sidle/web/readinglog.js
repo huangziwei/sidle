@@ -582,6 +582,15 @@
     showProgress(true);
     try {
       const r = await api.invoke("reading_log_import", { paths });
+      // Appended to a success line rather than replacing one: a short file still
+      // yields its prefix, so the import worked *and* something was incomplete.
+      // Deliberately not "re-import to fix" — the usual cause is a backup the
+      // Kindle itself never finished writing, which no re-import repairs. The
+      // overlap between dumps normally covers the loss; saying so would be a
+      // promise, and this is a note.
+      const cut = r.truncated
+        ? ` · ${r.truncated} file${r.truncated > 1 ? "s were" : " was"} incomplete on the Kindle`
+        : "";
       if (r.conflict) {
         // The archive names a Kindle other than the one it was being filed
         // under. Nothing was stored — misfiled reading is indistinguishable
@@ -598,7 +607,7 @@
       } else if (!r.events) {
         toast("no reading events in those files — is this a logbackup folder?", true);
       } else if (!r.added) {
-        toast(`already imported: ${r.sessions} sessions in ${r.files} files`);
+        toast(`already imported: ${r.sessions} sessions in ${r.files} files${cut}`);
       } else if (!r.attributed) {
         // Everything found is on books the library doesn't hold, so nothing was
         // counted — say so, or a successful import looks like a broken page.
@@ -609,7 +618,7 @@
         const orphans = Math.max(0, r.added - r.attributed);
         const tail = orphans ? ` · ${orphans} on books not in the library` : "";
         const reused = r.skipped ? `, ${r.skipped} already imported` : "";
-        toast(`${r.attributed} sessions added from ${r.files} files${reused}${tail}`);
+        toast(`${r.attributed} sessions added from ${r.files} files${reused}${tail}${cut}`);
       }
       invalidate();
       await refresh();

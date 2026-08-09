@@ -41,12 +41,16 @@ const DUMP_DIR: &str = "system/logbackup";
 pub struct Collected {
     /// Distinct event lines newer than the watermark.
     pub lines: Vec<String>,
-    /// Names of the dumps opened, sent alongside the lines so the desktop can
-    /// record them and skip them next time.
+    /// Names of the dumps read **in full**, sent alongside the lines so the
+    /// desktop can record them and skip them next time. A dump that decoded only
+    /// partway is deliberately absent, so the next sync reads it again.
     pub read: Vec<String>,
     /// Dumps skipped without being opened — the work this avoids is the entire
     /// point.
     pub skipped: usize,
+    /// Dumps that decoded only partway, usually because the firmware was still
+    /// writing one. Their prefix was taken; they are not reported as read.
+    pub truncated: usize,
 }
 
 /// The `YYMMDD:HHMMSS` a dump's name encodes, matching the prefix its lines
@@ -90,9 +94,16 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     // whole selection in memory twice on a device with 512 MB shared with the
     // framework.
     for (name, path) in dumps(us_root, watermark, seen, &mut out) {
-        if let Some(text) = read_maybe_gzip(&path) {
-            out.read.push(name);
-            take_events(&text, watermark, &mut out.lines);
+        if let Some(dump) = read_maybe_gzip(&path) {
+            // Its lines go either way; only a dump decoded to the end is
+            // reported as read, so a half-written one is picked up again next
+            // sync instead of being skipped on its name forever.
+            if dump.complete {
+                out.read.push(name);
+            } else {
+                out.truncated += 1;
+            }
+            take_events(&dump.text, watermark, &mut out.lines);
         }
     }
     if let Ok(text) = std::fs::read_to_string(LIVE_LOG) {
@@ -155,17 +166,43 @@ fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) {
     }
 }
 
+/// A decoded dump, and whether it decoded all the way to the end.
+struct Decoded {
+    text: String,
+    /// False when the archive was truncated, so `text` is a valid prefix rather
+    /// than the whole file. Such a dump must not be reported as read.
+    complete: bool,
+}
+
 /// Decode a log file, gunzipping it when it is gzipped. A truncated dump yields
 /// its intact prefix — the firmware rotates while writing, and the newest dump
 /// is routinely cut short, but its prefix is perfectly good data.
-fn read_maybe_gzip(path: &Path) -> Option<String> {
+///
+/// The decode error is kept rather than discarded: on this side the likeliest
+/// truncation is a live one — `log_backup.sh` gzipping a dump at the very moment
+/// a sync reads it — and that file will be complete a minute later. Reporting it
+/// as read would make the desktop skip it forever on a name that never changes.
+fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
+    // An empty file is a dump the firmware has created but not yet written, not
+    // a log with nothing in it — so it is not read, and not reported as read.
+    if bytes.is_empty() {
+        return None;
+    }
     if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut buf = Vec::new();
-        let _ = flate2::read::GzDecoder::new(&bytes[..]).read_to_end(&mut buf);
-        (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned())
+        let complete = flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_end(&mut buf)
+            .is_ok();
+        (!buf.is_empty()).then(|| Decoded {
+            text: String::from_utf8_lossy(&buf).into_owned(),
+            complete,
+        })
     } else {
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        Some(Decoded {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            complete: true,
+        })
     }
 }
 
@@ -246,6 +283,43 @@ mod tests {
         let mut lines = Vec::new();
         take_events(&text, "260809:000000", &mut lines);
         assert!(lines.is_empty());
+    }
+
+    /// A dump caught mid-write yields its prefix but is not reported as read, so
+    /// the next sync picks it up complete.
+    ///
+    /// This is the likeliest truncation on the device: `log_backup.sh` gzips a
+    /// snapshot at whatever moment the firmware decides, which can be during a
+    /// sync. Names never change, so reporting a half-decoded dump as read would
+    /// have the desktop skip it unopened for good.
+    #[test]
+    fn a_half_written_dump_is_taken_but_not_reported_as_read() {
+        use std::io::Write;
+        let dir = tempdir();
+        let backup = dir.join(DUMP_DIR);
+        std::fs::create_dir_all(&backup).unwrap();
+
+        let whole = format!("{}\n{}\n", event("260809:100000"), event("260809:100500"));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(whole.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let name = "log_backup_260809101500.txt.gz";
+        std::fs::write(backup.join(name), &gz[..gz.len() - 12]).unwrap();
+        let cut = collect(&dir, "", &[]);
+        assert_eq!(cut.truncated, 1);
+        assert!(
+            cut.read.is_empty(),
+            "the desktop must not be told this one is done with"
+        );
+
+        // Complete, a minute later, under the same name.
+        std::fs::write(backup.join(name), &gz).unwrap();
+        let full = collect(&dir, "", &[]);
+        assert_eq!(full.truncated, 0);
+        assert_eq!(full.read, vec![name.to_string()]);
+        assert_eq!(full.lines.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A unique scratch dir. The picker's tests run on the host, and the crate

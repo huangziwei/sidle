@@ -52,6 +52,10 @@ pub struct Imported {
     pub files: usize,
     /// Log files skipped unopened because this archive was already imported.
     pub skipped: usize,
+    /// Of `files`, how many decoded only partway. They still contributed their
+    /// prefix, and they stay eligible for re-import, so this is a note rather
+    /// than a failure — but a silent one would hide missing reading time.
+    pub truncated: usize,
     /// Distinct event lines after de-duplication.
     pub events: usize,
     /// Sessions parsed out of them.
@@ -121,9 +125,13 @@ pub struct Scan {
     /// Files skipped because this archive has already been imported. Never
     /// decompressed, never even opened.
     pub skipped: usize,
-    /// Names of the files actually read, so the caller can record them as seen
-    /// once the events they held are safely stored.
+    /// Names of the files read **in full**, so the caller can record them as
+    /// seen once the events they held are safely stored. A truncated file is
+    /// deliberately absent: it must stay eligible for a later, complete copy.
     pub read: Vec<String>,
+    /// Files that decoded only partway. Counted, not hidden — a dump silently
+    /// yielding half its events looks exactly like a quiet day.
+    pub truncated: usize,
     pub cancelled: bool,
 }
 
@@ -143,6 +151,21 @@ pub struct Scan {
 /// but a truncated file's intact prefix is perfectly good data, and heavy
 /// overlap between dumps usually supplies the lost tail anyway. Rejecting such a
 /// file would discard events for no gain.
+///
+/// Lenient about the data, strict about the claim: a short file's events are
+/// taken, but its name goes to `truncated` rather than `read`, so it is never
+/// recorded as done with. The two must not be conflated, because a `seen` entry
+/// is keyed by a name that never changes and is therefore permanent.
+///
+/// Usually the file will never grow: the device writes each snapshot once, on
+/// its own date, and never revisits it — in a real archive the short files were
+/// dates where `log_backup.sh` logged its trigger but never reached the prune
+/// step that follows a completed backup, so the Kindle left them short and
+/// always will. Re-reading such a file costs a few bytes and finds the same
+/// prefix, which is the right price. The case that justifies it is the other
+/// one: a file cut short in transfer, or read while the device was still
+/// writing it, is whole on the Kindle, and recording it as read would skip the
+/// good copy unopened for good.
 pub fn collect_events(
     paths: &[impl AsRef<Path>],
     seen: &std::collections::HashSet<String>,
@@ -177,18 +200,27 @@ pub fn collect_events(
             out.cancelled = true;
             return out;
         }
-        if let Some(text) = read_maybe_gzip(&file) {
+        if let Some(file) = read_maybe_gzip(&file) {
             out.files += 1;
-            out.read.push(name);
+            // Only a file decoded to its end is recorded as read. A truncated
+            // one still contributes its prefix, but claiming it was read would
+            // make the skip permanent: the names are immutable, so a complete
+            // copy pulled later carries the same name and would be skipped
+            // unopened, losing the tail for good.
+            if file.complete {
+                out.read.push(name);
+            } else {
+                out.truncated += 1;
+            }
             // One vectorised scan of the whole buffer per known device, and only
             // until the first hit — not a per-line test.
             if out.serial.is_none() {
                 out.serial = known_serials
                     .iter()
-                    .find(|s| text.contains(s.as_str()))
+                    .find(|s| file.text.contains(s.as_str()))
                     .cloned();
             }
-            for line in text.lines().filter(|l| l.contains(MARKER)) {
+            for line in file.text.lines().filter(|l| l.contains(MARKER)) {
                 out.events.insert(line.to_string());
             }
         }
@@ -209,18 +241,44 @@ fn walk(path: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// A decoded log file, and whether it decoded all the way to the end.
+struct Decoded {
+    text: String,
+    /// False when the archive was truncated, so `text` is a valid prefix rather
+    /// than the whole file. The caller must not record such a file as read.
+    complete: bool,
+}
+
 /// Decode a log file, gunzipping it when it is gzipped. Returns whatever
 /// decoded, including the valid prefix of a truncated archive.
-fn read_maybe_gzip(path: &Path) -> Option<String> {
+fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
+    // An empty file is a backup that produced nothing, not a log with nothing in
+    // it. Two of a real archive's 31 files were 0 bytes, both on dates where the
+    // device's own backup script started and never finished. Reading it as valid
+    // empty text would count it as a file and record its name as read.
+    if bytes.is_empty() {
+        return None;
+    }
     if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut out = Vec::new();
         // A truncated member yields Err *after* writing what it decoded, so the
         // buffer is kept either way; only a header-level failure yields nothing.
-        let _ = flate2::read::GzDecoder::new(&bytes[..]).read_to_end(&mut out);
-        (!out.is_empty()).then(|| String::from_utf8_lossy(&out).into_owned())
+        // The error is not discarded: it is the sole evidence that what came out
+        // is a prefix, and reading a prefix must not count as having read the
+        // file.
+        let complete = flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_end(&mut out)
+            .is_ok();
+        (!out.is_empty()).then(|| Decoded {
+            text: String::from_utf8_lossy(&out).into_owned(),
+            complete,
+        })
     } else {
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        Some(Decoded {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            complete: true,
+        })
     }
 }
 
@@ -519,6 +577,7 @@ pub fn import(
         return Ok(Imported {
             files: found.files,
             skipped: found.skipped,
+            truncated: found.truncated,
             events: found.events.len(),
             conflict: Some(named.clone()),
             ..Imported::default()
@@ -531,6 +590,7 @@ pub fn import(
         return Ok(Imported {
             files: found.files,
             skipped: found.skipped,
+            truncated: found.truncated,
             events: found.events.len(),
             cancelled: true,
             ..Imported::default()
@@ -538,6 +598,7 @@ pub fn import(
     }
     let mut out = store_events(conn, &found.events, found.files, device_serial, watch)?;
     out.skipped = found.skipped;
+    out.truncated = found.truncated;
     // Marked only now: a file counts as read once its events are stored, so an
     // interrupted or failed store leaves it to be read again.
     if !out.cancelled {
@@ -758,6 +819,65 @@ mod tests {
         let again = collect_events(&[&dir], &seen, &[], &mut job::ignore);
         assert_eq!((again.files, again.skipped), (0, 1));
         assert!(again.events.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A truncated dump gives up its prefix but is **not** recorded as read.
+    ///
+    /// The two rules are load-bearing together. Snapshot names are immutable, so
+    /// recording a half-decoded file as read would skip it unopened forever —
+    /// including the complete copy pulled later under the same name. A real
+    /// 31-file archive had 5 truncated, so this is the common case, not a corner.
+    #[test]
+    fn a_truncated_dump_gives_up_its_prefix_without_counting_as_read() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("sidle-rl-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let whole = format!(
+            "{}\n{}\n",
+            page("260803:100000", "NextPage", 1, 60_000, 10),
+            page("260803:100500", "NextPage", 1, 120_000, 20),
+        );
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(whole.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+
+        // Cut the archive short, exactly as an interrupted transfer or a dump
+        // read mid-write leaves it.
+        let name = "log_backup_260803101500.txt.gz";
+        std::fs::write(dir.join(name), &gz[..gz.len() - 12]).unwrap();
+
+        let cut = collect_events(&[&dir], &Default::default(), &[], &mut job::ignore);
+        assert_eq!(cut.files, 1, "it was opened and decoded as far as it went");
+        assert_eq!(
+            cut.truncated, 1,
+            "and the shortfall is reported, not hidden"
+        );
+        assert!(
+            cut.read.is_empty(),
+            "a prefix is not a read file: recording it would make the skip permanent"
+        );
+
+        // The other way a transfer fails: nothing arrives at all. That is not an
+        // empty log — it must not be counted, and above all not marked read.
+        std::fs::write(dir.join(name), b"").unwrap();
+        let nothing = collect_events(&[&dir], &Default::default(), &[], &mut job::ignore);
+        assert_eq!((nothing.files, nothing.truncated), (0, 0));
+        assert!(nothing.read.is_empty());
+
+        // The complete file, later. Same name — so had the truncated pass
+        // recorded it, this would find nothing at all.
+        std::fs::write(dir.join(name), &gz).unwrap();
+        let full = collect_events(&[&dir], &Default::default(), &[], &mut job::ignore);
+        assert_eq!(full.truncated, 0);
+        assert_eq!(full.read, vec![name.to_string()]);
+        assert_eq!(
+            full.events.len(),
+            2,
+            "both events, now that the tail is here"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
