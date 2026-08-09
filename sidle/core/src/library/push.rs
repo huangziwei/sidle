@@ -889,6 +889,54 @@ mod tests {
         );
     }
 
+    /// A highlight's capture date is the device's, and has to survive the trip
+    /// through the library back onto another device. Stamping it with the sync
+    /// time instead would tell the second Kindle every annotation was made the
+    /// day it was plugged in.
+    #[test]
+    fn the_devices_capture_date_survives_import_and_push() {
+        use crate::library::ingest;
+        let conn = mem_db();
+        let book = add_book(&conn);
+        // 2026-08-08T22:05:06Z, as a Kindle stamps it.
+        let made_at = 1_786_226_706_442_i64;
+
+        let from_device = vec![Annotation::highlight(
+            Anchor::new(10, 0, 100),
+            Anchor::new(10, 4, 104),
+            made_at,
+            Some("blue"),
+        )];
+        ingest::import_yjr(
+            &conn,
+            &from_device,
+            &index(),
+            Some(book),
+            Some("A Book"),
+            Some("Author"),
+            Some("DEV1"),
+            "now",
+        )
+        .unwrap();
+
+        let stored = db::list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0].added_at.is_some(),
+            "the device's creationTime must be kept, not dropped",
+        );
+
+        // Composing for a second device restores the very same stamp.
+        let out = compose(&conn, book, None, &index(), true).unwrap().unwrap();
+        let pushed = crate::library::yjr::parse(&out.bytes);
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(
+            pushed[0].created_ms,
+            Some(made_at),
+            "the second device must see when the highlight was really made",
+        );
+    }
+
     /// A mark made in Sidle, pushed to a device and read back off it, must stay
     /// one row. The reader writes a bookmark as a bare point — no end anchor, no
     /// covered text — while a device writes the point twice and the importer

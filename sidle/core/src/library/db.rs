@@ -770,6 +770,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // and the sync skips an unchanged one, so drop the checkpoints: the next
         // sync re-decodes and this time finds the anchors.
         conn.execute("DELETE FROM ink_sync", [])?;
+
+        // Same shape, for the capture date: an annotation's `creationTime` was
+        // parsed and dropped, so every device-imported row has an empty
+        // `added_at`. The sidecars still hold it, and import now backfills a
+        // missing one — but only for a sidecar it actually re-reads, and an
+        // unchanged one is skipped. Drop those checkpoints so the next sync
+        // reads each `.yjr` once more and the dates land.
+        conn.execute("DELETE FROM yjr_sync", [])?;
     }
 
     // §4c: stamp the schema version. migrate() always brings the DB up to the
@@ -2490,6 +2498,26 @@ pub fn insert_annotation(conn: &Connection, a: &NewAnnotation<'_>) -> rusqlite::
             a.imported_at,
             a.source,
         ],
+    )?;
+    Ok(n > 0)
+}
+
+/// Give an annotation the capture date it has none for, returning whether a row
+/// changed.
+///
+/// For rows imported before the device's `creationTime` was kept. Deliberately
+/// narrow — it fills an absent value only, so a date already on the row is never
+/// rewritten, which also makes it idempotent: once filled, later syncs find
+/// nothing to do.
+pub fn fill_missing_added_at(
+    conn: &Connection,
+    dedup_hash: &str,
+    added_at: &str,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE annotations SET added_at = ?1 \
+         WHERE dedup_hash = ?2 AND (added_at IS NULL OR added_at = '')",
+        params![added_at, dedup_hash],
     )?;
     Ok(n > 0)
 }

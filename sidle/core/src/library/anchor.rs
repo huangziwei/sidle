@@ -201,6 +201,14 @@ pub struct Resolved {
     /// `orange`), or `None` from a monochrome Kindle — which writes no colour
     /// rather than meaning yellow.
     pub color: Option<String>,
+    /// When the device says the annotation was made and last changed, epoch
+    /// milliseconds. Carried rather than dropped because it is the only dated
+    /// evidence of *when a book was open* that survives in the sidecar, and
+    /// because writing the record back to another device has to restore the
+    /// stamp it came with instead of inventing one. `None`, or a non-positive
+    /// value, means the record carried no usable clock.
+    pub created_ms: Option<i64>,
+    pub modified_ms: Option<i64>,
 }
 
 impl Resolved {
@@ -264,6 +272,8 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
         text,
         note_body: ann.body.clone(),
         color: ann.color.clone(),
+        created_ms: ann.created_ms.filter(|ms| *ms > 0),
+        modified_ms: ann.modified_ms.filter(|ms| *ms > 0),
     }
 }
 

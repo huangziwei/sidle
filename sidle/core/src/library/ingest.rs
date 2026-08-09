@@ -241,6 +241,10 @@ pub fn import_yjr(
             stats.unresolved += 1;
         }
         let hash = dedup_hash(&book_key, kind, &r);
+        // When the device says it was made. The only dated evidence of when a
+        // book was open that a sidecar keeps, and what a push has to write back
+        // so a second device shows the date the annotation was really made.
+        let added_at = r.created_ms.and_then(epoch_ms_to_iso);
         // Honor a Sidle-side deletion: the user removed this in Sidle, so the
         // backup must not re-add it (Restore from device clears the record).
         // Presence is still recorded below — the device does hold it.
@@ -264,7 +268,7 @@ pub fn import_yjr(
             color: r.color.as_deref(),
             clip_title,
             clip_author,
-            added_at: None,
+            added_at: added_at.as_deref(),
             added_raw: None,
             imported_at: now,
             source: SOURCE_YJR,
@@ -273,6 +277,13 @@ pub fn import_yjr(
             stats.inserted += 1;
         } else {
             stats.duplicate += 1;
+            // A row that predates this stamp being kept has none. Fill it from
+            // the device, which still holds it — narrow by construction: it only
+            // ever fills an absent value, so a date already recorded (a device's
+            // own, or one the user set) is never overwritten.
+            if let Some(iso) = added_at.as_deref() {
+                db::fill_missing_added_at(conn, &hash, iso)?;
+            }
         }
         current_hashes.push(hash);
     }
@@ -286,6 +297,12 @@ pub fn import_yjr(
     }
 
     Ok(stats)
+}
+
+/// A device stamp (epoch milliseconds) as the ISO-8601 the DB stores. `None`
+/// for a value outside the representable range.
+fn epoch_ms_to_iso(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.to_rfc3339())
 }
 
 /// Re-link orphan annotations (`book_id IS NULL`) whose `clip_title` now matches
@@ -810,6 +827,8 @@ mod tests {
             text: "走れメロス".to_string(),
             note_body: None,
             color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         let device = dedup_hash("メロス", "highlight", &r);
         let native = annotation_dedup_hash(
@@ -843,6 +862,8 @@ mod tests {
             text: "It's a pertinent question".to_string(),
             note_body: None,
             color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         // Reader's synthesized axis vs the device's raw pid, same passage.
         let from_sidle = dedup_hash("fragments", "highlight", &anchored(Some(25)));
@@ -872,6 +893,8 @@ mod tests {
             text: "It's a pertinent question".to_string(),
             note_body: None,
             color: None,
+            created_ms: None,
+            modified_ms: None,
         };
         assert_ne!(
             dedup_hash("fragments", "highlight", &span(104)),
