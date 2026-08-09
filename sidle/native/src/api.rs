@@ -870,6 +870,137 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
     Ok(report)
 }
 
+// ---------------------------------------------------------------------------
+// Reading log push — GET/POST /sync/reading-log
+// ---------------------------------------------------------------------------
+
+/// The push bundle: the reading-event lines this Kindle found past the desktop's
+/// watermark. Mirrors `sidle-server`'s `ReadingLogRequest`.
+#[derive(Serialize)]
+struct ReadingLogRequest<'a> {
+    device_serial: &'a str,
+    lines: &'a [String],
+    /// The snapshots those lines came from, so the desktop records them and this
+    /// Kindle never opens them again.
+    dumps: &'a [String],
+}
+
+/// The server's answer to "what do you already have from me?" — the snapshots it
+/// has read, and how far into the live log it has got.
+#[derive(Deserialize, Default)]
+struct ReadingWatermark {
+    #[serde(default)]
+    watermark: String,
+    #[serde(default)]
+    seen: Vec<String>,
+}
+
+/// What the desktop stored, for the picker's toast.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReadingLogReport {
+    #[serde(default)]
+    pub sessions: usize,
+    #[serde(default)]
+    pub added: usize,
+    #[serde(default)]
+    pub attributed: usize,
+    /// Dumps skipped on their filename alone — not from the server, filled in
+    /// locally so the log can show that the watermark did its job.
+    #[serde(skip)]
+    pub skipped: usize,
+}
+
+impl ReadingLogReport {
+    /// A terse toast fragment, or `None` when there was nothing new — which is
+    /// the normal case and does not deserve a line.
+    pub fn summary(&self) -> Option<String> {
+        (self.added > 0).then(|| {
+            let plural = if self.added == 1 { "" } else { "s" };
+            format!("{} reading session{plural}", self.added)
+        })
+    }
+}
+
+/// Push this Kindle's new reading events to the desktop.
+///
+/// Two round trips, and the first one is what makes this cheap: the desktop says
+/// how far it has already read, and everything at or before that is skipped —
+/// whole gzipped dumps, unopened, on their filename alone. With nothing new
+/// since the last Sync this reads one directory, scans the live log, and returns
+/// without a second request.
+pub fn push_reading_log(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    us_root: &Path,
+) -> Result<ReadingLogReport> {
+    if cfg.serial.is_empty() {
+        return Err(anyhow!(
+            "server.conf has no SERIAL= — re-run Update on Kindle in the desktop app \
+             (reading sessions are keyed per device)"
+        )
+        .into());
+    }
+
+    let base = format!("http://{}:{}/sync/reading-log", cfg.host, cfg.port);
+    let mark: ReadingWatermark = match agent
+        .get(&base)
+        .query("serial", &cfg.serial)
+        .set("X-Sidle-Token", &cfg.token)
+        .timeout(SYNC_TIMEOUT)
+        .call()
+    {
+        // `into_string` + `serde_json`, not ureq's `into_json`: that needs the
+        // `json` feature, which pulls dependencies this crate keeps out.
+        Ok(res) => {
+            let text = res
+                .into_string()
+                .with_context(|| format!("read body of GET {base}"))?;
+            serde_json::from_str(&text).with_context(|| format!("parse GET {base}"))?
+        }
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("GET {base}: {e}").into()),
+    };
+
+    let found = crate::readinglog::collect(us_root, &mark.watermark, &mark.seen);
+    if found.lines.is_empty() && found.read.is_empty() {
+        // The common case: nothing has been read since the last sync, so there
+        // is nothing to send and no reason to make the request.
+        return Ok(ReadingLogReport {
+            skipped: found.skipped,
+            ..Default::default()
+        });
+    }
+
+    let req = ReadingLogRequest {
+        device_serial: &cfg.serial,
+        lines: &found.lines,
+        dumps: &found.read,
+    };
+    let body = serde_json::to_vec(&req).context("serialize reading-log request")?;
+    let res = match agent
+        .post(&base)
+        .set("X-Sidle-Token", &cfg.token)
+        .set("Content-Type", "application/json")
+        .timeout(SYNC_TIMEOUT)
+        .send_bytes(&body)
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("POST {base}: {e}").into()),
+    };
+    let text = res
+        .into_string()
+        .with_context(|| format!("read body of {base}"))?;
+    let mut report: ReadingLogReport =
+        serde_json::from_str(&text).with_context(|| format!("parse {base}"))?;
+    report.skipped = found.skipped;
+    Ok(report)
+}
+
 /// Read every screenshot (`screenshot*` under `screenshots/` and the USB root)
 /// and picker log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
 /// filename so a screenshot in both `screenshots/` and the root is sent once.

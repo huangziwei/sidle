@@ -33,6 +33,12 @@ ureq = { version = "2", default-features = false }
 # proc-macro-driven (pure Rust at build time).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# flate2: gunzip the firmware's own `system/logbackup/*.txt.gz` reading logs.
+# rust_backend (miniz_oxide) rather than the default zlib — a C dependency would
+# break the static musl cross-link, same constraint as everything else here.
+# Read-only, and only for dumps the desktop's watermark says might hold
+# something new, which in the steady state is none of them.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # base64: encode `.yjr`/`.yjf` bytes for the `/sync/annotations` JSON body
 # (STANDARD alphabet, with padding — matches the server's decoder). Pure Rust,
 # no_std-capable, so the musl cross-link stays static. 0.22 matches the desktop.

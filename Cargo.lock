@@ -4640,6 +4640,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "hex",
  "image",
  "libc",

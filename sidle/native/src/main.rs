@@ -23,6 +23,7 @@ mod device_state;
 mod eink;
 mod font;
 mod orientation;
+mod readinglog;
 mod search;
 mod selfupdate;
 mod series;
@@ -837,6 +838,36 @@ fn run() -> anyhow::Result<()> {
                                                 Err(err) => {
                                                     log(format!("misc backup failed: {err}"));
                                                     summary = format!("{summary}\n(backup failed)");
+                                                }
+                                            }
+                                            // Same Sync tap sends the reading sessions the
+                                            // firmware logged about itself. Cheap by
+                                            // construction: the desktop says how far it has
+                                            // already read and everything older is skipped
+                                            // unopened, so the usual case reads one directory
+                                            // and sends nothing. Best-effort like the backup.
+                                            let rl_t0 = Instant::now();
+                                            match api::push_reading_log(
+                                                &agent,
+                                                &cfg,
+                                                std::path::Path::new(MNT_US),
+                                            ) {
+                                                Ok(rl) => {
+                                                    log(format!(
+                                                        "reading log in {:?}: {} new of {} \
+                                                         sessions, {} named, {} dumps skipped",
+                                                        rl_t0.elapsed(),
+                                                        rl.added,
+                                                        rl.sessions,
+                                                        rl.attributed,
+                                                        rl.skipped
+                                                    ));
+                                                    if let Some(s) = rl.summary() {
+                                                        summary = format!("{summary}\n{s}");
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    log(format!("reading log failed: {err}"));
                                                 }
                                             }
                                             // Same Sync tap pulls any book the desktop

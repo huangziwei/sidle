@@ -21,7 +21,6 @@
     year: null, // heatmap year, as a number; resolved on first render
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
-    devices: [], // Kindles the library knows, for the import picker and labels
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
@@ -428,22 +427,12 @@
         fact("Last read", shortDay(entry.last_at)),
         // Blank for sessions imported before Sidle was told which Kindle wrote
         // them; a row saying nothing beats a row inventing a device.
-        entry.devices.length
-          ? fact("Read on", deviceNames(entry.devices), entry.devices.join(", "))
-          : "",
+        entry.devices.length ? fact("Read on", entry.devices.join(", ")) : "",
       ].join("");
     } else {
       q("#rl-book-stats").innerHTML = "";
     }
     renderMonth();
-  }
-
-  // Serials as shown: the model when this Kindle is the plugged-in one (the
-  // only time Sidle knows a model), otherwise the tail of the serial, which is
-  // what distinguishes two devices at a glance. The full serials are the tooltip.
-  function deviceNames(serials) {
-    const named = new Map(state.devices.map((d) => [d.serial, d.model]));
-    return serials.map((s) => named.get(s) || `…${s.slice(-4)}`).join(", ");
   }
 
   // One figure as a label/value row. A vertical list beside the calendar reads
@@ -551,29 +540,33 @@
     q("#rl-progress-label").textContent = `${step}${count} — ${p.label}`;
   }
 
-  // Which Kindles the archive could be from. Populated once per page load —
-  // the list only grows when a new device syncs, which needs an app restart to
-  // matter anyway.
-  async function loadDevices() {
-    let devices = [];
-    try {
-      devices = await api.invoke("reading_log_devices");
-    } catch (e) {
-      console.warn("reading_log_devices failed:", e);
+  // Erasing the whole log is not undoable from inside Sidle — the way back is
+  // re-importing the archives — so the dialog states exactly what goes.
+  async function doPurge() {
+    const o = state.overview;
+    const what = o
+      ? `${fmtDuration(o.total_seconds)} across ${o.books_total} books and ${o.days_read} days`
+      : "the whole reading log";
+    if (
+      !confirm(
+        `Delete every reading session Sidle has stored?\n\nThis erases ${what}, ` +
+          `for every Kindle.\n\nThe logbackup files on disk are untouched — importing ` +
+          `them again brings this back.`,
+      )
+    ) {
+      return;
     }
-    state.devices = devices;
-    const sel = q("#rl-device");
-    sel.innerHTML = devices
-      .map((d) => {
-        const name = d.model || d.serial;
-        const tail = d.connected ? " (connected)" : "";
-        return `<option value="${esc(d.serial)}" title="${esc(d.serial)}">${esc(name)}${tail}</option>`;
-      })
-      .concat(`<option value="">Unknown device</option>`)
-      .join("");
-    // The plugged-in Kindle is sorted first and is almost always the one whose
-    // logs are being imported.
-    sel.value = devices.length ? devices[0].serial : "";
+    try {
+      const gone = await api.invoke("reading_log_clear");
+      toast(`reading log cleared — ${gone} sessions deleted`);
+      state.day = null;
+      state.book = null;
+      state.year = null;
+      invalidate();
+      await refresh();
+    } catch (e) {
+      toast(`could not clear the reading log: ${e}`, true);
+    }
   }
 
   async function doImport() {
@@ -588,14 +581,20 @@
 
     showProgress(true);
     try {
-      const r = await api.invoke("reading_log_import", {
-        paths,
-        deviceSerial: q("#rl-device").value || null,
-      });
-      if (r.cancelled) {
+      const r = await api.invoke("reading_log_import", { paths });
+      if (r.conflict) {
+        // The archive names a Kindle other than the one it was being filed
+        // under. Nothing was stored — misfiled reading is indistinguishable
+        // from correct reading once it is in.
+        toast(`these logs are from ${r.conflict} — nothing imported`, true);
+      } else if (r.cancelled) {
         // Both phases commit as they go, so a cancel keeps its work — say so,
         // or the user re-runs from scratch expecting to have lost it.
         toast("import stopped — what finished was kept, run it again to continue");
+      } else if (!r.files && r.skipped) {
+        // Every file was recognised and skipped unopened. Saying so is the
+        // difference between "nothing happened" and "there was nothing to do".
+        toast(`already imported — all ${r.skipped} files skipped`);
       } else if (!r.events) {
         toast("no reading events in those files — is this a logbackup folder?", true);
       } else if (!r.added) {
@@ -607,9 +606,10 @@
       } else {
         // `attributed`, not `added`: time on a missing book is stored inert and
         // appears nowhere, so counting it here would promise rows that never show.
-        const skipped = Math.max(0, r.added - r.attributed);
-        const tail = skipped ? ` · ${skipped} on books not in the library` : "";
-        toast(`${r.attributed} sessions added from ${r.files} files${tail}`);
+        const orphans = Math.max(0, r.added - r.attributed);
+        const tail = orphans ? ` · ${orphans} on books not in the library` : "";
+        const reused = r.skipped ? `, ${r.skipped} already imported` : "";
+        toast(`${r.attributed} sessions added from ${r.files} files${reused}${tail}`);
       }
       invalidate();
       await refresh();
@@ -623,8 +623,8 @@
   // ── Wiring ─────────────────────────────────────────────────────────────────
 
   function init() {
-    loadDevices();
     q("#rl-import").addEventListener("click", doImport);
+    q("#rl-purge").addEventListener("click", doPurge);
     q("#rl-cancel").addEventListener("click", async () => {
       const btn = q("#rl-cancel");
       btn.disabled = true;

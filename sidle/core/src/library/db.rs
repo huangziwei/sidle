@@ -163,7 +163,12 @@ pub struct BookRow {
 /// count — a converted book has no such thing — but the count of forward page
 /// events the device logged, which depends on font size and screen. Renamed so
 /// nothing downstream can present it as a book's pagination.
-pub const SCHEMA_VERSION: i64 = 16;
+/// v17: added `reading_log_dumps` — which of a device's log snapshots have
+/// already been read. A dump is an immutable snapshot with a unique name, so
+/// having read it once is a fact, not an inference from timestamps; recording it
+/// is what lets a re-import (and a device sync) skip ~90 MB of gzip unopened
+/// instead of decompressing it to discover it holds nothing new.
+pub const SCHEMA_VERSION: i64 = 17;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -724,6 +729,27 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS reading_sessions_book ON reading_sessions (book_id)",
+        [],
+    )?;
+
+    // v17: the log snapshots already read, per device.
+    //
+    // A `log_backup_<YYMMDDHHMMSS>.txt.gz` is an immutable snapshot with a name
+    // that states when it was taken, so "we have read this one" is a fact worth
+    // storing rather than something to re-derive. Keyed by device because the
+    // same name means a different file on a different Kindle.
+    //
+    // Names, not a timestamp watermark: an archive can hold days *older* than
+    // the newest session already stored — import a recent slice first, then the
+    // whole folder — and a watermark would silently skip them. A name that has
+    // not been seen is read, whatever its date.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_log_dumps (
+            device_serial TEXT NOT NULL DEFAULT '',
+            name          TEXT NOT NULL,
+            read_at       TEXT NOT NULL,
+            PRIMARY KEY (device_serial, name)
+        )"#,
         [],
     )?;
 
@@ -1479,6 +1505,90 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
         ],
     )?;
     Ok(n > 0)
+}
+
+/// The newest reading event this library holds for one device, or `None` if it
+/// holds none.
+///
+/// The watermark a device syncs against: everything at or before this is already
+/// stored, so the device can skip whole log dumps by their filename timestamp
+/// without opening one. Per-serial, because two Kindles are read independently
+/// and one being up to date says nothing about the other.
+pub fn reading_watermark(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT MAX(ended_at) FROM reading_sessions WHERE device_serial = ?1",
+        params![device_serial],
+        |r| r.get(0),
+    )
+}
+
+/// The log snapshots already read from one device, by filename.
+///
+/// What makes a re-import cheap: a name in this set is a file whose every event
+/// is already stored, so it is skipped without being opened. Snapshots are
+/// immutable, so this can never go stale in the dangerous direction.
+pub fn seen_dumps(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT name FROM reading_log_dumps WHERE device_serial = ?1")?;
+    let rows = stmt.query_map(params![device_serial], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Which device these log snapshots belong to, if the library has read any of
+/// them before.
+///
+/// Exact identification, not a guess: a snapshot's name encodes the second it
+/// was written, so two Kindles do not produce the same one, and a name already
+/// recorded says which device wrote it. `Ok(None)` means none of these files has
+/// been seen; `Err(names)` means they are recorded against **different** devices,
+/// which is a folder holding two Kindles' logs mixed together.
+pub fn dumps_owner(
+    conn: &Connection,
+    names: &[String],
+) -> rusqlite::Result<Result<Option<String>, Vec<String>>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT device_serial FROM reading_log_dumps WHERE name = ?1")?;
+    let mut owners: Vec<String> = Vec::new();
+    for name in names {
+        for owner in stmt.query_map(params![name], |r| r.get::<_, String>(0))? {
+            let owner = owner?;
+            if !owner.is_empty() && !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+    }
+    Ok(match owners.len() {
+        0 => Ok(None),
+        1 => Ok(Some(owners.remove(0))),
+        _ => Err(owners),
+    })
+}
+
+/// Erase the reading log completely — every session and every record of which
+/// snapshots have been read.
+///
+/// Both, together: keeping the read-snapshot records after deleting the sessions
+/// would leave a library that refuses to re-import the very archives it no longer
+/// holds. Returns how many sessions went.
+pub fn clear_reading_log(conn: &Connection) -> rusqlite::Result<usize> {
+    let sessions = conn.execute("DELETE FROM reading_sessions", [])?;
+    conn.execute("DELETE FROM reading_log_dumps", [])?;
+    Ok(sessions)
+}
+
+/// Record that a snapshot has been read in full.
+pub fn mark_dump_read(conn: &Connection, device_serial: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO reading_log_dumps (device_serial, name, read_at)
+         VALUES (?1, ?2, ?3)",
+        params![device_serial, name, now_iso()],
+    )?;
+    Ok(())
 }
 
 /// Seconds read per day over `[from, to]` (inclusive, `YYYY-MM-DD`), skipping

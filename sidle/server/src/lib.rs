@@ -32,7 +32,7 @@ use sidle_core::library::{
     import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
     paths::kfx_device_filename,
-    push,
+    push, reading_log,
 };
 
 // We call `db::open` per request (rather than holding a long-lived `Arc<
@@ -156,6 +156,15 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/sync/misc",
             post(sync_misc).layer(DefaultBodyLimit::max(MISC_BODY_LIMIT)),
+        )
+        // The Kindle asks how far this library has already read, then pushes only
+        // the events past that point. The GET is what keeps a sync cheap: it lets
+        // the device skip whole log dumps on their filename alone.
+        .route(
+            "/sync/reading-log",
+            get(reading_log_watermark)
+                .post(sync_reading_log)
+                .layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
         )
         // On-device app self-update pull: the picker fetches its own next binary
         // from the staged `device-dist/` bundle (written by the desktop app).
@@ -714,6 +723,150 @@ async fn sync_misc(
     })??;
 
     Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// Reading log — GET /sync/reading-log (watermark), POST /sync/reading-log
+// ---------------------------------------------------------------------------
+
+/// What the library already holds from one Kindle.
+///
+/// Two different skips, because the device has two kinds of source:
+///
+/// - `seen` names the log snapshots already read in full. A snapshot is
+///   immutable, so its name is proof, and the device skips it without opening
+///   it — the difference between a sync that gunzips 90 MB and one that lists a
+///   directory.
+/// - `watermark` is the newest event stored, as the `YYMMDD:HHMMSS` a syslog
+///   line starts with. It filters the *live* log, which has no stable name and
+///   is appended to continuously.
+///
+/// Both are empty for a device that has never synced, which correctly means
+/// "read everything once".
+#[derive(serde::Serialize, Default)]
+struct ReadingWatermark {
+    watermark: String,
+    seen: Vec<String>,
+}
+
+/// The picker's push: the reading-event lines it found newer than the
+/// watermark, verbatim.
+///
+/// Lines, not parsed sessions, on purpose. The session rules are subtle — a
+/// running per-book counter, gap splitting, two different end-of-book constants
+/// — and they live in exactly one implementation on this side. The device
+/// selects; the library parses.
+#[derive(serde::Deserialize)]
+struct ReadingLogRequest {
+    device_serial: String,
+    lines: Vec<String>,
+    /// The snapshots the device read to produce those lines, so this library can
+    /// skip them next time exactly as a re-import does.
+    #[serde(default)]
+    dumps: Vec<String>,
+}
+
+/// What `POST /sync/reading-log` stored, for the picker's toast.
+#[derive(serde::Serialize, Default)]
+struct ReadingLogResult {
+    sessions: usize,
+    added: usize,
+    attributed: usize,
+}
+
+/// `GET /sync/reading-log?serial=…` — how far this library has already read.
+async fn reading_log_watermark(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Json<ReadingWatermark>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let serial = query.get("serial").cloned().unwrap_or_default();
+    if serial.is_empty() {
+        // Without a serial there is no per-device answer, and guessing one would
+        // hand back another Kindle's progress.
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let conn = open_db(&state.paths)?;
+    let newest = db::reading_watermark(&conn, &serial).map_err(|err| {
+        tracing::error!(?err, "sync/reading-log: watermark query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let seen = db::seen_dumps(&conn, &serial).map_err(|err| {
+        tracing::error!(?err, "sync/reading-log: seen-dumps query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(ReadingWatermark {
+        watermark: newest
+            .as_deref()
+            .and_then(reading_log::log_stamp)
+            .unwrap_or_default(),
+        seen: seen.into_iter().collect(),
+    }))
+}
+
+/// `POST /sync/reading-log` — store the events the Kindle just found.
+///
+/// Idempotent by the same uniqueness index the desktop import relies on, so a
+/// re-push of an overlapping window adds nothing.
+async fn sync_reading_log(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Json(req): Json<ReadingLogRequest>,
+) -> Result<Json<ReadingLogResult>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    if req.device_serial.is_empty() {
+        // A session with no device would be stored as provenance-unknown and
+        // then claimed by whichever Kindle syncs next. Refuse instead.
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.lines.is_empty() && req.dumps.is_empty() {
+        return Ok(Json(ReadingLogResult::default()));
+    }
+
+    let paths = state.paths.clone();
+    // Parsing plus SQLite writes are blocking; keep them off the async executor.
+    let out = tokio::task::spawn_blocking(move || -> Result<ReadingLogResult, StatusCode> {
+        let conn = db::open(&paths.db()).map_err(|err| {
+            tracing::error!(?err, "sync/reading-log: open db");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        // A `BTreeSet` both de-duplicates and orders, which is what the parser
+        // requires — the device's own dumps overlap heavily by design.
+        let events: std::collections::BTreeSet<String> = req.lines.into_iter().collect();
+        let stored = reading_log::store_events(
+            &conn,
+            &events,
+            0,
+            &req.device_serial,
+            &mut sidle_core::library::job::ignore,
+        )
+        .map_err(|err| {
+            tracing::error!(?err, "sync/reading-log: store failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        // Recorded only after the events are stored, so a failure leaves the
+        // snapshot to be read again rather than skipped forever.
+        for name in &req.dumps {
+            db::mark_dump_read(&conn, &req.device_serial, name).map_err(|err| {
+                tracing::error!(?err, name, "sync/reading-log: mark dump read failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+        Ok(ReadingLogResult {
+            sessions: stored.sessions,
+            added: stored.added,
+            attributed: stored.attributed,
+        })
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "sync/reading-log: store task panicked");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })??;
+
+    Ok(Json(out))
 }
 
 /// Base64-encode a blob for the wire (standard alphabet, with padding) — the
@@ -1515,5 +1668,200 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- /sync/reading-log (the device's own push) -------------------------
+
+    /// One reading event in the device's syslog shape. Same fixture the parser's
+    /// own tests use; here it only has to survive the wire and reach the parser.
+    fn reading_line(stamp: &str, kind: &str, total_ms: i64, words: i64) -> String {
+        format!(
+            "{stamp} cvm[6144]: I ReadingTimerController:Information::{kind},\
+             Title:<private>,Asin:<private>,IntervalTime:900,\
+             TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:148207,\
+             NextTOCEntryPosition:YJPosition: CCC:99,\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+        )
+    }
+
+    /// A `POST /sync/reading-log` request with a JSON body and an optional token.
+    fn reading_log_request(token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/sync/reading-log")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("x-sidle-token", t);
+        }
+        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A library + a token, no books. Reading events store on their own.
+    fn bare_state(root: &Path) -> (AppState, String) {
+        let paths = LibraryPaths {
+            root: root.to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
+        (state, token)
+    }
+
+    /// The whole point of the pair of routes: what the device is told to fetch
+    /// shrinks after it pushes, and pushing the same window twice stores nothing
+    /// the second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_push_moves_the_watermark_and_a_repush_adds_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let serial = "G000TESTSERIAL";
+        let watermark_uri = format!("/sync/reading-log?serial={serial}");
+
+        // A Kindle that has never synced is told to read everything: no
+        // watermark to filter the live log by, no snapshot it may skip.
+        let resp = build_router(state.clone())
+            .oneshot(get_request(&watermark_uri, Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let before = json_body(resp).await;
+        assert_eq!(before["watermark"], "");
+        assert!(before["seen"].as_array().unwrap().is_empty());
+
+        let dump = "log_backup_260803101500.txt.gz";
+        let body = serde_json::json!({
+            "device_serial": serial,
+            "lines": [
+                reading_line("260803:100000", "NextPage", 60_000, 100),
+                reading_line("260803:100500", "NextPage", 120_000, 220),
+                reading_line("260803:101000", "CloseBook", 180_000, 300),
+            ],
+            "dumps": [dump],
+        });
+        let resp = build_router(state.clone())
+            .oneshot(reading_log_request(Some(&token), body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let report = json_body(resp).await;
+        assert_eq!(report["sessions"], 1);
+        assert_eq!(report["added"], 1);
+        assert_eq!(
+            report["attributed"], 0,
+            "no book in this library carries that end position"
+        );
+
+        // Now the device is told to skip the snapshot outright and to filter the
+        // live log to what came after the last event stored.
+        let resp = build_router(state.clone())
+            .oneshot(get_request(&watermark_uri, Some(&token)))
+            .await
+            .unwrap();
+        let after = json_body(resp).await;
+        assert_eq!(
+            after["watermark"], "260803:101000",
+            "the newest event, in the form a syslog line starts with"
+        );
+        assert_eq!(after["seen"], serde_json::json!([dump]));
+
+        // A device that pushes an overlapping window anyway — a sync that was
+        // interrupted after storing but before the toast, say — stores nothing
+        // twice.
+        let resp = build_router(state.clone())
+            .oneshot(reading_log_request(Some(&token), body))
+            .await
+            .unwrap();
+        let again = json_body(resp).await;
+        assert_eq!(again["sessions"], 1, "the same session was parsed again");
+        assert_eq!(again["added"], 0, "and recognised as already held");
+
+        // One Kindle's progress is never handed to another.
+        let resp = build_router(state)
+            .oneshot(get_request(
+                "/sync/reading-log?serial=G000OTHERDEVICE",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        let other = json_body(resp).await;
+        assert_eq!(other["watermark"], "");
+        assert!(other["seen"].as_array().unwrap().is_empty());
+    }
+
+    /// Nothing about a device's reading is reachable without the token, in
+    /// either direction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reading_log_endpoints_reject_missing_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _) = bare_state(tmp.path());
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request("/sync/reading-log?serial=S", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = serde_json::json!({ "device_serial": "S", "lines": [], "dumps": [] });
+        let resp = build_router(state)
+            .oneshot(reading_log_request(None, body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Both routes are per-device, so an unnamed device is refused rather than
+    /// answered with — or credited to — some other Kindle's progress.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unnamed_device_is_refused_rather_than_guessed_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request("/sync/reading-log", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = serde_json::json!({
+            "device_serial": "",
+            "lines": [reading_line("260803:100000", "NextPage", 60_000, 100)],
+            "dumps": [],
+        });
+        let resp = build_router(state)
+            .oneshot(reading_log_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A sync that found nothing new is the common case, and must cost the
+    /// library nothing: no parse, no write, an empty report.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sync_with_nothing_new_stores_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let body = serde_json::json!({
+            "device_serial": "G000TESTSERIAL",
+            "lines": [],
+            "dumps": [],
+        });
+        let resp = build_router(state)
+            .oneshot(reading_log_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let report = json_body(resp).await;
+        assert_eq!(report["sessions"], 0);
+        assert_eq!(report["added"], 0);
     }
 }

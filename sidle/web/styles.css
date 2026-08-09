@@ -4299,9 +4299,10 @@ kbd {
 .rl-nav .btn[disabled] { opacity: 0.3; cursor: default; }
 .rl-nav-fixed .btn { display: none; }
 
+/* No width cap: a serial is the label, and a truncated serial identifies
+   nothing. */
 .rl-device {
   font: inherit;
-  max-width: 220px;
   padding: 5px 8px;
   color: var(--fg);
   background: var(--surface);
@@ -4469,6 +4470,28 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The one destructive control on the page, kept at the very bottom and away
+   from Import. Muted until hovered: it should be findable, not inviting. */
+.rl-danger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 34px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.btn-danger {
+  color: var(--muted);
+  border-color: var(--border);
+}
+.btn-danger:hover {
+  color: #fff;
+  background: var(--danger, #a92c2c);
+  border-color: var(--danger, #a92c2c);
 }
 
 /* ── One book ────────────────────────────────────────────────────────────── */

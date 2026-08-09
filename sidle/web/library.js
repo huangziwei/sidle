@@ -136,10 +136,17 @@ const booksSelection = new window.SelectionController({
 // keyboard handlers in wireSelection() are written against this, so they're
 // section-agnostic.
 function activeController() {
-  // The Kindle page and the Misc tab have no selectable items — return no
-  // controller so the lasso and the Esc/Cmd-A handlers (which bail on a null
-  // controller) stay inert there.
-  if (state.section === "device" || state.section === "misc") return null;
+  // The Kindle page, the Misc tab and the Reading Log have no selectable items —
+  // return no controller so the lasso and the Esc/Cmd-A handlers (which bail on
+  // a null controller) stay inert there.
+  //
+  // This is not only about the lasso being pointless: `beginLasso` calls
+  // `preventDefault()` on the mousedown, which stops a native control from ever
+  // opening. A section missing from this list gets dropdowns that cannot be
+  // clicked — which is exactly what the Reading Log's selects did.
+  if (state.section === "device" || state.section === "misc" || state.section === "reading") {
+    return null;
+  }
   if (state.section === "notes") {
     return window.Notebooks ? window.Notebooks.selection() : null;
   }

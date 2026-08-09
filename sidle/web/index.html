@@ -223,10 +223,8 @@
           <header class="rl-head">
             <div id="rl-stats" class="rl-stats"></div>
             <div class="rl-head-actions">
-              <!-- The logs never name the device that wrote them, so the import
-                   is told. Options are the Kindles Sidle has already seen. -->
-              <select id="rl-device" class="rl-device"
-                      aria-label="Device the logs came from"></select>
+              <!-- No device picker. Which Kindle an archive came from is decided
+                   from the archive itself, or from the one that is plugged in. -->
               <button id="rl-import" class="btn"
                       title="Read logbackup files copied off a Kindle">Import…</button>
             </div>
@@ -292,6 +290,16 @@
               </header>
               <div id="rl-book-list" class="rl-cards"></div>
             </section>
+
+            <!-- Deliberately at the far end of the page and not in the toolbar:
+                 a button that erases the whole log has no business one misclick
+                 away from Import. It also confirms, and it only exists at all
+                 while there is something to delete. -->
+            <footer class="rl-danger">
+              <button id="rl-purge" class="btn btn-danger"
+                      title="Delete every reading session Sidle has stored">Delete the reading log…</button>
+              <span class="rl-muted">The logbackup files on disk are untouched.</span>
+            </footer>
           </div>
         </div>
 

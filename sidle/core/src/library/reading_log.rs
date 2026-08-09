@@ -46,10 +46,12 @@ const MARKER: &str = "ReadingTimerController";
 const SESSION_GAP_SECS: i64 = 30 * 60;
 
 /// What one [`import`] pass did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Imported {
     /// Log files read, including any that were truncated.
     pub files: usize,
+    /// Log files skipped unopened because this archive was already imported.
+    pub skipped: usize,
     /// Distinct event lines after de-duplication.
     pub events: usize,
     /// Sessions parsed out of them.
@@ -66,6 +68,9 @@ pub struct Imported {
     /// True when the pass stopped early. Sessions stored before that point
     /// stay stored; re-running is safe and picks up the rest.
     pub cancelled: bool,
+    /// Set when the archive names a Kindle other than the one it was being
+    /// imported for. Nothing was stored.
+    pub conflict: Option<String>,
 }
 
 /// One parsed session, before it is given a device or stored.
@@ -85,8 +90,49 @@ pub struct Session {
 // ---------------------------------------------------------------------------
 // Reading the archive
 
+/// The names of the log files an archive holds, without opening one.
+///
+/// Cheap enough to run before deciding anything: a directory walk and no I/O per
+/// file. A snapshot's name encodes the second it was written, so it identifies
+/// both the file and — once the library has read it once — the Kindle that wrote
+/// it (see [`db::dumps_owner`]).
+pub fn archive_names(paths: &[impl AsRef<Path>]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|p| walk(p.as_ref()))
+        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// What one pass over an archive found.
+#[derive(Debug, Default)]
+pub struct Scan {
+    pub events: BTreeSet<String>,
+    /// A device serial the library already knows, spotted verbatim somewhere in
+    /// the raw text.
+    ///
+    /// Opportunistic and never load-bearing: the reading events themselves never
+    /// name a device, and whether anything else in the log does depends on what
+    /// is installed. Its value is as a **contradiction check** — an archive that
+    /// names one Kindle must not be filed under another.
+    pub serial: Option<String>,
+    /// Files opened and decoded.
+    pub files: usize,
+    /// Files skipped because this archive has already been imported. Never
+    /// decompressed, never even opened.
+    pub skipped: usize,
+    /// Names of the files actually read, so the caller can record them as seen
+    /// once the events they held are safely stored.
+    pub read: Vec<String>,
+    pub cancelled: bool,
+}
+
 /// Collect the distinct event lines from every log file under `paths`, which may
 /// name plain-text logs, gzipped dumps, or directories of either.
+///
+/// A file whose name is in `seen` was read by an earlier import and is skipped
+/// without being opened — a log snapshot is immutable, so having read it once is
+/// a fact and re-reading it can only produce what is already stored.
 ///
 /// A [`BTreeSet`] does the de-duplication and the ordering in one step: the
 /// `YYMMDD:HHMMSS` prefix sorts chronologically, so the result is a clean
@@ -99,10 +145,11 @@ pub struct Session {
 /// file would discard events for no gain.
 pub fn collect_events(
     paths: &[impl AsRef<Path>],
+    seen: &std::collections::HashSet<String>,
+    known_serials: &[String],
     watch: job::Watch<'_>,
-) -> (BTreeSet<String>, usize, bool) {
-    let mut events = BTreeSet::new();
-    let mut files = 0;
+) -> Scan {
+    let mut out = Scan::default();
     // Enumerating first costs one cheap directory walk and buys a real total,
     // so the bar is a proportion from the first tick rather than a spinner.
     let all: Vec<_> = paths.iter().flat_map(|p| walk(p.as_ref())).collect();
@@ -112,6 +159,13 @@ pub fn collect_events(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // The whole point: a snapshot already read holds nothing new, and
+        // decompressing it to prove that is the cost this avoids. Checked before
+        // the progress tick so a re-import does not crawl through 30 no-ops.
+        if seen.contains(&name) {
+            out.skipped += 1;
+            continue;
+        }
         if watch(job::Report {
             phase: "read",
             done,
@@ -120,16 +174,26 @@ pub fn collect_events(
         })
         .is_break()
         {
-            return (events, files, true);
+            out.cancelled = true;
+            return out;
         }
         if let Some(text) = read_maybe_gzip(&file) {
-            files += 1;
+            out.files += 1;
+            out.read.push(name);
+            // One vectorised scan of the whole buffer per known device, and only
+            // until the first hit — not a per-line test.
+            if out.serial.is_none() {
+                out.serial = known_serials
+                    .iter()
+                    .find(|s| text.contains(s.as_str()))
+                    .cloned();
+            }
             for line in text.lines().filter(|l| l.contains(MARKER)) {
-                events.insert(line.to_string());
+                out.events.insert(line.to_string());
             }
         }
     }
-    (events, files, false)
+    out
 }
 
 /// Every file at or under `path`, one level of directory recursion at a time.
@@ -218,6 +282,31 @@ fn stamp(line: &str) -> Option<(String, i64, String)> {
         h.parse::<i64>().ok()? * 3600 + mi.parse::<i64>().ok()? * 60 + s.parse::<i64>().ok()?;
     let at = format!("{day}T{h}:{mi}:{s}");
     Some((day, secs, at))
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` back to the `YYMMDD:HHMMSS` a syslog line starts with.
+///
+/// The inverse of [`stamp`], and the form a watermark travels in: the device
+/// compares it against raw log prefixes and dump filenames, both of which are
+/// this shape, so the comparison is a plain string ordering with no date
+/// arithmetic on a device that has no date library.
+pub fn log_stamp(iso: &str) -> Option<String> {
+    let b = iso.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' {
+        return None;
+    }
+    let out = format!(
+        "{}{}{}:{}{}{}",
+        &iso[2..4],
+        &iso[5..7],
+        &iso[8..10],
+        &iso[11..13],
+        &iso[14..16],
+        &iso[17..19]
+    );
+    out.bytes()
+        .all(|c| c.is_ascii_digit() || c == b':')
+        .then_some(out)
 }
 
 /// Turn an ordered, de-duplicated event stream into sessions.
@@ -364,36 +453,119 @@ fn frombook_map<'a>(
 // ---------------------------------------------------------------------------
 // Import
 
+/// Which Kindle an archive belongs to, decided from the archive.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    /// These snapshots have been imported before, and the library recorded which
+    /// device they came from. Exact — a snapshot name encodes the second it was
+    /// written, so no two Kindles share one.
+    Recorded(String),
+    /// Nothing here has been seen before, so the archive cannot say. The caller
+    /// supplies the device (the plugged-in one), or refuses.
+    Unrecognised,
+    /// Files recorded against different Kindles — one folder holding two
+    /// devices' logs. Importing it as either would misfile the other's.
+    Mixed(Vec<String>),
+}
+
+/// Work out which Kindle wrote an archive **without opening a single file**.
+///
+/// Only the names are consulted, which is what makes this free and what makes it
+/// exact: a `log_backup_<YYMMDDHHMMSS>` is unique to the device-second that
+/// produced it, so a name the library has already read identifies its device
+/// outright. This is why an archive never has to be identified by hand twice —
+/// and why the first import of a genuinely new folder is the only moment the
+/// device has to come from somewhere else.
+pub fn identify(conn: &Connection, paths: &[impl AsRef<Path>]) -> rusqlite::Result<Origin> {
+    let names = archive_names(paths);
+    Ok(match db::dumps_owner(conn, &names)? {
+        Ok(Some(serial)) => Origin::Recorded(serial),
+        Ok(None) => Origin::Unrecognised,
+        Err(several) => Origin::Mixed(several),
+    })
+}
+
 /// Read every log under `paths`, store the sessions, and attribute what can be
 /// attributed.
 ///
-/// Safe to run repeatedly over the same archive: identical sessions collide on
-/// the uniqueness index and are ignored, so a second pass reports 0 added.
+/// Re-importing the same archive costs almost nothing. Snapshots already read
+/// are recorded by name and skipped **unopened** — not decompressed and then
+/// found to be redundant, which is what the uniqueness index alone would do and
+/// what made a second pass over a 92 MB archive as slow as the first.
 ///
-/// `device_serial` is **stated, never inferred.** The logs do not identify the
-/// device that wrote them — not once in a 30-day archive — so the caller has to
-/// say: the device itself knows its own serial, and a host-side import of a
-/// copied archive is told which device it came from. An empty serial means
-/// genuinely unknown provenance, and such rows are later claimed by the first
-/// import that does name a device (see
-/// [`db::insert_reading_session`]).
+/// `device_serial` is the Kindle these logs came from. Callers that *know* — the
+/// device pushing its own — pass it; a host-side import of a copied folder should
+/// resolve it with [`identify`] rather than ask, because a person picking from a
+/// list will eventually pick wrong and the mistake is invisible afterwards.
+///
+/// If the archive names a device the library knows and it contradicts
+/// `device_serial`, the import stores nothing and reports
+/// [`Imported::conflict`]: filing one Kindle's reading under another is worse
+/// than not importing at all.
 pub fn import(
     conn: &Connection,
     paths: &[impl AsRef<Path>],
     device_serial: &str,
     watch: job::Watch<'_>,
 ) -> rusqlite::Result<Imported> {
-    let (events, files, cancelled) = collect_events(paths, watch);
-    if cancelled {
-        // Nothing has been written yet, so an interrupted read leaves the
-        // library exactly as it was.
+    let seen = db::seen_dumps(conn, device_serial)?;
+    let known = db::known_device_serials(conn)?;
+    let found = collect_events(paths, &seen, &known, watch);
+    if let Some(named) = &found.serial
+        && !device_serial.is_empty()
+        && named != device_serial
+    {
         return Ok(Imported {
-            files,
-            events: events.len(),
+            files: found.files,
+            skipped: found.skipped,
+            events: found.events.len(),
+            conflict: Some(named.clone()),
+            ..Imported::default()
+        });
+    }
+    if found.cancelled {
+        // Nothing has been written yet, so an interrupted read leaves the
+        // library exactly as it was — including the seen-set, so the files it
+        // did manage are read again rather than silently dropped.
+        return Ok(Imported {
+            files: found.files,
+            skipped: found.skipped,
+            events: found.events.len(),
             cancelled: true,
             ..Imported::default()
         });
     }
+    let mut out = store_events(conn, &found.events, found.files, device_serial, watch)?;
+    out.skipped = found.skipped;
+    // Marked only now: a file counts as read once its events are stored, so an
+    // interrupted or failed store leaves it to be read again.
+    if !out.cancelled {
+        for name in &found.read {
+            db::mark_dump_read(conn, device_serial, name)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Store already-collected event lines. The half of [`import`] that does not
+/// touch the filesystem.
+///
+/// Split out for the device push, which arrives as lines over HTTP rather than
+/// as files on disk: a Kindle reads its own logs and sends what is new, and the
+/// host runs **this same parser** over them. One implementation of the session
+/// rules — the counter deltas, the gap splitting, the two end-of-book constants
+/// — is the point; a second copy on the device would be the one that drifts.
+///
+/// `events` must be de-duplicated and chronological, which a [`BTreeSet`] of raw
+/// lines gives for free.
+pub fn store_events(
+    conn: &Connection,
+    events: &BTreeSet<String>,
+    files: usize,
+    device_serial: &str,
+    watch: job::Watch<'_>,
+) -> rusqlite::Result<Imported> {
     // Sessions are grouped by the fingerprint every page event carries, then
     // rekeyed to the one the library can actually be joined against.
     let identity = frombook_map(events.iter().map(String::as_str));
@@ -561,5 +733,40 @@ mod tests {
         // `TotalWords` for `TotalWord`.
         assert_eq!(field(&line, "IntervalTime"), Some(900));
         assert_eq!(field(&line, "Time"), None);
+    }
+
+    #[test]
+    fn a_dump_already_read_is_skipped_without_being_opened() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-seen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "log_backup_260803100000.txt";
+        std::fs::write(
+            dir.join(name),
+            page("260803:100000", "NextPage", 1, 60_000, 10),
+        )
+        .unwrap();
+
+        let fresh = collect_events(&[&dir], &Default::default(), &[], &mut job::ignore);
+        assert_eq!((fresh.files, fresh.skipped), (1, 0));
+        assert_eq!(fresh.read, vec![name.to_string()]);
+        assert_eq!(fresh.events.len(), 1);
+
+        // The same archive, now known. Nothing is opened, so nothing is found —
+        // which is the point: the events are already stored.
+        let seen = std::collections::HashSet::from([name.to_string()]);
+        let again = collect_events(&[&dir], &seen, &[], &mut job::ignore);
+        assert_eq!((again.files, again.skipped), (0, 1));
+        assert!(again.events.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_watermark_converts_to_the_form_a_log_line_carries() {
+        assert_eq!(
+            log_stamp("2026-08-09T00:35:59").as_deref(),
+            Some("260809:003559")
+        );
+        assert_eq!(log_stamp("not a timestamp"), None);
     }
 }

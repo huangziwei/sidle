@@ -132,47 +132,15 @@ pub async fn reading_log_book(
     })
 }
 
-/// A Kindle the library has seen, offered as the source of an imported archive.
-#[derive(Debug, Serialize)]
-pub struct ReadingDevice {
-    pub serial: String,
-    /// The model, when this device happens to be plugged in right now — the
-    /// only place Sidle learns one. Otherwise the serial is all there is.
-    pub model: Option<String>,
-    pub connected: bool,
-}
-
-/// Which devices an imported archive could have come from.
+/// Throw the whole reading log away.
 ///
-/// The logs never say, so the user does. Every serial the library has recorded
-/// through any sync surface is offered, with the plugged-in one named and
-/// listed first because that is almost always the archive being imported.
+/// Everything, both tables: sessions and the record of which snapshots produced
+/// them. Anything short of that leaves a library that shows no reading and also
+/// refuses to import the archives back.
 #[tauri::command]
-pub async fn reading_log_devices(state: State<'_, AppState>) -> Result<Vec<ReadingDevice>, String> {
-    let live = state.device.lock().await.clone();
+pub async fn reading_log_clear(state: State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().await;
-    let mut known = db::known_device_serials(&conn).map_err(|e| e.to_string())?;
-    if let Some(d) = &live
-        && !d.serial.is_empty()
-        && !known.contains(&d.serial)
-    {
-        known.push(d.serial.clone());
-    }
-    let mut out: Vec<ReadingDevice> = known
-        .into_iter()
-        .map(|serial| {
-            let connected = live.as_ref().is_some_and(|d| d.serial == serial);
-            ReadingDevice {
-                model: connected
-                    .then(|| live.as_ref().and_then(|d| d.model.clone()))
-                    .flatten(),
-                serial,
-                connected,
-            }
-        })
-        .collect();
-    out.sort_by_key(|d| (!d.connected, d.serial.clone()));
-    Ok(out)
+    db::clear_reading_log(&conn).map_err(|e| e.to_string())
 }
 
 /// A live tick from an import in flight. `phase` is the machine name of the
@@ -215,7 +183,6 @@ pub async fn reading_log_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
-    device_serial: Option<String>,
 ) -> Result<reading_log::Imported, String> {
     use std::ops::ControlFlow;
     use std::sync::atomic::Ordering;
@@ -225,7 +192,36 @@ pub async fn reading_log_import(
     // Clear first: a cancel left over from a previous run must not kill this one
     // before it starts.
     cancel.store(false, Ordering::Relaxed);
-    let serial = device_serial.unwrap_or_default();
+    // Nobody is asked which Kindle this is. The archive says so itself when it
+    // has been imported before, and otherwise the plugged-in device does — a
+    // person choosing from a list of serials will eventually choose wrong, and
+    // reading filed under the wrong Kindle looks exactly like reading filed
+    // correctly.
+    let live = state.device.lock().await.clone();
+    let serial = {
+        let conn = state.db.lock().await;
+        let origin = reading_log::identify(&conn, &paths).map_err(|e| e.to_string())?;
+        match origin {
+            reading_log::Origin::Recorded(s) => s,
+            reading_log::Origin::Mixed(several) => {
+                return Err(format!(
+                    "these files come from more than one Kindle ({}). Import each \
+                     device's logs from its own folder.",
+                    several.join(", ")
+                ));
+            }
+            reading_log::Origin::Unrecognised => match live.as_ref().map(|d| d.serial.clone()) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    return Err(
+                        "connect the Kindle these logs came from, then import — Sidle \
+                         records which device wrote them so it only has to be plugged in once."
+                            .to_string(),
+                    );
+                }
+            },
+        }
+    };
     // The handle, not a guard: the lock is taken *inside* the blocking task, so
     // this whole job — minutes of KFX parsing on its first run — never occupies
     // an async worker thread, and `reading_log_cancel` stays answerable
