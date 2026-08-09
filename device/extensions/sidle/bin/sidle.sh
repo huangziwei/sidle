@@ -20,16 +20,19 @@ fi
 # cron — and hence installing it from here, the one thing that definitely runs
 # after an update or a fresh install.
 #
-# Every half hour, round the clock. Cron does not fire while the device is
-# suspended, so an entry is only reached if the reader happens to be awake then —
-# which is most of the time not. Frequency is what buys coverage, and it is
-# nearly free: the work is set by how much log there is to read, not by how often
-# we look, so 48 small runs cost about what 4 large ones do. No overnight cutoff,
-# because reading at 00:51 is in this device's own history and a cron line that
-# does not fire costs nothing. Idempotent — grep before appending, so relaunching
-# does not stack entries.
+# Every 15 minutes, round the clock — the same cadence stock `tinyrot` already
+# runs at in this crontab, which is what rotates the syslog we read. Matching it
+# means we can never be more than one rotation behind, and it costs nothing
+# extra: the work is set by how much log there is to read, not by how often we
+# look, so the runs get smaller as they get more frequent.
+#
+# Cron does not fire while the device is suspended, so an entry is only reached
+# if the reader happens to be awake then — which is most of the time not.
+# Frequency is what buys coverage. No overnight cutoff, because reading at 00:51
+# is in this device's own history and an entry that does not fire costs nothing.
+# Idempotent — grep before appending, so relaunching does not stack entries.
 CRONTAB=/etc/crontab/root
-CRONLINE="*/30 * * * * $EXT/bin/sidle --archive >/dev/null 2>&1"
+CRONLINE="*/15 * * * * $EXT/bin/sidle --archive >/dev/null 2>&1"
 if [ -d "$(dirname "$CRONTAB")" ] && ! grep -qF -- "--archive" "$CRONTAB" 2>/dev/null; then
     echo "$CRONLINE" >> "$CRONTAB" && echo "[$(date)] installed archive cron" >> "$LOG"
 fi
