@@ -28,13 +28,26 @@
 //! `/var/local/log/messages` on a size cap, and on a busy device that is roughly
 //! every ten minutes — one measured dump spanned 230 rotations in 38 hours. What
 //! it rotates away is not lost: it becomes
-//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz` beside it, and those
-//! chunks are exactly what the daily dump is built from. Reading only the live
-//! file would therefore see about ten minutes of history and leave the rest to
-//! arrive a day later in the next dump — or not at all, since `tinyrot` prunes
-//! chunks and the dumps demonstrably skip content when it does (a real archive
-//! lost 20 h of one day between two consecutive daily dumps). So the chunks are
-//! read too, filtered by the same watermark.
+//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz` beside it. Reading only
+//! the live file would therefore see about ten minutes of history and leave the
+//! rest to arrive a day later in the next dump — or not at all, since `tinyrot`
+//! prunes chunks and the dumps demonstrably skip content when it does (a real
+//! archive lost 20 h of one day between two consecutive daily dumps).
+//!
+//! So the chunks are read too, filtered by the same watermark. That is not an
+//! invention: it is what the firmware's own `showlog` does, and a dump is
+//! nothing more than its output gzipped —
+//!
+//! ```text
+//! ALLFILES=`ls -1 $ARCHIVE_DIR/${LOG}_*.gz | xargs`
+//! cat $ALLFILES | zcat >> "$OUTFILE"
+//! cat /var/log/$LOG >> "$OUTFILE"
+//! ```
+//!
+//! Reading the same set directly is what removes the wait for a daily snapshot,
+//! and the dumps then matter only for history older than the chunks still on
+//! disk — which is also all a host can reach, `/var/local/log` being on the root
+//! filesystem.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -130,19 +143,30 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
             take_events(&dump.text, watermark, &mut out.lines);
         }
     }
-    // The rotated chunks, then the live file. Together these are what the daily
-    // dump is made of, so reading them is what makes a sync independent of
-    // whether a dump was ever written for the period.
-    for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
-        if let Some(chunk) = read_maybe_gzip(&path) {
-            take_events(&chunk.text, watermark, &mut out.lines);
-        }
-    }
+    // The live file, then the rotated chunks — the same set the firmware's own
+    // `showlog` concatenates, which is what makes a sync independent of whether a
+    // dump was ever written for the period.
+    //
+    // Deliberately the reverse of `showlog`'s order, because `showlog` holds
+    // tinyrot's lock for the duration and this does not. Read the chunks first
+    // and a rotation in the gap moves the live file's contents into a chunk
+    // listed a moment too early, and those lines are in neither read. Live
+    // first, and the same rotation merely delivers them twice — which costs
+    // nothing, since the whole selection is de-duplicated below.
+    //
     // Not `read_to_string`: the syslog carries bytes that are not valid UTF-8,
     // and that returns `Err` for the whole file rather than for the offending
     // line — which would silently drop every event since the last rotation.
     if let Some(live) = read_maybe_gzip(Path::new(LIVE_LOG)) {
         take_events(&live.text, watermark, &mut out.lines);
+    }
+    for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
+        // A chunk pruned between the listing and the read simply yields nothing;
+        // one caught mid-rotation yields its intact prefix. Neither needs the
+        // lock, which is why not taking it is acceptable here.
+        if let Some(chunk) = read_maybe_gzip(&path) {
+            take_events(&chunk.text, watermark, &mut out.lines);
+        }
     }
     out.lines.sort();
     out.lines.dedup();
