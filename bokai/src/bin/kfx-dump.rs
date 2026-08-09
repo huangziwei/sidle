@@ -29,7 +29,9 @@ struct Args {
     stat: bool,
 
     /// Print detailed report for specified field/fragment (can be specified multiple times)
-    /// Supported: anchors, toc
+    /// Supported: anchors, container, content, dependencies, document, features,
+    /// locations, metadata, navigation, positions, raw_storylines, reading_orders,
+    /// resources, ruby (= ruby_content), ruby_pairs, sections, storylines
     #[arg(short = 'f', long = "field")]
     field: Vec<String>,
 }
@@ -107,7 +109,7 @@ fn main() -> IonResult<()> {
                 "ruby_pairs" => report_ruby_pairs(&data)?,
                 other => {
                     eprintln!(
-                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, reading_orders, resources, ruby, sections, storylines",
+                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, raw_storylines, reading_orders, resources, ruby, ruby_pairs, sections, storylines",
                         other
                     );
                     std::process::exit(1);

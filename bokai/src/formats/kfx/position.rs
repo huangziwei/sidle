@@ -4,9 +4,13 @@
 //! that turn an eid into a reading position:
 //!
 //! - `position_id_map` ($265) — `eid → pid`, a fine-grained monotonic position.
-//!   Reflowable books list `{eid, pid}` pairs directly; fixed-layout (PDF-backed)
-//!   books instead describe per-section runs, so those are replayed from
-//!   `section_position_id_map` ($609) to rebuild the same mapping.
+//!   It comes in two shapes. Some books list `{eid, pid}` pairs directly. Others
+//!   describe per-section spans as `{section_name, pid, length}`, and the
+//!   eid-level mapping is replayed from each `section_position_id_map` ($609).
+//!   The span shape is **not** peculiar to fixed-layout books — ordinary
+//!   reflowable text books ship it too (observed on two vertical-CJK novels,
+//!   2026-08-09) — so neither shape may be treated as a format tell. Only the
+//!   span shape states the last element's length, which is what ends the axis.
 //! - `location_map` ($550) / `yj.location_pid_map` ($621) — the pid boundaries
 //!   dividing the book into the human "Location" numbers a Kindle displays. A
 //!   book with a position map but no location map falls back to the device's
@@ -111,12 +115,12 @@ impl<'a> PositionFragments<'a> {
                 }
             }
         }
-        // Fixed-layout (PDF-backed) KFX: `position_id_map` is
-        // `{contains:[{section_name,pid,length}]}`, not the reflowable
-        // `{eid,pid}` list, so the loop above finds nothing. Rebuild `eid→pid`
-        // by replaying each `section_position_id_map` walk.
+        // The other shape: `position_id_map` is
+        // `{contains:[{section_name,pid,length}]}`, so the loop above finds
+        // nothing. Rebuild `eid→pid` by replaying each
+        // `section_position_id_map` walk.
         if pid_of.is_empty() {
-            pid_of = self.fixed_layout_pid_map();
+            pid_of = self.section_span_pid_map();
         }
         pid_of
     }
@@ -166,6 +170,45 @@ impl<'a> PositionFragments<'a> {
         boundaries
     }
 
+    /// The axis end from `position_id_map`'s per-section spans: the largest
+    /// `pid + length`, one past the book's last addressable position.
+    ///
+    /// This is the only statement of the **last** element's length in the
+    /// container. Every other element's length is implied by where the next one
+    /// starts, so a map keyed on start coordinates alone ends the axis at the
+    /// start of the final element and is short by its length. `None` when the
+    /// container states no spans (the `{eid, pid}` shape carries none).
+    ///
+    /// Amazon's own reading timer reports the book end as the last *valid*
+    /// position, which is this value minus one — verified 2026-08-09 against a
+    /// device's `ReadingTimerController` line on two books.
+    fn span_extent(&self) -> Option<i64> {
+        let mut end: Option<i64> = None;
+        for frag in &self.position_id_maps {
+            let Some(fields) = frag.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(contains) =
+                get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for entry in contains {
+                let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                if let Some(pid) = get_field(ef, KfxSymbol::Pid as u64).and_then(|v| v.as_int())
+                    && let Some(len) =
+                        get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int())
+                {
+                    let e = pid + len.max(0);
+                    end = Some(end.map_or(e, |cur: i64| cur.max(e)));
+                }
+            }
+        }
+        end
+    }
+
     /// Assemble the whole chain into the format-agnostic scale, or `None` when
     /// the container carries no position map — the book has no addressable
     /// reading positions to report.
@@ -190,15 +233,15 @@ impl<'a> PositionFragments<'a> {
                 boundaries.push(0);
             }
         }
-        Some(PositionMap::new(pid_of, boundaries))
+        Some(PositionMap::new(pid_of, boundaries, self.span_extent()))
     }
 
-    /// `eid → pid` for a FIXED-LAYOUT (PDF-backed) KFX. There `position_id_map`
-    /// ($265) is `{contains:[{section_name, pid, length}]}` (one span per
-    /// section) and every section carries a `section_position_id_map` ($609)
-    /// with the compact position→eid walk. Map each section to its base pid,
-    /// then replay the walk.
-    fn fixed_layout_pid_map(&self) -> HashMap<i64, i64> {
+    /// `eid → pid` for the span shape of `position_id_map` ($265):
+    /// `{contains:[{section_name, pid, length}]}`, one span per section, with
+    /// every section carrying a `section_position_id_map` ($609) holding the
+    /// compact position→eid walk. Map each section to its base pid, then replay
+    /// the walk. Reflowable and fixed-layout books alike ship this shape.
+    fn section_span_pid_map(&self) -> HashMap<i64, i64> {
         fn sym_id(v: &IonValue) -> Option<u64> {
             match v.unwrap_annotated() {
                 IonValue::Symbol(s) => Some(*s),
@@ -358,5 +401,38 @@ mod tests {
             h, 0xddb8_e84d_0f47_e605,
             "the eid→pid or eid→text map moved"
         );
+    }
+
+    /// The axis has to end *past* the last element's start, by that element's
+    /// own length. Every other element's length is implied by where the next
+    /// one begins, so a map that ends at the furthest coordinate it names stops
+    /// at the final element's first character: the book reads as shorter than
+    /// it is and progress can never reach the end.
+    ///
+    /// `position_id_map`'s per-section `length` is the only statement of that
+    /// last length, and `max(pid + length)` is the axis end. Checked against
+    /// Amazon's own arithmetic: a device's `ReadingTimerController` reports the
+    /// book's last valid position as exactly this extent minus one (verified on
+    /// two other books, 2026-08-09).
+    #[test]
+    fn the_axis_ends_past_the_last_elements_start() {
+        let Ok(kfx) = std::fs::read(FIXTURE) else {
+            return; // fixture not present in this checkout
+        };
+        let book = loader::load(&kfx).expect("load fixture");
+        let scale = position_map(&book).expect("fixture should carry a position map");
+        let last_start = scale
+            .positions()
+            .values()
+            .copied()
+            .max()
+            .expect("fixture should carry positioned eids");
+
+        assert!(
+            scale.max_position() > last_start,
+            "axis ended at the last element's start ({last_start}), so the final \
+             element occupies no space"
+        );
+        assert_eq!(scale.max_position(), 300063, "the fixture's axis end moved");
     }
 }

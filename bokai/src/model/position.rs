@@ -28,9 +28,9 @@ pub struct PositionMap {
     /// Location boundaries, ascending. `boundaries[k]` is the coordinate at
     /// which the `(k+1)`-th location starts.
     boundaries: Vec<i64>,
-    /// Where the axis ends. The last element's coordinate is where it *starts*,
-    /// so the extent is past it by that element's own length — a distinction
-    /// that only matters to a consumer measuring progress in coordinates.
+    /// Where the axis ends, one past its last coordinate. The last element's
+    /// coordinate is where it *starts*, so the extent is past it by that
+    /// element's own length.
     extent: i64,
 }
 
@@ -38,17 +38,29 @@ impl PositionMap {
     /// Assemble a map from an element→coordinate table and the location
     /// boundaries on the same axis. Boundaries are sorted here so callers can
     /// hand over whatever order the source listed them in.
-    pub fn new(position_of: HashMap<i64, i64>, mut boundaries: Vec<i64>) -> Self {
+    ///
+    /// `extent` is the axis end, one past the last addressable coordinate — the
+    /// same exclusive bound [`synthesized`](Self::synthesized) computes. A
+    /// source that states its own span should pass it, because it is the only
+    /// party that knows the **last** element's length: every other element's
+    /// length is implied by where the next one starts, but nothing follows the
+    /// last one. Pass `None` only when the source does not state it; the axis
+    /// then ends at the furthest coordinate named, which is the start of the
+    /// final element and therefore short by that element's length.
+    pub fn new(
+        position_of: HashMap<i64, i64>,
+        mut boundaries: Vec<i64>,
+        extent: Option<i64>,
+    ) -> Self {
         boundaries.sort_unstable();
-        // Nothing here knows the last element's length, so the axis is taken to
-        // end at the furthest coordinate named. Sources that ship boundaries
-        // carry the real extent in those instead.
-        let extent = position_of
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .max(boundaries.last().copied().unwrap_or(0));
+        let extent = extent.unwrap_or_else(|| {
+            position_of
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .max(boundaries.last().copied().unwrap_or(0))
+        });
         Self {
             position_of,
             boundaries,
@@ -177,7 +189,7 @@ mod tests {
     fn sample() -> PositionMap {
         // Three elements at 0/50/300, boundaries every 100.
         let position_of = HashMap::from([(7, 0), (9, 50), (4, 300)]);
-        PositionMap::new(position_of, vec![200, 0, 100, 300])
+        PositionMap::new(position_of, vec![200, 0, 100, 300], None)
     }
 
     #[test]

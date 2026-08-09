@@ -123,7 +123,8 @@ mod tests {
     /// Three elements whose ids run *against* reading order, so anything that
     /// leans on id ordering instead of the position scale shows up.
     fn sample() -> SourceText {
-        let positions = PositionMap::new(HashMap::from([(30, 0), (20, 10), (10, 20)]), vec![0]);
+        let positions =
+            PositionMap::new(HashMap::from([(30, 0), (20, 10), (10, 20)]), vec![0], None);
         let text_of = HashMap::from([
             (30, "alpha".to_string()),
             (20, "beta".to_string()),
@@ -161,7 +162,11 @@ mod tests {
     /// the element actually holding the passage.
     #[test]
     fn a_range_starting_on_a_textless_element_still_yields_its_text() {
-        let positions = PositionMap::new(HashMap::from([(500, 0), (501, 1), (502, 103)]), vec![0]);
+        let positions = PositionMap::new(
+            HashMap::from([(500, 0), (501, 1), (502, 103)]),
+            vec![0],
+            None,
+        );
         // 500 and 501 are placed section/heading wrappers with no text.
         let text_of = HashMap::from([(502, "Q: How many voters?".to_string())]);
         let t = SourceText::new(text_of, &positions);
@@ -187,7 +192,7 @@ mod tests {
     /// iteration — a range's text would change between runs.
     #[test]
     fn ties_on_position_order_by_element_id() {
-        let positions = PositionMap::new(HashMap::from([(7, 5), (3, 5), (9, 5)]), vec![0]);
+        let positions = PositionMap::new(HashMap::from([(7, 5), (3, 5), (9, 5)]), vec![0], None);
         let text_of = HashMap::from([
             (3, "a".to_string()),
             (7, "b".to_string()),

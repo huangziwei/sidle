@@ -58,7 +58,7 @@ impl BookIndex {
     /// Index from raw maps, for callers that already have them — unit tests,
     /// and any future reader that captures text during its own walk.
     pub fn from_parts(text_of: HashMap<i64, String>, pid_of: HashMap<i64, i64>) -> Self {
-        let positions = PositionMap::new(pid_of, Vec::new());
+        let positions = PositionMap::new(pid_of, Vec::new(), None);
         let text = SourceText::new(text_of, &positions);
         Self { text, positions }
     }
