@@ -82,6 +82,11 @@ pub struct AppState {
     pub reader_search_cache: ReaderSearchCache,
     /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
     pub reader_store: ReaderStoreCache,
+    /// Raised to ask an in-flight reading-log import to stop at its next safe
+    /// point. Only one such import can run at a time (the DB lock enforces it),
+    /// so one flag suffices; the import clears it before starting so a stale
+    /// cancel can't abort the next run.
+    pub reading_log_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/src-tauri`) until
@@ -260,6 +265,7 @@ impl AppState {
             device_app_source,
             reader_search_cache: Arc::new(Mutex::new(None)),
             reader_store: Arc::new(Mutex::new(None)),
+            reading_log_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }

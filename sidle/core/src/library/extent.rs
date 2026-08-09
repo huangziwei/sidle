@@ -15,16 +15,19 @@
 use bokai::model::{Book, Format};
 use rusqlite::Connection;
 
-use super::db;
+use super::{db, job};
 
 /// Outcome of one [`backfill`] pass.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Filled {
     /// Books that produced an extent.
     pub indexed: usize,
     /// Books whose file is missing, unreadable, or carries no position map.
     /// Recorded as 0 so they are not retried forever.
     pub skipped: usize,
+    /// True when the pass stopped early at the caller's request. What it had
+    /// already indexed is committed; the next pass resumes from there.
+    pub cancelled: bool,
 }
 
 /// The exclusive end of `bytes`' position axis, or `None` when the container
@@ -40,12 +43,34 @@ pub fn of_kfx(bytes: &[u8]) -> Option<i64> {
 
 /// Compute and store the extent for every book that lacks one.
 ///
-/// Idempotent and resumable: a pass that dies partway leaves the rows it managed
-/// to fill, and the next pass picks up the rest. Individual failures never abort
-/// the pass — an unreadable file is one unattributable book, not a broken index.
-pub fn backfill(conn: &Connection) -> rusqlite::Result<Filled> {
+/// Idempotent and resumable, which is what makes it safe to interrupt: each book
+/// is committed as it is computed, so cancelling — or crashing — keeps
+/// everything done so far and the next pass starts where this one stopped.
+/// Individual failures never abort the pass either; an unreadable file is one
+/// unattributable book, not a broken index.
+///
+/// Minutes across a large library on its first run, near-instant afterwards,
+/// so `watch` is not optional in practice: see [`job::Report`].
+pub fn backfill(conn: &Connection, watch: job::Watch<'_>) -> rusqlite::Result<Filled> {
     let mut out = Filled::default();
-    for (book_id, kfx_path) in db::books_missing_max_position(conn)? {
+    let pending = db::books_missing_max_position(conn)?;
+    let total = pending.len();
+    for (done, (book_id, kfx_path)) in pending.into_iter().enumerate() {
+        let name = std::path::Path::new(&kfx_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if watch(job::Report {
+            phase: "index",
+            done,
+            total,
+            label: &name,
+        })
+        .is_break()
+        {
+            out.cancelled = true;
+            break;
+        }
         let extent = std::fs::read(&kfx_path).ok().and_then(|b| of_kfx(&b));
         if extent.is_some() {
             out.indexed += 1;
@@ -72,7 +97,7 @@ mod tests {
         // follows does not keep retrying it.
         let id = insert_stub(&c, "deadbeef", Some("/nonexistent/book.kfx"));
         assert_eq!(db::books_missing_max_position(&c).unwrap().len(), 1);
-        let filled = backfill(&c).unwrap();
+        let filled = backfill(&c, &mut job::ignore).unwrap();
         assert_eq!((filled.indexed, filled.skipped), (0, 1));
         assert!(db::books_missing_max_position(&c).unwrap().is_empty());
         // 0 is unreachable as a device's last position, so it never joins.

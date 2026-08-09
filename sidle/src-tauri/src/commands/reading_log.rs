@@ -10,7 +10,7 @@
 use serde::Serialize;
 use tauri::State;
 
-use sidle_core::library::{db, extent, reading_log};
+use sidle_core::library::{db, extent, job, reading_log};
 
 use crate::state::AppState;
 
@@ -111,23 +111,108 @@ pub async fn reading_log_book(
     })
 }
 
+/// A live tick from an import in flight. `phase` is the machine name of the
+/// step (`index` → `read` → `store`); `fraction` spans the whole job, not the
+/// phase, so the bar only ever moves forward.
+#[derive(Clone, Serialize)]
+struct ImportProgress<'a> {
+    phase: &'a str,
+    done: usize,
+    total: usize,
+    fraction: f32,
+    label: &'a str,
+}
+
+/// Where each phase sits on the overall bar.
+///
+/// Indexing dominates a first import — thousands of KFX parses against a
+/// two-second log read — so it takes almost the whole bar. On every later run it
+/// has nothing to do and skips past instantly, which reads correctly as "the
+/// slow part is already done".
+fn phase_band(phase: &str) -> (f32, f32) {
+    match phase {
+        "index" => (0.00, 0.85),
+        "read" => (0.85, 0.95),
+        _ => (0.95, 1.00),
+    }
+}
+
 /// Import `logbackup` dumps the user picked, then attribute what can be
 /// attributed.
 ///
 /// The extent index is built first because attribution is meaningless without
 /// it. That is the slow half — minutes across a large library on the first run,
-/// nothing on every run after — which is exactly why this is a button and not
-/// something that happens at startup.
+/// nothing on every run after — which is why this reports progress, takes a
+/// cancel, and runs off the async runtime's worker: it is CPU-bound work
+/// holding the DB lock, and blocking a runtime thread with it would stall every
+/// other command.
 #[tauri::command]
 pub async fn reading_log_import(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
     device_serial: Option<String>,
 ) -> Result<reading_log::Imported, String> {
-    let conn = state.db.lock().await;
-    extent::backfill(&conn).map_err(|e| e.to_string())?;
-    reading_log::import(&conn, &paths, device_serial.as_deref().unwrap_or_default())
-        .map_err(|e| e.to_string())
+    use std::ops::ControlFlow;
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+
+    let cancel = state.reading_log_cancel.clone();
+    // Clear first: a cancel left over from a previous run must not kill this one
+    // before it starts.
+    cancel.store(false, Ordering::Relaxed);
+    let serial = device_serial.unwrap_or_default();
+    // The handle, not a guard: the lock is taken *inside* the blocking task, so
+    // this whole job — minutes of KFX parsing on its first run — never occupies
+    // an async worker thread, and `reading_log_cancel` stays answerable
+    // throughout.
+    let db = state.db.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let mut watch = |r: job::Report<'_>| {
+            if cancel.load(Ordering::Relaxed) {
+                return ControlFlow::Break(());
+            }
+            let (lo, hi) = phase_band(r.phase);
+            let fraction = lo + (hi - lo) * r.fraction().unwrap_or(0.0);
+            let _ = app.emit(
+                "reading-log:import-progress",
+                ImportProgress {
+                    phase: r.phase,
+                    done: r.done,
+                    total: r.total,
+                    fraction,
+                    label: r.label,
+                },
+            );
+            ControlFlow::Continue(())
+        };
+
+        let filled = extent::backfill(&conn, &mut watch).map_err(|e| e.to_string())?;
+        if filled.cancelled {
+            // The index is resumable, so what it managed is kept and nothing is
+            // imported yet — the next run continues from here.
+            return Ok(reading_log::Imported {
+                cancelled: true,
+                ..Default::default()
+            });
+        }
+        reading_log::import(&conn, &paths, &serial, &mut watch).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("import task failed: {e}"))?
+}
+
+/// Ask the running import to stop. Safe at any moment: both phases commit as
+/// they go, so cancelling keeps whatever was already done and a later run
+/// resumes rather than restarting.
+#[tauri::command]
+pub async fn reading_log_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .reading_log_cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 /// Ask for the folders holding `logbackup` dumps.

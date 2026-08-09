@@ -4530,3 +4530,34 @@ kbd {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
+
+/* Import progress. Present only while a job runs; the bar is a real fraction of
+   the whole import, not of the current phase, so it never restarts mid-run. */
+.rl-progress {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rl-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rl-progress-row progress {
+  flex: 1;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+#rl-progress-label {
+  margin-top: 8px;
+  font-size: 12px;
+  /* A long filename must not resize the panel on every tick. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

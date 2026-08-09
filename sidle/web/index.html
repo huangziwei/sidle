@@ -218,6 +218,17 @@
             </div>
           </header>
 
+          <!-- Import progress. The first run indexes every book's position axis
+               (minutes on a large library), so this is never a spinner: a real
+               fraction, the step it is on, and a way out. -->
+          <div id="rl-progress" class="rl-progress" hidden>
+            <div class="rl-progress-row">
+              <progress id="rl-progress-bar" max="1" value="0"></progress>
+              <button id="rl-cancel" class="btn">Cancel</button>
+            </div>
+            <div id="rl-progress-label" class="rl-muted"></div>
+          </div>
+
           <div id="rl-empty" class="empty" hidden>
             <p>No reading log yet.</p>
             <p class="empty-hint">

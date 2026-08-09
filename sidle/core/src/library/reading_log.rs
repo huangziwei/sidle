@@ -34,6 +34,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use super::db::{self, ReadingSession};
+use super::job;
 
 /// The tag every event line carries; the cheap prefilter before any parsing.
 const MARKER: &str = "ReadingTimerController";
@@ -57,6 +58,9 @@ pub struct Imported {
     pub added: usize,
     /// Sessions that now name a book, counted across the whole table.
     pub attributed: usize,
+    /// True when the pass stopped early. Sessions stored before that point
+    /// stay stored; re-running is safe and picks up the rest.
+    pub cancelled: bool,
 }
 
 /// One parsed session, before it is given a device or stored.
@@ -85,20 +89,39 @@ pub struct Session {
 /// but a truncated file's intact prefix is perfectly good data, and heavy
 /// overlap between dumps usually supplies the lost tail anyway. Rejecting such a
 /// file would discard events for no gain.
-pub fn collect_events(paths: &[impl AsRef<Path>]) -> (BTreeSet<String>, usize) {
+pub fn collect_events(
+    paths: &[impl AsRef<Path>],
+    watch: job::Watch<'_>,
+) -> (BTreeSet<String>, usize, bool) {
     let mut events = BTreeSet::new();
     let mut files = 0;
-    for path in paths {
-        for file in walk(path.as_ref()) {
-            if let Some(text) = read_maybe_gzip(&file) {
-                files += 1;
-                for line in text.lines().filter(|l| l.contains(MARKER)) {
-                    events.insert(line.to_string());
-                }
+    // Enumerating first costs one cheap directory walk and buys a real total,
+    // so the bar is a proportion from the first tick rather than a spinner.
+    let all: Vec<_> = paths.iter().flat_map(|p| walk(p.as_ref())).collect();
+    let total = all.len();
+    for (done, file) in all.into_iter().enumerate() {
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if watch(job::Report {
+            phase: "read",
+            done,
+            total,
+            label: &name,
+        })
+        .is_break()
+        {
+            return (events, files, true);
+        }
+        if let Some(text) = read_maybe_gzip(&file) {
+            files += 1;
+            for line in text.lines().filter(|l| l.contains(MARKER)) {
+                events.insert(line.to_string());
             }
         }
     }
-    (events, files)
+    (events, files, false)
 }
 
 /// Every file at or under `path`, one level of directory recursion at a time.
@@ -359,8 +382,19 @@ pub fn import(
     conn: &Connection,
     paths: &[impl AsRef<Path>],
     device_serial: &str,
+    watch: job::Watch<'_>,
 ) -> rusqlite::Result<Imported> {
-    let (events, files) = collect_events(paths);
+    let (events, files, cancelled) = collect_events(paths, watch);
+    if cancelled {
+        // Nothing has been written yet, so an interrupted read leaves the
+        // library exactly as it was.
+        return Ok(Imported {
+            files,
+            events: events.len(),
+            cancelled: true,
+            ..Imported::default()
+        });
+    }
     let serial = if device_serial.is_empty() {
         let known = db::known_device_serials(conn)?;
         sniff_serial(events.iter().map(String::as_str), &known)
@@ -378,7 +412,19 @@ pub fn import(
         sessions: sessions.len(),
         ..Imported::default()
     };
-    for s in &sessions {
+    let total = sessions.len();
+    for (done, s) in sessions.iter().enumerate() {
+        if watch(job::Report {
+            phase: "store",
+            done,
+            total,
+            label: &s.started_at,
+        })
+        .is_break()
+        {
+            out.cancelled = true;
+            break;
+        }
         // A session with no measurable duration is a book being opened and shut,
         // not reading; storing it would litter the calendar with empty days.
         if s.seconds <= 0 {

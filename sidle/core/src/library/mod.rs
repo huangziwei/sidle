@@ -8,6 +8,7 @@ pub mod extent;
 pub mod import;
 pub mod ingest;
 pub mod ink;
+pub mod job;
 pub mod kfx_cover;
 pub mod lang;
 pub mod merge;

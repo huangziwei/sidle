@@ -334,8 +334,33 @@
 
   // ── Import ─────────────────────────────────────────────────────────────────
 
+  // Named steps, so the label says what is happening rather than just ticking.
+  // "index" is the long one and the one that needs explaining: it is not
+  // reading the logs at all, it is measuring the library so the logs can be
+  // matched against it.
+  const PHASE_LABEL = {
+    index: "Indexing library",
+    read: "Reading logs",
+    store: "Saving sessions",
+  };
+
+  function showProgress(on) {
+    q("#rl-progress").hidden = !on;
+    q("#rl-import").disabled = on;
+    if (!on) {
+      q("#rl-progress-bar").value = 0;
+      q("#rl-progress-label").textContent = "";
+    }
+  }
+
+  function onProgress(p) {
+    q("#rl-progress-bar").value = p.fraction || 0;
+    const step = PHASE_LABEL[p.phase] || p.phase;
+    const count = p.total ? ` ${p.done + 1} / ${p.total}` : "";
+    q("#rl-progress-label").textContent = `${step}${count} — ${p.label}`;
+  }
+
   async function doImport() {
-    const btn = q("#rl-import");
     let paths;
     try {
       paths = await api.invoke("reading_log_pick_folders");
@@ -345,11 +370,14 @@
     }
     if (!paths || !paths.length) return;
 
-    btn.disabled = true;
-    btn.textContent = "Importing…";
+    showProgress(true);
     try {
       const r = await api.invoke("reading_log_import", { paths, deviceSerial: null });
-      if (!r.events) {
+      if (r.cancelled) {
+        // Both phases commit as they go, so a cancel keeps its work — say so,
+        // or the user re-runs from scratch expecting to have lost it.
+        toast("import stopped — what finished was kept, run it again to continue");
+      } else if (!r.events) {
         toast("no reading events in those files — is this a logbackup folder?", true);
       } else if (!r.added) {
         toast(`already imported: ${r.sessions} sessions in ${r.files} files`);
@@ -361,8 +389,7 @@
     } catch (e) {
       toast(`import failed: ${e}`, true);
     } finally {
-      btn.disabled = false;
-      btn.textContent = "Import…";
+      showProgress(false);
     }
   }
 
@@ -370,6 +397,21 @@
 
   function init() {
     q("#rl-import").addEventListener("click", doImport);
+    q("#rl-cancel").addEventListener("click", async () => {
+      const btn = q("#rl-cancel");
+      btn.disabled = true;
+      btn.textContent = "Stopping…";
+      try {
+        await api.invoke("reading_log_cancel");
+      } catch (e) {
+        toast(`could not cancel: ${e}`, true);
+      }
+      // The import's own `finally` hides the panel; restore the button for the
+      // next run either way.
+      btn.disabled = false;
+      btn.textContent = "Cancel";
+    });
+    api.listen("reading-log:import-progress", (e) => onProgress(e.payload));
     q("#rl-year").addEventListener("change", (e) => {
       state.year = e.target.value || null;
       state.day = null;

@@ -172,6 +172,7 @@ pub fn run() {
             commands::reading_log::reading_log_book,
             commands::reading_log::reading_log_import,
             commands::reading_log::reading_log_pick_folders,
+            commands::reading_log::reading_log_cancel,
         ])
         .on_window_event(|window, event| {
             // macOS convention: the red close button (and Cmd+W) closes the
