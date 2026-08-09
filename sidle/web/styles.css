@@ -4448,6 +4448,27 @@ kbd {
   gap: 8px;
 }
 
+/* Year / Month / Day, sitting beside the sort button and matched to it: same
+   height, same border, same surface, so the header reads as one row of controls
+   rather than a toolbar tab that wandered down the page. */
+.rl-bucket-seg {
+  background: var(--surface);
+}
+
+.rl-bucket-seg .seg-btn {
+  padding: 4px 12px;
+  color: var(--fg);
+}
+
+.rl-bucket-seg .seg-btn:hover {
+  background: var(--bg);
+}
+
+.rl-bucket-seg .seg-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* Books read are shown as covers, on the gallery's own `.book-card` / `.cover`
    primitives — the same book should look the same everywhere in the app. A
    little tighter than the gallery: these tiles are a reading list, not the
@@ -4456,6 +4477,27 @@ kbd {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 14px;
+}
+
+/* Months or days as bands down the page. Each band owns its own grid: sharing
+   one would let a short day's covers slide up into the row above and lose the
+   date they belong to. */
+.rl-bands {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  padding-top: 12px;
+}
+
+.rl-band-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.rl-band-head .rl-muted {
+  font-size: 12px;
 }
 
 .rl-card-time {

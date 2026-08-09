@@ -92,6 +92,9 @@ const ALL_TIME: (&str, &str) = ("0000-00-00", "9999-99-99");
 /// heatmap is showing one, a single day once a square is clicked. `sort` names
 /// a column ([`db::ReadingSort`]) and defaults, like the page, to most recently
 /// read first — a reading log is a record of what you are reading now.
+///
+/// `bucket` ([`db::ReadingBucket`]) subdivides the window so the same year can
+/// be shown whole or split into months or days; it defaults to undivided.
 #[tauri::command]
 pub async fn reading_log_books(
     state: State<'_, AppState>,
@@ -99,10 +102,13 @@ pub async fn reading_log_books(
     to: String,
     sort: Option<String>,
     asc: Option<bool>,
+    bucket: Option<String>,
 ) -> Result<Vec<db::ReadingEntry>, String> {
     let conn = state.db.lock().await;
     let sort = db::ReadingSort::from_name(sort.as_deref().unwrap_or_default());
-    db::reading_books(&conn, &from, &to, sort, asc.unwrap_or(false)).map_err(|e| e.to_string())
+    let bucket = db::ReadingBucket::from_name(bucket.as_deref().unwrap_or_default());
+    db::reading_books(&conn, &from, &to, sort, asc.unwrap_or(false), bucket)
+        .map_err(|e| e.to_string())
 }
 
 /// One book's reading history.
@@ -113,12 +119,15 @@ pub async fn reading_log_book(
 ) -> Result<ReadingBook, String> {
     let conn = state.db.lock().await;
     let days = db::reading_book_days(&conn, book_id).map_err(|e| e.to_string())?;
+    // Undivided: this page wants the book's whole history as one aggregate, not
+    // a row per year of it.
     let entry = db::reading_books(
         &conn,
         ALL_TIME.0,
         ALL_TIME.1,
         db::ReadingSort::default(),
         false,
+        db::ReadingBucket::Total,
     )
     .map_err(|e| e.to_string())?
     .into_iter()

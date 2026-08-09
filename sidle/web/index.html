@@ -281,6 +281,19 @@
                 <strong id="rl-books-title"></strong>
                 <span id="rl-books-total" class="rl-muted"></span>
                 <div class="rl-group-actions">
+                  <!-- How finely the year is cut up. Always the same books —
+                       only the bands they sit in change, and each band's figures
+                       are that band's own. Hidden while a single day is
+                       selected, which is already one band. -->
+                  <div class="seg rl-bucket-seg" id="rl-bucket-seg" role="tablist"
+                       aria-label="Group the year by">
+                    <button class="seg-btn active" data-bucket="year" role="tab" aria-selected="true"
+                            title="The whole year in one grid">Year</button>
+                    <button class="seg-btn" data-bucket="month" role="tab" aria-selected="false"
+                            title="A band per month">Month</button>
+                    <button class="seg-btn" data-bucket="day" role="tab" aria-selected="false"
+                            title="A band per day read">Day</button>
+                  </div>
                   <button id="rl-day-clear" class="btn btn-quiet" hidden>Show the year</button>
                   <button type="button" class="sort-button" id="rl-sort-button">
                     <span class="sort-label">Sort: Last read</span>

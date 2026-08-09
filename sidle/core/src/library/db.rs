@@ -1672,6 +1672,47 @@ impl ReadingSort {
     }
 }
 
+/// How finely [`reading_books`] slices the window it sums over: one row per book
+/// per slice.
+///
+/// A book's figures are a property of the span they are summed over, so a
+/// grid that shows a year split into months has to ask for months — grouping an
+/// all-time list client-side would print the same yearly total under every month
+/// the book appears in. [`ReadingBucket::Total`] is the whole window as one
+/// slice, which is what a caller wanting a single row per book asks for.
+///
+/// Parsed from a name from a closed set, for the same reason [`ReadingSort`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadingBucket {
+    #[default]
+    Total,
+    Year,
+    Month,
+    Day,
+}
+
+impl ReadingBucket {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "year" => Self::Year,
+            "month" => Self::Month,
+            "day" => Self::Day,
+            _ => Self::Total,
+        }
+    }
+
+    /// The slice key, as SQL over a `YYYY-MM-DD` day. Prefixes of that key sort
+    /// chronologically as text, so ordering by it needs no date arithmetic.
+    fn expr(self) -> &'static str {
+        match self {
+            Self::Total => "''",
+            Self::Year => "substr(s.day, 1, 4)",
+            Self::Month => "substr(s.day, 1, 7)",
+            Self::Day => "s.day",
+        }
+    }
+}
+
 /// Books read over `[from, to]` (inclusive, `YYYY-MM-DD`), with every figure
 /// summed **within that window** — a book's total for one day, or for one year,
 /// is a different number from its total ever.
@@ -1679,6 +1720,11 @@ impl ReadingSort {
 /// One query for every scope the page offers: a single day is `from == to`, and
 /// all time is an open range. Aggregating in SQL rather than filtering an
 /// all-time list on the client is what keeps those per-window sums honest.
+///
+/// `bucket` subdivides the window — a year asked for by month returns each book
+/// once per month it was read in, carrying that month's figures. Slices come
+/// back in `asc` order and contiguously, so a caller renders them by walking the
+/// rows once.
 ///
 /// The last-read time breaks every tie, so books that match on the sort key
 /// still come back newest-first rather than in whatever order the rows landed.
@@ -1688,18 +1734,20 @@ pub fn reading_books(
     to: &str,
     sort: ReadingSort,
     asc: bool,
+    bucket: ReadingBucket,
 ) -> rusqlite::Result<Vec<ReadingEntry>> {
     let root = conn_root(conn);
     let dir = if asc { "ASC" } else { "DESC" };
+    let bucket = bucket.expr();
     let mut stmt = conn.prepare(&format!(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at),
-                  GROUP_CONCAT(DISTINCT s.device_serial)
+                  GROUP_CONCAT(DISTINCT s.device_serial), {bucket}
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
-            GROUP BY s.book_id
-            ORDER BY {} {dir}, MAX(s.ended_at) DESC"#,
+            GROUP BY {bucket}, s.book_id
+            ORDER BY {bucket} {dir}, {} {dir}, MAX(s.ended_at) DESC"#,
         sort.expr()
     ))?;
     let rows = stmt.query_map(params![from, to], |r| row_to_entry(r, root.as_deref()))?;
@@ -1722,6 +1770,10 @@ pub fn reading_book_count(conn: &Connection) -> rusqlite::Result<i64> {
 /// nameless variant to render.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadingEntry {
+    /// Which slice of the window every figure below covers: `""` for the whole
+    /// of it, else `YYYY`, `YYYY-MM` or `YYYY-MM-DD` per the [`ReadingBucket`]
+    /// asked for.
+    pub bucket: String,
     pub book_id: i64,
     pub title: String,
     pub author: String,
@@ -1749,6 +1801,7 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
     let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
     let devices: Option<String> = r.get(11)?;
     Ok(ReadingEntry {
+        bucket: r.get(12)?,
         book_id: r.get(0)?,
         title: r.get(1)?,
         author: r.get(2)?,
@@ -5671,7 +5724,8 @@ mod tests {
                 "2026-08-02",
                 "2026-08-02",
                 ReadingSort::default(),
-                false
+                false,
+                ReadingBucket::default()
             )
             .unwrap()
             .is_empty()
@@ -5682,6 +5736,7 @@ mod tests {
             "9999-99-99",
             ReadingSort::default(),
             false,
+            ReadingBucket::default(),
         )
         .unwrap();
         assert_eq!(books.len(), 1);
@@ -5703,7 +5758,8 @@ mod tests {
                 "0000-00-00",
                 "9999-99-99",
                 ReadingSort::default(),
-                false
+                false,
+                ReadingBucket::default()
             )
             .unwrap()
             .is_empty()
@@ -5719,6 +5775,7 @@ mod tests {
             "9999-99-99",
             ReadingSort::default(),
             false,
+            ReadingBucket::default(),
         )
         .unwrap();
         assert_eq!(books.len(), 1);
@@ -5743,6 +5800,7 @@ mod tests {
             "2026-08-01",
             ReadingSort::default(),
             false,
+            ReadingBucket::default(),
         )
         .unwrap();
         assert_eq!((day.len(), day[0].seconds, day[0].sessions), (1, 3600, 1));
@@ -5752,6 +5810,7 @@ mod tests {
             "2026-12-31",
             ReadingSort::default(),
             false,
+            ReadingBucket::default(),
         )
         .unwrap();
         assert_eq!(
@@ -5764,12 +5823,69 @@ mod tests {
             "9999-99-99",
             ReadingSort::default(),
             false,
+            ReadingBucket::default(),
         )
         .unwrap();
         assert_eq!(
             (ever.len(), ever[0].seconds, ever[0].sessions),
             (1, 6000, 3)
         );
+    }
+
+    #[test]
+    fn a_window_asked_for_by_month_gives_each_month_its_own_figures() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-months", "何ヶ月も読む本");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+        insert_reading_session(&conn, &session("2026-07-30", 999, 600)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-02", 999, 1800)).unwrap();
+        resolve_reading_sessions(&conn).unwrap();
+
+        // One book, two months, and neither row carries the other's hours — the
+        // whole reason the split happens here rather than on the client.
+        let (f, t) = ("2026-01-01", "2026-12-31");
+        let months = reading_books(
+            &conn,
+            f,
+            t,
+            ReadingSort::default(),
+            false,
+            ReadingBucket::Month,
+        )
+        .unwrap();
+        let seen: Vec<(&str, i64, i64)> = months
+            .iter()
+            .map(|b| (b.bucket.as_str(), b.seconds, b.sessions))
+            .collect();
+        assert_eq!(seen, vec![("2026-08", 5400, 2), ("2026-07", 600, 1)]);
+
+        // The same window, undivided, is the sum of them.
+        let whole = reading_books(
+            &conn,
+            f,
+            t,
+            ReadingSort::default(),
+            false,
+            ReadingBucket::Total,
+        )
+        .unwrap();
+        assert_eq!((whole.len(), whole[0].seconds), (1, 6000));
+        assert_eq!(whole[0].bucket, "", "an undivided window names no slice");
+
+        // Days are the same idea one step finer, and the direction reverses the
+        // slices along with the books inside them.
+        let days = reading_books(
+            &conn,
+            f,
+            t,
+            ReadingSort::default(),
+            true,
+            ReadingBucket::Day,
+        )
+        .unwrap();
+        let keys: Vec<&str> = days.iter().map(|b| b.bucket.as_str()).collect();
+        assert_eq!(keys, vec!["2026-07-30", "2026-08-01", "2026-08-02"]);
     }
 
     #[test]
@@ -5785,15 +5901,16 @@ mod tests {
         resolve_reading_sessions(&conn).unwrap();
 
         let (f, t) = ("0000-00-00", "9999-99-99");
-        let recent = reading_books(&conn, f, t, ReadingSort::default(), false).unwrap();
+        let all = ReadingBucket::default();
+        let recent = reading_books(&conn, f, t, ReadingSort::default(), false, all).unwrap();
         assert_eq!(recent[0].book_id, new, "the newest read leads by default");
 
         // Every other order is offered, and every one reverses.
-        let longest = reading_books(&conn, f, t, ReadingSort::Seconds, false).unwrap();
+        let longest = reading_books(&conn, f, t, ReadingSort::Seconds, false, all).unwrap();
         assert_eq!(longest[0].book_id, old);
-        let shortest = reading_books(&conn, f, t, ReadingSort::Seconds, true).unwrap();
+        let shortest = reading_books(&conn, f, t, ReadingSort::Seconds, true, all).unwrap();
         assert_eq!(shortest[0].book_id, new);
-        let oldest = reading_books(&conn, f, t, ReadingSort::LastRead, true).unwrap();
+        let oldest = reading_books(&conn, f, t, ReadingSort::LastRead, true, all).unwrap();
         assert_eq!(oldest[0].book_id, old);
     }
 
@@ -5851,6 +5968,15 @@ mod tests {
         assert_eq!(
             ReadingSort::from_name("; DROP TABLE books--"),
             ReadingSort::LastRead
+        );
+    }
+
+    #[test]
+    fn an_unknown_bucket_name_falls_back_instead_of_reaching_the_query() {
+        assert_eq!(ReadingBucket::from_name("month"), ReadingBucket::Month);
+        assert_eq!(
+            ReadingBucket::from_name("s.day; DROP TABLE books--"),
+            ReadingBucket::Total
         );
     }
 

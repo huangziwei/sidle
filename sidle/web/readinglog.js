@@ -21,6 +21,7 @@
     year: null, // heatmap year, as a number; resolved on first render
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
+    bucket: "year", // how finely the grid cuts the year up: year | month | day
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
@@ -310,12 +311,17 @@
   // The grid always shows exactly what the heatmap above it is showing: the
   // whole year, or one day of it once a square is clicked. Its figures come
   // from a windowed query rather than a filtered all-time list, because a
-  // book's hours *that day* are not its hours ever.
+  // book's hours *that day* are not its hours ever — which is also why the
+  // month/day bands are asked for by the query instead of being cut out of a
+  // yearly list here: a book read across three months has three sets of figures.
   async function renderScope() {
     const day = state.day;
     const [from, to] = day ? [day, day] : [`${state.year}-01-01`, `${state.year}-12-31`];
+    // A selected day is already a single band, and the header names it.
+    const bucket = day ? "total" : state.bucket;
     q("#rl-books-title").textContent = day ? fmtDay(day) : `Books in ${state.year}`;
     q("#rl-day-clear").hidden = !day;
+    renderBucketControl();
     renderSortControl();
 
     // A later click must win, however the replies happen to arrive back.
@@ -327,6 +333,7 @@
         to,
         sort: state.sort.key,
         asc: state.sort.asc,
+        bucket,
       });
     } catch (e) {
       toast(`failed to load ${day || state.year}: ${e}`, true);
@@ -336,19 +343,71 @@
     state.books = rows;
     const total = rows.reduce((a, r) => a + r.seconds, 0);
     q("#rl-books-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
-    // A day's cards say when the sitting began; a year's say when the book was
-    // last open, which is what the default order sorts on — so the sequence on
-    // screen is legible rather than something you have to take on trust.
-    q("#rl-book-list").innerHTML = rows
+    // A band per day means every card already sits under its own date, so the
+    // cards say the time of day instead of repeating it — the same thing they
+    // do when a single day is selected.
+    const daily = !!day || bucket === "day";
+    const banded = bucket === "month" || bucket === "day";
+    const list = q("#rl-book-list");
+    list.className = banded ? "rl-bands" : "rl-cards";
+    list.innerHTML = banded ? bandsHtml(rows, bucket, daily) : cardsHtml(rows, daily);
+  }
+
+  // A day's cards say when the sitting began; a year's say when the book was
+  // last open, which is what the default order sorts on — so the sequence on
+  // screen is legible rather than something you have to take on trust.
+  function cardsHtml(rows, daily) {
+    return rows
       .map((r) =>
         entryCard(
           r,
-          day
+          daily
             ? `from ${r.first_at.slice(11, 16)}`
             : `${shortDay(r.last_at)} · ${r.sessions} sessions`,
         ),
       )
       .join("");
+  }
+
+  // Rows come back grouped and already in the asked-for direction, so one pass
+  // over them keeps that order rather than re-deriving it.
+  function bandsHtml(rows, bucket, daily) {
+    const out = [];
+    for (let i = 0; i < rows.length; ) {
+      let j = i;
+      while (j < rows.length && rows[j].bucket === rows[i].bucket) j++;
+      const band = rows.slice(i, j);
+      const secs = band.reduce((a, r) => a + r.seconds, 0);
+      out.push(
+        `<section class="rl-band"><header class="rl-band-head">` +
+          `<strong>${esc(bandLabel(rows[i].bucket, bucket))}</strong>` +
+          `<span class="rl-muted">${fmtDuration(secs)} · ` +
+          `${band.length} book${band.length === 1 ? "" : "s"}</span>` +
+          `</header><div class="rl-cards">${cardsHtml(band, daily)}</div></section>`,
+      );
+      i = j;
+    }
+    return out.join("");
+  }
+
+  // "August", or "August 9" — the year is in the header above every band, so
+  // repeating it on each one says nothing.
+  function bandLabel(key, bucket) {
+    const d = parseDay(bucket === "month" ? `${key}-01` : key);
+    if (!d) return key;
+    const shape =
+      bucket === "month" ? { month: "long" } : { month: "long", day: "numeric" };
+    return d.toLocaleDateString(undefined, shape);
+  }
+
+  function renderBucketControl() {
+    const seg = q("#rl-bucket-seg");
+    seg.hidden = !!state.day;
+    for (const b of seg.querySelectorAll(".seg-btn")) {
+      const on = b.dataset.bucket === state.bucket;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    }
   }
 
   function renderSortControl() {
@@ -664,6 +723,15 @@
     q("#rl-day-clear").addEventListener("click", () => {
       state.day = null;
       render();
+    });
+
+    // Year / Month / Day. The window does not change — only how finely the
+    // query cuts it — so the heatmap and the totals above stay put.
+    q("#rl-bucket-seg").addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn[data-bucket]");
+      if (!btn || btn.dataset.bucket === state.bucket) return;
+      state.bucket = btn.dataset.bucket;
+      renderScope();
     });
 
     // Sort: the gallery's control, over reading figures. Only the grid changes,
