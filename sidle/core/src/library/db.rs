@@ -1499,28 +1499,70 @@ pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Ve
     rows.collect()
 }
 
-/// Books read over `[from, to]` (inclusive, `YYYY-MM-DD`), longest first, with
-/// every figure summed **within that window** — a book's total for one day, or
-/// for one year, is a different number from its total ever.
+/// How [`reading_books`] orders what it returns.
+///
+/// Parsed from a name rather than taken as SQL: the ordering expression is
+/// chosen here from a closed set, so no caller can reach the query text.
+/// An unknown name is [`ReadingSort::LastRead`] — the reading log's natural
+/// order, most recently read first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadingSort {
+    #[default]
+    LastRead,
+    Seconds,
+    Sessions,
+    Words,
+}
+
+impl ReadingSort {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "seconds" => Self::Seconds,
+            "sessions" => Self::Sessions,
+            "words" => Self::Words,
+            _ => Self::LastRead,
+        }
+    }
+
+    fn expr(self) -> &'static str {
+        match self {
+            Self::LastRead => "MAX(s.ended_at)",
+            Self::Seconds => "SUM(s.seconds)",
+            Self::Sessions => "COUNT(*)",
+            Self::Words => "SUM(s.words)",
+        }
+    }
+}
+
+/// Books read over `[from, to]` (inclusive, `YYYY-MM-DD`), with every figure
+/// summed **within that window** — a book's total for one day, or for one year,
+/// is a different number from its total ever.
 ///
 /// One query for every scope the page offers: a single day is `from == to`, and
 /// all time is an open range. Aggregating in SQL rather than filtering an
 /// all-time list on the client is what keeps those per-window sums honest.
+///
+/// The last-read time breaks every tie, so books that match on the sort key
+/// still come back newest-first rather than in whatever order the rows landed.
 pub fn reading_books(
     conn: &Connection,
     from: &str,
     to: &str,
+    sort: ReadingSort,
+    asc: bool,
 ) -> rusqlite::Result<Vec<ReadingEntry>> {
     let root = conn_root(conn);
-    let mut stmt = conn.prepare(
+    let dir = if asc { "ASC" } else { "DESC" };
+    let mut stmt = conn.prepare(&format!(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at)
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY s.book_id
-            ORDER BY SUM(s.seconds) DESC"#,
-    )?;
+            ORDER BY {} {dir}, MAX(s.ended_at) DESC"#,
+        sort.expr()
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| row_to_entry(r, root.as_deref()))?;
     rows.collect()
 }
@@ -5472,11 +5514,24 @@ mod tests {
         let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
         assert_eq!(days, vec![("2026-08-01".to_string(), 3600)]);
         assert!(
-            reading_books(&conn, "2026-08-02", "2026-08-02")
-                .unwrap()
-                .is_empty()
+            reading_books(
+                &conn,
+                "2026-08-02",
+                "2026-08-02",
+                ReadingSort::default(),
+                false
+            )
+            .unwrap()
+            .is_empty()
         );
-        let books = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
+        let books = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_id, book);
         assert_eq!(books[0].title, "読んだ本");
@@ -5491,16 +5546,29 @@ mod tests {
         insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
         assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
         assert!(
-            reading_books(&conn, "0000-00-00", "9999-99-99")
-                .unwrap()
-                .is_empty()
+            reading_books(
+                &conn,
+                "0000-00-00",
+                "9999-99-99",
+                ReadingSort::default(),
+                false
+            )
+            .unwrap()
+            .is_empty()
         );
 
         let book = insert_minimal(&conn, "sha-late", "後から来た本");
         set_max_position(&conn, book, Some(1000)).unwrap();
         assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
 
-        let books = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
+        let books = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].seconds, 3600);
     }
@@ -5517,17 +5585,72 @@ mod tests {
 
         // One book throughout, but the figure differs per window — which is why
         // the client cannot filter an all-time list and get this right.
-        let day = reading_books(&conn, "2026-08-01", "2026-08-01").unwrap();
+        let day = reading_books(
+            &conn,
+            "2026-08-01",
+            "2026-08-01",
+            ReadingSort::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!((day.len(), day[0].seconds, day[0].sessions), (1, 3600, 1));
-        let year = reading_books(&conn, "2026-01-01", "2026-12-31").unwrap();
+        let year = reading_books(
+            &conn,
+            "2026-01-01",
+            "2026-12-31",
+            ReadingSort::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             (year.len(), year[0].seconds, year[0].sessions),
             (1, 5400, 2)
         );
-        let ever = reading_books(&conn, "0000-00-00", "9999-99-99").unwrap();
+        let ever = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             (ever.len(), ever[0].seconds, ever[0].sessions),
             (1, 6000, 3)
+        );
+    }
+
+    #[test]
+    fn the_default_order_is_most_recently_read_first() {
+        let conn = fresh_db();
+        // The long read is months old; the short one is recent.
+        let old = insert_minimal(&conn, "sha-old", "先に読んだ本");
+        let new = insert_minimal(&conn, "sha-new", "後で読んだ本");
+        set_max_position(&conn, old, Some(1000)).unwrap();
+        set_max_position(&conn, new, Some(2000)).unwrap();
+        insert_reading_session(&conn, &session("2026-01-05", 999, 7200)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-01", 1999, 600)).unwrap();
+        resolve_reading_sessions(&conn).unwrap();
+
+        let (f, t) = ("0000-00-00", "9999-99-99");
+        let recent = reading_books(&conn, f, t, ReadingSort::default(), false).unwrap();
+        assert_eq!(recent[0].book_id, new, "the newest read leads by default");
+
+        // Every other order is offered, and every one reverses.
+        let longest = reading_books(&conn, f, t, ReadingSort::Seconds, false).unwrap();
+        assert_eq!(longest[0].book_id, old);
+        let shortest = reading_books(&conn, f, t, ReadingSort::Seconds, true).unwrap();
+        assert_eq!(shortest[0].book_id, new);
+        let oldest = reading_books(&conn, f, t, ReadingSort::LastRead, true).unwrap();
+        assert_eq!(oldest[0].book_id, old);
+    }
+
+    #[test]
+    fn an_unknown_sort_name_falls_back_instead_of_reaching_the_query() {
+        assert_eq!(ReadingSort::from_name("seconds"), ReadingSort::Seconds);
+        assert_eq!(
+            ReadingSort::from_name("; DROP TABLE books--"),
+            ReadingSort::LastRead
         );
     }
 

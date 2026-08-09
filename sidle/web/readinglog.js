@@ -21,6 +21,7 @@
     year: null, // heatmap year, as a number; resolved on first render
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
+    sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
     month: null, // Date anchoring the book page's calendar
@@ -53,6 +54,13 @@
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
     if (n >= 1000) return `${Math.round(n / 1000)}k`;
     return String(n);
+  }
+
+  // "Aug 9" — enough to place a book in the year at a glance. Takes a full
+  // timestamp or a bare day; only the date part is ever used.
+  function shortDay(iso) {
+    const d = parseDay((iso || "").slice(0, 10));
+    return d ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
   }
 
   function fmtDay(iso) {
@@ -106,7 +114,10 @@
     else render();
   }
 
-  function hide() {}
+  // A popover left open would float over whichever section replaces this one.
+  function hide() {
+    closeSort();
+  }
 
   function invalidate() {
     state.loaded = false;
@@ -287,6 +298,15 @@
     );
   }
 
+  // What the grid can be ordered by. Every one is a column of the aggregate, so
+  // the ordering happens in SQL and matches the figures on the cards.
+  const SORT_KEYS = [
+    ["last", "Last read", "Most recently read first"],
+    ["seconds", "Reading time", "Longest first"],
+    ["sessions", "Sessions", "Most sittings first"],
+    ["words", "Words", "Most words read first"],
+  ];
+
   // The grid always shows exactly what the heatmap above it is showing: the
   // whole year, or one day of it once a square is clicked. Its figures come
   // from a windowed query rather than a filtered all-time list, because a
@@ -296,12 +316,18 @@
     const [from, to] = day ? [day, day] : [`${state.year}-01-01`, `${state.year}-12-31`];
     q("#rl-books-title").textContent = day ? fmtDay(day) : `Books in ${state.year}`;
     q("#rl-day-clear").hidden = !day;
+    renderSortControl();
 
     // A later click must win, however the replies happen to arrive back.
     const token = ++state.scope;
     let rows = [];
     try {
-      rows = await api.invoke("reading_log_books", { from, to });
+      rows = await api.invoke("reading_log_books", {
+        from,
+        to,
+        sort: state.sort.key,
+        asc: state.sort.asc,
+      });
     } catch (e) {
       toast(`failed to load ${day || state.year}: ${e}`, true);
     }
@@ -310,16 +336,47 @@
     state.books = rows;
     const total = rows.reduce((a, r) => a + r.seconds, 0);
     q("#rl-books-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
+    // A day's cards say when the sitting began; a year's say when the book was
+    // last open, which is what the default order sorts on — so the sequence on
+    // screen is legible rather than something you have to take on trust.
     q("#rl-book-list").innerHTML = rows
       .map((r) =>
         entryCard(
           r,
           day
             ? `from ${r.first_at.slice(11, 16)}`
-            : `${r.sessions} sessions · ${fmtWords(r.words)} words`,
+            : `${shortDay(r.last_at)} · ${r.sessions} sessions`,
         ),
       )
       .join("");
+  }
+
+  function renderSortControl() {
+    const [, name] = SORT_KEYS.find(([k]) => k === state.sort.key) || SORT_KEYS[0];
+    q("#rl-sort-button .sort-label").textContent = `Sort: ${name}`;
+    q("#rl-sort-button .sort-dir").textContent = state.sort.asc ? "↑" : "↓";
+
+    const list = q("#rl-sort-keys");
+    list.innerHTML = "";
+    for (const [key, label, hint] of SORT_KEYS) {
+      const li = document.createElement("li");
+      li.dataset.key = key;
+      li.title = hint;
+      if (state.sort.key === key) li.classList.add("active");
+      const radio = document.createElement("span");
+      radio.className = "sort-radio";
+      const text = document.createElement("span");
+      text.textContent = label;
+      li.append(radio, text);
+      list.appendChild(li);
+    }
+    for (const b of document.querySelectorAll("#rl-sort-popover .sort-dir-toggle button")) {
+      b.classList.toggle("active", b.dataset.dir === (state.sort.asc ? "asc" : "desc"));
+    }
+  }
+
+  function closeSort() {
+    q("#rl-sort-popover").hidden = true;
   }
 
   // ── One book ───────────────────────────────────────────────────────────────
@@ -352,25 +409,35 @@
       // shown at all — nothing here is inferred from page geometry.
       const wpm = entry.seconds > 0 ? Math.round((entry.words * 60) / entry.seconds) : 0;
       q("#rl-book-stats").innerHTML = [
-        statTile(fmtDuration(entry.seconds), "total"),
-        statTile(days.length, "days"),
-        statTile(fmtDuration(perDay), "per day"),
-        statTile(fmtWords(entry.words), "words"),
-        statTile(entry.sessions, "sessions"),
-        wpm ? statTile(wpm, "words/min") : "",
+        fact("Total", fmtDuration(entry.seconds)),
+        fact("Days read", days.length),
+        fact("Per day", fmtDuration(perDay)),
+        fact("Days elapsed", span, "First to last day read"),
+        fact("Sessions", entry.sessions),
+        fact("Words", fmtWords(entry.words)),
+        wpm ? fact("Words / min", wpm) : "",
         // Deliberately not called "pages": a converted book has no pagination,
         // and this counts forward taps at whatever font size the device was on.
-        statTile(
+        fact(
+          "Page turns",
           entry.page_turns,
-          "page turns",
           "Forward page turns on the device — depends on font size, not a page count",
         ),
-        statTile(span, "days elapsed", "First to last day read"),
+        fact("First read", shortDay(entry.first_at)),
+        fact("Last read", shortDay(entry.last_at)),
       ].join("");
     } else {
       q("#rl-book-stats").innerHTML = "";
     }
     renderMonth();
+  }
+
+  // One figure as a label/value row. A vertical list beside the calendar reads
+  // better than a strip of boxes across the top, and scales as figures are
+  // added without pushing anything off the edge.
+  function fact(label, value, hint) {
+    const t = hint ? ` title="${esc(hint)}"` : "";
+    return `<div class="rl-fact"${t}><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
   }
 
   function spanDays(days) {
@@ -545,6 +612,38 @@
     q("#rl-day-clear").addEventListener("click", () => {
       state.day = null;
       render();
+    });
+
+    // Sort: the gallery's control, over reading figures. Only the grid changes,
+    // so this re-runs the scope query rather than the whole page.
+    q("#rl-sort-button").addEventListener("click", () => {
+      const pop = q("#rl-sort-popover");
+      if (!pop.hidden) return closeSort();
+      pop.hidden = false;
+      positionPopover(pop, q("#rl-sort-button"));
+    });
+    q("#rl-sort-keys").addEventListener("click", (e) => {
+      const li = e.target.closest("li[data-key]");
+      if (!li) return;
+      state.sort = { key: li.dataset.key, asc: state.sort.asc };
+      closeSort();
+      renderScope();
+    });
+    for (const btn of document.querySelectorAll("#rl-sort-popover .sort-dir-toggle button")) {
+      btn.addEventListener("click", () => {
+        state.sort = { ...state.sort, asc: btn.dataset.dir === "asc" };
+        closeSort();
+        renderScope();
+      });
+    }
+    document.addEventListener("click", (e) => {
+      if (
+        !q("#rl-sort-popover").hidden &&
+        !e.target.closest("#rl-sort-popover") &&
+        !e.target.closest("#rl-sort-button")
+      ) {
+        closeSort();
+      }
     });
     q("#rl-back").addEventListener("click", () => {
       state.book = null;

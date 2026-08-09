@@ -86,18 +86,23 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
 /// A range wide enough to mean "ever" against `YYYY-MM-DD` day keys.
 const ALL_TIME: (&str, &str) = ("0000-00-00", "9999-99-99");
 
-/// What was read over `[from, to]` (inclusive, `YYYY-MM-DD`), longest first.
+/// What was read over `[from, to]` (inclusive, `YYYY-MM-DD`).
 ///
 /// The page's one book query, at whatever scope is selected: a year while the
-/// heatmap is showing one, a single day once a square is clicked.
+/// heatmap is showing one, a single day once a square is clicked. `sort` names
+/// a column ([`db::ReadingSort`]) and defaults, like the page, to most recently
+/// read first — a reading log is a record of what you are reading now.
 #[tauri::command]
 pub async fn reading_log_books(
     state: State<'_, AppState>,
     from: String,
     to: String,
+    sort: Option<String>,
+    asc: Option<bool>,
 ) -> Result<Vec<db::ReadingEntry>, String> {
     let conn = state.db.lock().await;
-    db::reading_books(&conn, &from, &to).map_err(|e| e.to_string())
+    let sort = db::ReadingSort::from_name(sort.as_deref().unwrap_or_default());
+    db::reading_books(&conn, &from, &to, sort, asc.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
 /// One book's reading history.
@@ -108,10 +113,16 @@ pub async fn reading_log_book(
 ) -> Result<ReadingBook, String> {
     let conn = state.db.lock().await;
     let days = db::reading_book_days(&conn, book_id).map_err(|e| e.to_string())?;
-    let entry = db::reading_books(&conn, ALL_TIME.0, ALL_TIME.1)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|b| b.book_id == book_id);
+    let entry = db::reading_books(
+        &conn,
+        ALL_TIME.0,
+        ALL_TIME.1,
+        db::ReadingSort::default(),
+        false,
+    )
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .find(|b| b.book_id == book_id);
     Ok(ReadingBook {
         days: days
             .into_iter()

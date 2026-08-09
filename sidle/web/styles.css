@@ -4430,7 +4430,12 @@ kbd {
   margin-bottom: 4px;
 }
 
-.rl-group-head .btn { margin-left: auto; }
+.rl-group-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* Books read are shown as covers, on the gallery's own `.book-card` / `.cover`
    primitives — the same book should look the same everywhere in the app. A
@@ -4456,24 +4461,78 @@ kbd {
   text-overflow: ellipsis;
 }
 
-/* ── One book's month calendar ───────────────────────────────────────────── */
+/* ── One book ────────────────────────────────────────────────────────────── */
 
-/* The header's own cover: fixed height, width follows the art. */
+/* A breadcrumb, not a button: it leaves the page rather than acting on it, and
+   a filled control beside the cover competed with the book for attention. */
+.rl-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 2px 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+.rl-back:hover { color: var(--fg); }
+
+/* Identity down one side, calendar filling the rest. The side column is sized
+   to a readable cover; the calendar takes everything left over, which is what
+   the old fixed-width one was wasting. */
+.rl-book-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .rl-book-layout { grid-template-columns: minmax(0, 1fr); }
+  .rl-book-cover { max-width: 200px; }
+}
+
+.rl-book-side { display: flex; flex-direction: column; gap: 4px; }
+
 .rl-book-cover {
-  height: 92px;
-  width: auto;
+  width: 100%;
+  height: auto;
   aspect-ratio: 2 / 3;
-  flex: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  margin-bottom: 10px;
 }
-.rl-book-cover .cover-placeholder { font-size: 10px; padding: 6px; }
 
-.rl-book-title { display: flex; flex-direction: column; }
-.rl-book-title .rl-muted { font-size: 12px; }
+.rl-book-name { font-size: 15px; line-height: 1.35; }
+.rl-book-side .rl-muted { font-size: 12px; }
+
+/* Figures as label/value rows down the side. Values are right-aligned on
+   tabular numerals so they compare vertically at a glance. */
+.rl-facts {
+  margin: 14px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.rl-fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.rl-fact dt { color: var(--muted); font-size: 12px; }
+.rl-fact dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
 .rl-month {
-  max-width: 620px;
   padding: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -4511,7 +4570,7 @@ kbd {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-height: 46px;
+  min-height: 62px;
   border-radius: 6px;
   font-variant-numeric: tabular-nums;
 }

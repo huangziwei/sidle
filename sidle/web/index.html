@@ -109,6 +109,17 @@
       </div>
     </div>
 
+    <!-- The Reading Log's own sort, over reading figures rather than library
+         metadata. Same markup as the gallery's so the two look and behave
+         alike; it lives out here for the same reason that one does. -->
+    <div class="sort-popover" id="rl-sort-popover" hidden>
+      <ul class="sort-key-list" id="rl-sort-keys"></ul>
+      <div class="sort-dir-toggle" role="group" aria-label="Sort direction">
+        <button type="button" data-dir="asc">↑ Asc</button>
+        <button type="button" data-dir="desc">↓ Desc</button>
+      </div>
+    </div>
+
     <main id="main">
       <!-- Drill-in breadcrumb: shown only while viewing one series' contents
            (Series grouping). Shared by the gallery + list. -->
@@ -267,33 +278,42 @@
               <header class="rl-group-head">
                 <strong id="rl-books-title"></strong>
                 <span id="rl-books-total" class="rl-muted"></span>
-                <button id="rl-day-clear" class="btn btn-quiet" hidden>Show the year</button>
+                <div class="rl-group-actions">
+                  <button id="rl-day-clear" class="btn btn-quiet" hidden>Show the year</button>
+                  <button type="button" class="sort-button" id="rl-sort-button">
+                    <span class="sort-label">Sort: Last read</span>
+                    <span class="sort-dir">↓</span>
+                  </button>
+                </div>
               </header>
               <div id="rl-book-list" class="rl-cards"></div>
             </section>
           </div>
         </div>
 
-        <!-- One book: a navigable month calendar + that book's statistics. -->
+        <!-- One book. The identity (cover, title, figures) is a column of its
+             own so the calendar can have the rest of the width; the figures
+             stack vertically down the side rather than running off in a strip
+             of boxes. -->
         <div id="rl-book" hidden>
-          <header class="rl-head">
-            <button id="rl-back" class="btn btn-quiet">‹ Reading Log</button>
-            <div id="rl-book-cover" class="cover rl-book-cover"></div>
-            <div class="rl-book-title">
-              <strong id="rl-book-title"></strong>
+          <button id="rl-back" class="rl-back">‹ Reading Log</button>
+          <div class="rl-book-layout">
+            <aside class="rl-book-side">
+              <div id="rl-book-cover" class="cover rl-book-cover"></div>
+              <strong id="rl-book-title" class="rl-book-name"></strong>
               <span id="rl-book-author" class="rl-muted"></span>
+              <dl id="rl-book-stats" class="rl-facts"></dl>
+            </aside>
+            <div class="rl-month">
+              <!-- Bounded by this book's own reading: no arrow leads to a month
+                   it was never opened in. -->
+              <header id="rl-month-nav" class="rl-month-head rl-nav">
+                <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
+                <strong id="rl-month-label"></strong>
+                <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
+              </header>
+              <div id="rl-month-grid" class="rl-month-grid"></div>
             </div>
-          </header>
-          <div id="rl-book-stats" class="rl-stats"></div>
-          <div class="rl-month">
-            <!-- Bounded by this book's own reading: no arrow leads to a month
-                 it was never opened in. -->
-            <header id="rl-month-nav" class="rl-month-head rl-nav">
-              <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
-              <strong id="rl-month-label"></strong>
-              <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
-            </header>
-            <div id="rl-month-grid" class="rl-month-grid"></div>
           </div>
         </div>
       </section>
