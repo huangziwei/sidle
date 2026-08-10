@@ -3121,7 +3121,7 @@ fn build_container_entity_map_fragment(
     }
     let ion = IonValue::Struct(ion_fields);
 
-    KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion)
+    KfxFragment::container_entity_map(ion)
 }
 
 /// Detect format symbol from file extension/magic bytes.
@@ -4361,7 +4361,7 @@ fn build_manga_container_entity_map_fragment(
             IonValue::List(dependencies),
         ),
     ]);
-    KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion)
+    KfxFragment::container_entity_map(ion)
 }
 
 // ============================================================================
@@ -4604,6 +4604,7 @@ pub fn pdf_to_kfx(
             i,
             page.width,
             page.height,
+            page_runs(i),
             &raw_location,
             pdf_rsrc_desc_sym,
         ));
@@ -5000,19 +5001,93 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
     KfxFragment::new(KfxSymbol::Section, &rec.section_name, ion)
 }
 
+/// A length in points, as Amazon writes it: an `Int` when it lands on a whole
+/// point, an Ion decimal otherwise.
+///
+/// Decimal rather than float because these are exact base-10 quantities —
+/// `hundredths` counts pt×100, the unit the text layer is already measured in —
+/// and a binary float would print them back as 30.219999999999999.
+fn pt_value(hundredths: i64) -> IonValue {
+    if hundredths % 100 == 0 {
+        return IonValue::Int(hundredths / 100);
+    }
+    let sign = if hundredths < 0 { "-" } else { "" };
+    let h = hundredths.abs();
+    IonValue::Decimal(format!("{sign}{}.{:02}", h / 100, h % 100))
+}
+
+/// A page dimension in points, at the precision the PDF states it.
+///
+/// Not [`pt_value`]: a page box is whatever the MediaBox says, and this book's
+/// is `351.496 × 598.11` — quantizing it to pt×100 would round the width to
+/// `351.5` and lose a digit Amazon keeps. Four decimals is past what an f32
+/// carries here, so the trim is what sets the final width.
+fn pt_page_dim(pt: f32) -> IonValue {
+    if pt.fract() == 0.0 && pt.abs() < i64::MAX as f32 {
+        return IonValue::Int(pt as i64);
+    }
+    let text = format!("{pt:.4}");
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    IonValue::Decimal(trimmed.to_string())
+}
+
+/// The page's content box, as the insets from each page edge that Amazon stores
+/// in `margin_left` / `margin_top` / `margin_right` / `margin_bottom`. `None`
+/// for a page with no text layer, which Amazon writes as a flat `margin: 0`.
+///
+/// Everything here is pt×100 — [`TextRun`](crate::formats::pdf::render::TextRun)
+/// geometry's own unit, measured from the page's top-left with Y down, so the
+/// insets come out exact instead of drifting through a float page size.
+///
+/// **This is the run box, and Amazon's is wider on some pages.** Measured
+/// against a Send-to-Kindle build of the same 352-page PDF: on a page whose only
+/// content is one line the two agree to 0.14 pt, but on title and chapter-opening
+/// pages Amazon states a box spanning the book's full type area even though no
+/// glyph reaches it — its box tracks text *frames*, not the text in them. Erring
+/// narrow is the safe direction: the reader crops to what it is given, so a box
+/// that hugs the glyphs trims more whitespace and can never trim into content.
+fn pdf_page_margins(
+    runs: &[crate::formats::pdf::render::TextRun],
+    page: (i64, i64),
+) -> Option<[i64; 4]> {
+    let left = runs.iter().map(|r| r.left).min()?;
+    let top = runs.iter().map(|r| r.top).min()?;
+    let right = runs.iter().map(|r| r.left + r.width).max()?;
+    let bottom = runs.iter().map(|r| r.top + r.height).max()?;
+    // Clamped because a run may overhang the MediaBox (a bleed glyph, or a
+    // rotated page whose bounds we took unrotated); a negative inset would ask
+    // the reader to crop outwards.
+    Some([
+        left.max(0),
+        top.max(0),
+        (page.0 - right).max(0),
+        (page.1 - bottom).max(0),
+    ])
+}
+
 /// Build the external_resource ($164) for one PDF page: a `format: pdf` view of
-/// the shared blob at `page_index`, sized to the page. References the shared
-/// resource descriptor (`d6`) via `auxiliary_data` and carries `margin: 0`, both
-/// matching Amazon's per-page resources.
+/// the shared blob at `page_index`, sized to the page and carrying the page's
+/// content box. References the shared resource descriptor (`d6`) via
+/// `auxiliary_data`.
+///
+/// The content box is what lets the reader's margin setting crop a fixed-layout
+/// page: it states where the ink stops, so trimming whitespace does not trim
+/// content. Without it every margin setting renders identically. See
+/// [`pdf_page_margins`] for how far it is from Amazon's own.
 fn build_pdf_external_resource(
     rec: &PdfPageRec,
     page_index: usize,
     width_pt: f32,
     height_pt: f32,
+    runs: &[crate::formats::pdf::render::TextRun],
     raw_location: &str,
     rsrc_desc_sym: u64,
 ) -> KfxFragment {
-    let ion = IonValue::Struct(vec![
+    let page = (
+        (width_pt * 100.0).round() as i64,
+        (height_pt * 100.0).round() as i64,
+    );
+    let mut fields = vec![
         (
             KfxSymbol::Format as u64,
             IonValue::Symbol(KfxSymbol::Pdf as u64),
@@ -5029,21 +5104,29 @@ fn build_pdf_external_resource(
             KfxSymbol::AuxiliaryData as u64,
             IonValue::Symbol(rsrc_desc_sym),
         ),
-        (
-            KfxSymbol::ResourceWidth as u64,
-            IonValue::Int(width_pt.round() as i64),
-        ),
-        (
-            KfxSymbol::ResourceHeight as u64,
-            IonValue::Int(height_pt.round() as i64),
-        ),
+        (KfxSymbol::ResourceWidth as u64, pt_page_dim(width_pt)),
+        (KfxSymbol::ResourceHeight as u64, pt_page_dim(height_pt)),
         (
             KfxSymbol::ResourceName as u64,
             IonValue::Symbol(rec.res_sym),
         ),
-        (KfxSymbol::Margin as u64, IonValue::Int(0)),
-    ]);
-    KfxFragment::new(KfxSymbol::ExternalResource, format!("e{page_index}"), ion)
+    ];
+    match pdf_page_margins(runs, page) {
+        Some([left, top, right, bottom]) => fields.extend([
+            (KfxSymbol::MarginLeft as u64, pt_value(left)),
+            (KfxSymbol::MarginTop as u64, pt_value(top)),
+            (KfxSymbol::MarginRight as u64, pt_value(right)),
+            (KfxSymbol::MarginBottom as u64, pt_value(bottom)),
+        ]),
+        // No text layer, so nothing states where this page's ink stops — the
+        // same flat `margin: 0` Amazon writes for its own contentless page.
+        None => fields.push((KfxSymbol::Margin as u64, IonValue::Int(0))),
+    }
+    KfxFragment::new(
+        KfxSymbol::ExternalResource,
+        format!("e{page_index}"),
+        IonValue::Struct(fields),
+    )
 }
 
 /// Build the external_resource ($164) for the page-1 cover JPEG: a loose image
@@ -5661,7 +5744,7 @@ fn build_pdf_container_entity_map_fragment(
             KfxSymbol::ContainerList as u64,
             IonValue::List(vec![container_entry]),
         )]);
-        return KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion);
+        return KfxFragment::container_entity_map(ion);
     };
 
     let mut dependencies: Vec<IonValue> = Vec::with_capacity(recs.len() * 2);
@@ -5707,7 +5790,7 @@ fn build_pdf_container_entity_map_fragment(
             IonValue::List(dependencies),
         ),
     ]);
-    KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion)
+    KfxFragment::container_entity_map(ion)
 }
 
 #[cfg(test)]

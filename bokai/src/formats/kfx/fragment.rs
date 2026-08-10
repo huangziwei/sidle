@@ -75,6 +75,19 @@ impl KfxFragment {
         }
     }
 
+    /// The `container_entity_map` singleton, carrying the Ion annotation Amazon
+    /// puts on it.
+    ///
+    /// This is the one annotated fragment in a KFX container — verified across a
+    /// Send-to-Kindle build, where `container_entity_map::{…}` is the only
+    /// `type::` prefix in 2124 entities. Readers reach the struct through
+    /// [`IonValue::unwrap_annotated`] either way; matching it keeps a written
+    /// container byte-comparable with Amazon's.
+    pub fn container_entity_map(value: IonValue) -> Self {
+        let ftype = KfxSymbol::ContainerEntityMap as u64;
+        Self::singleton(ftype, IonValue::Annotated(vec![ftype], Box::new(value)))
+    }
+
     /// Check if this is a singleton fragment.
     pub fn is_singleton(&self) -> bool {
         self.fid == format!("${}", self.ftype)
