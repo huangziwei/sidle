@@ -33,9 +33,23 @@ rand = "0.9"
 hex = "0.4"
 mime_guess = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# axum-server: the TLS listener. `tls-rustls-no-provider` rather than
+# `tls-rustls` because the latter pulls `aws-lc-rs`, whose cmake/C build would be
+# a new toolchain requirement — `ring` is already in the workspace graph (via
+# reqwest in src-tauri), so we install that provider explicitly instead and add
+# no C dependency that wasn't already there.
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The TLS test drives the server with the *device's* client stack, not the
+# host's: ureq 3 with the pure-Rust RustCrypto provider and our CA as the sole
+# root. Using reqwest/ring here would prove the server speaks TLS to something,
+# which isn't the question — the question is whether the constrained client that
+# has to accept our leaf actually does.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
+rustls-rustcrypto = "0.0.2-alpha"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 # `Router::oneshot` for in-process handler tests (the `/sync/annotations` gate)
 # without binding a socket — drives the full route + DefaultBodyLimit layer.

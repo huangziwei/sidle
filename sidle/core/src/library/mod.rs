@@ -24,6 +24,7 @@ pub mod relocate;
 pub mod rename;
 pub mod romaji;
 pub mod thumbnail;
+pub mod tls;
 pub mod yjr;
 
 pub use paths::LibraryPaths;

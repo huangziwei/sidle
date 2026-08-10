@@ -41,6 +41,17 @@ bokai = { path = "../../bokai", default-features = false, features = ["aozora", 
 # sidle-native we don't sweat binary size — but still feature-gate to the
 # cover formats we actually decode (jpg/png).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# rcgen: issues the private CA + server leaf for the LAN server's TLS
+# (library::tls). Host-only, so its default `ring` backend is fine — the armv7
+# picker's no-C constraint applies to the client side, not here. The
+# `x509-parser` feature is what provides `Issuer::from_ca_cert_pem`, so the
+# issuer is read from the CA actually on disk rather than re-derived from
+# parameters that could drift away from it.
+rcgen = { version = "0.14.8", features = ["x509-parser"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Reads back the certificates `library::tls` issues, to assert what actually
+# landed in the DER (SANs, issuer linkage, validity window) rather than trusting
+# that rcgen was asked for the right thing. Already in the lockfile via rcgen.
+x509-parser = "0.18"

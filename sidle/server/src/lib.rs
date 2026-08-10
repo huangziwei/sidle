@@ -23,8 +23,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use axum_server::tls_rustls::RustlsConfig;
 use rusqlite::Connection;
-use tokio::net::TcpListener;
 
 use sidle_core::library::{
     LibraryPaths, db,
@@ -99,6 +99,7 @@ pub async fn serve_with_shutdown(
         }
     });
 
+    let paths = config.paths.clone();
     let state = AppState {
         paths: config.paths,
         token: Arc::from(config.token),
@@ -106,17 +107,63 @@ pub async fn serve_with_shutdown(
 
     let app = build_router(state);
 
-    let listener = TcpListener::bind(&config.bind)
+    // rustls 0.23 needs a process-wide default provider before any config is
+    // built. `ring` rather than aws-lc-rs: it is already in the workspace graph,
+    // so this adds no new C build. Erroring means someone else installed one
+    // first (the embedded case), which is fine — theirs wins and works.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Fail loudly when the material is missing rather than falling back to
+    // plaintext: a server that quietly serves HTTP is exactly the outcome TLS
+    // exists to prevent, and the token would ride in the clear on every request
+    // without anything visibly wrong.
+    let tls = RustlsConfig::from_pem_file(paths.server_cert(), paths.server_key())
         .await
+        .with_context(|| {
+            format!(
+                "load TLS material ({} / {}) — run the desktop app once to issue it",
+                paths.server_cert().display(),
+                paths.server_key().display()
+            )
+        })?;
+
+    // std listener, not tokio's: `from_tcp_rustls` takes it, and binding here
+    // lets us log the port the OS actually chose (a `:0` bind in tests) before
+    // handing it over.
+    let listener = std::net::TcpListener::bind(&config.bind)
         .with_context(|| format!("bind {}", config.bind))?;
+    listener
+        .set_nonblocking(true)
+        .context("set listener nonblocking")?;
     let local = listener.local_addr()?;
-    tracing::info!("sidle-server listening on http://{local}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+    tracing::info!("sidle-server listening on https://{local}");
+
+    // axum-server drains via a `Handle` rather than a shutdown future, so bridge
+    // the two: the caller's future still decides *when*, and in-flight requests
+    // still get to finish. The timeout bounds a wedged request so a stop can't
+    // hang forever — SIGTERM callers (the app's stop, sakabar, plain `kill`)
+    // expect the process to actually go away.
+    let handle = axum_server::Handle::new();
+    let drain = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::info!("sidle-server: draining in-flight requests");
+        drain.graceful_shutdown(Some(SHUTDOWN_GRACE));
+    });
+
+    axum_server::from_tcp_rustls(listener, tls)
+        .context("adopt TCP listener for TLS")?
+        .handle(handle)
+        .serve(app.into_make_service())
         .await
-        .context("axum::serve")?;
+        .context("axum_server::serve")?;
     Ok(())
 }
+
+/// How long a drain waits for in-flight requests before the listener closes
+/// regardless. Generous enough for a book download to finish on a slow device
+/// link, short enough that a stop is still a stop.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 32 MB body cap on `POST /sync/annotations` and `POST /sync/reading-log`. A
 /// whole library's `.yjr`/`.yjf` sidecars (KB each) fit with generous headroom,
@@ -1327,18 +1374,50 @@ mod tests {
             .port()
     }
 
-    /// Graceful shutdown: the daemon serves `GET /` (200), then when the
-    /// shutdown future resolves `serve_with_shutdown` returns `Ok(())` and frees
-    /// the port — versus the old `axum::serve(..).await`, which only returned on
-    /// a bind error. This is the wiring SIGTERM/sakabar-stop/app-stop all rely
-    /// on; true in-flight-request drain timing is exercised by the live gate.
+    /// A client built exactly the way the Kindle picker will be: the pure-Rust
+    /// RustCrypto provider, and our own CA as the *sole* trust root — no public
+    /// roots at all, so a certificate from anywhere else cannot satisfy it.
+    ///
+    /// Sharing the device's stack is the point. A test that used the host's
+    /// reqwest/ring client would prove the server serves TLS to *something*,
+    /// which is not the question; the question is whether the leaf we issue is
+    /// accepted by the constrained client that has to accept it.
+    fn device_shaped_agent(ca_pem: &str) -> ureq::Agent {
+        use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+        let ca = Certificate::from_pem(ca_pem.as_bytes()).expect("parse CA pem");
+        ureq::Agent::config_builder()
+            .tls_config(
+                TlsConfig::builder()
+                    .provider(TlsProvider::Rustls)
+                    .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
+                    .root_certs(RootCerts::Specific(Arc::new(vec![ca])))
+                    .build(),
+            )
+            .build()
+            .new_agent()
+    }
+
+    /// Graceful shutdown, over a real TLS handshake: the daemon serves `GET /`
+    /// (200) to a client that trusts only our CA, then when the shutdown future
+    /// resolves `serve_with_shutdown` returns `Ok(())` and frees the port.
+    ///
+    /// This is simultaneously the proof that the whole certificate path works —
+    /// `library::tls` issues a leaf, the server presents it, and the device's
+    /// exact client stack validates it against the pinned root, including the
+    /// `127.0.0.1` IP SAN. Nothing about that is verifiable from the cert bytes
+    /// alone, which is why it lives here rather than in sidle-core.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn graceful_shutdown_returns_ok_and_frees_port() {
+    async fn serves_tls_to_a_pinned_client_then_shuts_down_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths {
             root: tmp.path().to_path_buf(),
         };
         paths.ensure().unwrap();
+        // The server refuses to start without material, so issue it the same way
+        // the desktop app will.
+        sidle_core::library::tls::issue_server_cert(&paths, &["127.0.0.1".to_string()]).unwrap();
+        let ca_pem = sidle_core::library::tls::ca_cert_pem(&paths).unwrap();
+
         let token = load_or_generate_token(&paths.root).unwrap();
         let port = pick_free_port();
         let config = Config {
@@ -1352,30 +1431,28 @@ mod tests {
             let _ = rx.await;
         }));
 
-        // Prove it serves HTTP, with a blocking std client off the runtime so we
-        // don't need tokio's io-util ext traits. Retries until the spawned axum
-        // task has bound + is accepting.
+        // ureq is blocking, so drive it off the runtime. Retries until the
+        // spawned task has bound and is accepting.
         let served = tokio::task::spawn_blocking(move || {
-            use std::io::{Read, Write};
             use std::time::{Duration, Instant};
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let agent = device_shaped_agent(&ca_pem);
+            let url = format!("https://127.0.0.1:{port}/");
+            let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                        .unwrap();
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    return buf.starts_with("HTTP/1.1 200");
+                match agent.get(&url).call() {
+                    Ok(res) => return Ok(res.status().as_u16()),
+                    Err(e) if Instant::now() > deadline => return Err(e.to_string()),
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
-                if Instant::now() > deadline {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(20));
             }
         })
         .await
         .unwrap();
-        assert!(served, "daemon never served a 200 on /");
+        assert_eq!(
+            served,
+            Ok(200),
+            "pinned client could not complete a TLS request against the issued leaf"
+        );
 
         // Fire shutdown → serve_with_shutdown must return Ok promptly.
         tx.send(()).unwrap();

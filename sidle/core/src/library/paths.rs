@@ -209,6 +209,34 @@ impl LibraryPaths {
         self.root.join("device-dist")
     }
 
+    /// TLS material for the LAN server: the private CA and the server leaf it
+    /// signs. Keyed off the active library root for the same reason as
+    /// [`device_dist`](Self::device_dist) — the app issues, the server reads.
+    pub fn tls_dir(&self) -> PathBuf {
+        self.root.join("tls")
+    }
+
+    /// The private CA certificate. This is the one file that also travels to the
+    /// device (as `etc/ca.pem`), where it is the picker's *sole* trust root.
+    pub fn ca_cert(&self) -> PathBuf {
+        self.tls_dir().join("ca.pem")
+    }
+
+    /// The CA's private key. Never leaves this machine; 0600.
+    pub fn ca_key(&self) -> PathBuf {
+        self.tls_dir().join("ca-key.pem")
+    }
+
+    /// The server leaf, re-issued whenever the addresses it must cover change.
+    pub fn server_cert(&self) -> PathBuf {
+        self.tls_dir().join("server.pem")
+    }
+
+    /// The server leaf's private key; 0600.
+    pub fn server_key(&self) -> PathBuf {
+        self.tls_dir().join("server-key.pem")
+    }
+
     /// Ensure base subdirectories exist.
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
