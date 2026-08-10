@@ -474,9 +474,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v15: the exclusive end of the book's position axis, cached because
     // deriving it means parsing the whole KFX (seconds per book, minutes across
     // a library). NULL means "not computed yet" — no book legitimately has a
-    // NULL extent — so [`books_missing_max_position`] can fill it incrementally
-    // and new imports need no change. Devices report the *last valid* position,
-    // one less than this; see `max_position_matches`.
+    // NULL extent — so [`books_missing_max_position`] can fill it incrementally.
+    // A new book is measured as its KFX is produced, because a row that waits
+    // for the sweep is a book whose reading is attributed to nothing in the
+    // meantime. Devices report the *last valid* position, one less than this;
+    // see `max_position_matches`.
     if !has_column(conn, "books", "max_position")? {
         conn.execute("ALTER TABLE books ADD COLUMN max_position INTEGER", [])?;
     }

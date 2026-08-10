@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::device::Transport;
 use crate::device::deploy::{self, DeploySource};
 use crate::device::monitor::{self, DeviceState};
-use crate::library::{LibraryPaths, db};
+use crate::library::{LibraryPaths, db, extent};
 use crate::queue::{self, QueueHandle};
 use crate::server::ServerHandle;
 
@@ -197,6 +197,53 @@ impl AppState {
             let q = queue.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = q.enqueue(id).await;
+            });
+        }
+
+        // Index the position axis of any book still missing one, so the Reading
+        // Log can attribute the sessions a Kindle reports against it. The
+        // conversion worker fills this as books arrive; this is the catch-up for
+        // rows that predate that, and the safety net for one that slipped.
+        //
+        // Deliberately not part of `bootstrap`'s body: a library that has never
+        // been indexed is minutes of container parsing, which must not stand
+        // between the user and their gallery. Backgrounded, and one book at a
+        // time — the parse happens off the lock and the connection is taken only
+        // to store the answer, so a long catch-up never holds the database
+        // against the app around it.
+        {
+            let db = db.clone();
+            tauri::async_runtime::spawn(async move {
+                let pending = {
+                    let conn = db.lock().await;
+                    db::books_missing_max_position(&conn).unwrap_or_default()
+                };
+                if pending.is_empty() {
+                    return;
+                }
+                eprintln!("[sidle/bootstrap] extent: indexing {} books", pending.len());
+                for (book_id, kfx_path) in pending {
+                    let extent =
+                        tauri::async_runtime::spawn_blocking(move || extent::of_file(&kfx_path))
+                            .await
+                            .unwrap_or(None);
+                    let conn = db.lock().await;
+                    if let Err(e) = db::set_max_position(&conn, book_id, extent) {
+                        eprintln!("[sidle/bootstrap] extent: book {book_id} not stored: {e}");
+                    }
+                }
+                // Newly indexed books are new answers to sessions already
+                // stored against a position nothing could be matched to. Without
+                // this the reading they account for stays invisible until the
+                // next Kindle sync happens to run the same pass.
+                let conn = db.lock().await;
+                match db::resolve_reading_sessions(&conn) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[sidle/bootstrap] extent: done, {n} reading sessions attributed")
+                    }
+                    Ok(_) => eprintln!("[sidle/bootstrap] extent: done"),
+                    Err(e) => eprintln!("[sidle/bootstrap] extent: done, attribution failed: {e}"),
+                }
             });
         }
 

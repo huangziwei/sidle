@@ -182,11 +182,17 @@ fn phase_band(phase: &str) -> (f32, f32) {
 /// attributed.
 ///
 /// The extent index is built first because attribution is meaningless without
-/// it. That is the slow half — minutes across a large library on the first run,
-/// nothing on every run after — which is why this reports progress, takes a
-/// cancel, and runs off the async runtime's worker: it is CPU-bound work
-/// holding the DB lock, and blocking a runtime thread with it would stall every
-/// other command.
+/// it, and this route lands a bulk of history at once — an unindexed library
+/// would take all of it unattributed. That is the slow half — minutes across a
+/// large library on the first run, nothing on every run after — which is why
+/// this reports progress, takes a cancel, and runs off the async runtime's
+/// worker: it is CPU-bound work holding the DB lock, and blocking a runtime
+/// thread with it would stall every other command.
+///
+/// It is not how the column normally gets filled. This import is a warm start
+/// for a library with a backlog of archives to pull in, which most never have;
+/// the everyday filling happens as books are converted and in the background
+/// sweep at app start (see [`extent`]).
 #[tauri::command]
 pub async fn reading_log_import(
     app: tauri::AppHandle,

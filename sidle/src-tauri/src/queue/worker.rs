@@ -15,6 +15,7 @@ use crate::cover_fetch;
 use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
+use crate::library::extent;
 use crate::library::import::{
     extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_bytes, sha256_of_file,
     write_bytes_atomic,
@@ -243,6 +244,49 @@ pub async fn run_job(
             let _ = db::set_asin(&conn, book_id, asin);
         }
     }
+
+    // Cache the book's position axis, which is what lets the Reading Log
+    // recognise it: a Kindle's session log names no book, only the position it
+    // stopped at, so a book with no cached extent can never be attributed and
+    // the time read on it is counted nowhere.
+    //
+    // Measured here because a conversion is the one moment the axis is created
+    // or changes, and because the alternative — waiting for a sweep — means a
+    // book read on the day it was added counts for nothing until then. Every
+    // route into the library ends in a job, so this covers all of them; the
+    // catch-up sweep at boot exists for rows that predate it.
+    //
+    // Whichever KFX the row will point at: the one just produced (epub→kfx), or
+    // the imported source the other direction derives from (and whose bytes the
+    // cover swap above may have rewritten). Off the lock and off the runtime —
+    // it parses the whole container.
+    let indexed = produced
+        .kfx_path
+        .clone()
+        .or_else(|| book.kfx_path.as_deref().map(PathBuf::from));
+    if let Some(kfx) = indexed {
+        let extent = tokio::task::spawn_blocking(move || extent::of_file(&kfx))
+            .await
+            .unwrap_or(None);
+        // `None` is stored too (as 0, "this file has no axis") — the honest
+        // answer for a container without a position map, and the value a
+        // re-convert must overwrite a stale extent with.
+        if extent.is_none() {
+            eprintln!(
+                "[sidle/queue] book {book_id}: no position map in the produced KFX; \
+                 reading time on this book cannot be attributed"
+            );
+        }
+        let conn = db.lock().await;
+        let _ = db::set_max_position(&conn, book_id, extent);
+        // A book that can now be recognised may be the answer to sessions
+        // already stored against a position that matched nothing — reading done
+        // on a Kindle before the desktop finished converting the same book.
+        if extent.is_some() {
+            let _ = db::resolve_reading_sessions(&conn);
+        }
+    }
+
     eprintln!(
         "[sidle/queue] book {book_id} done in {:.2}s",
         started.elapsed().as_secs_f32()

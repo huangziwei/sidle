@@ -11,6 +11,24 @@
 //! of thousand books takes minutes to index, which is fine in the background and
 //! unacceptable while opening the app. Rows are filled once and then skipped, so
 //! steady state is only whatever was imported since the last pass.
+//!
+//! **A book is measured when its KFX is produced**, which is the only moment its
+//! axis can change and the only one early enough to matter: a book read the day
+//! it was added is attributable only if it was indexed before that day's reading
+//! was synced, and the everyday case is a device that reports its reading within
+//! hours. The app also sweeps whatever is still missing in the background at
+//! start, which covers rows written before anything filled the column.
+//!
+//! [`backfill`] is that same work with progress reporting, for the one path that
+//! wants it done *before* a bulk of history lands — the manual archive import.
+//! That import is a warm-start and testing route that most libraries never take,
+//! so **nothing may depend on it having run**: a column filled only there is a
+//! column that is empty on a normal install.
+//!
+//! An extent that arrives late is not lost time. A session whose position
+//! matched nothing is kept, unattributed, and re-examined on every attribution
+//! pass, so indexing a book later retroactively claims the reading already
+//! recorded against it.
 
 use bokai::model::{Book, Format};
 use rusqlite::Connection;
@@ -39,6 +57,16 @@ pub fn of_kfx(bytes: &[u8]) -> Option<i64> {
     let mut book = Book::from_bytes(bytes, Format::Kfx).ok()?;
     let positions = book.position_map()?;
     Some(positions.max_position())
+}
+
+/// The extent of the KFX at `path`, or `None` when the file cannot be read or
+/// carries no position map.
+///
+/// The half of indexing that touches no database. Split out because it is the
+/// expensive half — a whole container parsed — and every caller but the
+/// user-driven [`backfill`] does it while something else holds the connection.
+pub fn of_file(path: impl AsRef<std::path::Path>) -> Option<i64> {
+    std::fs::read(path).ok().and_then(|bytes| of_kfx(&bytes))
 }
 
 /// Compute and store the extent for every book that lacks one.
@@ -71,7 +99,7 @@ pub fn backfill(conn: &Connection, watch: job::Watch<'_>) -> rusqlite::Result<Fi
             out.cancelled = true;
             break;
         }
-        let extent = std::fs::read(&kfx_path).ok().and_then(|b| of_kfx(&b));
+        let extent = of_file(&kfx_path);
         if extent.is_some() {
             out.indexed += 1;
         } else {
