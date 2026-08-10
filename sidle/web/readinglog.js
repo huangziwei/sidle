@@ -3,7 +3,9 @@
 // Classic script loaded AFTER library.js. Self-contained IIFE exposing
 // `window.ReadingLog` ({ refresh, show, hide, invalidate }); library.js's
 // section toggle drives show/hide. Backend: commands/reading_log.rs —
-// reading_log_overview / _day / _book / _import.
+// reading_log_overview / _books / _book / _import / _clear / _cancel /
+// _pick_folders, plus commands/reader.rs's `annotations_for_book` for the
+// highlights and notes on a book's page.
 //
 // The data behind this comes from the Kindle's own system logs, which name no
 // book: every session is identified by the book's end position and matched
@@ -25,6 +27,8 @@
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
+    notes: [], // that book's annotations, as `annotations_for_book` returns them
+    notesFailed: false, // that query failed, so an empty list means "unknown"
     month: null, // Date anchoring the book page's calendar
     overviewScroll: 0, // where the overview was left when a book was opened
   };
@@ -453,9 +457,23 @@
     // the card the user pressed was on screen.
     const from = scroller().scrollTop;
     try {
-      const data = await api.invoke("reading_log_book", { bookId });
+      // The annotations are the reader's own query — one book's highlights and
+      // notes, already grouped — so this page and the reader's sidebar can never
+      // disagree about what the book carries. A failure there is reported but
+      // does not hold up the reading history, which is what the page is for.
+      let failed = false;
+      const [data, notes] = await Promise.all([
+        api.invoke("reading_log_book", { bookId }),
+        api.invoke("annotations_for_book", { bookId }).catch((e) => {
+          toast(`failed to load highlights: ${e}`, true);
+          failed = true;
+          return [];
+        }),
+      ]);
       state.overviewScroll = from;
       state.book = { id: bookId, ...data };
+      state.notes = notes || [];
+      state.notesFailed = failed;
       const last = data.days.length ? parseDay(data.days[data.days.length - 1].day) : new Date();
       state.month = new Date(last.getFullYear(), last.getMonth(), 1);
       render();
@@ -505,6 +523,7 @@
       q("#rl-book-stats").innerHTML = "";
     }
     renderMonth();
+    renderNotes();
   }
 
   // One figure as a label/value row. A vertical list beside the calendar reads
@@ -582,6 +601,109 @@
       );
     }
     q("#rl-month-grid").innerHTML = cells.join("");
+  }
+
+  // ── Highlights and notes ───────────────────────────────────────────────────
+  //
+  // Everything the book carries, on one page, the way a Kindle's own notebook
+  // page shows it: the passages in reading order, each note under the passage it
+  // annotates. Nothing here is editable — the reader owns that, and a record of
+  // what was read has no business rewriting it.
+
+  // The edge colour of a row: the colour the reader paints that mark, resolved
+  // by the reader itself so the two can't disagree — including the yellow it
+  // gives a highlight the device left colourless. Only a hex value is passed on,
+  // because it lands in a `style` attribute and `color` arrives from a file the
+  // device wrote; every colour a Kindle names is one, so the guard costs
+  // nothing and an exotic literal simply goes unswatched.
+  function noteColor(name) {
+    const css = window.sidleReader?.highlightColor?.(name);
+    return /^#[0-9a-f]{3,8}$/i.test(css || "") ? css : null;
+  }
+
+  // "Yellow highlight" — the colour is named only when the device named it, so a
+  // literal or missing colour reads as a plain "Highlight" rather than echoing a
+  // hex value at the reader.
+  function noteKind(a) {
+    if (a.kind === "highlight") {
+      const named = a.color && window.sidleReader?.highlightColors?.[a.color];
+      return named ? `${a.color[0].toUpperCase()}${a.color.slice(1)} highlight` : "Highlight";
+    }
+    if (a.kind === "note") return "Note";
+    if (a.kind === "bookmark") return "Bookmark";
+    return a.kind;
+  }
+
+  // When the Kindle says the mark was made. The year is shown only when it is
+  // not this one, so the common case stays short. Blank for a row imported
+  // before Sidle kept the stamp — no date beats the import date pretending to
+  // be one.
+  function noteWhen(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(sameYear ? {} : { year: "numeric" }),
+    });
+  }
+
+  // The notes written against one highlight. A highlight can carry several —
+  // one added in Sidle, others on the Kindle — and they belong under the passage
+  // rather than as entries of their own. A hidden one is left out here as it is
+  // anywhere else; the count beside the heading is what says it exists.
+  function notesOn(a) {
+    return state.notes.filter((n) => n.attached_to === a.id && !n.hidden);
+  }
+
+  // "43 highlights · 2 notes". Bookmarks are counted separately and only when
+  // there are any: on most books the word would just be a zero.
+  function noteCounts(rows, hidden) {
+    const parts = [];
+    for (const kind of ["highlight", "note", "bookmark"]) {
+      const n = rows.filter((a) => a.kind === kind).length;
+      if (n) parts.push(`${n} ${kind}${n === 1 ? "" : "s"}`);
+    }
+    // Hidden rows are curated out of the reader, so they are curated out here
+    // too — but silently dropping them would make the count contradict the book.
+    if (hidden) parts.push(`${hidden} hidden`);
+    return parts.join(" · ");
+  }
+
+  function noteRow(a) {
+    const color = a.kind === "highlight" ? noteColor(a.color) : null;
+    const style = color ? ` style="--rl-note-color: ${esc(color)}"` : "";
+    const when = noteWhen(a.added_at);
+    // The row's own body, then every note hanging off it.
+    const bodies = [a.note_body, ...notesOn(a).map((n) => n.note_body)].filter(Boolean);
+    return (
+      `<li class="rl-note rl-note-${esc(a.kind)}"${style}>` +
+      `<div class="rl-note-head"><span class="rl-note-kind">${esc(noteKind(a))}</span>` +
+      `<span>${esc(when)}</span></div>` +
+      // A bookmark marks a place and quotes nothing; so does a highlight whose
+      // text the sidecar could not resolve. Either way there is no quote to draw.
+      (a.text ? `<p class="rl-note-text">${esc(a.text)}</p>` : "") +
+      bodies.map((b) => `<div class="rl-note-body">${esc(b)}</div>`).join("") +
+      `</li>`
+    );
+  }
+
+  function renderNotes() {
+    const rows = state.notes.filter((a) => !a.hidden);
+    // A note attached to a highlight is drawn inside that highlight's row, so it
+    // is not also a row of its own.
+    const listed = rows.filter((a) => a.attached_to == null);
+    const hidden = state.notes.length - rows.length;
+    q("#rl-notes-count").textContent = noteCounts(rows, hidden);
+    // The hint says how highlights get here, so it belongs only to a book that
+    // has none at all — a book whose every mark is hidden has them, and the
+    // count beside the heading already says so. A failed query leaves the
+    // section blank rather than telling the user a book carries nothing when
+    // what actually happened was that nothing could be read.
+    q("#rl-notes-empty").hidden = state.notes.length > 0 || state.notesFailed;
+    q("#rl-notes-list").innerHTML = listed.map(noteRow).join("");
   }
 
   // ── Import ─────────────────────────────────────────────────────────────────

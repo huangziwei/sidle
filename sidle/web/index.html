@@ -317,9 +317,9 @@
         </div>
 
         <!-- One book. The identity (cover, title, figures) is a column of its
-             own so the calendar can have the rest of the width; the figures
-             stack vertically down the side rather than running off in a strip
-             of boxes. -->
+             own so the calendar and the annotations can have the rest of the
+             width; the figures stack vertically down the side rather than
+             running off in a strip of boxes. -->
         <div id="rl-book" hidden>
           <button id="rl-back" class="rl-back">‹ Reading Log</button>
           <div class="rl-book-layout">
@@ -329,15 +329,35 @@
               <span id="rl-book-author" class="rl-muted"></span>
               <dl id="rl-book-stats" class="rl-facts"></dl>
             </aside>
-            <div class="rl-month">
-              <!-- Bounded by this book's own reading: no arrow leads to a month
-                   it was never opened in. -->
-              <header id="rl-month-nav" class="rl-month-head rl-nav">
-                <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
-                <strong id="rl-month-label"></strong>
-                <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
-              </header>
-              <div id="rl-month-grid" class="rl-month-grid"></div>
+            <!-- When it was read, then what was marked while reading it: both
+                 are records of this book, so they share the wide column and the
+                 identity beside them serves both. -->
+            <div class="rl-book-main">
+              <div class="rl-month">
+                <!-- Bounded by this book's own reading: no arrow leads to a month
+                     it was never opened in. -->
+                <header id="rl-month-nav" class="rl-month-head rl-nav">
+                  <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
+                  <strong id="rl-month-label"></strong>
+                  <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
+                </header>
+                <div id="rl-month-grid" class="rl-month-grid"></div>
+              </div>
+
+              <!-- Every highlight and note this book carries, in reading order.
+                   The same set the reader's sidebar lists, laid out to be read
+                   in full rather than skimmed three lines at a time. -->
+              <section class="rl-notes">
+                <header class="rl-group-head">
+                  <strong>Highlights &amp; notes</strong>
+                  <span id="rl-notes-count" class="rl-muted"></span>
+                </header>
+                <ol id="rl-notes-list" class="rl-note-list"></ol>
+                <p id="rl-notes-empty" class="rl-notes-empty" hidden>
+                  Nothing marked in this book. Highlights and notes come off a Kindle
+                  when it is connected, and are kept here even after the device drops them.
+                </p>
+              </section>
             </div>
           </div>
         </div>

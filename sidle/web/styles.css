@@ -4554,14 +4554,23 @@ kbd {
 }
 .rl-back:hover { color: var(--fg); }
 
-/* Identity down one side, calendar filling the rest. The side column is sized
-   to a readable cover; the calendar takes everything left over, which is what
-   the old fixed-width one was wasting. */
+/* Identity down one side, the book's own records filling the rest. The side
+   column is sized to a readable cover; the calendar and the annotations under it
+   take everything left over, which is what the old fixed-width one was wasting. */
 .rl-book-layout {
   display: grid;
   grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
   gap: 28px;
   align-items: start;
+}
+
+/* `min-width: 0` so a long unbroken highlight scrolls its own row rather than
+   widening the grid column and pushing the page sideways. */
+.rl-book-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
 }
 
 @media (max-width: 860px) {
@@ -4656,6 +4665,77 @@ kbd {
 /* Filled days carry white text on the two darkest steps, where the accent red
    is dark enough that body colour would fail contrast. */
 .rl-mday.rl-l3, .rl-mday.rl-l4 { color: #fff; }
+
+/* ── Highlights and notes (book page) ────────────────────────────────────────
+   The reader's sidebar clamps a quote to three lines because it is a jump list
+   beside the book. This is the page where a highlight is read instead, so
+   nothing is truncated and the column is held to a measure rather than stretched
+   across a wide window. */
+.rl-note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 78ch;
+}
+
+/* The coloured edge IS the colour of the mark in the book — set per row from
+   the reader's palette. A row without one (a bookmark, a note standing alone)
+   falls back to the ordinary border, so the edge never claims a colour the
+   device did not give. */
+.rl-note {
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--rl-note-color, var(--border-strong));
+  border-radius: var(--radius);
+}
+
+.rl-note-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.rl-note-kind { text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* `pre-wrap`: the paragraph breaks inside a long highlight are the book's own,
+   and a typed note is written in lines. `overflow-wrap` so an unbroken run — a
+   URL, a language that does not space its words — wraps instead of overflowing. */
+.rl-note-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* A note is the reader's own voice, so it reads against the passage above it
+   rather than as more of it. */
+.rl-note-body {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.rl-notes-empty {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
 
 /* The Reading Log entry point: a standalone pill at the far upper-left, the
    mirror of the Kindle pill on the right. It is deliberately not a member of

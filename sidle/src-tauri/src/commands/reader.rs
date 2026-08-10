@@ -705,6 +705,12 @@ pub struct AnnotationDto {
     pub color: Option<String>,
     /// `"yjr"` | `"clippings"` — provenance.
     pub source: String,
+    /// When the device says the annotation was made (ISO-8601), when it kept a
+    /// stamp. The only dated evidence of *when* a passage was marked, which is
+    /// what dates it on a page that lists a book's annotations rather than
+    /// painting them. `None` on a row that predates the stamp being stored —
+    /// never a guess from the import time.
+    pub added_at: Option<String>,
     /// Reversible "hidden from the reader" flag (kept in the backup).
     pub hidden: bool,
     /// For a `note`, the id of the highlight it annotates, when one encloses it.
@@ -731,6 +737,7 @@ impl From<AnnotationRow> for AnnotationDto {
             note_body: a.note_body,
             color: a.color,
             source: a.source,
+            added_at: a.added_at,
             hidden: a.hidden,
             attached_to: None,
         }

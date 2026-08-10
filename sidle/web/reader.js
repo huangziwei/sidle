@@ -347,11 +347,21 @@ function revealTopbar() {
   scheduleTopbarHide();
 }
 
-// Named Kindle highlight colors → CSS; falls back to a literal color or yellow.
+// Named Kindle highlight colors → CSS. Published with its resolver on
+// `window.sidleReader` (see the export at the foot of the file) so anything
+// listing annotations outside the reader colors them the way they are painted,
+// rather than keeping a second palette that could drift from this one.
 const COLORS = { yellow: "#f4d03f", blue: "#5dade2", pink: "#ec7fa9", orange: "#e59866" };
 const NOTE_CUE = "#b5651d"; // edge line marking a highlight that carries a note
 const BOOKMARK_COLOR = "#e07b39";
 const KIND_ICON = { highlight: "🖍", note: "📝", bookmark: "🔖" };
+
+// The CSS color a stored `color` is painted in: a Kindle color name, else the
+// value itself if the source wrote a literal one, else yellow — what a device
+// means by a highlight it gave no color.
+function highlightColor(name) {
+  return (name && COLORS[name]) || name || COLORS.yellow;
+}
 
 const NS = "http://www.w3.org/2000/svg";
 const svgEl = (tag) => document.createElementNS(NS, tag);
@@ -526,7 +536,7 @@ function paintAnnotations(doc, overlayer) {
       continue;
     }
     if (!annotationRects(doc, ann).length) continue; // not in this section
-    const color = (ann.color && COLORS[ann.color]) || ann.color || COLORS.yellow;
+    const color = highlightColor(ann.color);
     // overlayer.add (and redraw on resize) calls range.getClientRects(); hand it
     // a range-like that recomputes our per-element rects each time.
     const rangeLike = { getClientRects: () => annotationRects(doc, ann) };
@@ -1108,7 +1118,13 @@ function annotationRow(ann) {
   // The row's own body, then every note attached to it. A highlight may carry
   // several — one written here, others added on the Kindle — and they belong
   // under the passage they annotate, not as separate entries in the list.
-  for (const text of [ann.note_body, ...notesFor(ann).map((n) => n.note_body)]) {
+  //
+  // An attached note obeys "Show hidden" like any other row. It has no row of
+  // its own to carry a Hide button, so it can only be hidden while standing
+  // alone and then enclosed by a later highlight — printing it here regardless
+  // would make hiding it silently stop meaning anything.
+  const attached = notesFor(ann).filter((n) => showHidden || !n.hidden);
+  for (const text of [ann.note_body, ...attached.map((n) => n.note_body)]) {
     if (!text) continue;
     const note = document.createElement("div");
     note.className = "ann-note";
@@ -4454,4 +4470,16 @@ if (document.readyState === "loading") {
   wire();
 }
 
-window.sidleReader = { open, close, openNotebook, isNotebookOpen, reloadAnnotations };
+// The palette goes out alongside the resolver because a caller listing
+// annotations needs both: the color to swatch a row with, and whether a stored
+// name is one the device writes — a highlight is labelled "Yellow highlight"
+// only when the device said yellow, never by echoing a raw value back.
+window.sidleReader = {
+  open,
+  close,
+  openNotebook,
+  isNotebookOpen,
+  reloadAnnotations,
+  highlightColor,
+  highlightColors: COLORS,
+};
