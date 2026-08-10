@@ -327,12 +327,10 @@ impl Framebuffer {
     /// Two distinct problems live in this queue, and nothing used to read it.
     ///
     /// **Exposures.** We select `EXPOSURE` when creating the window, but with the
-    /// queue unread the damage was never repaired. On the Scribe that shows on
-    /// every launch: the framework paints over our window as it hands off, and
-    /// the bottom strip stays blank — drawn and hit-testable, but absent from the
-    /// panel — until some unrelated interaction forces a full repaint.
-    /// `backing_store(ALWAYS)` is only a hint and this server does not honour it,
-    /// so the redraw has to be ours.
+    /// queue unread the damage was never repaired: the framework paints over our
+    /// window as it hands off, and nothing puts it back. We do not ask for
+    /// backing store (see `open` for why that request is actively harmful here),
+    /// so repairing damage is our job and this is how we learn of it.
     ///
     /// **Errors.** `put_image` returns a `VoidCookie`, so a rejected request is
     /// reported *asynchronously here*, not at the call site — `?` on the send

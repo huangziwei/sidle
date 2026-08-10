@@ -656,13 +656,20 @@ mod tests {
     /// The 7" panels must come out of the adaptive path with exactly the layout
     /// they had when it was three hard-coded constants — otherwise this is a
     /// redesign of the shipped devices, not an accommodation of a new one.
+    ///
+    /// Both geometries are checked because they are not the same: a Colorsoft
+    /// reports 1272×1696 (measured off the device, not the 1264×1680 the older
+    /// comments assume), and a rule that only held for the rounder number would
+    /// be a rule that held for no real device.
     #[test]
     fn seven_inch_panels_are_unchanged() {
-        let l = Layout::compute(1264, 1680, 190, 80);
-        assert_eq!((l.cols, l.rows), (3, 3));
-        assert_eq!(l.cell_h, CELL_H_MAX, "cell height must not shrink here");
-        assert_eq!(l.page_size(), 9);
-        assert_eq!(l.left, 60, "grid stays centred where it was");
+        for (w, h, expect_left) in [(1264u32, 1680u32, 60i32), (1272, 1696, 64)] {
+            let l = Layout::compute(w, h, 190, 80);
+            assert_eq!((l.cols, l.rows), (3, 3), "{w}x{h}");
+            assert_eq!(l.cell_h, CELL_H_MAX, "{w}x{h}: cell height must not shrink");
+            assert_eq!(l.page_size(), 9, "{w}x{h}");
+            assert_eq!(l.left, expect_left, "{w}x{h}: grid stays centred");
+        }
     }
 
     /// The Scribe's extra area buys rows, not bigger covers.

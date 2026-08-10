@@ -466,6 +466,11 @@ fn pick_from_devices(raw: &str) -> Option<String> {
     let word_bits = bitmap_word_bits(raw);
 
     let mut best: Option<(i32, String, String)> = None; // (score, event node, name)
+    // A pen-named node that would otherwise qualify, kept aside. Excluding pens
+    // outright would make this a filter, and a filter that misjudges costs the
+    // only usable device — `pen` is a substring, and some panel somewhere will
+    // contain it. Held as a last resort so a wrong guess costs a preference.
+    let mut pen_fallback: Option<(String, String)> = None;
     for block in raw.split("\n\n") {
         let name = block
             .lines()
@@ -480,17 +485,18 @@ fn pick_from_devices(raw: &str) -> Option<String> {
             continue;
         };
 
-        if PEN_NAMES.iter().any(|needle| name.contains(needle)) {
-            eprintln!("touch: skipping /dev/input/{node} (name={name:?}) — pen digitizer");
-            continue;
-        }
-
         // The power key (no EV_ABS) and accelerometers (no INPUT_PROP_DIRECT)
         // fail this, which is what keeps them out of the running.
         let has_abs = first_hex_word(block, "B: EV=") & (1 << EV_ABS_BIT) != 0;
         let is_direct = first_hex_word(block, "B: PROP=") & (1 << INPUT_PROP_DIRECT) != 0;
         let name_match = TOUCH_NAMES.iter().any(|needle| name.contains(needle));
         if !(name_match || (has_abs && is_direct)) {
+            continue;
+        }
+
+        if PEN_NAMES.iter().any(|needle| name.contains(needle)) {
+            eprintln!("touch: deferring /dev/input/{node} (name={name:?}) — looks like a pen");
+            pen_fallback.get_or_insert((node.to_string(), name));
             continue;
         }
 
@@ -509,9 +515,16 @@ fn pick_from_devices(raw: &str) -> Option<String> {
         }
     }
 
-    let (score, node, name) = best?;
-    // stderr → sidle.sh's log; confirms which node we grabbed.
-    eprintln!("touch: using /dev/input/{node} (name={name:?}, score={score})");
+    if let Some((score, node, name)) = best {
+        // stderr → sidle.sh's log; confirms which node we grabbed.
+        eprintln!("touch: using /dev/input/{node} (name={name:?}, score={score})");
+        return Some(node);
+    }
+    // Nothing else qualified, so a pen-named node is better than no input at
+    // all — a device with an unusable picker is worse than one driven by the
+    // wrong digitizer, and the log says plainly which happened.
+    let (node, name) = pen_fallback?;
+    eprintln!("touch: using /dev/input/{node} (name={name:?}) — pen-named, but the only candidate");
     Some(node)
 }
 
@@ -677,6 +690,33 @@ B: ABS=f000003
             ABS_MT_TRACKING_ID as u32,
             word_bits
         ));
+    }
+
+    /// The pen exclusion must not be able to leave a device with no input.
+    /// `pen` is a substring, so some panel will eventually contain it, and a
+    /// picker that cannot be tapped is worse than one driven by a digitizer.
+    #[test]
+    fn a_pen_named_node_is_used_when_it_is_the_only_candidate() {
+        let only_pen = "\
+I: Bus=0018 Vendor=2d1f Product=0158 Version=1827
+N: Name=\"acme-pen-touch\"
+P: Phys=
+H: Handlers=event2 perfmgr
+B: PROP=2
+B: EV=f
+B: ABS=ee18000 0
+";
+        assert_eq!(pick_from_devices(only_pen).as_deref(), Some("event2"));
+    }
+
+    /// …but it stays a last resort: with a real panel present, the pen loses.
+    #[test]
+    fn a_pen_named_node_still_loses_to_a_real_panel() {
+        assert_eq!(
+            pick_from_devices(SCRIBE_DEVICES).as_deref(),
+            Some("event3"),
+            "the fallback must not promote the pen when something better exists"
+        );
     }
 
     /// A device with no touch node at all must report that, not pick the power
