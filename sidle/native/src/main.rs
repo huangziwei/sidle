@@ -22,6 +22,7 @@ mod dedrm;
 mod device_state;
 mod eink;
 mod font;
+mod handwriting;
 mod orientation;
 mod readinglog;
 mod search;
@@ -71,6 +72,11 @@ const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
 /// `screenshots/` (and the root itself on KOA2 stock firmware), picker logs at the
 /// root. See [`api::push_misc`].
 const MNT_US: &str = "/mnt/us";
+/// Where the firmware keeps everything the pen writes: ink drawn on sideloaded
+/// books (`<asin>!!PDOC!!notebook/`) and standalone notebooks (`<uuid>/`). Only
+/// a Scribe has it; on every other Kindle the directory simply isn't there and
+/// the scan comes back empty. See [`handwriting`].
+const NOTEBOOKS_DIR: &str = "/mnt/us/.notebooks";
 /// On-device cover thumbnail cache, under the extension dir (not documents/,
 /// so the stock indexer never sees it). See [`cover_cache`].
 const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
@@ -902,10 +908,34 @@ fn run() -> anyhow::Result<()> {
                                     let dirty = toast::draw(&mut fb, &mut renderer, "Syncing…");
                                     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                     let sync_t0 = Instant::now();
+                                    // One walk of `.notebooks/` feeds both halves of the
+                                    // handwriting sync: ink travels with the annotations
+                                    // below (it needs their anchors), notebooks go on their
+                                    // own route afterwards. Empty on a Kindle with no pen,
+                                    // which costs a failed `read_dir` and nothing else.
+                                    let hw_t0 = Instant::now();
+                                    let pen = handwriting::scan(
+                                        std::path::Path::new(NOTEBOOKS_DIR),
+                                        &library_asins(&books),
+                                    );
+                                    if !pen.ink.is_empty()
+                                        || !pen.notebooks.is_empty()
+                                        || pen.foreign > 0
+                                    {
+                                        log(format!(
+                                            "handwriting scan in {:?}: {} inked books, {} \
+                                             notebooks, {} not ours",
+                                            hw_t0.elapsed(),
+                                            pen.ink.len(),
+                                            pen.notebooks.len(),
+                                            pen.foreign
+                                        ));
+                                    }
                                     match api::push_annotations(
                                         &agent,
                                         &cfg,
                                         std::path::Path::new(DOWNLOAD_DIR),
+                                        &pen.ink,
                                     ) {
                                         Ok(report) => {
                                             let mut summary = report.summary();
@@ -931,6 +961,32 @@ fn run() -> anyhow::Result<()> {
                                                 Err(err) => {
                                                     log(format!("misc backup failed: {err}"));
                                                     summary = format!("{summary}\n(backup failed)");
+                                                }
+                                            }
+                                            // The standalone-notebook half of the pen sync.
+                                            // Its own route because a notebook is a library
+                                            // entity of its own, not something drawn on a
+                                            // book. Best-effort like the rest.
+                                            match api::push_notebooks(&agent, &cfg, &pen.notebooks)
+                                            {
+                                                Ok(nb) => {
+                                                    for f in &nb.failed {
+                                                        log(format!("notebook failed: {f}"));
+                                                    }
+                                                    if nb.suppressed > 0 {
+                                                        log(format!(
+                                                            "{} notebook(s) not restored — \
+                                                             deleted in Sidle",
+                                                            nb.suppressed
+                                                        ));
+                                                    }
+                                                    if let Some(s) = nb.summary() {
+                                                        log(format!("notebooks: {s}"));
+                                                        summary = format!("{summary}\n{s}");
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    log(format!("notebook backup failed: {err}"));
                                                 }
                                             }
                                             // Same Sync tap sends the reading sessions the
@@ -1923,6 +1979,19 @@ fn load_cover(
             None
         }
     }
+}
+
+/// The content_ids of every book in the library, which is what tells the
+/// handwriting scan whose ink is whose: the device names an ink notebook after
+/// the host book's baked content_id, and the same directory holds Amazon's cloud
+/// documents under ids that look identical.
+///
+/// Built from the boot snapshot rather than a fresh fetch. A book pushed to the
+/// device after the picker opened would be absent, but ink can only exist on a
+/// book that has been opened and drawn on, so in practice the set is complete;
+/// anything missed is counted as `foreign` in the log and picked up next launch.
+fn library_asins(books: &[api::Book]) -> std::collections::HashSet<String> {
+    books.iter().filter_map(|b| b.asin.clone()).collect()
 }
 
 /// Push every decrypted `.kfx-zip` to the desktop over the LAN, returning a

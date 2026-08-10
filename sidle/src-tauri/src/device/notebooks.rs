@@ -115,7 +115,14 @@ pub fn import_device_notebooks(
         match pull_one(transport, &root, &thumbs, name) {
             Ok(Some(p)) => {
                 let conn = db.blocking_lock();
-                match import_pulled(&conn, paths, &p) {
+                match notebook::import_notebook_bytes(
+                    &conn,
+                    paths,
+                    &p.uuid,
+                    &p.nbk,
+                    p.cover.as_deref(),
+                    &p.updated_at,
+                ) {
                     Ok(NotebookOutcome::Imported(_)) => summary.imported += 1,
                     Ok(NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
                     Ok(NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
@@ -128,37 +135,6 @@ pub fn import_device_notebooks(
     }
     on_progress(total, total);
     Ok(summary)
-}
-
-/// Stage the pulled bytes to temp files (core's `import_notebook` decodes from a
-/// path) and import. The temp dir is removed afterward, success or not.
-fn import_pulled(
-    conn: &rusqlite::Connection,
-    paths: &LibraryPaths,
-    p: &Pulled,
-) -> Result<NotebookOutcome> {
-    let tmp = std::env::temp_dir().join(format!("sidle-nbk-dev-{}", p.uuid));
-    std::fs::create_dir_all(&tmp).with_context(|| "stage notebook tempdir")?;
-    let nbk_path = tmp.join("nbk");
-    std::fs::write(&nbk_path, &p.nbk).with_context(|| "stage nbk bytes")?;
-    let cover_path = match &p.cover {
-        Some(bytes) => {
-            let cp = tmp.join("thumbnail.png");
-            std::fs::write(&cp, bytes).with_context(|| "stage cover bytes")?;
-            Some(cp)
-        }
-        None => None,
-    };
-    let out = notebook::import_notebook(
-        conn,
-        paths,
-        &p.uuid,
-        &nbk_path,
-        cover_path.as_deref(),
-        &p.updated_at,
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
-    out
 }
 
 #[cfg(test)]

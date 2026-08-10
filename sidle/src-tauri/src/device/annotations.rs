@@ -14,6 +14,7 @@ use crate::device::ink;
 use crate::device::misc;
 use crate::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
+use crate::library::ink::{handwritten_notes, import_collected_ink};
 use crate::library::{LibraryPaths, db, import, push};
 use crate::state::DbHandle;
 
@@ -208,7 +209,7 @@ pub fn import_device_annotations(
                 t.elapsed().as_secs_f32()
             );
             // The handwritten-ink anchors live in the same `.yjr`s we just pulled.
-            let notes = ink::handwritten_notes(&collected);
+            let notes = handwritten_notes(&collected);
 
             // The push plans off the same sidecars the import just read, so the
             // slow device walk happens once.
@@ -224,7 +225,7 @@ pub fn import_device_annotations(
                     &now,
                     &|cur, tot, label| on_progress("annotations", cur, tot, label),
                 )?;
-                ink::import_collected_ink(
+                import_collected_ink(
                     &conn,
                     paths,
                     &device.serial,

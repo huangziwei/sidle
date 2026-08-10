@@ -199,6 +199,7 @@ mod tests {
             series_name: None,
             series_index: None,
             kind: None,
+            asin: None,
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),

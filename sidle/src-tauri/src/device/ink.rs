@@ -3,30 +3,21 @@
 //! the host book, in the SAME pass as the annotation sync
 //! ([`crate::device::annotations::import_device_annotations`]).
 //!
-//! Like [`crate::device::annotations`], the device-side walk lives here (the
-//! [`Transport`] is an app concept); the decode → join → storage is
-//! [`sidle_core::library::ink`]. Ink is a Scribe (MTP) feature, so this runs only
-//! on the MTP path — mass-storage Kindles have no handwriting.
+//! Like [`crate::device::annotations`], only the device-side walk lives here
+//! (the [`Transport`] is an app concept); the decode → join → storage is
+//! [`sidle_core::library::ink`], which the LAN server drives too. Ink is a
+//! Scribe feature, so this runs only on the MTP path — mass-storage Kindles have
+//! no handwriting.
 
 use std::collections::HashSet;
 
 use anyhow::Result;
-use rusqlite::Connection;
 
 use crate::device::{TPath, Transport};
-use crate::library::ingest::{CollectedYjr, DeviceImportReport};
-use crate::library::yjr::{self, Annotation};
-use crate::library::{LibraryPaths, db, import, ink};
+use crate::library::ink::CollectedInk;
 
 /// `.notebooks/` child suffix marking a sideloaded-doc ink notebook.
 const PDOC_SUFFIX: &str = "!!PDOC!!notebook";
-
-/// One pulled ink notebook: the host book's content_id (`== books.asin`) + the
-/// raw `nbk` bytes.
-pub struct CollectedInk {
-    pub asin: String,
-    pub nbk_bytes: Vec<u8>,
-}
 
 /// Walk the device `.notebooks/` for OUR sideloaded-doc ink
 /// (`<content_id>!!PDOC!!notebook/nbk`) and pull each `nbk`. `known_asins` is the
@@ -72,74 +63,6 @@ fn pdoc_asin(dir_name: &str) -> Option<String> {
         .strip_suffix(PDOC_SUFFIX)
         .filter(|id| !id.is_empty())
         .map(|id| id.to_string())
-}
-
-/// Every handwritten-ink record across the collected `.yjr`s (the union), under
-/// either name a device writes one. The container-id join in
-/// [`ink::import_ink`] selects the right notes per nbk, so we needn't associate a
-/// note with a specific book here — a stray note from another book simply won't
-/// match this nbk's page containers.
-pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
-    collected
-        .iter()
-        .filter_map(|c| c.yjr_bytes.as_deref())
-        .flat_map(yjr::parse)
-        .filter(|a| matches!(a.kind, yjr::Kind::Handwritten(_)))
-        .collect()
-}
-
-/// Import the pulled ink into the library (under an already-held DB lock),
-/// folding the counts into `report`. Each notebook joins to its host book by
-/// `asin == books.asin`; an unmatched asin is skipped (the book isn't in the
-/// library — it'll sync next connect once it's added). An unchanged `nbk` (same
-/// content sha) skips the decode + raster re-render via the `ink_sync`
-/// checkpoint, exactly like the `.yjr` fast path.
-// Eight distinct inputs (db handle, paths, device id, timestamp, the two pulled
-// collections, the report sink, and the progress callback) with one call site —
-// a parameter struct would add indirection without removing any real coupling.
-#[allow(clippy::too_many_arguments)]
-pub fn import_collected_ink(
-    conn: &Connection,
-    paths: &LibraryPaths,
-    device_serial: &str,
-    now: &str,
-    inks: &[CollectedInk],
-    notes: &[Annotation],
-    report: &mut DeviceImportReport,
-    on_ink: &dyn Fn(usize, usize, &str),
-) -> Result<()> {
-    let total = inks.len();
-    for (i, CollectedInk { asin, nbk_bytes }) in inks.iter().enumerate() {
-        let Some(book_id) = db::book_id_by_asin(conn, asin)? else {
-            continue; // host book not in the library (yet) — relink on a later sync
-        };
-        let Some(book) = db::get_book(conn, book_id)? else {
-            continue;
-        };
-        on_ink(i + 1, total, &book.title);
-        let nbk_sha = import::sha256_of_bytes(nbk_bytes);
-        if db::get_ink_sync_sha(conn, device_serial, asin)?.as_deref() == Some(nbk_sha.as_str()) {
-            report.ink_unchanged += 1;
-            continue; // unchanged nbk — nothing to re-decode
-        }
-        let stats = ink::import_ink(
-            conn,
-            paths,
-            Some(book_id),
-            &book.sha256,
-            asin,
-            book.kfx_path.as_deref(),
-            book.kfx_sha256.as_deref(),
-            nbk_bytes,
-            notes,
-            Some(device_serial),
-            now,
-        )?;
-        db::set_ink_sync_sha(conn, device_serial, asin, &nbk_sha, now)?;
-        report.ink_books += 1;
-        report.ink_pages += stats.pages;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

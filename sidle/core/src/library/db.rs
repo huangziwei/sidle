@@ -3030,6 +3030,33 @@ pub fn get_ink_sync_sha(
     .optional()
 }
 
+/// Every `(asin, nbk_sha)` this device has synced ink for — [`get_ink_sync_sha`]
+/// for the whole device at once.
+///
+/// A device that holds its own filesystem (the on-device picker) asks for this
+/// before a LAN sync so it can hash its `.notebooks/` locally and upload only
+/// what changed. The USB path has no use for it: there the host does the walk
+/// and checks each nbk as it goes.
+pub fn ink_sync_shas(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT asin, nbk_sha FROM ink_sync WHERE device_serial = ?1")?;
+    let rows = stmt.query_map(params![device_serial], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// Every stored notebook's `(uuid, nbk_sha256)`, skipping rows whose sha
+/// predates the column. The notebook twin of [`ink_sync_shas`] — and NOT keyed
+/// by device, because a notebook is one library entity no matter which Scribe
+/// wrote it.
+pub fn notebook_shas(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT uuid, nbk_sha256 FROM notebooks WHERE nbk_sha256 IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
 /// Record the nbk content sha decoded for `(device_serial, asin)` (upsert).
 pub fn set_ink_sync_sha(
     conn: &Connection,

@@ -16,6 +16,7 @@ use crate::library::LibraryPaths;
 use crate::library::db::{self, NotebookRow};
 
 /// Result of importing one notebook directory.
+#[derive(Debug)]
 pub enum NotebookOutcome {
     /// Newly imported or re-extracted (content changed).
     Imported(NotebookRow),
@@ -100,6 +101,54 @@ pub fn import_notebook(
     Ok(NotebookOutcome::Imported(row))
 }
 
+/// Import a notebook whose bytes arrived over a wire rather than as a file — an
+/// MTP pull from the desktop, a LAN push from the on-device picker.
+///
+/// A KDF notebook *is* a SQLite database, so it has to be decoded from a path;
+/// this stages the bytes to a temp dir, delegates to [`import_notebook`], and
+/// cleans up either way. Every transport that carries notebook bytes goes
+/// through here, so they all import identically.
+///
+/// The staging directory is unique per call, not per notebook: the desktop's USB
+/// pull and the LAN server are separate processes that can be importing the same
+/// uuid at the same moment, and a shared path would have one deleting the
+/// other's bytes mid-decode.
+pub fn import_notebook_bytes(
+    conn: &Connection,
+    paths: &LibraryPaths,
+    uuid: &str,
+    nbk: &[u8],
+    cover: Option<&[u8]>,
+    updated_at: &str,
+) -> Result<NotebookOutcome> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("nbk-staging-{}-{n}-{uuid}", std::process::id()));
+    std::fs::create_dir_all(&tmp).context("stage notebook tempdir")?;
+    let out = (|| {
+        let nbk_path = tmp.join("nbk");
+        std::fs::write(&nbk_path, nbk).context("stage nbk bytes")?;
+        let cover_path = match cover {
+            Some(bytes) => {
+                let cp = tmp.join("thumbnail.png");
+                std::fs::write(&cp, bytes).context("stage cover bytes")?;
+                Some(cp)
+            }
+            None => None,
+        };
+        import_notebook(
+            conn,
+            paths,
+            uuid,
+            &nbk_path,
+            cover_path.as_deref(),
+            updated_at,
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    out
+}
+
 /// Render a stored notebook to a single multi-page PDF — one page per cached
 /// page SVG, read from the import-time render cache so we never re-parse the
 /// `nbk`. `page_count` is the notebook row's count. Page assembly and SVG
@@ -125,4 +174,45 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decoding a real `nbk` is `bokai::formats::nbk`'s job; what belongs here is
+    /// that the staging around it never leaks. A failed decode is the case that
+    /// would leave a temp dir behind, so that's the one to check.
+    #[test]
+    fn import_notebook_bytes_removes_its_staging_dir_when_the_decode_fails() {
+        let root = std::env::temp_dir().join("sidle-nbk-staging-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = LibraryPaths { root };
+        paths.ensure().unwrap();
+        let conn = db::open(&paths.db()).unwrap();
+
+        let uuid = "da85e6f7-9672-2e2b-ef94-e57fc3502e45";
+        let err = import_notebook_bytes(&conn, &paths, uuid, b"not a KDF database", None, "t0")
+            .expect_err("garbage bytes are not a notebook");
+        assert!(
+            format!("{err:#}").contains(uuid),
+            "the error names the notebook it was decoding: {err:#}"
+        );
+        // The staging path is unique per call, so find any that survived by its
+        // prefix rather than reconstructing the name.
+        let leaked: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("nbk-staging-") && n.ends_with(uuid))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "staging dir left behind after a failure: {leaked:?}"
+        );
+        // And nothing was recorded for it, so a later sync can still store it.
+        assert!(db::get_notebook_by_uuid(&conn, uuid).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
 }

@@ -322,6 +322,10 @@ fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Bo
         // conversion job, so state it here rather than letting the `None`
         // default report it as EPUB in the Format facet.
         kind: Some("kfx_to_epub".to_string()),
+        // A purchase's own Amazon ASIN, not a content_id Sidle baked — the ink
+        // sync matches against the library's asins, and this book isn't in the
+        // library, so leaving it unset keeps it out of that match.
+        asin: None,
         file_size,
         imported_at,
         tags: Vec::new(),

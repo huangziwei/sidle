@@ -18,6 +18,7 @@
 //! this stays compatible if the server adds columns. The full shape lives at
 //! sidle/core/src/library/db.rs.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
@@ -178,6 +179,16 @@ pub struct Book {
     /// which [`Book::source_format`] reads as EPUB, matching the desktop.
     #[serde(default)]
     pub kind: Option<String>,
+    /// The content_id baked into the KFX Sidle pushed. The device names this
+    /// book's ink notebook with it (`.notebooks/<asin>!!PDOC!!notebook`), so
+    /// this is what tells the handwriting sync which of those directories hold
+    /// ink of ours and which are Amazon's own cloud documents.
+    ///
+    /// Already on the wire for the same reason as [`Self::kind`]. `None` for a
+    /// book that has no KFX yet — such a book can't have been pushed, so it
+    /// can't have ink either.
+    #[serde(default)]
+    pub asin: Option<String>,
     #[serde(default)]
     pub imported_at: String,
     /// User-defined tags. Server canonicalizes them (trimmed, lowercased,
@@ -472,6 +483,20 @@ fn looks_like_sha8_kfx(name: &str) -> bool {
 struct SyncRequest {
     device_serial: String,
     sdrs: Vec<SyncSdr>,
+    /// Handwritten ink drawn on sideloaded books, one entry per host book.
+    ///
+    /// It travels with the sidecars rather than on a route of its own because
+    /// the desktop anchors each ink page to its host page using the
+    /// `handwritten_note` records inside those very `.yjr`s. Sent apart, every
+    /// page would import unanchored.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inks: Vec<SyncInk>,
+}
+
+#[derive(Serialize)]
+struct SyncInk {
+    asin: String,
+    nbk_b64: String,
 }
 
 #[derive(Serialize)]
@@ -525,6 +550,12 @@ pub struct SyncReport {
     /// How many of those actually landed. Set locally, like `pruned`.
     #[serde(default)]
     pub written: usize,
+    /// Ink pages the library decoded out of the notebooks we just sent. The
+    /// per-book count rides in the same response and the desktop shows it; the
+    /// picker's toast has room for one number, and pages are the one that says
+    /// how much handwriting actually landed.
+    #[serde(default)]
+    pub ink_pages: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -553,6 +584,10 @@ impl SyncReport {
         if self.written > 0 {
             parts.push(format!("{} sent here", self.written));
         }
+        if self.ink_pages > 0 {
+            let plural = if self.ink_pages == 1 { "" } else { "s" };
+            parts.push(format!("{} ink page{plural}", self.ink_pages));
+        }
         let mut s = if parts.is_empty() {
             "annotation sync: nothing new".to_string()
         } else {
@@ -569,10 +604,70 @@ impl SyncReport {
 /// generous headroom over the list/cover timeouts (still LAN-only).
 const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `GET /sync/annotations` — the ink content shas the library already decoded
+/// off this device, `{asin: nbk_sha}`.
+#[derive(Deserialize, Default)]
+struct InkManifest {
+    #[serde(default)]
+    ink: HashMap<String, String>,
+}
+
+/// `GET /sync/notebooks` — `{uuid: nbk_sha}` for every notebook the library
+/// holds. Not device-keyed: a notebook is one entity wherever it was written.
+#[derive(Deserialize, Default)]
+struct NotebookManifest {
+    #[serde(default)]
+    notebooks: HashMap<String, String>,
+}
+
+/// Fetch a sync route's "what do you already have?" manifest.
+///
+/// `skip` short-circuits the request when the device has nothing of that kind —
+/// the usual case on a Kindle without a pen, where a round trip would only
+/// confirm there is nothing to compare.
+///
+/// Any failure yields an empty manifest, which reads as "the library has
+/// nothing" and sends everything. That is the safe direction: the import is
+/// idempotent on content sha, so a redundant upload costs only bandwidth, while
+/// a wrongly-skipped one loses a page. A rejected token isn't swallowed either —
+/// the POST that follows hits the same wall and reports it properly.
+fn fetch_manifest<T: for<'de> Deserialize<'de> + Default>(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    url: &str,
+    skip: bool,
+) -> T {
+    if skip {
+        return T::default();
+    }
+    let res = agent
+        .get(url)
+        .query("device_serial", &cfg.serial)
+        .set("X-Sidle-Token", &cfg.token)
+        .timeout(SYNC_TIMEOUT)
+        .call();
+    let text = match res.map(|r| r.into_string()) {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            eprintln!("[sidle/sync] read GET {url} failed ({e}) — sending everything");
+            return T::default();
+        }
+        Err(e) => {
+            eprintln!("[sidle/sync] GET {url} failed ({e}) — sending everything");
+            return T::default();
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("[sidle/sync] parse GET {url} failed ({e}) — sending everything");
+        T::default()
+    })
+}
+
 /// Scan the on-device reading-state sidecars and push them to sidle-server's
 /// `POST /sync/annotations` — the LAN twin of a USB sync. `sidle_dir` is
-/// `/mnt/us/documents/Sidle` (the download dir). Returns the server's
-/// [`SyncReport`].
+/// `/mnt/us/documents/Sidle` (the download dir). `ink` is the handwriting found
+/// on this device's books ([`crate::handwriting::scan`]); pass an empty slice on
+/// a Kindle with no pen. Returns the server's [`SyncReport`].
 ///
 /// Errors with a re-install breadcrumb if `server.conf` carries no `SERIAL=`
 /// (a pre-sync install): annotations are keyed per device, so the serial is
@@ -582,6 +677,7 @@ pub fn push_annotations(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
     sidle_dir: &Path,
+    ink: &[crate::handwriting::Nbk],
 ) -> Result<SyncReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
@@ -591,8 +687,32 @@ pub fn push_annotations(
         .into());
     }
 
+    let url = format!("http://{}:{}/sync/annotations", cfg.host, cfg.port);
     let (sdrs, pruned) = collect_sidecars(sidle_dir)?;
-    if sdrs.is_empty() {
+    // Ask before sending: the library reports the ink it has already decoded off
+    // this device, and anything matching is left where it is. An `nbk` runs tens
+    // of KB and a book's ink rarely changes again once it's drawn.
+    let have: InkManifest = fetch_manifest(agent, cfg, &url, ink.is_empty());
+    let inks: Vec<SyncInk> = ink
+        .iter()
+        .filter(|n| have.ink.get(&n.id) != Some(&n.sha))
+        .filter_map(|n| {
+            // Re-read now that we know it's going: the scan hashed and released
+            // the bytes so a no-op sync never holds a notebook in memory.
+            match std::fs::read(&n.path) {
+                Ok(bytes) => Some(SyncInk {
+                    asin: n.id.clone(),
+                    nbk_b64: BASE64.encode(bytes),
+                }),
+                Err(e) => {
+                    eprintln!("[sidle/ink] read {} failed: {e}", n.path.display());
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if sdrs.is_empty() && inks.is_empty() {
         // Nothing live to sync — skip the round-trip, but still report any
         // orphaned copies we pruned off the device this pass.
         return Ok(SyncReport {
@@ -604,10 +724,10 @@ pub fn push_annotations(
     let req = SyncRequest {
         device_serial: cfg.serial.clone(),
         sdrs,
+        inks,
     };
     let body = serde_json::to_vec(&req).context("serialize sync request")?;
 
-    let url = format!("http://{}:{}/sync/annotations", cfg.host, cfg.port);
     let res = match agent
         .post(&url)
         .set("X-Sidle-Token", &cfg.token)
@@ -745,6 +865,171 @@ fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)
         }
     }
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Notebook push — GET/POST /sync/notebooks
+// ---------------------------------------------------------------------------
+
+/// The push bundle: the standalone notebooks whose bytes the library doesn't
+/// already hold. Mirrors `sidle-server`'s `NotebookSyncRequest`.
+#[derive(Serialize)]
+struct NotebookRequest {
+    notebooks: Vec<SyncNotebook>,
+}
+
+#[derive(Serialize)]
+struct SyncNotebook {
+    uuid: String,
+    nbk_b64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_b64: Option<String>,
+    updated_at: String,
+}
+
+/// What the library stored, for the picker's toast.
+#[derive(Debug, Default, Deserialize)]
+pub struct NotebookReport {
+    #[serde(default)]
+    pub imported: usize,
+    /// Notebooks the library refused to re-create because they were deleted in
+    /// Sidle. Not an error and not shown in the toast, but logged — it is the
+    /// answer to "why is my notebook not coming back?".
+    #[serde(default)]
+    pub suppressed: usize,
+    #[serde(default)]
+    pub failed: Vec<String>,
+}
+
+impl NotebookReport {
+    /// A terse toast fragment, or `None` when nothing was stored — the normal
+    /// case once a notebook has been backed up, and not worth a line.
+    pub fn summary(&self) -> Option<String> {
+        if self.imported == 0 && self.failed.is_empty() {
+            return None;
+        }
+        let plural = if self.imported == 1 { "" } else { "s" };
+        let mut s = format!("{} notebook{plural} backed up", self.imported);
+        if !self.failed.is_empty() {
+            s.push_str(&format!(", {} failed", self.failed.len()));
+        }
+        Some(s)
+    }
+}
+
+/// Back the Scribe's standalone handwritten notebooks up to the library —
+/// `GET /sync/notebooks` for what it already holds, then `POST` the rest.
+///
+/// `found` is [`crate::handwriting::scan`]'s notebook list. Nothing to send is
+/// the steady state and costs one small GET; a device with no pen costs nothing
+/// at all.
+pub fn push_notebooks(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    found: &[crate::handwriting::Standalone],
+) -> Result<NotebookReport> {
+    let url = format!("http://{}:{}/sync/notebooks", cfg.host, cfg.port);
+    let have: NotebookManifest = fetch_manifest(agent, cfg, &url, found.is_empty());
+
+    let todo: Vec<&crate::handwriting::Standalone> = found
+        .iter()
+        .filter(|n| have.notebooks.get(&n.nbk.id) != Some(&n.nbk.sha))
+        .collect();
+
+    let mut report = NotebookReport::default();
+    for batch in batches(&todo, NOTEBOOK_BATCH_BYTES) {
+        let notebooks: Vec<SyncNotebook> = batch
+            .iter()
+            .filter_map(|n| {
+                // Re-read only what's going, and only a batch at a time: a
+                // notebook runs to a couple of MB, this device has 512 MB shared
+                // with the framework, and base64 inflates by a third.
+                let bytes = match std::fs::read(&n.nbk.path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!(
+                            "[sidle/notebooks] read {} failed: {e}",
+                            n.nbk.path.display()
+                        );
+                        return None;
+                    }
+                };
+                Some(SyncNotebook {
+                    uuid: n.nbk.id.clone(),
+                    nbk_b64: BASE64.encode(bytes),
+                    // Best-effort: no cover just means the viewer renders page 0.
+                    cover_b64: n
+                        .cover
+                        .as_deref()
+                        .and_then(|p| std::fs::read(p).ok())
+                        .map(|b| BASE64.encode(b)),
+                    updated_at: n.updated_at.clone(),
+                })
+            })
+            .collect();
+        if notebooks.is_empty() {
+            continue;
+        }
+        let body = serde_json::to_vec(&NotebookRequest { notebooks })
+            .context("serialize notebook request")?;
+        let res = match agent
+            .post(&url)
+            .set("X-Sidle-Token", &cfg.token)
+            .set("Content-Type", "application/json")
+            .timeout(SYNC_TIMEOUT)
+            .send_bytes(&body)
+        {
+            Ok(res) => res,
+            Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+                return Err(SidleError::TokenMismatch);
+            }
+            Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
+        };
+        let text = res
+            .into_string()
+            .with_context(|| format!("read body of {url}"))?;
+        let part: NotebookReport =
+            serde_json::from_str(&text).with_context(|| format!("parse {url}"))?;
+        report.imported += part.imported;
+        report.suppressed += part.suppressed;
+        report.failed.extend(part.failed);
+    }
+    Ok(report)
+}
+
+/// How many `nbk` bytes one `POST /sync/notebooks` may carry.
+///
+/// Sized for the device, not the server: base64 inflates by a third and the
+/// serialized body is a second copy, so a batch costs roughly 2.7× this in peak
+/// RAM — and this Kindle has 512 MB shared with the reader framework. Each batch
+/// is committed on its own, so a library of any size syncs in bounded memory.
+const NOTEBOOK_BATCH_BYTES: u64 = 12 * 1024 * 1024;
+
+/// Split notebooks into groups whose `nbk` bytes sum to at most `budget`.
+///
+/// A single notebook larger than the budget still goes alone rather than being
+/// dropped — sending it is the only way it ever gets backed up, and the server's
+/// cap is the real ceiling.
+fn batches<'a>(
+    items: &[&'a crate::handwriting::Standalone],
+    budget: u64,
+) -> Vec<Vec<&'a crate::handwriting::Standalone>> {
+    let mut out: Vec<Vec<&crate::handwriting::Standalone>> = Vec::new();
+    let mut cur: Vec<&crate::handwriting::Standalone> = Vec::new();
+    let mut used = 0u64;
+    for n in items {
+        let size = std::fs::metadata(&n.nbk.path).map(|m| m.len()).unwrap_or(0);
+        if !cur.is_empty() && used + size > budget {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(n);
+        used += size;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1440,7 @@ mod tests {
             series_name: None,
             series_index: None,
             kind: None,
+            asin: None,
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),
@@ -1219,6 +1505,52 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sidle-sync-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Batching is what keeps a first sync from a well-used Scribe inside the
+    /// device's RAM, so it has to hold on the two cases that matter: a run of
+    /// notebooks splits at the budget, and one bigger than the whole budget
+    /// still goes rather than being silently skipped.
+    #[test]
+    fn notebooks_batch_by_bytes_and_never_drop_an_oversized_one() {
+        let base = scratch("batches");
+        std::fs::create_dir_all(&base).unwrap();
+        let make = |name: &str, size: usize| {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("nbk");
+            std::fs::write(&path, vec![0u8; size]).unwrap();
+            crate::handwriting::Standalone {
+                nbk: crate::handwriting::Nbk {
+                    id: name.to_string(),
+                    path,
+                    sha: String::new(),
+                },
+                cover: None,
+                updated_at: String::new(),
+            }
+        };
+        let items = [make("a", 400), make("b", 400), make("c", 400)];
+        let refs: Vec<&crate::handwriting::Standalone> = items.iter().collect();
+
+        // 1000-byte budget: a+b fill it, c starts the next batch.
+        let split = batches(&refs, 1000);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].len(), 2);
+        assert_eq!(split[1].len(), 1);
+
+        // Everything fits → one request.
+        assert_eq!(batches(&refs, 10_000).len(), 1);
+
+        // A notebook larger than the whole budget is sent alone, not dropped:
+        // going alone is the only way it is ever backed up.
+        let huge = [make("huge", 4000)];
+        let huge_refs: Vec<&crate::handwriting::Standalone> = huge.iter().collect();
+        let split = batches(&huge_refs, 1000);
+        assert_eq!(split.len(), 1);
+        assert_eq!(split[0].len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

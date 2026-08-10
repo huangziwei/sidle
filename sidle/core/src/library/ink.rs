@@ -31,10 +31,11 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use crate::library::LibraryPaths;
 use crate::library::db::{self, NewBookInk};
+use crate::library::ingest::{CollectedYjr, DeviceImportReport};
 use crate::library::pdf_geom::{self, PageGeom};
-use crate::library::yjr::Annotation;
+use crate::library::yjr::{self, Annotation};
+use crate::library::{LibraryPaths, import};
 
 /// Outcome of one ink import.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -190,6 +191,88 @@ pub fn import_ink(
     Ok(stats)
 }
 
+/// One ink notebook pulled off a device: the host book's content_id
+/// (`== books.asin`) plus the raw `nbk` bytes. How they were pulled — an MTP
+/// walk from the desktop, a `std::fs` read by the on-device picker — is the
+/// caller's business; from here on both are the same import.
+pub struct CollectedInk {
+    pub asin: String,
+    pub nbk_bytes: Vec<u8>,
+}
+
+/// Every handwritten-ink record across the collected `.yjr`s (the union).
+///
+/// These are the anchors: each names an ink page by its `container_id` and
+/// carries the host-page position. The container-id join in [`import_ink`]
+/// selects the right notes per nbk, so a note from another book simply won't
+/// match this nbk's pages — which is why one flat union across the whole sync
+/// is correct and no per-book association is needed here.
+pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
+    collected
+        .iter()
+        .filter_map(|c| c.yjr_bytes.as_deref())
+        .flat_map(yjr::parse)
+        .filter(|a| matches!(a.kind, yjr::Kind::Handwritten(_)))
+        .collect()
+}
+
+/// Import a sync's worth of pulled ink, folding the counts into `report`.
+///
+/// Each notebook joins to its host book by `asin == books.asin`; an unmatched
+/// asin is skipped rather than stored as an orphan — the book isn't in the
+/// library, so it'll link on a later sync once it is. An unchanged `nbk` (same
+/// content sha as the last sync from this device) skips the decode + raster
+/// re-render via the `ink_sync` checkpoint, exactly like the `.yjr` fast path.
+///
+/// Call under an already-held DB lock; the slow device reads belong before it.
+// Eight distinct inputs (db handle, paths, device id, timestamp, the two pulled
+// collections, the report sink, and the progress callback) — a parameter struct
+// would add indirection without removing any real coupling.
+#[allow(clippy::too_many_arguments)]
+pub fn import_collected_ink(
+    conn: &Connection,
+    paths: &LibraryPaths,
+    device_serial: &str,
+    now: &str,
+    inks: &[CollectedInk],
+    notes: &[Annotation],
+    report: &mut DeviceImportReport,
+    on_ink: &dyn Fn(usize, usize, &str),
+) -> Result<()> {
+    let total = inks.len();
+    for (i, CollectedInk { asin, nbk_bytes }) in inks.iter().enumerate() {
+        let Some(book_id) = db::book_id_by_asin(conn, asin)? else {
+            continue; // host book not in the library (yet) — relink on a later sync
+        };
+        let Some(book) = db::get_book(conn, book_id)? else {
+            continue;
+        };
+        on_ink(i + 1, total, &book.title);
+        let nbk_sha = import::sha256_of_bytes(nbk_bytes);
+        if db::get_ink_sync_sha(conn, device_serial, asin)?.as_deref() == Some(nbk_sha.as_str()) {
+            report.ink_unchanged += 1;
+            continue; // unchanged nbk — nothing to re-decode
+        }
+        let stats = import_ink(
+            conn,
+            paths,
+            Some(book_id),
+            &book.sha256,
+            asin,
+            book.kfx_path.as_deref(),
+            book.kfx_sha256.as_deref(),
+            nbk_bytes,
+            notes,
+            Some(device_serial),
+            now,
+        )?;
+        db::set_ink_sync_sha(conn, device_serial, asin, &nbk_sha, now)?;
+        report.ink_books += 1;
+        report.ink_pages += stats.pages;
+    }
+    Ok(())
+}
+
 /// Re-link orphan ink (`book_id IS NULL`) whose `asin` now matches a library
 /// book. Run after a book is added/edited (the safety net for ink that landed
 /// before its host book existed, or got unlinked by `ON DELETE SET NULL`).
@@ -323,6 +406,108 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A `.yjr` carrying one handwritten-ink record naming `container`, plus a
+    /// bookmark that must not be mistaken for one.
+    fn yjr_with_ink_note(container: &str) -> Vec<u8> {
+        use crate::library::yjr::{Anchor, Kind, Store};
+        let mut store = Store::empty();
+        store.merge_annotations(&[
+            Annotation {
+                kind: Kind::Bookmark,
+                anchors: vec![Anchor::new(10, 0, 9)],
+                body: None,
+                color: None,
+                created_ms: Some(0),
+                modified_ms: Some(0),
+            },
+            Annotation {
+                kind: Kind::Handwritten("handwritten_note".into()),
+                anchors: vec![Anchor::new(11, 0, 42)],
+                body: Some(container.to_string()),
+                color: None,
+                created_ms: Some(0),
+                modified_ms: Some(0),
+            },
+        ]);
+        store.encode()
+    }
+
+    /// The anchors the ink import joins on are pulled out of the sidecars the
+    /// same sync carried: every `.yjr` in the collection, ink records only, one
+    /// flat union across books.
+    #[test]
+    fn handwritten_notes_unions_the_ink_records_and_drops_the_rest() {
+        let collected = vec![
+            CollectedYjr {
+                sdr_name: "a.deadbeef.sdr".into(),
+                yjr_bytes: Some(yjr_with_ink_note("container-a")),
+                yjf_bytes: None,
+                yjr_name: None,
+                yjf_name: None,
+            },
+            CollectedYjr {
+                sdr_name: "b.cafef00d.sdr".into(),
+                yjr_bytes: Some(yjr_with_ink_note("container-b")),
+                yjf_bytes: None,
+                yjr_name: None,
+                yjf_name: None,
+            },
+            // A book read but never annotated — no `.yjr` at all.
+            CollectedYjr {
+                sdr_name: "c.12345678.sdr".into(),
+                yjr_bytes: None,
+                yjf_bytes: None,
+                yjr_name: None,
+                yjf_name: None,
+            },
+        ];
+        let notes = handwritten_notes(&collected);
+        assert_eq!(notes.len(), 2, "the bookmarks are not ink");
+        let mut bodies: Vec<&str> = notes.iter().filter_map(|n| n.body.as_deref()).collect();
+        bodies.sort_unstable();
+        assert_eq!(bodies, ["container-a", "container-b"]);
+        assert!(
+            notes
+                .iter()
+                .all(|n| matches!(n.kind, yjr::Kind::Handwritten(_)))
+        );
+    }
+
+    /// The join is by container id, so which book a note came from doesn't
+    /// matter — but a book whose ink notebook isn't in the library must not be
+    /// invented, and one whose host book is absent is skipped rather than
+    /// stored as an orphan.
+    #[test]
+    fn import_collected_ink_skips_an_asin_with_no_host_book() {
+        let conn = mem_db();
+        add_book(&conn, "sha-a", "KNOWNASIN");
+        let mut report = DeviceImportReport::default();
+        import_collected_ink(
+            &conn,
+            &LibraryPaths {
+                root: std::env::temp_dir().join("sidle-ink-no-host"),
+            },
+            "G000TESTSERIAL",
+            "t0",
+            &[CollectedInk {
+                asin: "NOSUCHASIN".into(),
+                nbk_bytes: b"not-a-real-nbk".to_vec(),
+            }],
+            &[],
+            &mut report,
+            &|_, _, _| {},
+        )
+        .expect("an unmatched asin is a skip, not an error");
+        assert_eq!(report.ink_books, 0);
+        assert_eq!(report.ink_pages, 0);
+        // Nothing was checkpointed either, so the next sync will offer it again
+        // once the host book lands.
+        assert_eq!(
+            db::get_ink_sync_sha(&conn, "G000TESTSERIAL", "NOSUCHASIN").unwrap(),
+            None
+        );
     }
 
     #[test]

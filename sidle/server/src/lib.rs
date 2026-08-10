@@ -31,6 +31,8 @@ use sidle_core::library::{
     device_backup::{self, MiscKind},
     import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
+    ink::{self, CollectedInk},
+    notebook::{self, NotebookOutcome},
     paths::kfx_device_filename,
     push, reading_log,
 };
@@ -116,10 +118,18 @@ pub async fn serve_with_shutdown(
     Ok(())
 }
 
-/// 32 MB body cap on `POST /sync/annotations`. A whole library's `.yjr`/`.yjf`
-/// sidecars (KB each) fit with generous headroom; bounds the JSON buffer the body
-/// extractor builds so a stray/oversized POST can't exhaust memory.
+/// 32 MB body cap on `POST /sync/annotations` and `POST /sync/reading-log`. A
+/// whole library's `.yjr`/`.yjf` sidecars (KB each) fit with generous headroom,
+/// as does the ink that rides along with them (an `nbk` of pen strokes on a book
+/// is tens of KB); bounds the JSON buffer the body extractor builds so a
+/// stray/oversized POST can't exhaust memory.
 const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// Body cap on `POST /sync/notebooks`. A standalone notebook is a much larger
+/// `nbk` than a book's ink — a well-used one reaches a couple of MB — so this
+/// sits higher. It is not sized for a whole Scribe at once on purpose: the
+/// device batches its upload to bound its own RAM, and a cap it can't reach is
+/// no cap at all.
+const NOTEBOOK_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Body cap on `POST /sync/book` — a decrypted book (`.kfx-zip`), buffered whole
 /// before it's handed to the importer. Generous for an image-heavy purchase;
 /// single-user LAN, so the transient RAM is fine.
@@ -142,9 +152,20 @@ pub(crate) fn build_router(state: AppState) -> Router {
         // P3 write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
         // the LAN twin of the USB import. Token-gated like the reads; body-limited
         // so an oversized POST can't exhaust memory.
+        // The GET is the ink half's watermark: what this library already holds
+        // for the asking device, so the POST carries only changed notebooks.
         .route(
             "/sync/annotations",
-            post(sync_annotations).layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
+            get(ink_manifest)
+                .post(sync_annotations)
+                .layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
+        )
+        // The Scribe's standalone notebooks, same ask-then-send shape.
+        .route(
+            "/sync/notebooks",
+            get(notebook_manifest)
+                .post(sync_notebooks)
+                .layer(DefaultBodyLimit::max(NOTEBOOK_BODY_LIMIT)),
         )
         .route(
             "/sync/book",
@@ -415,6 +436,38 @@ struct SyncRequest {
     /// `server.conf` (the Mac reads the USB iSerial at mount time).
     device_serial: String,
     sdrs: Vec<SyncSdr>,
+    /// Handwritten ink drawn on sideloaded books, one entry per host book, as
+    /// pulled from `.notebooks/<asin>!!PDOC!!notebook/nbk`.
+    ///
+    /// It rides in the annotation bundle rather than a route of its own because
+    /// an ink page anchors to its host page through the `handwritten_note`
+    /// records in that book's `.yjr` — the anchors are in `sdrs`, so separating
+    /// the two would import every page unanchored. Same reason the USB path
+    /// folds ink into its annotation pass. Empty from a device with no pen.
+    #[serde(default)]
+    inks: Vec<SyncInk>,
+}
+
+/// One host book's ink notebook. Sent only when its content sha differs from
+/// what `GET /sync/annotations` reported, so a steady-state sync carries none.
+#[derive(serde::Deserialize)]
+struct SyncInk {
+    /// The host book's baked content_id (`books.asin`) — the `<asin>` in the
+    /// device's `.notebooks/<asin>!!PDOC!!notebook` dir name.
+    asin: String,
+    /// The `nbk` (a KDF SQLite file), base64.
+    nbk_b64: String,
+}
+
+/// What `GET /sync/annotations` answers: the ink content shas this library has
+/// already decoded for the asking device, `{asin: nbk_sha}`.
+///
+/// The device holds its own filesystem, so it hashes `.notebooks/` locally and
+/// sends only what this map doesn't already account for. Per-device because
+/// `ink_sync` is: the same book inked on two Kindles is two separate facts.
+#[derive(serde::Serialize)]
+struct InkManifest {
+    ink: HashMap<String, String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -457,6 +510,35 @@ struct SyncResponse {
     write: Vec<OutgoingSdr>,
 }
 
+/// The device serial a manifest request is asking about. Refused rather than
+/// defaulted: an empty serial would hand one Kindle another's checkpoint, and
+/// the device would then skip uploading ink this library has never seen.
+fn required_serial(query: &HashMap<String, String>) -> Result<String, StatusCode> {
+    match query.get("device_serial") {
+        Some(s) if !s.is_empty() => Ok(s.clone()),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// `GET /sync/annotations?device_serial=…` — the ink shas already decoded for
+/// this device, so its next POST carries only notebooks that actually changed.
+async fn ink_manifest(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Json<InkManifest>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let serial = required_serial(&query)?;
+    let conn = open_db(&state.paths)?;
+    let ink = db::ink_sync_shas(&conn, &serial).map_err(|err| {
+        tracing::error!(?err, "sync/annotations: ink manifest query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(InkManifest {
+        ink: ink.into_iter().collect(),
+    }))
+}
+
 /// Ingest pushed annotations — the LAN twin of the USB import. Token-gated, then
 /// base64-decode → `Vec<CollectedYjr>` → the **exact** USB-path function
 /// [`ingest::import_collected`], so a LAN import is byte-for-byte the same DB
@@ -485,6 +567,13 @@ async fn sync_annotations(
             yjf_name: sdr.yjf_name,
         });
     }
+    let mut inks = Vec::with_capacity(req.inks.len());
+    for ink in req.inks {
+        inks.push(CollectedInk {
+            asin: ink.asin,
+            nbk_bytes: decode_b64(&ink.nbk_b64)?,
+        });
+    }
 
     let paths = state.paths.clone();
     let device_serial = req.device_serial;
@@ -502,11 +591,33 @@ async fn sync_annotations(
         // file against what the library holds, and that comparison is the same
         // either way. Cloned because the import consumes them.
         let for_push = collected.clone();
-        let report = ingest::import_collected(&conn, collected, &device_serial, &db::now_iso())
+        // The ink anchors live in the very sidecars that just arrived — read
+        // them before the import consumes the collection.
+        let notes = ink::handwritten_notes(&collected);
+        let mut report = ingest::import_collected(&conn, collected, &device_serial, &db::now_iso())
             .map_err(|err| {
                 tracing::error!(?err, "sync: import_collected failed");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+        // Ink, through the same core function the USB pass calls — so a LAN sync
+        // and a cable sync are one DB operation, not two implementations. A
+        // failure here must not lose the annotations already committed above, so
+        // it's logged and the report goes back with its ink counts at zero.
+        if !inks.is_empty()
+            && let Err(err) = ink::import_collected_ink(
+                &conn,
+                &paths,
+                &device_serial,
+                &db::now_iso(),
+                &inks,
+                &notes,
+                &mut report,
+                &|_, _, _| {},
+            )
+        {
+            tracing::error!(?err, "sync: ink import failed");
+        }
+        let report = report;
 
         // The device writes these itself — it is the one holding the filesystem.
         // Same planner as USB, so both routes agree on what a sidecar should
@@ -560,6 +671,134 @@ async fn sync_annotations(
     })??;
 
     Ok(Json(response))
+}
+
+// ---------------------------------------------------------------------------
+// Standalone notebooks — GET/POST /sync/notebooks
+// ---------------------------------------------------------------------------
+
+/// What `GET /sync/notebooks` answers: `{uuid: nbk_sha}` for every notebook the
+/// library holds.
+///
+/// Unlike the ink manifest this takes no device — a notebook is one library
+/// entity regardless of which Scribe wrote it, so two devices holding the same
+/// uuid hold the same notebook.
+#[derive(serde::Serialize)]
+struct NotebookManifest {
+    notebooks: HashMap<String, String>,
+}
+
+/// The push bundle: the standalone notebooks whose bytes differ from the
+/// manifest (a device sends nothing when nothing changed).
+#[derive(serde::Deserialize)]
+struct NotebookSyncRequest {
+    notebooks: Vec<SyncNotebook>,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncNotebook {
+    /// The `.notebooks/<uuid>` dir name — the notebook's identity.
+    uuid: String,
+    /// The `nbk` (a KDF SQLite file), base64.
+    nbk_b64: String,
+    /// `.notebooks/thumbnails/<uuid>.png`, base64, when the device has one.
+    /// Absent just means the viewer falls back to rendering page 0.
+    #[serde(default)]
+    cover_b64: Option<String>,
+    /// The `nbk`'s on-device "Date Modified" (naive ISO) — the notebook's
+    /// `updated_at`. Only the device knows it, so only the device can say.
+    updated_at: String,
+}
+
+/// What `POST /sync/notebooks` stored, for the picker's toast.
+#[derive(serde::Serialize, Default)]
+struct NotebookSyncResult {
+    imported: usize,
+    unchanged: usize,
+    /// Notebooks deleted in Sidle, which a re-push must not resurrect.
+    suppressed: usize,
+    /// `<uuid>: <error>` for each notebook that failed to decode or store. The
+    /// rest of the bundle still lands — one corrupt `nbk` doesn't fail a sync.
+    failed: Vec<String>,
+}
+
+/// `GET /sync/notebooks` — the notebook shas this library already holds.
+async fn notebook_manifest(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Json<NotebookManifest>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let conn = open_db(&state.paths)?;
+    let notebooks = db::notebook_shas(&conn).map_err(|err| {
+        tracing::error!(?err, "sync/notebooks: manifest query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(NotebookManifest {
+        notebooks: notebooks.into_iter().collect(),
+    }))
+}
+
+/// `POST /sync/notebooks` — back up the Scribe's standalone handwritten
+/// notebooks, the LAN twin of the desktop's MTP pull.
+///
+/// Goes through the same core import that pull uses, so a notebook that arrives
+/// over WiFi and one that arrives over a cable produce the same rows, the same
+/// page-SVG cache, and the same deletion suppression.
+async fn sync_notebooks(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Json(req): Json<NotebookSyncRequest>,
+) -> Result<Json<NotebookSyncResult>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    if req.notebooks.is_empty() {
+        return Ok(Json(NotebookSyncResult::default()));
+    }
+    // Decode up front: a malformed blob is a client bug (400), kept distinct
+    // from a decode/store failure below (which is per-notebook, not fatal).
+    let mut pushed = Vec::with_capacity(req.notebooks.len());
+    for nb in req.notebooks {
+        let nbk = decode_b64(&nb.nbk_b64)?;
+        let cover = decode_b64_opt(nb.cover_b64.as_deref())?;
+        pushed.push((nb.uuid, nbk, cover, nb.updated_at));
+    }
+
+    let paths = state.paths.clone();
+    // Decode + SVG render + SQLite writes are all blocking.
+    let out = tokio::task::spawn_blocking(move || -> Result<NotebookSyncResult, StatusCode> {
+        let conn = db::open(&paths.db()).map_err(|err| {
+            tracing::error!(?err, "sync/notebooks: open db");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let mut out = NotebookSyncResult::default();
+        for (uuid, nbk, cover, updated_at) in &pushed {
+            match notebook::import_notebook_bytes(
+                &conn,
+                &paths,
+                uuid,
+                nbk,
+                cover.as_deref(),
+                updated_at,
+            ) {
+                Ok(NotebookOutcome::Imported(_)) => out.imported += 1,
+                Ok(NotebookOutcome::Unchanged(_)) => out.unchanged += 1,
+                Ok(NotebookOutcome::Suppressed) => out.suppressed += 1,
+                Err(err) => {
+                    tracing::error!(?err, uuid, "sync/notebooks: import failed");
+                    out.failed.push(format!("{uuid}: {err:#}"));
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "sync/notebooks: import task panicked");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })??;
+
+    Ok(Json(out))
 }
 
 /// What `POST /sync/book` reports back, so the Kindle can toast imported-vs-
@@ -911,11 +1150,13 @@ fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
 }
 
 /// Did the import change anything an open reader would render? New or removed
-/// annotations, or a moved last-read position, warrant a repaint pulse; a re-sync
-/// of unchanged `.yjr` (pure duplicates) does not. (`unresolved` rows are a subset
-/// of `inserted`, so checking `inserted` already covers them.)
+/// annotations, a moved last-read position, or fresh ink pages warrant a repaint
+/// pulse; a re-sync of unchanged `.yjr` (pure duplicates) does not.
+/// (`unresolved` rows are a subset of `inserted`, so checking `inserted` already
+/// covers them; `ink_unchanged` is the ink equivalent of a duplicate and is
+/// deliberately not counted.)
 fn import_changed_anything(r: &DeviceImportReport) -> bool {
-    r.annotations.inserted > 0 || r.positions > 0 || r.relinked > 0
+    r.annotations.inserted > 0 || r.positions > 0 || r.relinked > 0 || r.ink_pages > 0
 }
 
 /// Atomically write `<root>/.sync-pulse.json` — the cross-process signal the GUI
@@ -1559,6 +1800,20 @@ mod tests {
         assert!(!import_changed_anything(&r), "empty report → no pulse");
         r.annotations.inserted = 1;
         assert!(import_changed_anything(&r), "a new annotation → pulse");
+
+        // Ink is rendered by the reader too, so a sync that brought only
+        // handwriting still has to repaint an open book.
+        let mut ink_only = DeviceImportReport {
+            ink_books: 1,
+            ink_pages: 2,
+            ..Default::default()
+        };
+        assert!(import_changed_anything(&ink_only), "new ink pages → pulse");
+        // A re-sync whose nbk hadn't changed is the ink twin of a duplicate.
+        ink_only.ink_pages = 0;
+        ink_only.ink_books = 0;
+        ink_only.ink_unchanged = 1;
+        assert!(!import_changed_anything(&ink_only), "unchanged ink → quiet");
     }
 
     // --- GET /device/... (LAN self-update pull) ----------------------------
@@ -1888,5 +2143,223 @@ mod tests {
         // Nothing stored for this device, so nothing is confirmed — and the
         // device must not read that as licence to delete its archive.
         assert_eq!(report["watermark"], "");
+    }
+
+    // --- Handwriting: ink on /sync/annotations, notebooks on their own route ---
+    //
+    // Decoding an `nbk` is `bokai::formats::nbk`'s job and needs a real KDF
+    // SQLite file, which this crate has no fixture for. What is covered here is
+    // everything around that decode: which notebooks the device is told to send,
+    // what happens to one it can't decode, and that neither route is reachable
+    // without a token.
+
+    fn notebook_request(token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/sync/notebooks")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("x-sidle-token", t);
+        }
+        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    /// The manifest is what makes a sync cheap, and it is keyed per device: the
+    /// same book inked on two Kindles is two separate facts, so one device's
+    /// checkpoint must never let another skip an upload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_ink_manifest_reports_only_the_asking_devices_checkpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let conn = db::open(&state.paths.db()).unwrap();
+        db::set_ink_sync_sha(&conn, "SCRIBE01", "ASINA", "sha-a", "t0").unwrap();
+        db::set_ink_sync_sha(&conn, "SCRIBE01", "ASINB", "sha-b", "t0").unwrap();
+        db::set_ink_sync_sha(&conn, "OTHERKINDLE", "ASINC", "sha-c", "t0").unwrap();
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request(
+                "/sync/annotations?device_serial=SCRIBE01",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let m = json_body(resp).await;
+        assert_eq!(m["ink"]["ASINA"], "sha-a");
+        assert_eq!(m["ink"]["ASINB"], "sha-b");
+        assert!(
+            m["ink"].get("ASINC").is_none(),
+            "another Kindle's checkpoint would make this one skip an upload"
+        );
+
+        // A device that has never synced is told nothing, so it sends everything.
+        let resp = build_router(state)
+            .oneshot(get_request(
+                "/sync/annotations?device_serial=NEWDEVICE",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["ink"], serde_json::json!({}));
+    }
+
+    /// Without a serial there is no per-device answer, and defaulting to one
+    /// would hand back a checkpoint that isn't this device's — which would make
+    /// it skip ink this library has never seen. Refuse instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_ink_manifest_refuses_an_unnamed_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let resp = build_router(state)
+            .oneshot(get_request("/sync/annotations", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The notebook manifest is library-wide, not per device: a notebook is one
+    /// entity wherever it was written, so any Scribe asking gets the same answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_notebook_manifest_lists_the_library_regardless_of_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let conn = db::open(&state.paths.db()).unwrap();
+        let uuid = "da85e6f7-9672-2e2b-ef94-e57fc3502e45";
+        db::upsert_notebook(&conn, uuid, 3, "sha-nb", "t0", "t0").unwrap();
+
+        for who in ["SCRIBE01", "OTHERKINDLE"] {
+            let resp = build_router(state.clone())
+                .oneshot(get_request(
+                    &format!("/sync/notebooks?device_serial={who}"),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(json_body(resp).await["notebooks"][uuid], "sha-nb");
+        }
+    }
+
+    /// One notebook that won't decode must not cost the sync the others: it is
+    /// named in `failed` and the request still succeeds. (All three are garbage
+    /// here — the point is the shape of the answer, not the decode.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notebook_that_cannot_be_decoded_is_reported_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let body = serde_json::json!({
+            "notebooks": [
+                {
+                    "uuid": "da85e6f7-9672-2e2b-ef94-e57fc3502e45",
+                    "nbk_b64": BASE64.encode(b"not a KDF database"),
+                    "updated_at": "2026-08-10T11:22:33",
+                },
+                {
+                    "uuid": "7507c10c-d7eb-a652-c030-2090b7bb1660",
+                    "nbk_b64": BASE64.encode(b"also not one"),
+                    "cover_b64": BASE64.encode(b"PNG"),
+                    "updated_at": "2026-08-10T11:22:34",
+                },
+            ],
+        });
+        let resp = build_router(state)
+            .oneshot(notebook_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "one bad nbk is not a 500");
+        let out = json_body(resp).await;
+        assert_eq!(out["imported"], 0);
+        assert_eq!(
+            out["failed"].as_array().map(Vec::len),
+            Some(2),
+            "each failure is named so the log can show which notebook it was"
+        );
+    }
+
+    /// A malformed blob is the client's bug, and must read as one — distinct
+    /// from an `nbk` that arrived intact but wouldn't decode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_notebooks_rejects_bad_base64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = bare_state(tmp.path());
+        let body = serde_json::json!({
+            "notebooks": [ {
+                "uuid": "da85e6f7-9672-2e2b-ef94-e57fc3502e45",
+                "nbk_b64": "!!!not base64!!!",
+                "updated_at": "2026-08-10T11:22:33",
+            } ],
+        });
+        let resp = build_router(state)
+            .oneshot(notebook_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn notebook_endpoints_reject_missing_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _token) = bare_state(tmp.path());
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request("/sync/notebooks", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = build_router(state.clone())
+            .oneshot(notebook_request(None, serde_json::json!({"notebooks": []})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = build_router(state)
+            .oneshot(get_request("/sync/annotations?device_serial=X", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Ink rides in the annotation bundle, so a notebook whose host book isn't
+    /// in the library must be skipped without costing the sidecars that arrived
+    /// with it — the highlights are the thing that must always land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ink_for_an_unknown_book_does_not_cost_the_annotations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (paths, book) = library_with_matching_book(tmp.path());
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState {
+            paths: paths.clone(),
+            token: Arc::from(token.as_str()),
+        };
+        let body = serde_json::json!({
+            "device_serial": "G000TESTSERIAL",
+            "sdrs": [ {
+                "sdr_name": "book.deadbeef.sdr",
+                "yjr_b64": BASE64.encode(yjr_bookmark(1492, 0, 9)),
+            } ],
+            "inks": [ {
+                "asin": "NOSUCHASIN",
+                "nbk_b64": BASE64.encode(b"not a KDF database"),
+            } ],
+        });
+        let resp = build_router(state)
+            .oneshot(sync_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let report = json_body(resp).await;
+        assert_eq!(report["ink_books"], 0);
+        assert!(
+            report["annotations"]["inserted"].as_u64().unwrap() >= 1,
+            "the bookmark still imported: {report}"
+        );
+        let conn = db::open(&paths.db()).unwrap();
+        assert!(
+            !db::list_annotations_for_book(&conn, book)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
