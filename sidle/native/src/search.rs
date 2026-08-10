@@ -56,6 +56,7 @@ mod tests {
             publisher: None,
             series_name: None,
             series_index: None,
+            kind: None,
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),

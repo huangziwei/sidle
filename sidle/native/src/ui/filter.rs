@@ -33,16 +33,24 @@ pub enum Facet {
     Publisher,
     Series,
     Tags,
+    /// Format the book was imported from (PDF / EPUB / KFX).
+    ///
+    /// Unlike the others this one is about whether a book is *readable here*,
+    /// and it is useful in both directions: a Scribe filters down to the PDFs
+    /// its 10.2" panel can actually show, while a 7" Kindle filters them out
+    /// precisely because it cannot.
+    Format,
 }
 
 impl Facet {
     /// Display order in the Filter menu.
-    pub const ALL: [Facet; 5] = [
+    pub const ALL: [Facet; 6] = [
         Facet::Language,
         Facet::Author,
         Facet::Publisher,
         Facet::Series,
         Facet::Tags,
+        Facet::Format,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,6 +60,7 @@ impl Facet {
             Facet::Publisher => "Publisher",
             Facet::Series => "Series",
             Facet::Tags => "Tags",
+            Facet::Format => "Format",
         }
     }
 }
@@ -111,6 +120,9 @@ impl Filters {
 pub fn extract_facet_values(book: &Book, facet: Facet) -> Vec<String> {
     match facet {
         Facet::Language => vec![non_empty_or_sentinel(&book.language)],
+        // Always exactly one value, and never the [`NONE`] sentinel: every book
+        // was imported from something, and an absent `kind` still means EPUB.
+        Facet::Format => vec![book.source_format().to_string()],
         Facet::Publisher => vec![non_empty_or_sentinel(
             book.publisher.as_deref().unwrap_or(""),
         )],
@@ -223,6 +235,7 @@ mod tests {
             publisher: None,
             series_name: None,
             series_index: None,
+            kind: None,
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),
@@ -230,6 +243,72 @@ mod tests {
             kfx_rev: 0,
             search_key: String::new(),
         }
+    }
+
+    /// The conversion `kind` is the only record of what a book came from, and it
+    /// is the string form `"<source>_to_<target>"`.
+    #[test]
+    fn format_facet_reads_the_conversion_kind() {
+        for (kind, expect) in [
+            (Some("pdf_to_kfx"), "PDF"),
+            (Some("epub_to_kfx"), "EPUB"),
+            (Some("kfx_to_epub"), "KFX"),
+            // A row without a job: the desktop reads this as EPUB, so we must too
+            // or the same book lands in different buckets on the two surfaces.
+            (None, "EPUB"),
+            // Anything unrecognised is EPUB rather than a new bucket, so an added
+            // conversion direction cannot silently fragment the facet.
+            (Some("djvu_to_kfx"), "EPUB"),
+        ] {
+            let b = Book {
+                kind: kind.map(str::to_string),
+                ..book(1)
+            };
+            assert_eq!(
+                extract_facet_values(&b, Facet::Format),
+                vec![expect.to_string()],
+                "kind {kind:?}"
+            );
+        }
+    }
+
+    /// Format is never the "—" sentinel — every book came from something — and it
+    /// is exactly one value, so the facet is a clean partition of the library.
+    #[test]
+    fn format_facet_partitions_and_multi_selects() {
+        let pdf = Book {
+            kind: Some("pdf_to_kfx".into()),
+            ..book(1)
+        };
+        let epub = Book {
+            kind: Some("epub_to_kfx".into()),
+            ..book(2)
+        };
+        let kfx = Book {
+            kind: Some("kfx_to_epub".into()),
+            ..book(3)
+        };
+        for b in [&pdf, &epub, &kfx] {
+            let v = extract_facet_values(b, Facet::Format);
+            assert_eq!(v.len(), 1);
+            assert_ne!(v[0], NONE, "format should never be the none sentinel");
+        }
+
+        // Selecting one value hides the others — the Scribe case, filtering down
+        // to the fixed-layout books it can actually show.
+        let mut f = Filters::default();
+        f.toggle(Facet::Format, "PDF");
+        assert!(matches(&pdf, &f, None));
+        assert!(!matches(&epub, &f, None));
+
+        // OR within the facet, like every other one: the 7" case is the inverse,
+        // selecting everything readable and leaving PDFs out.
+        f.clear_all();
+        f.toggle(Facet::Format, "EPUB");
+        f.toggle(Facet::Format, "KFX");
+        assert!(matches(&epub, &f, None));
+        assert!(matches(&kfx, &f, None));
+        assert!(!matches(&pdf, &f, None));
     }
 
     #[test]

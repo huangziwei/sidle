@@ -168,6 +168,16 @@ pub struct Book {
     pub series_index: Option<f64>,
     #[serde(default)]
     pub file_size: i64,
+    /// Conversion direction, `"<source>_to_<target>"` (`"pdf_to_kfx"`,
+    /// `"epub_to_kfx"`, `"kfx_to_epub"`) — the only record of which format a book
+    /// was imported *from*, which is what the Format facet groups by.
+    ///
+    /// Already on the wire: `/list.json` flattens the whole library row, so this
+    /// arrived before the picker had a use for it and reading it needs no
+    /// protocol change. `#[serde(default)]` → `None` against an older server,
+    /// which [`Book::source_format`] reads as EPUB, matching the desktop.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub imported_at: String,
     /// User-defined tags. Server canonicalizes them (trimmed, lowercased,
@@ -199,6 +209,34 @@ pub struct Book {
     /// falls back to canon'ing the raw title/author on-device (Latin-only match).
     #[serde(default)]
     pub search_key: String,
+}
+
+impl Book {
+    /// The format this book was imported *from* — `"PDF"`, `"EPUB"` or `"KFX"`.
+    ///
+    /// Read off the conversion `kind` (`"<source>_to_<target>"`), the same
+    /// derivation the desktop's `source_format` uses, so both surfaces group a
+    /// book the same way. Upper-cased because these are format names and the
+    /// facet menu shows them verbatim.
+    ///
+    /// Why it earns a facet: format decides whether a book is *readable on this
+    /// device*. A PDF is fixed-layout and cannot reflow, so it is unusable on a
+    /// 7" panel and good on a 10.2" one — which makes this the one facet whose
+    /// useful setting differs per Kindle, in both directions.
+    pub fn source_format(&self) -> &'static str {
+        match self
+            .kind
+            .as_deref()
+            .unwrap_or("epub_to_kfx")
+            .split("_to_")
+            .next()
+            .unwrap_or("epub")
+        {
+            "pdf" => "PDF",
+            "kfx" => "KFX",
+            _ => "EPUB",
+        }
+    }
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -1116,6 +1154,7 @@ mod tests {
             publisher: None,
             series_name: None,
             series_index: None,
+            kind: None,
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),

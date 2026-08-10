@@ -318,6 +318,10 @@ fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Bo
         publisher: None,
         series_name: None,
         series_index: None,
+        // A purchase pulled off the device is KFX by construction — it has no
+        // conversion job, so state it here rather than letting the `None`
+        // default report it as EPUB in the Format facet.
+        kind: Some("kfx_to_epub".to_string()),
         file_size,
         imported_at,
         tags: Vec::new(),
