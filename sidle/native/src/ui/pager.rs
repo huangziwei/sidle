@@ -20,7 +20,6 @@ use crate::eink::fb::Framebuffer;
 use crate::ui::text::TextRenderer;
 
 pub const STRIP_H: u32 = 80;
-pub const PAGE_SIZE: usize = 9;
 
 const EXIT_ZONE_W: u32 = 200;
 /// Filter zone sits immediately right of Exit, same fixed-width pattern.
@@ -50,9 +49,10 @@ pub enum PagerHit {
     Next,
 }
 
-pub fn n_pages(books: usize) -> usize {
-    // `.max(1)` keeps an empty library on a single (empty) page.
-    books.div_ceil(PAGE_SIZE).max(1)
+pub fn n_pages(books: usize, page_size: usize) -> usize {
+    // `.max(1)` keeps an empty library on a single (empty) page; the inner one
+    // also guards the divide against a degenerate layout.
+    books.div_ceil(page_size.max(1)).max(1)
 }
 
 pub fn strip_top(fb_yres: u32) -> u32 {

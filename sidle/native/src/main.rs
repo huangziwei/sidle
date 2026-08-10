@@ -41,7 +41,7 @@ use ui::diag;
 use ui::filter::{self, Filters};
 use ui::filtermenu;
 use ui::grid;
-use ui::pager::{self, PAGE_SIZE, PagerHit};
+use ui::pager::{self, PagerHit};
 use ui::searchbar;
 use ui::sort::SortState;
 use ui::text::TextRenderer;
@@ -162,6 +162,19 @@ fn main() {
     // X11-window proof-of-concept (see eink::x11poc): validates that a
     // Sidle-created window is WM-managed + recomposited on teardown before we
     // port the renderer off raw /dev/fb0. Bypasses all fb/config setup.
+    // `--probe-x`: dump the X server's capabilities, time a real full-screen
+    // paint, and check whether the pre-X eink refresh paths exist. Written to
+    // `/mnt/us/sidle-xprobe.txt` so it can be pulled off without a shell.
+    //
+    // Meant to be run on a device whose display behaves and on one whose does
+    // not: the renderer assumes the server turns damage into a panel refresh by
+    // itself, and if that differs between them the diff says so outright, where
+    // adjusting the upload never could.
+    if std::env::args().any(|a| a == "--probe-x") {
+        let r = eink::xprobe::run_logged();
+        log(format!("xprobe done: {r:?}"));
+        return;
+    }
     if std::env::args().any(|a| a == "--x11-poc") {
         let r = eink::x11poc::run(log);
         log(format!("x11poc done: {r:?}"));
@@ -507,7 +520,19 @@ fn run() -> anyhow::Result<()> {
     let mut series_view: Option<String> = None;
     let mut cells = series::cells_for_top(&entries);
 
-    let mut total_pages = pager::n_pages(cells.len());
+    // How many cells this panel fits, which sets the page size — so it has to be
+    // known before the first page count is taken.
+    let layout = grid::Layout::compute(fb.var.xres, fb.var.yres, TOP_MARGIN, pager::STRIP_H);
+    log(format!(
+        "grid: {}x{} cells of {}x{} ({} per page)",
+        layout.cols,
+        layout.rows,
+        grid::CELL_W,
+        layout.cell_h,
+        layout.page_size()
+    ));
+
+    let mut total_pages = pager::n_pages(cells.len(), layout.page_size());
     log(format!(
         "books: {} in {} tiles of {} ({} on device, {} pages, list in {:?})",
         all_books.len(),
@@ -526,7 +551,6 @@ fn run() -> anyhow::Result<()> {
     // back and re-grouping are instant.
     let mut covers: Vec<Option<DynamicImage>> = vec![None; cells.len()];
 
-    let (grid_left, grid_top) = grid::grid_origin(fb.var.xres, TOP_MARGIN);
     let mut page: usize = 0;
     log("initial render (placeholders)");
     repaint_page(
@@ -539,8 +563,7 @@ fn run() -> anyhow::Result<()> {
         &mut covers,
         page,
         total_pages,
-        grid_left,
-        grid_top,
+        layout,
         sort,
         filters.active_facets(),
         series_view.as_deref(),
@@ -577,19 +600,21 @@ fn run() -> anyhow::Result<()> {
                 // Down on a cell arms it. Down on the strip or in margins
                 // is a no-op — strip actions fire on Up regardless of
                 // hold time, so they don't need to arm.
-                let visible_count = cells.len().saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE);
-                if let Some(cell_pos) = grid::cell_at_tap(x, y, grid_left, grid_top, visible_count)
-                {
-                    let cell_idx = page * PAGE_SIZE + cell_pos;
-                    let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
+                let visible_count = cells
+                    .len()
+                    .saturating_sub(page * layout.page_size())
+                    .min(layout.page_size());
+                if let Some(cell_pos) = layout.cell_at_tap(x, y, visible_count) {
+                    let cell_idx = page * layout.page_size() + cell_pos;
+                    let (cx, cy) = layout.cell_xy(cell_pos);
                     if cx >= 0 && cy >= 0 {
-                        grid::outline_cell(&mut fb, cx, cy, true);
+                        grid::outline_cell(&mut fb, cx, cy, layout.cell_h, true);
                         fb.send_update(
                             MxcfbRect {
                                 top: cy as u32,
                                 left: cx as u32,
                                 width: grid::CELL_W,
-                                height: grid::CELL_H,
+                                height: layout.cell_h,
                             },
                             WAVEFORM_MODE_DU,
                         )?;
@@ -642,8 +667,7 @@ fn run() -> anyhow::Result<()> {
                             &mut covers,
                             page,
                             total_pages,
-                            grid_left,
-                            grid_top,
+                            layout,
                             sort,
                             filters.active_facets(),
                             series_view.as_deref(),
@@ -670,7 +694,7 @@ fn run() -> anyhow::Result<()> {
                         // so `members_of` is Some; the `if let` is defensive.
                         if let Some(members) = series::members_of(&entries, &name) {
                             cells = series::cells_for_series(members);
-                            total_pages = pager::n_pages(cells.len());
+                            total_pages = pager::n_pages(cells.len(), layout.page_size());
                             covers = vec![None; cells.len()];
                             page = 0;
                             series_view = Some(name);
@@ -684,8 +708,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -723,8 +746,7 @@ fn run() -> anyhow::Result<()> {
                         &mut covers,
                         page,
                         total_pages,
-                        grid_left,
-                        grid_top,
+                        layout,
                         sort,
                         filters.active_facets(),
                         series_view.as_deref(),
@@ -778,8 +800,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -828,7 +849,7 @@ fn run() -> anyhow::Result<()> {
                                     &all_books, &filters, sort, &query,
                                 ));
                                 cells = series::cells_for_top(&entries);
-                                total_pages = pager::n_pages(cells.len());
+                                total_pages = pager::n_pages(cells.len(), layout.page_size());
                                 covers = vec![None; cells.len()];
                                 page = 0;
                                 log(format!(
@@ -846,8 +867,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -1011,8 +1031,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -1053,7 +1072,7 @@ fn run() -> anyhow::Result<()> {
                             &all_books, &filters, sort, &query,
                         ));
                         cells = series::cells_for_top(&entries);
-                        total_pages = pager::n_pages(cells.len());
+                        total_pages = pager::n_pages(cells.len(), layout.page_size());
                         covers = vec![None; cells.len()];
                         page = 0;
                         log(format!("search {:?}: {} tiles", query, cells.len()));
@@ -1068,8 +1087,7 @@ fn run() -> anyhow::Result<()> {
                         &mut covers,
                         page,
                         total_pages,
-                        grid_left,
-                        grid_top,
+                        layout,
                         sort,
                         filters.active_facets(),
                         series_view.as_deref(),
@@ -1123,7 +1141,7 @@ fn run() -> anyhow::Result<()> {
                                     &all_books, &filters, sort, &query,
                                 ));
                                 cells = series::cells_for_top(&entries);
-                                total_pages = pager::n_pages(cells.len());
+                                total_pages = pager::n_pages(cells.len(), layout.page_size());
                                 covers = vec![None; cells.len()];
                                 page = 0;
                                 log(format!(
@@ -1144,8 +1162,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -1159,7 +1176,7 @@ fn run() -> anyhow::Result<()> {
                             log("back to series top level");
                             series_view = None;
                             cells = series::cells_for_top(&entries);
-                            total_pages = pager::n_pages(cells.len());
+                            total_pages = pager::n_pages(cells.len(), layout.page_size());
                             covers = vec![None; cells.len()];
                             page = 0;
                             repaint_page(
@@ -1172,8 +1189,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -1195,8 +1211,7 @@ fn run() -> anyhow::Result<()> {
                                     &mut covers,
                                     page,
                                     total_pages,
-                                    grid_left,
-                                    grid_top,
+                                    layout,
                                     sort,
                                     filters.active_facets(),
                                     series_view.as_deref(),
@@ -1219,8 +1234,7 @@ fn run() -> anyhow::Result<()> {
                                     &mut covers,
                                     page,
                                     total_pages,
-                                    grid_left,
-                                    grid_top,
+                                    layout,
                                     sort,
                                     filters.active_facets(),
                                     series_view.as_deref(),
@@ -1288,7 +1302,7 @@ fn run() -> anyhow::Result<()> {
                                     &all_books, &filters, sort, &query,
                                 ));
                                 cells = series::cells_for_top(&entries);
-                                total_pages = pager::n_pages(cells.len());
+                                total_pages = pager::n_pages(cells.len(), layout.page_size());
                                 covers = vec![None; cells.len()];
                                 page = 0;
                             }
@@ -1304,8 +1318,7 @@ fn run() -> anyhow::Result<()> {
                                 &mut covers,
                                 page,
                                 total_pages,
-                                grid_left,
-                                grid_top,
+                                layout,
                                 sort,
                                 filters.active_facets(),
                                 series_view.as_deref(),
@@ -1352,8 +1365,7 @@ fn run() -> anyhow::Result<()> {
                         &mut covers,
                         page,
                         total_pages,
-                        grid_left,
-                        grid_top,
+                        layout,
                         sort,
                         filters.active_facets(),
                         series_view.as_deref(),
@@ -1398,8 +1410,7 @@ fn run() -> anyhow::Result<()> {
                             &mut covers,
                             page,
                             total_pages,
-                            grid_left,
-                            grid_top,
+                            layout,
                             sort,
                             filters.active_facets(),
                             series_view.as_deref(),
@@ -1410,16 +1421,16 @@ fn run() -> anyhow::Result<()> {
                         // Flip the tile to the armed cue and present it (partial
                         // refresh + short dwell) before the action overlay paints
                         // over it, so the "held long enough" signal is actually seen.
-                        let cell_pos = a.cell_idx.saturating_sub(page * PAGE_SIZE);
-                        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
+                        let cell_pos = a.cell_idx.saturating_sub(page * layout.page_size());
+                        let (cx, cy) = layout.cell_xy(cell_pos);
                         if cx >= 0 && cy >= 0 {
-                            grid::draw_arm_cue(&mut fb, cx, cy);
+                            grid::draw_arm_cue(&mut fb, cx, cy, layout.cell_h);
                             fb.send_update(
                                 MxcfbRect {
                                     top: cy as u32,
                                     left: cx as u32,
                                     width: grid::CELL_W,
-                                    height: grid::CELL_H,
+                                    height: layout.cell_h,
                                 },
                                 WAVEFORM_MODE_DU,
                             )?;
@@ -1511,7 +1522,7 @@ fn run() -> anyhow::Result<()> {
                                 },
                                 None => series::cells_for_top(&entries),
                             };
-                            total_pages = pager::n_pages(cells.len());
+                            total_pages = pager::n_pages(cells.len(), layout.page_size());
                             covers = vec![None; cells.len()];
                             page = page.min(total_pages.saturating_sub(1));
                             log(format!(
@@ -1531,8 +1542,7 @@ fn run() -> anyhow::Result<()> {
                             &mut covers,
                             page,
                             total_pages,
-                            grid_left,
-                            grid_top,
+                            layout,
                             sort,
                             filters.active_facets(),
                             series_view.as_deref(),
@@ -1541,16 +1551,29 @@ fn run() -> anyhow::Result<()> {
                         )?;
                     }
                 } else if armed.is_none() {
-                    // Idle poll. The X server rotates our window to the framework
-                    // orientation but leaves it blank until we repaint, and raw
-                    // touch/buttons don't follow the rotation. So on a detected
-                    // flip: re-orient input, then repaint the current page (the X
-                    // server rotates the repaint correctly, clearing the blank).
+                    // Idle poll. Two things can leave the window stale, and both
+                    // are repaired the same way — repaint the current page.
+                    //
+                    // A rotation: the X server rotates our window to the
+                    // framework orientation but leaves it blank until we
+                    // repaint, and raw touch/buttons don't follow the rotation,
+                    // so input is re-oriented too.
+                    //
+                    // Damage: the framework paints over us during handoff (most
+                    // visibly on launch, where it blanks the bottom strip while
+                    // leaving it hit-testable), or one of our own updates was
+                    // rejected. Both surface on the X event queue, and neither is
+                    // repaired unless we redraw.
                     let o = orientation::Orientation::detect();
-                    if o != current_orient {
-                        log(format!("orientation: {current_orient:?} -> {o:?}"));
-                        current_orient = o;
-                        input.set_orientation(o);
+                    let damaged = fb.pump_events();
+                    if o != current_orient || damaged {
+                        if o != current_orient {
+                            log(format!("orientation: {current_orient:?} -> {o:?}"));
+                            current_orient = o;
+                            input.set_orientation(o);
+                        } else {
+                            log("x11: damage — repainting");
+                        }
                         repaint_page(
                             &mut fb,
                             &mut renderer,
@@ -1561,8 +1584,7 @@ fn run() -> anyhow::Result<()> {
                             &mut covers,
                             page,
                             total_pages,
-                            grid_left,
-                            grid_top,
+                            layout,
                             sort,
                             filters.active_facets(),
                             series_view.as_deref(),
@@ -1614,8 +1636,7 @@ fn draw_gallery_page(
     covers: &[Option<DynamicImage>],
     page: usize,
     total_pages: usize,
-    grid_left: i32,
-    grid_top: i32,
+    layout: grid::Layout,
     header: &str,
     filter_count: usize,
     drilled: bool,
@@ -1628,7 +1649,7 @@ fn draw_gallery_page(
     // the keyboard overlay), then the sort header just below it. Drilled into a
     // series: no bar (search is a top-level action), just the series-name header.
     let hbaseline = if drilled {
-        grid_top * 60 / 100
+        layout.top * 60 / 100
     } else {
         searchbar::draw(fb, renderer, query, true);
         searchbar::draw_buttons(fb, drm_active);
@@ -1642,10 +1663,10 @@ fn draw_gallery_page(
         renderer.draw(fb, hx, hbaseline, h, false);
     }
 
-    let start = page * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(cells.len());
+    let start = page * layout.page_size();
+    let end = (start + layout.page_size()).min(cells.len());
     for (cell_pos, idx) in (start..end).enumerate() {
-        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
+        let (cx, cy) = layout.cell_xy(cell_pos);
         if cx < 0 || cy < 0 {
             continue;
         }
@@ -1658,11 +1679,28 @@ fn draw_gallery_page(
                     text: &cells[idx].cover_book.title,
                     script,
                 };
-                grid::draw_book_cell(fb, renderer, cx, cy, covers[idx].as_ref(), title);
+                grid::draw_book_cell(
+                    fb,
+                    renderer,
+                    cx,
+                    cy,
+                    layout.cell_h,
+                    covers[idx].as_ref(),
+                    title,
+                );
             }
             CellKind::Series { name, count } => {
                 let name = grid::Label { text: name, script };
-                grid::draw_series_cell(fb, renderer, cx, cy, covers[idx].as_ref(), *count, name);
+                grid::draw_series_cell(
+                    fb,
+                    renderer,
+                    cx,
+                    cy,
+                    layout.cell_h,
+                    covers[idx].as_ref(),
+                    *count,
+                    name,
+                );
             }
         }
     }
@@ -1706,8 +1744,7 @@ fn repaint_page(
     covers: &mut [Option<DynamicImage>],
     page: usize,
     total_pages: usize,
-    grid_left: i32,
-    grid_top: i32,
+    layout: grid::Layout,
     sort: SortState,
     filter_count: usize,
     series_view: Option<&str>,
@@ -1726,8 +1763,7 @@ fn repaint_page(
         covers,
         page,
         total_pages,
-        grid_left,
-        grid_top,
+        layout,
         &header,
         filter_count,
         drilled,
@@ -1735,7 +1771,7 @@ fn repaint_page(
         drm.is_some(),
     )?;
     fetch_and_paint_page(
-        fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top, drm,
+        fb, renderer, agent, cfg, cache_dir, cells, covers, page, layout, drm,
     )?;
     Ok(())
 }
@@ -1755,12 +1791,11 @@ fn fetch_and_paint_page(
     cells: &[Cell],
     covers: &mut [Option<DynamicImage>],
     page: usize,
-    grid_left: i32,
-    grid_top: i32,
+    layout: grid::Layout,
     drm: Option<&[dedrm::DrmBook]>,
 ) -> anyhow::Result<()> {
-    let start = page * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(cells.len());
+    let start = page * layout.page_size();
+    let end = (start + layout.page_size()).min(cells.len());
     let t_pg = Instant::now();
     let mut fetched = 0usize;
     for idx in start..end {
@@ -1781,7 +1816,7 @@ fn fetch_and_paint_page(
         };
 
         if let Some(img) = img.as_ref() {
-            let (cx, cy) = grid::cell_xy(grid_left, grid_top, idx - start);
+            let (cx, cy) = layout.cell_xy(idx - start);
             if cx >= 0 && cy >= 0 {
                 let script = font::Script::of_language(&cells[idx].cover_book.language);
                 match &cells[idx].kind {
@@ -1790,11 +1825,20 @@ fn fetch_and_paint_page(
                             text: &cells[idx].cover_book.title,
                             script,
                         };
-                        grid::draw_book_cell(fb, renderer, cx, cy, Some(img), title);
+                        grid::draw_book_cell(fb, renderer, cx, cy, layout.cell_h, Some(img), title);
                     }
                     CellKind::Series { name, count } => {
                         let name = grid::Label { text: name, script };
-                        grid::draw_series_cell(fb, renderer, cx, cy, Some(img), *count, name);
+                        grid::draw_series_cell(
+                            fb,
+                            renderer,
+                            cx,
+                            cy,
+                            layout.cell_h,
+                            Some(img),
+                            *count,
+                            name,
+                        );
                     }
                 }
                 fb.send_update(
@@ -1802,7 +1846,7 @@ fn fetch_and_paint_page(
                         top: cy as u32,
                         left: cx as u32,
                         width: grid::CELL_W,
-                        height: grid::CELL_H,
+                        height: layout.cell_h,
                     },
                     WAVEFORM_MODE_GC16,
                 )?;

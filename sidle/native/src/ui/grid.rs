@@ -1,6 +1,6 @@
 //! Cover grid: layout + cell hit-test + image blit.
 //!
-//! 3×N grid centered on the panel, each cell is a fixed `CELL_W × CELL_H`
+//! grid centered on the panel (see `Layout`), each cell `CELL_W` wide
 //! bounding box. Covers fit inside via aspect-preserving resize (image
 //! crate's `Triangle` filter — bilinear, fast enough on armv7l, and we
 //! don't need Lanczos-quality on a 16-shade eink panel). Missing covers
@@ -24,11 +24,101 @@ pub struct Label<'a> {
     pub script: Script,
 }
 
-pub const COLS: usize = 3;
+/// Cell width is fixed. Every Kindle we target is ~300 ppi (KOA2 2102px/7",
+/// Scribe 3100px/10.2"), so a pixel size is a *physical* size across the range:
+/// a bigger panel wants more covers, not larger ones. Only the row/column count
+/// adapts, and height flexes just enough to land one more row.
 pub const CELL_W: u32 = 360;
-pub const CELL_H: u32 = 440;
+/// Tallest a cell gets — the height the 7" devices have always used, so their
+/// layout is unchanged by adaptivity.
+pub const CELL_H_MAX: u32 = 440;
+/// Shortest a cell may be squeezed to in order to fit another row. Trades ~3%
+/// of cover height for a whole extra row on a tall panel, which is the better
+/// deal at this density.
+pub const CELL_H_MIN: u32 = 420;
 pub const COL_GAP: u32 = 32;
 pub const ROW_GAP: u32 = 20;
+
+/// The grid as it fits *this* panel: how many cells, how tall, and where the
+/// block sits. Computed once at startup from the framebuffer geometry and then
+/// passed around in place of the old `grid_left`/`grid_top` pair, so no call
+/// site gains a parameter.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub cols: usize,
+    pub rows: usize,
+    /// Actual cell height, between [`CELL_H_MIN`] and [`CELL_H_MAX`].
+    pub cell_h: u32,
+    /// Origin of the cell block, centred horizontally.
+    pub left: i32,
+    pub top: i32,
+}
+
+impl Layout {
+    /// Fit as many rows as the panel allows at [`CELL_H_MIN`], then give the
+    /// rows back whatever height is spare, capped at [`CELL_H_MAX`].
+    ///
+    /// Fit-then-expand rather than a plain divide, because the two orders differ
+    /// where it matters: dividing by the maximum height loses a row on the
+    /// Scribe (2210px of usable height is four 440px rows with 390px stranded),
+    /// while fitting at the minimum finds five and then settles them at 426px.
+    /// On a 1264×1680 panel both orders agree — 3×3 at the full 440 — so the
+    /// existing devices keep precisely the layout they had.
+    pub fn compute(fb_xres: u32, fb_yres: u32, top_margin: u32, strip_h: u32) -> Self {
+        let cols = ((fb_xres + COL_GAP) / (CELL_W + COL_GAP)).max(1) as usize;
+        let avail = fb_yres.saturating_sub(top_margin + strip_h);
+        let rows = ((avail + ROW_GAP) / (CELL_H_MIN + ROW_GAP)).max(1) as usize;
+        let cell_h = (avail.saturating_sub((rows as u32 - 1) * ROW_GAP) / rows as u32)
+            .clamp(CELL_H_MIN, CELL_H_MAX);
+
+        let grid_w = cols as u32 * CELL_W + (cols as u32 - 1) * COL_GAP;
+        Self {
+            cols,
+            rows,
+            cell_h,
+            left: ((fb_xres as i32) - grid_w as i32) / 2,
+            top: top_margin as i32,
+        }
+    }
+
+    /// Cells per page — what used to be the `PAGE_SIZE` constant.
+    pub fn page_size(&self) -> usize {
+        self.cols * self.rows
+    }
+
+    /// Screen origin of the `idx`-th cell on the current page.
+    pub fn cell_xy(&self, idx: usize) -> (i32, i32) {
+        let col = idx % self.cols;
+        let row = idx / self.cols;
+        (
+            self.left + col as i32 * (CELL_W + COL_GAP) as i32,
+            self.top + row as i32 * (self.cell_h + ROW_GAP) as i32,
+        )
+    }
+
+    /// Which cell a tap landed on, or `None` for the gaps and the margins.
+    pub fn cell_at_tap(&self, tx: u32, ty: u32, n_books: usize) -> Option<usize> {
+        if (tx as i32) < self.left || (ty as i32) < self.top {
+            return None;
+        }
+        let local_x = (tx as i32 - self.left) as u32;
+        let local_y = (ty as i32 - self.top) as u32;
+        let stride_x = CELL_W + COL_GAP;
+        let stride_y = self.cell_h + ROW_GAP;
+        let col = (local_x / stride_x) as usize;
+        let row = (local_y / stride_y) as usize;
+        if col >= self.cols || row >= self.rows {
+            return None;
+        }
+        // Reject taps that land in the gap between cells (improves accuracy
+        // — otherwise a tap right between two covers picks the left one).
+        if local_x % stride_x >= CELL_W || local_y % stride_y >= self.cell_h {
+            return None;
+        }
+        let idx = row * self.cols + col;
+        if idx < n_books { Some(idx) } else { None }
+    }
+}
 
 // ---- Series-collection tile geometry (see `draw_series_cell`) ----
 /// Bottom band of a series tile, reserved for the series name (book covers
@@ -43,14 +133,14 @@ const BADGE_MARGIN: u32 = 8;
 /// Padding inside the count badge around its number.
 const BADGE_PAD: u32 = 12;
 
-/// Decode a JPEG/PNG byte buffer and resize to fit inside `CELL_W × CELL_H`,
+/// Decode a JPEG/PNG byte buffer and resize to fit inside `CELL_W × CELL_H_MAX`,
 /// preserving aspect. Returns the resized image in its source color (the cover
 /// thumbnail is a color JPEG; [`blit_fit`] samples its RGB).
 pub fn decode_resize(bytes: &[u8]) -> Result<DynamicImage> {
     let img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
         .decode()?;
-    Ok(img.resize(CELL_W, CELL_H, FilterType::Triangle))
+    Ok(img.resize(CELL_W, CELL_H_MAX, FilterType::Triangle))
 }
 
 /// The aspect-fit placement of an `iw × ih` image inside the box — the rect
@@ -120,9 +210,9 @@ pub fn blit_fit(
 
 /// Frame the selected cell with a black border so the user knows which is
 /// armed (download for a book, drill-in for a series). 6px border.
-pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, selected: bool) {
+pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, cell_h: u32, selected: bool) {
     let shade = if selected { 0x00 } else { 0xFF };
-    outline_rect(fb, cell_x, cell_y, CELL_W, CELL_H, 6, shade);
+    outline_rect(fb, cell_x, cell_y, CELL_W, cell_h, 6, shade);
 }
 
 /// Paint the "armed" cue on a held book cell once the hold crosses the long-press
@@ -132,12 +222,12 @@ pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, selected: bo
 /// stays visible around the badge so the user still sees which book is arming. The
 /// post-action repaint clears it. `(cell_x, cell_y)` is the on-screen cell origin
 /// (see [`cell_xy`]); off-screen no-ops.
-pub fn draw_arm_cue(fb: &mut Framebuffer, cell_x: i32, cell_y: i32) {
+pub fn draw_arm_cue(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, cell_h: u32) {
     if cell_x < 0 || cell_y < 0 {
         return;
     }
     // Center the badge on the cover region (the cell minus the bottom name band).
-    let cover_h = CELL_H - NAME_BAND_H;
+    let cover_h = cell_h - NAME_BAND_H;
     let cx = cell_x + CELL_W as i32 / 2;
     let cy = cell_y + cover_h as i32 / 2;
     const BADGE: u32 = 140;
@@ -421,11 +511,13 @@ pub fn draw_key_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade: u8)
 /// [`draw_series_cell`]: `top_inset` is 0 for a standalone book (the cover uses
 /// the full height above the band) and `BAR_STRIP_H` for a series (leaving room
 /// for the stack bars). Off-screen cells no-op with a zero-size rect.
+#[allow(clippy::too_many_arguments)]
 fn draw_cover_tile(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
     cell_x: i32,
     cell_y: i32,
+    cell_h: u32,
     top_inset: u32,
     cover: Option<&DynamicImage>,
     label: Label,
@@ -433,13 +525,13 @@ fn draw_cover_tile(
     if cell_x < 0 || cell_y < 0 {
         return (cell_x, cell_y, 0, 0);
     }
-    fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, CELL_H, 0xFF);
+    fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, cell_h, 0xFF);
 
     // Cover region: full cell width (edge-to-edge, no inset card or frame),
     // between the optional top inset and the bottom name band. The cover
     // aspect-fits exactly like a standalone book cover.
     let region_y = cell_y + top_inset as i32;
-    let region_h = CELL_H - NAME_BAND_H - top_inset;
+    let region_h = cell_h - NAME_BAND_H - top_inset;
     let rect = match cover {
         Some(img) => blit_fit(fb, cell_x, region_y, CELL_W, region_h, img),
         None => {
@@ -451,7 +543,7 @@ fn draw_cover_tile(
 
     // Name band: a 2px separator then the label, centered and clamped to one
     // ellipsized line so a long title can't overrun the cell.
-    let band_top = cell_y as u32 + (CELL_H - NAME_BAND_H);
+    let band_top = cell_y as u32 + (cell_h - NAME_BAND_H);
     fb.fill_rect(band_top, cell_x as u32, CELL_W, 2, 0x00);
     const PAD: u32 = 16;
     let width = CELL_W.saturating_sub(PAD * 2);
@@ -476,10 +568,11 @@ pub fn draw_book_cell(
     renderer: &mut TextRenderer,
     cell_x: i32,
     cell_y: i32,
+    cell_h: u32,
     cover: Option<&DynamicImage>,
     title: Label,
 ) {
-    draw_cover_tile(fb, renderer, cell_x, cell_y, 0, cover, title);
+    draw_cover_tile(fb, renderer, cell_x, cell_y, cell_h, 0, cover, title);
 }
 
 /// Render a series-collection tile: the shared cover tile (see
@@ -488,19 +581,29 @@ pub fn draw_book_cell(
 /// further back — a "stack of volumes" hint) and a solid dark **count badge**
 /// (light number = available-to-download members) at the cover's bottom-left.
 /// Self-contained for both the placeholder paint and the per-cover refresh.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_series_cell(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
     cell_x: i32,
     cell_y: i32,
+    cell_h: u32,
     cover: Option<&DynamicImage>,
     count: usize,
     name: Label,
 ) {
     // Series reserve BAR_STRIP_H above the cover for the stack bars; the cover
     // is otherwise identical to a book's, so the two line up in the grid.
-    let (cov_x, cov_y, cov_w, cov_h) =
-        draw_cover_tile(fb, renderer, cell_x, cell_y, BAR_STRIP_H, cover, name);
+    let (cov_x, cov_y, cov_w, cov_h) = draw_cover_tile(
+        fb,
+        renderer,
+        cell_x,
+        cell_y,
+        cell_h,
+        BAR_STRIP_H,
+        cover,
+        name,
+    );
     if cov_w == 0 {
         return; // off-screen cell
     }
@@ -546,48 +649,64 @@ pub fn draw_series_cell(
     renderer.draw(fb, text_x, text_baseline, &badge_text, true);
 }
 
-/// Grid origin computed to center the grid on the panel.
-pub fn grid_origin(fb_xres: u32, top_margin: u32) -> (i32, i32) {
-    let grid_w = COLS as u32 * CELL_W + (COLS as u32 - 1) * COL_GAP;
-    let left = ((fb_xres as i32) - grid_w as i32) / 2;
-    (left, top_margin as i32)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn cell_xy(grid_left: i32, grid_top: i32, idx: usize) -> (i32, i32) {
-    let col = idx % COLS;
-    let row = idx / COLS;
-    let x = grid_left + col as i32 * (CELL_W + COL_GAP) as i32;
-    let y = grid_top + row as i32 * (CELL_H + ROW_GAP) as i32;
-    (x, y)
-}
+    /// The 7" panels must come out of the adaptive path with exactly the layout
+    /// they had when it was three hard-coded constants — otherwise this is a
+    /// redesign of the shipped devices, not an accommodation of a new one.
+    #[test]
+    fn seven_inch_panels_are_unchanged() {
+        let l = Layout::compute(1264, 1680, 190, 80);
+        assert_eq!((l.cols, l.rows), (3, 3));
+        assert_eq!(l.cell_h, CELL_H_MAX, "cell height must not shrink here");
+        assert_eq!(l.page_size(), 9);
+        assert_eq!(l.left, 60, "grid stays centred where it was");
+    }
 
-pub fn cell_at_tap(
-    tx: u32,
-    ty: u32,
-    grid_left: i32,
-    grid_top: i32,
-    n_books: usize,
-) -> Option<usize> {
-    if (tx as i32) < grid_left || (ty as i32) < grid_top {
-        return None;
+    /// The Scribe's extra area buys rows, not bigger covers.
+    #[test]
+    fn scribe_gains_rows_and_columns() {
+        let l = Layout::compute(1860, 2480, 190, 80);
+        assert_eq!((l.cols, l.rows), (4, 5));
+        assert_eq!(l.page_size(), 20);
+        assert_eq!(l.left, 162);
+        // Fit-then-expand: five rows only exist below CELL_H_MAX, and the result
+        // must still clear the floor.
+        assert!(
+            (CELL_H_MIN..CELL_H_MAX).contains(&l.cell_h),
+            "cell_h {} outside [{CELL_H_MIN}, {CELL_H_MAX})",
+            l.cell_h
+        );
+        // Everything has to actually fit between the header and the strip.
+        let used = l.rows as u32 * l.cell_h + (l.rows as u32 - 1) * ROW_GAP;
+        assert!(
+            used <= 2480 - 190 - 80,
+            "{used} overflows the usable height"
+        );
     }
-    let local_x = (tx as i32 - grid_left) as u32;
-    let local_y = (ty as i32 - grid_top) as u32;
-    let stride_x = CELL_W + COL_GAP;
-    let stride_y = CELL_H + ROW_GAP;
-    let col = (local_x / stride_x) as usize;
-    let row = (local_y / stride_y) as usize;
-    if col >= COLS {
-        return None;
+
+    /// A panel too small for even one full cell must still yield a usable grid
+    /// rather than a divide-by-zero or an empty page.
+    #[test]
+    fn degenerate_panel_still_yields_one_cell() {
+        let l = Layout::compute(100, 100, 190, 80);
+        assert_eq!((l.cols, l.rows), (1, 1));
+        assert_eq!(l.page_size(), 1);
     }
-    // Reject taps that land in the gap between cells (improves accuracy
-    // — otherwise a tap right between two covers picks the left one).
-    if local_x % stride_x >= CELL_W {
-        return None;
+
+    #[test]
+    fn taps_in_gaps_and_margins_miss() {
+        let l = Layout::compute(1860, 2480, 190, 80);
+        let (x, y) = l.cell_xy(0);
+        assert_eq!(l.cell_at_tap(x as u32 + 5, y as u32 + 5, 20), Some(0));
+        // The column gap between cell 0 and cell 1.
+        let gap_x = x as u32 + CELL_W + COL_GAP / 2;
+        assert_eq!(l.cell_at_tap(gap_x, y as u32 + 5, 20), None);
+        // Left of the grid entirely.
+        assert_eq!(l.cell_at_tap(4, y as u32 + 5, 20), None);
+        // Past the last row — must not wrap onto a phantom cell.
+        assert_eq!(l.cell_at_tap(x as u32 + 5, 2470, 20), None);
     }
-    if local_y % stride_y >= CELL_H {
-        return None;
-    }
-    let idx = row * COLS + col;
-    if idx < n_books { Some(idx) } else { None }
 }

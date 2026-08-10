@@ -22,7 +22,8 @@
 //! to the visual's channel masks plus a pad byte; a grayscale panel (KOA2, depth
 //! 8) takes a per-pixel luma collapse (a gray UI pixel passes through exactly;
 //! the rare color cover desaturates). `send_update` does that conversion per
-//! band. The dirty rows are chunked under the server's max request length. Type/
+//! band. A paint goes as one request (BIG-REQUESTS), so the server sees one
+//! damage region rather than several. Type/
 //! method names (`Framebuffer`, `MxcfbRect`, `send_update`) are kept so the
 //! renderer is unchanged; the X server drives the eink refresh, so the waveform
 //! is ignored.
@@ -32,9 +33,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use x11rb::connection::Connection;
+// `maximum_request_bytes` (BIG-REQUESTS-aware) lives on this trait.
+use x11rb::connection::RequestConnection as _;
+use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, BackingStore, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, Gcontext,
-    ImageFormat, ImageOrder, PropMode, Screen, Window, WindowClass,
+    AtomEnum, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, Gcontext, ImageFormat,
+    ImageOrder, PropMode, Screen, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 // `change_property8` lives in the wrapper `ConnectionExt`.
@@ -175,9 +179,24 @@ impl Framebuffer {
             0,
             WindowClass::INPUT_OUTPUT,
             screen.root_visual,
+            // No `backing_store`. Asking for it costs panel updates on this
+            // hardware: with backing store the server can satisfy our drawing
+            // out of off-screen storage and propagate only some of it to the
+            // controller, so pixels are in the framebuffer and correct while the
+            // panel never refreshes them. That reads as content drawn,
+            // hit-testable, and invisible — a strip that responds to taps it
+            // doesn't display, a toast that won't clear, a repaint that appears
+            // an interaction late.
+            //
+            // Isolated by controlled comparison on a Scribe (`--probe-x`): two
+            // windows, identical paints and timing, differing only in this flag.
+            // Without it, 24 test squares landed every time; with it, squares
+            // went missing and others drew half. A framebuffer readback showed
+            // memory correct in both cases, which places the loss after X
+            // entirely — so this is the server's choice about what to send
+            // onward, not ours about what to draw.
             &CreateWindowAux::new()
                 .background_pixel(screen.white_pixel)
-                .backing_store(BackingStore::ALWAYS)
                 .event_mask(EventMask::EXPOSURE),
         )
         .context("create_window")?;
@@ -201,9 +220,52 @@ impl Framebuffer {
             .context("create_gc")?;
         conn.flush().context("flush after map")?;
 
-        let max_req_bytes = (conn.setup().maximum_request_length as usize)
-            .saturating_mul(4)
-            .max(4096);
+        // What the WM actually gave us, versus what we asked for. Everything is
+        // drawn against the *root* dimensions above, so a window that came back
+        // smaller or offset silently clips whatever sits at the screen edges —
+        // which is exactly how a top search bar and a bottom strip go missing
+        // while the middle of the grid survives. Logged rather than corrected
+        // because the right correction depends on which way it differs.
+        match conn
+            .get_geometry(win)
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.reply().map_err(|e| e.to_string()))
+        {
+            Ok(g) => {
+                if u32::from(g.width) != xres || u32::from(g.height) != yres || g.x != 0 || g.y != 0
+                {
+                    eprintln!(
+                        "fb: WARNING window geometry {}x{}+{}+{} != root {xres}x{yres}+0+0 \
+                         — edge-anchored UI will be clipped",
+                        g.width, g.height, g.x, g.y
+                    );
+                } else {
+                    eprintln!("fb: window geometry matches root ({xres}x{yres})");
+                }
+            }
+            Err(e) => eprintln!("fb: could not read window geometry: {e}"),
+        }
+
+        // Ask the connection, not the setup block. `setup().maximum_request_length`
+        // is the *pre-negotiation* limit (65535 units = ~256 KB); x11rb enables
+        // BIG-REQUESTS during connect, and `maximum_request_bytes()` reports the
+        // ~16 MB limit that actually applies. A whole 1860×2480 frame is 4.6 MB,
+        // so a paint is one request.
+        //
+        // Uncapped on purpose. Splitting a paint into bands hands the server
+        // several damage regions instead of one, and since what actually goes
+        // missing on this hardware is a *panel refresh* rather than a request
+        // (measured: framebuffer memory was correct even when the screen wasn't),
+        // more regions is more to lose. Measurement also puts the single request
+        // at least as fast as the alternatives — 17.7 ms against 27.3 ms for
+        // eighteen bands — so there is nothing to trade off.
+        let max_req_bytes = conn.maximum_request_bytes().max(4096);
+        eprintln!(
+            "fb: max request {} bytes ({} rows/band at {} bpp)",
+            max_req_bytes,
+            max_req_bytes / (xres as usize * bytes_per_pixel).max(1),
+            bytes_per_pixel
+        );
 
         let backing = vec![0xFFu8; xres as usize * yres as usize * CH];
 
@@ -258,6 +320,44 @@ impl Framebuffer {
                 self.backing[s..e].fill(value);
             }
         }
+    }
+
+    /// Drain the X event queue, reporting whether the server asked us to redraw.
+    ///
+    /// Two distinct problems live in this queue, and nothing used to read it.
+    ///
+    /// **Exposures.** We select `EXPOSURE` when creating the window, but with the
+    /// queue unread the damage was never repaired. On the Scribe that shows on
+    /// every launch: the framework paints over our window as it hands off, and
+    /// the bottom strip stays blank — drawn and hit-testable, but absent from the
+    /// panel — until some unrelated interaction forces a full repaint.
+    /// `backing_store(ALWAYS)` is only a hint and this server does not honour it,
+    /// so the redraw has to be ours.
+    ///
+    /// **Errors.** `put_image` returns a `VoidCookie`, so a rejected request is
+    /// reported *asynchronously here*, not at the call site — `?` on the send
+    /// cannot see it. An unread queue therefore turns a failed screen update into
+    /// silence, which is indistinguishable from a display that simply didn't
+    /// refresh. Logging them is what makes that difference observable at all.
+    ///
+    /// Drains rather than peeks: a burst during handoff should cost one repaint,
+    /// not one per event.
+    pub fn pump_events(&mut self) -> bool {
+        let mut needs_repaint = false;
+        while let Ok(Some(event)) = self.conn.poll_for_event() {
+            match event {
+                Event::Expose(_) => needs_repaint = true,
+                Event::Error(e) => {
+                    // A dropped update leaves the panel stale, so treat it as
+                    // damage too — retrying costs one repaint and may well
+                    // succeed, where doing nothing certainly stays wrong.
+                    eprintln!("x11: WARNING request failed: {e:?}");
+                    needs_repaint = true;
+                }
+                _ => {}
+            }
+        }
+        needs_repaint
     }
 
     /// Present the dirty rows, converting the RGB backing to the wire pixel
@@ -326,7 +426,22 @@ impl Framebuffer {
                 .context("put_image")?;
             y += h as u32;
         }
-        self.conn.flush().context("flush")?;
+        // Round-trip, not a bare flush. `flush` only guarantees the bytes left
+        // this process; it says nothing about the server having consumed them,
+        // and the panel refresh rides on the server actually processing the
+        // batch. Without a reply to wait for, a paint could sit unprocessed
+        // until the *next* request arrived — which is precisely the "repaint is
+        // one tap behind" behaviour, and why chrome drawn in the same pass as
+        // the grid could still show up later than it.
+        //
+        // It earns a second keep: a reply forces the server to have dealt with
+        // every preceding request, so any error they raised is delivered now
+        // rather than sitting unnoticed on the event queue.
+        self.conn
+            .get_input_focus()
+            .context("sync round-trip")?
+            .reply()
+            .context("sync reply")?;
         Ok(0)
     }
 

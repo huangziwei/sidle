@@ -23,11 +23,22 @@
 //!
 //! Device discovery: `/proc/bus/input/devices` is text. Name-matching alone is
 //! brittle across panels — KOA2 reports "cyttsp", the Colorsoft reports
-//! "fts_ts" (FocalTech) — so we primarily match on *capability*: a touchscreen
-//! advertises absolute axes (`EV_ABS`) and is a direct device
-//! (`INPUT_PROP_DIRECT`), which the power-key / accelerometer nodes are not.
-//! A name allowlist is kept as a fast path. We then extract its `eventN`
-//! handler; no `EVIOCGNAME` ioctl needed.
+//! "fts_ts" (FocalTech) — so capability matters too: a touchscreen advertises
+//! absolute axes (`EV_ABS`) and is a direct device (`INPUT_PROP_DIRECT`).
+//! We extract its `eventN` handler; no `EVIOCGNAME` ioctl needed.
+//!
+//! Capability alone is *not* sufficient, and the Scribe is why. It carries a
+//! Wacom EMR pen digitizer alongside the finger panel, and a pen on a screen is
+//! every bit as `EV_ABS` + `INPUT_PROP_DIRECT` as a finger is. Taking the first
+//! capable node grabbed `wacomdigitizer`, and because we `EVIOCGRAB` what we
+//! open, that both blinded the picker to touch and starved the framework of pen
+//! input — the device could only be recovered by rebooting.
+//!
+//! So discovery *scores* every node and takes the best, rather than returning
+//! the first that clears a bar. Pen/stylus digitizers are excluded outright;
+//! everything else is ranked by how much it looks like a finger panel. Scoring
+//! rather than filtering is deliberate: a heuristic that ranks wrongly costs a
+//! preference, while one that filters wrongly costs the only usable device.
 //!
 //! Wire format: on the KOA2's kernel (4.1.15, 32-bit ARM), each event is
 //! 16 bytes — `struct timeval` is 8 bytes, then u16 type, u16 code,
@@ -164,6 +175,22 @@ impl Touch {
         // boolean (see drivers/input/evdev.c). Pass 1.
         let grab_res = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, 1) };
         let grabbed = grab_res == 0;
+        // A failed grab is not fatal — we still read the device — but it stops
+        // being *exclusive*, so the framework goes on receiving the same touches
+        // and acts on them behind us: a swipe reaches the stock home screen, and
+        // the framework repaints over our chrome. That presents as "the picker
+        // works but the OS is fighting it", which is impossible to guess at from
+        // the outside, so say so plainly.
+        if grabbed {
+            eprintln!("touch: EVIOCGRAB ok — exclusive");
+        } else {
+            let err = std::io::Error::last_os_error();
+            eprintln!(
+                "touch: WARNING EVIOCGRAB failed on {} ({err}) — input is NOT exclusive; \
+                 the framework will also act on these touches",
+                path.display()
+            );
+        }
         Ok(Self {
             file,
             cur_x: 0,
@@ -386,49 +413,145 @@ impl Drop for Touch {
     }
 }
 
+/// Names that are never a finger panel. A pen digitizer satisfies every
+/// capability test a touchscreen does, so nothing but the name separates them
+/// from the outside — and grabbing one is the difference between a working
+/// picker and a device that needs a reboot.
+const PEN_NAMES: [&str; 4] = ["wacom", "digitizer", "stylus", "pen"];
+
+/// Names that are a finger panel on some Kindle we know of. `pt_mt` is the
+/// Scribe's (Parade multitouch), sitting next to a Wacom pen node.
+const TOUCH_NAMES: [&str; 9] = [
+    "touch",
+    "cyttsp",
+    "zforce",
+    "atmel",
+    "fts",
+    "focaltech",
+    "goodix",
+    "elan",
+    "pt_mt",
+];
+
+/// The firmware's own answer to which node is the finger panel. Newer Kindle
+/// firmware (the Scribe on 5.19.4.0.1) ships `/dev/input/touch` and
+/// `/dev/input/stylus` symlinks next to the `eventN` nodes. When that exists it
+/// outranks anything we could infer, because it is the device telling us
+/// directly rather than us guessing from capability bits.
+const TOUCH_ALIAS: &str = "/dev/input/touch";
+
 fn find_touch_device() -> Result<PathBuf> {
+    if std::fs::metadata(TOUCH_ALIAS).is_ok() {
+        eprintln!("touch: using {TOUCH_ALIAS} (firmware alias)");
+        return Ok(PathBuf::from(TOUCH_ALIAS));
+    }
+    find_touch_device_by_scan()
+}
+
+/// Rank the `eventN` nodes when no firmware alias exists (KOA2, Colorsoft).
+fn find_touch_device_by_scan() -> Result<PathBuf> {
     let raw = std::fs::read_to_string("/proc/bus/input/devices")
         .context("read /proc/bus/input/devices")?;
+    match pick_from_devices(&raw) {
+        Some(node) => Ok(PathBuf::from(format!("/dev/input/{node}"))),
+        None => bail!("no touchscreen entry in /proc/bus/input/devices"),
+    }
+}
 
+/// The scan's decision, split out from the I/O so it can be tested against real
+/// `/proc/bus/input/devices` captures. Returns the winning `eventN`.
+fn pick_from_devices(raw: &str) -> Option<String> {
+    // Word width of the kernel's bitmap longs, needed to index `B: ABS=`.
+    // Derived once from the whole file (see `bitmap_word_bits`).
+    let word_bits = bitmap_word_bits(raw);
+
+    let mut best: Option<(i32, String, String)> = None; // (score, event node, name)
     for block in raw.split("\n\n") {
         let name = block
             .lines()
             .find_map(|l| l.strip_prefix("N: Name="))
             .unwrap_or("")
             .to_lowercase();
-        // Fast path: a known controller name. Fallback: capabilities — the
-        // device reports absolute axes and is a direct touch surface. The
-        // power key (EV=3, no EV_ABS) and accelerometers (no INPUT_PROP_DIRECT)
-        // are rejected by the capability test.
-        let name_match = [
-            "touch",
-            "cyttsp",
-            "zforce",
-            "atmel",
-            "fts",
-            "focaltech",
-            "goodix",
-            "elan",
-        ]
-        .iter()
-        .any(|needle| name.contains(needle));
+        let Some(node) = block
+            .lines()
+            .find_map(|l| l.strip_prefix("H: Handlers="))
+            .and_then(|rest| rest.split_whitespace().find(|w| w.starts_with("event")))
+        else {
+            continue;
+        };
+
+        if PEN_NAMES.iter().any(|needle| name.contains(needle)) {
+            eprintln!("touch: skipping /dev/input/{node} (name={name:?}) — pen digitizer");
+            continue;
+        }
+
+        // The power key (no EV_ABS) and accelerometers (no INPUT_PROP_DIRECT)
+        // fail this, which is what keeps them out of the running.
         let has_abs = first_hex_word(block, "B: EV=") & (1 << EV_ABS_BIT) != 0;
         let is_direct = first_hex_word(block, "B: PROP=") & (1 << INPUT_PROP_DIRECT) != 0;
+        let name_match = TOUCH_NAMES.iter().any(|needle| name.contains(needle));
         if !(name_match || (has_abs && is_direct)) {
             continue;
         }
-        for line in block.lines() {
-            let Some(rest) = line.strip_prefix("H: Handlers=") else {
-                continue;
-            };
-            if let Some(ev) = rest.split_whitespace().find(|w| w.starts_with("event")) {
-                // stderr → sidle.sh's log; confirms which node we grabbed.
-                eprintln!("touch: using /dev/input/{ev} (name={name:?})");
-                return Ok(PathBuf::from(format!("/dev/input/{ev}")));
-            }
+
+        // Multitouch position axes are what this parser actually reads, so a
+        // node that reports them is the one we want. Best-effort: a bitmap we
+        // can't read just doesn't earn the points.
+        let has_mt = has_bitmap_bit(block, "B: ABS=", ABS_MT_POSITION_X as u32, word_bits);
+
+        let score = i32::from(name_match) * 4 + i32::from(has_mt) * 2 + i32::from(is_direct);
+        eprintln!(
+            "touch: candidate /dev/input/{node} (name={name:?}) \
+             score={score} mt={has_mt} direct={is_direct} abs={has_abs}"
+        );
+        if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
+            best = Some((score, node.to_string(), name));
         }
     }
-    bail!("no touchscreen entry in /proc/bus/input/devices");
+
+    let (score, node, name) = best?;
+    // stderr → sidle.sh's log; confirms which node we grabbed.
+    eprintln!("touch: using /dev/input/{node} (name={name:?}, score={score})");
+    Some(node)
+}
+
+/// Width in bits of the kernel's `unsigned long` for the bitmaps in
+/// `/proc/bus/input/devices`, inferred from the longest hex word in the file.
+///
+/// It can't be read off a single line: the kernel prints each word with `%lx`,
+/// so leading zeros are stripped, and it omits leading all-zero words entirely.
+/// A word longer than 8 hex digits can only have come from a 64-bit long. This
+/// only ever feeds *scoring*, so guessing 32 on a device that never happens to
+/// print a wide word costs a preference, not a device.
+fn bitmap_word_bits(raw: &str) -> u32 {
+    let widest = raw
+        .lines()
+        .filter(|l| l.starts_with("B: "))
+        .flat_map(|l| l.split_whitespace())
+        .filter(|w| w.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|w| w.len())
+        .max()
+        .unwrap_or(0);
+    if widest > 8 { 64 } else { 32 }
+}
+
+/// Test one bit of a `/proc/bus/input/devices` bitmap line.
+///
+/// Words are printed most-significant first and the lowest word is always last
+/// (the kernel skips only *leading* empty words), so indexing from the end is
+/// what makes this stable regardless of how many words were elided.
+fn has_bitmap_bit(block: &str, prefix: &str, bit: u32, word_bits: u32) -> bool {
+    let Some(rest) = block.lines().find_map(|l| l.strip_prefix(prefix)) else {
+        return false;
+    };
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let from_end = (bit / word_bits) as usize;
+    if from_end >= words.len() {
+        return false;
+    }
+    u64::from_str_radix(words[words.len() - 1 - from_end], 16)
+        .map(|w| (w >> (bit % word_bits)) & 1 == 1)
+        .unwrap_or(false)
 }
 
 /// First whitespace-separated hex word of the `prefix` line in a
@@ -447,6 +570,126 @@ fn first_hex_word(block: &str, prefix: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim `/proc/bus/input/devices` from a Kindle Scribe on 5.19.4.0.1.
+    /// The pen digitizer enumerates *before* the finger panel and is every bit
+    /// as `EV_ABS` + `INPUT_PROP_DIRECT`, which is what made the old
+    /// take-the-first-capable-node rule grab it — and, because we `EVIOCGRAB`,
+    /// left the device needing a reboot.
+    const SCRIBE_DEVICES: &str = "\
+I: Bus=0019 Vendor=0001 Product=0001 Version=0100
+N: Name=\"bd71828-pwrkey\"
+P: Phys=gpio-keys/input0
+H: Handlers=event0 perfmgr
+B: PROP=0
+B: EV=3
+B: KEY=100000 0 0 0
+
+I: Bus=0018 Vendor=003d Product=0000 Version=0000
+N: Name=\"kx132-accel\"
+P: Phys=
+H: Handlers=event1 perfmgr
+B: PROP=0
+B: EV=9
+B: ABS=1000007
+
+I: Bus=0018 Vendor=2d1f Product=0158 Version=1827
+N: Name=\"WacomDigitizer\"
+P: Phys=
+H: Handlers=event2 perfmgr
+B: PROP=2
+B: EV=b
+B: KEY=1c03 0 0 0 0 0 0 0 0 0 0
+B: ABS=f000003
+
+I: Bus=0000 Vendor=0000 Product=0000 Version=0000
+N: Name=\"pt_mt\"
+P: Phys=2-0024/input0
+H: Handlers=event3 perfmgr
+B: PROP=2
+B: EV=f
+B: KEY=0
+B: REL=0
+B: ABS=ee18000 0
+
+I: Bus=0018 Vendor=2d1f Product=0158 Version=1827
+N: Name=\"stylus-custom\"
+P: Phys=
+H: Handlers=event4 perfmgr
+B: PROP=0
+B: EV=b
+B: KEY=1c03 0 0 0 0 0 0 0 0 0 0
+B: ABS=f000003
+";
+
+    #[test]
+    fn scribe_picks_the_finger_panel_not_the_pen() {
+        assert_eq!(
+            pick_from_devices(SCRIBE_DEVICES).as_deref(),
+            Some("event3"),
+            "must pick pt_mt; picking the Wacom node freezes the device"
+        );
+    }
+
+    /// The discriminator has to hold on capability alone, because a panel's name
+    /// is not something we can rely on knowing in advance.
+    #[test]
+    fn the_pen_loses_on_capability_even_without_its_name() {
+        let anonymised = SCRIBE_DEVICES
+            .replace("WacomDigitizer", "acme-input-a")
+            .replace("stylus-custom", "acme-input-b")
+            .replace("pt_mt", "acme-input-c");
+        assert_eq!(
+            pick_from_devices(&anonymised).as_deref(),
+            Some("event3"),
+            "ABS_MT axes alone should carry the decision"
+        );
+    }
+
+    /// The Scribe's kernel is 32-bit, so `B: ABS=ee18000 0` is two 32-bit words,
+    /// most-significant first. `ABS_MT_POSITION_X` (0x35 = bit 53) lives in the
+    /// high word; the Wacom node's single word has no bit 53 at all.
+    #[test]
+    fn abs_mt_bit_is_read_from_the_right_word() {
+        let word_bits = bitmap_word_bits(SCRIBE_DEVICES);
+        assert_eq!(word_bits, 32);
+
+        let finger = "B: ABS=ee18000 0";
+        let pen = "B: ABS=f000003";
+        assert!(has_bitmap_bit(
+            finger,
+            "B: ABS=",
+            ABS_MT_POSITION_X as u32,
+            word_bits
+        ));
+        assert!(!has_bitmap_bit(
+            pen,
+            "B: ABS=",
+            ABS_MT_POSITION_X as u32,
+            word_bits
+        ));
+        // ABS_MT_SLOT (0x2f) and ABS_MT_TRACKING_ID (0x39) are the other axes
+        // this parser depends on; both are in the same high word.
+        assert!(has_bitmap_bit(finger, "B: ABS=", 0x2f, word_bits));
+        assert!(has_bitmap_bit(
+            finger,
+            "B: ABS=",
+            ABS_MT_TRACKING_ID as u32,
+            word_bits
+        ));
+    }
+
+    /// A device with no touch node at all must report that, not pick the power
+    /// key or the accelerometer.
+    #[test]
+    fn no_touch_node_yields_none() {
+        let only_pwrkey = SCRIBE_DEVICES
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(pick_from_devices(&only_pwrkey), None);
+    }
 
     // KOA2 / Colorsoft portrait width.
     const XRES: u32 = 1264;
