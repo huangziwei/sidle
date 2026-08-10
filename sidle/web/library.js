@@ -4085,6 +4085,11 @@ function openEditor(b) {
   window.sidleEditor.open(b.id);
 }
 
+// Open a book in the reader, reporting the load on the status line. `b` needs
+// only `id` and `title`, which is what lets the Reading Log's book page call
+// this with a pair of its own instead of reaching for `sidleReader.open`: a KFX
+// can take seconds to open, and every route to the reader owes the user the
+// same "Opening …" while it does.
 async function openReader(b) {
   if (!window.sidleReader) {
     showToast("reader not ready", true);

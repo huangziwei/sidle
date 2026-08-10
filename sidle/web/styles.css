@@ -4589,6 +4589,25 @@ kbd {
   margin-bottom: 10px;
 }
 
+/* The cover opens the book, so it lifts under the pointer the way a gallery card
+   does. Keyed on `role`, which the renderer sets only when there is a book to
+   open — an empty frame stays a frame. */
+#rl-book-cover[role="button"] {
+  cursor: pointer;
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+#rl-book-cover[role="button"]:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+  border-color: var(--border-strong);
+}
+
+#rl-book-cover[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .rl-book-name { font-size: 15px; line-height: 1.35; }
 .rl-book-side .rl-muted { font-size: 12px; }
 

@@ -483,6 +483,18 @@
     }
   }
 
+  // Into the book itself, from the cover. Goes through the gallery's own open
+  // path (`openReader`, library.js) rather than calling the reader directly, so
+  // a slow KFX load says "Opening …" in the status bar exactly as it does from
+  // the Books grid — the alternative is a click that looks like it did nothing
+  // for several seconds. The reader is a full overlay: closing it comes back to
+  // this page, untouched.
+  function openInReader() {
+    const { id, entry } = state.book || {};
+    if (!entry) return;
+    openReader({ id, title: entry.title });
+  }
+
   function renderBook() {
     const { entry, days } = state.book;
     q("#rl-book-title").textContent = entry ? entry.title : "Book";
@@ -493,6 +505,16 @@
     box.innerHTML = entry ? coverInner(cover, entry.title) : "";
 
     if (entry) {
+      // The cover opens the book. It carries the affordance only while there is
+      // a book behind it — an entry-less page draws an empty frame, and a
+      // control that opens nothing has no business being focusable. `role` is
+      // also what the click and key handlers match on, so the thing that looks
+      // pressable and the thing that responds are the same thing.
+      box.setAttribute("role", "button");
+      box.setAttribute("tabindex", "0");
+      box.setAttribute("aria-label", `Open ${entry.title} in the reader`);
+      box.title = "Open in the reader";
+
       const span = spanDays(days);
       const perDay = days.length ? Math.round(entry.seconds / days.length) : 0;
       // Pace comes from the device's own word counts, which is why it can be
@@ -520,6 +542,7 @@
         entry.devices.length ? fact("Read on", entry.devices.join(", ")) : "",
       ].join("");
     } else {
+      for (const a of ["role", "tabindex", "aria-label", "title"]) box.removeAttribute(a);
       q("#rl-book-stats").innerHTML = "";
     }
     renderMonth();
@@ -927,11 +950,19 @@
         return;
       }
       const row = e.target.closest(".rl-card[data-book]");
-      if (row) openBook(Number(row.dataset.book));
+      if (row) {
+        openBook(Number(row.dataset.book));
+        return;
+      }
+      // `[role]` rather than the id alone: the renderer sets it only on a cover
+      // that has a book behind it.
+      if (e.target.closest("#rl-book-cover[role]")) openInReader();
     });
     q("#reading-log").addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
-      const hit = e.target.closest(".rl-cell[data-day], .rl-card[data-book]");
+      const hit = e.target.closest(
+        ".rl-cell[data-day], .rl-card[data-book], #rl-book-cover[role]",
+      );
       if (!hit) return;
       e.preventDefault();
       hit.click();
