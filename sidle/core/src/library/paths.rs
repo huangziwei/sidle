@@ -374,11 +374,15 @@ fn sanitize_ink_id(id: &str) -> String {
 
 /// A device serial as a single path segment for `device-backup/<serial>/`.
 /// Serials are alphanumeric in practice ([`sanitize_ink_id`] keeps those), but
-/// fall back to a fixed name when the transport couldn't read one — an empty
-/// segment would collapse the backup dirs into their parent.
+/// fall back to a fixed name when the segment would not be a name at all:
+/// empty (the transport read no serial), or all dots — `sanitize_ink_id` keeps
+/// `.`, so a serial of `..` survives it as traversal and would hoist the backup
+/// dirs a level out of `device-backup/`. On the WiFi push the serial arrives
+/// verbatim in the request body, so this is a bound on untrusted input, not a
+/// formality.
 fn sanitize_device_id(serial: &str) -> String {
     let s = sanitize_ink_id(serial);
-    if s.is_empty() {
+    if s.is_empty() || s.chars().all(|c| c == '.') {
         "unknown-device".to_string()
     } else {
         s
@@ -599,6 +603,33 @@ mod tests {
     fn basename_sanitizes_path_separators() {
         let s = format_basename(&["A/B\\C".into()], "Title: With/Slashes?", Some("2020"));
         assert_eq!(s, "[A_B_C] Title_ With_Slashes_ (2020)");
+    }
+
+    /// The serial reaches this from the network verbatim (the WiFi misc push),
+    /// so a dot-only segment must not survive as traversal — `..` would put the
+    /// backup dirs a level out of `device-backup/`.
+    #[test]
+    fn device_id_rejects_traversal_segments() {
+        let paths = LibraryPaths {
+            root: PathBuf::from("/tmp/root"),
+        };
+        for serial in ["..", ".", "...", ""] {
+            assert_eq!(
+                paths.device_backup_screenshots(serial),
+                PathBuf::from("/tmp/root/device-backup/unknown-device/screenshots"),
+                "serial {serial:?} escaped the backup dir"
+            );
+        }
+        // Separators still fold to `_`, keeping a crafted serial one segment.
+        assert_eq!(
+            paths.device_backup_logs("../../etc"),
+            PathBuf::from("/tmp/root/device-backup/.._.._etc/logs")
+        );
+        // A real serial passes through untouched.
+        assert_eq!(
+            paths.device_backup_logs("G000AB12345678"),
+            PathBuf::from("/tmp/root/device-backup/G000AB12345678/logs")
+        );
     }
 
     #[test]

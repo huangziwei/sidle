@@ -207,9 +207,9 @@ pub(crate) fn check_token(
     query: &HashMap<String, String>,
     expected: &str,
 ) -> Result<(), StatusCode> {
-    // Header takes precedence (programmatic callers — the picker, curl
-    // scripts), then `?token=` fallback for browser navigations on `/kindle`
-    // / `/dl/{id}` where setting a custom header isn't possible from a click.
+    // Header takes precedence — it is what every client sends. The `?token=`
+    // fallback covers a plain browser navigation or a pasted URL, where setting
+    // a custom header isn't possible.
     let got = headers
         .get("x-sidle-token")
         .and_then(|v| v.to_str().ok())
