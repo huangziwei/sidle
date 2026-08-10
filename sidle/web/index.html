@@ -314,6 +314,25 @@
               <span class="rl-muted">The logbackup files on disk are untouched.</span>
             </footer>
           </div>
+
+          <!-- Reading that two or more books explain equally well. Deliberately
+               OUTSIDE #rl-body: a library whose reading is all unresolved has no
+               days to draw and shows the empty state instead — and that is
+               precisely the library that needs to reach this. -->
+          <section id="rl-ambiguous" class="rl-ambiguous" hidden>
+            <header class="rl-group-head">
+              <strong>Which book was this?</strong>
+              <span id="rl-ambiguous-total" class="rl-muted"></span>
+            </header>
+            <p class="rl-ambiguous-hint">
+              A Kindle's log names no book. It states the position the reading stopped
+              at, and Sidle recognises the book by finding the one whose text ends
+              exactly there. These books are the same length, so the position fits
+              both — and rather than guess, Sidle counts the time nowhere until you
+              say which it was.
+            </p>
+            <ol id="rl-ambiguous-list" class="rl-ambiguous-list"></ol>
+          </section>
         </div>
 
         <!-- One book. The identity (cover, title, figures) is a column of its

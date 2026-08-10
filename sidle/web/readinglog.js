@@ -29,6 +29,7 @@
     book: null, // { id, days, entry } when the book page is open
     notes: [], // that book's annotations, as `annotations_for_book` returns them
     notesFailed: false, // that query failed, so an empty list means "unknown"
+    ambiguous: [], // reading several books fit equally, one entry per position
     month: null, // Date anchoring the book page's calendar
     overviewScroll: 0, // where the overview was left when a book was opened
   };
@@ -112,10 +113,18 @@
 
   async function refresh() {
     try {
-      state.overview = await api.invoke("reading_log_overview");
+      // Two halves of the same picture: what the library could name on its own,
+      // and the ties it would not guess at. The second is reading the page
+      // reports in no total, so it is fetched alongside rather than behind a
+      // click nobody would think to make.
+      [state.overview, state.ambiguous] = await Promise.all([
+        api.invoke("reading_log_overview"),
+        api.invoke("reading_log_ambiguous"),
+      ]);
     } catch (e) {
       toast(`failed to load reading log: ${e}`, true);
       state.overview = null;
+      state.ambiguous = [];
     }
     state.loaded = true;
     render();
@@ -145,6 +154,9 @@
     q("#rl-overview").hidden = !!state.book;
     q("#rl-book").hidden = !state.book;
     if (state.book) return renderBook();
+    // Before the early return below: a library whose reading is *all* tied has
+    // no days to draw, and that is the library that most needs to see this.
+    renderAmbiguous();
     if (!has) {
       q("#rl-stats").innerHTML = "";
       return;
@@ -448,6 +460,105 @@
 
   function closeSort() {
     q("#rl-sort-popover").hidden = true;
+  }
+
+  // ── Which book was this? ───────────────────────────────────────────────────
+  //
+  // A device's log names no book: it states the position its reading stopped at,
+  // and a book is recognised by ending exactly there. Two books of identical
+  // length end at the same position, so the reading fits both and the automatic
+  // pass refuses to pick — the one question here that a person can answer, by
+  // looking at two covers and remembering which they read.
+  //
+  // Reading whose position fits NO book is not this case and is never listed.
+  // That book is not in the library, and nothing about the group says which book
+  // it was: a duration, a date span and a word count identify nothing. It stays
+  // where it is — counted nowhere, named on its own the day its book comes back.
+  //
+  // The backend sends only ties (`reading_log_ambiguous`), so everything drawn
+  // here has candidates to draw.
+
+  // Where reading stopped is the identity of a group, so it is what every action
+  // is keyed by — never the sessions, which are just what accumulated there.
+  // No early return on an empty list: hiding the section while leaving the last
+  // question drawn inside it keeps a settled tie in the page, one `hidden` away
+  // from being shown again.
+  function renderAmbiguous() {
+    const groups = state.ambiguous;
+    const secs = groups.reduce((a, g) => a + g.seconds, 0);
+    q("#rl-ambiguous").hidden = groups.length === 0;
+    q("#rl-ambiguous-total").textContent = groups.length
+      ? `${fmtDuration(secs)} · ${groups.length} to settle`
+      : "";
+    q("#rl-ambiguous-list").innerHTML = groups.map(groupRow).join("");
+  }
+
+  // "8m · 2 sessions · Jun 22 – Jun 23". Not an identification — nothing here
+  // identifies a book — but the reading being claimed, which is what the choice
+  // below it is about.
+  function groupFacts(g) {
+    const span =
+      shortDay(g.first_at) === shortDay(g.last_at)
+        ? shortDay(g.last_at)
+        : `${shortDay(g.first_at)} – ${shortDay(g.last_at)}`;
+    const parts = [
+      fmtDuration(g.seconds),
+      `${g.sessions} session${g.sessions === 1 ? "" : "s"}`,
+      span,
+    ];
+    if (g.devices.length) parts.push(g.devices.join(", "));
+    return parts.join(" · ");
+  }
+
+  // The candidates are the whole of the question, so they are on the row from
+  // the start — there is nothing to expand and no step between seeing the tie
+  // and settling it.
+  function groupRow(g) {
+    const cands = g.candidates || [];
+    return (
+      `<li class="rl-ambiguous-row" data-position="${g.end_position}">` +
+      `<div class="rl-ambiguous-facts">${esc(groupFacts(g))}</div>` +
+      `<p class="rl-pick-note">${cands.length === 2 ? "Both" : `All ${cands.length}`} ` +
+      `of these end at exactly this position. Which one did you read?</p>` +
+      `<div class="rl-pick-books">${cands.map(bookOption).join("")}</div>` +
+      `</li>`
+    );
+  }
+
+  // A candidate: the cover at a size you can recognise a book by, its title and
+  // author under it. The cover is the point — two same-length books are told
+  // apart by looking, not by reading a figure.
+  function bookOption(b) {
+    const url = coverUrlFor(b, { thumb: true });
+    return (
+      `<button type="button" class="rl-pick-book" data-book="${b.id}" ` +
+      `title="${esc(b.title)}${b.author ? `\n${esc(b.author)}` : ""}">` +
+      `<span class="cover rl-pick-cover${url ? " has-image" : ""}">` +
+      coverInner(url, b.title) +
+      `</span><span class="t">${esc(b.title)}</span>` +
+      `<span class="a">${esc(b.author || "Unknown author")}</span></button>`
+    );
+  }
+
+  // Settle one. The choice is the answer, not a proposal: the row goes, the
+  // reading belongs to that book, and the page reloads because the totals, the
+  // heatmap and the grid all change — this is reading that was in none of them
+  // a moment ago.
+  async function nameBook(position, bookId) {
+    const group = state.ambiguous.find((g) => g.end_position === position);
+    const book = (group?.candidates || []).find((b) => b.id === bookId);
+    let moved;
+    try {
+      moved = await api.invoke("reading_log_attribute", { endPosition: position, bookId });
+    } catch (e) {
+      toast(`could not name that reading: ${e}`, true);
+      return;
+    }
+    toast(
+      `${fmtDuration(group?.seconds || 0)} across ${moved} session` +
+        `${moved === 1 ? "" : "s"} → ${book ? book.title : "that book"}`,
+    );
+    await refresh();
   }
 
   // ── One book ───────────────────────────────────────────────────────────────
@@ -956,8 +1067,18 @@
       }
       // `[role]` rather than the id alone: the renderer sets it only on a cover
       // that has a book behind it.
-      if (e.target.closest("#rl-book-cover[role]")) openInReader();
+      if (e.target.closest("#rl-book-cover[role]")) {
+        openInReader();
+        return;
+      }
+
+      // Settling a tie: which candidate was clicked, in which row — the row
+      // carries the position that is the group's whole identity.
+      const tie = e.target.closest(".rl-ambiguous-row[data-position]");
+      const pick = e.target.closest(".rl-pick-book[data-book]");
+      if (tie && pick) nameBook(Number(tie.dataset.position), Number(pick.dataset.book));
     });
+
     q("#reading-log").addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       const hit = e.target.closest(

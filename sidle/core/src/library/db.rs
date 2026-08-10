@@ -1860,6 +1860,90 @@ pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
     Ok(resolved)
 }
 
+/// Reading that resolved to no book, one row per position it stopped at.
+///
+/// Every session at one position is the same book — the position IS the
+/// fingerprint — so the group, not the session, is the unit anything acts on.
+/// What each group cannot say is *which* book: either no library book ends
+/// there, or several do. Only the second is answerable, and by the candidates
+/// rather than by anything in this struct — nothing here identifies a book.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnmatchedReading {
+    /// The device's last-valid position: this group's whole identity, and what
+    /// [`books_with_last_position`] is asked about.
+    pub end_position: i64,
+    pub sessions: i64,
+    pub seconds: i64,
+    pub page_turns: i64,
+    pub words: i64,
+    pub first_at: String,
+    pub last_at: String,
+    /// Which Kindles this was read on; empty for sessions imported without
+    /// provenance. Same meaning as on [`ReadingEntry`].
+    pub devices: Vec<String>,
+}
+
+/// Every position with reading against it that belongs to no book, newest last
+/// read first.
+///
+/// The counterpart to [`resolve_reading_sessions`]: that function attributes
+/// what the axis can decide alone, and this is everything it left. Two different
+/// situations, which callers are expected to tell apart by asking
+/// [`books_with_last_position`] about each — several books ending at the position
+/// is a tie a person can settle; none ending there is a book that is not in the
+/// library, which nothing and nobody can name from a duration and a date.
+pub fn unmatched_reading(conn: &Connection) -> rusqlite::Result<Vec<UnmatchedReading>> {
+    let mut stmt = conn.prepare(
+        "SELECT end_position, COUNT(*), SUM(seconds), SUM(page_turns), SUM(words),
+                MIN(started_at), MAX(ended_at), GROUP_CONCAT(DISTINCT device_serial)
+           FROM reading_sessions
+          WHERE book_id IS NULL
+          GROUP BY end_position
+          ORDER BY MAX(ended_at) DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let devices: Option<String> = r.get(7)?;
+        Ok(UnmatchedReading {
+            end_position: r.get(0)?,
+            sessions: r.get(1)?,
+            seconds: r.get(2)?,
+            page_turns: r.get(3)?,
+            words: r.get(4)?,
+            first_at: r.get(5)?,
+            last_at: r.get(6)?,
+            devices: devices
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        })
+    })?;
+    rows.collect()
+}
+
+/// Settle a position by hand: attach `book_id` to every unattributed session
+/// that stopped there.
+///
+/// The one thing [`resolve_reading_sessions`] will not do on its own — choose
+/// between books that end at the same position. It is a person's judgement, not
+/// a derivation, and it is final: an attributed session is no longer `NULL`, so
+/// no later pass reconsiders it and the position stops being a question.
+///
+/// Touches only unattributed rows, so it can never take reading away from the
+/// book that already holds it.
+pub fn attribute_reading_position(
+    conn: &Connection,
+    end_position: i64,
+    book_id: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE reading_sessions SET book_id = ?2
+          WHERE book_id IS NULL AND end_position = ?1",
+        params![end_position, book_id],
+    )
+}
+
 /// Create or replace the job row for a book. `kind` is set on first insert
 /// and preserved on subsequent status updates — the worker doesn't need to
 /// know which direction it ran when it reports back.
@@ -5782,6 +5866,95 @@ mod tests {
         .unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].seconds, 3600);
+    }
+
+    /// The tie the automatic pass refuses to break, and the way out of it: two
+    /// books of identical length end at the same position, so the reading could
+    /// be either and a person says which.
+    #[test]
+    fn reading_two_books_could_explain_is_named_by_hand_and_can_be_unnamed() {
+        let conn = fresh_db();
+        let a = insert_minimal(&conn, "sha-tie-a", "花束は毒");
+        let b = insert_minimal(&conn, "sha-tie-b", "恋物語");
+        set_max_position(&conn, a, Some(1000)).unwrap();
+        set_max_position(&conn, b, Some(1000)).unwrap();
+        insert_reading_session(&conn, &session("2026-06-22", 999, 300)).unwrap();
+        insert_reading_session(&conn, &session("2026-06-23", 999, 225)).unwrap();
+
+        // Two candidates, so nothing is attributed and nothing is counted.
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
+        assert!(
+            reading_days(&conn, "0000-00-00", "9999-99-99")
+                .unwrap()
+                .is_empty()
+        );
+
+        // It surfaces as one group — the position is the fingerprint, so every
+        // session at it is the same book — carrying the whole of what was read.
+        let groups = unmatched_reading(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].end_position, 999);
+        assert_eq!(groups[0].sessions, 2);
+        assert_eq!(groups[0].seconds, 525);
+        assert_eq!(groups[0].first_at, "2026-06-22T20:00:00");
+        assert_eq!(groups[0].last_at, "2026-06-23T21:00:00");
+        assert_eq!(groups[0].devices, vec!["DEV".to_string()]);
+        assert_eq!(books_with_last_position(&conn, 999).unwrap(), vec![a, b]);
+
+        // Settled: both sessions move, and the time appears where it never was.
+        assert_eq!(attribute_reading_position(&conn, 999, a).unwrap(), 2);
+        let named = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+            ReadingBucket::default(),
+        )
+        .unwrap();
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].book_id, a);
+        assert_eq!(named[0].seconds, 525);
+
+        // And the question is over: the position is not asked about again.
+        assert!(unmatched_reading(&conn).unwrap().is_empty());
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
+    }
+
+    /// Naming never takes reading away from the book that already holds it: the
+    /// write touches unattributed rows only.
+    #[test]
+    fn naming_a_position_leaves_sessions_another_book_already_holds() {
+        let conn = fresh_db();
+        let held = insert_minimal(&conn, "sha-held", "先に名前がついた本");
+        let other = insert_minimal(&conn, "sha-other", "別の本");
+        set_max_position(&conn, held, Some(1000)).unwrap();
+        insert_reading_session(&conn, &session("2026-06-22", 999, 300)).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+
+        // A later session at the same position, still unattributed.
+        insert_reading_session(&conn, &session("2026-06-23", 999, 225)).unwrap();
+        conn.execute(
+            "UPDATE reading_sessions SET book_id = NULL WHERE day = '2026-06-23'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(attribute_reading_position(&conn, 999, other).unwrap(), 1);
+        let rows: Vec<(String, Option<i64>)> = conn
+            .prepare("SELECT day, book_id FROM reading_sessions ORDER BY day")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("2026-06-22".to_string(), Some(held)),
+                ("2026-06-23".to_string(), Some(other)),
+            ]
+        );
     }
 
     #[test]

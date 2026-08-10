@@ -141,6 +141,76 @@ pub async fn reading_log_book(
     })
 }
 
+/// Reading that several books could equally be, and those books.
+///
+/// `candidates` are the books whose axis ends exactly where this reading
+/// stopped. There are always at least two — that tie is the only reason the
+/// automatic pass left it alone, and it is the whole of what a person needs to
+/// answer it: the covers of two or three books, one of which they read.
+#[derive(Debug, Serialize)]
+pub struct AmbiguousReading {
+    #[serde(flatten)]
+    pub reading: db::UnmatchedReading,
+    pub candidates: Vec<db::BookRow>,
+}
+
+/// The reading a person can still resolve: every unattributed position that
+/// **several** library books end at.
+///
+/// A position no book ends at is deliberately absent, and is not a lesser
+/// version of this case. It means the book is not in the library — deleted, or
+/// never imported — and nothing about the group says which book it was: a
+/// duration, a date span and a word count identify nothing. Offering it as a
+/// choice would be inviting a guess, so it stays where it already is: kept as a
+/// row, counted nowhere, and named the moment its book comes back and
+/// [`db::resolve_reading_sessions`] can see it.
+#[tauri::command]
+pub async fn reading_log_ambiguous(
+    state: State<'_, AppState>,
+) -> Result<Vec<AmbiguousReading>, String> {
+    let conn = state.db.lock().await;
+    let groups = db::unmatched_reading(&conn).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for reading in groups {
+        let ids =
+            db::books_with_last_position(&conn, reading.end_position).map_err(|e| e.to_string())?;
+        if ids.len() < 2 {
+            continue;
+        }
+        let mut candidates = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(book) = db::get_book(&conn, id).map_err(|e| e.to_string())? {
+                candidates.push(book);
+            }
+        }
+        // A candidate whose row vanished between the two queries would leave a
+        // tie of one, which is not a question worth asking.
+        if candidates.len() > 1 {
+            out.push(AmbiguousReading {
+                reading,
+                candidates,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Settle a tied position: `book_id` takes every unattributed session that
+/// stopped there. Returns how many sessions moved.
+///
+/// The user's answer to a question only they can answer, so it is final — the
+/// position leaves [`reading_log_ambiguous`] and the reading is that book's from
+/// then on.
+#[tauri::command]
+pub async fn reading_log_attribute(
+    state: State<'_, AppState>,
+    end_position: i64,
+    book_id: i64,
+) -> Result<usize, String> {
+    let conn = state.db.lock().await;
+    db::attribute_reading_position(&conn, end_position, book_id).map_err(|e| e.to_string())
+}
+
 /// Throw the whole reading log away.
 ///
 /// Everything, both tables: sessions and the record of which snapshots produced
