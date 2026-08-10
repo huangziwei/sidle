@@ -6,7 +6,16 @@
 //! manifest.json              # format/version, counts, db_sha256 (integrity + schema gate)
 //! library.db                 # consistent VACUUM INTO snapshot (deflate)
 //! books/<sha>/...            # the whole tree, verbatim (store — already-compressed media)
+//! notebooks/<uuid>/...       # Scribe handwriting, same treatment
+//! <everything else>          # every other root entry, swept (see `excluded_from_archive`)
 //! ```
+//!
+//! `books/` and `notebooks/` are enumerated from the DB snapshot, so the archived
+//! file set matches the archived rows exactly. Everything else at the root is
+//! swept in by default and only a named exclusion list keeps anything out — the
+//! opposite default from the first two versions of this format, which named what
+//! to include and silently dropped user data twice for it (notebook files until
+//! v2, `device-backup/` until v3).
 //!
 //! Two hazards drive the design (§3): **H1** — a live WAL DB can't be copied
 //! file-by-file, so we snapshot with `VACUUM INTO` (shared with
@@ -38,7 +47,13 @@ const FORMAT_TAG: &str = "sidle-library-backup";
 /// handwriting). v1 archives stored only `library.db` + `books/`, so a restore
 /// of one silently dropped notebook files; v2 closes that. A v1 archive still
 /// restores into a v2 app — it simply has no `notebooks/` entries to extract.
-const FORMAT_VERSION: u32 = 2;
+///
+/// v3: every other root entry is swept in too — `device-backup/` (the Kindle
+/// screenshots and picker logs the Misc tab shows, which are files on disk and
+/// nowhere in the DB, so v2 archives carried no trace of them), `cover-thumb.fmt`,
+/// `.server-token`, and anything added later. An older archive restores into a
+/// v3 app unchanged; it simply has fewer entries to extract.
+const FORMAT_VERSION: u32 = 3;
 
 /// The archive's `manifest.json`: enough to validate integrity, gate the schema
 /// version on restore, and report what's inside without unzipping.
@@ -203,10 +218,11 @@ pub fn create_archive_with_progress(
 
     add_file(&mut zw, "library.db", &snapshot.path, deflated)?;
 
-    // Progress is per archived directory (books + notebooks) — the unit that
-    // dominates wall-clock. `book_dirs`/`notebook_dirs` already counted the ones
-    // that exist on disk, so the loop bodies and the total agree.
-    let total_dirs = (book_dirs + notebook_dirs).max(0) as u64;
+    // Progress is per archived entry (books + notebooks + the swept remainder) —
+    // the unit that dominates wall-clock. `book_dirs`/`notebook_dirs` already
+    // counted the ones that exist on disk, so the loop bodies and the total agree.
+    let extras = root_extras(source_root)?;
+    let total_dirs = (book_dirs + notebook_dirs).max(0) as u64 + extras.len() as u64;
     let mut done_dirs = 0u64;
     for sha in &inv.shas {
         let dir = books_dir.join(sha);
@@ -227,6 +243,26 @@ pub fn create_archive_with_progress(
             done_dirs += 1;
             on_progress(done_dirs, total_dirs);
         }
+    }
+
+    // Everything else the root holds, at its own name: `device-backup/` above
+    // all — the Misc tab's screenshots and picker logs, which exist only as
+    // files and would otherwise be in no backup at all — plus `cover-thumb.fmt`,
+    // `.server-token`, and whatever lands there next. Deflated rather than
+    // stored: this is small and mostly text (logs, markers, a token), and the
+    // screenshots are the only already-compressed thing in it. v3.
+    for path in &extras {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if path.is_dir() {
+            add_dir(&mut zw, &name, path, deflated)?;
+        } else if path.is_file() {
+            add_file(&mut zw, &name, path, deflated)?;
+        }
+        done_dirs += 1;
+        on_progress(done_dirs, total_dirs);
     }
 
     zw.finish().context("finalize backup zip")?;
@@ -324,12 +360,13 @@ pub(crate) fn stage_archive(
 ///
 /// Validates the manifest and gates the schema BEFORE touching disk, extracts to
 /// a sibling staging dir, verifies the DB (checksum + opens as a sidle library
-/// with the manifest's book count), then swaps: the current `library.db*` +
-/// `books/` are moved aside to a `<root>.bak-<ts>` directory and the staged
-/// payload moved into place — renames only (staging + safety are siblings of
+/// with the manifest's book count), then swaps: everything the current root
+/// holds is moved aside to a `<root>.bak-<ts>` directory and the staged payload
+/// moved into place — renames only (staging + safety are siblings of
 /// `dest_root`, hence same volume). `previous` decides whether that set-aside
 /// library is then kept as the undo or deleted. `config.json` (if `dest_root` is
-/// the state dir) is left untouched. The caller relaunches afterward (H5).
+/// the state dir) is the one thing left where it is. The caller relaunches
+/// afterward (H5).
 pub fn restore(
     src_zip: &Path,
     dest_root: &Path,
@@ -458,6 +495,53 @@ impl Drop for TempSnapshot {
 /// Open the snapshot read-only and read book/annotation counts + the full sha
 /// list + the notebook uuid list, so the file set we archive matches the DB
 /// snapshot exactly.
+/// Root entries the archive leaves out, and the only reason anything is left
+/// out: the default is to carry it. An allow-list is what let this format ship
+/// twice without user data it should have had, so a tree nobody here has heard
+/// of is archived rather than dropped.
+fn excluded_from_archive(name: &str) -> bool {
+    matches!(
+        name,
+        // Already in the archive, enumerated from the DB's own inventory.
+        "books" | "notebooks"
+        // `library.db` in the archive IS the snapshot. The live file and its WAL
+        // sidecars are a different, mid-write moment of the same DB.
+        | "library.db" | "library.db-wal" | "library.db-shm"
+        // The root pointer says where THIS machine keeps its library. It belongs
+        // to the machine, not to the copy of the library.
+        | "config.json"
+        // The LAN daemon's runtime, valid only for the process running now: a
+        // PID naming one of this machine's processes, its log, and the two pulse
+        // files it writes to poke the app.
+        | "server.pid" | "server.log" | ".sync-pulse.json" | ".book-pulse.json"
+        // Staged out of the app bundle whenever a device needs it.
+        | "device-dist"
+        // Finder droppings, not ours.
+        | ".DS_Store"
+    )
+}
+
+/// Every root entry [`excluded_from_archive`] does not name, sorted so the
+/// archive is deterministic. A root that is not there yet has nothing to sweep;
+/// a root that refuses to be listed fails the backup rather than quietly
+/// producing an archive missing everything this sweep exists to carry.
+fn root_extras(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e).with_context(|| format!("list {}", root.display())),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("list {}", root.display()))?;
+        if !excluded_from_archive(&entry.file_name().to_string_lossy()) {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 fn read_snapshot_inventory(db_path: &Path) -> Result<SnapshotInventory> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open snapshot {}", db_path.display()))?;
@@ -607,25 +691,31 @@ pub(crate) fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(name))
 }
 
-/// Move the library *payload* — `library.db` (+ WAL sidecars), `books/`, and
-/// `notebooks/` — from `from` to `to` by rename. Leaves anything else (notably
-/// `config.json`, the root pointer when `from` is the state dir) in place.
+/// Move the library *payload* from `from` to `to` by rename — everything the
+/// directory holds except `config.json`, the root pointer, which stays behind
+/// when `from` is the state dir.
+///
+/// Everything, not a list of trees: the set-aside has to empty the root of the
+/// old library, or a swept entry that exists on both sides (`device-backup/` is
+/// the first) meets its counterpart when the restored payload moves in, and
+/// renaming a directory onto a non-empty one fails.
 fn move_payload(from: &Path, to: &Path) -> Result<()> {
-    for name in ["library.db", "library.db-wal", "library.db-shm"] {
-        let src = from.join(name);
-        if src.exists() {
-            let dst = to.join(name);
-            fs::rename(&src, &dst)
-                .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
+    let entries = match fs::read_dir(from) {
+        Ok(entries) => entries,
+        // A root that isn't there holds nothing to set aside.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("list {}", from.display())),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("list {}", from.display()))?;
+        let name = entry.file_name();
+        if name == "config.json" {
+            continue;
         }
-    }
-    for tree in ["books", "notebooks"] {
-        let src = from.join(tree);
-        if src.exists() {
-            let dst = to.join(tree);
-            fs::rename(&src, &dst)
-                .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
-        }
+        let src = entry.path();
+        let dst = to.join(&name);
+        fs::rename(&src, &dst)
+            .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
 }
@@ -718,6 +808,18 @@ mod tests {
             "2026-02-02T00:00:00+00:00",
         )
         .unwrap();
+        // The swept remainder (v3). `device-backup/` is the case that motivated
+        // it — screenshots and picker logs exist as files and are named nowhere
+        // in the DB, so an inventory-driven archive could not see them at all.
+        // `cover-thumb.fmt` stands for the small root markers beside it.
+        let shots = root.join("device-backup").join("G000").join("screenshots");
+        fs::create_dir_all(&shots).unwrap();
+        fs::write(shots.join("screenshot_1.png"), "png-bytes").unwrap();
+        fs::write(root.join("cover-thumb.fmt"), "j").unwrap();
+        // Excluded, and seeded here so the exclusions are exercised rather than
+        // asserted about an empty root: this machine's daemon PID and Finder junk.
+        fs::write(root.join("server.pid"), "4242").unwrap();
+        fs::write(root.join(".DS_Store"), "finder").unwrap();
         (conn, books)
     }
 
@@ -794,6 +896,26 @@ mod tests {
             "notebook page bytes identical after roundtrip"
         );
 
+        // The swept remainder (v3): the Misc tab's screenshots — files the DB
+        // never names, so no inventory-driven archive could have found them —
+        // and the root markers beside them.
+        assert_eq!(
+            fs::read_to_string(dst_root.join("device-backup/G000/screenshots/screenshot_1.png"))
+                .unwrap(),
+            "png-bytes",
+            "device-backup carried, bytes identical"
+        );
+        assert_eq!(
+            fs::read_to_string(dst_root.join("cover-thumb.fmt")).unwrap(),
+            "j"
+        );
+
+        // …and only the remainder: this machine's daemon PID would name one of
+        // its processes on whatever machine restored the archive, and the Finder
+        // junk is not ours to carry.
+        assert!(!dst_root.join("server.pid").exists(), "server.pid excluded");
+        assert!(!dst_root.join(".DS_Store").exists(), ".DS_Store excluded");
+
         // Relativization invariant: the stored columns remain root-relative after
         // a backup→restore roundtrip (a regression here would dangle on the next move).
         let raw = Connection::open_with_flags(
@@ -863,9 +985,34 @@ mod tests {
             )
             .unwrap();
         }
+        // The destination has its own `device-backup/` — the entry that exists
+        // on BOTH sides of the swap. Setting the old root aside wholesale is
+        // what keeps the staged one's rename from meeting a non-empty directory.
+        let dst_shots = dst_root.join("device-backup/G999/screenshots");
+        fs::create_dir_all(&dst_shots).unwrap();
+        fs::write(dst_shots.join("old.png"), "OLD-png").unwrap();
+        // And its own root pointer, which is the machine's and must survive.
+        fs::write(dst_root.join("config.json"), "{}").unwrap();
 
         let outcome = restore(&zip, &dst_root, db::SCHEMA_VERSION, PreviousLibrary::Keep).unwrap();
         assert_eq!(outcome.books, 2);
+
+        // The archive's device-backup replaced the destination's, and the root
+        // pointer stayed where it was.
+        assert!(
+            dst_root
+                .join("device-backup/G000/screenshots/screenshot_1.png")
+                .is_file()
+        );
+        assert!(
+            !dst_root.join("device-backup/G999").exists(),
+            "old device-backup replaced, not merged into"
+        );
+        assert_eq!(
+            fs::read_to_string(dst_root.join("config.json")).unwrap(),
+            "{}",
+            "root pointer belongs to the machine and is left alone"
+        );
 
         // The restored library is live; the old book is gone from the root.
         let rconn = db::open(&dst_root.join("library.db")).unwrap();
@@ -882,12 +1029,18 @@ mod tests {
             "old book dir gone from live root"
         );
 
-        // The pre-restore library is preserved intact in the safety copy (the undo).
+        // The pre-restore library is preserved intact in the safety copy (the
+        // undo) — all of it, not just the DB and the books.
         let safety = outcome.safety_copy.expect("kept");
         assert!(safety.join("library.db").is_file());
         assert_eq!(
             fs::read_to_string(safety.join("books/zzz/book.epub")).unwrap(),
             "OLD-zzz"
+        );
+        assert_eq!(
+            fs::read_to_string(safety.join("device-backup/G999/screenshots/old.png")).unwrap(),
+            "OLD-png",
+            "the undo holds the screenshots it replaced too"
         );
     }
 
