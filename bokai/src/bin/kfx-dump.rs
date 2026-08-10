@@ -2320,7 +2320,20 @@ fn dump_ion_data_extended(
     // there: SST[base_symbol_count - 10 + k] = extended_symbols[k] → SID
     // $(base_symbol_count + k), which is where the container put them.
     let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
+
+    // The other direction: a container built against a *newer* YJ_symbols
+    // declares more imports than our static table carries (Amazon's own
+    // PDF conversions declare 854 against our 852). Stopping at the table's
+    // length would seat every doc symbol that many ids early — names silently
+    // shifted throughout, and the highest ids past the end of the table, which
+    // aborts the whole fragment. Fill the shortfall so a doc symbol keeps the
+    // id the container gave it and only the unnamed base ids print bare.
+    let unnamed: Vec<String> = (base_end..base_symbol_count)
+        .map(|id| format!("${id}"))
+        .collect();
+
     let mut all_symbols: Vec<&str> = KFX_SYMBOL_TABLE[10..base_end].to_vec();
+    all_symbols.extend(unnamed.iter().map(String::as_str));
     for sym in extended_symbols {
         all_symbols.push(sym.as_str());
     }
