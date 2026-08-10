@@ -26,7 +26,14 @@
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
     month: null, // Date anchoring the book page's calendar
+    overviewScroll: 0, // where the overview was left when a book was opened
   };
+
+  // Every section shares one scroll container, and swapping the overview for the
+  // book page does not move it — so a book opened from halfway down the list
+  // opens halfway down itself. The drill-in parks the overview's offset and
+  // starts the book at its top; going back puts the overview back where it was.
+  const scroller = () => q("#main");
 
   function toast(msg, isError = false) {
     if (typeof window.showToast === "function") window.showToast(msg, isError);
@@ -230,8 +237,9 @@
     const level = levelScale(o.days);
 
     const cols = [];
-    let months = [];
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
+    const months = [];
+    // `d` walks a week at a time by mutation, so the binding itself never moves.
+    for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
       const week = [];
       for (let i = 0; i < 7; i++) {
         const cur = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i);
@@ -441,12 +449,17 @@
   // ── One book ───────────────────────────────────────────────────────────────
 
   async function openBook(bookId) {
+    // Read at the click, not after the reply: this is where the list was when
+    // the card the user pressed was on screen.
+    const from = scroller().scrollTop;
     try {
       const data = await api.invoke("reading_log_book", { bookId });
+      state.overviewScroll = from;
       state.book = { id: bookId, ...data };
       const last = data.days.length ? parseDay(data.days[data.days.length - 1].day) : new Date();
       state.month = new Date(last.getFullYear(), last.getMonth(), 1);
       render();
+      scroller().scrollTop = 0;
     } catch (e) {
       toast(`failed to load book: ${e}`, true);
     }
@@ -768,6 +781,10 @@
     q("#rl-back").addEventListener("click", () => {
       state.book = null;
       render();
+      // The grid keeps the height it had until `renderScope`'s reply replaces
+      // it with the same rows, and a card's height is its cover's aspect ratio,
+      // not a loaded image — so the offset is good to restore right now.
+      scroller().scrollTop = state.overviewScroll;
     });
     for (const sel of ["#rl-prev", "#rl-next"]) {
       q(sel).addEventListener("click", (e) => {

@@ -14,7 +14,9 @@ const state = {
   // When grouped, the series whose contents are being browsed, or null at the
   // top level. Ephemeral navigation — never persisted.
   seriesView: null, // string | null
-  section: "books", // 'books' | 'notes' | 'misc' | 'device' — top-level tab (device = Kindle page)
+  // Top-level tab. 'device' is the Kindle page, reached from the upper-right
+  // pill rather than the tab strip.
+  section: "books", // 'books' | 'notes' | 'misc' | 'reading' | 'device'
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
   // currently-selected values for that facet. See extractFacetValues for
@@ -355,6 +357,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   // Likewise for the Misc tab (screenshots + logs backed up on Sync).
   if (state.section === "misc") window.Misc?.show();
+  // And the Reading Log, which loads its overview on first show.
+  if (state.section === "reading") window.ReadingLog?.show();
 });
 
 function loadPreferences() {
@@ -395,8 +399,14 @@ function loadPreferences() {
   if (fmtMode === "source" || fmtMode === "companion") state.formatFacetMode = fmtMode;
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
+  // Every section setSection persists (i.e. all but the transient Kindle page)
+  // is a section boot can land on — otherwise a stored one it refuses to read
+  // doesn't just fail to open, it costs the user the tab they actually left off
+  // in, which the same key was holding.
   const section = localStorage.getItem("section");
-  if (section === "notes" || section === "misc") state.section = section;
+  if (section === "notes" || section === "misc" || section === "reading") {
+    state.section = section;
+  }
   applySection();
 }
 
@@ -515,8 +525,32 @@ function setGroup(g) {
 }
 
 // The library section to fall back to when leaving the Kindle page (the pill
-// toggles device ⇄ here). Only ever 'books', 'notes', or 'misc' (never 'device').
+// toggles device ⇄ here). Any section but 'device', which is the one place the
+// pill can be pressed from and so can never be the way back.
 let lastLibrarySection = "books";
+
+// One scroll container (#main) holds every section, and swapping which one is
+// visible does not move it — so leaving a long page deep down opens the next one
+// at that same offset, or clamped to its end. Each navigation that swaps what is
+// on screen parks the offset it is leaving under the page it is leaving, and
+// restores the arriving page's own (0 the first time it is seen).
+const scrollMarks = new Map();
+
+// Which page the scroller is showing. Inside Books a series drill-in is its own
+// page with its own offset; everywhere else the section is the page.
+function scrollKey() {
+  return state.section === "books" && state.seriesView != null
+    ? `series:${state.seriesView}`
+    : state.section;
+}
+
+function parkScroll(key) {
+  scrollMarks.set(key, $("#main").scrollTop);
+}
+
+function restoreScroll(key) {
+  $("#main").scrollTop = scrollMarks.get(key) || 0;
+}
 
 // Top-level Books / Notes / Misc / Kindle split. Books and Notes share the
 // Gallery/List view toggle; switching swaps the action button (Add → Import) and
@@ -525,6 +559,10 @@ let lastLibrarySection = "books";
 // (owned by misc.js). 'device' is the full-screen Kindle page (entered via the
 // upper-right pill or `\`) — transient: never persisted, never the boot home.
 function setSection(s) {
+  // Re-picking the section already open is not a navigation: leave the scroller
+  // alone rather than yanking the page the user is reading back to its top.
+  const moving = state.section !== s;
+  if (moving) parkScroll(scrollKey());
   state.section = s;
   // Drill-in is a Books-only navigation; don't carry it across the tab switch.
   state.seriesView = null;
@@ -560,6 +598,9 @@ function setSection(s) {
     // so the grouping matches the flat|series toggle again.
     render();
   }
+  // Last, so the arriving section's content — and therefore its height — is in
+  // place before the offset is applied.
+  if (moving) restoreScroll(scrollKey());
 }
 
 function applySection() {
@@ -1286,16 +1327,20 @@ function seriesSubtitle(entry) {
 
 // Drill into a series' contents (from a collection tile or series-index row).
 function enterSeries(name) {
+  parkScroll(scrollKey());
   state.seriesView = name;
   clearSelection(); // selection is scoped to the on-screen set, which changes
   render();
+  restoreScroll(scrollKey());
 }
 
 // Back out to the grouped top level.
 function exitSeries() {
+  parkScroll(scrollKey());
   state.seriesView = null;
   clearSelection();
   render();
+  restoreScroll(scrollKey());
 }
 
 // ---------------------------------------------------------------------------
