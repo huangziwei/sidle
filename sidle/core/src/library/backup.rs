@@ -72,13 +72,33 @@ pub struct Counts {
     pub notebooks: i64,
 }
 
+/// What becomes of the library a restore replaces.
+///
+/// The swap sets it aside either way — that is a rename, so it is instant and
+/// costs no space, and it means every original file is still intact if the move
+/// of the restored payload fails partway. This decides only what happens after
+/// that move succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousLibrary {
+    /// Leave it at `<root>.bak-<ts>` as the undo. Nothing removes it later, so
+    /// the disk carries both libraries until the user deletes it.
+    Keep,
+    /// Delete it once the restored library is in place, freeing the space it
+    /// held. The restore is then final: the archive is the only other copy.
+    Discard,
+}
+
 /// Result of a restore, surfaced to the UI: what came in, and where the
-/// pre-restore library was set aside (the undo).
+/// pre-restore library still sits.
 #[derive(Debug, Clone)]
 pub struct RestoreOutcome {
     pub books: i64,
     pub annotations: i64,
-    pub safety_copy: PathBuf,
+    /// The set-aside library's directory, or `None` once it has been removed.
+    /// This reports the disk, not the request — a [`PreviousLibrary::Discard`]
+    /// whose removal failed still names the directory, because the space is
+    /// still taken and the caller has something to say about it.
+    pub safety_copy: Option<PathBuf>,
 }
 
 /// Take the consistent DB snapshot — the only step that needs the live
@@ -305,12 +325,18 @@ pub(crate) fn stage_archive(
 /// Validates the manifest and gates the schema BEFORE touching disk, extracts to
 /// a sibling staging dir, verifies the DB (checksum + opens as a sidle library
 /// with the manifest's book count), then swaps: the current `library.db*` +
-/// `books/` are moved aside to a `<root>.bak-<ts>` safety copy (the undo) and the
-/// staged payload moved into place — renames only (staging + safety are siblings
-/// of `dest_root`, hence same volume). `config.json` (if `dest_root` is the state
-/// dir) is left untouched. The caller relaunches afterward (H5).
-pub fn restore(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<RestoreOutcome> {
-    restore_with_progress(src_zip, dest_root, app_user_version, &|_, _| {})
+/// `books/` are moved aside to a `<root>.bak-<ts>` directory and the staged
+/// payload moved into place — renames only (staging + safety are siblings of
+/// `dest_root`, hence same volume). `previous` decides whether that set-aside
+/// library is then kept as the undo or deleted. `config.json` (if `dest_root` is
+/// the state dir) is left untouched. The caller relaunches afterward (H5).
+pub fn restore(
+    src_zip: &Path,
+    dest_root: &Path,
+    app_user_version: i64,
+    previous: PreviousLibrary,
+) -> Result<RestoreOutcome> {
+    restore_with_progress(src_zip, dest_root, app_user_version, previous, &|_, _| {})
 }
 
 /// Like [`restore`], but ticks `on_progress(entries_done, entries_total)` over
@@ -320,6 +346,7 @@ pub fn restore_with_progress(
     src_zip: &Path,
     dest_root: &Path,
     app_user_version: i64,
+    previous: PreviousLibrary,
     on_progress: &dyn Fn(u64, u64),
 ) -> Result<RestoreOutcome> {
     // (1)+(2) Validate + gate the manifest, extract into a sibling staging dir,
@@ -348,25 +375,39 @@ pub fn restore_with_progress(
         );
     }
 
-    // (4) Swap. Move the current payload aside (undo), then the staged payload
-    //     into place. The live app's open Connection points at the old
-    //     library.db inode (now under the safety copy); we relaunch right after,
-    //     so the next process opens the restored files.
+    // (4) Swap. Move the current payload aside, then the staged payload into
+    //     place. The live app's open Connection points at the old library.db
+    //     inode (now under the set-aside dir); we relaunch right after, so the
+    //     next process opens the restored files.
+    //
+    //     Aside first even when the caller wants it gone: the move is a rename,
+    //     so it costs nothing, and it means a failure in the second move leaves
+    //     every original file intact rather than half-deleted.
     let safety = sibling(
         dest_root,
         &format!("bak-{}", Utc::now().format("%Y%m%d-%H%M%S")),
     )?;
-    fs::create_dir_all(&safety)
-        .with_context(|| format!("create safety copy {}", safety.display()))?;
+    fs::create_dir_all(&safety).with_context(|| format!("create {}", safety.display()))?;
     move_payload(dest_root, &safety).context("set current library aside")?;
     fs::create_dir_all(dest_root).with_context(|| format!("recreate {}", dest_root.display()))?;
     move_payload(&staging, dest_root).context("move restored library into place")?;
     let _ = fs::remove_dir(&staging); // now empty
 
+    // (5) Only now, with the restored library live, is the old one expendable.
+    //     A removal that fails is not a failed restore — the restore is done and
+    //     correct — so it is reported as a directory still on disk, not an error.
+    let safety_copy = match previous {
+        PreviousLibrary::Keep => Some(safety),
+        PreviousLibrary::Discard => match fs::remove_dir_all(&safety) {
+            Ok(()) => None,
+            Err(_) => Some(safety),
+        },
+    };
+
     Ok(RestoreOutcome {
         books: manifest.counts.books,
         annotations: manifest.counts.annotations,
-        safety_copy: safety,
+        safety_copy,
     })
 }
 
@@ -704,9 +745,12 @@ mod tests {
         let dst_root = dst.path().join("Relocated");
         fs::create_dir_all(&dst_root).unwrap();
         let dst_root = dst_root.canonicalize().unwrap();
-        let outcome = restore(&zip, &dst_root, db::SCHEMA_VERSION).unwrap();
+        let outcome = restore(&zip, &dst_root, db::SCHEMA_VERSION, PreviousLibrary::Keep).unwrap();
         assert_eq!(outcome.books, 2);
-        assert!(outcome.safety_copy.exists(), "safety copy kept as undo");
+        assert!(
+            outcome.safety_copy.as_ref().expect("kept").exists(),
+            "safety copy kept as undo"
+        );
 
         // Restored DB opens, counts + precious rows survive, files byte-identical.
         let rconn = db::open(&dst_root.join("library.db")).unwrap();
@@ -820,7 +864,7 @@ mod tests {
             .unwrap();
         }
 
-        let outcome = restore(&zip, &dst_root, db::SCHEMA_VERSION).unwrap();
+        let outcome = restore(&zip, &dst_root, db::SCHEMA_VERSION, PreviousLibrary::Keep).unwrap();
         assert_eq!(outcome.books, 2);
 
         // The restored library is live; the old book is gone from the root.
@@ -839,11 +883,58 @@ mod tests {
         );
 
         // The pre-restore library is preserved intact in the safety copy (the undo).
-        assert!(outcome.safety_copy.join("library.db").is_file());
+        let safety = outcome.safety_copy.expect("kept");
+        assert!(safety.join("library.db").is_file());
         assert_eq!(
-            fs::read_to_string(outcome.safety_copy.join("books/zzz/book.epub")).unwrap(),
+            fs::read_to_string(safety.join("books/zzz/book.epub")).unwrap(),
             "OLD-zzz"
         );
+    }
+
+    /// The other half of the choice: `Discard` leaves no set-aside library
+    /// behind, so the space the replaced one held comes back.
+    #[test]
+    fn restore_discarding_previous_removes_the_old_library() {
+        let src = tempfile::tempdir().unwrap();
+        let src_root = src.path().canonicalize().unwrap();
+        let (conn, books_dir) = seed_library(&src_root);
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("library.sidlebak");
+        create(&conn, &books_dir, &src_root, "test-1.0", &zip).unwrap();
+        drop(conn);
+
+        // Destination: a different, populated library, so there is something to
+        // discard rather than an empty root.
+        let dst = tempfile::tempdir().unwrap();
+        let dst_root = dst.path().join("Live");
+        fs::create_dir_all(dst_root.join("books/zzz")).unwrap();
+        let dst_root = dst_root.canonicalize().unwrap();
+        db::open(&dst_root.join("library.db")).unwrap();
+        fs::write(dst_root.join("books/zzz/book.epub"), "OLD-zzz").unwrap();
+
+        let outcome = restore(
+            &zip,
+            &dst_root,
+            db::SCHEMA_VERSION,
+            PreviousLibrary::Discard,
+        )
+        .unwrap();
+        assert_eq!(outcome.books, 2);
+        assert!(
+            outcome.safety_copy.is_none(),
+            "nothing set aside once discarded"
+        );
+
+        // The restored library is live and the old payload is gone from disk —
+        // no `<root>.bak-*` sibling left holding it.
+        assert!(dst_root.join("books/aaa/book.epub").is_file());
+        assert!(!dst_root.join("books/zzz").exists());
+        let leftovers: Vec<_> = fs::read_dir(dst_root.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("Live.bak-"))
+            .collect();
+        assert!(leftovers.is_empty(), "set-aside dirs left: {leftovers:?}");
     }
 
     #[test]
@@ -859,7 +950,13 @@ mod tests {
         let dst_root = dst.path().join("Relocated");
         fs::create_dir_all(&dst_root).unwrap();
         // Pretend the app is one schema version behind the backup.
-        let err = restore(&zip, &dst_root, manifest.db_user_version - 1).unwrap_err();
+        let err = restore(
+            &zip,
+            &dst_root,
+            manifest.db_user_version - 1,
+            PreviousLibrary::Keep,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("schema"), "got: {err}");
         // Gate runs before any disk mutation → target untouched, no staging left.
         assert!(!dst_root.join("library.db").exists(), "target untouched");
@@ -914,7 +1011,13 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         let dst_root = dst.path().join("Relocated");
         fs::create_dir_all(&dst_root).unwrap();
-        let err = restore(&tampered, &dst_root, db::SCHEMA_VERSION).unwrap_err();
+        let err = restore(
+            &tampered,
+            &dst_root,
+            db::SCHEMA_VERSION,
+            PreviousLibrary::Keep,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("checksum"), "got: {err}");
         // Verify fails AFTER extraction, so the swap never runs: target untouched
         // and the staging dir is cleaned up.
@@ -940,7 +1043,7 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         let dst_root = dst.path().join("Relocated");
         fs::create_dir_all(&dst_root).unwrap();
-        assert!(restore(&zpath, &dst_root, db::SCHEMA_VERSION).is_err());
+        assert!(restore(&zpath, &dst_root, db::SCHEMA_VERSION, PreviousLibrary::Keep).is_err());
         assert!(!dst_root.join("library.db").exists(), "target untouched");
     }
 }

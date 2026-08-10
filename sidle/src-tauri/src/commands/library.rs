@@ -1408,18 +1408,22 @@ pub async fn library_restore_pick_src(app: AppHandle) -> Result<Option<String>, 
     Ok(result.map(|p| p.to_string()))
 }
 
-/// Restore a `.sidlebak` over the current library, then relaunch. Replaces the
-/// library; the pre-restore copy is kept at `<root>.bak-<timestamp>` as the undo
-/// (the confirm UI states this). Refuses while a conversion is in flight (the
-/// swap would strand its output), validates + verifies before the swap (so a bad
-/// archive leaves the target untouched), then relaunches onto the restored files
-/// — the same restore-then-relaunch path as relocate (H5), since the live
-/// `Connection` can't be repointed in place.
+/// Restore a `.sidlebak` over the current library, then relaunch. Refuses while
+/// a conversion is in flight (the swap would strand its output), validates +
+/// verifies before the swap (so a bad archive leaves the target untouched), then
+/// relaunches onto the restored files — the same restore-then-relaunch path as
+/// relocate (H5), since the live `Connection` can't be repointed in place.
+///
+/// `keep_previous` is the choice the confirm UI puts to the user: keep the
+/// replaced library at `<root>.bak-<timestamp>` as an undo, or delete it and get
+/// the space back. Either way the swap itself sets it aside first, so nothing is
+/// removed until the restored library is in place.
 #[tauri::command]
 pub async fn library_restore(
     app: AppHandle,
     state: State<'_, AppState>,
     src: String,
+    keep_previous: bool,
 ) -> Result<(), String> {
     let src = PathBuf::from(src);
     let dest_root = state.paths.root.clone();
@@ -1457,13 +1461,33 @@ pub async fn library_restore(
             );
         }
     };
-    let outcome = backup::restore_with_progress(&src, &dest_root, db::SCHEMA_VERSION, &on_progress)
-        .map_err(|e| format!("{e:#}"))?;
-    eprintln!(
-        "[sidle/backup] restored {} books; previous library kept at {}",
-        outcome.books,
-        outcome.safety_copy.display()
-    );
+    let previous = if keep_previous {
+        backup::PreviousLibrary::Keep
+    } else {
+        backup::PreviousLibrary::Discard
+    };
+    let outcome =
+        backup::restore_with_progress(&src, &dest_root, db::SCHEMA_VERSION, previous, &on_progress)
+            .map_err(|e| format!("{e:#}"))?;
+    // The third case is the one worth logging loudly: the user asked for the
+    // space back and did not get it, which no other surface will tell them
+    // (the app restarts immediately after).
+    match (&outcome.safety_copy, keep_previous) {
+        (Some(p), true) => eprintln!(
+            "[sidle/backup] restored {} books; previous library kept at {}",
+            outcome.books,
+            p.display()
+        ),
+        (Some(p), false) => eprintln!(
+            "[sidle/backup] restored {} books; could NOT remove the previous library, left at {}",
+            outcome.books,
+            p.display()
+        ),
+        (None, _) => eprintln!(
+            "[sidle/backup] restored {} books; previous library removed",
+            outcome.books
+        ),
+    }
 
     // Relaunch onto the restored library; `restart` diverges.
     app.restart()

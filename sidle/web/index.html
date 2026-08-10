@@ -665,8 +665,9 @@
             <h3>Back up &amp; restore</h3>
             <p class="settings-hint">
               A backup is one <code>.sidlebak</code> file holding your whole library — books,
-              covers, metadata, highlights, and notebooks. <strong>Restore</strong> replaces the
-              current library (a dated safety copy is kept next to it) and restarts.
+              covers, metadata, highlights, handwriting, and your reading log.
+              <strong>Restore</strong> replaces the current library and restarts; it asks first
+              whether to delete the library it replaces or set it aside as an undo.
               <strong>Merge</strong> folds another library&rsquo;s books and notebooks into this
               one &mdash; additive, nothing is removed, and no restart.
             </p>
@@ -682,10 +683,15 @@
              is always visible — it used to sit at the end of the scrolling list
              and fall below the fold. -->
         <div class="settings-pinned">
+          <!-- One confirm box, shared by relocate (move / use) and restore.
+               Restore is the only one with two ways to say yes, so it borrows
+               #settings-confirm-keep and relabels the primary button;
+               resetRelocateConfirm puts both back. -->
           <div id="settings-confirm" class="settings-confirm" hidden>
             <p id="settings-confirm-text" class="settings-confirm-text"></p>
             <div class="settings-confirm-actions">
               <button type="button" id="settings-confirm-cancel" class="btn-link">Cancel</button>
+              <button type="button" id="settings-confirm-keep" class="btn" hidden>Keep a copy &amp; restart</button>
               <button type="button" id="settings-confirm-ok" class="btn">Confirm &amp; restart</button>
             </div>
           </div>

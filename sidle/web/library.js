@@ -453,7 +453,10 @@ function wireToolbar() {
   $("#settings-restore").addEventListener("click", pickRestore);
   $("#settings-merge").addEventListener("click", doMerge);
   $("#settings-confirm-cancel").addEventListener("click", resetRelocateConfirm);
-  $("#settings-confirm-ok").addEventListener("click", confirmRelocate);
+  // Arrow-wrapped, not passed by reference: the listener's first argument is the
+  // click event, and a truthy one would read as "keep a copy".
+  $("#settings-confirm-ok").addEventListener("click", () => confirmRelocate(false));
+  $("#settings-confirm-keep").addEventListener("click", () => confirmRelocate(true));
 }
 
 async function onAddClick() {
@@ -4199,12 +4202,23 @@ function closeSettings() {
 function resetRelocateConfirm() {
   relocatePending = null;
   $("#settings-confirm").hidden = true;
-  $("#settings-confirm-ok").disabled = false;
+  const ok = $("#settings-confirm-ok");
+  ok.disabled = false;
+  // Restore borrows this box for a second way to say yes and a louder primary
+  // button; hand both back, or the next move/use prompt inherits them.
+  ok.textContent = "Confirm & restart";
+  ok.classList.remove("btn-primary");
+  const keep = $("#settings-confirm-keep");
+  keep.hidden = true;
+  keep.disabled = false;
 }
 
 async function pickRelocate(mode) {
   const dest = await window.api.invoke("library_pick_folder");
   if (!dest) return;
+  // From a known state: a restore prompt left open would otherwise lend this one
+  // its two yes-buttons.
+  resetRelocateConfirm();
   relocatePending = { mode, dest };
   $("#settings-confirm-text").textContent =
     mode === "move"
@@ -4214,10 +4228,16 @@ async function pickRelocate(mode) {
   $("#settings-status").hidden = true;
 }
 
-async function confirmRelocate() {
+// `keepPrevious` only means anything to restore: it is which of the box's two
+// yes-buttons was pressed — set the replaced library aside as an undo, or delete
+// it and get its space back.
+async function confirmRelocate(keepPrevious) {
   if (!relocatePending) return;
   const { mode, dest } = relocatePending;
+  // Both yes-buttons go down together: two live ways to commit while one is
+  // already running is two restores.
   $("#settings-confirm-ok").disabled = true;
+  $("#settings-confirm-keep").disabled = true;
   setSettingsStatus(
     mode === "move" ? "Copying library…"
     : mode === "restore" ? "Restoring… this can take a while for a large backup."
@@ -4228,7 +4248,7 @@ async function confirmRelocate() {
     if (mode === "move") {
       await window.api.invoke("library_relocate_move", { dest });
     } else if (mode === "restore") {
-      await window.api.invoke("library_restore", { src: dest });
+      await window.api.invoke("library_restore", { src: dest, keepPrevious });
     } else {
       await window.api.invoke("library_relocate_use", { dir: dest });
     }
@@ -4237,6 +4257,7 @@ async function confirmRelocate() {
     setSettingsStatus("Restarting…");
   } catch (e) {
     $("#settings-confirm-ok").disabled = false;
+    $("#settings-confirm-keep").disabled = false;
     setSettingsStatus(String(e?.message ?? e), true);
     fileopInFlight = false;
     state.fileop = null;
@@ -4276,14 +4297,27 @@ async function doBackup() {
   }
 }
 
-// Restore IS destructive and restarts, so it routes through the shared
-// confirm box (mode "restore"), handled in confirmRelocate.
+// Restore IS destructive and restarts, so it routes through the shared confirm
+// box (mode "restore"), handled in confirmRelocate — with a second yes-button,
+// because "what happens to the library being replaced" is a real choice and the
+// wrong default is expensive either way: keeping it silently leaves a second
+// whole library on the disk, deleting it leaves the archive as the only copy.
+// Replace outright is the offered one; keeping is for a restore you are unsure
+// of, and the undo is yours to delete afterwards.
 async function pickRestore() {
   const src = await window.api.invoke("library_restore_pick_src");
   if (!src) return;
+  resetRelocateConfirm(); // same known state the relocate prompts start from
   relocatePending = { mode: "restore", dest: src };
   $("#settings-confirm-text").textContent =
-    `Restore from:\n${src}\n\nThis replaces your current library. A dated safety copy is kept next to it, and sidle restarts.`;
+    `Restore from:\n${src}\n\nThis replaces your current library with the one in the backup, and sidle restarts.\n\n` +
+    `Replace: the current library is deleted once the restored one is in place, and its space comes back.\n` +
+    `Keep a copy: it is set aside next to your library as a dated folder instead — an undo you delete yourself, ` +
+    `and until you do the disk holds both libraries.`;
+  const ok = $("#settings-confirm-ok");
+  ok.textContent = "Replace & restart";
+  ok.classList.add("btn-primary");
+  $("#settings-confirm-keep").hidden = false;
   $("#settings-confirm").hidden = false;
   $("#settings-status").hidden = true;
 }
