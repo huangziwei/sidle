@@ -100,6 +100,13 @@ pub struct Session {
     /// paginated, and paging backwards is not reading a page again.
     pub page_turns: i64,
     pub words: i64,
+    /// Every distinct point the reader was seen at, ascending.
+    ///
+    /// Not stored — this is how the session gets a book. The log redacts the
+    /// title, but a `.yjr` sidecar records where its own book was left, and the
+    /// sync files that under a `book_id`. A point in both is the same reader in
+    /// the same book.
+    pub locations: Vec<Location>,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +367,47 @@ fn book_position(line: &str) -> Option<i64> {
     payloads(line).find_map(end_position)
 }
 
+/// A point in a book, as the device writes it.
+///
+/// Every position on a line reads `<handle>:<coordinate>`. The coordinate alone
+/// is a number two books can share; the handle carries the **source element
+/// id**, which is the book's own vocabulary. Together they are specific enough
+/// to identify a book by — see [`db::device_positions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Location {
+    pub eid: i64,
+    pub offset: i64,
+    pub linear_pos: i64,
+}
+
+/// `<tag><eid><offset>` — one tag byte then two little-endian `u32`s, base64'd.
+/// The same encoding the `.yjr` sidecars use for their anchors.
+fn decode_handle(handle: &str) -> Option<(i64, i64)> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(handle)
+        .ok()?;
+    let eid = u32::from_le_bytes(raw.get(1..5)?.try_into().ok()?);
+    let offset = u32::from_le_bytes(raw.get(5..9)?.try_into().ok()?);
+    Some((eid as i64, offset as i64))
+}
+
+/// Read `<name>:YJPosition: <handle>:<coordinate>` out of one payload.
+fn location(payload: &str, name: &str) -> Option<Location> {
+    let key = format!("{name}:YJPosition: ");
+    let rest = &payload[payload.find(&key)? + key.len()..];
+    let (handle, tail) = rest.split_once(':')?;
+    let end = tail
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(tail.len());
+    let (eid, offset) = decode_handle(handle)?;
+    Some(Location {
+        eid,
+        offset,
+        linear_pos: tail[..end].parse().ok()?,
+    })
+}
+
 /// True when the line names `event` as an event rather than merely containing
 /// the word.
 ///
@@ -384,6 +432,9 @@ struct Observation {
     /// The book's running reading counter, in milliseconds.
     total_ms: Option<i64>,
     words: Option<i64>,
+    /// Where the reader was standing. Names no book by itself, but a book's
+    /// sidecar names the same point.
+    at: Option<Location>,
     page_turn: bool,
     closes: bool,
 }
@@ -419,6 +470,7 @@ fn observation(line: &str) -> Option<Observation> {
         position: end_position(chosen)?,
         total_ms: field(chosen, "TotalTime"),
         words: field(chosen, "TotalWords"),
+        at: location(chosen, "CurrentPos"),
         page_turn,
         closes,
     })
@@ -598,6 +650,7 @@ struct Open {
     words_lo: Option<i64>,
     words_hi: i64,
     page_turns: i64,
+    locations: Vec<Location>,
 }
 
 impl Open {
@@ -620,6 +673,7 @@ impl Open {
             words_lo: None,
             words_hi: 0,
             page_turns: 0,
+            locations: Vec::new(),
         }
     }
 
@@ -636,12 +690,18 @@ impl Open {
             self.words_lo = Some(self.words_lo.map_or(w, |lo| lo.min(w)));
             self.words_hi = self.words_hi.max(w);
         }
+        if let Some(at) = obs.at {
+            self.locations.push(at);
+        }
         // A book reopened after finishing restarts its counter; the run so far is
         // already banked because a fresh `Open` is made per run.
     }
 
-    fn finish(self) -> Session {
+    fn finish(mut self) -> Session {
+        self.locations.sort_unstable();
+        self.locations.dedup();
         Session {
+            locations: self.locations,
             started_at: self.started_at,
             ended_at: self.ended_at,
             end_position: self.end_position,
@@ -798,6 +858,29 @@ pub fn import(
     Ok(out)
 }
 
+/// The single book every one of these points belongs to, or `None`.
+///
+/// One agreement is enough to name a session, because a point is specific
+/// enough to belong to one book. Two *different* books agreeing is not a
+/// stronger answer but a contradiction — one of the points is a coincidence and
+/// nothing here can say which — so it names nothing.
+fn names_a_book(
+    locations: &[Location],
+    positions: &std::collections::HashMap<(i64, i64, i64), i64>,
+) -> Option<i64> {
+    let mut found: Option<i64> = None;
+    for at in locations {
+        let Some(&book) = positions.get(&(at.eid, at.offset, at.linear_pos)) else {
+            continue;
+        };
+        match found {
+            Some(held) if held != book => return None,
+            _ => found = Some(book),
+        }
+    }
+    found
+}
+
 /// Store already-collected event lines. The half of [`import`] that does not
 /// touch the filesystem.
 ///
@@ -829,6 +912,7 @@ pub fn store_events(
         identity.entry(last_word).or_insert(from_book);
     }
     let sessions = parse_sessions(events.iter().map(String::as_str));
+    let positions = db::device_positions(conn, device_serial)?;
 
     let mut out = Imported {
         files,
@@ -874,6 +958,14 @@ pub fn store_events(
         if db::insert_reading_session(conn, &row)? {
             out.added += 1;
         }
+        // The log cannot name a book, but it can say where the reader stood,
+        // and the sidecar sync already knows which book was left at that point.
+        // One agreement names the fingerprint for good: `attribute_reading_position`
+        // settles every unattributed session that stopped there, so a book only
+        // has to be caught once for its whole history to follow.
+        if let Some(book_id) = names_a_book(&s.locations, &positions) {
+            db::attribute_reading_position(conn, row.end_position, book_id)?;
+        }
     }
     out.attributed = db::resolve_reading_sessions(conn)?;
     Ok(out)
@@ -890,9 +982,9 @@ mod tests {
             "{stamp} cvm[6144]: I ReadingTimerController:Information::{kind},\
              Title:<private>,Asin:<private>,IntervalTime:900,\
              TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:{end},\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: BBB:{end},\
              NextTOCEntryPosition:YJPosition: CCC:99,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: DDD:6612;"
         )
     }
 
@@ -903,8 +995,8 @@ mod tests {
             "{stamp} java[8437]: I ReadingTimerController:Information::\
              IntervalTime:5153,IntervalWords:349,Interval%:0.002,\
              TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:{end},\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: BBB:{end},\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: DDD:6612;"
         )
     }
 
@@ -917,8 +1009,8 @@ mod tests {
              TimeLeftInSectionString:24 mins left in chapter;\
              CloseBook,Title:<private>,Asin:<private>,IntervalTime:900,\
              TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:{end},\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: BBB:{end},\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:12,EndPos:YJPosition: DDD:6612;"
         )
     }
 
@@ -1074,6 +1166,61 @@ mod tests {
         let cut = "260803:100000 java[1]: I ReadingTimerController:\
                    Information::TotalTime:900,Total%:0.5;";
         assert_eq!(field(cut, "TotalTime"), Some(900));
+    }
+
+    #[test]
+    fn a_position_handle_carries_the_element_id_the_sidecars_use() {
+        // Verbatim from a device: the handle beside coordinate 39799, whose
+        // book's sidecar recorded eid 1566 offset 0 at that same coordinate.
+        assert_eq!(decode_handle("AR4GAAAAAAAA"), Some((1566, 0)));
+        // A non-zero offset, to pin the field order — the offset is the second
+        // little-endian u32, not part of the element id.
+        assert_eq!(decode_handle("AQ3PAQAhAAAA"), Some((118_541, 33)));
+        // Too short to hold both fields, rather than silently reading zeros.
+        assert_eq!(decode_handle("AQA="), None);
+    }
+
+    #[test]
+    fn a_session_collects_the_points_the_reader_stood_at() {
+        let lines = [
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            page("260803:100500", "CloseBook", 148_207, 120_000, 220),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        // `page` writes the same handle on both lines, so the two collapse:
+        // the points are the distinct places visited, not one per event.
+        assert_eq!(
+            out[0].locations,
+            vec![Location {
+                eid: 1566,
+                offset: 0,
+                linear_pos: 12
+            }]
+        );
+    }
+
+    #[test]
+    fn a_point_two_books_disagree_about_names_neither() {
+        let a = Location {
+            eid: 1566,
+            offset: 0,
+            linear_pos: 12,
+        };
+        let b = Location {
+            eid: 99,
+            offset: 0,
+            linear_pos: 500,
+        };
+        let mut positions = std::collections::HashMap::new();
+        positions.insert((a.eid, a.offset, a.linear_pos), 7_i64);
+        assert_eq!(names_a_book(&[a, b], &positions), Some(7));
+
+        // A second book claiming another of the same session's points is a
+        // contradiction, not a tie-break: one of them is a coincidence and
+        // nothing here can say which.
+        positions.insert((b.eid, b.offset, b.linear_pos), 9_i64);
+        assert_eq!(names_a_book(&[a, b], &positions), None);
+        assert_eq!(names_a_book(&[], &positions), None);
     }
 
     #[test]

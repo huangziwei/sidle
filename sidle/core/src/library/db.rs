@@ -1548,6 +1548,52 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
     Ok(n > 0)
 }
 
+/// Where one Kindle says it left each book, keyed by the point itself.
+///
+/// This is the bridge from a log to a library. A reading event names no book —
+/// every line reads `Title:<private>` — but it does state where the reader was
+/// standing. A `.yjr` sidecar states the same thing for a book, and the sidecar
+/// sync files it under the `book_id` it belongs to, because a sidecar sits
+/// beside a file whose identity is never in doubt. A point that appears in both
+/// is one reader at one moment, so the log line is about that book.
+///
+/// Keyed on `(eid, offset, linear_pos)` rather than the coordinate alone: the
+/// element id is the book's own vocabulary, and demanding all three is what
+/// keeps two books that merely share a coordinate — near the front, they all do
+/// — from being taken for each other.
+///
+/// One device's own rows only, and only points that name exactly one book. An
+/// ambiguous point identifies nothing; dropping it costs an attribution, and
+/// keeping it would invent one.
+pub fn device_positions(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<std::collections::HashMap<(i64, i64, i64), i64>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT eid, "offset", linear_pos, book_id FROM reading_position
+            WHERE device_serial = ?1 AND source = 'device'
+              AND eid IS NOT NULL AND "offset" IS NOT NULL AND linear_pos IS NOT NULL"#,
+    )?;
+    let rows = stmt.query_map(params![device_serial], |r| {
+        Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, i64>(3)?))
+    })?;
+    let mut out: std::collections::HashMap<(i64, i64, i64), i64> = Default::default();
+    let mut ambiguous = Vec::new();
+    for row in rows {
+        let (key, book) = row?;
+        match out.get(&key) {
+            Some(held) if *held != book => ambiguous.push(key),
+            _ => {
+                out.insert(key, book);
+            }
+        }
+    }
+    for key in ambiguous {
+        out.remove(&key);
+    }
+    Ok(out)
+}
+
 /// Remember which last position goes with which last-word position.
 ///
 /// First sighting wins, matching the rule the parser uses within one archive:
