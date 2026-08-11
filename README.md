@@ -34,9 +34,9 @@ The app will be built and put into `/Applications/Sidle`
 
 Book data and library database will be stored in `~/Library/Application Support/Sidle/`, and can be changed to other locations.
 
-To install the Kindle app, plug in the Kindle via USB, then in the Kindle tab, open `Kindle app` and click `Install on Kindle`.
+To install the Kindle native app for the first time, plug in the Kindle via USB, then in the Kindle tab, open `Kindle app` and click `Install on Kindle`. 
 
-Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 15.16.2.1.1) and Kindle Colorsoft (1th Gen; 15.8.0.2) 
+Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 5.16.2.1.1), Kindle Colorsoft (1th Gen; 5.18.0.2), and Kindle Scribe (1st Gen; 5.19.4.0.1).
 
 ## But Why?
 
