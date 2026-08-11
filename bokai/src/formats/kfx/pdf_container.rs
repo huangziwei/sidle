@@ -268,21 +268,28 @@ mod tests {
         };
         let storyline = KfxSymbol::Storyline as u32;
         let aux = KfxSymbol::AuxiliaryData as u32;
-        // A text page gets a second, invisible "text" storyline beside the image.
+        // Every page carries the image storyline plus an invisible "text"
+        // storyline beside it — the run-less page's holding one empty
+        // page-sized container, so the overlay EID exists on every page. This
+        // is the pair Amazon emits (352 pages → 704 storylines).
         assert_eq!(
             count(&without, storyline),
-            1,
-            "no-text page: image storyline only"
+            2,
+            "no-text page: image storyline + empty text storyline"
         );
         assert_eq!(
             count(&with_text, storyline),
             2,
             "text page: image + text storyline"
         );
-        // ...plus links_extracted (per page) + text_baseline (per run) aux entries.
-        assert!(
-            count(&with_text, aux) >= count(&without, aux) + 2,
-            "text layer adds links_extracted + text_baseline aux"
+        // auxiliary_data is one `<section>-ad` per page stating `page_rotation`,
+        // and nothing else — a text layer adds none. (Earlier builds emitted a
+        // `text_baseline` per run and a `links_extracted` per page; Amazon emits
+        // neither, and nothing read them back.)
+        assert_eq!(
+            count(&with_text, aux),
+            count(&without, aux),
+            "the text layer adds no auxiliary_data"
         );
     }
 
@@ -378,9 +385,11 @@ mod tests {
             .iter()
             .map(|s| int(&field(s, KfxSymbol::Pid).expect("pid")))
             .collect();
-        // Page 0 span = anchor+container+image+textref+anchor_end (5) + 5 + 7;
-        // page 1 (no text) = anchor+container+image+anchor_end (4).
-        assert_eq!(lengths, vec![5 + 5 + 7, 4]);
+        // Page 0 span = anchor+container+image+textref+anchor_end (5) + 5 + 7.
+        // Page 1 has no text and still spans 6: the same 5, plus the one empty
+        // page-sized container its text storyline holds. Every page carries the
+        // overlay, so no page is the odd one out of the position axis.
+        assert_eq!(lengths, vec![5 + 5 + 7, 5 + 1]);
         assert_eq!(pids[0], 0, "first section starts at pid 0");
         assert_eq!(pids[1], lengths[0], "pids are cumulative");
 

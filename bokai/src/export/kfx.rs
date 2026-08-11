@@ -4420,23 +4420,30 @@ struct PdfPageRec {
     container_id: u64,
     /// `id` of the image node — the renderable content EID for this page.
     image_id: u64,
-    /// Text layer for this page (empty when no text was extracted). The
-    /// secondary "text" storyline's name symbol, the EID of the `{story_name,
-    /// ignore}` child that pulls it into the page container, the page's
-    /// `links_extracted` aux symbol, and one record per extracted run. All zero
-    /// / empty when `runs` is empty — emission is gated on `!runs.is_empty()`.
+    /// Symbol naming this page's `<section>-ad` auxiliary_data entity, which
+    /// carries its `page_rotation`. One per page, text layer or not.
+    rotation_aux_sym: u64,
+    /// Text layer for this page: the secondary "text" storyline's name symbol,
+    /// the EID of the `{story_name, ignore}` child that pulls it into the page
+    /// container, and one record per extracted run.
+    ///
+    /// The storyline exists even for a page that yielded no runs — Amazon emits
+    /// one per page either way (352 page + 352 text storylines for 352 pages),
+    /// the empty one holding a single page-sized container. A page missing from
+    /// the pair would be the one page whose overlay the reader cannot address.
     text_story_sym: u64,
     text_ref_id: u64,
-    links_aux_sym: u64,
+    /// EID of the empty page-sized container a run-less page's text storyline
+    /// holds. Only meaningful when `runs` is empty; the runs carry their own.
+    empty_text_id: u64,
     runs: Vec<PdfRunRec>,
 }
 
-/// Per-text-run bookkeeping: the text item's EID, the symbol naming its
-/// `text_baseline` auxiliary_data entity, and the run's UTF-16 length (its span
-/// in the section position map — each character is one reading position).
+/// Per-text-run bookkeeping: the text item's EID and the run's UTF-16 length
+/// (its span in the section position map — each character is one reading
+/// position).
 struct PdfRunRec {
     id: u64,
-    baseline_aux_sym: u64,
     len: usize,
 }
 
@@ -4504,27 +4511,26 @@ pub fn pdf_to_kfx(
         let image_id = ctx.next_fragment_id();
         ctx.record_content_length(image_id, 1);
 
-        // Text layer: when this page has extracted runs, allocate the text
-        // storyline's name, the `{story_name, ignore}` child EID, the page's
-        // `links_extracted` aux symbol, and one EID + `text_baseline` aux symbol
-        // per run (storing each run's UTF-16 length as its position span).
+        // The page's rotation aux, and its text overlay: the storyline's name,
+        // the `{story_name, ignore}` child EID, and one EID per run (carrying
+        // the run's UTF-16 length as its position span). Allocated for every
+        // page — a textless page still gets the pair, holding an empty
+        // page-sized container.
+        let rotation_aux_sym = ctx.symbols.get_or_intern(&format!("{section_name}-ad"));
         let runs = page_runs(i);
-        let (text_story_sym, text_ref_id, links_aux_sym, run_recs) = if runs.is_empty() {
-            (0, 0, 0, Vec::new())
+        let text_story_sym = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
+        let text_ref_id = ctx.next_fragment_id();
+        let run_recs: Vec<PdfRunRec> = runs
+            .iter()
+            .map(|run| PdfRunRec {
+                id: ctx.next_fragment_id(),
+                len: run.content.encode_utf16().count(),
+            })
+            .collect();
+        let empty_text_id = if run_recs.is_empty() {
+            ctx.next_fragment_id()
         } else {
-            let tss = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
-            let tref = ctx.next_fragment_id();
-            let laux = ctx.symbols.get_or_intern(&format!("dp{i}"));
-            let rrecs: Vec<PdfRunRec> = runs
-                .iter()
-                .enumerate()
-                .map(|(j, run)| PdfRunRec {
-                    id: ctx.next_fragment_id(),
-                    baseline_aux_sym: ctx.symbols.get_or_intern(&format!("dt{i}_{j}")),
-                    len: run.content.encode_utf16().count(),
-                })
-                .collect();
-            (tss, tref, laux, rrecs)
+            0
         };
 
         recs.push(PdfPageRec {
@@ -4536,9 +4542,10 @@ pub fn pdf_to_kfx(
             pt_landscape_id,
             container_id: container_id_num,
             image_id,
+            rotation_aux_sym,
             text_story_sym,
             text_ref_id,
-            links_aux_sym,
+            empty_text_id,
             runs: run_recs,
         });
     }
@@ -4564,8 +4571,6 @@ pub fn pdf_to_kfx(
     // PDF resource (every page's external_resource references it via
     // `auxiliary_data`), `d7` lists `[d6]`, and `document_data` points at `d7`.
     // Replicating this is part of full structural parity with Amazon's S2K KFX.
-    let pdf_rsrc_desc_sym = ctx.symbols.get_or_intern("d6");
-    let aux_list_sym = ctx.symbols.get_or_intern("d7");
 
     // ---- Synthesis: build fragments in reference entity order ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
@@ -4596,9 +4601,12 @@ pub fn pdf_to_kfx(
         let page = pdf.pages[i];
         sections.push(build_pdf_page_section(rec));
         storylines.push(build_pdf_page_storyline(rec, page.width, page.height));
-        if !rec.runs.is_empty() {
-            text_storylines.push(build_pdf_text_storyline(rec, page_runs(i)));
-        }
+        text_storylines.push(build_pdf_text_storyline(
+            rec,
+            page_runs(i),
+            page.width,
+            page.height,
+        ));
         resources.push(build_pdf_external_resource(
             rec,
             i,
@@ -4606,60 +4614,31 @@ pub fn pdf_to_kfx(
             page.height,
             page_runs(i),
             &raw_location,
-            pdf_rsrc_desc_sym,
         ));
     }
     fragments.extend(sections);
     fragments.extend(storylines);
     fragments.extend(text_storylines);
 
-    // auxiliary_data ($597) resource descriptors: `d6` describes the embedded
-    // PDF (the single shared resource), `d7` lists `[d6]`. Amazon's
-    // external_resources + document_data reference these. (Replaces bokai's old
-    // per-section `IS_TARGET_SECTION` aux, which Amazon's PDF KFX does not have.)
-    fragments.push(build_aux_fragment(
-        "d6",
-        pdf_rsrc_desc_sym,
-        vec![
-            (
-                "resource_stream",
-                IonValue::String(PDF_RSRC_NAME.to_string()),
-            ),
-            ("type", IonValue::String("resource".to_string())),
-            ("size", IonValue::String(pdf.bytes.len().to_string())),
-        ],
-    ));
-    fragments.push(build_aux_fragment(
-        "d7",
-        aux_list_sym,
-        vec![(
-            "auxData_resource_list",
-            IonValue::List(vec![IonValue::Symbol(pdf_rsrc_desc_sym)]),
-        )],
-    ));
-
-    // auxiliary_data ($597) for the text layer: per page a `links_extracted`
-    // entry (referenced by the page container's `auxiliary_data.default`), and
-    // per run a `text_baseline` entry (referenced by the text item's
-    // `auxiliary_data.'yj.conversion'`). Mirrors Amazon's ~10.9k aux entities.
-    for (i, rec) in recs.iter().enumerate() {
-        if rec.runs.is_empty() {
-            continue;
-        }
+    // auxiliary_data ($597): one `<section>-ad` per page stating the page's
+    // rotation, and nothing else — that is the entire aux set of a
+    // Send-to-Kindle PDF KFX (measured: 352 fragments for 352 pages, every one
+    // of them `page_rotation`). Standalone, not referenced from the section;
+    // the reader finds it by the name.
+    //
+    // Earlier builds instead emitted a `text_baseline` entry per run and a
+    // `links_extracted` entry per page, plus `d6`/`d7` resource descriptors
+    // referenced from `external_resource` and `document_data`. Amazon emits
+    // none of those, nothing reads them back, and on this book they were 14023
+    // fragments against Amazon's 352 — 15787 container entity refs against
+    // 2123.
+    for rec in &recs {
         fragments.push(build_kv_aux_fragment(
-            &format!("dp{i}"),
-            rec.links_aux_sym,
-            "links_extracted",
-            IonValue::Bool(true),
+            &format!("{}-ad", rec.section_name),
+            rec.rotation_aux_sym,
+            "page_rotation",
+            IonValue::Int(0),
         ));
-        for (j, (rr, run)) in rec.runs.iter().zip(page_runs(i)).enumerate() {
-            fragments.push(build_kv_aux_fragment(
-                &format!("dt{i}_{j}"),
-                rr.baseline_aux_sym,
-                "text_baseline",
-                IonValue::Int(run.baseline),
-            ));
-        }
     }
 
     // external_resource entities (pages, then the cover), then the bcRawMedia
@@ -4720,7 +4699,7 @@ pub fn pdf_to_kfx(
     // document_data now that every fragment ID is allocated (max_id correct).
     fragments.insert(
         document_data_index,
-        build_pdf_document_data_fragment(&ctx, aux_list_sym, ppd_sym),
+        build_pdf_document_data_fragment(&ctx, ppd_sym),
     );
 
     // ---- Serialize ----
@@ -4765,11 +4744,12 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
         ),
     ]);
 
-    // Container content: the PDF page image, plus (for a text page) the
-    // text-storyline reference marked `ignore: true` (invisible overlay).
-    let mut content = vec![image];
-    if !rec.runs.is_empty() {
-        content.push(IonValue::Struct(vec![
+    // Container content: the PDF page image, then the text-storyline reference
+    // marked `ignore: true` (the invisible overlay). Present on every page —
+    // see `PdfPageRec::text_story_sym`.
+    let content = vec![
+        image,
+        IonValue::Struct(vec![
             (KfxSymbol::Id as u64, IonValue::Int(rec.text_ref_id as i64)),
             (
                 KfxSymbol::StoryName as u64,
@@ -4784,8 +4764,8 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
                 KfxSymbol::Type as u64,
                 IonValue::Symbol(KfxSymbol::Container as u64),
             ),
-        ]));
-    }
+        ]),
+    ];
 
     let mut container_fields = vec![
         (KfxSymbol::Id as u64, IonValue::Int(rec.container_id as i64)),
@@ -4804,17 +4784,6 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
             IonValue::Symbol(KfxSymbol::Center as u64),
         ),
     ];
-    // Amazon puts `auxiliary_data: {default: d…}` on the page container (before
-    // `type`) when there's a text layer.
-    if !rec.runs.is_empty() {
-        container_fields.push((
-            KfxSymbol::AuxiliaryData as u64,
-            IonValue::Struct(vec![(
-                KfxSymbol::Default as u64,
-                IonValue::Symbol(rec.links_aux_sym),
-            )]),
-        ));
-    }
     container_fields.push((
         KfxSymbol::Type as u64,
         IonValue::Symbol(KfxSymbol::Container as u64),
@@ -4845,6 +4814,8 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
 fn build_pdf_text_storyline(
     rec: &PdfPageRec,
     runs: &[crate::formats::pdf::render::TextRun],
+    width_pt: f32,
+    height_pt: f32,
 ) -> KfxFragment {
     let items: Vec<IonValue> = rec
         .runs
@@ -4874,13 +4845,6 @@ fn build_pdf_text_storyline(
             IonValue::Struct(vec![
                 (KfxSymbol::Id as u64, IonValue::Int(rr.id as i64)),
                 (
-                    KfxSymbol::AuxiliaryData as u64,
-                    IonValue::Struct(vec![(
-                        KfxSymbol::YjConversion as u64,
-                        IonValue::Symbol(rr.baseline_aux_sym),
-                    )]),
-                ),
-                (
                     KfxSymbol::Position as u64,
                     IonValue::Symbol(KfxSymbol::Fixed as u64),
                 ),
@@ -4904,6 +4868,38 @@ fn build_pdf_text_storyline(
             ])
         })
         .collect();
+
+    // A page that yielded no runs still gets a storyline, holding one empty
+    // page-sized container — what Amazon puts there, and what keeps every page
+    // addressable through the same overlay EID.
+    let items = if items.is_empty() {
+        vec![IonValue::Struct(vec![
+            (
+                KfxSymbol::Id as u64,
+                IonValue::Int(rec.empty_text_id as i64),
+            ),
+            (
+                KfxSymbol::Width as u64,
+                IonValue::Int((width_pt * 100.0).round() as i64),
+            ),
+            (
+                KfxSymbol::Height as u64,
+                IonValue::Int((height_pt * 100.0).round() as i64),
+            ),
+            (KfxSymbol::Top as u64, IonValue::Int(0)),
+            (KfxSymbol::Left as u64, IonValue::Int(0)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+            (
+                KfxSymbol::Position as u64,
+                IonValue::Symbol(KfxSymbol::Fixed as u64),
+            ),
+        ])]
+    } else {
+        items
+    };
 
     let ion = IonValue::Struct(vec![
         (
@@ -5067,8 +5063,7 @@ fn pdf_page_margins(
 
 /// Build the external_resource ($164) for one PDF page: a `format: pdf` view of
 /// the shared blob at `page_index`, sized to the page and carrying the page's
-/// content box. References the shared resource descriptor (`d6`) via
-/// `auxiliary_data`.
+/// content box.
 ///
 /// The content box is what lets the reader's margin setting crop a fixed-layout
 /// page: it states where the ink stops, so trimming whitespace does not trim
@@ -5081,7 +5076,6 @@ fn build_pdf_external_resource(
     height_pt: f32,
     runs: &[crate::formats::pdf::render::TextRun],
     raw_location: &str,
-    rsrc_desc_sym: u64,
 ) -> KfxFragment {
     let page = (
         (width_pt * 100.0).round() as i64,
@@ -5099,10 +5093,6 @@ fn build_pdf_external_resource(
         (
             KfxSymbol::Location as u64,
             IonValue::String(raw_location.to_string()),
-        ),
-        (
-            KfxSymbol::AuxiliaryData as u64,
-            IonValue::Symbol(rsrc_desc_sym),
         ),
         (KfxSymbol::ResourceWidth as u64, pt_page_dim(width_pt)),
         (KfxSymbol::ResourceHeight as u64, pt_page_dim(height_pt)),
@@ -5387,13 +5377,11 @@ fn build_pdf_metadata_fragment(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) 
     KfxFragment::singleton(KfxSymbol::Metadata, ion)
 }
 
-/// document_data ($538): minimal fixed-layout document — max_id, pan_zoom,
-/// `auxiliary_data: {'yj.authoring': d7}` (the resource-descriptor list), and the
-/// reading order. (Reflow fields like font_size/line_height are irrelevant to a
-/// PDF-backed book and omitted, matching Amazon's PDF document_data.)
+/// document_data ($538): minimal fixed-layout document — max_id, pan_zoom and
+/// the reading order, which is all Amazon's PDF document_data carries. (Reflow
+/// fields like font_size/line_height are irrelevant to a PDF-backed book.)
 fn build_pdf_document_data_fragment(
     ctx: &ExportContext,
-    aux_list_sym: u64,
     ppd_sym: Option<KfxSymbol>,
 ) -> KfxFragment {
     let reading_order = pdf_reading_order(ctx, ppd_sym);
@@ -5402,13 +5390,6 @@ fn build_pdf_document_data_fragment(
         (
             KfxSymbol::PanZoom as u64,
             IonValue::Symbol(KfxSymbol::Enabled as u64),
-        ),
-        (
-            KfxSymbol::AuxiliaryData as u64,
-            IonValue::Struct(vec![(
-                KfxSymbol::YjAuthoring as u64,
-                IonValue::Symbol(aux_list_sym),
-            )]),
         ),
         (
             KfxSymbol::ReadingOrders as u64,
@@ -5436,9 +5417,10 @@ fn build_pdf_document_data_fragment(
 /// terminator, which must agree. Keep in sync with
 /// [`build_pdf_section_position_id_map_fragments`].
 fn pdf_section_span(rec: &PdfPageRec) -> i64 {
-    let mut span = 4i64; // pt_id + container + image + pt_landscape
-    if !rec.runs.is_empty() {
-        span += 1; // text_ref
+    let mut span = 5i64; // pt_id + container + image + pt_landscape + text_ref
+    if rec.runs.is_empty() {
+        span += 1; // the empty page-sized container that stands in for the runs
+    } else {
         span += rec.runs.iter().map(|r| r.len as i64).sum::<i64>();
     }
     span
@@ -5457,8 +5439,10 @@ fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
                 IonValue::Int(rec.container_id as i64),
                 IonValue::Int(rec.image_id as i64),
             ];
-            if !rec.runs.is_empty() {
-                ids.push(IonValue::Int(rec.text_ref_id as i64));
+            ids.push(IonValue::Int(rec.text_ref_id as i64));
+            if rec.runs.is_empty() {
+                ids.push(IonValue::Int(rec.empty_text_id as i64));
+            } else {
                 ids.extend(rec.runs.iter().map(|r| IonValue::Int(r.id as i64)));
             }
             IonValue::Struct(vec![
@@ -5517,8 +5501,10 @@ fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFr
             // device rejects with "An error occurred").
             let mut order: Vec<(u64, i64)> =
                 vec![(rec.pt_id, 1), (rec.container_id, 1), (rec.image_id, 1)];
-            if !rec.runs.is_empty() {
-                order.push((rec.text_ref_id, 1));
+            order.push((rec.text_ref_id, 1));
+            if rec.runs.is_empty() {
+                order.push((rec.empty_text_id, 1));
+            } else {
                 order.extend(rec.runs.iter().map(|r| (r.id, r.len as i64)));
             }
             order.push((rec.pt_landscape_id, 1));

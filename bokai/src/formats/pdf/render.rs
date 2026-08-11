@@ -456,35 +456,56 @@ mod macos {
             // A word's width is its own ink extent; a space's width is the gap
             // between the neighbouring words (PDFKit gives spaces no ink box, so
             // their advance has to come from the surrounding glyphs).
-            let words = segs
-                .iter()
-                .enumerate()
-                .map(|(k, s)| {
-                    let width = if !s.space && s.r > s.l {
-                        ((s.r - s.l) * SCALE).round() as i64
-                    } else if s.space {
-                        let prev_r = segs[..k]
-                            .iter()
-                            .rev()
-                            .find_map(|p| p.r.is_finite().then_some(p.r));
-                        let next_l = segs[k + 1..]
-                            .iter()
-                            .find_map(|p| p.l.is_finite().then_some(p.l));
-                        match (prev_r, next_l) {
-                            (Some(pr), Some(nl)) if nl > pr => ((nl - pr) * SCALE).round() as i64,
-                            _ => 0,
-                        }
-                    } else {
-                        0
-                    };
-                    StyleSeg {
-                        offset: s.start,
-                        length: s.len,
-                        width,
-                        is_word: !s.space,
+            //
+            // Amazon also emits a `left` kerning correction on a segment whose
+            // start disagrees with the widths that precede it — 277 of its
+            // 296094 segments on this book. Not reproduced: deriving it from
+            // the gap between the running pen and the glyph's ink fired on
+            // 50103 segments against Amazon's 277, so that is not the rule, and
+            // a wrong correction on one segment in six would drag every later
+            // word's hit box off its glyphs.
+            let mut words: Vec<StyleSeg> = Vec::with_capacity(segs.len());
+            for (k, s) in segs.iter().enumerate() {
+                let width = if !s.space && s.r > s.l {
+                    ((s.r - s.l) * SCALE).round() as i64
+                } else if s.space {
+                    let prev_r = segs[..k]
+                        .iter()
+                        .rev()
+                        .find_map(|p| p.r.is_finite().then_some(p.r));
+                    let next_l = segs[k + 1..]
+                        .iter()
+                        .find_map(|p| p.l.is_finite().then_some(p.l));
+                    match (prev_r, next_l) {
+                        (Some(pr), Some(nl)) if nl > pr => ((nl - pr) * SCALE).round() as i64,
+                        _ => 0,
                     }
-                })
-                .collect();
+                } else {
+                    0
+                };
+                words.push(StyleSeg {
+                    offset: s.start,
+                    length: s.len,
+                    width,
+                    is_word: !s.space,
+                });
+            }
+
+            // Amazon ends every run with a space, folded into the final word's
+            // segment ("Anthropological " as one 16-unit word), and a run that is
+            // the whole of a short page gets one too. It is the line separator
+            // made explicit: without it the last word of a line and the first of
+            // the next are adjacent in the position axis, so the word iterator
+            // runs them together and each line costs one reading position less
+            // than Amazon's — measured as a 2-position shortfall per page on a
+            // two-line page.
+            let mut content = content;
+            if !content.ends_with(char::is_whitespace) {
+                content.push(' ');
+                if let Some(last) = words.last_mut() {
+                    last.length += 1;
+                }
+            }
 
             Some(TextRun {
                 content,
