@@ -105,6 +105,14 @@ impl BookIndex {
     ///
     /// Capped at [`MAX_RESULTS`]; each hit carries up to [`PREVIEW_CHARS`] of
     /// context per side, drawn from the *original* casing.
+    /// The elements in reading order — the sequence a scan that must cross
+    /// element boundaries walks. [`search`](Self::search) does not need it
+    /// because a query match has to fit inside one element; re-anchoring an
+    /// annotation does, because a highlight routinely spans several.
+    pub fn reading_order(&self) -> &[i64] {
+        self.text.reading_order()
+    }
+
     pub fn search(&self, needle: &str) -> Vec<SearchMatch> {
         if needle.is_empty() {
             return Vec::new();

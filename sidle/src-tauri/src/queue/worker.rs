@@ -265,9 +265,35 @@ pub async fn run_job(
         .clone()
         .or_else(|| book.kfx_path.as_deref().map(PathBuf::from));
     if let Some(kfx) = indexed {
-        let extent = tokio::task::spawn_blocking(move || extent::of_file(&kfx))
+        let read = kfx.clone();
+        let extent = tokio::task::spawn_blocking(move || extent::of_file(&read))
             .await
             .unwrap_or(None);
+        // Existing annotations hold handles into the *previous* build of this
+        // book, and a rebuild moves them: one extra fragment on a page shifts
+        // every element id after it, so a highlight silently starts covering
+        // other words. Their text is what survives, so re-find it. Off the
+        // runtime — it parses the container again.
+        let reanchor = tokio::task::spawn_blocking(move || {
+            std::fs::read(&kfx)
+                .ok()
+                .and_then(|bytes| reanchor_index(&bytes))
+        })
+        .await
+        .unwrap_or(None);
+        if let Some(index) = reanchor {
+            let conn = db.lock().await;
+            match sidle_core::library::reanchor::book(&conn, book_id, &index) {
+                Ok(done) if done.moved > 0 || done.stranded > 0 => eprintln!(
+                    "[sidle/queue] book {book_id}: re-anchored {} annotation(s), \
+                     {} already correct, {} left where they were (text not found, \
+                     or found in several places)",
+                    done.moved, done.intact, done.stranded
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("[sidle/queue] book {book_id}: re-anchor failed: {e}"),
+            }
+        }
         // `None` is stored too (as 0, "this file has no axis") — the honest
         // answer for a container without a position map, and the value a
         // re-convert must overwrite a stale extent with.
@@ -824,4 +850,12 @@ mod tests {
         assert!(!is_jpeg(&[0xFF, 0xD8])); // truncated
         assert!(!is_jpeg(&[]));
     }
+}
+
+/// The rebuilt book's text index, or `None` when it carries no readable text.
+///
+/// Split out only to keep the container parse inside the blocking task: a
+/// `BookIndex` is not `Send`-friendly to build across an await point.
+fn reanchor_index(bytes: &[u8]) -> Option<sidle_core::library::anchor::BookIndex> {
+    sidle_core::library::anchor::BookIndex::from_kfx(bytes)
 }
