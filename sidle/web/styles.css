@@ -103,6 +103,21 @@ button {
   background: var(--border);
 }
 
+/* A `.btn` without the frame, for controls that must be reachable but should
+   not compete with the panel they sit in — a calendar's step arrows, the escape
+   out of a selected day. Compact enough to share a header line with a `.seg`. */
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  padding: 2px 8px;
+}
+
+.btn-quiet:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
 .seg {
   display: inline-flex;
   border: 1px solid var(--border-strong);
@@ -4293,6 +4308,11 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Tall enough for the tallest control either header can carry — a segmented
+     control on one side, the quiet arrows on the other — so the two panels'
+     titles sit on one line and their charts start at the same height, whether
+     or not the year arrows are there to hold the row open. */
+  min-height: 28px;
   margin-bottom: 10px;
 }
 
@@ -4358,10 +4378,12 @@ kbd {
    so on a wide window it used to sit in a full-width card with half of it
    empty. It now takes exactly what it needs and the clock takes the rest.
    Below the breakpoint there is no rest to take and they stack. */
+/* The pair reads as one picture, so it is one band: both panels take the height
+   of the taller (grid items stretch by default), and each gives the slack to its
+   chart rather than ending wherever its own content happens to stop. */
 .rl-panels {
   display: grid;
   grid-template-columns: auto minmax(320px, 1fr);
-  align-items: start;
   gap: 14px;
 }
 
@@ -4376,12 +4398,23 @@ kbd {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* Columns, so that whichever panel is the shorter of the two can hand its share
+   of the band's height to the chart inside it. */
 .rl-heatmap-wrap,
 .rl-clock-wrap {
+  display: flex;
+  flex-direction: column;
   padding: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+/* The author `display: flex` above shadows the UA `[hidden]{display:none}`, so
+   `q(".rl-clock-wrap").hidden = true` (a year whose sessions all predate the
+   timestamps) wouldn't hide it. Restore it — same fix as .seg/.error-report. */
+.rl-clock-wrap[hidden] {
+  display: none;
 }
 
 .rl-heatmap-wrap { overflow-x: auto; }
@@ -4401,24 +4434,30 @@ kbd {
 .rl-clock-seg .seg-btn:hover { background: var(--surface); }
 .rl-clock-seg .seg-btn.active { background: var(--accent); color: #fff; }
 
-/* All three views occupy the same box, so switching between them does not
-   shunt the book grid up and down the page. The month grid is the short one —
-   a library with two months of reading draws two rows — so it is centred
-   rather than left hanging from the top of an otherwise empty panel. */
+/* Takes whatever the band leaves after the header — normally the calendar's
+   height, which is what squares the two panels off against each other. All
+   three views draw into that one box, so switching between them does not shunt
+   the book grid up and down the page; a grid shorter than the box (a library
+   with two months of reading draws two rows) is centred in it rather than left
+   hanging from the top. The floor is for the stacked layout below the
+   breakpoint, where there is no calendar beside it to take the height from. */
 .rl-clock {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  flex: 1;
   min-height: 133px;
 }
 
 /* Hour of the day as bars. They share the width equally and grow from the
-   baseline; `--v` is the fraction of the busiest hour, set per bar. */
+   baseline; `--v` is the fraction of the busiest hour, set per bar. The bars
+   take the panel's spare height instead of leaving it under the axis. */
 .rl-bars {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  height: 116px;
+  flex: 1;
+  min-height: 116px;
 }
 
 .rl-bar {
@@ -4549,12 +4588,16 @@ kbd {
 .rl-l3 { background: var(--rl-3); }
 .rl-l4 { background: var(--rl-4); }
 
+/* Keeps to the bottom edge: when the clock beside it is the taller panel, the
+   slack belongs between the calendar and the legend — a key hanging directly
+   under the calendar with empty panel below it reads as a layout accident. */
 .rl-legend {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  margin-top: 10px;
+  margin-top: auto;
+  padding-top: 10px;
   font-size: 11px;
   color: var(--muted);
 }
