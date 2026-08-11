@@ -142,10 +142,68 @@ pub fn parse_txt(text: &str) -> Document {
 // Body-loop state machine
 // =========================================================================
 
+/// A `字下げ` block: how far the first line of a paragraph is indented and how
+/// far the lines it wraps onto are, both in characters.
+///
+/// `［＃ここからN字下げ］` sets them equal. `折り返してM字下げ` (and its
+/// `改行天付き` variant, whose first line starts flush) makes the wrapped lines
+/// deeper — a hanging indent, which is `text-indent` measured back from the
+/// wrap depth.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Indent {
+    first: u32,
+    wrap: u32,
+}
+
+impl Indent {
+    fn flat(n: u32) -> Self {
+        Indent { first: n, wrap: n }
+    }
+
+    /// `class`/`style` attribute text for a `<p>` carrying this indent. The
+    /// stylesheet's `.indent` already means one character, so the common case
+    /// needs no inline metrics.
+    ///
+    /// The offset is written as the physical `margin-top`, not the logical
+    /// `margin-inline-start`. The document is authored `vertical-rl`, where the
+    /// two are the same edge, and physical is the form both the style pipeline
+    /// and commercial vertical editions speak — a logical property is dropped
+    /// on the way to KFX, which left every 字下げ block flush on the device.
+    fn attrs(&self, extra_classes: &[&str]) -> String {
+        let mut classes = vec!["indent"];
+        classes.extend_from_slice(extra_classes);
+        let mut out = format!(r#" class="{}""#, classes.join(" "));
+        if *self != Indent::flat(1) {
+            out.push_str(&format!(r#" style="margin-top:{}em"#, self.wrap));
+            if self.first != self.wrap {
+                out.push_str(&format!(
+                    ";text-indent:-{}em",
+                    self.wrap.saturating_sub(self.first)
+                ));
+            }
+            out.push('"');
+        }
+        out
+    }
+}
+
+/// Work a line's own markers deferred to after that line has been written.
+/// `［＃ここで…終わり］` closes a range *including* the line it sits on, so the
+/// style has to survive long enough to reach that line's `<p>`.
+#[derive(Default)]
+struct PendingClose {
+    block_style: bool,
+    indent: bool,
+    box_p: bool,
+}
+
 #[derive(Default)]
 struct BodyState {
-    indent_level: u32,
-    block_styles: Vec<&'static str>,
+    indent: Option<Indent>,
+    /// Open `［＃ここから…］` block styles, innermost last. `None` for a marker
+    /// that carries no rendering (see [`block_style_class`]) — it still occupies
+    /// a slot so that its `終わり` pops the right entry.
+    block_styles: Vec<Option<&'static str>>,
     /// State of the currently-open `罫囲み` (ruled box). `None` when not inside
     /// a box; `Some(first)` while a box `<p>` is open, where `first` is true
     /// until the first line is written (so lines after it get a `<br/>`
@@ -158,9 +216,18 @@ struct BodyState {
     referenced_images: Vec<String>,
 }
 
+/// Class for a `［＃ここから…］` block style, or `None` when the marker names a
+/// print-layout fact that reflowable vertical text renders as ordinary text.
+///
+/// `横組み` is the latter. It records that the 底本 set a run horizontally —
+/// formulae, a Latin sentence — but a writing-mode switch is the wrong way to
+/// carry that: CSS ignores it on an inline box, and KFX does *not*, so the same
+/// markup did nothing in the EPUB while rotating whole runs 90° out of the
+/// column on the device. Commercial vertical editions of the same text set
+/// every one of these runs in the ordinary vertical flow, which is also what a
+/// Latin run does by itself under `text-orientation: mixed`.
 fn block_style_class(name: &str) -> Option<&'static str> {
     match name {
-        "横組み" => Some("yokogumi"),
         "ゴシック体" => Some("gothic"),
         "斜体" => Some("italic"),
         "罫囲み" | "枠囲み" => Some("keigakomi"),
@@ -177,8 +244,8 @@ fn block_style_class(name: &str) -> Option<&'static str> {
 /// made the device paginate *between* the children (still one line per page).
 /// Kindle paginates between a container's block children but flows `<br/>`/`\n`
 /// line breaks *within* a single text block — so one `<p>` with `<br/>`s keeps
-/// every line together in one box. The other block styles (gothic/italic/
-/// yokogumi) compose fine per-paragraph and stay that way.
+/// every line together in one box. The other block styles (gothic, italic)
+/// compose fine per-paragraph and stay that way.
 fn is_box_class(cls: &str) -> bool {
     cls.starts_with("keigakomi")
 }
@@ -192,8 +259,12 @@ fn close_open_boxes(state: &mut BodyState) {
     }
 }
 
-static INDENT_START_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"［＃ここから[０-９0-9]+字下げ[^］]*］").unwrap());
+/// `［＃ここからN字下げ］`, optionally `、折り返してM字下げ］`, and the
+/// `［＃ここから改行天付き、折り返してM字下げ］` form whose first line is flush.
+static INDENT_START_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"［＃ここから(?:([０-９0-9]+)字下げ|改行天付き)(?:、折り返して([０-９0-9]+)字下げ)?[^］]*］")
+        .unwrap()
+});
 static INDENT_END_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃ここで字下げ終わり］").unwrap());
 static BLOCK_START_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -237,34 +308,66 @@ static HEADING_NAKAMIDASHI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃中見出し］(.+?)［＃中見出し終わり］").unwrap());
 static HEADING_KOMIDASHI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃小見出し］(.+?)［＃小見出し終わり］").unwrap());
+/// A one-line indent: `［＃N字下げ］`, or `［＃天からN字下げ］` measured from the
+/// top of the column (identical in reflowable text, where there is nothing else
+/// to measure from).
 static INDENT_SINGLE_PREFIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"［＃[０-９0-9]+字下げ］").unwrap());
+    LazyLock::new(|| Regex::new(r"［＃(?:天から)?([０-９0-9]+)字下げ］").unwrap());
 static EDITORIAL_BASE_NOTE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃「[^」]*」は底本では[^］]*］").unwrap());
+/// Notes the input made about the 底本 rather than about setting: what the
+/// printed page had before Aozora corrected it, and `ママ` marking a reading
+/// left as printed. They address the reader of the source file, not the reader
+/// of the book, so they carry no markup and are removed wherever they appear.
+static EDITORIAL_NOTE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"［＃(?:ルビの)?「[^」]*」は底本では[^］]*］|［＃(?:「[^」]*」は)?ママ］").unwrap()
+});
 
 fn process_line(raw_in: &str, state: &mut BodyState) {
+    let pending = process_line_inner(raw_in, state);
+    // Deferred so that the line carrying a `終わり` marker is itself still
+    // inside the range that marker closes.
+    if pending.box_p {
+        close_open_boxes(state);
+    }
+    if pending.block_style {
+        state.block_styles.pop();
+    }
+    if pending.indent {
+        state.indent = None;
+    }
+}
+
+fn process_line_inner(raw_in: &str, state: &mut BodyState) -> PendingClose {
     let mut raw = raw_in.to_string();
+    let mut pending = PendingClose::default();
 
     // Block indent start (consume marker; rest of line continues).
-    if INDENT_START_RE.is_match(&raw) {
-        state.indent_level += 1;
+    if let Some(caps) = INDENT_START_RE.captures(&raw) {
+        // `改行天付き` has no first-line depth: the first line starts flush.
+        let first = caps
+            .get(1)
+            .and_then(|m| parse_zenkaku_int(m.as_str()))
+            .unwrap_or(0);
+        let wrap = caps
+            .get(2)
+            .and_then(|m| parse_zenkaku_int(m.as_str()))
+            .unwrap_or(first);
+        state.indent = Some(Indent { first, wrap });
         raw = INDENT_START_RE.replace(&raw, "").to_string();
         if raw.trim().is_empty() {
-            return;
+            return pending;
         }
     }
-    // Block indent end. Any trailing line content gets a single indented <p>,
-    // then indent level resets (matches HTML tool — *not* a stack).
+    // Block indent end. Trailing content on this line is still indented; the
+    // reset happens after it has been written. Not a stack — matches the
+    // annotation, where `字下げ終わり` closes whatever is open.
     if INDENT_END_RE.is_match(&raw) {
         raw = INDENT_END_RE.replace(&raw, "").to_string();
-        if !raw.trim().is_empty() {
-            let inner = convert_aozora_line(&raw, &mut state.referenced_images);
-            state.html.push_str(r#"<p class="indent">"#);
-            state.html.push_str(&inner);
-            state.html.push_str("</p>\n");
+        pending.indent = true;
+        if raw.trim().is_empty() {
+            return pending;
         }
-        state.indent_level = 0;
-        return;
     }
 
     // `字詰め` (chars-per-line) block markers: consume as no-ops so they don't
@@ -272,7 +375,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     if JIZUME_RE.is_match(&raw) {
         raw = JIZUME_RE.replace_all(&raw, "").to_string();
         if raw.trim().is_empty() {
-            return;
+            return pending;
         }
     }
 
@@ -281,62 +384,64 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     // class. The box `<p>` carries `indent` when inside a `字下げ` block.
     if let Some(caps) = BLOCK_START_RE.captures(&raw) {
         let name = caps.get(1).unwrap().as_str();
-        if let Some(cls) = block_style_class(name) {
-            if is_box_class(cls) {
+        let cls = block_style_class(name);
+        match cls {
+            Some(cls) if is_box_class(cls) => {
                 close_open_boxes(state); // no nesting; flush any prior box
-                let indent = if state.indent_level > 0 {
-                    "indent "
-                } else {
-                    ""
+                let attrs = match state.indent {
+                    Some(indent) => indent.attrs(&[cls]),
+                    None => format!(r#" class="{}""#, cls),
                 };
-                state
-                    .html
-                    .push_str(&format!("<p class=\"{}{}\">", indent, cls));
+                state.html.push_str(&format!("<p{}>", attrs));
                 state.box_first = Some(true);
-            } else {
-                state.block_styles.push(cls);
             }
+            // A box owns its own `<p>`, so it is not on the per-paragraph
+            // stack; every other marker takes a slot whether or not it renders.
+            _ => state.block_styles.push(cls),
         }
         raw = BLOCK_START_RE.replace(&raw, "").to_string();
         if raw.trim().is_empty() {
-            return;
+            return pending;
         }
     }
     // Block-level style end. A box name (`…囲み`) closes the box `<p>`; anything
-    // else pops a per-paragraph block style.
+    // else releases a per-paragraph block style once this line is out.
     if let Some(caps) = BLOCK_END_RE.captures(&raw) {
         let name = caps.get(1).unwrap().as_str();
         if name.contains("囲み") {
-            close_open_boxes(state);
+            pending.box_p = true;
         } else {
-            state.block_styles.pop();
+            pending.block_style = true;
         }
-        // Note: JS uses a looser end-strip regex than start. Match its
-        // behavior — strip anything `［＃ここで...終わり］`.
-        let end_strip = Regex::new(r"［＃ここで[^］]*終わり］").unwrap();
-        raw = end_strip.replace(&raw, "").to_string();
+        // The end marker is matched more loosely than the start: strip anything
+        // shaped `［＃ここで...終わり］` so an unpaired name leaves no residue.
+        static END_STRIP_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃ここで[^］]*終わり］").unwrap());
+        raw = END_STRIP_RE.replace(&raw, "").to_string();
         if raw.trim().is_empty() {
-            return;
+            return pending;
         }
     }
 
     // Page / section breaks reset block state. If the whole line is just a
     // page-break marker, skip it; otherwise strip and continue.
     if PAGE_BREAK_RE.is_match(&raw) {
-        state.indent_level = 0;
+        state.indent = None;
         close_open_boxes(state);
         state.block_styles.clear();
+        pending = PendingClose::default();
         if PAGE_BREAK_LINE_ONLY_RE.is_match(raw.trim()) {
-            return;
+            return pending;
         }
         raw = PAGE_BREAK_RE.replace_all(&raw, "").to_string();
     }
 
     // Heading lines reset block state.
     if HEADING_PRECEDES_RE.is_match(&raw) {
-        state.indent_level = 0;
+        state.indent = None;
         close_open_boxes(state);
         state.block_styles.clear();
+        pending = PendingClose::default();
     }
 
     // 大見出し → <h2>
@@ -357,7 +462,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         state
             .html
             .push_str(&format!("<h2 id=\"{}\">{}</h2>\n", id, inner));
-        return;
+        return pending;
     }
     if let Some(caps) = HEADING_NAKAMIDASHI_RE.captures(&raw) {
         state.heading_id += 1;
@@ -374,7 +479,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         state
             .html
             .push_str(&format!("<h3 id=\"{}\">{}</h3>\n", id, inner));
-        return;
+        return pending;
     }
     if let Some(caps) = HEADING_KOMIDASHI_RE.captures(&raw) {
         state.heading_id += 1;
@@ -390,10 +495,17 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         state
             .html
             .push_str(&format!("<h4 id=\"{}\">{}</h4>\n", id, converted));
-        return;
+        return pending;
     }
 
-    // Inline indent prefix `［＃N字下げ］` — strip everywhere on the line.
+    // One-line indent prefix `［＃N字下げ］`. It indents only its own line, so
+    // it overrides — never accumulates onto — an enclosing `字下げ` block.
+    let mut line_indent = state.indent;
+    if let Some(caps) = INDENT_SINGLE_PREFIX_RE.captures(&raw)
+        && let Some(n) = caps.get(1).and_then(|m| parse_zenkaku_int(m.as_str()))
+    {
+        line_indent = Some(Indent::flat(n));
+    }
     raw = INDENT_SINGLE_PREFIX_RE.replace_all(&raw, "").to_string();
 
     // Postfix heading form: `TEXT［＃「TEXT」は<大|中|小>見出し］`. Detect
@@ -427,7 +539,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
                 "<h{} id=\"{}\">{}</h{}>\n",
                 level, id, converted, level
             ));
-            return;
+            return pending;
         }
         // Postfix annotation present but the preceding text doesn't match
         // the quoted target verbatim (rare — usually means the heading text
@@ -451,30 +563,25 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         }
         state.html.push_str(&inner);
         state.box_first = Some(false);
-        return;
+        return pending;
     }
 
     if raw.trim().is_empty() {
         state.html.push_str("<p><br/></p>\n");
-        return;
+        return pending;
     }
 
-    let mut classes: Vec<&str> = Vec::new();
-    if state.indent_level > 0 {
-        classes.push("indent");
-    }
-    for cls in &state.block_styles {
-        classes.push(cls);
-    }
-    let p_attr = if classes.is_empty() {
-        String::new()
-    } else {
-        format!(r#" class="{}""#, classes.join(" "))
+    let block_classes: Vec<&str> = state.block_styles.iter().flatten().copied().collect();
+    let p_attr = match line_indent {
+        Some(indent) => indent.attrs(&block_classes),
+        None if block_classes.is_empty() => String::new(),
+        None => format!(r#" class="{}""#, block_classes.join(" ")),
     };
     let inner = convert_aozora_line(&raw, &mut state.referenced_images);
     state
         .html
         .push_str(&format!("<p{}>{}</p>\n", p_attr, inner));
+    pending
 }
 
 fn strip_editorial_notes_for_heading(s: &str) -> String {
@@ -491,6 +598,13 @@ fn plain_text_for_heading(s: &str) -> String {
 // =========================================================================
 // Inline annotation processing (convertAozoraLine)
 // =========================================================================
+
+/// Convert one line of Aozora source to inline XHTML: ruby, gaiji, images and
+/// the inline annotations. Exposed for the parts of a document that are not
+/// body lines but are still written in the same notation (the colophon).
+pub fn convert_line(line: &str, images: &mut Vec<String>) -> String {
+    convert_aozora_line(line, images)
+}
 
 fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
     // Per-line fast paths. Most lines in a typical Aozora book have *no*
@@ -518,30 +632,32 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         });
     }
 
-    if has_ruby {
-        // Ruby with explicit ｜ marker: ｜base《reading》
-        static RUBY_MARKER_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"｜([^《]+?)《([^》]+)》").unwrap());
-        s = re_replace_cow(&RUBY_MARKER_RE, s, |caps| {
-            format!(
-                "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
-                &caps[1], &caps[2]
-            )
-        });
-        // Ruby on bare CJK runs: kanji《reading》
-        static RUBY_CJK_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"([\u{4E00}-\u{9FFF}\u{3400}-\u{4DBF}\u{F900}-\u{FAFF}]+)《([^》]+)》")
-                .unwrap()
-        });
-        s = re_replace_cow(&RUBY_CJK_RE, s, |caps| {
-            format!(
-                "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
-                &caps[1], &caps[2]
-            )
+    // Gaiji resolution runs *before* ruby: the annotation sits between the
+    // character and its reading (`顳※［＃「需＋頁」、第3水準1-94-6］《こめかみ》`),
+    // so the ruby base only becomes visible once `※［＃…］` has collapsed to 顬.
+    if has_gaiji {
+        static GAIJI_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"※［＃([^］]*)］").unwrap());
+        s = re_replace_cow(&GAIJI_RE, s, |caps| {
+            // No code in the annotation (a prose-only glyph description) means
+            // nothing to resolve — `※` stays as the Aozora placeholder.
+            super::gaiji::resolve(&caps[1])
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|| "※".to_string())
         });
     }
 
+    if has_ruby {
+        s = apply_ruby(s);
+    }
+
     if has_anno {
+        // Editorial notes come out before anything reads a range. They record
+        // what the 底本 printed and never wrap text, but a note landing inside
+        // a 割り注 or 傍点 range split it — every paired form stops at `［`, so
+        // the enclosing style was silently lost.
+        s = re_replace_str_cow(&EDITORIAL_NOTE_RE, s, "");
+
         // --- Block-form paired annotations ---
         for form in PAIRED_FORMS.iter() {
             s = re_replace_cow(&form.re, s, |caps| {
@@ -613,37 +729,16 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
             }
         }
 
-        // Inline notes
-        static WARIRYUU_RE: LazyLock<Regex> =
+        // 割り注 — a two-line note set inline. The marker states the *setting*;
+        // the delimiters around it are the 底本's own text and are already in
+        // the source (`人形（［＃割り注］…［＃割り注終わり］）`), so adding a pair
+        // here doubled every one of them. Small type is what carries the
+        // distinction in reflowable text, matching the commercial editions.
+        static WARICHU_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap());
-        s = re_replace_cow(&WARIRYUU_RE, s, |caps| {
-            format!("<small>（{}）</small>", &caps[1])
+        s = re_replace_cow(&WARICHU_RE, s, |caps| {
+            format!(r#"<span class="warichu">{}</span>"#, &caps[1])
         });
-    }
-
-    if has_gaiji {
-        // Gaiji: ※［＃description、code］ → keep ※
-        static GAIJI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"※［＃[^］]*］").unwrap());
-        s = match GAIJI_RE.replace_all(&s, "※") {
-            Cow::Borrowed(_) => s,
-            Cow::Owned(o) => Cow::Owned(o),
-        };
-    }
-
-    if has_anno {
-        // Named special chars
-        static KANTAN_GIMON_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"［＃感嘆符疑問符、[^\]]*］").unwrap());
-        s = re_replace_str_cow(&KANTAN_GIMON_RE, s, "\u{2049}");
-        static KANTAN_FUTATSU_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"［＃感嘆符二つ、[^\]]*］").unwrap());
-        s = re_replace_str_cow(&KANTAN_FUTATSU_RE, s, "\u{203C}");
-        static DAKUTEN_WA_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"［＃濁点付き片仮名ワ、[^\]]*］").unwrap());
-        s = re_replace_str_cow(&DAKUTEN_WA_RE, s, "\u{30F7}");
-        static ALEPH_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"［＃アレフ、[^\]]*］").unwrap());
-        s = re_replace_str_cow(&ALEPH_RE, s, "\u{05D0}");
 
         // Strip editorial notes and heading-reference notes.
         s = re_replace_str_cow(&EDITORIAL_BASE_NOTE_RE, s, "");
@@ -681,6 +776,169 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
     }
 
     s.into_owned()
+}
+
+// =========================================================================
+// Ruby
+// =========================================================================
+
+/// The character classes an unmarked ruby base is allowed to span.
+///
+/// Aozora only requires the explicit `｜` marker when the base does not start
+/// on a class boundary; otherwise the base is "everything back to the last
+/// character of a different class". Classes are the ones the input rules name:
+/// 漢字 (with the iteration/repetition marks that behave as kanji), ひらがな,
+/// カタカナ, and 欧字 in either width.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum RubyClass {
+    Kanji,
+    Hiragana,
+    Katakana,
+    Latin,
+    /// Anything else — a Greek letter, ℵ, an operator. Ruby still attaches, but
+    /// only to that single character: there is no run to extend over, and
+    /// letting punctuation accumulate would swallow the sentence before it.
+    Other,
+}
+
+fn ruby_class(c: char) -> RubyClass {
+    match c {
+        '\u{3005}' | '\u{3006}' | '\u{3007}' => RubyClass::Kanji, // 々〆〇
+        '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{2A6DF}'
+        | '\u{2A700}'..='\u{2EBEF}'
+        | '\u{2F800}'..='\u{2FA1F}' => RubyClass::Kanji,
+        '\u{3041}'..='\u{309F}' => RubyClass::Hiragana,
+        '\u{30A1}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => {
+            RubyClass::Katakana
+        }
+        'A'..='Z' | 'a'..='z' | '0'..='9' => RubyClass::Latin,
+        '\u{FF10}'..='\u{FF19}' | '\u{FF21}'..='\u{FF3A}' | '\u{FF41}'..='\u{FF5A}' => {
+            RubyClass::Latin
+        }
+        _ => RubyClass::Other,
+    }
+}
+
+/// Replace every `《reading》` with a `<ruby>` over the base that precedes it.
+///
+/// The explicit form `｜base《reading》` states its own base. Otherwise the base
+/// is found by walking backwards: over an element when one ends there, over a
+/// `〔…〕` accent-decomposition group, or over the run of same-class characters.
+/// A base that cannot be identified leaves the `《…》` untouched rather than
+/// guessing.
+///
+/// A base that is an element rather than text is a glyph with no character to
+/// stand for it (梵字, ヘブライ文字), which reaches the reader as an `<img/>`.
+/// Ruby cannot ride on it: KFX annotates a character range within a text run,
+/// an image occupies no range there, and the reading would reach the EPUB and
+/// vanish from the KFX. It goes into the image's description instead, where
+/// both formats keep it — which is also how commercial vertical editions set
+/// these glyphs.
+fn apply_ruby(s: Cow<'_, str>) -> Cow<'_, str> {
+    if !s.contains('《') {
+        return s;
+    }
+    let src: &str = &s;
+    let mut out = String::with_capacity(src.len() + 64);
+    // Byte index in `src` up to which `out` has been written.
+    let mut copied = 0usize;
+    let mut search = 0usize;
+
+    while let Some(rel) = src[search..].find('《') {
+        let open = search + rel;
+        let Some(rel_close) = src[open..].find('》') else {
+            break;
+        };
+        let close = open + rel_close;
+        let reading = &src[open + '《'.len_utf8()..close];
+        search = close + '》'.len_utf8();
+
+        // An empty `《》` is the legend for the notation, not a reading.
+        if reading.is_empty() {
+            continue;
+        }
+        // The base has to lie in text this pass has not already consumed.
+        let Some(base_start) = ruby_base_start(&src[copied..open]).map(|i| copied + i) else {
+            continue;
+        };
+        out.push_str(&src[copied..base_start]);
+        let base = &src[base_start..open];
+        // `｜` only delimits the base; it never reaches the reader.
+        let base = base.strip_prefix('｜').unwrap_or(base);
+        if base.contains('<') {
+            out.push_str(&fold_reading_into_alt(base, reading));
+        } else {
+            out.push_str("<ruby>");
+            out.push_str(base);
+            out.push_str("<rp>（</rp><rt>");
+            out.push_str(reading);
+            out.push_str("</rt><rp>）</rp></ruby>");
+        }
+        copied = search;
+    }
+
+    if copied == 0 {
+        return s;
+    }
+    out.push_str(&src[copied..]);
+    Cow::Owned(out)
+}
+
+/// Record a reading on the element that would have been its ruby base, by
+/// adding it to the image's `alt`. The annotation's own prose often already
+/// names the reading (`底本が「ラン」とルビを付した梵字`), so it is only appended
+/// when the description does not already carry it.
+fn fold_reading_into_alt(base: &str, reading: &str) -> String {
+    let Some(alt_start) = base.find(r#" alt=""#).map(|i| i + r#" alt=""#.len()) else {
+        return base.to_string();
+    };
+    let Some(alt_len) = base[alt_start..].find('"') else {
+        return base.to_string();
+    };
+    let alt = &base[alt_start..alt_start + alt_len];
+    if alt.contains(reading) {
+        return base.to_string();
+    }
+    format!(
+        "{}{}（{}）{}",
+        &base[..alt_start],
+        alt,
+        reading,
+        &base[alt_start + alt_len..]
+    )
+}
+
+/// Byte offset within `head` where the ruby base for a `《` at its end begins.
+fn ruby_base_start(head: &str) -> Option<usize> {
+    // Explicit marker anywhere in the available text wins: `｜base《reading》`.
+    if let Some(i) = head.rfind('｜') {
+        return Some(i);
+    }
+    let last = head.chars().next_back()?;
+    // An element ends here (`<img …/>`, `</ruby>`). Text-level `<` and `>` are
+    // already escaped, so the nearest `<` is unambiguously this tag's start.
+    if last == '>' {
+        return head.rfind('<');
+    }
+    // 〔…〕 wraps accent-decomposed Western text and rubies as one unit.
+    if last == '〕' {
+        return head.rfind('〔');
+    }
+    let class = ruby_class(last);
+    if class == RubyClass::Other {
+        return Some(head.len() - last.len_utf8());
+    }
+    let mut start = head.len();
+    for c in head.chars().rev() {
+        if ruby_class(c) != class {
+            break;
+        }
+        start -= c.len_utf8();
+    }
+    Some(start)
 }
 
 /// Borrow-first XML escape. Returns the input unchanged when it contains
@@ -780,7 +1038,8 @@ static PAIRED_FORMS: LazyLock<Vec<PairedForm>> = LazyLock::new(|| {
         paired_form("太字", "<strong>", "</strong>"),
         paired_form("ゴシック体", r#"<span class="gothic">"#, "</span>"),
         paired_form("斜体", "<i>", "</i>"),
-        paired_form("横組み", r#"<span class="yokogumi">"#, "</span>"),
+        // `横組み` deliberately absent — see `block_style_class`. The catch-all
+        // drops the markers and the run stays in the vertical flow.
         paired_form("上付き小文字", "<sup>", "</sup>"),
         paired_form("下付き小文字", "<sub>", "</sub>"),
         paired_form("行右小書き", "<sup>", "</sup>"),
@@ -930,11 +1189,101 @@ mod tests {
     }
 
     #[test]
-    fn gaiji_collapses_to_marker() {
+    fn gaiji_resolves_to_the_character_it_names() {
+        // The annotation names the character exactly; `※` is a placeholder for
+        // a reader with no table, not the text.
         let mut imgs = Vec::new();
         let out = convert_aozora_line("※［＃感嘆符疑問符、1-8-78］あ", &mut imgs);
-        assert!(out.starts_with("※"));
-        assert!(!out.contains("［＃"));
+        assert_eq!(out, "\u{2049}あ");
+        let out = convert_aozora_line("顳※［＃「需＋頁」、第3水準1-94-6］", &mut imgs);
+        assert_eq!(out, "顳顬");
+        // A glyph described only in prose has nothing to resolve to.
+        let out = convert_aozora_line("※［＃「くさかんむり／夷」］", &mut imgs);
+        assert_eq!(out, "※");
+    }
+
+    #[test]
+    fn gaiji_resolves_before_ruby_reads_its_base() {
+        // The annotation sits between the character and its reading, so a ruby
+        // pass running first saw no base at all and left `《…》` in the text.
+        let mut imgs = Vec::new();
+        let out = convert_aozora_line(
+            "両側の顳※［＃「需＋頁」、第3水準1-94-6］《こめかみ》に",
+            &mut imgs,
+        );
+        assert!(
+            out.contains("<ruby>顳顬<rp>（</rp><rt>こめかみ</rt>"),
+            "got: {out}"
+        );
+        assert!(!out.contains('《'), "got: {out}");
+    }
+
+    #[test]
+    fn ruby_attaches_to_latin_and_iteration_marks() {
+        // Aozora only requires the `｜` marker when the base does not start on a
+        // character-class boundary. A kanji-only base rule dropped every
+        // Western word's reading and every base ending in an iteration mark.
+        let mut imgs = Vec::new();
+        let out = convert_aozora_line("Quean《クイーン》 locked《ロックト》", &mut imgs);
+        assert!(
+            out.contains("<ruby>Quean<rp>（</rp><rt>クイーン</rt>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<ruby>locked<rp>（</rp><rt>ロックト</rt>"),
+            "got: {out}"
+        );
+        let out = convert_aozora_line("聖鐘の殷々《いんいん》たる", &mut imgs);
+        assert!(
+            out.contains("<ruby>殷々<rp>（</rp><rt>いんいん</rt>"),
+            "got: {out}"
+        );
+        let out = convert_aozora_line("ＰＡＴＥＲ《パテル》", &mut imgs);
+        assert!(
+            out.contains("<ruby>ＰＡＴＥＲ<rp>（</rp><rt>パテル</rt>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn a_reading_on_a_glyph_image_lands_in_its_description() {
+        // A glyph with no character to stand for it arrives as an image. Ruby
+        // cannot ride on an image through KFX, so the reading is recorded on
+        // the image rather than emitted as markup that only one output keeps.
+        // The raw `《…》` must not survive either way.
+        let mut imgs = Vec::new();
+        let out = convert_aozora_line(
+            "ヘブライ文字の［＃ヘブライ文字「YOD」（fig24.png、横15×縦23）入る］《ヨッド》まで",
+            &mut imgs,
+        );
+        assert_eq!(
+            out,
+            r#"ヘブライ文字の<img src="../images/fig24.png" alt="ヘブライ文字「YOD」（ヨッド）"/>まで"#
+        );
+        // When the description already names the reading, nothing is appended.
+        let out = convert_aozora_line(
+            "呪語の［＃底本が「ラン」とルビを付した梵字（fig15.png、横18×縦23）入る］《ラン》の字",
+            &mut imgs,
+        );
+        assert_eq!(
+            out,
+            r#"呪語の<img src="../images/fig15.png" alt="底本が「ラン」とルビを付した梵字"/>の字"#
+        );
+    }
+
+    #[test]
+    fn warichu_keeps_the_source_delimiters() {
+        // The marker states that the note is set inline in two lines; the
+        // parentheses around it are the 底本's own text and are already there.
+        let mut imgs = Vec::new();
+        let out = convert_aozora_line(
+            "人形（［＃割り注］土耳古の操人形［＃割り注終わり］）を",
+            &mut imgs,
+        );
+        assert_eq!(
+            out,
+            r#"人形（<span class="warichu">土耳古の操人形</span>）を"#
+        );
     }
 
     #[test]
@@ -951,6 +1300,94 @@ mod tests {
         let doc = parse_txt(src);
         assert!(doc.body_xhtml.contains(r#"<p class="indent">字下げ中</p>"#));
         assert!(doc.body_xhtml.contains("<p>通常2</p>"));
+    }
+
+    #[test]
+    fn indent_depth_is_carried_not_flattened() {
+        // Every depth used to collapse to the stylesheet's one character, and a
+        // one-line `［＃N字下げ］` indented nothing at all.
+        let src = "T\nA\n\n-------\n［＃ここから４字下げ］\n深い\n［＃ここで字下げ終わり］\n［＃５字下げ］一行だけ\n［＃天から２字下げ］天から\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(
+            body.contains(r#"<p class="indent" style="margin-top:4em">深い</p>"#),
+            "body:\n{body}"
+        );
+        assert!(
+            body.contains(r#"<p class="indent" style="margin-top:5em">一行だけ</p>"#),
+            "body:\n{body}"
+        );
+        assert!(
+            body.contains(r#"<p class="indent" style="margin-top:2em">天から</p>"#),
+            "body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn hanging_indent_is_measured_back_from_the_wrap_depth() {
+        let src = "T\nA\n\n-------\n［＃ここから１字下げ、折り返して４字下げ］\n本文\n［＃ここで字下げ終わり］\n［＃ここから改行天付き、折り返して１字下げ］\n天付き\n［＃ここで字下げ終わり］\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(
+            body.contains(r#"<p class="indent" style="margin-top:4em;text-indent:-3em">本文</p>"#),
+            "body:\n{body}"
+        );
+        assert!(
+            body.contains(
+                r#"<p class="indent" style="margin-top:1em;text-indent:-1em">天付き</p>"#
+            ),
+            "body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn block_end_marker_still_covers_its_own_line() {
+        // `［＃ここで…終わり］` closes a range that *includes* the line it sits
+        // on. Popping the style before writing that line dropped it from the
+        // one paragraph a single-line block consists of.
+        let src =
+            "T\nA\n\n-------\n［＃ここからゴシック体］\n本文［＃ここでゴシック体終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(
+            body.contains(r#"<p class="gothic">本文</p>"#),
+            "body:\n{body}"
+        );
+        assert!(body.contains("<p>後</p>"), "body:\n{body}");
+    }
+
+    #[test]
+    fn yokogumi_stays_in_the_vertical_flow() {
+        // The marker records that the 底本 set the run horizontally. Carrying
+        // that as a writing-mode switch is inert on an inline box in CSS but
+        // live in KFX, where it rotates the run out of the column; commercial
+        // vertical editions set these runs in the ordinary flow.
+        let src = "T\nA\n\n-------\n式は［＃横組み］犯人＋Ｘ［＃横組み終わり］だ\n［＃ここから横組み］\n段落［＃ここで横組み終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(!body.contains("yokogumi"), "body:\n{body}");
+        assert!(!body.contains("横組み"), "body:\n{body}");
+        assert!(body.contains("<p>式は犯人＋Ｘだ</p>"), "body:\n{body}");
+        assert!(body.contains("<p>段落</p>"), "body:\n{body}");
+        assert!(body.contains("<p>後</p>"), "body:\n{body}");
+    }
+
+    #[test]
+    fn a_styleless_block_marker_does_not_pop_an_enclosing_style() {
+        // 横組み renders as nothing, but its `終わり` must still release its own
+        // slot rather than the style opened around it.
+        let src = "T\nA\n\n-------\n［＃ここからゴシック体］\n［＃ここから横組み］\n中［＃ここで横組み終わり］\nまだゴシック\n［＃ここでゴシック体終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(
+            body.contains(r#"<p class="gothic">中</p>"#),
+            "body:\n{body}"
+        );
+        assert!(
+            body.contains(r#"<p class="gothic">まだゴシック</p>"#),
+            "body:\n{body}"
+        );
+        assert!(body.contains("<p>後</p>"), "body:\n{body}");
     }
 
     #[test]
@@ -997,6 +1434,21 @@ mod tests {
             "marker text stripped; body:\n{body}"
         );
         assert!(body.contains("<p>本文</p>"), "body:\n{body}");
+    }
+
+    #[test]
+    fn box_end_marker_keeps_its_own_line_in_the_box() {
+        // Same shape as `block_end_marker_still_covers_its_own_line`: the last
+        // line of a box may carry the `終わり` marker, and it belongs inside.
+        let src =
+            "T\nA\n\n-------\n［＃ここから罫囲み］\n一行目\n二行目［＃ここで罫囲み終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(
+            body.contains(r#"<p class="keigakomi">一行目<br/>二行目</p>"#),
+            "body:\n{body}"
+        );
+        assert!(body.contains("<p>後</p>"), "body:\n{body}");
     }
 
     #[test]

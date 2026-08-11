@@ -14,6 +14,7 @@
 
 pub mod cover;
 pub mod epub_builder;
+pub mod gaiji;
 pub mod parser_txt;
 
 pub use cover::{build_cover_svg, render_cover_jpeg};

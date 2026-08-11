@@ -223,9 +223,15 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
     if !doc.colophon.is_empty() {
         let mut col_body = String::from(r#"<div class="colophon" id="colophon">"#);
         col_body.push('\n');
+        // The colophon is Aozora prose like any other: the 底本 notes it carries
+        // quote ruby and gaiji from the text they discuss, so they go through
+        // the same line conversion instead of reaching the reader as raw
+        // `《…》` and `※［＃…］`. Images it might name are already manifested by
+        // the body pass, so nothing new is collected here.
+        let mut colophon_images = Vec::new();
         for line in doc.colophon.lines() {
             col_body.push_str("<p>");
-            col_body.push_str(&escape_xml(line));
+            col_body.push_str(&super::parser_txt::convert_line(line, &mut colophon_images));
             col_body.push_str("</p>\n");
         }
         col_body.push_str("</div>\n");
@@ -666,7 +672,7 @@ em.sesame {
   text-emphasis: filled sesame;
 }
 rt { font-size: 0.55em; }
-p.indent { margin-inline-start: 1em; text-indent: 0; }
+p.indent { margin-top: 1em; text-indent: 0; }
 img { max-width: 100%; max-height: 100%; }
 .underline { text-decoration: underline; }
 .underline-double { text-decoration: underline double; }
@@ -684,7 +690,7 @@ em.double-circle { font-style: normal; -webkit-text-emphasis: filled double-circ
 em.batsu { font-style: normal; -webkit-text-emphasis: "×"; text-emphasis: "×"; }
 .gothic { font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif; }
 .italic { font-style: italic; }
-.yokogumi { writing-mode: horizontal-tb; -webkit-writing-mode: horizontal-tb; -epub-writing-mode: horizontal-tb; }
+.warichu { font-size: 0.85em; }
 .chitsuki { display: block; text-align: end; }
 .keigakomi { border: 1px solid currentColor; padding: 0.2em; break-inside: avoid; }
 .keigakomi-dashed { border: 1px dashed currentColor; padding: 0.2em; break-inside: avoid; }
