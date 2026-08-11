@@ -4377,10 +4377,13 @@ kbd {
 /* The calendar is 53 fixed-width columns and cannot use more width than that,
    so on a wide window it used to sit in a full-width card with half of it
    empty. It now takes exactly what it needs and the clock takes the rest.
-   Below the breakpoint there is no rest to take and they stack. */
-/* The pair reads as one picture, so it is one band: both panels take the height
-   of the taller (grid items stretch by default), and each gives the slack to its
-   chart rather than ending wherever its own content happens to stop. */
+   Below the breakpoint there is no rest to take and they stack.
+
+   Vertically the pair is one band, not two independent cards: grid items
+   stretch, so both panels stand as tall as the taller of the two and the slack
+   falls inside the shorter one. Sizing each to its own content instead left the
+   clock ending a dozen pixels above the calendar — near enough to read as a
+   mistake, which it was. */
 .rl-panels {
   display: grid;
   grid-template-columns: auto minmax(320px, 1fr);
@@ -4436,28 +4439,39 @@ kbd {
 
 /* Takes whatever the band leaves after the header — normally the calendar's
    height, which is what squares the two panels off against each other. All
-   three views draw into that one box, so switching between them does not shunt
-   the book grid up and down the page; a grid shorter than the box (a library
-   with two months of reading draws two rows) is centred in it rather than left
-   hanging from the top. The floor is for the stacked layout below the
-   breakpoint, where there is no calendar beside it to take the height from. */
+   three views draw into that one box and any view shorter than it is centred in
+   it rather than left hanging from the top, so switching cuts moves nothing on
+   the page. The one view that can outgrow the calendar is a full year of months;
+   that enlarges the band itself, both panels together, which is a page that
+   grew rather than a panel that spilled. The floor is for the stacked layout
+   below the breakpoint, where there is no calendar beside it to take the
+   height from. */
 .rl-clock {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  flex: 1;
+  /* Grows into the band's slack from its content height, rather than from zero:
+     a zero basis would leave the panel's own height to the intrinsic-sizing
+     rules for flex items, and a month grid taller than the calendar has to
+     enlarge the band, not spill out of it. */
+  flex: 1 1 auto;
   min-height: 133px;
 }
 
 /* Hour of the day as bars. They share the width equally and grow from the
-   baseline; `--v` is the fraction of the busiest hour, set per bar. The bars
-   take the panel's spare height instead of leaving it under the axis. */
+   baseline; `--v` is the fraction of the busiest hour, set per bar.
+
+   The height stays a fixed length on purpose: every bar is a percentage of it
+   (`.rl-bar`, and the `--v` fill inside it), and a percentage needs a definite
+   height to resolve against. Flexing this box to fill the panel would leave
+   that height definite only through three levels of post-layout flex and grid
+   resolution — correct by spec, but the failure if an engine disagrees is a
+   chart of nothing. The panel's spare height is centred around it instead. */
 .rl-bars {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  flex: 1;
-  min-height: 116px;
+  height: 116px;
 }
 
 .rl-bar {
