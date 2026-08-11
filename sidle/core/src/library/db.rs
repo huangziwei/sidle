@@ -758,6 +758,29 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // The two end-of-book constants a device states for one book, so the pairing
+    // outlives the archive that revealed it.
+    //
+    // Every event line repeats the last *word* position, but only an occasional
+    // `BookEndPosition` states the last position, which is what
+    // [`books_with_last_position`] joins on. An archive that holds a book's
+    // sessions need not hold that event — one reader stack cuts the field off
+    // the line outright — and derived per-import, the pairing is then lost and
+    // the book unnameable however many times it is read.
+    //
+    // Learned once, applied to every session since: [`resolve_reading_sessions`]
+    // re-keys what it can already name. That is also why a session must never be
+    // stored twice under the two constants — the identity index counts the
+    // position, so the second key inserts a row rather than replacing one, and
+    // the same sitting is counted twice.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_log_book_ends (
+            last_word_position INTEGER PRIMARY KEY,
+            from_book          INTEGER NOT NULL
+        )"#,
+        [],
+    )?;
+
     // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
     // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
     // linked annotation. Idempotent: a no-op on a DB that never had any. Kept
@@ -1525,6 +1548,30 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
     Ok(n > 0)
 }
 
+/// Remember which last position goes with which last-word position.
+///
+/// First sighting wins, matching the rule the parser uses within one archive:
+/// two builds of one title differ in both numbers together, so a pair is either
+/// already right or about a different book entirely.
+pub fn record_book_ends(conn: &Connection, pairs: &[(i64, i64)]) -> rusqlite::Result<()> {
+    for (last_word_position, from_book) in pairs {
+        conn.execute(
+            "INSERT OR IGNORE INTO reading_log_book_ends (last_word_position, from_book)
+             VALUES (?1, ?2)",
+            params![last_word_position, from_book],
+        )?;
+    }
+    Ok(())
+}
+
+/// Every pairing learned so far.
+pub fn known_book_ends(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+    let mut stmt =
+        conn.prepare("SELECT last_word_position, from_book FROM reading_log_book_ends")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
 /// The newest reading event this library holds for one device, or `None` if it
 /// holds none.
 ///
@@ -1846,6 +1893,29 @@ pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
+    // A session stored before its book's two end constants were paired is keyed
+    // by the last-word position, which matches no book. Re-key it now that the
+    // pairing is known, rather than leaving it unnameable for good.
+    //
+    // `UPDATE OR IGNORE`: if a row already holds this sitting under the right
+    // key, the stale one is a duplicate of it and stays as it is — unattributed
+    // and so counted nowhere, which is the one outcome that cannot inflate a
+    // total.
+    let ends = known_book_ends(conn)?;
+    for position in &pending {
+        if let Some(from_book) = ends.get(position) {
+            conn.execute(
+                "UPDATE OR IGNORE reading_sessions SET end_position = ?2
+                  WHERE book_id IS NULL AND end_position = ?1",
+                params![position, from_book],
+            )?;
+        }
+    }
+    let pending: Vec<i64> = pending
+        .into_iter()
+        .map(|p| ends.get(&p).copied().unwrap_or(p))
+        .collect();
+
     let mut resolved = 0;
     for position in pending {
         let candidates = books_with_last_position(conn, position)?;
@@ -5808,6 +5878,41 @@ mod tests {
             page_turns: 40,
             words: 9000,
         }
+    }
+
+    #[test]
+    fn a_session_is_named_once_its_two_end_constants_are_paired() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-ends", "聖書");
+        set_max_position(&conn, book, Some(9_464_649)).unwrap();
+
+        // The archive that held this sitting never stated the book's last
+        // position, so it is keyed by the last-*word* position every line
+        // carries. Nothing in the library ends there.
+        insert_reading_session(&conn, &session("2026-08-11", 9_464_647, 30)).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
+
+        // A later archive states both constants together.
+        record_book_ends(&conn, &[(9_464_647, 9_464_648)]).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+
+        // Re-keyed in place, not duplicated: the identity index counts the
+        // position, so a second insert under the other constant would be a
+        // second row and the sitting would be counted twice.
+        let (rows, named): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(book_id) FROM reading_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, named), (1, 1));
+        assert_eq!(
+            reading_days(&conn, "0000-00-00", "9999-99-99")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

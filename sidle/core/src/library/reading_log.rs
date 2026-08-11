@@ -818,7 +818,16 @@ pub fn store_events(
 ) -> rusqlite::Result<Imported> {
     // Sessions are grouped by the fingerprint every page event carries, then
     // rekeyed to the one the library can actually be joined against.
-    let identity = frombook_map(events.iter().map(String::as_str));
+    //
+    // What this archive reveals is remembered, and what earlier ones revealed is
+    // applied: a book states its last position only occasionally, so the archive
+    // holding a sitting often is not the one that can name it.
+    let mut identity = frombook_map(events.iter().map(String::as_str));
+    let learned: Vec<(i64, i64)> = identity.iter().map(|(k, v)| (*k, *v)).collect();
+    db::record_book_ends(conn, &learned)?;
+    for (last_word, from_book) in db::known_book_ends(conn)? {
+        identity.entry(last_word).or_insert(from_book);
+    }
     let sessions = parse_sessions(events.iter().map(String::as_str));
 
     let mut out = Imported {
