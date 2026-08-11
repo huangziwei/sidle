@@ -1,14 +1,19 @@
 //! Recover reading sessions from a Kindle's own system logs.
 //!
 //! The device writes `/var/local/log/messages` and, at most once a day, gzips a
-//! snapshot of it into `system/logbackup/`. Under the `cvm` tag those logs carry
+//! snapshot of it into `system/logbackup/`. Those logs carry
 //! `ReadingTimerController` events — one per page turn, plus book open/close —
 //! which together are an unbiased, dated record of every reading session. The
 //! `.sdr` sidecars carry nothing comparable: their timer is a pair of running
 //! counters with no clock attached.
 //!
-//! Three properties of the source shape everything here:
+//! Four properties of the source shape everything here:
 //!
+//! - **An event is not reliably named.** The `cvm` reader writes the event name
+//!   first: `Information::NextPage,<fields>`. The Corretto/KPP reader loses the
+//!   head of a payload to a `SyslogFormatter` "Argument Value Mismatch", leaving
+//!   the name mid-line after a `;` or absent altogether. What a line carries is
+//!   dependable; what it is called is not. See [`observation`].
 //! - **The book is redacted.** Every line reads `Title:<private>,Asin:<private>`
 //!   and no line anywhere carries a path. What each line *does* carry is the
 //!   book's last position, which identifies it against
@@ -44,6 +49,12 @@ const MARKER: &str = "ReadingTimerController";
 /// events are further apart than this, because the reader plainly left. Without
 /// it, opening a book in the morning and again at night reads as one session.
 const SESSION_GAP_SECS: i64 = 30 * 60;
+
+/// How far a session's opening counter may outrun the wall clock before it is
+/// rejected as belonging to some other book. `StoredBookData` states whole
+/// seconds, so a legitimate one can round a second past the clock; a minute
+/// clears that without admitting a stale value from another book.
+const SEED_SLACK_SECS: i64 = 60;
 
 /// What one [`import`] pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
@@ -285,10 +296,21 @@ fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
 // ---------------------------------------------------------------------------
 // Parsing
 
-/// Pull `name:<digits>` out of a line. Anchored on the preceding comma so
-/// `TotalTime` cannot match inside a longer field name.
+/// Pull `name:<digits>` out of a line.
+///
+/// Anchored on the preceding separator so `TotalTime` cannot match inside a
+/// longer field name. Any of three will do: a field normally follows the comma
+/// after its neighbour, the first field of a line follows the `Information::`
+/// prefix, and the first field of a payload read on its own has nothing in front
+/// of it at all. Which field comes first is not fixed, because one firmware
+/// routinely writes a payload with its head cut off (see [`observation`]).
 fn field(line: &str, name: &str) -> Option<i64> {
-    let at = line.find(&format!(",{name}:"))? + name.len() + 2;
+    let needle = format!("{name}:");
+    let bytes = line.as_bytes();
+    let at = line.match_indices(&needle).find_map(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        matches!(before, None | Some(b',') | Some(b':')).then_some(at + needle.len())
+    })?;
     let rest = &line[at..];
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -296,14 +318,35 @@ fn field(line: &str, name: &str) -> Option<i64> {
     rest[..end].parse().ok()
 }
 
-/// The book's own end position — the first `EndPos:` on the line.
+/// The payloads a line carries, each `<Event>,<fields>` with the event name
+/// possibly missing.
 ///
-/// Page events state `EndPos` twice: first the book's end, then the end of the
-/// current chapter. Only the first identifies the book, so this must not be a
-/// last-match or all-matches scan.
-fn end_position(line: &str) -> Option<i64> {
-    let at = line.find("EndPos:YJPosition: ")? + "EndPos:YJPosition: ".len();
-    let rest = &line[at..];
+/// Usually one. A line carries two when the head of the first was cut, leaving
+/// its tail in front of the `;` that begins the next. Fields have to be read
+/// from a single payload: each states its own positions, so reading across the
+/// boundary pairs one event's counter with another's book.
+fn payloads(line: &str) -> impl Iterator<Item = &str> {
+    line.split_once("Information::")
+        .map_or("", |(_, rest)| rest)
+        .split(';')
+        .filter(|p| !p.is_empty())
+}
+
+/// The book's own end position within one payload, or `None` when the payload
+/// states only the chapter's.
+///
+/// A payload states `EndPos` twice — the book's, then the current chapter's —
+/// with the `NextTOCEntry…` group between them. What distinguishes them is which
+/// side of that group they fall on, not which comes first: a payload can arrive
+/// with its head cut away and the book's `EndPos` gone with it, leaving the
+/// chapter's leading a payload it does not describe. The whole group is the
+/// marker, not one field of it, because a cut lands anywhere.
+fn end_position(payload: &str) -> Option<i64> {
+    let at = payload.find("EndPos:YJPosition: ")?;
+    if payload.find("NextTOCEntry").is_some_and(|toc| toc < at) {
+        return None;
+    }
+    let rest = &payload[at + "EndPos:YJPosition: ".len()..];
     let colon = rest.find(':')?;
     let tail = &rest[colon + 1..];
     let end = tail
@@ -312,14 +355,94 @@ fn end_position(line: &str) -> Option<i64> {
     tail[..end].parse().ok()
 }
 
-/// `ReadingTimerController:Information::<Kind>` — the event kind.
-fn kind(line: &str) -> Option<&str> {
-    let at = line.find("Information::")? + "Information::".len();
-    let rest = &line[at..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
+/// The book a whole line is about, from whichever of its payloads names one.
+fn book_position(line: &str) -> Option<i64> {
+    payloads(line).find_map(end_position)
+}
+
+/// True when the line names `event` as an event rather than merely containing
+/// the word.
+///
+/// An event is written `<sep><Event>,`, where `<sep>` is the `Information::`
+/// prefix or the `;` that terminates the payload before it. Requiring a
+/// separator is what stops `CloseBook` matching inside a field value, and
+/// accepting `;` is what finds an event that is not first on its line — which on
+/// one firmware is where most of them are.
+fn names(line: &str, event: &str) -> bool {
+    let bytes = line.as_bytes();
+    line.match_indices(event).any(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + event.len()).copied();
+        matches!(before, Some(b':') | Some(b';')) && matches!(after, None | Some(b',') | Some(b';'))
+    })
+}
+
+/// What one log line contributes to a session.
+struct Observation {
+    /// The book's own end position: this line's fingerprint for its book.
+    position: i64,
+    /// The book's running reading counter, in milliseconds.
+    total_ms: Option<i64>,
+    words: Option<i64>,
+    page_turn: bool,
+    closes: bool,
+}
+
+/// Read a line as an observation of some book's reading counter, or `None` when
+/// the line is not about a book.
+///
+/// A line qualifies on what it carries — a running counter beside a book's end
+/// position — rather than on being a named page event, because a mangled
+/// payload keeps its fields and loses its name. Only page events and closes
+/// carry `TotalTime`, so this selects the same lines on a log where every event
+/// *is* named, and recovers the rest on one where they are not.
+///
+/// The name is still read wherever it survives, because nothing else can say
+/// that a close ended the session or that an advance was forward rather than
+/// back.
+fn observation(line: &str) -> Option<Observation> {
+    let page_turn = names(line, "NextPage");
+    let closes = names(line, "CloseBook");
+    // A named page event with no counter still marks a turn; the device omits
+    // `TotalTime` from the ones it declines to credit.
+    let named = page_turn || closes || names(line, "PreviousPage") || names(line, "GoToPosition");
+    // The payload holding the counter, or — for those uncredited events — any
+    // that at least says which book.
+    let chosen = payloads(line)
+        .find(|p| field(p, "TotalTime").is_some() && end_position(p).is_some())
+        .or_else(|| {
+            named
+                .then(|| payloads(line).find(|p| end_position(p).is_some()))
+                .flatten()
+        })?;
+    Some(Observation {
+        position: end_position(chosen)?,
+        total_ms: field(chosen, "TotalTime"),
+        words: field(chosen, "TotalWords"),
+        page_turn,
+        closes,
+    })
+}
+
+/// A book's reading counter at the instant it was opened, in milliseconds, from
+/// an `OpenBook` line's `StoredBookData`.
+///
+/// `TimeRead:9,229 sec.` — whole seconds, thousands-separated. `null` means a
+/// book with no history, which is a counter of zero, not an absent one.
+fn opened_at_counter(line: &str) -> Option<i64> {
+    let rest = line.split_once("StoredBookData:")?.1;
+    if rest.starts_with("null") {
+        return Some(0);
+    }
+    let digits = rest.strip_prefix("TimeRead:")?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit() && c != ',')
+        .unwrap_or(digits.len());
+    digits[..end]
+        .replace(',', "")
+        .parse::<i64>()
+        .ok()
+        .map(|s| s * 1000)
 }
 
 /// `YYMMDD:HHMMSS` at the start of a syslog line, as (`YYYY-MM-DD`, seconds
@@ -378,9 +501,9 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
     let mut out = Vec::new();
     let mut open: Option<Open> = None;
     let mut prev_day_secs: Option<(String, i64)> = None;
+    let mut opened: Option<Opened> = None;
 
     for line in events {
-        let Some(k) = kind(line) else { continue };
         let Some((day, secs, at)) = stamp(line) else {
             continue;
         };
@@ -394,27 +517,75 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
         };
         prev_day_secs = Some((day.clone(), secs));
 
-        let is_page = matches!(k, "NextPage" | "PreviousPage" | "GoToPosition");
-        if !is_page && k != "CloseBook" {
-            continue;
+        if let Some(counter_ms) = opened_at_counter(line) {
+            opened = Some(Opened {
+                counter_ms,
+                day: day.clone(),
+                secs,
+                at: at.clone(),
+            });
         }
-        let Some(position) = end_position(line) else {
+
+        let Some(obs) = observation(line) else {
             continue;
         };
 
+        // Consumed at the first observation after the open, whether or not it is
+        // used: an open belongs to the session it precedes and to no later one.
+        let seed = opened
+            .take()
+            .and_then(|o| o.vouch(&day, secs, obs.total_ms));
+
         if let Some(cur) = &open
-            && (cur.end_position != position || gapped)
+            && (cur.end_position != obs.position || gapped)
         {
             out.extend(open.take().map(Open::finish));
         }
-        let cur = open.get_or_insert_with(|| Open::new(position, &at));
-        cur.observe(line, &at, k);
-        if k == "CloseBook" {
+        let cur = open.get_or_insert_with(|| Open::new(obs.position, &at, seed));
+        cur.observe(&at, &obs);
+        if obs.closes {
             out.extend(open.take().map(Open::finish));
         }
     }
     out.extend(open.map(Open::finish));
     out
+}
+
+/// An `OpenBook` seen but not yet attached to a session.
+struct Opened {
+    counter_ms: i64,
+    day: String,
+    secs: i64,
+    at: String,
+}
+
+/// Where a session begins: the counter it resumes from and the clock time it
+/// started at, both taken from the `OpenBook` that vouched for them.
+struct Start {
+    counter_ms: i64,
+    at: String,
+}
+
+impl Opened {
+    /// This open as a session start, or `None` when it cannot be vouched for.
+    ///
+    /// An open states no position, so it cannot prove which book it belongs to.
+    /// Two guards stand in: the counter must not already exceed the first
+    /// observation's, and the reading it would add must fit inside the wall
+    /// clock since the open, because counted reading time cannot outrun the
+    /// clock. A stale open from another book fails one or the other; a genuine
+    /// one clears both with room to spare.
+    fn vouch(self, day: &str, secs: i64, first_total: Option<i64>) -> Option<Start> {
+        let total = first_total?;
+        let elapsed = secs.checked_sub(self.secs).filter(|e| *e >= 0)?;
+        (self.day == day
+            && self.counter_ms <= total
+            && total - self.counter_ms <= (elapsed + SEED_SLACK_SECS) * 1000)
+            .then_some(Start {
+                counter_ms: self.counter_ms,
+                at: self.at,
+            })
+    }
 }
 
 /// A session under construction.
@@ -430,29 +601,38 @@ struct Open {
 }
 
 impl Open {
-    fn new(end_position: i64, at: &str) -> Self {
+    /// `start` is where the book was opened, where an `OpenBook` vouched for it.
+    /// That is the session's true floor in both senses: the first *logged*
+    /// observation can sit minutes past the open, so taking it as the floor
+    /// discards the reading in between and reports a sitting that took no time
+    /// at all. Without one, the first observation is the best available start.
+    fn new(end_position: i64, at: &str, start: Option<Start>) -> Self {
+        let (time_lo, started_at) = match start {
+            Some(s) => (Some(s.counter_ms), s.at),
+            None => (None, at.to_string()),
+        };
         Self {
             end_position,
-            started_at: at.to_string(),
+            started_at,
             ended_at: at.to_string(),
-            time_lo: None,
-            time_hi: 0,
+            time_lo,
+            time_hi: time_lo.unwrap_or(0),
             words_lo: None,
             words_hi: 0,
             page_turns: 0,
         }
     }
 
-    fn observe(&mut self, line: &str, at: &str, k: &str) {
+    fn observe(&mut self, at: &str, obs: &Observation) {
         self.ended_at = at.to_string();
-        if k == "NextPage" {
+        if obs.page_turn {
             self.page_turns += 1;
         }
-        if let Some(t) = field(line, "TotalTime") {
+        if let Some(t) = obs.total_ms {
             self.time_lo = Some(self.time_lo.map_or(t, |lo| lo.min(t)));
             self.time_hi = self.time_hi.max(t);
         }
-        if let Some(w) = field(line, "TotalWords") {
+        if let Some(w) = obs.words {
             self.words_lo = Some(self.words_lo.map_or(w, |lo| lo.min(w)));
             self.words_hi = self.words_hi.max(w);
         }
@@ -486,12 +666,21 @@ impl Open {
 /// `BookEndPosition` fires on most book opens, so a corpus that contains a
 /// book's sessions almost always contains its mapping too; the first sighting
 /// wins, since two builds of one title differ in both numbers together.
+///
+/// "Most" is not "all", which is why the pending value is dropped at every
+/// `OpenBook`. A book that states no `BookEndPosition` would otherwise inherit
+/// whichever one was last seen and be filed as an entirely different book.
+/// Dropping it leaves such a book keyed by its own `EndPos`: unnamed until an
+/// archive shows its mapping, which is the answer that is at least true.
 fn frombook_map<'a>(
     events: impl IntoIterator<Item = &'a str>,
 ) -> std::collections::HashMap<i64, i64> {
     let mut map = std::collections::HashMap::new();
     let mut pending: Option<i64> = None;
     for line in events {
+        if names(line, "OpenBook") {
+            pending = None;
+        }
         if let Some(at) = line.find("BookEndPosition.FromBook:YJPosition: ") {
             let rest = &line[at + "BookEndPosition.FromBook:YJPosition: ".len()..];
             pending = rest.split_once(':').and_then(|(_, tail)| {
@@ -501,7 +690,7 @@ fn frombook_map<'a>(
                 tail[..end].parse().ok()
             });
         }
-        if let (Some(from_book), Some(ep)) = (pending, end_position(line)) {
+        if let (Some(from_book), Some(ep)) = (pending, book_position(line)) {
             map.entry(ep).or_insert(from_book);
         }
     }
@@ -698,6 +887,52 @@ mod tests {
         )
     }
 
+    /// The same fields, from a reader that lost the head of the payload: no
+    /// event name at all, the line beginning partway down the field list.
+    fn headless(stamp: &str, end: i64, total_ms: i64, words: i64) -> String {
+        format!(
+            "{stamp} java[8437]: I ReadingTimerController:Information::\
+             IntervalTime:5153,IntervalWords:349,Interval%:0.002,\
+             TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:{end},\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+        )
+    }
+
+    /// A close where that reader usually puts it: after the tail of the
+    /// preceding payload, rather than at the head of its own.
+    fn buried_close(stamp: &str, end: i64, total_ms: i64, words: i64) -> String {
+        format!(
+            "{stamp} java[8437]: I ReadingTimerController:Information::\
+             DataSufficient:YES,NewTimeLeft:1440,OldTimeLeft:1521,\
+             TimeLeftInSectionString:24 mins left in chapter;\
+             CloseBook,Title:<private>,Asin:<private>,IntervalTime:900,\
+             TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:{end},\
+             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
+        )
+    }
+
+    /// `OpenBook`, stating the counter the book resumes from. `stored` is the
+    /// device's literal text, thousands separators and all.
+    fn open_book(stamp: &str, stored: &str) -> String {
+        format!(
+            "{stamp} java[8437]: I ReadingTimerController:Information::OpenBook,\
+             CurrentVersionUsed:0,StoredBookData:{stored},\
+             Title:<private>,Asin:<private>;"
+        )
+    }
+
+    /// The event that states both of a book's end-of-book constants.
+    fn book_end_position(stamp: &str, from_book: i64, last_word: i64) -> String {
+        format!(
+            "{stamp} cvm[6144]: I ReadingTimerController:Information::\
+             BookEndPosition.FromBook:YJPosition: AAA:{from_book},\
+             BookEndPosition.LastWordPos.override:YJPosition: BBB:{last_word},\
+             CurrentPos:YJPosition: AAA:524,EndPos:YJPosition: BBB:{last_word};"
+        )
+    }
+
     #[test]
     fn a_session_measures_the_counter_delta_not_the_wall_clock() {
         let lines = [
@@ -721,7 +956,38 @@ mod tests {
         // The chapter's EndPos (6612) trails the book's on every page line; a
         // last-match scan would file every book under one fingerprint.
         let line = page("260803:100000", "NextPage", 148_207, 1000, 1);
-        assert_eq!(end_position(&line), Some(148_207));
+        assert_eq!(book_position(&line), Some(148_207));
+    }
+
+    #[test]
+    fn a_chapter_left_leading_a_cut_payload_is_not_taken_for_the_book() {
+        // The head of this payload is gone, taking the book's EndPos with it and
+        // leaving the chapter's first. Reading it as the book's would key the
+        // session to a position no book has.
+        let cut = "260803:100000 java[1]: I ReadingTimerController:Information::\
+                   PosLeft:919720,NextTOCEntryPosition:YJPosition: AAA:17008,\
+                   NextTOCEntryLength:43,CurrentPos:YJPosition: BBB:16969,\
+                   EndPos:YJPosition: AAA:17008,PosLeft:39;";
+        assert_eq!(book_position(cut), None);
+
+        // The cut can also land inside the TOC group, leaving a later field of
+        // it as the only sign that what follows is a chapter.
+        let mid_group = "260803:100000 java[1]: I ReadingTimerController:Information::\
+                         NextTOCEntryLevel:0,NextTOCEntryType:null,\
+                         CurrentPos:YJPosition: BBB:78,EndPos:YJPosition: AAA:189;";
+        assert_eq!(book_position(mid_group), None);
+
+        // The close that follows on the same line does state it, and that is the
+        // one the session must use.
+        let both = format!(
+            "{cut}CloseBook,Title:<private>,TotalTime:6491,\
+                            CurrentPos:YJPosition: BBB:16969,\
+                            EndPos:YJPosition: CCC:936689,PosLeft:919720,\
+                            NextTOCEntryPosition:YJPosition: AAA:17008,\
+                            CurrentPos:YJPosition: BBB:16969,\
+                            EndPos:YJPosition: AAA:17008;"
+        );
+        assert_eq!(book_position(&both), Some(936_689));
     }
 
     #[test]
@@ -794,6 +1060,87 @@ mod tests {
         // `TotalWords` for `TotalWord`.
         assert_eq!(field(&line, "IntervalTime"), Some(900));
         assert_eq!(field(&line, "Time"), None);
+        // A cut payload can begin on any field, so the first one has the
+        // `Information::` prefix in front of it rather than a comma.
+        let cut = "260803:100000 java[1]: I ReadingTimerController:\
+                   Information::TotalTime:900,Total%:0.5;";
+        assert_eq!(field(cut, "TotalTime"), Some(900));
+    }
+
+    #[test]
+    fn a_close_that_is_not_first_on_its_line_still_ends_the_session() {
+        let lines = [
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            buried_close("260803:100500", 148_207, 120_000, 220),
+            page("260803:100600", "NextPage", 148_207, 130_000, 240),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        // Same book with no gap, so only the close can be splitting these.
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].seconds, out[1].seconds), (60, 0));
+    }
+
+    #[test]
+    fn a_payload_that_lost_its_name_is_still_an_observation() {
+        let lines = [
+            headless("260803:100000", 936_689, 10_000, 50),
+            headless("260803:100500", 936_689, 70_000, 150),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].seconds, 60);
+        assert_eq!(out[0].words, 100);
+        assert_eq!(out[0].end_position, 936_689);
+        // Nothing named a page turn, so none is claimed. Counting an
+        // observation as a turn would inflate the count on the reader that
+        // names them.
+        assert_eq!(out[0].page_turns, 0);
+    }
+
+    #[test]
+    fn a_session_starts_at_the_counter_the_book_was_opened_at() {
+        let lines = [
+            open_book("260803:100000", "TimeRead:1,000 sec. WPM:430.27. Version:0"),
+            // First event logged three minutes in, by which time the counter
+            // has already moved with the reader.
+            page("260803:100300", "NextPage", 148_207, 1_180_000, 100),
+            page("260803:100400", "CloseBook", 148_207, 1_240_000, 200),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 1);
+        // 1240 - 1000, not 1240 - 1180: those three minutes were read too.
+        assert_eq!(out[0].seconds, 240);
+        // And they belong inside the session, not before it.
+        assert_eq!(out[0].started_at, "2026-08-03T10:00:00");
+    }
+
+    #[test]
+    fn an_open_is_not_credited_to_a_book_it_cannot_belong_to() {
+        let lines = [
+            open_book("260803:100000", "null"),
+            // Ten seconds later, a book already an hour into its counter. It
+            // cannot be the book that just opened from zero.
+            page("260803:100010", "NextPage", 148_207, 3_600_000, 100),
+            page("260803:100110", "CloseBook", 148_207, 3_660_000, 200),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].seconds, 60);
+    }
+
+    #[test]
+    fn a_book_that_states_no_end_position_does_not_borrow_one() {
+        let lines = [
+            book_end_position("260803:095956", 148_213, 148_207),
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            // A second book opens and never states its own.
+            open_book("260803:101000", "null"),
+            page("260803:101100", "NextPage", 764_576, 5_000, 10),
+        ];
+        let map = frombook_map(lines.iter().map(String::as_str));
+        assert_eq!(map.get(&148_207), Some(&148_213));
+        // Unnamed, rather than named as the book before it.
+        assert_eq!(map.get(&764_576), None);
     }
 
     #[test]
