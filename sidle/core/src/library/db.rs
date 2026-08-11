@@ -781,6 +781,30 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // The points a log fingerprint was seen at — the evidence for naming it.
+    //
+    // Attribution is not decided once. A session can arrive before the sidecar
+    // that names its book, and the log lines that carried it are gone by the
+    // next sync: the device sends only what is newer than the last session
+    // stored, so nothing already stored is ever re-parsed. Keeping only the
+    // conclusion therefore froze the guess; keeping the evidence lets
+    // [`resolve_reading_sessions`] re-decide on every pass, whenever it can.
+    //
+    // Keyed by fingerprint, not by session, because that is the unit of
+    // attribution: every session at one fingerprint is the same book, so points
+    // from all of them are evidence about the same question and duplicates
+    // across sessions collapse.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_log_points (
+            end_position INTEGER NOT NULL,
+            eid          INTEGER NOT NULL,
+            "offset"     INTEGER NOT NULL,
+            linear_pos   INTEGER NOT NULL,
+            PRIMARY KEY (end_position, eid, "offset", linear_pos)
+        )"#,
+        [],
+    )?;
+
     // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
     // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
     // linked annotation. Idempotent: a no-op on a DB that never had any. Kept
@@ -1562,22 +1586,22 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
 /// keeps two books that merely share a coordinate — near the front, they all do
 /// — from being taken for each other.
 ///
-/// One device's own rows only, and only points that name exactly one book. An
-/// ambiguous point identifies nothing; dropping it costs an attribution, and
-/// keeping it would invent one.
+/// Every Kindle's rows, not just the one being imported: a point is a point,
+/// and a book read on two devices is the same book. Only points that name
+/// exactly one book, though — an ambiguous one identifies nothing, and dropping
+/// it costs an attribution where keeping it would invent one.
 pub fn device_positions(
     conn: &Connection,
-    device_serial: &str,
-) -> rusqlite::Result<std::collections::HashMap<(i64, i64, i64), i64>> {
+) -> rusqlite::Result<std::collections::HashMap<Point, i64>> {
     let mut stmt = conn.prepare(
         r#"SELECT eid, "offset", linear_pos, book_id FROM reading_position
-            WHERE device_serial = ?1 AND source = 'device'
+            WHERE source = 'device'
               AND eid IS NOT NULL AND "offset" IS NOT NULL AND linear_pos IS NOT NULL"#,
     )?;
-    let rows = stmt.query_map(params![device_serial], |r| {
+    let rows = stmt.query_map([], |r| {
         Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, i64>(3)?))
     })?;
-    let mut out: std::collections::HashMap<(i64, i64, i64), i64> = Default::default();
+    let mut out: std::collections::HashMap<Point, i64> = Default::default();
     let mut ambiguous = Vec::new();
     for row in rows {
         let (key, book) = row?;
@@ -1590,6 +1614,65 @@ pub fn device_positions(
     }
     for key in ambiguous {
         out.remove(&key);
+    }
+    Ok(out)
+}
+
+/// A point in a book: its source element id, the offset into that element, and
+/// the same place on the linear axis. All three, because a bare coordinate near
+/// the front of a book is one every book shares.
+pub type Point = (i64, i64, i64);
+
+/// The single book every one of these points belongs to, or `None`.
+///
+/// One agreement is enough, because a point carries the book's own element id
+/// and is specific enough to belong to one book. Two *different* books agreeing
+/// is not a stronger answer but a contradiction — one of the points is a
+/// coincidence and nothing here can say which — so it names nothing.
+fn sole_book_at(points: &[Point], anchors: &std::collections::HashMap<Point, i64>) -> Option<i64> {
+    let mut found: Option<i64> = None;
+    for point in points {
+        let Some(&book) = anchors.get(point) else {
+            continue;
+        };
+        match found {
+            Some(held) if held != book => return None,
+            _ => found = Some(book),
+        }
+    }
+    found
+}
+
+/// Remember where a fingerprint's reader was seen standing.
+///
+/// Evidence, not a conclusion: the book these points belong to may not be
+/// nameable yet, and the lines that carried them will not come round again.
+pub fn record_log_points(
+    conn: &Connection,
+    end_position: i64,
+    points: &[Point],
+) -> rusqlite::Result<()> {
+    for (eid, offset, linear_pos) in points {
+        conn.execute(
+            r#"INSERT OR IGNORE INTO reading_log_points (end_position, eid, "offset", linear_pos)
+                VALUES (?1, ?2, ?3, ?4)"#,
+            params![end_position, eid, offset, linear_pos],
+        )?;
+    }
+    Ok(())
+}
+
+/// Every point recorded against each fingerprint.
+fn log_points(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<i64, Vec<Point>>> {
+    let mut stmt =
+        conn.prepare(r#"SELECT end_position, eid, "offset", linear_pos FROM reading_log_points"#)?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+    })?;
+    let mut out: std::collections::HashMap<i64, Vec<Point>> = Default::default();
+    for row in rows {
+        let (fingerprint, point) = row?;
+        out.entry(fingerprint).or_default().push(point);
     }
     Ok(out)
 }
@@ -1962,10 +2045,24 @@ pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
         .map(|p| ends.get(&p).copied().unwrap_or(p))
         .collect();
 
+    // Where each Kindle says it left each book. The log never names a book, but
+    // a point it does name is one a sidecar can also name — see
+    // [`device_positions`].
+    let anchors = device_positions(conn)?;
+    let points = log_points(conn)?;
+
     let mut resolved = 0;
     for position in pending {
         let candidates = books_with_last_position(conn, position)?;
-        if let [book_id] = candidates[..] {
+        let book_id = match candidates[..] {
+            [only] => Some(only),
+            // The axis decided nothing — either no book ends there, or several
+            // do. Ask where the reader was instead: that is a different
+            // question, and it answers some the axis cannot, including a book
+            // the library holds in a different build than the device read.
+            _ => sole_book_at(points.get(&position).map_or(&[], Vec::as_slice), &anchors),
+        };
+        if let Some(book_id) = book_id {
             resolved += conn.execute(
                 "UPDATE reading_sessions SET book_id = ?2
                   WHERE book_id IS NULL AND end_position = ?1",
@@ -5924,6 +6021,53 @@ mod tests {
             page_turns: 40,
             words: 9000,
         }
+    }
+
+    #[test]
+    fn a_point_two_books_disagree_about_names_neither() {
+        let a = (1566_i64, 0_i64, 12_i64);
+        let b = (99_i64, 0_i64, 500_i64);
+        let mut anchors = std::collections::HashMap::new();
+        anchors.insert(a, 7_i64);
+        assert_eq!(sole_book_at(&[a, b], &anchors), Some(7));
+
+        // A second book claiming another of the same fingerprint's points is a
+        // contradiction, not a tie-break: one of them is a coincidence and
+        // nothing here can say which.
+        anchors.insert(b, 9_i64);
+        assert_eq!(sole_book_at(&[a, b], &anchors), None);
+        assert_eq!(sole_book_at(&[], &anchors), None);
+    }
+
+    #[test]
+    fn a_point_the_sidecars_know_names_a_book_the_axis_cannot() {
+        let conn = fresh_db();
+        // The library holds a *newer* build than the device read, so the axis
+        // the device logged ends nowhere near this book's.
+        let book = insert_minimal(&conn, "sha-pkd", "The Novels of Philip K. Dick");
+        set_max_position(&conn, book, Some(425_357)).unwrap();
+        set_reading_position(
+            &conn,
+            book,
+            Some(4728),
+            Some(0),
+            Some(246_466),
+            "device",
+            "DEV",
+        )
+        .unwrap();
+
+        insert_reading_session(&conn, &session("2026-08-11", 419_504, 60)).unwrap();
+        // Nothing ends at 419505, and no tolerance is going to reach 425357.
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
+
+        // The reader stood at a point the book's own sidecar also records.
+        record_log_points(&conn, 419_504, &[(4728, 0, 246_466)]).unwrap();
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+        let named: i64 = conn
+            .query_row("SELECT book_id FROM reading_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(named, book);
     }
 
     #[test]

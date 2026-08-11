@@ -858,29 +858,6 @@ pub fn import(
     Ok(out)
 }
 
-/// The single book every one of these points belongs to, or `None`.
-///
-/// One agreement is enough to name a session, because a point is specific
-/// enough to belong to one book. Two *different* books agreeing is not a
-/// stronger answer but a contradiction — one of the points is a coincidence and
-/// nothing here can say which — so it names nothing.
-fn names_a_book(
-    locations: &[Location],
-    positions: &std::collections::HashMap<(i64, i64, i64), i64>,
-) -> Option<i64> {
-    let mut found: Option<i64> = None;
-    for at in locations {
-        let Some(&book) = positions.get(&(at.eid, at.offset, at.linear_pos)) else {
-            continue;
-        };
-        match found {
-            Some(held) if held != book => return None,
-            _ => found = Some(book),
-        }
-    }
-    found
-}
-
 /// Store already-collected event lines. The half of [`import`] that does not
 /// touch the filesystem.
 ///
@@ -912,7 +889,6 @@ pub fn store_events(
         identity.entry(last_word).or_insert(from_book);
     }
     let sessions = parse_sessions(events.iter().map(String::as_str));
-    let positions = db::device_positions(conn, device_serial)?;
 
     let mut out = Imported {
         files,
@@ -958,14 +934,17 @@ pub fn store_events(
         if db::insert_reading_session(conn, &row)? {
             out.added += 1;
         }
-        // The log cannot name a book, but it can say where the reader stood,
-        // and the sidecar sync already knows which book was left at that point.
-        // One agreement names the fingerprint for good: `attribute_reading_position`
-        // settles every unattributed session that stopped there, so a book only
-        // has to be caught once for its whole history to follow.
-        if let Some(book_id) = names_a_book(&s.locations, &positions) {
-            db::attribute_reading_position(conn, row.end_position, book_id)?;
-        }
+        // Keep where the reader stood, even though nothing here can say which
+        // book it was. These lines will not be offered again — the device sends
+        // only what is newer than the newest session stored — so this is the
+        // last chance to record them, and a sidecar that names the book may not
+        // arrive for another sync yet.
+        let points: Vec<db::Point> = s
+            .locations
+            .iter()
+            .map(|l| (l.eid, l.offset, l.linear_pos))
+            .collect();
+        db::record_log_points(conn, row.end_position, &points)?;
     }
     out.attributed = db::resolve_reading_sessions(conn)?;
     Ok(out)
@@ -1197,30 +1176,6 @@ mod tests {
                 linear_pos: 12
             }]
         );
-    }
-
-    #[test]
-    fn a_point_two_books_disagree_about_names_neither() {
-        let a = Location {
-            eid: 1566,
-            offset: 0,
-            linear_pos: 12,
-        };
-        let b = Location {
-            eid: 99,
-            offset: 0,
-            linear_pos: 500,
-        };
-        let mut positions = std::collections::HashMap::new();
-        positions.insert((a.eid, a.offset, a.linear_pos), 7_i64);
-        assert_eq!(names_a_book(&[a, b], &positions), Some(7));
-
-        // A second book claiming another of the same session's points is a
-        // contradiction, not a tie-break: one of them is a coincidence and
-        // nothing here can say which.
-        positions.insert((b.eid, b.offset, b.linear_pos), 9_i64);
-        assert_eq!(names_a_book(&[a, b], &positions), None);
-        assert_eq!(names_a_book(&[], &positions), None);
     }
 
     #[test]
