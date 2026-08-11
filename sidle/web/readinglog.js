@@ -24,6 +24,7 @@
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
     bucket: "year", // how finely the grid cuts the year up: year | month | day
+    clockView: "hour", // which cut of the clock cube is drawn: hour | week | month
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
     book: null, // { id, days, entry } when the book page is open
@@ -173,6 +174,7 @@
     renderStats(o);
     renderYearNav(o, years);
     renderHeatmap(o);
+    renderClock(o);
     renderScope();
   }
 
@@ -291,6 +293,179 @@
       `<div class="rl-dows"><span></span><span>Mon</span><span></span><span>Wed</span>` +
       `<span></span><span>Fri</span><span></span></div>` +
       `<div class="rl-weeks">${cols.join("")}</div></div>`;
+  }
+
+  // ── When you read ──────────────────────────────────────────────────────────
+  //
+  // The heatmap answers "which days"; this answers "when in them". Both draw the
+  // selected year, so they read as one picture — a square on the left is a day,
+  // and the panel on the right is what the hours of such days look like.
+  //
+  // The backend sends one cube of (month, weekday, hour) seconds for all time
+  // (`db::reading_clock`, where the spreading rule and its one caveat live).
+  // Every view here is a marginal of it, which is why they can be cut in the
+  // page rather than asked for: hour-seconds add up, unlike the per-book
+  // aggregates the grid below shows, where re-slicing a total is exactly the
+  // bug `ReadingBucket` exists to prevent.
+
+  const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+
+  // The cube, narrowed to the year on screen.
+  function clockOfYear(o) {
+    const p = `${state.year}-`;
+    return (o.clock || []).filter((c) => c.month.startsWith(p));
+  }
+
+  // Seconds per hour, for one grouping of the cube. `keyOf` says which row a
+  // cell belongs to; the result is a Map of row key → 24 hours.
+  function clockRows(cells, keyOf) {
+    const rows = new Map();
+    for (const c of cells) {
+      const key = keyOf(c);
+      if (!rows.has(key)) rows.set(key, new Array(24).fill(0));
+      rows.get(key)[c.hour] += c.seconds;
+    }
+    return rows;
+  }
+
+  function renderClock(o) {
+    const cells = clockOfYear(o);
+    // A year always has days here — `render` only reaches this with data — but
+    // a year whose every session predates the stamps would have no cube.
+    q(".rl-clock-wrap").hidden = cells.length === 0;
+    if (!cells.length) return;
+    renderClockSeg();
+    const view = state.clockView;
+    const [html, note] =
+      view === "hour" ? clockBars(cells) : clockGrid(cells, view);
+    q("#rl-clock").innerHTML = html;
+    q("#rl-clock-note").textContent = note;
+  }
+
+  function renderClockSeg() {
+    for (const b of q("#rl-clock-seg").querySelectorAll(".seg-btn")) {
+      const on = b.dataset.clock === state.clockView;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+  }
+
+  // "23:00–24:00" — an hour is a span, and labelling a bar `23` alone invites
+  // reading it as an instant.
+  function hourSpan(h) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(h)}:00–${p(h + 1)}:00`;
+  }
+
+  // The year's hours as bars. Heights are a fraction of the busiest hour rather
+  // than of a fixed scale, for the same reason the heatmap shades that way: the
+  // shape of a day is the point, not how it compares to somebody else's.
+  function clockBars(cells) {
+    const hours = clockRows(cells, () => "").get("") || new Array(24).fill(0);
+    const peak = Math.max(...hours, 1);
+    const bars = hours
+      .map((secs, h) => {
+        // A zero bar draws nothing at all — a stub of colour would read as a
+        // little reading rather than as none.
+        const v = secs / peak;
+        return (
+          `<div class="rl-bar" style="--v:${v.toFixed(4)}" ` +
+          `title="${hourSpan(h)} — ${secs ? fmtDuration(secs) : "nothing"}">` +
+          `<i></i></div>`
+        );
+      })
+      .join("");
+    // Every third hour, so the axis stays legible at any panel width while each
+    // label still sits under the bar it names.
+    const axis = hours
+      .map((_, h) => `<span>${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`)
+      .join("");
+    return [
+      `<div class="rl-bars">${bars}</div><div class="rl-bar-axis">${axis}</div>`,
+      peakNote(hours.map((secs, h) => [hourSpan(h), secs])),
+    ];
+  }
+
+  // Hour of the day against the weekday, or against the month: 24 columns on the
+  // heatmap's own five-step ramp, so a cell here and a square there mean the
+  // same kind of thing.
+  function clockGrid(cells, view) {
+    const byWeek = view === "week";
+    const rows = clockRows(cells, (c) => (byWeek ? c.dow : c.month));
+    const order = byWeek ? [...rows.keys()].sort((a, b) => a - b) : monthSpan(rows);
+    const label = (k) => (byWeek ? DOW[k] : MONTHS[+k.slice(5, 7) - 1]);
+
+    // Scaled across the whole grid, not per row: a quiet month must look quiet
+    // beside a busy one, which is the entire point of the month view.
+    const peak = Math.max(...[...rows.values()].flat(), 1);
+    const level = (secs) => {
+      if (!secs) return 0;
+      const r = secs / peak;
+      return r > 0.66 ? 4 : r > 0.4 ? 3 : r > 0.15 ? 2 : 1;
+    };
+
+    const head =
+      `<span></span>` +
+      new Array(24)
+        .fill(0)
+        .map((_, h) => `<span>${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`)
+        .join("");
+    const body = order
+      .map((key) => {
+        // A month inside the reading span with nothing in it is a real row of
+        // zeroes — a month you did not read is worth seeing — so it is drawn
+        // rather than skipped.
+        const hours = rows.get(key) || new Array(24).fill(0);
+        const name = label(key);
+        return (
+          `<span class="rl-clock-label">${esc(name)}</span>` +
+          hours
+            .map(
+              (secs, h) =>
+                `<i class="rl-clock-cell rl-l${level(secs)}" title="${esc(name)} ` +
+                `${hourSpan(h)} — ${secs ? fmtDuration(secs) : "nothing"}"></i>`,
+            )
+            .join("")
+        );
+      })
+      .join("");
+    const flat = [];
+    for (const key of order) {
+      (rows.get(key) || []).forEach((secs, h) =>
+        flat.push([`${label(key)} ${hourSpan(h)}`, secs]),
+      );
+    }
+    return [
+      `<div class="rl-clock-grid">${head}${body}</div>`,
+      peakNote(flat),
+    ];
+  }
+
+  // Every month from the first read to the last, so a gap between two reading
+  // months is visible instead of being closed up — the same rule the book
+  // page's calendar arrows follow.
+  function monthSpan(rows) {
+    const keys = [...rows.keys()].sort();
+    const [lo, hi] = [+keys[0].slice(5, 7), +keys[keys.length - 1].slice(5, 7)];
+    const year = keys[0].slice(0, 4);
+    const out = [];
+    for (let m = lo; m <= hi; m++) out.push(`${year}-${String(m).padStart(2, "0")}`);
+    return out;
+  }
+
+  // "Most at Tue 22:00–23:00 · 4h 12m". One line, because a chart of this size
+  // states its shape and nothing else — the figure behind the tallest bar is
+  // the one thing you cannot read off it.
+  function peakNote(pairs) {
+    let best = null;
+    for (const [label, secs] of pairs) {
+      if (secs > 0 && (!best || secs > best[1])) best = [label, secs];
+    }
+    return best ? `most at ${best[0]} · ${fmtDuration(best[1])}` : "";
   }
 
   // The cover markup the gallery uses, so a book looks the same wherever it
@@ -1001,6 +1176,15 @@
       if (!btn || btn.dataset.bucket === state.bucket) return;
       state.bucket = btn.dataset.bucket;
       renderScope();
+    });
+
+    // Hour / Week / Month. Three cuts of one cube already in hand, so this
+    // redraws the panel and asks the backend nothing.
+    q("#rl-clock-seg").addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn[data-clock]");
+      if (!btn || btn.dataset.clock === state.clockView) return;
+      state.clockView = btn.dataset.clock;
+      if (state.overview) renderClock(state.overview);
     });
 
     // Sort: the gallery's control, over reading figures. Only the grid changes,

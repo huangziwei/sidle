@@ -50,6 +50,11 @@ pub struct ReadingOverview {
     /// streak).
     pub longest_streak: i64,
     pub current_streak: i64,
+    /// When in the day the reading happened, as a (month, weekday, hour) cube —
+    /// see [`db::reading_clock`]. All-time like `days`, and for the same reason:
+    /// hour-seconds are additive, so the page sums the months of whichever year
+    /// the heatmap is showing rather than asking again per year.
+    pub clock: Vec<db::ClockCell>,
 }
 
 /// One book's page: per-day totals plus the aggregate.
@@ -66,6 +71,7 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
     // history is a few thousand rows at most.
     let days = db::reading_days(&conn, ALL_TIME.0, ALL_TIME.1).map_err(|e| e.to_string())?;
     let books_total = db::reading_book_count(&conn).map_err(|e| e.to_string())?;
+    let clock = db::reading_clock(&conn).map_err(|e| e.to_string())?;
 
     let total_seconds = days.iter().map(|(_, s)| s).sum();
     let (longest_streak, current_streak) = streaks(days.iter().map(|(d, _)| d.as_str()));
@@ -80,6 +86,7 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
         total_seconds,
         longest_streak,
         current_streak,
+        clock,
     })
 }
 

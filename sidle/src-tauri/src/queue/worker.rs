@@ -756,6 +756,14 @@ fn derived_basename(book: &BookRow, source: &Path) -> String {
     format_basename(&authors, &book.title, None)
 }
 
+/// The rebuilt book's text index, or `None` when it carries no readable text.
+///
+/// Split out only to keep the container parse inside the blocking task: a
+/// `BookIndex` is not `Send`-friendly to build across an await point.
+fn reanchor_index(bytes: &[u8]) -> Option<sidle_core::library::anchor::BookIndex> {
+    sidle_core::library::anchor::BookIndex::from_kfx(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,12 +858,4 @@ mod tests {
         assert!(!is_jpeg(&[0xFF, 0xD8])); // truncated
         assert!(!is_jpeg(&[]));
     }
-}
-
-/// The rebuilt book's text index, or `None` when it carries no readable text.
-///
-/// Split out only to keep the container parse inside the blocking task: a
-/// `BookIndex` is not `Send`-friendly to build across an await point.
-fn reanchor_index(bytes: &[u8]) -> Option<sidle_core::library::anchor::BookIndex> {
-    sidle_core::library::anchor::BookIndex::from_kfx(bytes)
 }

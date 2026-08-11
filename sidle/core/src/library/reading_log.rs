@@ -27,10 +27,15 @@
 //!   with `Total%`, the fraction of the book read, and survives across sessions.
 //!   A session's contribution is its *delta*.
 //!
-//! Times are device-local wall clock. The syslog prefix carries no offset, and
-//! the device's clock has been seen running ~60 s ahead of the UTC stamps
-//! embedded in the same lines — irrelevant at the resolution of "what did I read
-//! on Tuesday", which is what this feeds.
+//! Times are device-local wall clock, taken from the syslog line prefix, which
+//! is the only clock a `ReadingTimerController` line carries — its payload holds
+//! counters and no absolute stamp. Other lines in the same log embed *UTC*
+//! stamps, and the two differ by exactly the device's offset (measured +02:00 to
+//! the second on two devices, 2026-08-11): local is the one this wants, since
+//! reading at 23:00 means 23:00 where the reader was, not 21:00 in Greenwich.
+//! The offset itself is recorded nowhere, so a device carried across timezones
+//! stamps each day in whatever local time it was on and nothing afterwards can
+//! reconcile them.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -554,6 +559,8 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
     let mut open: Option<Open> = None;
     let mut prev_day_secs: Option<(String, i64)> = None;
     let mut opened: Option<Opened> = None;
+    // A break, once noticed, waits here until an observation can act on it.
+    let mut gapped = false;
 
     for line in events {
         let Some((day, secs, at)) = stamp(line) else {
@@ -561,7 +568,18 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
         };
         // The gap is measured against the previous *event of any kind*, so a
         // stretch of non-page activity still breaks a session.
-        let gapped = match &prev_day_secs {
+        //
+        // It is *held* rather than read on the spot, because the line that
+        // notices a break is usually not one that can end a session: a third of
+        // the marker lines carry no counter and no position — `OpenBook`,
+        // `Reading_Resumed`, `TapOnFooter` — and the reader coming back after a
+        // night's sleep produces exactly such a line first. Read locally, that
+        // line consumed the break and re-anchored the clock, so the observation
+        // behind it saw no gap at all and the two sittings merged. Measured on
+        // one device's archive: 6 breaks taken, 116 swallowed, sessions running
+        // to 48 h of wall clock and booking a whole night's reading to the day
+        // before it.
+        gapped |= match &prev_day_secs {
             Some((prev_day, prev_secs)) => {
                 *prev_day != day || secs.saturating_sub(*prev_secs) > SESSION_GAP_SECS
             }
@@ -581,6 +599,9 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
         let Some(obs) = observation(line) else {
             continue;
         };
+        // Consumed here and only here: whatever happened between two
+        // observations is decided at the second of them.
+        let gapped = std::mem::take(&mut gapped);
 
         // Consumed at the first observation after the open, whether or not it is
         // used: an open belongs to the session it precedes and to no later one.
@@ -993,6 +1014,14 @@ mod tests {
         )
     }
 
+    /// A marker line carrying neither a counter nor a position — a third of a
+    /// real archive's lines are these. Verbatim in shape from a Colorsoft dump.
+    fn nameless(stamp: &str) -> String {
+        format!(
+            "{stamp} cvm[4799]: I ReadingTimerController:Information::Reading_Resumed,Reason:8;"
+        )
+    }
+
     /// `OpenBook`, stating the counter the book resumes from. `stored` is the
     /// device's literal text, thousands separators and all.
     fn open_book(stamp: &str, stored: &str) -> String {
@@ -1097,6 +1126,41 @@ mod tests {
         let out = parse_sessions(lines.iter().map(String::as_str));
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].seconds, out[1].seconds), (60, 60));
+    }
+
+    #[test]
+    fn a_line_inside_the_gap_does_not_bridge_it() {
+        // The reader comes back at night and the device says so before it says
+        // anything about a book. That line carries no counter and no position,
+        // so it can end no session — but it must not stand in for the silence
+        // either, or the evening's reading joins the morning's.
+        let lines = [
+            page("260803:080000", "NextPage", 148_207, 60_000, 100),
+            page("260803:080100", "NextPage", 148_207, 120_000, 200),
+            nameless("260803:225900"),
+            page("260803:230000", "NextPage", 148_207, 300_000, 400),
+            page("260803:230100", "NextPage", 148_207, 360_000, 500),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].seconds, out[1].seconds), (60, 60));
+    }
+
+    #[test]
+    fn a_session_does_not_run_past_midnight() {
+        // Every figure on the page is grouped by the day a session began, so a
+        // session that spans two days books the second day's reading to the
+        // first. The day change is a break like any other and is noticed on
+        // whichever line crosses it — here one that observes nothing.
+        let lines = [
+            page("260803:234500", "NextPage", 148_207, 60_000, 100),
+            nameless("260804:000100"),
+            page("260804:000200", "NextPage", 148_207, 120_000, 200),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 2);
+        assert_eq!(&out[0].started_at[..10], "2026-08-03");
+        assert_eq!(&out[1].started_at[..10], "2026-08-04");
     }
 
     #[test]

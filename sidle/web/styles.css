@@ -4313,16 +4313,26 @@ kbd {
 .rl-muted { color: var(--muted); }
 
 /* Headline figures. Tabular numerals keep the row from twitching as values
-   re-render after an import. */
+   re-render after an import.
+
+   The row is the page's full width and the tiles share it equally, rather than
+   six small boxes huddled at the left with the window's other half blank. The
+   count is fixed, so `1fr` each is a real layout and not a guess: widen the
+   window and the figures stay a row of six, evenly spaced. */
 .rl-stats {
-  display: flex;
-  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 18px;
+}
+
+@media (max-width: 900px) {
+  .rl-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 .rl-stat {
-  min-width: 92px;
+  min-width: 0;
   padding: 9px 13px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -4342,15 +4352,138 @@ kbd {
   letter-spacing: 0.04em;
 }
 
-/* ── Heatmap ─────────────────────────────────────────────────────────────── */
+/* ── Heatmap, and the clock beside it ────────────────────────────────────── */
 
-.rl-heatmap-wrap {
+/* The calendar is 53 fixed-width columns and cannot use more width than that,
+   so on a wide window it used to sit in a full-width card with half of it
+   empty. It now takes exactly what it needs and the clock takes the rest.
+   Below the breakpoint there is no rest to take and they stack. */
+.rl-panels {
+  display: grid;
+  grid-template-columns: auto minmax(320px, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+@media (max-width: 1180px) {
+  .rl-panels { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Nothing to draw beside the calendar — every session predates the stamps the
+   clock needs — so the calendar takes the row rather than sitting next to a
+   reserved-but-empty column. */
+.rl-panels:has(> .rl-clock-wrap[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rl-heatmap-wrap,
+.rl-clock-wrap {
   padding: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow-x: auto;
 }
+
+.rl-heatmap-wrap { overflow-x: auto; }
+
+/* Same header rhythm as the year nav opposite, so the two panels' titles sit on
+   one line across the page. */
+.rl-clock-head { gap: 10px; }
+.rl-clock-head .rl-muted { font-size: 12px; }
+.rl-clock-seg { margin-left: auto; background: var(--bg); }
+
+.rl-clock-seg .seg-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.rl-clock-seg .seg-btn:hover { background: var(--surface); }
+.rl-clock-seg .seg-btn.active { background: var(--accent); color: #fff; }
+
+/* All three views occupy the same box, so switching between them does not
+   shunt the book grid up and down the page. The month grid is the short one —
+   a library with two months of reading draws two rows — so it is centred
+   rather than left hanging from the top of an otherwise empty panel. */
+.rl-clock {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 133px;
+}
+
+/* Hour of the day as bars. They share the width equally and grow from the
+   baseline; `--v` is the fraction of the busiest hour, set per bar. */
+.rl-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 116px;
+}
+
+.rl-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+/* An hour with no reading draws nothing: a one-pixel stub would read as a
+   little reading rather than as none. */
+.rl-bar i {
+  display: block;
+  width: 100%;
+  height: calc(var(--v) * 100%);
+  background: var(--rl-3);
+  border-radius: 2px 2px 0 0;
+}
+
+.rl-bar:hover i { background: var(--rl-4); }
+
+.rl-bar-axis,
+.rl-clock-grid > span:not(.rl-clock-label) {
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-bar-axis {
+  display: flex;
+  gap: 2px;
+  margin-top: 5px;
+}
+
+.rl-bar-axis span {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: left;
+}
+
+/* Weekday × hour, or month × hour: the heatmap's own five-step ramp, on cells
+   that stretch to fill the panel instead of the calendar's fixed 13px. */
+.rl-clock-grid {
+  display: grid;
+  grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+  align-items: center;
+  gap: 3px;
+}
+
+.rl-clock-label {
+  font-size: 9px;
+  color: var(--muted);
+  text-align: right;
+  padding-right: 3px;
+}
+
+.rl-clock-cell {
+  display: block;
+  height: 13px;
+  border-radius: 3px;
+  background: var(--rl-0);
+}
+
+.rl-clock-cell:hover { outline: 1px solid var(--border-strong); }
 
 .rl-grid { display: flex; gap: 6px; }
 .rl-weeks { display: flex; gap: 3px; }

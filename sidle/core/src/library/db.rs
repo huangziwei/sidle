@@ -5,6 +5,7 @@
 //! request). WAL + `busy_timeout` (see [`open`]) let those two processes share
 //! the file safely. rusqlite calls block, but the library workload is tiny.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
@@ -1803,6 +1804,134 @@ pub fn reading_days(
     )?;
     let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
+}
+
+/// One cell of the reading clock: seconds read in a given hour of the day, on
+/// the days of one month that fall on one weekday.
+///
+/// Deliberately a cube rather than three flat tables. Hour-seconds are additive,
+/// so every view worth drawing — the hours of a year, a weekday × hour grid, a
+/// month × hour grid — is a marginal of this one set, and summing marginals
+/// client-side cannot go wrong the way re-slicing a book aggregate can (see
+/// [`ReadingBucket`]). One query, one payload, and switching views costs nothing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClockCell {
+    /// `YYYY-MM`. A year is a prefix of it, which is how the page windows this
+    /// to whatever the heatmap is showing.
+    pub month: String,
+    /// Days since Sunday, 0–6 — matching the heatmap's own week, which starts
+    /// there.
+    pub dow: u8,
+    pub hour: u8,
+    pub seconds: i64,
+}
+
+/// Beyond this much wall clock, a session is not treated as a sitting whose
+/// reading can be spread across it.
+///
+/// Sessions are cut at a half-hour silence, so a real one is a few minutes to a
+/// few hours wide — the widest the parser produced over a month of one device's
+/// archives was 6.2 h. Rows far past that are from before
+/// [`super::reading_log::parse_sessions`] held its gap flag across lines that
+/// observe nothing: several sittings glued into one row, up to 48 h wide. They
+/// hold real reading time and are not re-derivable, so they are kept — but
+/// spreading them evenly is what invents an hour of reading at 04:00 on a reader
+/// who has never once read at 04:00. Measured on the live library: uniform
+/// spreading put 0.6 h in *every* hour from 02:00 to 06:00, against a true zero.
+const SPREADABLE_SPAN_SECS: i64 = 6 * 3600;
+
+/// When reading happened, by hour of the day.
+///
+/// A session states a wall-clock window and the seconds of reading counted
+/// inside it, which are not the same number — the device credits reading, not
+/// the clock. Its time is therefore spread evenly across the hours the window
+/// covers, that being the only thing the row actually claims. A row too wide to
+/// be one sitting ([`SPREADABLE_SPAN_SECS`]) is instead booked whole to the hour
+/// it began, which is the one thing about such a row that is still a fact.
+///
+/// The *hour* is the true clock hour, including past midnight. The *day* is the
+/// session's own day throughout, so these totals sum to exactly what
+/// [`reading_days`] reports for the same window rather than drifting from it by
+/// whatever crossed midnight.
+pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
+    let mut stmt = conn.prepare(
+        "SELECT day, started_at, ended_at, seconds FROM reading_sessions
+          WHERE book_id IS NOT NULL AND seconds > 0",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+
+    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
+    for row in rows {
+        let (day, started_at, ended_at, seconds) = row?;
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") else {
+            continue;
+        };
+        let key = |hour: u8| {
+            (
+                day[..7].to_string(),
+                chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
+                hour,
+            )
+        };
+        let (Some(from), Some(to)) = (clock_secs(&started_at), clock_secs(&ended_at)) else {
+            continue;
+        };
+        // The end is past the start on the clock unless the session ran over
+        // midnight, in which case it is a day further on.
+        let span = if to >= from {
+            to - from
+        } else {
+            to + 86400 - from
+        };
+        if span == 0 || span > SPREADABLE_SPAN_SECS {
+            *cells.entry(key((from / 3600) as u8)).or_default() += seconds;
+            continue;
+        }
+        // Whole seconds per hour, then the division's remainder to the hour the
+        // session began: a rounding loss would quietly shrink the year's total
+        // below what the heatmap beside it reports.
+        let mut placed = 0;
+        for h in (from / 3600)..=((from + span) / 3600) {
+            let (lo, hi) = (h * 3600, (h + 1) * 3600);
+            let overlap = (from + span).min(hi) - from.max(lo);
+            if overlap <= 0 {
+                continue;
+            }
+            let share = seconds * overlap / span;
+            placed += share;
+            *cells.entry(key(((h % 24) as u8).min(23))).or_default() += share;
+        }
+        *cells.entry(key((from / 3600) as u8)).or_default() += seconds - placed;
+    }
+
+    Ok(cells
+        .into_iter()
+        .filter(|(_, seconds)| *seconds > 0)
+        .map(|((month, dow, hour), seconds)| ClockCell {
+            month,
+            dow,
+            hour,
+            seconds,
+        })
+        .collect())
+}
+
+/// Seconds into the day of a `YYYY-MM-DDTHH:MM:SS` stamp.
+fn clock_secs(iso: &str) -> Option<i64> {
+    if iso.len() < 19 {
+        return None;
+    }
+    let h: i64 = iso[11..13].parse().ok()?;
+    let m: i64 = iso[14..16].parse().ok()?;
+    let s: i64 = iso[17..19].parse().ok()?;
+    Some(h * 3600 + m * 60 + s)
 }
 
 /// Per-day totals for one book, oldest first — the book page's calendar.
@@ -6021,6 +6150,84 @@ mod tests {
             page_turns: 40,
             words: 9000,
         }
+    }
+
+    /// A session with an explicit clock window, for [`reading_clock`].
+    fn sitting(day: &str, from: &str, to: &str, seconds: i64, book: i64) -> ReadingSession {
+        ReadingSession {
+            started_at: format!("{day}T{from}"),
+            ended_at: format!("{day}T{to}"),
+            book_id: Some(book),
+            ..session(day, 1, seconds)
+        }
+    }
+
+    #[test]
+    fn a_sitting_is_spread_over_the_hours_it_covered() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-clock", "A book");
+        // Ninety minutes of counted reading over three hours of clock: half an
+        // hour of the 20:00 hour, all of 21:00, half of 22:00 — so the middle
+        // hour takes twice what either end does.
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-11", "20:30:00", "22:30:00", 5400, book),
+        )
+        .unwrap();
+        let cells = reading_clock(&conn).unwrap();
+        let at = |h: u8| cells.iter().find(|c| c.hour == h).map_or(0, |c| c.seconds);
+        assert_eq!((at(20), at(21), at(22)), (1350, 2700, 1350));
+        // Nothing may be lost to the division: the hours of a day have to add
+        // back up to what the heatmap reports for it.
+        assert_eq!(cells.iter().map(|c| c.seconds).sum::<i64>(), 5400);
+        // 2026-08-11 is a Tuesday.
+        assert!(cells.iter().all(|c| c.dow == 2 && c.month == "2026-08"));
+    }
+
+    #[test]
+    fn a_row_too_wide_to_be_a_sitting_is_not_smeared_across_the_night() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-legacy", "A book");
+        // A pre-fix row: one stored session covering a whole day and a bit,
+        // which is several sittings glued together. Spreading it evenly would
+        // report reading in every hour including 04:00.
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-11T23:38:00".into(),
+                ended_at: "2026-08-12T23:16:28".into(),
+                book_id: Some(book),
+                ..session("2026-08-11", 1, 3600)
+            },
+        )
+        .unwrap();
+        let cells = reading_clock(&conn).unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!((cells[0].hour, cells[0].seconds), (23, 3600));
+    }
+
+    #[test]
+    fn a_sitting_past_midnight_keeps_its_own_hours_and_its_own_day() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-midnight", "A book");
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-11T23:30:00".into(),
+                ended_at: "2026-08-12T00:30:00".into(),
+                book_id: Some(book),
+                ..session("2026-08-11", 1, 3600)
+            },
+        )
+        .unwrap();
+        let cells = reading_clock(&conn).unwrap();
+        // The hours are the real clock hours, on both sides of midnight...
+        let hours: Vec<u8> = cells.iter().map(|c| c.hour).collect();
+        assert_eq!(hours, vec![0, 23]);
+        // ...but both belong to the day the session began, so this sums to
+        // exactly what `reading_days` gives for that day and nothing lands in
+        // a day the heatmap would draw as empty.
+        assert!(cells.iter().all(|c| c.month == "2026-08" && c.dow == 2));
     }
 
     #[test]

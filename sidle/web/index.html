@@ -252,26 +252,55 @@
           </div>
 
           <div id="rl-body" hidden>
-            <div class="rl-heatmap-wrap">
-              <!-- One year at a time. The arrows step to the next year that has
-                   reading in it, and are hidden when there is only one. -->
-              <header id="rl-year-nav" class="rl-nav">
-                <button id="rl-year-prev" class="btn btn-quiet"
-                        aria-label="Previous year">‹</button>
-                <strong id="rl-year-label"></strong>
-                <button id="rl-year-next" class="btn btn-quiet"
-                        aria-label="Next year">›</button>
-                <span id="rl-year-total" class="rl-muted"></span>
-              </header>
-              <div id="rl-heatmap" class="rl-heatmap" role="img"
-                   aria-label="Reading time per day"></div>
-              <div class="rl-legend">
-                <span>Less</span>
-                <i class="rl-cell rl-l0"></i><i class="rl-cell rl-l1"></i>
-                <i class="rl-cell rl-l2"></i><i class="rl-cell rl-l3"></i>
-                <i class="rl-cell rl-l4"></i>
-                <span>More</span>
+            <!-- Which days, beside which hours of them. The calendar is a fixed
+                 53 weeks wide and left half the window empty on its own; the
+                 clock takes that half and answers the question the calendar
+                 cannot — not whether you read that day, but when in it. Both
+                 draw the same year, so the pair reads as one picture. -->
+            <div class="rl-panels">
+              <div class="rl-heatmap-wrap">
+                <!-- One year at a time. The arrows step to the next year that has
+                     reading in it, and are hidden when there is only one. -->
+                <header id="rl-year-nav" class="rl-nav">
+                  <button id="rl-year-prev" class="btn btn-quiet"
+                          aria-label="Previous year">‹</button>
+                  <strong id="rl-year-label"></strong>
+                  <button id="rl-year-next" class="btn btn-quiet"
+                          aria-label="Next year">›</button>
+                  <span id="rl-year-total" class="rl-muted"></span>
+                </header>
+                <div id="rl-heatmap" class="rl-heatmap" role="img"
+                     aria-label="Reading time per day"></div>
+                <div class="rl-legend">
+                  <span>Less</span>
+                  <i class="rl-cell rl-l0"></i><i class="rl-cell rl-l1"></i>
+                  <i class="rl-cell rl-l2"></i><i class="rl-cell rl-l3"></i>
+                  <i class="rl-cell rl-l4"></i>
+                  <span>More</span>
+                </div>
               </div>
+
+              <!-- Hour of the day, on the device's own local clock. Three cuts
+                   of one cube (readinglog.js): the year's hours as bars, then
+                   the same hours against the weekday and against the month,
+                   which is where a habit shifting over the year shows up. -->
+              <section class="rl-clock-wrap">
+                <header class="rl-nav rl-clock-head">
+                  <strong>When you read</strong>
+                  <span id="rl-clock-note" class="rl-muted"></span>
+                  <div class="seg rl-clock-seg" id="rl-clock-seg" role="tablist"
+                       aria-label="Cut the day by">
+                    <button class="seg-btn active" data-clock="hour" role="tab" aria-selected="true"
+                            title="The year's reading by hour of the day">Hour</button>
+                    <button class="seg-btn" data-clock="week" role="tab" aria-selected="false"
+                            title="Hour of the day against the day of the week">Week</button>
+                    <button class="seg-btn" data-clock="month" role="tab" aria-selected="false"
+                            title="Hour of the day against the month — how the habit moved">Month</button>
+                  </div>
+                </header>
+                <div id="rl-clock" class="rl-clock" role="img"
+                     aria-label="Reading time by hour of the day"></div>
+              </section>
             </div>
 
             <!-- The books of whatever the heatmap is showing: the whole year,
