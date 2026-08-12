@@ -7,7 +7,11 @@
 #   cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
 # Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
 #
-# armv7-unknown-linux-musleabihf = hardfloat NEON, matches the KOA2's Cortex-A9.
+# armv7-unknown-linux-musleabihf = hardfloat NEON. One binary covers the fleet:
+# the primary target is the Colorsoft, and the newer MediaTek devices (Colorsoft,
+# Scribe) run a 32-bit armv7 userspace just as the legacy KOA2's Cortex-A9 does.
+# Size and speed decisions should be weighed against the Colorsoft; the KOA2 is
+# the slow floor we still support, not the device to design for.
 # musl = static link so the binary is firmware-version-agnostic.
 #
 # Linker: rustc's bundled rust-lld via `link-self-contained=yes`. This is the

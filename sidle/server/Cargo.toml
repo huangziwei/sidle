@@ -39,7 +39,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # reqwest in src-tauri), so we install that provider explicitly instead and add
 # no C dependency that wasn't already there.
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+# No `tls12`: both ends of every connection are ours — this server and the
+# picker — so there is nothing to be compatible with. TLS 1.3 only removes a
+# protocol version's worth of attack surface and negotiation for free. The
+# picker must be built the same way; a 1.2-only client would simply fail to
+# handshake, which is the correct outcome rather than a silent downgrade.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -48,8 +53,23 @@ tempfile = "3"
 # root. Using reqwest/ring here would prove the server speaks TLS to something,
 # which isn't the question — the question is whether the constrained client that
 # has to accept our leaf actually does.
+#
+# Note that ureq enables `rustls/tls12` unconditionally, and cargo unifies
+# features, so the server *as built for tests* carries TLS 1.2 support the
+# shipped binary does not (`cargo tree -e features,no-dev -i rustls` to confirm
+# the real thing is 1.3-only). Harmless: both sides offer 1.3, so 1.3 is what
+# the test negotiates and exercises. The only untested delta is the server
+# refusing a 1.2 ClientHello, which is rustls' behaviour rather than ours.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
-rustls-rustcrypto = "0.0.2-alpha"
+# Pinned to a git rev, not the crates.io `0.0.2-alpha`: that release is from
+# April 2024 and lags the repo badly. The crate is glue rather than
+# cryptography — it maps `aes-gcm`, `chacha20poly1305`, `p256`, `rsa`, the
+# `*-dalek` crates and `sha2` onto rustls' provider traits — and it lives under
+# the RustCrypto org itself. Not independently audited; accepted knowingly,
+# because it is the only way to keep the picker's armv7 cross-link free of C.
+# Keep this rev identical to the one sidle-native builds against, or the test
+# stops standing in for the device.
+rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "7b44a2de957b6596d267a920d3aec0d4137defb1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 # `Router::oneshot` for in-process handler tests (the `/sync/annotations` gate)
 # without binding a socket — drives the full route + DefaultBodyLimit layer.
