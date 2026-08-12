@@ -65,6 +65,27 @@ impl StylePool {
         self.styles.is_empty()
     }
 
+    /// Rewrite every style in place, keeping each one's `StyleId`.
+    ///
+    /// Ids are positional and nodes hold them, so entries are edited where
+    /// they sit rather than re-interned. A rewrite can make two entries
+    /// equal; the dedup map is rebuilt so later interning still finds one of
+    /// them, and the duplicate simply stays unreferenced.
+    pub fn rewrite<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut ComputedStyle),
+    {
+        for style in &mut self.styles {
+            f(style);
+        }
+        self.intern_map.clear();
+        for (i, style) in self.styles.iter().enumerate() {
+            self.intern_map
+                .entry(style.clone())
+                .or_insert(StyleId(i as u32));
+        }
+    }
+
     /// Iterate over all (StyleId, ComputedStyle) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (StyleId, &ComputedStyle)> {
         self.styles

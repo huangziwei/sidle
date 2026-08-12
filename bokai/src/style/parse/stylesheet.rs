@@ -102,6 +102,31 @@ impl Stylesheet {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+
+    /// Rewrite every asset `url()` this stylesheet declares from the form the
+    /// author wrote to whatever `resolve` returns.
+    ///
+    /// A CSS `url()` is relative to the stylesheet, not to the document that
+    /// links it, so only the caller that knows where the rules came from can
+    /// do this — the parser deliberately keeps the target verbatim. Callers
+    /// pass a resolver that canonicalizes into the archive's path space, the
+    /// same one image `src` attributes land in.
+    pub fn resolve_asset_urls<F>(&mut self, mut resolve: F)
+    where
+        F: FnMut(&str) -> String,
+    {
+        for rule in &mut self.rules {
+            for decl in rule
+                .declarations
+                .iter_mut()
+                .chain(rule.important_declarations.iter_mut())
+            {
+                if let Declaration::BackgroundImage(src) = decl {
+                    *src = resolve(src);
+                }
+            }
+        }
+    }
 }
 
 /// Parse a bare declaration list — the contents of a `style=""` attribute.

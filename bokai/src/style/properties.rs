@@ -169,9 +169,31 @@ enum_property! {
 }
 
 enum_property! {
+    /// How a background image tiles (`background-repeat`).
+    pub enum BackgroundRepeat {
+        #[default]
+        Repeat => "repeat",
+        RepeatX => "repeat-x",
+        RepeatY => "repeat-y",
+        NoRepeat => "no-repeat",
+        Space => "space",
+        Round => "round",
+    }
+}
+
+enum_property! {
     /// Border style values.
+    ///
+    /// `Unset` — not `None` — is the default, because "the source declared
+    /// no border" and "the source declared `border: none`" are different
+    /// facts wherever the consumer's user-agent stylesheet draws a border by
+    /// itself. `<hr>` is the case that matters: every renderer rules a line
+    /// across an `<hr>` unless told not to, so collapsing an explicit
+    /// `border: none` into the default meant the line came back on the other
+    /// side of the conversion. Only `Unset` is skipped by the exporters.
     pub enum BorderStyle {
         #[default]
+        Unset => "unset",
         None => "none",
         Solid => "solid",
         Dotted => "dotted",
@@ -181,6 +203,17 @@ enum_property! {
         Ridge => "ridge",
         Inset => "inset",
         Outset => "outset",
+    }
+}
+
+impl BorderStyle {
+    /// Whether this style paints a line. Both "no border declared"
+    /// (`Unset`) and "explicitly no border" (`None`) paint nothing — they
+    /// differ only in what they mean to a consumer that has a default of
+    /// its own.
+    #[inline]
+    pub fn draws(&self) -> bool {
+        !matches!(self, BorderStyle::Unset | BorderStyle::None)
     }
 }
 

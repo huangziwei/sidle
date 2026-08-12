@@ -223,6 +223,19 @@ impl Chapter {
                 }
                 _ => {}
             }
+            // A picture the stylesheet paints (a section-break ornament, say)
+            // is one the renderer has to fetch just the same, so it belongs in
+            // the fetch list. It does not make the chapter `image_only`
+            // though: a background is decoration behind content, never the
+            // content itself.
+            if let Some(src) = self
+                .styles
+                .get(n.style)
+                .and_then(|s| s.background_image.as_deref())
+                && !out.images.iter().any(|h| h == src)
+            {
+                out.images.push(src.to_string());
+            }
             self.summarize(child, out, text_seen, pending_space);
         }
     }

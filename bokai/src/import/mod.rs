@@ -153,14 +153,22 @@ pub trait Importer: Send + Sync {
                 PathBuf::from(crate::util::percent_decode(&href))
             };
 
-            if let Some(sheet) = self.load_stylesheet(&css_path) {
+            if let Some(mut sheet) = self.load_stylesheet(&css_path) {
+                // A linked sheet's `url()`s are relative to the sheet itself.
+                let base = css_path.to_string_lossy().replace('\\', "/");
+                sheet.resolve_asset_urls(|src| resolve_asset_url(&base, src));
                 stylesheets.push((sheet, Origin::Author));
             }
         }
 
-        // Parse inline styles
+        // Parse inline styles. Theirs are relative to the document instead.
+        let inline_base = self.source_id(id).map(|p| p.to_string());
         for css in inline {
-            stylesheets.push((Stylesheet::parse(&css), Origin::Author));
+            let mut sheet = Stylesheet::parse(&css);
+            if let Some(base) = &inline_base {
+                sheet.resolve_asset_urls(|src| resolve_asset_url(base, src));
+            }
+            stylesheets.push((sheet, Origin::Author));
         }
 
         // Compile the already-parsed DOM to IR
@@ -566,6 +574,18 @@ pub(crate) fn normalize_components(p: &Path) -> PathBuf {
 /// This canonicalizes paths like `../images/photo.jpg` relative to the
 /// chapter's source path (e.g., `OEBPS/text/ch1.html`) to absolute archive
 /// paths (e.g., `OEBPS/images/photo.jpg`).
+/// Canonicalize one CSS `url()` target into the archive's path space, so a
+/// background image is keyed exactly like an `<img src>` pointing at the same
+/// file. External URLs and data URIs are not archive paths and pass through.
+fn resolve_asset_url(base_path: &str, url: &str) -> String {
+    if url.contains("://") || url.starts_with("data:") {
+        return url.to_string();
+    }
+    resolve_relative_path(base_path, url)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 fn resolve_semantic_paths(chapter: &mut Chapter, base_path: &str) {
     chapter.semantics.resolve_paths(|path| {
         // Skip external URLs and data URIs

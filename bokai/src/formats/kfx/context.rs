@@ -1112,7 +1112,30 @@ impl ExportContext {
         builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         finalize_tatechuyoko(&mut kfx_style);
+        self.apply_background_image(&ir_style, &mut kfx_style);
         kfx_style
+    }
+
+    /// Attach the style's background picture, if it declares one.
+    ///
+    /// KFX names the picture with a symbol pointing at an `external_resource`
+    /// — the same reference an `<img>` element carries — so this cannot go
+    /// through the schema's string transforms. Both the short name and its
+    /// symbol are minted in export Pass 1 for every media asset, so an
+    /// immutable lookup is enough here; a `background-image` naming something
+    /// the book does not ship simply resolves to nothing and is dropped.
+    fn apply_background_image(
+        &self,
+        ir_style: &crate::style::ComputedStyle,
+        kfx_style: &mut crate::formats::kfx::style_registry::ComputedStyle,
+    ) {
+        use crate::formats::kfx::style_schema::KfxValue;
+        if let Some(src) = ir_style.background_image.as_deref()
+            && let Some(name) = self.resource_registry.get_name(src)
+            && let Some(symbol) = self.symbols.get(name)
+        {
+            kfx_style.set(KfxSymbol::BackgroundImage, KfxValue::SymbolId(symbol));
+        }
     }
 
     /// Register a Link-element style. Like `register_ir_style_with_hint`,
@@ -1155,6 +1178,7 @@ impl ExportContext {
             );
         }
         finalize_tatechuyoko(&mut kfx_style);
+        self.apply_background_image(&ir_style, &mut kfx_style);
         kfx_style
     }
 

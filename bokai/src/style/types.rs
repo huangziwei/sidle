@@ -28,6 +28,19 @@ pub struct ComputedStyle {
     pub color: Option<Color>,
     pub background_color: Option<Color>,
 
+    // Background image. `background_image` holds an archive-relative asset
+    // path in the same string space as `Semantics::src` — importers resolve
+    // the CSS `url()` against the stylesheet's own location, so consumers
+    // never have to know where the rule was written. Publishers paint
+    // section-break ornaments this way (`hr { background: url(x.jpg)
+    // no-repeat center }`), so dropping it loses a picture, not a flourish.
+    pub background_image: Option<String>,
+    pub background_repeat: BackgroundRepeat,
+    /// Background origin offsets. `Auto` means the source declared none;
+    /// CSS's initial `0% 0%` applies.
+    pub background_position_x: Length,
+    pub background_position_y: Length,
+
     // Text
     pub text_align: TextAlign,
     pub text_align_last: TextAlignLast,

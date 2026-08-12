@@ -3976,12 +3976,22 @@ function reflowPriorityHrefs(dto, resumeEid) {
 // Swap freshly-arrived images into every live section document.
 function patchLiveSectionImages() {
   if (!resLoader) return;
+  const docs = [];
   for (const { doc } of overlays) {
     try {
       patchPendingImages(doc, resLoader.resolve);
+      docs.push(doc);
     } catch {
       /* detached section doc — ignore */
     }
+  }
+  // A picture the stylesheet paints (section-break ornaments and the like)
+  // arrives on the same stream but lives in a rule, not an element — so the
+  // sheet itself is republished with the new blob URLs bound in.
+  try {
+    book?.restyle?.(docs);
+  } catch {
+    /* book torn down mid-sweep — ignore */
   }
 }
 

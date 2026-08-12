@@ -421,9 +421,23 @@ fn build_kfx_container(
             // container_entity_map can declare the dependency graph that
             // Kindle uses to locate images.
             for node_id in chapter.iter_dfs() {
-                if let Some(node) = chapter.node(node_id)
-                    && node.role == crate::model::Role::Image
+                let Some(node) = chapter.node(node_id) else {
+                    continue;
+                };
+                if node.role == crate::model::Role::Image
                     && let Some(src) = chapter.semantics.src(node_id)
+                {
+                    let short_name = ctx.resource_registry.get_or_create_name(src);
+                    ctx.record_section_image_ref(section_name, &short_name);
+                }
+                // A picture reached through the stylesheet counts just as
+                // much as one in an `<img>`: publishers paint section-break
+                // ornaments as an `<hr>` background, and a dependency missed
+                // here is a resource the bundler drops on the floor.
+                if let Some(src) = chapter
+                    .styles
+                    .get(node.style)
+                    .and_then(|s| s.background_image.as_deref())
                 {
                     let short_name = ctx.resource_registry.get_or_create_name(src);
                     ctx.record_section_image_ref(section_name, &short_name);

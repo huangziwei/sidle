@@ -22,7 +22,7 @@ use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::position::PositionFragments;
 use crate::formats::kfx::resource_index::{self, ImageResource};
 use crate::formats::kfx::schema::schema;
-use crate::formats::kfx::storyline::parse_storyline_to_ir;
+use crate::formats::kfx::storyline::{SectionTemplate, parse_storyline_to_ir};
 use crate::formats::kfx::structure::{self, ContentSource};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
@@ -32,6 +32,7 @@ use crate::model::{
     AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, PageSpread,
     PositionMap, SourceText, TocEntry,
 };
+use crate::style::CssDecl;
 
 /// Shorthand for getting a KfxSymbol as u32 for field lookups.
 macro_rules! sym {
@@ -557,7 +558,14 @@ impl Importer for KfxImporter {
         let named = self
             .styles
             .iter()
-            .map(|(name, fields)| (name.clone(), convert_yj_properties(fields, &self.symbols)))
+            .map(|(name, fields)| {
+                let mut decl = convert_yj_properties(fields, &self.symbols);
+                // A `background-image` still names a KFX resource here; the
+                // sheet ships beside the exported files, so it has to point
+                // at those instead.
+                self.rewrite_css_image_urls(&mut decl);
+                (name.clone(), decl)
+            })
             .collect();
         // `link_unvisited_style` / `link_visited_style` are nested styles that
         // apply only in one link state, so they leave the flat rule above and
@@ -1519,10 +1527,9 @@ impl KfxImporter {
             .and_then(|v| v.as_int());
         crate::formats::kfx::storyline::apply_section_template(
             &mut chapter,
-            template.eid,
-            template.style.as_deref(),
-            &template.inline_style,
+            &template,
             story_eid,
+            &self.symbols,
             Some(styles.as_ref()),
             Some(anchor_table.as_ref()),
         );
@@ -1638,10 +1645,13 @@ impl KfxImporter {
         // root.
         crate::formats::kfx::storyline::apply_section_template(
             &mut chapter,
-            container_eid,
-            style_name.as_deref(),
-            &inline_style,
+            &SectionTemplate {
+                eid: container_eid,
+                style: style_name,
+                inline_style,
+            },
             story_eid,
+            &self.symbols,
             Some(styles.as_ref()),
             Some(anchor_table.as_ref()),
         );
@@ -1650,22 +1660,54 @@ impl KfxImporter {
         Ok((chapter, declared))
     }
 
+    /// Point a converted rule's `background-image` at the exported file.
+    ///
+    /// `convert_yj_properties` renders the KFX symbol as `url(eF)` because
+    /// that is all the style fragment says; the sheet ships next to the
+    /// extracted images, so the resource name becomes the filename here —
+    /// the stylesheet counterpart of [`Self::rewrite_image_srcs`].
+    fn rewrite_css_image_urls(&self, decl: &mut CssDecl) {
+        let Some(value) = decl.get("background-image") else {
+            return;
+        };
+        let Some(name) = value
+            .strip_prefix("url(")
+            .and_then(|v| v.strip_suffix(')'))
+            .map(|v| v.trim_matches(['"', '\'']))
+        else {
+            return;
+        };
+        let Some(&i) = self.image_by_name.get(name) else {
+            return;
+        };
+        let filename = self.images[i].filename.clone();
+        decl.set("background-image", format!("url(\"{filename}\")"));
+    }
+
     /// Rewrite image references from KFX resource names ("eF") to the
     /// exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the IR
     /// speaks file paths, exactly like an EPUB-sourced book.
+    ///
+    /// Covers both places a picture can be named: an element's `src` and a
+    /// style's `background-image`.
     fn rewrite_image_srcs(&self, chapter: &mut Chapter) {
+        let filename_of = |name: &str| {
+            self.image_by_name
+                .get(name)
+                .map(|&i| self.images[i].filename.clone())
+        };
         let node_ids: Vec<_> = chapter.iter_dfs().collect();
         for node_id in node_ids {
-            let Some(filename) = chapter
-                .semantics
-                .src(node_id)
-                .and_then(|src| self.image_by_name.get(src))
-                .map(|&i| self.images[i].filename.clone())
-            else {
+            let Some(filename) = chapter.semantics.src(node_id).and_then(&filename_of) else {
                 continue;
             };
             chapter.semantics.set_src(node_id, &filename);
         }
+        chapter.styles.rewrite(|style| {
+            if let Some(filename) = style.background_image.as_deref().and_then(&filename_of) {
+                style.background_image = Some(filename);
+            }
+        });
     }
 
     /// Derive the book-level writing mode and page-progression direction
@@ -2475,17 +2517,6 @@ impl KfxImporter {
         self.ruby_indexed = true;
         Ok(())
     }
-}
-
-/// The main page template's identity within one section: its own `$155` id,
-/// `$157 style` name, and the CSS declarations converted from its remaining
-/// outer fields (a per-section `writing_mode` is the common one), carried
-/// onto the chapter's root container.
-#[derive(Debug, Default, Clone)]
-struct SectionTemplate {
-    eid: Option<i64>,
-    style: Option<String>,
-    inline_style: Vec<(String, String)>,
 }
 
 /// One fixed-layout page's identity: the owning section and the page's leaf

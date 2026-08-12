@@ -224,6 +224,13 @@ pub enum IrField {
     PaddingRight,
     Color,
     BackgroundColor,
+    /// How a background image tiles. Only meaningful alongside
+    /// `background-image`, which the resource registry resolves separately
+    /// (a KFX `background_image` is a symbol naming an external resource, not
+    /// a string the schema's transforms can produce).
+    BackgroundRepeat,
+    BackgroundPositionX,
+    BackgroundPositionY,
     VerticalAlign,
     TextDecorationUnderline,
     TextDecorationStrikethrough,
@@ -620,6 +627,46 @@ impl StyleSchema {
             transform: ValueTransform::ParseColor {
                 output_format: ColorFormat::PackedInt,
             },
+            context: StyleContext::BlockOnly,
+        });
+
+        // ====================================================================
+        // Background image placement
+        // ====================================================================
+        // `background_image` itself is not registered here: its KFX value is a
+        // symbol naming an `external_resource`, which only the export context
+        // can mint (see `ExportContext::build_ir_style`). These three describe
+        // how that picture is laid down.
+
+        // KFX has no `repeat` symbol — the absent property means "tile both
+        // axes", which is also CSS's initial value, so only the narrowing
+        // values need a mapping. `space` and `round` have no KFX equivalent
+        // and fall through to the default tiling.
+        schema.register(StylePropertyRule {
+            ir_key: "background-repeat",
+            ir_field: Some(IrField::BackgroundRepeat),
+            kfx_symbol: KfxSymbol::BackgroundRepeat,
+            transform: ValueTransform::Map(vec![
+                ("no-repeat".into(), KfxValue::Symbol(KfxSymbol::NoRepeat)),
+                ("repeat-x".into(), KfxValue::Symbol(KfxSymbol::RepeatX)),
+                ("repeat-y".into(), KfxValue::Symbol(KfxSymbol::RepeatY)),
+            ]),
+            context: StyleContext::BlockOnly,
+        });
+
+        schema.register(StylePropertyRule {
+            ir_key: "background-position-x",
+            ir_field: Some(IrField::BackgroundPositionX),
+            kfx_symbol: KfxSymbol::BackgroundPositionx,
+            transform: ValueTransform::PreserveUnit,
+            context: StyleContext::BlockOnly,
+        });
+
+        schema.register(StylePropertyRule {
+            ir_key: "background-position-y",
+            ir_field: Some(IrField::BackgroundPositionY),
+            kfx_symbol: KfxSymbol::BackgroundPositiony,
+            transform: ValueTransform::PreserveUnit,
             context: StyleContext::BlockOnly,
         });
 
@@ -1949,6 +1996,23 @@ pub fn extract_ir_field(
         }
         IrField::Color => ir_style.color.map(|c| c.to_css_string()),
         IrField::BackgroundColor => ir_style.background_color.map(|c| c.to_css_string()),
+        // The three below ride with `background-image`: without a picture to
+        // tile or place they say nothing, and Amazon never writes them alone.
+        IrField::BackgroundRepeat => (ir_style.background_image.is_some()
+            && ir_style.background_repeat != default.background_repeat)
+            .then(|| ir_style.background_repeat.to_css_string()),
+        IrField::BackgroundPositionX => (ir_style.background_image.is_some()
+            && !is_default_length(
+                ir_style.background_position_x,
+                default.background_position_x,
+            ))
+        .then(|| ir_style.background_position_x.to_css_string()),
+        IrField::BackgroundPositionY => (ir_style.background_image.is_some()
+            && !is_default_length(
+                ir_style.background_position_y,
+                default.background_position_y,
+            ))
+        .then(|| ir_style.background_position_y.to_css_string()),
         IrField::VerticalAlign => {
             if ir_style.vertical_align != ir_style::VerticalAlign::Baseline {
                 Some(ir_style.vertical_align.to_css_string())
@@ -2578,6 +2642,21 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
         IrField::BackgroundColor => {
             if let Some((r, g, b)) = parse_css_color(css_value) {
                 ir_style.background_color = Some(ir_style::Color::rgb(r, g, b));
+            }
+        }
+        IrField::BackgroundRepeat => {
+            if let Some(r) = ir_style::BackgroundRepeat::from_css(css_value) {
+                ir_style.background_repeat = r;
+            }
+        }
+        IrField::BackgroundPositionX => {
+            if let Some(len) = parse_css_length_to_ir(css_value) {
+                ir_style.background_position_x = len;
+            }
+        }
+        IrField::BackgroundPositionY => {
+            if let Some(len) = parse_css_length_to_ir(css_value) {
+                ir_style.background_position_y = len;
             }
         }
         IrField::VerticalAlign => {

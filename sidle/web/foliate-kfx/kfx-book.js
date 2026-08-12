@@ -17,6 +17,9 @@ const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 const XLINK = "http://www.w3.org/1999/xlink";
 
+// `url(...)` in a stylesheet, capturing the target with its optional quotes.
+const CSS_URL = /url\(\s*([^)]*?)\s*\)/gi;
+
 // Injected into every section: fit images/SVG to the page so illustrations and
 // the cover aren't squeezed, stretched, or cropped. Appended last so it wins
 // over the book's own stylesheet. Page COLORS, font, and color-scheme are NOT
@@ -77,20 +80,80 @@ export function patchPendingImages(doc, resolve) {
 // the paginator awaits `load()`, so a jump ahead of the stream just waits a
 // beat). Without a loader, only the DTO's inline content resolves.
 export function makeKfxBook(dto, loader) {
-  // href → blob: URL for every eagerly-shipped non-spine resource (style.css).
+  // href → blob: URL for every eagerly-shipped non-spine resource.
   const resourceUrls = new Map();
+  // Stylesheets are held as text, not published straight to a blob: a rule
+  // like `hr.transition { background: url(image_e1.jpg) }` (how publishers
+  // draw section-break ornaments) needs that href turned into a blob URL of
+  // its own, because a sheet served from blob: has no base path to resolve
+  // relative refs against. The image bytes stream in lazily, so the sheet is
+  // republished as they land — see `restyle`.
+  const sheets = new Map(); // href → { text, url, pending }
   for (const r of dto.resources) {
-    const url = URL.createObjectURL(
-      new Blob([b64ToBytes(r.data_base64)], { type: r.mime || "application/octet-stream" }),
-    );
-    resourceUrls.set(r.href, url);
+    const bytes = b64ToBytes(r.data_base64);
+    const mime = r.mime || "application/octet-stream";
+    if (mime.startsWith("text/css")) {
+      sheets.set(r.href, { text: new TextDecoder().decode(bytes), url: null, pending: true });
+      continue;
+    }
+    resourceUrls.set(r.href, URL.createObjectURL(new Blob([bytes], { type: mime })));
   }
 
   const sectionBlobs = new Map(); // index → live section blob URL (for unload)
+  // Superseded stylesheet blobs. A document that has not yet swapped to the
+  // republished sheet is still reading one of these, so they are only freed
+  // when the book closes.
+  const staleSheetUrls = [];
 
   // Ready URL for href, from the inline resources or the lazy loader.
-  const urlFor = (v) =>
-    resourceUrls.get(v) || (loader ? loader.resolve(v) : null) || null;
+  const urlFor = (v) => {
+    const sheet = sheets.get(v);
+    if (sheet) return sheetUrl(sheet);
+    return resourceUrls.get(v) || (loader ? loader.resolve(v) : null) || null;
+  };
+
+  // Publish a stylesheet with its `url()` refs bound to blob URLs. While any
+  // ref is still unresolved the sheet is rebuilt on each request, so a
+  // section loading later picks up whatever arrived since; an unchanged
+  // rebuild keeps the existing blob so nothing churns. Superseded blobs stay
+  // alive until close — a live document may still be reading one.
+  const sheetUrl = (sheet) => {
+    if (sheet.url && !sheet.pending) return sheet.url;
+    let pending = false;
+    const text = sheet.text.replace(CSS_URL, (whole, ref) => {
+      const target = ref.trim().replace(/^["']|["']$/g, "");
+      // Absolute, protocol-relative and fragment refs address something
+      // other than a bundled asset; they are left exactly as authored.
+      if (!target || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(target)) return whole;
+      const url = resourceUrls.get(target) || (loader ? loader.resolve(target) : null);
+      if (url) return `url("${url}")`;
+      pending = true;
+      return whole;
+    });
+    sheet.pending = pending;
+    if (sheet.url && text === sheet.built) return sheet.url;
+    if (sheet.url) staleSheetUrls.push(sheet.url);
+    sheet.built = text;
+    sheet.url = URL.createObjectURL(new Blob([text], { type: "text/css" }));
+    return sheet.url;
+  };
+
+  // Re-point every live document at a rebuilt stylesheet, for images that
+  // arrived after those sections rendered — the `patchPendingImages` of CSS
+  // backgrounds. No-op once every ref in the sheet has resolved.
+  const restyle = (docs) => {
+    for (const [href, sheet] of sheets) {
+      if (!sheet.pending) continue;
+      const before = sheet.url;
+      const url = sheetUrl(sheet);
+      if (url === before) continue;
+      for (const doc of docs) {
+        for (const link of doc.querySelectorAll("link[data-kfx-sheet]")) {
+          if (link.getAttribute("data-kfx-sheet") === href) link.setAttribute("href", url);
+        }
+      }
+    }
+  };
 
   const rewriteRefs = (html) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
@@ -106,7 +169,13 @@ export function makeKfxBook(dto, loader) {
         el.setAttribute(attr, placeholderUrl(loader.known.get(v)));
       }
     };
-    doc.querySelectorAll("link[href]").forEach((el) => fix(el, "href"));
+    doc.querySelectorAll("link[href]").forEach((el) => {
+      // Remember which sheet this link is, so `restyle` can re-point it once
+      // the images its rules paint have streamed in.
+      const v = el.getAttribute("href");
+      if (v && sheets.has(v)) el.setAttribute("data-kfx-sheet", v);
+      fix(el, "href");
+    });
     doc.querySelectorAll("img[src]").forEach((el) => fix(el, "src"));
     // SVG cover wrapper references the cover via xlink:href (and/or href).
     doc.querySelectorAll("image").forEach((el) => {
@@ -203,13 +272,23 @@ export function makeKfxBook(dto, loader) {
     // index ↔ href, for resolving TOC targets and annotation sections.
     hrefs: dto.sections.map((s) => s.href),
 
+    // Rebuild any stylesheet still waiting on images and re-point the given
+    // live documents at it — the `patchPendingImages` of CSS backgrounds.
+    restyle,
+
     // Free every blob URL (inline resources + any live section) when closing.
     // Lazily-fetched image blobs belong to the resource loader, not us.
     destroy() {
       for (const url of resourceUrls.values()) URL.revokeObjectURL(url);
       for (const url of sectionBlobs.values()) URL.revokeObjectURL(url);
+      for (const sheet of sheets.values()) {
+        if (sheet.url) URL.revokeObjectURL(sheet.url);
+      }
+      for (const url of staleSheetUrls) URL.revokeObjectURL(url);
       resourceUrls.clear();
       sectionBlobs.clear();
+      sheets.clear();
+      staleSheetUrls.length = 0;
     },
   };
 }

@@ -28,8 +28,9 @@ use super::parse::keywords::{
     parse_word_break, parse_writing_mode,
 };
 use super::parse::values::{
+    Axis, parse_background_position, parse_background_position_axis, parse_background_repeat,
     parse_background_shorthand, parse_color, parse_integer, parse_length, parse_length_or_normal,
-    parse_text_decoration,
+    parse_text_decoration, parse_url_value,
 };
 use super::properties::*;
 
@@ -42,6 +43,13 @@ pub enum Declaration {
     // Colors
     Color(Color),
     BackgroundColor(Color),
+
+    // Background image. The payload is the `url()` target as written; the
+    // importer resolves it against the stylesheet's own location.
+    BackgroundImage(String),
+    BackgroundRepeat(BackgroundRepeat),
+    BackgroundPositionX(Length),
+    BackgroundPositionY(Length),
 
     // Font properties
     FontFamily(String),
@@ -241,6 +249,37 @@ impl Declaration {
                 })
                 .unwrap_or_default(),
             "border" => parse_border_shorthand(input),
+            "background" => {
+                let bg = parse_background_shorthand(input);
+                let mut decls = Vec::with_capacity(4);
+                if let Some(c) = bg.color {
+                    decls.push(Self::BackgroundColor(c));
+                }
+                if let Some(url) = bg.image {
+                    decls.push(Self::BackgroundImage(url));
+                }
+                if let Some(r) = bg.repeat {
+                    decls.push(Self::BackgroundRepeat(r));
+                }
+                if let Some(x) = bg.position_x {
+                    decls.push(Self::BackgroundPositionX(x));
+                }
+                if let Some(y) = bg.position_y {
+                    decls.push(Self::BackgroundPositionY(y));
+                }
+                decls
+            }
+            "background-position" => {
+                let (x, y) = parse_background_position(input);
+                let mut decls = Vec::with_capacity(2);
+                if let Some(x) = x {
+                    decls.push(Self::BackgroundPositionX(x));
+                }
+                if let Some(y) = y {
+                    decls.push(Self::BackgroundPositionY(y));
+                }
+                decls
+            }
             "font" => parse_font_shorthand(input),
             "border-top" => parse_border_side_shorthand(input, BorderSide::Top),
             "border-right" => parse_border_side_shorthand(input, BorderSide::Right),
@@ -287,7 +326,14 @@ impl Declaration {
             // Colors
             "color" => parse_color(input).map(Self::Color),
             "background-color" => parse_color(input).map(Self::BackgroundColor),
-            "background" => parse_background_shorthand(input).map(Self::BackgroundColor),
+            "background-image" => parse_url_value(input).map(Self::BackgroundImage),
+            "background-repeat" => parse_background_repeat(input).map(Self::BackgroundRepeat),
+            "background-position-x" => {
+                parse_background_position_axis(input, Axis::Horizontal).map(Self::BackgroundPositionX)
+            }
+            "background-position-y" => {
+                parse_background_position_axis(input, Axis::Vertical).map(Self::BackgroundPositionY)
+            }
 
             // Font properties
             "font-family" => parse_font_family(input).map(Self::FontFamily),
@@ -522,10 +568,112 @@ pub fn parse_inline_decl(s: &str) -> CssDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::properties::BackgroundRepeat;
+
+    /// Parse one declaration the way a stylesheet rule body would.
+    fn parse_decl(name: &str, value: &str) -> Vec<Declaration> {
+        let mut input = cssparser::ParserInput::new(value);
+        let mut parser = Parser::new(&mut input);
+        Declaration::parse(name, &mut parser)
+    }
 
     #[test]
     fn parse_inline_decl_round_trip() {
         let decl = parse_inline_decl(" width: 100% ; ; text-align: center ");
         assert_eq!(decl.to_inline(), "width: 100%; text-align: center");
+    }
+
+    /// The section-break ornament idiom: publishers paint an `<hr>` with a
+    /// picture and hide the rule. Every part of that has to survive parsing —
+    /// the url most of all, since it is the only place the image is named.
+    #[test]
+    fn background_shorthand_keeps_the_image() {
+        let decls = parse_decl(
+            "background",
+            "url('../images/asterisks.jpg') no-repeat center",
+        );
+        let mut image = None;
+        let mut repeat = None;
+        let mut x = None;
+        let mut y = None;
+        for d in &decls {
+            match d {
+                Declaration::BackgroundImage(s) => image = Some(s.clone()),
+                Declaration::BackgroundRepeat(r) => repeat = Some(*r),
+                Declaration::BackgroundPositionX(l) => x = Some(*l),
+                Declaration::BackgroundPositionY(l) => y = Some(*l),
+                _ => {}
+            }
+        }
+        assert_eq!(image.as_deref(), Some("../images/asterisks.jpg"));
+        assert_eq!(repeat, Some(BackgroundRepeat::NoRepeat));
+        // A lone `center` centres both axes.
+        assert_eq!(x, Some(Length::Percent(50.0)));
+        assert_eq!(y, Some(Length::Percent(50.0)));
+    }
+
+    #[test]
+    fn background_shorthand_still_reads_the_color() {
+        let decls = parse_decl("background", "#ff0000 url(bg.png) repeat-x");
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BackgroundColor(_)))
+        );
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BackgroundImage(s) if s == "bg.png"))
+        );
+        assert!(decls.iter().any(
+            |d| matches!(d, Declaration::BackgroundRepeat(r) if *r == BackgroundRepeat::RepeatX)
+        ));
+    }
+
+    /// Everything after the `/` is the size, which the IR does not model —
+    /// but it must not be mistaken for the position that precedes it.
+    #[test]
+    fn background_size_does_not_displace_the_position() {
+        let decls = parse_decl("background", "url(bg.png) no-repeat left top / cover");
+        let x = decls.iter().find_map(|d| match d {
+            Declaration::BackgroundPositionX(l) => Some(*l),
+            _ => None,
+        });
+        let y = decls.iter().find_map(|d| match d {
+            Declaration::BackgroundPositionY(l) => Some(*l),
+            _ => None,
+        });
+        assert_eq!(x, Some(Length::Percent(0.0)));
+        assert_eq!(y, Some(Length::Percent(0.0)));
+    }
+
+    /// Named axes bind by name, not by order — `bottom left` is y then x.
+    #[test]
+    fn background_position_named_axes_bind_by_name() {
+        let decls = parse_decl("background-position", "bottom left");
+        let x = decls.iter().find_map(|d| match d {
+            Declaration::BackgroundPositionX(l) => Some(*l),
+            _ => None,
+        });
+        let y = decls.iter().find_map(|d| match d {
+            Declaration::BackgroundPositionY(l) => Some(*l),
+            _ => None,
+        });
+        assert_eq!(x, Some(Length::Percent(0.0)));
+        assert_eq!(y, Some(Length::Percent(100.0)));
+    }
+
+    /// `border: none` on an element whose renderer draws one by default is a
+    /// statement, not silence: it must not land on the same value as "no
+    /// border declared", or the rule comes back on the far side.
+    #[test]
+    fn declared_border_none_differs_from_undeclared() {
+        let decls = parse_decl("border", "none");
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BorderTopStyle(BorderStyle::None)))
+        );
+        assert_ne!(BorderStyle::None, BorderStyle::default());
     }
 }

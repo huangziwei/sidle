@@ -722,7 +722,7 @@ where
                         if let Some(styles_map) = styles
                             && let Some(kfx_props) = styles_map.get(style_name)
                         {
-                            let ir_style = kfx_style_to_ir(kfx_props);
+                            let ir_style = kfx_style_to_ir(kfx_props, symbols);
                             let style_id = chapter.styles.intern(ir_style);
                             if let Some(node) = chapter.node_mut(node_id) {
                                 node.style = style_id;
@@ -1044,6 +1044,17 @@ fn hinted_wrapper_role(
     }
 }
 
+/// The main page template's identity within one section: its own `$155` id,
+/// `$157 style` name, and the CSS declarations converted from its remaining
+/// outer fields (a per-section `writing_mode` is the common one), carried
+/// onto the chapter's root container.
+#[derive(Debug, Default, Clone)]
+pub struct SectionTemplate {
+    pub eid: Option<i64>,
+    pub style: Option<String>,
+    pub inline_style: Vec<(String, String)>,
+}
+
 /// Re-root the chapter under the section's main page-template container —
 /// the body-level `<div>` calibre emits for every reflowable
 /// section — carrying the template's style, then stamp the anchors reaching
@@ -1053,13 +1064,18 @@ fn hinted_wrapper_role(
 /// root never walks offsets (calibre stamps it at offset 0 only).
 pub fn apply_section_template(
     chapter: &mut Chapter,
-    template_eid: Option<i64>,
-    template_style: Option<&str>,
-    template_inline: &[(String, String)],
+    template: &SectionTemplate,
     story_eid: Option<i64>,
+    symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     anchor_table: Option<&AnchorTable>,
 ) {
+    let SectionTemplate {
+        eid: template_eid,
+        style: template_style,
+        inline_style: template_inline,
+    } = template;
+    let (template_eid, template_style) = (*template_eid, template_style.as_deref());
     let root = chapter.root();
     let wrapper = chapter.alloc_node(Node::new(Role::Container));
 
@@ -1068,7 +1084,7 @@ pub fn apply_section_template(
         if let Some(styles_map) = styles
             && let Some(kfx_props) = styles_map.get(style_name)
         {
-            let ir_style = kfx_style_to_ir(kfx_props);
+            let ir_style = kfx_style_to_ir(kfx_props, symbols);
             let style_id = chapter.styles.intern(ir_style);
             if let Some(node) = chapter.node_mut(wrapper) {
                 node.style = style_id;
@@ -1529,11 +1545,25 @@ fn apply_semantics_to_node(
 ///
 /// This is schema-driven: iterates schema rules with KFX symbol mappings,
 /// applies inverse transforms to convert KFX values back to IR values.
-fn kfx_style_to_ir(props: &[(u64, IonValue)]) -> crate::style::ComputedStyle {
+fn kfx_style_to_ir(
+    props: &[(u64, IonValue)],
+    symbols: &SymbolTable,
+) -> crate::style::ComputedStyle {
     use crate::formats::kfx::style_schema::{StyleSchema, import_kfx_style};
 
     let schema = StyleSchema::standard();
-    import_kfx_style(schema, props)
+    let mut style = import_kfx_style(schema, props);
+    // `background_image` names an `external_resource` by symbol, which the
+    // schema's value transforms cannot resolve — they never see the table.
+    // The IR keeps the resource name until the importer swaps in the
+    // exported filename, the same two steps an `<img src>` goes through.
+    if let Some(name) = get_field(props, sym!(BackgroundImage))
+        .and_then(|v| v.as_symbol())
+        .and_then(|id| symbols.resolve_opt(id))
+    {
+        style.background_image = Some(name.to_string());
+    }
+    style
 }
 
 /// Build text nodes with inline spans applied.
@@ -1662,7 +1692,7 @@ fn build_text_with_spans(
             if let Some(styles_map) = styles
                 && let Some(kfx_props) = styles_map.get(style_name)
             {
-                let ir_style = kfx_style_to_ir(kfx_props);
+                let ir_style = kfx_style_to_ir(kfx_props, symbols);
                 let style_id = chapter.styles.intern(ir_style);
                 if let Some(node) = chapter.node_mut(span_node) {
                     node.style = style_id;
@@ -1852,7 +1882,7 @@ where
 // ============================================================================
 
 use crate::formats::kfx::context::ExportContext;
-use crate::style::{BorderStyle, ComputedStyle, Length};
+use crate::style::{ComputedStyle, Length};
 
 /// Check if a style has borders that require container wrapping in KFX.
 ///
@@ -1860,13 +1890,13 @@ use crate::style::{BorderStyle, ComputedStyle, Length};
 /// with nested `type: text` for the content. Without this wrapper, borders don't
 /// render on Kindle devices.
 fn needs_container_wrapper(style: &ComputedStyle) -> bool {
-    let has_top = style.border_style_top != BorderStyle::None
+    let has_top = style.border_style_top.draws()
         && !matches!(style.border_width_top, Length::Auto | Length::Px(0.0));
-    let has_bottom = style.border_style_bottom != BorderStyle::None
+    let has_bottom = style.border_style_bottom.draws()
         && !matches!(style.border_width_bottom, Length::Auto | Length::Px(0.0));
-    let has_left = style.border_style_left != BorderStyle::None
+    let has_left = style.border_style_left.draws()
         && !matches!(style.border_width_left, Length::Auto | Length::Px(0.0));
-    let has_right = style.border_style_right != BorderStyle::None
+    let has_right = style.border_style_right.draws()
         && !matches!(style.border_width_right, Length::Auto | Length::Px(0.0));
     has_top || has_bottom || has_left || has_right
 }
@@ -3492,6 +3522,7 @@ mod tests {
         SymbolTable::new(0, Vec::new())
     }
     use crate::model::{GlobalNodeId, Role};
+    use crate::style::BorderStyle;
 
     #[test]
     fn test_is_short_ascii_digit_run() {
@@ -4682,6 +4713,69 @@ mod tests {
             vec![KfxSymbol::HorizontalRule as u64],
             "a bordered <hr> must export as one horizontal_rule element, \
              not a container wrapping an empty text block"
+        );
+    }
+
+    /// A section-break ornament is an `<hr>` whose whole appearance is a CSS
+    /// background picture, with the rule itself switched off. Both halves have
+    /// to reach the KFX style: the picture as a `background_image` symbol
+    /// naming the resource, and the explicit `border_style: none` — a KFX
+    /// `horizontal_rule` draws its line from the border properties (Amazon's
+    /// own rule styles carry `border_style` + `border_weight`), so a style
+    /// that says nothing gets the device's default line drawn across it.
+    #[test]
+    fn ornament_hr_exports_its_background_and_suppressed_rule() {
+        use crate::style::{BackgroundRepeat, BorderStyle, ComputedStyle};
+
+        let mut chapter = Chapter::new();
+        let mut style = ComputedStyle {
+            background_image: Some("OEBPS/images/asterisks.jpg".to_string()),
+            background_repeat: BackgroundRepeat::NoRepeat,
+            ..Default::default()
+        };
+        style.border_style_top = BorderStyle::None;
+        style.border_style_bottom = BorderStyle::None;
+        let style_id = chapter.styles.intern(style);
+
+        let mut rule = Node::new(Role::Rule);
+        rule.style = style_id;
+        let rule_id = chapter.alloc_node(rule);
+        chapter.append_child(chapter.root(), rule_id);
+
+        let mut ctx = crate::formats::kfx::context::ExportContext::new();
+        // Export Pass 1 mints a short name and symbol for every media asset;
+        // the style lookup is immutable and relies on that having happened.
+        let short = ctx
+            .resource_registry
+            .get_or_create_name("OEBPS/images/asterisks.jpg");
+        let expected = ctx.symbols.get_or_intern(&short);
+
+        let _ = build_storyline_ion(&chapter, &mut ctx);
+
+        let (_, style) = ctx
+            .style_registry
+            .styles()
+            .find(|(_, s)| s.get(KfxSymbol::BackgroundImage).is_some())
+            .expect("the ornament's style carries a background_image");
+        assert_eq!(
+            style.get(KfxSymbol::BackgroundImage),
+            Some(&crate::formats::kfx::style_schema::KfxValue::SymbolId(
+                expected
+            )),
+            "background_image must name the external_resource by symbol"
+        );
+        assert_eq!(
+            style.get(KfxSymbol::BackgroundRepeat),
+            Some(&crate::formats::kfx::style_schema::KfxValue::Symbol(
+                KfxSymbol::NoRepeat
+            ))
+        );
+        assert_eq!(
+            style.get(KfxSymbol::BorderStyleTop),
+            Some(&crate::formats::kfx::style_schema::KfxValue::Symbol(
+                KfxSymbol::None
+            )),
+            "an <hr> told to draw no border must say so, or the device rules its own line"
         );
     }
 

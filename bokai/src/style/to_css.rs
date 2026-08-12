@@ -44,6 +44,44 @@ macro_rules! emit_4sided {
     };
 }
 
+/// Emit a 4-sided property whose CSS name carries the side in the *middle*
+/// (`border-top-style`, `border-top-width`), unlike margin/padding which
+/// suffix it.
+macro_rules! emit_4sided_infix {
+    ($self:expr, $default:expr, $buf:expr,
+     $top:ident, $right:ident, $bottom:ident, $left:ident,
+     $prefix:expr, $suffix:expr) => {
+        emit_if_changed!(
+            $self,
+            $default,
+            $buf,
+            $top,
+            concat!($prefix, "-top-", $suffix)
+        );
+        emit_if_changed!(
+            $self,
+            $default,
+            $buf,
+            $right,
+            concat!($prefix, "-right-", $suffix)
+        );
+        emit_if_changed!(
+            $self,
+            $default,
+            $buf,
+            $bottom,
+            concat!($prefix, "-bottom-", $suffix)
+        );
+        emit_if_changed!(
+            $self,
+            $default,
+            $buf,
+            $left,
+            concat!($prefix, "-left-", $suffix)
+        );
+    };
+}
+
 /// Emit 4-sided optional color (border-color).
 macro_rules! emit_4sided_color {
     ($self:expr, $buf:expr,
@@ -84,6 +122,26 @@ impl ToCss for ComputedStyle {
         // Colors
         emit_color_if_some!(self, buf, color, "color");
         emit_color_if_some!(self, buf, background_color, "background-color");
+
+        // Background image. The stored path is archive-relative; a consumer
+        // that needs it relative to its own output rewrites it on the way
+        // out, exactly as it does for an image `src`.
+        if let Some(ref src) = self.background_image {
+            buf.push_str("background-image: url(\"");
+            buf.push_str(&src.replace('"', "%22"));
+            buf.push_str("\"); ");
+            // Only meaningful alongside an image, so they ride with it.
+            emit_if_changed!(self, default, buf, background_repeat, "background-repeat");
+            if self.background_position_x != default.background_position_x
+                || self.background_position_y != default.background_position_y
+            {
+                buf.push_str("background-position: ");
+                position_or_zero(self.background_position_x).to_css(buf);
+                buf.push(' ');
+                position_or_zero(self.background_position_y).to_css(buf);
+                buf.push_str("; ");
+            }
+        }
 
         // Text properties
         emit_if_changed!(self, default, buf, text_align, "text-align");
@@ -213,7 +271,7 @@ impl ToCss for ComputedStyle {
         emit_if_changed!(self, default, buf, break_inside, "break-inside");
 
         // Border styles (4-sided)
-        emit_4sided!(
+        emit_4sided_infix!(
             self,
             default,
             buf,
@@ -221,11 +279,12 @@ impl ToCss for ComputedStyle {
             border_style_right,
             border_style_bottom,
             border_style_left,
-            "border-style"
+            "border",
+            "style"
         );
 
         // Border widths (4-sided)
-        emit_4sided!(
+        emit_4sided_infix!(
             self,
             default,
             buf,
@@ -233,7 +292,8 @@ impl ToCss for ComputedStyle {
             border_width_right,
             border_width_bottom,
             border_width_left,
-            "border-width"
+            "border",
+            "width"
         );
 
         // Border colors (4-sided optional)
@@ -290,6 +350,17 @@ const GENERIC_FAMILIES: &[&str] = &[
     "emoji",
     "fangsong",
 ];
+
+/// A background-position axis for serialization. `Auto` in either axis means
+/// the source declared only the other one, so the undeclared axis falls back
+/// to the CSS initial value rather than serializing as `auto` — which
+/// `background-position` does not accept.
+fn position_or_zero(len: super::properties::Length) -> super::properties::Length {
+    match len {
+        super::properties::Length::Auto => super::properties::Length::Percent(0.0),
+        other => other,
+    }
+}
 
 /// Quote font-family names that need quoting in CSS.
 ///

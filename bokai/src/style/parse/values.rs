@@ -4,7 +4,7 @@
 
 use cssparser::{ParseError, Parser, Token};
 
-use crate::style::properties::{Color, Length};
+use crate::style::properties::{BackgroundRepeat, Color, Length};
 
 /// Text decoration value (can combine underline and line-through).
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,27 +63,50 @@ pub(crate) fn parse_color(input: &mut Parser<'_, '_>) -> Option<Color> {
     None
 }
 
-/// Parse the CSS `background` shorthand and extract just the color component.
+/// The components of the CSS `background` shorthand that the IR models.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BackgroundShorthand {
+    pub color: Option<Color>,
+    /// The `url()` target, exactly as written — resolving it against the
+    /// stylesheet's location is the importer's job, which is the only layer
+    /// that knows where the rule was written.
+    pub image: Option<String>,
+    pub repeat: Option<BackgroundRepeat>,
+    pub position_x: Option<Length>,
+    pub position_y: Option<Length>,
+}
+
+/// Parse the CSS `background` shorthand.
 ///
-/// The background shorthand can contain: color, image, position, repeat, size, attachment,
-/// origin, clip - in any order. We parse tokens in a loop and extract any color we find.
+/// The shorthand can carry color, image, position, repeat, size, attachment,
+/// origin and clip in any order, so we parse tokens in a loop and keep the
+/// components the IR models. Size, attachment, origin and clip are consumed
+/// and discarded — the IR has no vocabulary for them yet.
 /// See https://www.w3.org/TR/css-backgrounds-3/#background
-pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Option<Color> {
-    let mut color: Option<Color> = None;
+pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> BackgroundShorthand {
+    let mut out = BackgroundShorthand::default();
+    // Positional keywords bind to an axis by order, not by name: `center` on
+    // its own means both axes, `center bottom` means x then y. Collect them
+    // in order and resolve once the whole value is consumed.
+    let mut positions: Vec<PositionComponent> = Vec::new();
+    // Set once a `/` is seen — from there on, lengths are the size.
+    let mut size_follows = false;
 
     // Try to parse each component in any order, like lightningcss does
     loop {
         // Try to parse a color if we haven't found one yet
-        if color.is_none()
+        if out.color.is_none()
             && let Ok(c) =
                 input.try_parse(|i| parse_color(i).ok_or(i.new_custom_error::<_, ()>(())))
         {
-            color = Some(c);
+            out.color = Some(c);
             continue;
         }
 
-        // Skip over url() functions (background-image)
-        if input.try_parse(|i| i.expect_url()).is_ok() {
+        // The image. `url()` is the only form the IR carries; gradients fall
+        // through to the function skip below.
+        if let Ok(url) = input.try_parse(|i| i.expect_url().map(|u| u.as_ref().to_string())) {
+            out.image = Some(url);
             continue;
         }
 
@@ -103,33 +126,59 @@ pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Option<C
             continue;
         }
 
-        // Skip over known keywords: repeat-x, repeat-y, no-repeat, cover, contain,
-        // fixed, scroll, local, padding-box, border-box, content-box, etc.
-        if input
-            .try_parse(|i| {
-                let ident = i.expect_ident()?;
-                match ident.as_ref() {
+        // Keywords: repeat and position are kept, the rest are consumed so
+        // parsing can carry on past them.
+        enum Kw {
+            Repeat(BackgroundRepeat),
+            Position(PositionComponent),
+            Ignored,
+        }
+        if let Ok(kw) = input.try_parse(|i| {
+            let ident = i.expect_ident()?;
+            Ok(match ident.as_ref() {
                 // repeat keywords
-                "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" |
-                // size keywords
-                "cover" | "contain" | "auto" |
-                // attachment keywords
-                "scroll" | "fixed" | "local" |
-                // box keywords (origin/clip)
-                "padding-box" | "border-box" | "content-box" |
+                "repeat" => Kw::Repeat(BackgroundRepeat::Repeat),
+                "repeat-x" => Kw::Repeat(BackgroundRepeat::RepeatX),
+                "repeat-y" => Kw::Repeat(BackgroundRepeat::RepeatY),
+                "no-repeat" => Kw::Repeat(BackgroundRepeat::NoRepeat),
+                "space" => Kw::Repeat(BackgroundRepeat::Space),
+                "round" => Kw::Repeat(BackgroundRepeat::Round),
                 // position keywords
-                "top" | "bottom" | "left" | "right" | "center" |
-                // none keyword
-                "none" => Ok(()),
-                _ => Err(i.new_custom_error::<_, ()>(())),
-            }
+                "left" => Kw::Position(PositionComponent::Horizontal(0.0)),
+                "right" => Kw::Position(PositionComponent::Horizontal(100.0)),
+                "top" => Kw::Position(PositionComponent::Vertical(0.0)),
+                "bottom" => Kw::Position(PositionComponent::Vertical(100.0)),
+                "center" => Kw::Position(PositionComponent::Either(50.0)),
+                // size keywords / attachment keywords / box (origin, clip)
+                // keywords / `none`: consumed, not modelled
+                "cover" | "contain" | "auto" | "scroll" | "fixed" | "local" | "padding-box"
+                | "border-box" | "content-box" | "none" => Kw::Ignored,
+                _ => return Err(i.new_custom_error::<_, ()>(())),
             })
-            .is_ok()
-        {
+        }) {
+            match kw {
+                Kw::Repeat(r) => out.repeat = Some(r),
+                Kw::Position(p) if !size_follows => positions.push(p),
+                Kw::Position(_) | Kw::Ignored => {}
+            }
             continue;
         }
 
-        // Skip over lengths and percentages (for position/size)
+        // Lengths and percentages. Before the `/` they are position offsets;
+        // after it they are the size, which the IR does not model.
+        if let Ok(len) = input.try_parse(|i| parse_length(i).ok_or(i.new_custom_error::<_, ()>(())))
+        {
+            if !size_follows {
+                positions.push(match len {
+                    Length::Percent(p) => PositionComponent::Either(p),
+                    other => PositionComponent::Length(other),
+                });
+            }
+            continue;
+        }
+
+        // Anything else that tokenizes as a number or dimension is consumed
+        // without interpretation.
         if input
             .try_parse(|i| match i.next()? {
                 Token::Dimension { .. } | Token::Percentage { .. } | Token::Number { .. } => Ok(()),
@@ -140,8 +189,10 @@ pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Option<C
             continue;
         }
 
-        // Skip the "/" delimiter used between position and size
+        // The "/" delimiter separates position from size. The positions
+        // collected so far stand; everything after it belongs to the size.
         if input.try_parse(|i| i.expect_delim('/')).is_ok() {
+            size_follows = true;
             continue;
         }
 
@@ -149,7 +200,130 @@ pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Option<C
         break;
     }
 
-    color
+    let (x, y) = resolve_position(&positions);
+    out.position_x = x;
+    out.position_y = y;
+    out
+}
+
+/// One token of a `background-position` value, before axes are assigned.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PositionComponent {
+    /// `left` / `right` — horizontal by name.
+    Horizontal(f32),
+    /// `top` / `bottom` — vertical by name.
+    Vertical(f32),
+    /// `center` or a percentage — axis decided by position in the value.
+    Either(f32),
+    /// A non-percentage offset, likewise axis-by-position.
+    Length(Length),
+}
+
+/// Assign collected position components to axes.
+///
+/// One value sets x and centres y; two values are x then y unless a named
+/// keyword says otherwise (`bottom left` is legal and means y then x).
+pub(crate) fn resolve_position(parts: &[PositionComponent]) -> (Option<Length>, Option<Length>) {
+    if parts.is_empty() {
+        return (None, None);
+    }
+    let mut x: Option<Length> = None;
+    let mut y: Option<Length> = None;
+    let mut unassigned: Vec<Length> = Vec::new();
+
+    for part in parts {
+        match *part {
+            PositionComponent::Horizontal(p) => x = Some(Length::Percent(p)),
+            PositionComponent::Vertical(p) => y = Some(Length::Percent(p)),
+            PositionComponent::Either(p) => unassigned.push(Length::Percent(p)),
+            PositionComponent::Length(l) => unassigned.push(l),
+        }
+    }
+
+    let mut rest = unassigned.into_iter();
+    if x.is_none() {
+        x = rest.next();
+    }
+    if y.is_none() {
+        y = rest.next();
+    }
+    // A lone value sets its own axis and centres the other one: `left` is
+    // `left center`, `top` is `center top`, `25%` is `25% center`.
+    if parts.len() == 1 {
+        x = x.or(Some(Length::Percent(50.0)));
+        y = y.or(Some(Length::Percent(50.0)));
+    }
+    (x, y)
+}
+
+/// Which axis a `background-position-x` / `-y` longhand names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+/// Parse a bare `url(...)` value (`background-image`). Returns the target as
+/// written; `none` and gradients yield `None`, since the IR carries only a
+/// single raster reference.
+pub(crate) fn parse_url_value(input: &mut Parser<'_, '_>) -> Option<String> {
+    input
+        .try_parse(|i| i.expect_url().map(|u| u.as_ref().to_string()))
+        .ok()
+}
+
+/// Parse a `background-repeat` value. The two-value form (`no-repeat repeat`)
+/// collapses to its horizontal component, which is what the axis-less IR
+/// field can express.
+pub(crate) fn parse_background_repeat(input: &mut Parser<'_, '_>) -> Option<BackgroundRepeat> {
+    let ident = input.try_parse(|i| i.expect_ident_cloned()).ok()?;
+    BackgroundRepeat::from_css(&ident.to_ascii_lowercase())
+}
+
+/// Parse a `background-position` value into its two axes.
+pub(crate) fn parse_background_position(
+    input: &mut Parser<'_, '_>,
+) -> (Option<Length>, Option<Length>) {
+    let mut parts = Vec::new();
+    while let Some(part) = parse_position_component(input) {
+        parts.push(part);
+    }
+    resolve_position(&parts)
+}
+
+/// Parse a single-axis `background-position-x` / `-y` value.
+pub(crate) fn parse_background_position_axis(
+    input: &mut Parser<'_, '_>,
+    axis: Axis,
+) -> Option<Length> {
+    let part = parse_position_component(input)?;
+    let (x, y) = resolve_position(&[part]);
+    match axis {
+        Axis::Horizontal => x,
+        Axis::Vertical => y,
+    }
+}
+
+/// Parse one keyword or length of a position value.
+fn parse_position_component(input: &mut Parser<'_, '_>) -> Option<PositionComponent> {
+    if let Ok(part) = input.try_parse(|i| {
+        let ident = i.expect_ident()?;
+        Ok(match ident.as_ref() {
+            "left" => PositionComponent::Horizontal(0.0),
+            "right" => PositionComponent::Horizontal(100.0),
+            "top" => PositionComponent::Vertical(0.0),
+            "bottom" => PositionComponent::Vertical(100.0),
+            "center" => PositionComponent::Either(50.0),
+            _ => return Err(i.new_custom_error::<_, ()>(())),
+        })
+    }) {
+        return Some(part);
+    }
+    match input.try_parse(|i| parse_length(i).ok_or(i.new_custom_error::<_, ()>(()))) {
+        Ok(Length::Percent(p)) => Some(PositionComponent::Either(p)),
+        Ok(other) => Some(PositionComponent::Length(other)),
+        Err(_) => None,
+    }
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {

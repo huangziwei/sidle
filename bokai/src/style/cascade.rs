@@ -425,6 +425,10 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         // Colors
         Declaration::Color(c) => style.color = Some(*c),
         Declaration::BackgroundColor(c) => style.background_color = Some(*c),
+        Declaration::BackgroundImage(src) => style.background_image = Some(src.clone()),
+        Declaration::BackgroundRepeat(r) => style.background_repeat = *r,
+        Declaration::BackgroundPositionX(l) => style.background_position_x = *l,
+        Declaration::BackgroundPositionY(l) => style.background_position_y = *l,
 
         // Font properties
         Declaration::FontFamily(s) => style.font_family = Some(s.clone()),

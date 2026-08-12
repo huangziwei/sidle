@@ -311,6 +311,12 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
             let s = symbols.resolve(*id).to_string();
             if prop.name == "font-family" && is_default_font_name(&s) {
                 None
+            } else if prop.name == "background-image" {
+                // The symbol names an `external_resource`, the same reference
+                // an image element carries. Wrap it as a CSS url; the
+                // importer swaps the resource name for the exported filename
+                // afterwards, exactly as it does for an `<img src>`.
+                Some(format!("url({s})"))
             } else {
                 Some(s)
             }
@@ -1350,6 +1356,40 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- backgrounds ----
+    // `background_image` carries a symbol naming an `external_resource`;
+    // `property_value` renders it as a CSS `url()`.
+    (
+        "background_image",
+        Prop {
+            name: "background-image",
+            values: None,
+        },
+    ),
+    (
+        "background_repeat",
+        Prop {
+            name: "background-repeat",
+            values: Some(&[
+                ("no_repeat", Some("no-repeat")),
+                ("repeat_x", Some("repeat-x")),
+                ("repeat_y", Some("repeat-y")),
+            ]),
+        },
+    ),
+    (
+        "background_positionx",
+        Prop {
+            name: "background-position-x",
+            values: None,
+        },
+    ),
+    (
+        "background_positiony",
+        Prop {
+            name: "background-position-y",
+            values: None,
+        },
+    ),
     (
         "background_origin",
         Prop {
