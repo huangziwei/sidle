@@ -8,8 +8,13 @@
 # Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
 #
 # armv7-unknown-linux-musleabihf = hardfloat NEON. One binary covers the fleet:
-# the primary target is the Colorsoft, and the newer MediaTek devices (Colorsoft,
-# Scribe) run a 32-bit armv7 userspace just as the legacy KOA2's Cortex-A9 does.
+# the primary target is the Colorsoft, and the newer devices (Colorsoft, Scribe)
+# run a 32-bit armv7 userspace just as the legacy KOA2 does.
+#
+# The KOA2 is a **Cortex-A7** (Freescale i.MX7 Dual, `CPU part: 0xc07`, kernel
+# 4.1) — read off the device 2026-08-12, correcting a long-standing "Cortex-A9"
+# claim here. It genuinely has no ARMv8 crypto extensions, where the newer two
+# advertise `aes pmull sha1 sha2` (unusable from an armv7 build, but present).
 # Size and speed decisions should be weighed against the Colorsoft; the KOA2 is
 # the slow floor we still support, not the device to design for.
 # musl = static link so the binary is firmware-version-agnostic.
