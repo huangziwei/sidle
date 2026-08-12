@@ -668,12 +668,33 @@ mod tests {
     /// border declared", or the rule comes back on the far side.
     #[test]
     fn declared_border_none_differs_from_undeclared() {
-        let decls = parse_decl("border", "none");
+        for value in ["none", "0", "0 none", "hidden"] {
+            let decls = parse_decl("border", value);
+            assert!(
+                decls
+                    .iter()
+                    .any(|d| matches!(d, Declaration::BorderTopStyle(BorderStyle::None))),
+                "`border: {value}` must state that no border is drawn"
+            );
+        }
+        assert_ne!(BorderStyle::None, BorderStyle::default());
+    }
+
+    /// A shorthand that names a style keeps it; the fill-in is only for the
+    /// component the author left out.
+    #[test]
+    fn border_shorthand_keeps_a_named_style() {
+        let decls = parse_decl("border", "1px solid black");
         assert!(
             decls
                 .iter()
-                .any(|d| matches!(d, Declaration::BorderTopStyle(BorderStyle::None)))
+                .any(|d| matches!(d, Declaration::BorderTopStyle(BorderStyle::Solid)))
         );
-        assert_ne!(BorderStyle::None, BorderStyle::default());
+        let decls = parse_decl("border-bottom", "2px dashed");
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BorderBottomStyle(BorderStyle::Dashed)))
+        );
     }
 }

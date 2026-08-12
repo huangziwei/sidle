@@ -129,7 +129,7 @@ pub(crate) fn parse_border_side_shorthand(
     if width.is_none() && style.is_none() && color.is_none() {
         return vec![];
     }
-    side.make_declarations(width, style, color)
+    side.make_declarations(width, Some(style.unwrap_or(BorderStyle::None)), color)
 }
 
 /// Parse combined border shorthand (e.g., `border: 1px solid red`).
@@ -141,6 +141,13 @@ pub(crate) fn parse_border_shorthand(input: &mut Parser<'_, '_>) -> Vec<Declarat
     if width.is_none() && style.is_none() && color.is_none() {
         return vec![];
     }
+
+    // A shorthand sets every longhand it controls, so an omitted style takes
+    // its initial value rather than staying undeclared. That distinction is
+    // the whole point on an `<hr>`: `border: 0` is the commonest way to hide
+    // one, and it names no style at all — read as silence it would leave the
+    // renderer free to draw its own default rule.
+    let style = Some(style.unwrap_or(BorderStyle::None));
 
     let mut decls = Vec::with_capacity(12);
 
