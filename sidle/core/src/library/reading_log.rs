@@ -110,13 +110,6 @@ pub struct Session {
     /// paginated, and paging backwards is not reading a page again.
     pub page_turns: i64,
     pub words: i64,
-    /// Every distinct point the reader was seen at, ascending.
-    ///
-    /// Not stored — this is how the session gets a book. The log redacts the
-    /// title, but a `.yjr` sidecar records where its own book was left, and the
-    /// sync files that under a `book_id`. A point in both is the same reader in
-    /// the same book.
-    pub locations: Vec<Location>,
     /// Seconds of counted reading per clock hour of the session's own day,
     /// ascending by hour, summing to exactly [`Self::seconds`].
     ///
@@ -389,6 +382,33 @@ fn book_position(line: &str) -> Option<i64> {
     payloads(line).find_map(end_position)
 }
 
+/// Every `(book fingerprint, point the reader stood at)` the events state.
+///
+/// The bridge from a log to a library, and the reason it is gathered from *every*
+/// line rather than from the sessions: a line states a position whether or not
+/// the parser can make a sitting out of it. `BookEndPosition` carries one and is
+/// no session's observation; a book opened and shut carries one and its session
+/// is discarded for having no duration. Both are the same evidence — a point that
+/// a `.yjr` sidecar also names is that book — and the log offers it once.
+///
+/// Read within one payload, never across: a line can carry two, and each states
+/// its own book, so pairing one payload's position with another's book files the
+/// reader in a book they were not in.
+fn positions_seen<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<(i64, Location)> {
+    let mut out = Vec::new();
+    for line in events {
+        for payload in payloads(line) {
+            if let (Some(book), Some(at)) = (end_position(payload), location(payload, "CurrentPos"))
+            {
+                out.push((book, at));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// A point in a book, as the device writes it.
 ///
 /// Every position on a line reads `<handle>:<coordinate>`. The coordinate alone
@@ -454,9 +474,6 @@ struct Observation {
     /// The book's running reading counter, in milliseconds.
     total_ms: Option<i64>,
     words: Option<i64>,
-    /// Where the reader was standing. Names no book by itself, but a book's
-    /// sidecar names the same point.
-    at: Option<Location>,
     page_turn: bool,
     closes: bool,
 }
@@ -492,7 +509,6 @@ fn observation(line: &str) -> Option<Observation> {
         position: end_position(chosen)?,
         total_ms: field(chosen, "TotalTime"),
         words: field(chosen, "TotalWords"),
-        at: location(chosen, "CurrentPos"),
         page_turn,
         closes,
     })
@@ -759,7 +775,6 @@ struct Open {
     words_lo: Option<i64>,
     words_hi: i64,
     page_turns: i64,
-    locations: Vec<Location>,
     /// The last observation's instant and counters — the near side of the
     /// interval a midnight cut has to divide, and of the one each new
     /// observation books against the clock.
@@ -794,7 +809,6 @@ impl Open {
             words_lo,
             words_hi: words_lo.unwrap_or(0),
             page_turns: 0,
-            locations: Vec::new(),
             last: from,
             // A vouched start is a counter reading at a known instant, so the
             // stretch from there to the first observation is an interval like any
@@ -857,9 +871,6 @@ impl Open {
             self.words_hi = self.words_hi.max(w);
             self.last_words = Some(w);
         }
-        if let Some(at) = obs.at {
-            self.locations.push(at);
-        }
         // A book reopened after finishing restarts its counter; the run so far is
         // already banked because a fresh `Open` is made per run.
     }
@@ -915,13 +926,10 @@ impl Open {
         self.finish()
     }
 
-    fn finish(mut self) -> Session {
-        self.locations.sort_unstable();
-        self.locations.dedup();
+    fn finish(self) -> Session {
         let seconds = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
         Session {
             hours: hours_in_seconds(&self.hours_ms, seconds),
-            locations: self.locations,
             started_at: self.started_at,
             ended_at: self.ended_at,
             end_position: self.end_position,
@@ -1139,6 +1147,18 @@ pub fn store_events(
     for (last_word, from_book) in db::known_book_ends(conn)? {
         identity.entry(last_word).or_insert(from_book);
     }
+    // Where the reader was seen standing, before a single session is looked at.
+    //
+    // First, and unconditionally, because this is the evidence that names a book
+    // and these lines are never offered again: the device sends only what is
+    // newer than the newest session stored. Anything downstream may decide a
+    // sitting is not worth a row — a book opened and shut is not reading — but
+    // that decision must not reach back and discard what its events witnessed.
+    // The `.yjr` sidecar that names the book may not arrive for another sync.
+    for (fingerprint, at) in positions_seen(events.iter().map(String::as_str)) {
+        let key = identity.get(&fingerprint).copied().unwrap_or(fingerprint);
+        db::record_log_points(conn, key, &[(at.eid, at.offset, at.linear_pos)])?;
+    }
     let sessions = parse_sessions(events.iter().map(String::as_str));
 
     let mut out = Imported {
@@ -1161,7 +1181,13 @@ pub fn store_events(
             break;
         }
         // A session with no measurable duration is a book being opened and shut,
-        // not reading; storing it would litter the calendar with empty days.
+        // not reading; a row for it would litter the calendar with empty days.
+        //
+        // A judgement about the row and about nothing else. Everything those
+        // events witnessed was recorded above, before this decided the sitting
+        // was not worth keeping — a book opened and shut is exactly when the
+        // device states where the reader stood in it, and that is the evidence
+        // that names the book later.
         if s.seconds <= 0 {
             continue;
         }
@@ -1193,17 +1219,6 @@ pub fn store_events(
             // does not.
             db::record_session_hours(conn, &row, &s.hours)?;
         }
-        // Keep where the reader stood, even though nothing here can say which
-        // book it was. These lines will not be offered again — the device sends
-        // only what is newer than the newest session stored — so this is the
-        // last chance to record them, and a sidecar that names the book may not
-        // arrive for another sync yet.
-        let points: Vec<db::Point> = s
-            .locations
-            .iter()
-            .map(|l| (l.eid, l.offset, l.linear_pos))
-            .collect();
-        db::record_log_points(conn, row.end_position, &points)?;
     }
     out.attributed = db::resolve_reading_sessions(conn)?;
     Ok(out)
@@ -1563,22 +1578,83 @@ mod tests {
     }
 
     #[test]
-    fn a_session_collects_the_points_the_reader_stood_at() {
+    fn every_line_that_states_where_the_reader_stood_gives_up_its_point() {
+        let stood = Location {
+            eid: 1566,
+            offset: 0,
+            linear_pos: 12,
+        };
         let lines = [
             page("260803:100000", "NextPage", 148_207, 60_000, 100),
             page("260803:100500", "CloseBook", 148_207, 120_000, 220),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
-        // `page` writes the same handle on both lines, so the two collapse:
-        // the points are the distinct places visited, not one per event.
+        // `page` writes the same handle on both lines, so the two collapse: the
+        // points are the distinct places visited, not one per event.
         assert_eq!(
-            out[0].locations,
-            vec![Location {
-                eid: 1566,
-                offset: 0,
-                linear_pos: 12
-            }]
+            positions_seen(lines.iter().map(String::as_str)),
+            vec![(148_207, stood)],
         );
+
+        // The evidence is gathered from the lines, not from the sittings the
+        // parser makes of them — so it survives a line no session covers.
+        // `BookEndPosition` is no observation, and a book opened and shut has no
+        // measurable duration and gets no row at all; both state a point, and the
+        // log states each of them exactly once.
+        let opened_and_shut = ["260803:095956 cvm[6144]: I ReadingTimerController:\
+             Information::BookEndPosition.FromBook:YJPosition: AR4GAAAAAAAA:148213,\
+             BookEndPosition.LastWordPos.override:YJPosition: AR4GAAAAAAAA:148207,\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:524,\
+             EndPos:YJPosition: AR4GAAAAAAAA:148207;"];
+        assert!(parse_sessions(opened_and_shut.iter().copied()).is_empty());
+        assert_eq!(
+            positions_seen(opened_and_shut.iter().copied()),
+            vec![(
+                148_207,
+                Location {
+                    eid: 1566,
+                    offset: 0,
+                    linear_pos: 524
+                }
+            )],
+        );
+    }
+
+    /// A sitting judged not worth a row must not take its evidence with it.
+    ///
+    /// The regression this guards is a one-line `continue`: skipping a session
+    /// with no measurable duration used to skip recording where the reader stood
+    /// in it, and a book opened and shut is precisely when the device states
+    /// that. The lines are offered once, so the loss was permanent and silent —
+    /// it showed up only as a session that could never be named.
+    #[test]
+    fn a_book_opened_and_shut_still_gives_up_where_the_reader_stood() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-points-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+
+        let events: BTreeSet<String> = ["260803:095956 cvm[6144]: I ReadingTimerController:\
+             Information::BookEndPosition.FromBook:YJPosition: AR4GAAAAAAAA:148213,\
+             BookEndPosition.LastWordPos.override:YJPosition: AR4GAAAAAAAA:148207,\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:524,\
+             EndPos:YJPosition: AR4GAAAAAAAA:148207;"
+            .to_string()]
+        .into_iter()
+        .collect();
+        let out = store_events(&conn, &events, 1, "DEV", &mut job::ignore).unwrap();
+        assert_eq!(out.added, 0, "opening and shutting a book is not reading");
+
+        // Filed under the book's *last* position, the one the library joins on,
+        // because the same line stated the pairing.
+        let point: (i64, i64, i64) = conn
+            .query_row(
+                r#"SELECT end_position, eid, linear_pos FROM reading_log_points"#,
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("the point survives the session that was not stored");
+        assert_eq!(point, (148_213, 1566, 524));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
