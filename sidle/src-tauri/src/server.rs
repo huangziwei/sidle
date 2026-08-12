@@ -5,8 +5,9 @@
 //!
 //! start/stop/status mirror what sakabar does, so both can manage one shared
 //! daemon and agree on a single instance:
-//! - **start** health-probes `/` and REPLACES an already-running instance,
-//!   then spawns the binary detached (new session, stdio → `<root>/server.log`).
+//! - **start** issues the TLS material the daemon will not start without, checks
+//!   the port for *any* listener, REPLACES an already-running instance, then
+//!   spawns the binary detached (new session, stdio → `<root>/server.log`).
 //!   Because the daemon outlives the GUI, the one a launching app finds is
 //!   usually its own predecessor, still running whatever code was on disk when it
 //!   started; replacing it is what keeps "the app and the server were built from
@@ -17,7 +18,9 @@
 //!   writes it on start, removes it on graceful exit), then reaps the child if we
 //!   were the one who spawned it.
 //! - **status** is observation-based (`/` probe + PID file), so a daemon started
-//!   anywhere shows as running here, and vice-versa.
+//!   anywhere shows as running here, and vice-versa. Since the switch to TLS the
+//!   probe verifies the leaf against our own CA, so "running" means a daemon a
+//!   Kindle could actually use — a listener we cannot verify reads as down.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -74,16 +77,55 @@ pub struct ServerStatus {
     pub pid: Option<i32>,
 }
 
-/// Shared HTTP client for liveness probes — built once (reqwest client
-/// construction is non-trivial; the start loop probes repeatedly).
-fn http() -> &'static reqwest::Client {
+/// Shared HTTPS client for liveness probes, trusting our own CA and nothing
+/// else added on top of the system roots.
+///
+/// Built once (reqwest client construction is non-trivial; the start loop probes
+/// repeatedly) but **cached only on success**: on a first run the CA does not
+/// exist until [`ensure_tls_material`] has run, and caching a client without it
+/// would leave every later probe unable to verify the daemon it just started.
+///
+/// A CA regenerated after this point needs an app restart to take effect. That
+/// costs nothing in practice — regenerating orphans every device carrying the
+/// old root, so it is already a redeploy-everything event.
+fn probe_client(paths: &LibraryPaths) -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("build reqwest probe client")
-    })
+    if let Some(client) = CLIENT.get() {
+        return Some(client);
+    }
+    let pem = crate::library::tls::ca_cert_pem(paths).ok()?;
+    let ca = reqwest::Certificate::from_pem(pem.as_bytes()).ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .add_root_certificate(ca)
+        .build()
+        .ok()?;
+    let _ = CLIENT.set(client);
+    CLIENT.get()
+}
+
+/// Issue the TLS material the daemon refuses to start without, covering the
+/// addresses clients actually dial.
+///
+/// Loopback is for this app's own probe; the LAN address is what the Kindle
+/// uses, and it is re-issued on every start because DHCP can move it. The CA
+/// underneath is created once and never regenerated (see `library::tls`), so
+/// this is cheap and idempotent in the way that matters — devices keep trusting
+/// the same root across every re-issue.
+///
+/// Note the leaf covers the LAN address **as of server start**. If the Mac's
+/// address changes while the daemon is running, the running leaf goes stale and
+/// the device fails to verify it until the next start. That is the same trip
+/// that already has to rewrite `HOST=` in the device's `server.conf`, so it is
+/// not a new failure mode — but it is why this lives on the start path rather
+/// than only at deploy.
+fn ensure_tls_material(paths: &LibraryPaths) -> Result<()> {
+    let mut sans = vec!["127.0.0.1".to_string(), "localhost".to_string()];
+    if let Some(ip) = crate::device::deploy::detect_lan_ipv4() {
+        sans.push(ip.to_string());
+    }
+    crate::library::tls::issue_server_cert(paths, &sans)
+        .context("issue TLS material for the LAN server")
 }
 
 /// How long to let a replaced daemon drain before giving up and adopting it.
@@ -91,24 +133,53 @@ fn http() -> &'static reqwest::Client {
 /// is exactly the request worth waiting for.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Poll until nothing answers on `port`. `true` if it went quiet in time.
+/// Poll until nothing holds `port`. `true` if it went quiet in time.
 async fn wait_for_port_free(port: u16, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if !probe(port).await {
+        if !port_open(port).await {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    !probe(port).await
+    !port_open(port).await
 }
 
-/// "Up" = the liveness page answers (any HTTP response — mirrors sakabar's
-/// "healthy = any HTTPURLResponse"). A down port fails fast (connection refused),
-/// so this is cheap to poll.
-async fn probe(port: u16) -> bool {
-    http()
-        .get(format!("http://127.0.0.1:{port}/"))
+/// Is *anything* listening on `port`? A bare TCP connect, so it is deliberately
+/// blind to what protocol the listener speaks.
+///
+/// That blindness is the point. Port contention is a question about the socket,
+/// not about the daemon, and answering it over HTTPS would make a listener we
+/// cannot speak to look like a free port — after which the spawn below fails to
+/// bind for reasons the logs would not explain. The case is real rather than
+/// theoretical: a daemon left over from a pre-TLS build serves plaintext and
+/// answers no HTTPS probe at all, and it is exactly the one a launching app
+/// most needs to displace.
+async fn port_open(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// "Up" = the liveness page answers over TLS, with the leaf verified against our
+/// own CA. Any HTTP status counts (mirrors sakabar's "healthy = any
+/// HTTPURLResponse"); what must succeed is the handshake.
+///
+/// Stricter than the old plaintext probe on purpose: it now answers "our daemon
+/// is serving, and its certificate is one our devices will accept", which is the
+/// property a launch actually depends on. A listener we cannot verify reads as
+/// down here — see [`port_open`] for the places that need the weaker question.
+async fn probe(paths: &LibraryPaths, port: u16) -> bool {
+    let Some(client) = probe_client(paths) else {
+        return false;
+    };
+    client
+        .get(format!("https://127.0.0.1:{port}/"))
         .send()
         .await
         .is_ok()
@@ -135,7 +206,7 @@ impl ServerHandle {
 
     pub async fn status(&self, paths: &LibraryPaths) -> ServerStatus {
         let port = self.inner.lock().await.port;
-        let up = probe(port).await;
+        let up = probe(paths, port).await;
         let token = sidle_server::load_or_generate_token(&paths.root).ok();
         ServerStatus {
             running: up,
@@ -163,7 +234,7 @@ impl ServerHandle {
         // The exception is a daemon we cannot name — no PID file, so nothing to
         // signal. That is a server someone else is running; adopt it rather than
         // fail, exactly as before.
-        if probe(port).await {
+        if port_open(port).await {
             if Self::read_pid(&paths).is_none() {
                 return Ok(self.status(&paths).await);
             }
@@ -177,6 +248,11 @@ impl ServerHandle {
                 return Ok(self.status(&paths).await);
             }
         }
+
+        // The daemon hard-errors rather than falling back to plaintext when TLS
+        // material is missing, so issue it before the spawn rather than letting
+        // the failure surface as an unexplained "never became reachable".
+        ensure_tls_material(&paths)?;
 
         // Resolving the binary (and a dev build-on-demand) plus the spawn syscall
         // are blocking, so do them off the reactor.
@@ -194,7 +270,7 @@ impl ServerHandle {
         // The spawn returns before axum binds — wait until it's accepting. 10 s cap
         // (the dev build, if any, already happened in the blocking task above).
         for _ in 0..200 {
-            if probe(port).await {
+            if probe(&paths, port).await {
                 return Ok(self.status(&paths).await);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -216,7 +292,9 @@ impl ServerHandle {
     /// user who left it off must not find it switched on because they opened the
     /// app. Nothing running means nothing to realign.
     pub async fn realign_on_launch(&self, paths: LibraryPaths, port: u16) -> Result<()> {
-        if !probe(port).await {
+        // `port_open` rather than the TLS probe: a daemon from a pre-TLS build is
+        // precisely one that needs realigning, and it cannot answer HTTPS.
+        if !port_open(port).await {
             return Ok(());
         }
         self.start(paths, port).await.map(|_| ())
@@ -227,7 +305,7 @@ impl ServerHandle {
         // Only signal a server that's actually up — guards against SIGTERM to a
         // reused PID from a stale `server.pid` (the daemon removes it on graceful
         // exit, but a SIGKILL/crash could leave one behind).
-        if probe(port).await
+        if port_open(port).await
             && let Some(pid) = Self::read_pid(paths)
         {
             // SAFETY: plain libc `kill(2)`; `pid` is from the daemon's fresh PID
@@ -340,7 +418,11 @@ mod tests {
     /// A throwaway HTTP server on a free port that 200s any request, run on a
     /// blocking std thread (so the test needs no extra tokio features). Leaks the
     /// thread — fine for a test process.
-    fn dummy_http_server() -> u16 {
+    /// A plaintext listener holding a port — a *squatter*, not a sidle server.
+    /// It answers HTTP and cannot complete a TLS handshake, which is what makes
+    /// it the right stand-in for both cases the adoption path guards against: a
+    /// daemon from a pre-TLS build, and an unrelated process on 8731.
+    fn dummy_plaintext_squatter() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -379,12 +461,19 @@ mod tests {
         }
     }
 
-    /// A healthy server with no PID file is someone else's — there is nothing to
+    /// A listener with no PID file is someone else's — there is nothing to
     /// signal, so it is adopted rather than replaced or duplicated. (The replace
     /// path needs the real binary and is covered by the live gate.)
+    ///
+    /// It is also reported as **not running**, and that is the point of the
+    /// assertion rather than an accident of the fixture: since the switch to
+    /// TLS, "running" means a daemon whose certificate our own CA vouches for —
+    /// exactly the daemon a Kindle could use. A squatter that cannot present one
+    /// is no more usable to the app than to the device, so calling it "running"
+    /// would promise a sync that cannot happen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn start_adopts_a_running_server_it_cannot_name() {
-        let port = dummy_http_server();
+    async fn an_unverifiable_squatter_is_adopted_but_not_called_running() {
+        let port = dummy_plaintext_squatter();
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths {
             root: tmp.path().to_path_buf(),
@@ -393,11 +482,19 @@ mod tests {
 
         let handle = ServerHandle::default();
         let s = handle.start(paths.clone(), port).await.unwrap();
-        assert!(s.running);
-        assert_eq!(s.port, Some(port));
         assert!(
             handle.inner.lock().await.child.is_none(),
             "a server we cannot signal must be adopted, not re-spawned"
+        );
+        assert!(
+            !s.running,
+            "a listener that cannot complete our TLS handshake is not a server \
+             the device could use either — reporting it as running would promise \
+             a sync that cannot happen"
+        );
+        assert_eq!(
+            s.port, None,
+            "no port is being served that we can vouch for"
         );
     }
 
@@ -406,7 +503,7 @@ mod tests {
     /// to bind an occupied port. Falling back to adoption keeps a working server.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn start_falls_back_to_adopting_a_daemon_that_will_not_release_the_port() {
-        let port = dummy_http_server();
+        let port = dummy_plaintext_squatter();
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths {
             root: tmp.path().to_path_buf(),
@@ -425,11 +522,15 @@ mod tests {
         .await
         .expect("start must give up on the drain, not hang")
         .unwrap();
-        assert!(s.running, "the surviving server is reported as running");
         assert!(
             handle.inner.lock().await.child.is_none(),
             "never spawn a second server onto an occupied port"
         );
+        // The port is still held, so binding a second daemon would have failed —
+        // that is what this test is really protecting. Whether the survivor is
+        // *usable* is a separate question, answered by the TLS probe, and for a
+        // plaintext squatter the answer is no.
+        assert!(!s.running);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

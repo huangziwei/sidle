@@ -1,4 +1,4 @@
-//! Sidle-server HTTP client.
+//! Sidle-server HTTPS client.
 //!
 //! Three endpoints, all token-gated, all sync via `ureq`:
 //! - `GET /list.json`  → library as JSON (incl. the on-device save name)
@@ -7,6 +7,16 @@
 //!
 //! Token is sent as `X-Sidle-Token` header. The server also accepts
 //! `?token=` query but the header is cleaner for programmatic clients.
+//!
+//! # Trust
+//!
+//! Every request is TLS, including on the home LAN, and the only certificate
+//! this binary will accept is one issued by the CA at [`CA_PATH`] — see
+//! [`build_agent`]. There is no plaintext fall-back and no scheme setting: a
+//! server that cannot present our leaf is a server we do not talk to. That is
+//! the whole point, since the token grants the entire library plus the write
+//! surface and never rotates, so one captured request would be a permanent
+//! compromise.
 //!
 //! Book shape mirrors `sidle_core::library::db::BookRow`. The core display +
 //! download fields are `id`/`title` (display), `kfx_sha256` (on-device dedupe),
@@ -73,6 +83,53 @@ impl From<anyhow::Error> for SidleError {
 
 pub type Result<T> = std::result::Result<T, SidleError>;
 
+/// The CA the picker pins, pushed by the desktop app's install alongside
+/// `server.conf`. Sibling of [`crate::CONFIG_PATH`] on purpose: the two are
+/// written by the same deploy and are useless apart — an address without a
+/// trust root cannot be dialled, and a root without an address has nothing to
+/// verify.
+pub const CA_PATH: &str = "/mnt/us/extensions/sidle/etc/ca.pem";
+
+/// Build the one shared agent: TLS, with our CA as the **sole** trust root.
+///
+/// Sole rather than additional. ureq is compiled without `rustls-webpki-roots`,
+/// so the Mozilla root set is not in this binary at all — which makes the pin
+/// structural. No public CA can mint a certificate this picker will accept,
+/// which is a stronger position than trusting the public set and then hoping.
+///
+/// The provider is RustCrypto's rather than ring's, and that is a build
+/// decision before it is a crypto one: ring carries a C build script, cargo
+/// unifies features so it would be compiled whether or not it were ever called,
+/// and that alone breaks the pure-Rust `rust-lld` cross path this single static
+/// armv7 binary depends on. It is passed explicitly because there is no default
+/// to fall back on under `rustls-no-provider` — a missing provider should be a
+/// visible wiring decision, not a runtime surprise.
+///
+/// `configure` receives the builder so callers can set their own timeouts; the
+/// gallery and the `--update` path want different ones.
+pub fn build_agent(
+    configure: impl FnOnce(
+        ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+    ) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+) -> Result<ureq::Agent> {
+    use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+
+    let pem = std::fs::read(CA_PATH).with_context(|| {
+        format!("read {CA_PATH} — reinstall from the desktop app to place the CA")
+    })?;
+    let ca = Certificate::from_pem(&pem)
+        .map_err(|e| anyhow!("parse {CA_PATH}: {e} — the CA on device is not a usable PEM"))?;
+
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .unversioned_rustls_crypto_provider(std::sync::Arc::new(rustls_rustcrypto::provider()))
+        .root_certs(RootCerts::Specific(std::sync::Arc::new(vec![ca])))
+        .build();
+
+    let config = configure(ureq::Agent::config_builder().tls_config(tls)).build();
+    Ok(ureq::Agent::new_with_config(config))
+}
+
 /// Issue a GET against sidle-server with the token header, translating
 /// `ureq::Error::Status(401|403)` to [`SidleError::TokenMismatch`].
 /// Every other transport/status error becomes `SidleError::Other`.
@@ -87,20 +144,45 @@ pub(crate) fn get_with_token(
     url: &str,
     token: &str,
     timeout: Duration,
-) -> Result<ureq::Response> {
+) -> Result<Response> {
     match agent
         .get(url)
-        .set("X-Sidle-Token", token)
-        .timeout(timeout)
+        .header("X-Sidle-Token", token)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .call()
     {
         Ok(res) => Ok(res),
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             Err(SidleError::TokenMismatch)
         }
         Err(e) => Err(anyhow!("GET {url}: {e}").into()),
     }
 }
+
+/// What ureq 3 hands back. Named once here so the dozen call sites below do not
+/// each spell out the generic — and so a future ureq change is one edit.
+pub(crate) type Response = ureq::http::Response<ureq::Body>;
+
+/// Read a whole response body as text, bounded.
+///
+/// ureq 3 requires an explicit limit to read a body to a `String`, which is a
+/// better default than ureq 2's unbounded `into_string()`: every one of these
+/// responses is a small JSON document, and an unbounded read of a wedged or
+/// hostile server is exactly the thing a 512 MB device cannot absorb.
+pub(crate) fn read_text(res: &mut Response, limit: usize) -> anyhow::Result<String> {
+    res.body_mut()
+        .with_config()
+        .limit(limit as u64)
+        .read_to_string()
+        .map_err(|e| anyhow!("read response body: {e}"))
+}
+
+/// Cap for the JSON control responses (`/list.json`, the sync endpoints'
+/// receipts). Generous for a library listing of a few thousand books, and far
+/// below anything that would trouble the device.
+pub(crate) const JSON_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// Timeout for the boot-time `list_books` request. Short so the boot
 /// toast surfaces quickly when the server is down/wedged — anything
@@ -251,11 +333,10 @@ impl Book {
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
-    let url = format!("http://{}:{}/list.json", cfg.host, cfg.port);
-    let res = get_with_token(agent, &url, &cfg.token, LIST_TIMEOUT)?;
-    let body = res
-        .into_string()
-        .with_context(|| format!("read body of {url}"))?;
+    let url = format!("https://{}:{}/list.json", cfg.host, cfg.port);
+    let mut res = get_with_token(agent, &url, &cfg.token, LIST_TIMEOUT)?;
+    let body =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let mut books: Vec<Book> =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     for book in &mut books {
@@ -307,10 +388,11 @@ pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<V
     // import (see sidle_core::library::thumbnail) — ~30–50KB instead of the
     // full-res cover. The server falls back to full-res if the thumbnail isn't
     // on disk yet, so this is always safe to request.
-    let url = format!("http://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
-    let res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
+    let url = format!("https://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
+    let mut res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();
-    res.into_reader()
+    res.body_mut()
+        .as_reader()
         .take(COVER_MAX_BYTES as u64)
         .read_to_end(&mut bytes)
         .with_context(|| format!("read body of {url}"))?;
@@ -347,24 +429,29 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
     // gave us — so a row the server couldn't name fails before we spend the
     // download instead of after.
     let filename = device_filename(book)?;
-    let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
+    let url = format!("https://{}:{}/get/{}", cfg.host, cfg.port, book.id);
     // No overall request timeout: a big book over a sleepy radio can take
     // minutes, and an overall deadline would kill a transfer that's making
     // steady progress (the 256 MB-truncation bug's slow-path twin). The
     // session agent's per-read timeout (`timeout_read`, set in `main`) bounds a
     // genuinely stalled socket instead. The body is returned unread so the
     // caller can stream it to disk with live progress + cancel.
-    let res = match agent.get(&url).set("X-Sidle-Token", &cfg.token).call() {
+    let res = match agent.get(&url).header("X-Sidle-Token", &cfg.token).call() {
         Ok(res) => res,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("GET {url}: {e}").into()),
     };
     let expected_len = res
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    let reader: Box<dyn Read + Send> = Box::new(res.into_reader().take(KFX_MAX_BYTES));
+    // `into_reader` consumes the response, so the length has to come off the
+    // headers first — reversing these silently drops the size check that makes
+    // `stream_download` able to tell a finished transfer from a truncated one.
+    let reader: Box<dyn Read + Send> = Box::new(res.into_body().into_reader().take(KFX_MAX_BYTES));
     Ok(Download {
         filename,
         reader,
@@ -643,15 +730,19 @@ fn fetch_manifest<T: for<'de> Deserialize<'de> + Default>(
     let res = agent
         .get(url)
         .query("device_serial", &cfg.serial)
-        .set("X-Sidle-Token", &cfg.token)
-        .timeout(SYNC_TIMEOUT)
+        .header("X-Sidle-Token", &cfg.token)
+        .config()
+        .timeout_global(Some(SYNC_TIMEOUT))
+        .build()
         .call();
-    let text = match res.map(|r| r.into_string()) {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            eprintln!("[sidle/sync] read GET {url} failed ({e}) — sending everything");
-            return T::default();
-        }
+    let text = match res {
+        Ok(mut r) => match read_text(&mut r, JSON_MAX_BYTES) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[sidle/sync] read GET {url} failed ({e}) — sending everything");
+                return T::default();
+            }
+        },
         Err(e) => {
             eprintln!("[sidle/sync] GET {url} failed ({e}) — sending everything");
             return T::default();
@@ -687,7 +778,7 @@ pub fn push_annotations(
         .into());
     }
 
-    let url = format!("http://{}:{}/sync/annotations", cfg.host, cfg.port);
+    let url = format!("https://{}:{}/sync/annotations", cfg.host, cfg.port);
     let (sdrs, pruned) = collect_sidecars(sidle_dir)?;
     // Ask before sending: the library reports the ink it has already decoded off
     // this device, and anything matching is left where it is. An `nbk` runs tens
@@ -728,22 +819,23 @@ pub fn push_annotations(
     };
     let body = serde_json::to_vec(&req).context("serialize sync request")?;
 
-    let res = match agent
+    let mut res = match agent
         .post(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .set("Content-Type", "application/json")
-        .timeout(SYNC_TIMEOUT)
-        .send_bytes(&body)
+        .header("X-Sidle-Token", &cfg.token)
+        .header("Content-Type", "application/json")
+        .config()
+        .timeout_global(Some(SYNC_TIMEOUT))
+        .build()
+        .send(&body)
     {
         Ok(res) => res,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
     };
-    let body = res
-        .into_string()
-        .with_context(|| format!("read body of {url}"))?;
+    let body =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let mut report: SyncReport =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     // `pruned` is device-side hygiene, not in the server's report — fold it in
@@ -928,7 +1020,7 @@ pub fn push_notebooks(
     cfg: &ServerConfig,
     found: &[crate::handwriting::Standalone],
 ) -> Result<NotebookReport> {
-    let url = format!("http://{}:{}/sync/notebooks", cfg.host, cfg.port);
+    let url = format!("https://{}:{}/sync/notebooks", cfg.host, cfg.port);
     let have: NotebookManifest = fetch_manifest(agent, cfg, &url, found.is_empty());
 
     let todo: Vec<&crate::handwriting::Standalone> = found
@@ -972,22 +1064,23 @@ pub fn push_notebooks(
         }
         let body = serde_json::to_vec(&NotebookRequest { notebooks })
             .context("serialize notebook request")?;
-        let res = match agent
+        let mut res = match agent
             .post(&url)
-            .set("X-Sidle-Token", &cfg.token)
-            .set("Content-Type", "application/json")
-            .timeout(SYNC_TIMEOUT)
-            .send_bytes(&body)
+            .header("X-Sidle-Token", &cfg.token)
+            .header("Content-Type", "application/json")
+            .config()
+            .timeout_global(Some(SYNC_TIMEOUT))
+            .build()
+            .send(&body)
         {
             Ok(res) => res,
-            Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
                 return Err(SidleError::TokenMismatch);
             }
             Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
         };
-        let text = res
-            .into_string()
-            .with_context(|| format!("read body of {url}"))?;
+        let text =
+            read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
         let part: NotebookReport =
             serde_json::from_str(&text).with_context(|| format!("parse {url}"))?;
         report.imported += part.imported;
@@ -1055,22 +1148,21 @@ struct BookPushReply {
 /// than buffering the whole book in the Kindle's RAM.
 pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result<BookPush> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let url = format!("http://{}:{}/sync/book", cfg.host, cfg.port);
-    let res = match agent
+    let url = format!("https://{}:{}/sync/book", cfg.host, cfg.port);
+    let mut res = match agent
         .post(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .set("Content-Type", "application/octet-stream")
+        .header("X-Sidle-Token", &cfg.token)
+        .header("Content-Type", "application/octet-stream")
         .send(file)
     {
         Ok(res) => res,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
     };
-    let body = res
-        .into_string()
-        .with_context(|| format!("read body of {url}"))?;
+    let body =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let reply: BookPushReply =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     Ok(match reply.outcome.as_str() {
@@ -1158,23 +1250,24 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
     };
     let body = serde_json::to_vec(&req).context("serialize misc request")?;
 
-    let url = format!("http://{}:{}/sync/misc", cfg.host, cfg.port);
-    let res = match agent
+    let url = format!("https://{}:{}/sync/misc", cfg.host, cfg.port);
+    let mut res = match agent
         .post(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .set("Content-Type", "application/json")
-        .timeout(SYNC_TIMEOUT)
-        .send_bytes(&body)
+        .header("X-Sidle-Token", &cfg.token)
+        .header("Content-Type", "application/json")
+        .config()
+        .timeout_global(Some(SYNC_TIMEOUT))
+        .build()
+        .send(&body)
     {
         Ok(res) => res,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
     };
-    let body = res
-        .into_string()
-        .with_context(|| format!("read body of {url}"))?;
+    let body =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let report: MiscReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
 
     // The server has them now (a non-2xx would have returned above) — clear the
@@ -1271,23 +1364,24 @@ pub fn push_reading_log(
         .into());
     }
 
-    let base = format!("http://{}:{}/sync/reading-log", cfg.host, cfg.port);
+    let base = format!("https://{}:{}/sync/reading-log", cfg.host, cfg.port);
     let mark: ReadingWatermark = match agent
         .get(&base)
         .query("serial", &cfg.serial)
-        .set("X-Sidle-Token", &cfg.token)
-        .timeout(SYNC_TIMEOUT)
+        .header("X-Sidle-Token", &cfg.token)
+        .config()
+        .timeout_global(Some(SYNC_TIMEOUT))
+        .build()
         .call()
     {
-        // `into_string` + `serde_json`, not ureq's `into_json`: that needs the
-        // `json` feature, which pulls dependencies this crate keeps out.
-        Ok(res) => {
-            let text = res
-                .into_string()
+        // Read + `serde_json`, not ureq's `into_json`: that needs the `json`
+        // feature, which pulls dependencies this crate keeps out.
+        Ok(mut res) => {
+            let text = read_text(&mut res, JSON_MAX_BYTES)
                 .with_context(|| format!("read body of GET {base}"))?;
             serde_json::from_str(&text).with_context(|| format!("parse GET {base}"))?
         }
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("GET {base}: {e}").into()),
@@ -1309,22 +1403,23 @@ pub fn push_reading_log(
         dumps: &found.read,
     };
     let body = serde_json::to_vec(&req).context("serialize reading-log request")?;
-    let res = match agent
+    let mut res = match agent
         .post(&base)
-        .set("X-Sidle-Token", &cfg.token)
-        .set("Content-Type", "application/json")
-        .timeout(SYNC_TIMEOUT)
-        .send_bytes(&body)
+        .header("X-Sidle-Token", &cfg.token)
+        .header("Content-Type", "application/json")
+        .config()
+        .timeout_global(Some(SYNC_TIMEOUT))
+        .build()
+        .send(&body)
     {
         Ok(res) => res,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("POST {base}: {e}").into()),
     };
-    let text = res
-        .into_string()
-        .with_context(|| format!("read body of {base}"))?;
+    let text =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {base}"))?;
     let mut report: ReadingLogReport =
         serde_json::from_str(&text).with_context(|| format!("parse {base}"))?;
     report.skipped = found.skipped;

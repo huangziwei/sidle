@@ -29,7 +29,8 @@ device/
 │   │   └── sidle.sh        wrapper: applies staged updates, logs, execs
 │   ├── etc/
 │   │   ├── server.conf     your Mac's IP + auth token (gitignored)
-│   │   └── server.conf.example
+│   │   ├── server.conf.example
+│   │   └── ca.pem          the CA the picker pins (pushed from the library root)
 │   ├── config.xml          KUAL menu metadata — optional
 │   └── menu.json           KUAL entry "Sidle" → bin/sidle.sh — optional
 ├── assets/cover.svg        source for the tile's embedded cover art
@@ -149,6 +150,10 @@ when something goes wrong.
 - Raw evdev on `/dev/input/eventN` with `EVIOCGRAB` for exclusive input.
 - Framework lifecycle via `killall STOP cvm` / `killall CONT cvm` (with
   `appmgrd start home` to nudge the framework into repainting on exit).
-- HTTP via `ureq` (no TLS — LAN only), JSON via serde.
+- HTTPS via `ureq` 3 + `rustls` with the pure-Rust RustCrypto provider, JSON via
+  serde. TLS everywhere, including on the LAN: the picker pins the CA at
+  `etc/ca.pem` as its **only** trust root (the Mozilla root set is not compiled
+  in at all), so no public CA can issue a certificate it will accept. There is
+  no plaintext fall-back and the scheme is not configurable.
 - Text via `fontdue` + Kindle's bundled TBGothic font.
 - Images via `image` (JPEG/PNG features only).

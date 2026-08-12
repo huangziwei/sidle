@@ -339,8 +339,11 @@ fn run_update() -> anyhow::Result<()> {
     update_log("=== LAN self-update (--update): start ===");
     update_log(format!("argv: {:?}", std::env::args().collect::<Vec<_>>()));
     let cfg = config::load(Path::new(CONFIG_PATH))?;
-    update_log(format!("server: http://{}:{}", cfg.host, cfg.port));
-    let agent = ureq::AgentBuilder::new().build();
+    update_log(format!("server: https://{}:{}", cfg.host, cfg.port));
+    // A missing or unusable CA ends `--update` here rather than at the first
+    // request, so the log names the actual problem — this is the break-glass
+    // path, and "cannot reach the server" would send someone hunting the radio.
+    let agent = api::build_agent(|c| c).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut renderer = TextRenderer::load(FONT_PX)?;
     let orient = orientation::Orientation::detect();
@@ -389,18 +392,19 @@ fn run() -> anyhow::Result<()> {
     log(format!("sidle-native M9 start: ts={ts}"));
 
     let cfg = config::load(Path::new(CONFIG_PATH))?;
-    log(format!("server: http://{}:{}", cfg.host, cfg.port));
+    log(format!("server: https://{}:{}", cfg.host, cfg.port));
 
-    // One agent for the whole session: HTTP keep-alive across list + covers +
-    // download over a single warm connection (see api::get_with_token). The
-    // per-read timeout bounds a stalled socket without capping total transfer
-    // time, so a 300 MB+ book over a slow radio still completes; a dead
-    // connection fails in `SOCKET_READ_TIMEOUT` instead of hanging the picker.
-    // (list/cover keep their own short *overall* deadlines on top, via
-    // get_with_token — this per-read bound only ever tightens them.)
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(SOCKET_READ_TIMEOUT)
-        .build();
+    // One agent for the whole session: keep-alive across list + covers +
+    // download over a single warm connection (see api::get_with_token), which
+    // now also amortises the TLS handshake across the page's nine cover
+    // fetches instead of paying it per request. The per-read timeout bounds a
+    // stalled socket without capping total transfer time, so a 300 MB+ book
+    // over a slow radio still completes; a dead connection fails in
+    // `SOCKET_READ_TIMEOUT` instead of hanging the picker. (list/cover keep
+    // their own short *overall* deadlines on top, via get_with_token — this
+    // per-read bound only ever tightens them.)
+    let agent = api::build_agent(|c| c.timeout_recv_body(Some(SOCKET_READ_TIMEOUT)))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cache_dir = Path::new(COVER_CACHE_DIR);
 
     // Open the X11 window, input, and renderer *before* the first network

@@ -23,6 +23,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::api::Result;
+use crate::api::{JSON_MAX_BYTES, read_text};
 use crate::config::ServerConfig;
 
 /// One file in the server's `device-dist/manifest.json`. Mirrors the desktop's
@@ -83,11 +84,10 @@ const BINARY_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// `GET /device/manifest.json`. 401/403 → [`crate::api::SidleError::TokenMismatch`]
 /// (via `get_with_token`), so the caller shows the "plug into sidle" toast.
 pub fn fetch_manifest(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<DistManifest> {
-    let url = format!("http://{}:{}/device/manifest.json", cfg.host, cfg.port);
-    let res = crate::api::get_with_token(agent, &url, &cfg.token, MANIFEST_TIMEOUT)?;
-    let body = res
-        .into_string()
-        .with_context(|| format!("read body of {url}"))?;
+    let url = format!("https://{}:{}/device/manifest.json", cfg.host, cfg.port);
+    let mut res = crate::api::get_with_token(agent, &url, &cfg.token, MANIFEST_TIMEOUT)?;
+    let body =
+        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let manifest: DistManifest =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     Ok(manifest)
@@ -98,10 +98,11 @@ pub fn fetch_manifest(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<DistMan
 /// catch-all `{*name}` reassembles the path — percent-encoding the slash would
 /// break the route. v1 manifest names are ASCII path-safe.
 pub fn download_file(agent: &ureq::Agent, cfg: &ServerConfig, name: &str) -> Result<Vec<u8>> {
-    let url = format!("http://{}:{}/device/file/{}", cfg.host, cfg.port, name);
+    let url = format!("https://{}:{}/device/file/{}", cfg.host, cfg.port, name);
     let res = crate::api::get_with_token(agent, &url, &cfg.token, BINARY_DOWNLOAD_TIMEOUT)?;
     let mut bytes = Vec::new();
-    res.into_reader()
+    res.into_body()
+        .into_reader()
         .take(BINARY_MAX_BYTES as u64)
         .read_to_end(&mut bytes)
         .with_context(|| format!("read body of {url}"))?;

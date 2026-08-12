@@ -675,12 +675,17 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
         });
 
     let source = state.device_app_source.clone();
+    // Cheap and idempotent, and it has to exist before the status can say
+    // anything true about `etc/ca.pem`. Creating the CA needs no server and no
+    // network — just two files — so there is nothing to wait for.
+    let _ = sidle_core::library::tls::ensure_ca(&state.paths);
+    let ca_cert = state.paths.ca_cert();
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || {
-        deploy::compute_status(&source, &conf, transport.as_ref())
+        deploy::compute_status(&source, &conf, &ca_cert, transport.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -714,15 +719,23 @@ pub async fn device_app_install(
     let source = state.device_app_source.clone();
     let app_handle = app.clone();
     let dist_dir = state.paths.device_dist();
+    // Hard-fail rather than push a bundle without the trust root: the picker
+    // pins this CA and nothing else, so a device that receives every other file
+    // but not `etc/ca.pem` cannot complete a single handshake — and would look
+    // like a successful install.
+    sidle_core::library::tls::ensure_ca(&state.paths)
+        .map_err(|e| format!("issue the CA the device must pin: {e:#}"))?;
+    let ca_cert = state.paths.ca_cert();
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<DeployInstallReport, String> {
-        let report = deploy::install_all(&source, &conf, transport.as_ref(), |progress| {
-            let _ = app_handle.emit("device-app:install-progress", progress);
-        })
-        .map_err(|e| format!("{e:#}"))?;
+        let report =
+            deploy::install_all(&source, &conf, &ca_cert, transport.as_ref(), |progress| {
+                let _ = app_handle.emit("device-app:install-progress", progress);
+            })
+            .map_err(|e| format!("{e:#}"))?;
         // Refresh the LAN dist so an untethered in-app Update pull gets the
         // exact binary this push just wrote. Non-fatal — a staging miss
         // doesn't undo a successful device install.

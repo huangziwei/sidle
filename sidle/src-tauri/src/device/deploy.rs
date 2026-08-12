@@ -1,7 +1,8 @@
 //! On-device app deploy — pushes everything the native picker needs onto a
 //! jailbroken Kindle: the armv7 binary, the launcher wrapper, a freshly
-//! rendered `etc/server.conf`, the KUAL menu entry (`config.xml`,
-//! `menu.json`), and the one-tap launcher tile at `documents/Sidle.sh`.
+//! rendered `etc/server.conf`, the CA at `etc/ca.pem`, the KUAL menu entry
+//! (`config.xml`, `menu.json`), and the one-tap launcher tile at
+//! `documents/Sidle.sh`.
 //!
 //! The in-repo `device/` directory is a literal mirror of the mount, so a
 //! slot's source path and its device path are the same relative string —
@@ -9,6 +10,13 @@
 //! to the deploy means dropping it in `device/` at the path it should land on
 //! and adding one [`Slot`]; there is no source-vs-device path mapping to keep
 //! in sync.
+//!
+//! Two slots are **not** mirrored, because their bytes are per-install rather
+//! than per-repo: `etc/server.conf` is rendered live, and `etc/ca.pem` is
+//! copied from the library root. The CA is the root the picker pins — its only
+//! trust anchor, since the device client compiles in no public root set — so a
+//! bundle that arrives without it leaves a device that cannot complete a single
+//! handshake while looking perfectly installed.
 //!
 //! The picker is not a KUAL app: `documents/Sidle.sh` is a jailbreak-hotfix
 //! scriptlet the library indexes as a tile, and tapping it runs
@@ -277,13 +285,23 @@ fn mirrored(source: &DeploySource, device_rel: &'static str) -> Slot<'static> {
     }
 }
 
-fn slots<'a>(source: &'a DeploySource, conf: &ServerConfRender) -> Vec<Slot<'a>> {
+fn slots<'a>(source: &'a DeploySource, conf: &ServerConfRender, ca_cert: &Path) -> Vec<Slot<'a>> {
     vec![
         // Not mirrored: the picker is cross-compiled into `target/`, and ships
         // on-device under its short name.
         Slot {
             device_rel: "extensions/sidle/bin/sidle",
             source: Source::BinaryFile(source.binary_path.as_path()),
+        },
+        // Not mirrored: the CA lives in the library root, not the repo, and is
+        // per-install material like `server.conf`. This is the root the picker
+        // pins — its *only* trust anchor, since the device client is built with
+        // no public root set compiled in — so a device without it cannot
+        // complete a handshake at all. Pushed as a file rather than rendered
+        // bytes because that is what it is; the caller guarantees it exists.
+        Slot {
+            device_rel: "extensions/sidle/etc/ca.pem",
+            source: Source::File(ca_cert.to_path_buf()),
         },
         mirrored(source, "extensions/sidle/bin/sidle.sh"),
         // The KUAL menu entry — the optional second front door. Everything
@@ -350,12 +368,13 @@ fn device_sha_opt(transport: &dyn Transport, path: &TPath) -> Result<Option<Stri
 pub fn compute_status(
     source: &DeploySource,
     conf: &ServerConfRender,
+    ca_cert: &Path,
     transport: &dyn Transport,
 ) -> Result<DeployStatus> {
-    let mut files = Vec::with_capacity(7);
+    let mut files = Vec::with_capacity(8);
     let mut binary_missing = false;
 
-    for slot in slots(source, conf) {
+    for slot in slots(source, conf, ca_cert) {
         let device_hash = device_sha_opt(transport, &slot.tpath())?;
 
         let state = match slot.source {
@@ -364,9 +383,14 @@ pub fn compute_status(
                 classify(source_hash, device_hash)
             }
             Source::File(path) => {
+                // Two kinds of file land here: the `device/` mirror, where a
+                // miss means repo layout drift, and the CA in the library root,
+                // where it means nobody issued one. Name the path and let it say
+                // which rather than asserting the mirror.
                 let source_hash = sha256_file_opt(&path)?.ok_or_else(|| {
                     anyhow!(
-                        "device/ mirror source missing at {} — repo layout drift?",
+                        "deploy source missing at {} — repo layout drift, or TLS \
+                         material never issued",
                         path.display()
                     )
                 })?;
@@ -494,14 +518,15 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 pub fn install_all(
     source: &DeploySource,
     conf: &ServerConfRender,
+    ca_cert: &Path,
     transport: &dyn Transport,
     mut on_progress: impl FnMut(&DeployFileInstallResult),
 ) -> Result<DeployInstallReport> {
     // No explicit mkdir: `Transport::write_atomic` creates the bin/ and etc/
     // parents on both transports (mass-storage `create_dir_all`, MTP
     // `ensure_folder`), so a fresh install needs no pre-step.
-    let mut results = Vec::with_capacity(7);
-    for slot in slots(source, conf) {
+    let mut results = Vec::with_capacity(8);
+    for slot in slots(source, conf, ca_cert) {
         let result = install_one(transport, &slot);
         on_progress(&result);
         results.push(result);
@@ -748,6 +773,22 @@ mod tests {
         crate::device::mass_storage::transport::MassStorageTransport::new(dir.to_path_buf())
     }
 
+    /// A stand-in CA on disk. Deliberately NOT under the `device/` mirror: the
+    /// real one lives in the library root, and a test that put it in the mirror
+    /// would stop exercising the fact that this slot's source comes from
+    /// somewhere else entirely. Content is irrelevant here — every slot is
+    /// compared by hash, so any stable bytes prove the same plumbing.
+    fn ca_path(repo: &Path) -> PathBuf {
+        let p = repo.join("library-root").join("tls").join("ca.pem");
+        if !p.exists() {
+            write_file(
+                &p,
+                b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
+            );
+        }
+        p
+    }
+
     #[test]
     fn render_has_trailing_newline_and_all_fields() {
         let conf = make_conf();
@@ -811,7 +852,13 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
+        let status = compute_status(
+            &source,
+            &make_conf(),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+        )
+        .unwrap();
         assert_eq!(status.overall, DeployOverall::NotInstalled);
         assert!(
             status
@@ -828,8 +875,16 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
-        install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
-        let status = compute_status(&source, &conf, &ms(device.path())).unwrap();
+        install_all(
+            &source,
+            &conf,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+        let status =
+            compute_status(&source, &conf, &ca_path(tmp.path()), &ms(device.path())).unwrap();
         assert_eq!(status.overall, DeployOverall::InSync);
     }
 
@@ -841,12 +896,20 @@ mod tests {
 
         // First install with one token.
         let conf1 = make_conf();
-        install_all(&source, &conf1, &ms(device.path()), |_| {}).unwrap();
+        install_all(
+            &source,
+            &conf1,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
 
         // Token rotates; everything else identical.
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let status = compute_status(&source, &conf2, &ms(device.path())).unwrap();
+        let status =
+            compute_status(&source, &conf2, &ca_path(tmp.path()), &ms(device.path())).unwrap();
 
         match status.overall {
             DeployOverall::Stale {
@@ -873,7 +936,13 @@ mod tests {
         let source = make_source(tmp.path(), false); // no binary
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
+        let status = compute_status(
+            &source,
+            &make_conf(),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+        )
+        .unwrap();
         assert_eq!(status.overall, DeployOverall::BinaryNotBuilt);
         let bin = status
             .files
@@ -890,8 +959,22 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
-        install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
-        let report = install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
+        install_all(
+            &source,
+            &conf,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+        let report = install_all(
+            &source,
+            &conf,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
 
         assert!(
             report
@@ -909,11 +992,25 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
 
         let conf1 = make_conf();
-        install_all(&source, &conf1, &ms(device.path()), |_| {}).unwrap();
+        install_all(
+            &source,
+            &conf1,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
 
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let report = install_all(&source, &conf2, &ms(device.path()), |_| {}).unwrap();
+        let report = install_all(
+            &source,
+            &conf2,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
 
         let written: Vec<&str> = report
             .results
@@ -932,7 +1029,14 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
-        install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
+        install_all(
+            &source,
+            &make_conf(),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
         assert!(
@@ -953,6 +1057,43 @@ mod tests {
         );
     }
 
+    /// The CA has to arrive, byte-identical, from outside the `device/` mirror.
+    ///
+    /// Worth its own test rather than leaning on the file count: the picker pins
+    /// this root and carries no public root set at all, so a deploy that pushed
+    /// every other file but silently skipped or corrupted this one would look
+    /// completely successful and leave a device that cannot complete a single
+    /// handshake. The failure would surface as "sync is broken", nowhere near
+    /// this code.
+    #[test]
+    fn install_pushes_the_ca_the_picker_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+
+        install_all(&source, &make_conf(), &ca, &ms(device.path()), |_| {}).unwrap();
+
+        let landed = device.path().join("extensions/sidle/etc/ca.pem");
+        assert!(landed.exists(), "the device never received a trust root");
+        assert_eq!(
+            std::fs::read(&landed).unwrap(),
+            std::fs::read(&ca).unwrap(),
+            "the CA must arrive byte-identical — a re-encoded or truncated PEM \
+             fails verification just as completely as a missing one"
+        );
+        // It comes from the library root, so it must NOT be expected in the
+        // repo mirror — a future `mirrored()` call for this path would compile
+        // and then push the wrong bytes.
+        assert!(
+            !source
+                .mount_dir
+                .join("extensions/sidle/etc/ca.pem")
+                .exists(),
+            "the CA is per-install state, not a mirrored repo file"
+        );
+    }
+
     #[test]
     fn install_progress_fires_per_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -960,10 +1101,17 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
 
         let mut events = 0;
-        install_all(&source, &make_conf(), &ms(device.path()), |_| events += 1).unwrap();
+        install_all(
+            &source,
+            &make_conf(),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| events += 1,
+        )
+        .unwrap();
         // extensions/sidle/{bin/sidle, bin/sidle.sh, config.xml, menu.json,
-        // etc/server.conf} + documents/Sidle.sh
-        assert_eq!(events, 6);
+        // etc/server.conf, etc/ca.pem} + documents/Sidle.sh
+        assert_eq!(events, 7);
     }
 
     #[test]
@@ -994,7 +1142,14 @@ mod tests {
         let stale = bin_dir.join("sidle.new");
         std::fs::write(&stale, b"stale-lan-stage").unwrap();
 
-        install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
+        install_all(
+            &source,
+            &make_conf(),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
 
         assert!(
             !stale.exists(),
