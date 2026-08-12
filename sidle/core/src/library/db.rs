@@ -175,7 +175,11 @@ pub struct BookRow {
 /// v19: cuts stored sessions at the midnights they cross, so a night's reading
 /// counts to the night it happened. Data-only — see
 /// [`split_sessions_at_midnight`].
-pub const SCHEMA_VERSION: i64 = 19;
+/// v20: added `reading_session_hours` — which clock hours a sitting's reading
+/// actually fell in, recorded from the log's own intervals at parse time. The
+/// events state it and are never offered twice; a session row keeps only a
+/// window and a total, from which the hours can afterwards only be guessed at.
+pub const SCHEMA_VERSION: i64 = 20;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -740,6 +744,31 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS reading_sessions_day ON reading_sessions (day)",
+        [],
+    )?;
+
+    // v20: which hours of its day a sitting's reading fell in.
+    //
+    // Not a cache of anything. A session states a window and a total, and those
+    // two cannot yield the distribution inside them: an hour spent on one
+    // chapter and then a slow hour of glancing at the page are the same row.
+    // Only the log's own intervals say, the parser is the only thing that ever
+    // sees them, and a device never sends an event twice — so this is written at
+    // parse time or it is not knowable afterwards.
+    //
+    // Hours, not finer: the device credits a whole interval at its far end, so a
+    // page turn is the resolution the source actually carries, and an hour is
+    // the finest unit anything here reports. Keyed to the session, which carries
+    // the day and the book — a session cannot cross midnight, so every hour of
+    // one belongs to one day.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_session_hours (
+            session_id INTEGER NOT NULL
+                       REFERENCES reading_sessions (id) ON DELETE CASCADE,
+            hour       INTEGER NOT NULL,
+            seconds    INTEGER NOT NULL,
+            PRIMARY KEY (session_id, hour)
+        )"#,
         [],
     )?;
     conn.execute(
@@ -1587,6 +1616,46 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
     Ok(n > 0)
 }
 
+/// Record which hours of its day a session's reading fell in.
+///
+/// Called with the row the same parse produced, and only when that row was
+/// actually stored: hours and totals are one measurement, and a set of hours
+/// against someone else's totals would have the clock report a day the calendar
+/// beside it does not.
+///
+/// Keyed by the session's identity rather than a row id the caller would have to
+/// thread through. Silently does nothing when no such session is stored, which is
+/// the right answer for the case that reaches here: hours against no session
+/// would be reported nowhere and deleted by nothing.
+pub fn record_session_hours(
+    conn: &Connection,
+    s: &ReadingSession,
+    hours: &[(u8, i64)],
+) -> rusqlite::Result<()> {
+    if hours.is_empty() {
+        return Ok(());
+    }
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM reading_sessions
+              WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
+            params![s.device_serial, s.started_at, s.end_position],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(());
+    };
+    for (hour, seconds) in hours {
+        conn.execute(
+            "INSERT OR REPLACE INTO reading_session_hours (session_id, hour, seconds)
+             VALUES (?1, ?2, ?3)",
+            params![id, hour, seconds],
+        )?;
+    }
+    Ok(())
+}
+
 /// One day's share of a session that ran across midnight.
 struct Piece {
     started_at: String,
@@ -1969,6 +2038,10 @@ pub fn dumps_owner(
 /// would leave a library that refuses to re-import the very archives it no longer
 /// holds. Returns how many sessions went.
 pub fn clear_reading_log(conn: &Connection) -> rusqlite::Result<usize> {
+    // Explicitly, not by cascade: the foreign key only fires where
+    // `PRAGMA foreign_keys` is on, and a connection that opened without it would
+    // leave these rows behind to be adopted by whatever row id came next.
+    conn.execute("DELETE FROM reading_session_hours", [])?;
     let sessions = conn.execute("DELETE FROM reading_sessions", [])?;
     conn.execute("DELETE FROM reading_log_dumps", [])?;
     Ok(sessions)
@@ -2040,21 +2113,58 @@ const SPREADABLE_SPAN_SECS: i64 = 6 * 3600;
 
 /// When reading happened, by hour of the day.
 ///
-/// A session states a wall-clock window and the seconds of reading counted
-/// inside it, which are not the same number — the device credits reading, not
-/// the clock. Its time is therefore spread evenly across the hours the window
-/// covers, that being the only thing the row actually claims. A row too wide to
-/// be one sitting ([`SPREADABLE_SPAN_SECS`]) is instead booked whole to the hour
-/// it began, which is the one thing about such a row that is still a fact.
+/// Read from `reading_session_hours` wherever a session has it: the log's own
+/// intervals, booked to the hours they ran through when the events were still to
+/// hand. That is measurement, and it is why this is not a view over the session
+/// table.
+///
+/// The fallback below is for rows stored before those hours were kept, and it is
+/// the reason they are kept. A session states a wall-clock window and the seconds
+/// counted inside it, which are not the same number — the device credits reading,
+/// not the clock — so all such a row supports is spreading its time evenly across
+/// the hours it covers, which turns an hour of solid reading into a smear over
+/// however long the sitting happened to last. A row too wide to be one sitting
+/// ([`SPREADABLE_SPAN_SECS`]) is instead booked whole to the hour it began, which
+/// is the one thing about such a row that is still a fact.
 ///
 /// The *hour* is the true clock hour, including past midnight. The *day* is the
 /// session's own day throughout, so these totals sum to exactly what
 /// [`reading_days`] reports for the same window rather than drifting from it by
 /// whatever crossed midnight.
 pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
+    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
+    let cell = |day: &str, hour: u8| -> Option<(String, u8, u8)> {
+        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+        Some((
+            day[..7].to_string(),
+            chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
+            hour,
+        ))
+    };
+
+    let mut measured = conn.prepare(
+        "SELECT s.day, h.hour, h.seconds
+           FROM reading_session_hours h
+           JOIN reading_sessions s ON s.id = h.session_id
+          WHERE s.book_id IS NOT NULL",
+    )?;
+    for row in measured.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, u8>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })? {
+        let (day, hour, seconds) = row?;
+        if let Some(key) = cell(&day, hour.min(23)) {
+            *cells.entry(key).or_default() += seconds;
+        }
+    }
+
     let mut stmt = conn.prepare(
         "SELECT day, started_at, ended_at, seconds FROM reading_sessions
-          WHERE book_id IS NOT NULL AND seconds > 0",
+          WHERE book_id IS NOT NULL AND seconds > 0
+            AND id NOT IN (SELECT session_id FROM reading_session_hours)",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -2065,19 +2175,12 @@ pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
         ))
     })?;
 
-    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
     for row in rows {
         let (day, started_at, ended_at, seconds) = row?;
-        let Ok(date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") else {
+        if cell(&day, 0).is_none() {
             continue;
-        };
-        let key = |hour: u8| {
-            (
-                day[..7].to_string(),
-                chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
-                hour,
-            )
-        };
+        }
+        let key = |hour: u8| cell(&day, hour).expect("day parsed above");
         let (Some(from), Some(to)) = (clock_secs(&started_at), clock_secs(&ended_at)) else {
             continue;
         };
@@ -6361,9 +6464,49 @@ mod tests {
     }
 
     #[test]
-    fn a_sitting_is_spread_over_the_hours_it_covered() {
+    fn the_clock_reports_the_hours_the_log_recorded_not_the_ones_it_could_guess() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-hours", "A book");
+        // A sitting two hours wide whose reading was nearly all in the first
+        // hour. Nothing about the row says so — only the log's own intervals did,
+        // and this is where they were kept.
+        let row = ReadingSession {
+            started_at: "2026-08-11T20:00:00".into(),
+            ended_at: "2026-08-11T22:00:00".into(),
+            book_id: Some(book),
+            ..session("2026-08-11", 1, 3000)
+        };
+        insert_reading_session(&conn, &row).unwrap();
+        record_session_hours(&conn, &row, &[(20, 2900), (21, 100)]).unwrap();
+
+        let cells = reading_clock(&conn).unwrap();
+        let at = |h: u8| cells.iter().find(|c| c.hour == h).map_or(0, |c| c.seconds);
+        // Spreading the window would have reported 1500 s in each hour.
+        assert_eq!((at(20), at(21)), (2900, 100));
+        // Counted once: a session with recorded hours must not also be spread.
+        assert_eq!(cells.iter().map(|c| c.seconds).sum::<i64>(), 3000);
+        assert_eq!(
+            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap(),
+            vec![("2026-08-11".to_string(), 3000)],
+            "and the clock still agrees with the calendar beside it",
+        );
+
+        // Clearing takes the hours with the sessions rather than leaving them to
+        // be adopted by whatever row id comes next.
+        clear_reading_log(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM reading_session_hours", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_sitting_without_recorded_hours_is_spread_over_the_ones_it_covered() {
         let conn = fresh_db();
         let book = insert_minimal(&conn, "sha-clock", "A book");
+        // The fallback, for rows stored before the parser kept its intervals.
         // Ninety minutes of counted reading over three hours of clock: half an
         // hour of the 20:00 hour, all of 21:00, half of 22:00 — so the middle
         // hour takes twice what either end does.

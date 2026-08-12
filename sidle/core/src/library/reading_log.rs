@@ -117,6 +117,18 @@ pub struct Session {
     /// sync files that under a `book_id`. A point in both is the same reader in
     /// the same book.
     pub locations: Vec<Location>,
+    /// Seconds of counted reading per clock hour of the session's own day,
+    /// ascending by hour, summing to exactly [`Self::seconds`].
+    ///
+    /// **This is evidence, not a derivation, and it exists only here.** The
+    /// device states its counter at each event, so the parser knows which hours
+    /// a sitting's reading actually fell in — and after this pass nobody will:
+    /// the events are never offered twice, and a stored session keeps only its
+    /// window and its total. Anything reconstructing hours from those two has to
+    /// assume the reading was spread evenly across the sitting, which is how an
+    /// hour spent on one chapter before midnight becomes an even smear over the
+    /// three hours the sitting happened to span.
+    pub hours: Vec<(u8, i64)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -689,7 +701,7 @@ struct Opened {
     at: Moment,
 }
 
-/// Where a session begins: the counters it resumes from and the clock time it
+/// Where a session begins: the counters it resumes from and the instant it
 /// started at. Either the `OpenBook` that vouched for them, or the midnight a
 /// run was cut at.
 struct Start {
@@ -697,7 +709,7 @@ struct Start {
     /// The word counter at that same instant, where it is known. An `OpenBook`
     /// states no word count; a midnight cut interpolates one.
     words: Option<i64>,
-    at: String,
+    at: Moment,
 }
 
 impl Opened {
@@ -718,7 +730,7 @@ impl Opened {
             .then_some(Start {
                 counter_ms: self.counter_ms,
                 words: None,
-                at: self.at.at,
+                at: self.at,
             })
     }
 }
@@ -749,27 +761,33 @@ struct Open {
     page_turns: i64,
     locations: Vec<Location>,
     /// The last observation's instant and counters — the near side of the
-    /// interval a midnight cut has to divide.
+    /// interval a midnight cut has to divide, and of the one each new
+    /// observation books against the clock.
     last: Moment,
     last_time: Option<i64>,
     last_words: Option<i64>,
+    /// Milliseconds of counted reading booked against each hour of the day, as
+    /// the intervals arrive. Kept here because this is the only place the
+    /// intervals exist: a stored session has only its window and its total.
+    hours_ms: [i64; 24],
 }
 
 impl Open {
     /// `start` is where the book was opened, where an `OpenBook` vouched for it
     /// or where midnight cut the run before it. That is the session's true floor
-    /// in both senses: the first *logged* observation can sit minutes past the
-    /// open, so taking it as the floor discards the reading in between and
-    /// reports a sitting that took no time at all. Without one, the first
-    /// observation is the best available start.
+    /// in three senses: the first *logged* observation can sit minutes past the
+    /// open, so taking it as the floor discards the reading in between, reports a
+    /// sitting that took no time at all, and books what it does count to the
+    /// wrong hours. Without one, the first observation is the best available
+    /// start.
     fn new(end_position: i64, now: &Moment, start: Option<Start>) -> Self {
-        let (time_lo, words_lo, started_at) = match start {
+        let (time_lo, words_lo, from) = match start {
             Some(s) => (Some(s.counter_ms), s.words, s.at),
-            None => (None, None, now.at.clone()),
+            None => (None, None, now.clone()),
         };
         Self {
             end_position,
-            started_at,
+            started_at: from.at.clone(),
             ended_at: now.at.clone(),
             time_lo,
             time_hi: time_lo.unwrap_or(0),
@@ -777,13 +795,53 @@ impl Open {
             words_hi: words_lo.unwrap_or(0),
             page_turns: 0,
             locations: Vec::new(),
-            last: now.clone(),
-            last_time: None,
-            last_words: None,
+            last: from,
+            // A vouched start is a counter reading at a known instant, so the
+            // stretch from there to the first observation is an interval like any
+            // other and is booked like one.
+            last_time: time_lo,
+            last_words: words_lo,
+            hours_ms: [0; 24],
         }
     }
 
+    /// Book an interval's counted reading against the clock hours it ran
+    /// through, `from` and `to` being seconds into the day.
+    ///
+    /// Evenly across the interval, which is the whole of what the log says: the
+    /// device credits an interval in full at its far end and states nothing
+    /// about where inside it the reading fell. An interval is a page turn wide,
+    /// so that assumption spans minutes — where spreading a *session* spans
+    /// hours, and is the guess this exists to avoid.
+    fn credit(&mut self, from: i64, to: i64, advance_ms: i64) {
+        if advance_ms <= 0 {
+            return;
+        }
+        let hour = |secs: i64| ((secs / 3600) as usize).min(23);
+        let span = to - from;
+        if span <= 0 {
+            self.hours_ms[hour(from)] += advance_ms;
+            return;
+        }
+        let mut placed = 0;
+        for h in (from / 3600)..=((to - 1) / 3600) {
+            let overlap = to.min((h + 1) * 3600) - from.max(h * 3600);
+            if overlap <= 0 {
+                continue;
+            }
+            let share = advance_ms * overlap / span;
+            placed += share;
+            self.hours_ms[hour(h * 3600)] += share;
+        }
+        // The division's remainder to the hour the interval began in, so the
+        // hours of a session add back up to the session.
+        self.hours_ms[hour(from)] += advance_ms - placed;
+    }
+
     fn observe(&mut self, now: &Moment, obs: &Observation) {
+        if let (Some(from), Some(to)) = (self.last_time, obs.total_ms) {
+            self.credit(self.last.secs, now.secs, to - from);
+        }
         self.ended_at = now.at.clone();
         self.last = now.clone();
         if obs.page_turn {
@@ -829,7 +887,12 @@ impl Open {
                 .last_words
                 .zip(obs.words)
                 .map(|(from, to)| from + share(to - from, elapsed, before)),
-            at: format!("{}T00:00:00", now.day),
+            at: Moment {
+                day: now.day.clone(),
+                secs: 0,
+                abs: now.abs - now.secs,
+                at: format!("{}T00:00:00", now.day),
+            },
         }))
     }
 
@@ -839,6 +902,11 @@ impl Open {
     /// The stored end is one second short of the boundary, that being the last
     /// instant this day has: reading recorded at `T00:00:00` is the next day's.
     fn finish_at(mut self, boundary: &Start) -> Session {
+        if let Some(from) = self.last_time {
+            // Midnight is 86400 seconds into *this* day; the same instant is
+            // second zero of the next, where the run resumes.
+            self.credit(self.last.secs, 86_400, boundary.counter_ms - from);
+        }
         self.time_hi = self.time_hi.max(boundary.counter_ms);
         if let Some(w) = boundary.words {
             self.words_hi = self.words_hi.max(w);
@@ -850,16 +918,49 @@ impl Open {
     fn finish(mut self) -> Session {
         self.locations.sort_unstable();
         self.locations.dedup();
+        let seconds = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
         Session {
+            hours: hours_in_seconds(&self.hours_ms, seconds),
             locations: self.locations,
             started_at: self.started_at,
             ended_at: self.ended_at,
             end_position: self.end_position,
-            seconds: (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000,
+            seconds,
             page_turns: self.page_turns,
             words: self.words_hi - self.words_lo.unwrap_or(self.words_hi),
         }
     }
+}
+
+/// The hours a session's milliseconds fall in, as whole seconds summing to
+/// exactly `seconds`.
+///
+/// Truncating each hour on its own would shed up to a second per hour, so a
+/// day's hours would quietly fall short of the day beside them. The running
+/// total is what gets truncated instead, which spends the error inside the
+/// session rather than losing it. A last correction covers the case the
+/// milliseconds cannot account for — a counter that ran backwards mid-run, say —
+/// because the two figures are shown side by side and must agree.
+fn hours_in_seconds(hours_ms: &[i64; 24], seconds: i64) -> Vec<(u8, i64)> {
+    let mut out = Vec::new();
+    let (mut running, mut placed) = (0, 0);
+    for (hour, ms) in hours_ms.iter().enumerate() {
+        running += ms;
+        let secs = running / 1000 - placed;
+        placed += secs;
+        if secs > 0 {
+            out.push((hour as u8, secs));
+        }
+    }
+    if placed != seconds
+        && let Some(busiest) = out
+            .iter_mut()
+            .max_by_key(|(_, s)| *s)
+            .filter(|(_, s)| *s + seconds - placed > 0)
+    {
+        busiest.1 += seconds - placed;
+    }
+    out
 }
 
 /// Map each book's per-line fingerprint to the number that actually identifies
@@ -1083,6 +1184,14 @@ pub fn store_events(
         };
         if db::insert_reading_session(conn, &row)? {
             out.added += 1;
+            // The hours the sitting's reading actually fell in — from the log's
+            // own intervals, which exist nowhere else and are never sent twice.
+            //
+            // Written with the row and only with the row. The two are one
+            // measurement: hours from a second, longer parse against totals from
+            // the first would have the clock report a day the calendar beside it
+            // does not.
+            db::record_session_hours(conn, &row, &s.hours)?;
         }
         // Keep where the reader stood, even though nothing here can say which
         // book it was. These lines will not be offered again — the device sends
@@ -1326,6 +1435,37 @@ mod tests {
         assert_eq!(out[0].ended_at, "2026-08-03T23:59:59");
         assert_eq!(out[1].started_at, "2026-08-04T00:00:00");
         assert_eq!(out[1].ended_at, "2026-08-04T00:10:00");
+        // The clock agrees with the calendar: the boundary divides the hours as
+        // it divides the days, with nothing booked to an hour on the far side.
+        assert_eq!(out[0].hours, vec![(23, 600)]);
+        assert_eq!(out[1].hours, vec![(0, 600)]);
+    }
+
+    #[test]
+    fn a_sitting_books_its_reading_to_the_hours_it_was_actually_read_in() {
+        let lines = [
+            page("260803:200000", "NextPage", 148_207, 0, 0),
+            page("260803:201500", "NextPage", 148_207, 900_000, 200),
+            page("260803:203000", "NextPage", 148_207, 1_800_000, 400),
+            // The reader stops here. The page still turns now and then, but the
+            // device credits five seconds for each of the next two stretches —
+            // it counts reading, and there is almost none.
+            page("260803:205500", "NextPage", 148_207, 1_805_000, 405),
+            page("260803:212000", "NextPage", 148_207, 1_810_000, 410),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].seconds, 1810);
+        // Half an hour of solid reading in the 20:00 hour and four seconds in
+        // the 21:00 hour. Spreading the session's total across its 80-minute
+        // window instead — all a stored row can support — would report 452 s of
+        // reading at 21:00, and the difference is not recoverable later.
+        assert_eq!(out[0].hours, vec![(20, 1806), (21, 4)]);
+        assert_eq!(
+            out[0].hours.iter().map(|(_, s)| s).sum::<i64>(),
+            out[0].seconds,
+            "the hours of a session must add up to the session",
+        );
     }
 
     #[test]
