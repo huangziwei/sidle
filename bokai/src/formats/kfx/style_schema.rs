@@ -231,6 +231,8 @@ pub enum IrField {
     BackgroundRepeat,
     BackgroundPositionX,
     BackgroundPositionY,
+    BackgroundSizeX,
+    BackgroundSizeY,
     VerticalAlign,
     TextDecorationUnderline,
     TextDecorationStrikethrough,
@@ -666,6 +668,22 @@ impl StyleSchema {
             ir_key: "background-position-y",
             ir_field: Some(IrField::BackgroundPositionY),
             kfx_symbol: KfxSymbol::BackgroundPositiony,
+            transform: ValueTransform::PreserveUnit,
+            context: StyleContext::BlockOnly,
+        });
+
+        schema.register(StylePropertyRule {
+            ir_key: "background-size-x",
+            ir_field: Some(IrField::BackgroundSizeX),
+            kfx_symbol: KfxSymbol::BackgroundSizex,
+            transform: ValueTransform::PreserveUnit,
+            context: StyleContext::BlockOnly,
+        });
+
+        schema.register(StylePropertyRule {
+            ir_key: "background-size-y",
+            ir_field: Some(IrField::BackgroundSizeY),
+            kfx_symbol: KfxSymbol::BackgroundSizey,
             transform: ValueTransform::PreserveUnit,
             context: StyleContext::BlockOnly,
         });
@@ -1860,6 +1878,34 @@ fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool
     value == default || matches!(value, ir_style::Length::Px(v) if v == 0.0)
 }
 
+/// One axis of `background-size`, as KFX's `background_sizex` / `sizey` can
+/// state it. `vertical` picks the y axis.
+///
+/// KFX has no `cover` / `contain` keyword — only a length per axis — so the
+/// two keywords cannot be carried across faithfully:
+///
+/// * `cover` becomes `100%` on both axes. That fills the box as the author
+///   asked, at the cost of the aspect ratio `cover` would have preserved by
+///   cropping. Leaving it off instead paints the picture at its intrinsic
+///   size, which for the full-page textures that use `cover` is further from
+///   the intent than a stretch.
+/// * `contain` is left off. Its whole point is that nothing is cropped or
+///   distorted, and `100%` would distort; the intrinsic size at least keeps
+///   the ratio.
+///
+/// The IR keeps the keyword either way, so the EPUB side round-trips exactly.
+fn background_size_axis(ir_style: &ir_style::ComputedStyle, vertical: bool) -> Option<String> {
+    ir_style.background_image.as_ref()?;
+    match ir_style.background_size {
+        ir_style::BackgroundSize::Auto | ir_style::BackgroundSize::Contain => None,
+        ir_style::BackgroundSize::Cover => Some("100%".to_string()),
+        ir_style::BackgroundSize::Explicit(x, y) => {
+            let len = if vertical { y } else { x };
+            (len != ir_style::Length::Auto).then(|| len.to_css_string())
+        }
+    }
+}
+
 /// Extract a CSS string from an IR ComputedStyle field.
 ///
 /// This is the centralized extraction logic for the bidirectional schema.
@@ -2013,6 +2059,8 @@ pub fn extract_ir_field(
                 default.background_position_y,
             ))
         .then(|| ir_style.background_position_y.to_css_string()),
+        IrField::BackgroundSizeX => background_size_axis(ir_style, false),
+        IrField::BackgroundSizeY => background_size_axis(ir_style, true),
         IrField::VerticalAlign => {
             if ir_style.vertical_align != ir_style::VerticalAlign::Baseline {
                 Some(ir_style.vertical_align.to_css_string())
@@ -2652,6 +2700,26 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
         IrField::BackgroundPositionX => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 ir_style.background_position_x = len;
+            }
+        }
+        // KFX states size per axis, so each arm fills its own half of the
+        // pair and leaves whatever the other arm already wrote.
+        IrField::BackgroundSizeX => {
+            if let Some(len) = parse_css_length_to_ir(css_value) {
+                let y = match ir_style.background_size {
+                    ir_style::BackgroundSize::Explicit(_, y) => y,
+                    _ => ir_style::Length::Auto,
+                };
+                ir_style.background_size = ir_style::BackgroundSize::Explicit(len, y);
+            }
+        }
+        IrField::BackgroundSizeY => {
+            if let Some(len) = parse_css_length_to_ir(css_value) {
+                let x = match ir_style.background_size {
+                    ir_style::BackgroundSize::Explicit(x, _) => x,
+                    _ => ir_style::Length::Auto,
+                };
+                ir_style.background_size = ir_style::BackgroundSize::Explicit(x, len);
             }
         }
         IrField::BackgroundPositionY => {

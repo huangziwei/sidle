@@ -132,6 +132,7 @@ impl ToCss for ComputedStyle {
             buf.push_str("\"); ");
             // Only meaningful alongside an image, so they ride with it.
             emit_if_changed!(self, default, buf, background_repeat, "background-repeat");
+            emit_if_changed!(self, default, buf, background_size, "background-size");
             if self.background_position_x != default.background_position_x
                 || self.background_position_y != default.background_position_y
             {

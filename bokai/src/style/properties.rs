@@ -181,6 +181,41 @@ enum_property! {
     }
 }
 
+/// How a background image is scaled into its box (`background-size`).
+///
+/// `Cover` and `Contain` are keywords, not lengths: they depend on the box's
+/// measured aspect ratio, which no stylesheet-time value can stand in for. A
+/// consumer that cannot express them says so at the point of export rather
+/// than having the distinction quietly flattened here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BackgroundSize {
+    /// Not declared — the picture is drawn at its intrinsic size.
+    #[default]
+    Auto,
+    /// Scale uniformly until the box is covered, cropping the overflow.
+    Cover,
+    /// Scale uniformly until the picture fits inside the box.
+    Contain,
+    /// Explicit per-axis size. `Length::Auto` on an axis means "keep the
+    /// intrinsic ratio against the other one".
+    Explicit(Length, Length),
+}
+
+impl ToCss for BackgroundSize {
+    fn to_css(&self, buf: &mut String) {
+        match self {
+            BackgroundSize::Auto => buf.push_str("auto"),
+            BackgroundSize::Cover => buf.push_str("cover"),
+            BackgroundSize::Contain => buf.push_str("contain"),
+            BackgroundSize::Explicit(x, y) => {
+                x.to_css(buf);
+                buf.push(' ');
+                y.to_css(buf);
+            }
+        }
+    }
+}
+
 enum_property! {
     /// Border style values.
     ///

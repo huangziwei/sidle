@@ -36,6 +36,7 @@ pub struct ComputedStyle {
     // no-repeat center }`), so dropping it loses a picture, not a flourish.
     pub background_image: Option<String>,
     pub background_repeat: BackgroundRepeat,
+    pub background_size: BackgroundSize,
     /// Background origin offsets. `Auto` means the source declared none;
     /// CSS's initial `0% 0%` applies.
     pub background_position_x: Length,

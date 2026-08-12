@@ -91,7 +91,27 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
     }
 
     resolve_box_align(&mut out);
+    merge_axis_pair(&mut out, "background-position", "0%");
+    merge_axis_pair(&mut out, "background-size", "auto");
     out
+}
+
+/// Fold a KFX per-axis pair into the CSS shorthand that carries both.
+///
+/// KFX states background position and size as `…x` / `…y` fields. CSS has no
+/// `background-size-x`, and while `background-position-x` does exist it is a
+/// later addition than the shorthand — so this output, which goes straight
+/// into a stylesheet, uses the two-value shorthand both renderers have always
+/// understood. `missing` is the value for an axis the style leaves unstated.
+fn merge_axis_pair(decl: &mut CssDecl, property: &str, missing: &str) {
+    let x = decl.take(&format!("{property}-x"));
+    let y = decl.take(&format!("{property}-y"));
+    if x.is_none() && y.is_none() {
+        return;
+    }
+    let x = x.unwrap_or_else(|| missing.to_string());
+    let y = y.unwrap_or_else(|| missing.to_string());
+    decl.set(property.to_string(), format!("{x} {y}"));
 }
 
 /// The pseudo-class rules a KFX style carries for hyperlink states.
@@ -1387,6 +1407,20 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         "background_positiony",
         Prop {
             name: "background-position-y",
+            values: None,
+        },
+    ),
+    (
+        "background_sizex",
+        Prop {
+            name: "background-size-x",
+            values: None,
+        },
+    ),
+    (
+        "background_sizey",
+        Prop {
+            name: "background-size-y",
             values: None,
         },
     ),

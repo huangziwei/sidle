@@ -4,7 +4,7 @@
 
 use cssparser::{ParseError, Parser, Token};
 
-use crate::style::properties::{BackgroundRepeat, Color, Length};
+use crate::style::properties::{BackgroundRepeat, BackgroundSize, Color, Length};
 
 /// Text decoration value (can combine underline and line-through).
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,6 +74,7 @@ pub(crate) struct BackgroundShorthand {
     pub repeat: Option<BackgroundRepeat>,
     pub position_x: Option<Length>,
     pub position_y: Option<Length>,
+    pub size: Option<BackgroundSize>,
 }
 
 /// Parse the CSS `background` shorthand.
@@ -131,6 +132,7 @@ pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Backgrou
         enum Kw {
             Repeat(BackgroundRepeat),
             Position(PositionComponent),
+            Size(BackgroundSize),
             Ignored,
         }
         if let Ok(kw) = input.try_parse(|i| {
@@ -143,32 +145,46 @@ pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> Backgrou
                 "no-repeat" => Kw::Repeat(BackgroundRepeat::NoRepeat),
                 "space" => Kw::Repeat(BackgroundRepeat::Space),
                 "round" => Kw::Repeat(BackgroundRepeat::Round),
+                // size keywords — only ever after the `/`
+                "cover" => Kw::Size(BackgroundSize::Cover),
+                "contain" => Kw::Size(BackgroundSize::Contain),
                 // position keywords
                 "left" => Kw::Position(PositionComponent::Horizontal(0.0)),
                 "right" => Kw::Position(PositionComponent::Horizontal(100.0)),
                 "top" => Kw::Position(PositionComponent::Vertical(0.0)),
                 "bottom" => Kw::Position(PositionComponent::Vertical(100.0)),
                 "center" => Kw::Position(PositionComponent::Either(50.0)),
-                // size keywords / attachment keywords / box (origin, clip)
-                // keywords / `none`: consumed, not modelled
-                "cover" | "contain" | "auto" | "scroll" | "fixed" | "local" | "padding-box"
-                | "border-box" | "content-box" | "none" => Kw::Ignored,
+                // `auto` is a size on either axis and the initial value of
+                // several other components; attachment / box (origin, clip) /
+                // `none` carry nothing the IR models.
+                "auto" | "scroll" | "fixed" | "local" | "padding-box" | "border-box"
+                | "content-box" | "none" => Kw::Ignored,
                 _ => return Err(i.new_custom_error::<_, ()>(())),
             })
         }) {
             match kw {
                 Kw::Repeat(r) => out.repeat = Some(r),
+                Kw::Size(s) => out.size = Some(s),
                 Kw::Position(p) if !size_follows => positions.push(p),
                 Kw::Position(_) | Kw::Ignored => {}
             }
             continue;
         }
 
-        // Lengths and percentages. Before the `/` they are position offsets;
-        // after it they are the size, which the IR does not model.
+        // Lengths and percentages: position offsets before the `/`, the
+        // explicit size after it.
         if let Ok(len) = input.try_parse(|i| parse_length(i).ok_or(i.new_custom_error::<_, ()>(())))
         {
-            if !size_follows {
+            if size_follows {
+                out.size = Some(match out.size {
+                    // Second value completes the pair; `Length::Auto` stands
+                    // in for the axis the author left implicit.
+                    Some(BackgroundSize::Explicit(x, Length::Auto)) => {
+                        BackgroundSize::Explicit(x, len)
+                    }
+                    _ => BackgroundSize::Explicit(len, Length::Auto),
+                });
+            } else {
                 positions.push(match len {
                     Length::Percent(p) => PositionComponent::Either(p),
                     other => PositionComponent::Length(other),
@@ -278,6 +294,27 @@ pub(crate) fn parse_url_value(input: &mut Parser<'_, '_>) -> Option<String> {
 pub(crate) fn parse_background_repeat(input: &mut Parser<'_, '_>) -> Option<BackgroundRepeat> {
     let ident = input.try_parse(|i| i.expect_ident_cloned()).ok()?;
     BackgroundRepeat::from_css(&ident.to_ascii_lowercase())
+}
+
+/// Parse a `background-size` value: `cover`, `contain`, or one/two
+/// lengths where a missing second axis is `auto`.
+pub(crate) fn parse_background_size(input: &mut Parser<'_, '_>) -> Option<BackgroundSize> {
+    if let Ok(kw) = input.try_parse(|i| {
+        let ident = i.expect_ident()?;
+        Ok(match ident.as_ref() {
+            "cover" => BackgroundSize::Cover,
+            "contain" => BackgroundSize::Contain,
+            "auto" => BackgroundSize::Auto,
+            _ => return Err(i.new_custom_error::<_, ()>(())),
+        })
+    }) {
+        return Some(kw);
+    }
+    let x = parse_length(input)?;
+    let y = input
+        .try_parse(|i| parse_length(i).ok_or(i.new_custom_error::<_, ()>(())))
+        .unwrap_or(Length::Auto);
+    Some(BackgroundSize::Explicit(x, y))
 }
 
 /// Parse a `background-position` value into its two axes.

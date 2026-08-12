@@ -2019,6 +2019,24 @@ fn resolve_page_target(
 // Entity Assembler: Packages Schema output into KFX Entity Hierarchy
 // ============================================================================
 
+/// The background half of `<body>`'s style, when it declares a picture.
+///
+/// `None` — so the page template stays exactly as it was — for the ordinary
+/// chapter whose body paints nothing.
+fn page_background_style(chapter: &Chapter) -> Option<crate::style::ComputedStyle> {
+    let root = chapter.styles.get(chapter.node(chapter.root())?.style)?;
+    root.background_image.as_ref()?;
+    Some(crate::style::ComputedStyle {
+        background_image: root.background_image.clone(),
+        background_repeat: root.background_repeat,
+        background_position_x: root.background_position_x,
+        background_position_y: root.background_position_y,
+        background_size: root.background_size,
+        background_color: root.background_color,
+        ..Default::default()
+    })
+}
+
 /// Build chapter entities returning them separately for grouped emission.
 ///
 /// Returns (section, storyline, Option<content>) so they can be grouped by type.
@@ -2154,7 +2172,7 @@ fn build_chapter_entities_grouped(
         ])
     } else {
         // Normal text page
-        IonValue::Struct(vec![
+        let mut fields = vec![
             (KfxSymbol::Id as u64, IonValue::Int(section_id as i64)),
             (
                 KfxSymbol::StoryName as u64,
@@ -2164,7 +2182,17 @@ fn build_chapter_entities_grouped(
                 KfxSymbol::Type as u64,
                 IonValue::Symbol(KfxSymbol::Text as u64),
             ),
-        ])
+        ];
+        // A picture `<body>` paints belongs to the page, not to any element
+        // inside it — the storyline walk emits the root's children and never
+        // the root itself, so the page template is where it can land. Only a
+        // background reaches it: the rest of body's box (its margins, its
+        // padding) has no page-template meaning and is left alone.
+        if let Some(style) = page_background_style(chapter) {
+            let symbol = ctx.register_ir_style_with_hint(&style, Some("page"));
+            fields.push((KfxSymbol::Style as u64, IonValue::Symbol(symbol)));
+        }
+        IonValue::Struct(fields)
     };
 
     let section_ion = IonValue::Struct(vec![
@@ -6712,6 +6740,49 @@ mod entity_structure_tests {
 // *is* the cover (cover.jpeg), so that branch can't be exercised here. Dropped
 // with the epictetus fixture; re-add with a synthetic cover≠titlepage book if
 // this path regresses.
+
+#[cfg(test)]
+mod page_background_tests {
+    use super::*;
+    use crate::style::{BackgroundSize, ComputedStyle};
+
+    /// A picture `<body>` paints has nowhere to go inside the storyline — the
+    /// walk emits the root's children, never the root — so it rides on the
+    /// section's page template instead. Anything else about body's box stays
+    /// off it: a page template is not a block container.
+    #[test]
+    fn body_background_becomes_a_page_style() {
+        let mut chapter = Chapter::new();
+        let style = ComputedStyle {
+            background_image: Some("OEBPS/images/paper.jpg".to_string()),
+            background_size: BackgroundSize::Cover,
+            // Body's box, which must not follow the picture onto the page.
+            margin_top: crate::style::Length::Px(40.0),
+            ..Default::default()
+        };
+        let id = chapter.styles.intern(style);
+        chapter.node_mut(chapter.root()).unwrap().style = id;
+
+        let page = page_background_style(&chapter).expect("a painted body yields a page style");
+        assert_eq!(
+            page.background_image.as_deref(),
+            Some("OEBPS/images/paper.jpg")
+        );
+        assert_eq!(page.background_size, BackgroundSize::Cover);
+        assert_eq!(page.margin_top, crate::style::Length::Auto);
+    }
+
+    #[test]
+    fn an_unpainted_body_leaves_the_page_template_alone() {
+        let mut chapter = Chapter::new();
+        let id = chapter.styles.intern(ComputedStyle {
+            margin_top: crate::style::Length::Px(40.0),
+            ..Default::default()
+        });
+        chapter.node_mut(chapter.root()).unwrap().style = id;
+        assert!(page_background_style(&chapter).is_none());
+    }
+}
 
 #[cfg(test)]
 mod resource_export_tests {

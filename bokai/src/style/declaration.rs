@@ -29,8 +29,8 @@ use super::parse::keywords::{
 };
 use super::parse::values::{
     Axis, parse_background_position, parse_background_position_axis, parse_background_repeat,
-    parse_background_shorthand, parse_color, parse_integer, parse_length, parse_length_or_normal,
-    parse_text_decoration, parse_url_value,
+    parse_background_shorthand, parse_background_size, parse_color, parse_integer, parse_length,
+    parse_length_or_normal, parse_text_decoration, parse_url_value,
 };
 use super::properties::*;
 
@@ -48,6 +48,7 @@ pub enum Declaration {
     // importer resolves it against the stylesheet's own location.
     BackgroundImage(String),
     BackgroundRepeat(BackgroundRepeat),
+    BackgroundSize(BackgroundSize),
     BackgroundPositionX(Length),
     BackgroundPositionY(Length),
 
@@ -261,6 +262,9 @@ impl Declaration {
                 if let Some(r) = bg.repeat {
                     decls.push(Self::BackgroundRepeat(r));
                 }
+                if let Some(sz) = bg.size {
+                    decls.push(Self::BackgroundSize(sz));
+                }
                 if let Some(x) = bg.position_x {
                     decls.push(Self::BackgroundPositionX(x));
                 }
@@ -328,6 +332,7 @@ impl Declaration {
             "background-color" => parse_color(input).map(Self::BackgroundColor),
             "background-image" => parse_url_value(input).map(Self::BackgroundImage),
             "background-repeat" => parse_background_repeat(input).map(Self::BackgroundRepeat),
+            "background-size" => parse_background_size(input).map(Self::BackgroundSize),
             "background-position-x" => {
                 parse_background_position_axis(input, Axis::Horizontal).map(Self::BackgroundPositionX)
             }
@@ -630,8 +635,8 @@ mod tests {
         ));
     }
 
-    /// Everything after the `/` is the size, which the IR does not model —
-    /// but it must not be mistaken for the position that precedes it.
+    /// The size follows the `/` and must not be mistaken for the position
+    /// that precedes it — nor swallow it.
     #[test]
     fn background_size_does_not_displace_the_position() {
         let decls = parse_decl("background", "url(bg.png) no-repeat left top / cover");
@@ -645,6 +650,50 @@ mod tests {
         });
         assert_eq!(x, Some(Length::Percent(0.0)));
         assert_eq!(y, Some(Length::Percent(0.0)));
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BackgroundSize(BackgroundSize::Cover)))
+        );
+    }
+
+    /// `background-size` in all three forms it is written in: the keywords,
+    /// one length (the other axis stays proportional), and an explicit pair.
+    #[test]
+    fn background_size_parses_keywords_and_lengths() {
+        let size_of = |name: &str, value: &str| {
+            parse_decl(name, value).into_iter().find_map(|d| match d {
+                Declaration::BackgroundSize(s) => Some(s),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            size_of("background-size", "cover"),
+            Some(BackgroundSize::Cover)
+        );
+        assert_eq!(
+            size_of("background-size", "contain"),
+            Some(BackgroundSize::Contain)
+        );
+        assert_eq!(
+            size_of("background-size", "50%"),
+            Some(BackgroundSize::Explicit(
+                Length::Percent(50.0),
+                Length::Auto
+            ))
+        );
+        assert_eq!(
+            size_of("background-size", "10px 20px"),
+            Some(BackgroundSize::Explicit(Length::Px(10.0), Length::Px(20.0)))
+        );
+        // Also reachable through the shorthand's post-slash slot.
+        assert_eq!(
+            size_of("background", "url(a.png) center / 100% 100%"),
+            Some(BackgroundSize::Explicit(
+                Length::Percent(100.0),
+                Length::Percent(100.0)
+            ))
+        );
     }
 
     /// Named axes bind by name, not by order — `bottom left` is y then x.
