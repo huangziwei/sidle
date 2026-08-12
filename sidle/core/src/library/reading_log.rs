@@ -36,6 +36,11 @@
 //! The offset itself is recorded nowhere, so a device carried across timezones
 //! stamps each day in whatever local time it was on and nothing afterwards can
 //! reconcile them.
+//!
+//! So the day a session counts to, and the midnight a run is cut at, are the
+//! reader's own — never the host's, and never UTC, which west of Greenwich would
+//! move a late night's reading a day early and east of it a day late. Nothing
+//! downstream converts: the stamps stay the naive local strings written here.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -502,9 +507,25 @@ fn opened_at_counter(line: &str) -> Option<i64> {
         .map(|s| s * 1000)
 }
 
-/// `YYMMDD:HHMMSS` at the start of a syslog line, as (`YYYY-MM-DD`, seconds
-/// into the day, `YYYY-MM-DDTHH:MM:SS`).
-fn stamp(line: &str) -> Option<(String, i64, String)> {
+/// One stamped moment in the log.
+#[derive(Debug, Clone)]
+struct Moment {
+    /// `YYYY-MM-DD`, the day the line fell on.
+    day: String,
+    /// Seconds into `day`.
+    secs: i64,
+    /// The same instant as a single running count of seconds.
+    ///
+    /// Elapsed time is measured on this and never on `secs`, which runs
+    /// backwards at midnight: subtracting there reads a whole night's absence as
+    /// no time at all.
+    abs: i64,
+    /// `YYYY-MM-DDTHH:MM:SS` — the form a session stores.
+    at: String,
+}
+
+/// `YYMMDD:HHMMSS` at the start of a syslog line.
+fn stamp(line: &str) -> Option<Moment> {
     let raw = line.as_bytes();
     if raw.len() < 13 || raw[6] != b':' || !line[..6].bytes().all(|c| c.is_ascii_digit()) {
         return None;
@@ -518,8 +539,20 @@ fn stamp(line: &str) -> Option<(String, i64, String)> {
     let day = format!("20{y}-{mo}-{d}");
     let secs: i64 =
         h.parse::<i64>().ok()? * 3600 + mi.parse::<i64>().ok()? * 60 + s.parse::<i64>().ok()?;
+    // A real date, so `abs` counts days that exist. A prefix that parses as six
+    // digits but names no day is not a log line this can place in time.
+    let date = chrono::NaiveDate::from_ymd_opt(
+        2000 + y.parse::<i32>().ok()?,
+        mo.parse().ok()?,
+        d.parse().ok()?,
+    )?;
     let at = format!("{day}T{h}:{mi}:{s}");
-    Some((day, secs, at))
+    Some(Moment {
+        day,
+        secs,
+        abs: chrono::Datelike::num_days_from_ce(&date) as i64 * 86_400 + secs,
+        at,
+    })
 }
 
 /// `YYYY-MM-DDTHH:MM:SS` back to the `YYMMDD:HHMMSS` a syslog line starts with.
@@ -550,20 +583,26 @@ pub fn log_stamp(iso: &str) -> Option<String> {
 /// Turn an ordered, de-duplicated event stream into sessions.
 ///
 /// A session is a run of page events on one book. It ends when the book changes,
-/// when the reader closes it, or when the gap to the next event exceeds
-/// [`SESSION_GAP_SECS`]. Its duration is the span of the book's running
-/// `TotalTime` counter across the run — not the wall clock between first and
-/// last event, which would count the time the device sat asleep on an open page.
+/// when the reader closes it, when the gap to the next event exceeds
+/// [`SESSION_GAP_SECS`] — and at midnight, because every figure the log reports
+/// is grouped by the day a session began. Its duration is the span of the book's
+/// running `TotalTime` counter across the run — not the wall clock between first
+/// and last event, which would count the time the device sat asleep on an open
+/// page.
+///
+/// Midnight is the one break the reader did not make, and it is the only one
+/// where the interval that straddles it is **divided** rather than dropped: see
+/// [`Break`].
 pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Session> {
     let mut out = Vec::new();
     let mut open: Option<Open> = None;
-    let mut prev_day_secs: Option<(String, i64)> = None;
+    let mut prev_abs: Option<i64> = None;
     let mut opened: Option<Opened> = None;
     // A break, once noticed, waits here until an observation can act on it.
     let mut gapped = false;
 
     for line in events {
-        let Some((day, secs, at)) = stamp(line) else {
+        let Some(now) = stamp(line) else {
             continue;
         };
         // The gap is measured against the previous *event of any kind*, so a
@@ -579,20 +618,13 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
         // one device's archive: 6 breaks taken, 116 swallowed, sessions running
         // to 48 h of wall clock and booking a whole night's reading to the day
         // before it.
-        gapped |= match &prev_day_secs {
-            Some((prev_day, prev_secs)) => {
-                *prev_day != day || secs.saturating_sub(*prev_secs) > SESSION_GAP_SECS
-            }
-            None => false,
-        };
-        prev_day_secs = Some((day.clone(), secs));
+        gapped |= prev_abs.is_some_and(|prev| now.abs - prev > SESSION_GAP_SECS);
+        prev_abs = Some(now.abs);
 
         if let Some(counter_ms) = opened_at_counter(line) {
             opened = Some(Opened {
                 counter_ms,
-                day: day.clone(),
-                secs,
-                at: at.clone(),
+                at: now.clone(),
             });
         }
 
@@ -605,17 +637,24 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
 
         // Consumed at the first observation after the open, whether or not it is
         // used: an open belongs to the session it precedes and to no later one.
-        let seed = opened
-            .take()
-            .and_then(|o| o.vouch(&day, secs, obs.total_ms));
+        let mut seed = opened.take().and_then(|o| o.vouch(&now, obs.total_ms));
 
-        if let Some(cur) = &open
-            && (cur.end_position != obs.position || gapped)
+        match open
+            .as_ref()
+            .and_then(|cur| cur.broken_by(&now, &obs, gapped))
         {
-            out.extend(open.take().map(Open::finish));
+            None => {}
+            Some(Break::Left) => out.extend(open.take().map(Open::finish)),
+            Some(Break::Midnight(boundary)) => {
+                out.extend(open.take().map(|cur| cur.finish_at(&boundary)));
+                // The run was already under way, so nothing that happened after
+                // midnight can be its start: the boundary is, and an `OpenBook`
+                // seen in between describes a book that was already open.
+                seed = Some(boundary);
+            }
         }
-        let cur = open.get_or_insert_with(|| Open::new(obs.position, &at, seed));
-        cur.observe(&at, &obs);
+        let cur = open.get_or_insert_with(|| Open::new(obs.position, &now, seed));
+        cur.observe(&now, &obs);
         if obs.closes {
             out.extend(open.take().map(Open::finish));
         }
@@ -624,18 +663,40 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
     out
 }
 
+/// How a run in progress ends when a new observation cannot join it.
+enum Break {
+    /// The reader left, or moved to another book. The run ends where it was last
+    /// seen and the next one starts from scratch — whatever the counter did in
+    /// between is not reading anyone did on either side of the break.
+    Left,
+    /// Midnight, with the reader still reading. The reader broke nothing, so the
+    /// interval straddling the boundary is real reading time that belongs to
+    /// both days, and the run is cut *at* midnight with the counters
+    /// interpolated there: the day just ended keeps the share before, the day
+    /// beginning starts from the same value and keeps the share after.
+    ///
+    /// Cutting it like any other break would credit that interval to neither —
+    /// the device states a counter only at each event, so the advance across the
+    /// boundary falls between the two sessions and is lost. A reader who stops
+    /// shortly after midnight loses the whole of it, which is what makes a late
+    /// night look like an early evening that ended at 23:5x.
+    Midnight(Start),
+}
+
 /// An `OpenBook` seen but not yet attached to a session.
 struct Opened {
     counter_ms: i64,
-    day: String,
-    secs: i64,
-    at: String,
+    at: Moment,
 }
 
-/// Where a session begins: the counter it resumes from and the clock time it
-/// started at, both taken from the `OpenBook` that vouched for them.
+/// Where a session begins: the counters it resumes from and the clock time it
+/// started at. Either the `OpenBook` that vouched for them, or the midnight a
+/// run was cut at.
 struct Start {
     counter_ms: i64,
+    /// The word counter at that same instant, where it is known. An `OpenBook`
+    /// states no word count; a midnight cut interpolates one.
+    words: Option<i64>,
     at: String,
 }
 
@@ -648,17 +709,32 @@ impl Opened {
     /// clock since the open, because counted reading time cannot outrun the
     /// clock. A stale open from another book fails one or the other; a genuine
     /// one clears both with room to spare.
-    fn vouch(self, day: &str, secs: i64, first_total: Option<i64>) -> Option<Start> {
+    fn vouch(self, now: &Moment, first_total: Option<i64>) -> Option<Start> {
         let total = first_total?;
-        let elapsed = secs.checked_sub(self.secs).filter(|e| *e >= 0)?;
-        (self.day == day
+        let elapsed = now.abs.checked_sub(self.at.abs).filter(|e| *e >= 0)?;
+        (self.at.day == now.day
             && self.counter_ms <= total
             && total - self.counter_ms <= (elapsed + SEED_SLACK_SECS) * 1000)
             .then_some(Start {
                 counter_ms: self.counter_ms,
-                at: self.at,
+                words: None,
+                at: self.at.at,
             })
     }
+}
+
+/// The share of a counter's advance that falls before a boundary inside the
+/// interval it was measured over, in proportion to the wall clock either side.
+///
+/// The device credits an interval in full at its far end, so this is the only
+/// thing the log says about where inside the interval the reading happened:
+/// evenly, which is also how [`super::db::reading_clock`] spreads a session
+/// across the hours it covers.
+fn share(advance: i64, elapsed: i64, before: i64) -> i64 {
+    if elapsed <= 0 || advance <= 0 {
+        return 0;
+    }
+    advance * before.clamp(0, elapsed) / elapsed
 }
 
 /// A session under construction.
@@ -672,50 +748,103 @@ struct Open {
     words_hi: i64,
     page_turns: i64,
     locations: Vec<Location>,
+    /// The last observation's instant and counters — the near side of the
+    /// interval a midnight cut has to divide.
+    last: Moment,
+    last_time: Option<i64>,
+    last_words: Option<i64>,
 }
 
 impl Open {
-    /// `start` is where the book was opened, where an `OpenBook` vouched for it.
-    /// That is the session's true floor in both senses: the first *logged*
-    /// observation can sit minutes past the open, so taking it as the floor
-    /// discards the reading in between and reports a sitting that took no time
-    /// at all. Without one, the first observation is the best available start.
-    fn new(end_position: i64, at: &str, start: Option<Start>) -> Self {
-        let (time_lo, started_at) = match start {
-            Some(s) => (Some(s.counter_ms), s.at),
-            None => (None, at.to_string()),
+    /// `start` is where the book was opened, where an `OpenBook` vouched for it
+    /// or where midnight cut the run before it. That is the session's true floor
+    /// in both senses: the first *logged* observation can sit minutes past the
+    /// open, so taking it as the floor discards the reading in between and
+    /// reports a sitting that took no time at all. Without one, the first
+    /// observation is the best available start.
+    fn new(end_position: i64, now: &Moment, start: Option<Start>) -> Self {
+        let (time_lo, words_lo, started_at) = match start {
+            Some(s) => (Some(s.counter_ms), s.words, s.at),
+            None => (None, None, now.at.clone()),
         };
         Self {
             end_position,
             started_at,
-            ended_at: at.to_string(),
+            ended_at: now.at.clone(),
             time_lo,
             time_hi: time_lo.unwrap_or(0),
-            words_lo: None,
-            words_hi: 0,
+            words_lo,
+            words_hi: words_lo.unwrap_or(0),
             page_turns: 0,
             locations: Vec::new(),
+            last: now.clone(),
+            last_time: None,
+            last_words: None,
         }
     }
 
-    fn observe(&mut self, at: &str, obs: &Observation) {
-        self.ended_at = at.to_string();
+    fn observe(&mut self, now: &Moment, obs: &Observation) {
+        self.ended_at = now.at.clone();
+        self.last = now.clone();
         if obs.page_turn {
             self.page_turns += 1;
         }
         if let Some(t) = obs.total_ms {
             self.time_lo = Some(self.time_lo.map_or(t, |lo| lo.min(t)));
             self.time_hi = self.time_hi.max(t);
+            self.last_time = Some(t);
         }
         if let Some(w) = obs.words {
             self.words_lo = Some(self.words_lo.map_or(w, |lo| lo.min(w)));
             self.words_hi = self.words_hi.max(w);
+            self.last_words = Some(w);
         }
         if let Some(at) = obs.at {
             self.locations.push(at);
         }
         // A book reopened after finishing restarts its counter; the run so far is
         // already banked because a fresh `Open` is made per run.
+    }
+
+    /// Whether this observation ends the run, and how. See [`Break`].
+    fn broken_by(&self, now: &Moment, obs: &Observation, gapped: bool) -> Option<Break> {
+        if self.end_position != obs.position || gapped {
+            return Some(Break::Left);
+        }
+        if self.last.day == now.day {
+            return None;
+        }
+        // Mid-run, over midnight. Both counters are read at the boundary by
+        // straight-line interpolation between the observations either side of
+        // it; without a counter on both sides there is nothing to divide, and
+        // the day change is then no better than an ordinary break.
+        let (Some(from), Some(to)) = (self.last_time, obs.total_ms) else {
+            return Some(Break::Left);
+        };
+        let elapsed = now.abs - self.last.abs;
+        let before = now.abs - now.secs - self.last.abs;
+        Some(Break::Midnight(Start {
+            counter_ms: from + share(to - from, elapsed, before),
+            words: self
+                .last_words
+                .zip(obs.words)
+                .map(|(from, to)| from + share(to - from, elapsed, before)),
+            at: format!("{}T00:00:00", now.day),
+        }))
+    }
+
+    /// Close the run at the midnight it was cut at, crediting this day the share
+    /// of the unfinished interval that fell before the boundary.
+    ///
+    /// The stored end is one second short of the boundary, that being the last
+    /// instant this day has: reading recorded at `T00:00:00` is the next day's.
+    fn finish_at(mut self, boundary: &Start) -> Session {
+        self.time_hi = self.time_hi.max(boundary.counter_ms);
+        if let Some(w) = boundary.words {
+            self.words_hi = self.words_hi.max(w);
+        }
+        self.ended_at = format!("{}T23:59:59", self.last.day);
+        self.finish()
     }
 
     fn finish(mut self) -> Session {
@@ -1150,8 +1279,8 @@ mod tests {
     fn a_session_does_not_run_past_midnight() {
         // Every figure on the page is grouped by the day a session began, so a
         // session that spans two days books the second day's reading to the
-        // first. The day change is a break like any other and is noticed on
-        // whichever line crosses it — here one that observes nothing.
+        // first. The day change is noticed on whichever line crosses it — here
+        // one that observes nothing.
         let lines = [
             page("260803:234500", "NextPage", 148_207, 60_000, 100),
             nameless("260804:000100"),
@@ -1161,6 +1290,76 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(&out[0].started_at[..10], "2026-08-03");
         assert_eq!(&out[1].started_at[..10], "2026-08-04");
+        // The clock the cut is made on is the device's own local one, the only
+        // clock the syslog prefix carries: `260804:000200` is two minutes past
+        // the reader's midnight whatever the offset to UTC happens to be. The
+        // same line under UTC would be the 3rd still, and a night's reading
+        // would land a day early.
+        assert_eq!(out[1].started_at, "2026-08-04T00:00:00");
+    }
+
+    #[test]
+    fn the_interval_that_spans_midnight_is_divided_between_the_two_days() {
+        // Reading straight through midnight: events five minutes apart, then a
+        // ten-minute interval that straddles the boundary with half its wall
+        // clock either side.
+        let lines = [
+            page("260803:235000", "NextPage", 148_207, 3_000_000, 1000),
+            page("260803:235500", "NextPage", 148_207, 3_300_000, 1200),
+            page("260804:000500", "NextPage", 148_207, 3_900_000, 1600),
+            page("260804:001000", "NextPage", 148_207, 4_200_000, 1800),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 2);
+
+        // Half the crossing interval belongs to each day, so each gets its own
+        // five minutes plus five of the ten that straddled the boundary.
+        assert_eq!((out[0].seconds, out[1].seconds), (600, 600));
+        assert_eq!((out[0].words, out[1].words), (400, 400));
+        // And nothing falls between them: the counter advanced 1200 s in all.
+        assert_eq!(out[0].seconds + out[1].seconds, 1200);
+
+        // The rows meet at the boundary rather than at the events either side
+        // of it — the reader was reading at 23:59 and at 00:01, and no minute
+        // between the two is stranded outside both.
+        assert_eq!(out[0].started_at, "2026-08-03T23:50:00");
+        assert_eq!(out[0].ended_at, "2026-08-03T23:59:59");
+        assert_eq!(out[1].started_at, "2026-08-04T00:00:00");
+        assert_eq!(out[1].ended_at, "2026-08-04T00:10:00");
+    }
+
+    #[test]
+    fn a_night_asleep_over_midnight_is_still_a_break_and_bridges_nothing() {
+        // The same day change, but the reader left. Splitting at the boundary
+        // would credit both days with a share of eight hours the device counted
+        // while nobody was reading, so this break is taken where it happened and
+        // the interval across it belongs to neither day.
+        let lines = [
+            page("260803:225000", "NextPage", 148_207, 3_000_000, 1000),
+            page("260803:225500", "NextPage", 148_207, 3_300_000, 1200),
+            page("260804:070000", "NextPage", 148_207, 3_900_000, 1600),
+            page("260804:071000", "NextPage", 148_207, 4_200_000, 1800),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].ended_at, "2026-08-03T22:55:00");
+        assert_eq!(out[1].started_at, "2026-08-04T07:00:00");
+        assert_eq!((out[0].seconds, out[1].seconds), (300, 300));
+    }
+
+    #[test]
+    fn an_absence_across_midnight_is_measured_in_real_elapsed_time() {
+        // 50 minutes, of which the clock reads 10 before midnight and 40 after.
+        // Seconds-into-the-day run backwards there, so measuring the gap on them
+        // reads this as no time at all and bridges a break that happened.
+        let lines = [
+            page("260803:235000", "NextPage", 148_207, 3_000_000, 1000),
+            page("260804:004000", "NextPage", 148_207, 3_300_000, 1200),
+        ];
+        let out = parse_sessions(lines.iter().map(String::as_str));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].ended_at, "2026-08-03T23:50:00");
+        assert_eq!(out[1].started_at, "2026-08-04T00:40:00");
     }
 
     #[test]

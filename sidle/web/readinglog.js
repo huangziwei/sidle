@@ -1043,8 +1043,10 @@
     q("#rl-progress-label").textContent = `${step}${count} — ${p.label}`;
   }
 
-  // Erasing the whole log is not undoable from inside Sidle — the way back is
-  // re-importing the archives — so the dialog states exactly what goes.
+  // Erasing the whole log is not undoable, and mostly not recoverable either: a
+  // Kindle sends only what is newer than the newest session stored, so what it
+  // has already pushed it will not push again. The dialog says so and states
+  // exactly what goes.
   async function doPurge() {
     const o = state.overview;
     const what = o
@@ -1053,8 +1055,10 @@
     if (
       !confirm(
         `Delete every reading session Sidle has stored?\n\nThis erases ${what}, ` +
-          `for every Kindle.\n\nThe logbackup files on disk are untouched — importing ` +
-          `them again brings this back.`,
+          `for every Kindle.\n\nThis cannot be undone. A Kindle sends only what is ` +
+          `newer than the newest session stored and clears its own copy at that ` +
+          `mark, so reading that arrived from the device is gone with these rows. ` +
+          `Only days a logbackup file still covers can be read again.`,
       )
     ) {
       return;

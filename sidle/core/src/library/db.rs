@@ -172,7 +172,10 @@ pub struct BookRow {
 /// v18: clears `reading_log_dumps`. v17 recorded truncated and empty files as
 /// read, and a claim keyed by an immutable name is permanent — the complete copy
 /// arrives under the same name and would be skipped unopened. Data-only.
-pub const SCHEMA_VERSION: i64 = 18;
+/// v19: cuts stored sessions at the midnights they cross, so a night's reading
+/// counts to the night it happened. Data-only — see
+/// [`split_sessions_at_midnight`].
+pub const SCHEMA_VERSION: i64 = 19;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -692,9 +695,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     //
     // Times are **device-local wall clock with no offset** — that is all the
     // syslog prefix carries, and it is also what the reader means by "what did I
-    // read on Tuesday". `day` is `started_at`'s date, denormalized because every
-    // view of this table groups by it; a session crossing midnight counts to the
-    // day it began.
+    // read on Tuesday". Nothing converts them to the host's zone: a Kindle read
+    // at 23:00 in Berlin says 23:00, and the day it counts to is the reader's
+    // own, not Greenwich's.
+    //
+    // `day` is `started_at`'s date, denormalized because every view of this
+    // table groups by it. [`super::reading_log::parse_sessions`] cuts a run at
+    // local midnight, so a session lands in one day and each day keeps the share
+    // of the crossing interval that fell inside it. Rows written before that
+    // rule can still span two days and count wholly to the day they began.
     //
     // The uniqueness index is what makes re-importing safe: dumps overlap
     // heavily and the same session arrives many times over. `device_serial` is
@@ -946,6 +955,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // filesystem, not about this table — so the whole table goes.
     if from_version < 18 {
         conn.execute("DELETE FROM reading_log_dumps", [])?;
+    }
+
+    // v19: sessions stored before the parser cut a run at midnight.
+    if from_version < 19 {
+        split_sessions_at_midnight(conn)?;
     }
 
     // §4c: stamp the schema version. migrate() always brings the DB up to the
@@ -1571,6 +1585,190 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
         ],
     )?;
     Ok(n > 0)
+}
+
+/// One day's share of a session that ran across midnight.
+struct Piece {
+    started_at: String,
+    ended_at: String,
+    seconds: i64,
+    page_turns: i64,
+    words: i64,
+}
+
+impl Piece {
+    fn day(&self) -> &str {
+        &self.started_at[..10]
+    }
+}
+
+/// Cut a session's wall-clock window at every midnight inside it, dividing the
+/// three counters between the pieces in proportion to the time each holds.
+///
+/// Empty when the window falls inside one day, or when either end is unreadable.
+///
+/// Even division is the only thing such a row still says about where inside
+/// itself the reading happened — the same assumption [`reading_clock`] makes
+/// spreading a session over the hours it covers. It is an estimate, and on a row
+/// too wide to be one sitting it is a poor one; what it is not is the status quo,
+/// where a night's reading counts wholly to the day before it.
+fn split_across_midnight(
+    started_at: &str,
+    ended_at: &str,
+    seconds: i64,
+    page_turns: i64,
+    words: i64,
+) -> Vec<Piece> {
+    let fmt = "%Y-%m-%dT%H:%M:%S";
+    let (Ok(from), Ok(to)) = (
+        chrono::NaiveDateTime::parse_from_str(started_at, fmt),
+        chrono::NaiveDateTime::parse_from_str(ended_at, fmt),
+    ) else {
+        return Vec::new();
+    };
+    let span = (to - from).num_seconds();
+    if span <= 0 || from.date() == to.date() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<Piece> = Vec::new();
+    let mut cursor = from;
+    while cursor < to {
+        let Some(midnight) = cursor
+            .date()
+            .succ_opt()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+        else {
+            return Vec::new();
+        };
+        let end = midnight.min(to);
+        let held = (end - cursor).num_seconds();
+        let share = |total: i64| total * held / span;
+        out.push(Piece {
+            started_at: cursor.format(fmt).to_string(),
+            // The last instant of the day, for every piece but the one that ends
+            // where the session did: reading recorded at `T00:00:00` is the next
+            // day's, and that is where the next piece starts.
+            ended_at: if end == to {
+                ended_at.to_string()
+            } else {
+                format!("{}T23:59:59", cursor.format("%Y-%m-%d"))
+            },
+            seconds: share(seconds),
+            page_turns: share(page_turns),
+            words: share(words),
+        });
+        cursor = end;
+    }
+
+    // Integer division loses up to a second per piece, and a reading log that
+    // quietly shrinks when it is corrected is worse than one that is wrong in a
+    // way you can see. The remainder goes to the day the session began, as it
+    // does in [`reading_clock`].
+    let placed = (
+        out.iter().map(|p| p.seconds).sum::<i64>(),
+        out.iter().map(|p| p.page_turns).sum::<i64>(),
+        out.iter().map(|p| p.words).sum::<i64>(),
+    );
+    if let Some(first) = out.first_mut() {
+        first.seconds += seconds - placed.0;
+        first.page_turns += page_turns - placed.1;
+        first.words += words - placed.2;
+    }
+    out
+}
+
+/// Cut every stored session that spans more than one day at the midnights it
+/// crosses (v19).
+///
+/// Rows written before [`super::reading_log::parse_sessions`] cut a run at
+/// midnight counted a late night wholly to the evening it started in. Nothing is
+/// dropped here and nothing is invented: a row's seconds, page turns and words
+/// are divided between the days its own clock covered, and every one of them
+/// stays in the library.
+///
+/// It works from the row alone, and has to. A stored session keeps its window
+/// and its totals, not the events behind them, and those events are never
+/// offered twice: a device sends only what is newer than the newest session
+/// stored and purges its own archive at that watermark. So the division is by
+/// wall clock, evenly — exact for a sitting that ran through midnight, an
+/// estimate of the ratio for a row that is several sittings glued together by
+/// the older gap-flag defect, where the reader was asleep across part of the
+/// span. The totals are preserved either way.
+///
+/// The first piece keeps the row, which keeps its identity `(device_serial,
+/// started_at, end_position)` intact; the rest are inserted. It is written in
+/// that order deliberately: the update is what stops the row being seen as
+/// crossing again, so an interrupted pass leaves work still to do rather than
+/// work already double-counted, and the inserts ignore a collision instead of
+/// adding to one.
+fn split_sessions_at_midnight(conn: &Connection) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, device_serial, started_at, ended_at, end_position, book_id,
+                seconds, page_turns, words
+           FROM reading_sessions
+          WHERE substr(started_at, 1, 10) <> substr(ended_at, 1, 10)",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut split = 0;
+    for (id, device_serial, started_at, ended_at, end_position, book_id, seconds, turns, words) in
+        rows
+    {
+        let pieces = split_across_midnight(&started_at, &ended_at, seconds, turns, words);
+        let Some((first, rest)) = pieces.split_first() else {
+            continue;
+        };
+        for piece in rest {
+            conn.execute(
+                r#"INSERT OR IGNORE INTO reading_sessions
+                    (device_serial, started_at, ended_at, day, end_position, book_id,
+                     seconds, page_turns, words)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+                params![
+                    device_serial,
+                    piece.started_at,
+                    piece.ended_at,
+                    piece.day(),
+                    end_position,
+                    book_id,
+                    piece.seconds,
+                    piece.page_turns,
+                    piece.words,
+                ],
+            )?;
+        }
+        conn.execute(
+            "UPDATE reading_sessions
+                SET ended_at = ?1, day = ?2, seconds = ?3, page_turns = ?4, words = ?5
+              WHERE id = ?6",
+            params![
+                first.ended_at,
+                first.day(),
+                first.seconds,
+                first.page_turns,
+                first.words,
+                id
+            ],
+        )?;
+        split += 1;
+    }
+    Ok(split)
 }
 
 /// Where one Kindle says it left each book, keyed by the point itself.
@@ -6228,6 +6426,108 @@ mod tests {
         // exactly what `reading_days` gives for that day and nothing lands in
         // a day the heatmap would draw as empty.
         assert!(cells.iter().all(|c| c.month == "2026-08" && c.dow == 2));
+    }
+
+    /// Every session in the library, oldest first, as
+    /// `(day, started_at, ended_at, seconds)`.
+    fn stored_sessions(conn: &Connection) -> Vec<(String, String, String, i64)> {
+        let mut stmt = conn
+            .prepare("SELECT day, started_at, ended_at, seconds FROM reading_sessions ORDER BY started_at")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn v19_cuts_a_stored_session_at_the_midnight_it_crossed() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-v19", "A book");
+        // A pre-v19 row: one sitting that ran from late evening into the small
+        // hours, counted wholly to the evening. Three quarters of its clock fell
+        // before midnight.
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-11T23:00:00".into(),
+                ended_at: "2026-08-12T00:20:00".into(),
+                book_id: Some(book),
+                seconds: 4000,
+                page_turns: 40,
+                words: 8000,
+                ..session("2026-08-11", 1, 4000)
+            },
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 18).unwrap();
+        migrate(&conn).unwrap();
+
+        assert_eq!(
+            stored_sessions(&conn),
+            vec![
+                (
+                    "2026-08-11".into(),
+                    "2026-08-11T23:00:00".into(),
+                    "2026-08-11T23:59:59".into(),
+                    3000
+                ),
+                (
+                    "2026-08-12".into(),
+                    "2026-08-12T00:00:00".into(),
+                    "2026-08-12T00:20:00".into(),
+                    1000
+                ),
+            ],
+        );
+        // The night is now on the night's own day, and not a second of it was
+        // lost or invented on the way there.
+        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(days.iter().map(|(_, s)| s).sum::<i64>(), 4000);
+
+        // Running again changes nothing: the rows no longer cross a midnight.
+        conn.pragma_update(None, "user_version", 18).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(stored_sessions(&conn).len(), 2);
+    }
+
+    #[test]
+    fn a_row_spanning_two_midnights_becomes_three_days() {
+        // The widest kind the old parser produced — several sittings glued into
+        // one row. It is divided by its own clock because that is the only thing
+        // the row still says; the alternative is leaving all of it on the first
+        // evening, where none of it belongs.
+        let pieces =
+            split_across_midnight("2026-06-20T23:06:41", "2026-06-22T00:40:06", 360, 36, 7200);
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|p| p.day().to_string())
+                .collect::<Vec<_>>(),
+            vec!["2026-06-20", "2026-06-21", "2026-06-22"],
+        );
+        assert_eq!(pieces[1].started_at, "2026-06-21T00:00:00");
+        assert_eq!(pieces[1].ended_at, "2026-06-21T23:59:59");
+        assert_eq!(pieces[2].ended_at, "2026-06-22T00:40:06");
+        // The middle day holds all 24 of its hours and takes the bulk of it.
+        assert!(pieces[1].seconds > pieces[0].seconds + pieces[2].seconds);
+        // Integer division loses nothing: the pieces add back up to the row.
+        assert_eq!(pieces.iter().map(|p| p.seconds).sum::<i64>(), 360);
+        assert_eq!(pieces.iter().map(|p| p.page_turns).sum::<i64>(), 36);
+        assert_eq!(pieces.iter().map(|p| p.words).sum::<i64>(), 7200);
+    }
+
+    #[test]
+    fn a_session_inside_one_day_is_not_cut() {
+        assert!(
+            split_across_midnight("2026-08-11T20:00:00", "2026-08-11T21:00:00", 3600, 1, 1)
+                .is_empty()
+        );
+        // Nor is one whose stamps cannot be read, rather than being cut at a
+        // midnight guessed from a string.
+        assert!(split_across_midnight("2026-08-11", "2026-08-12", 3600, 1, 1).is_empty());
     }
 
     #[test]

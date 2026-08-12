@@ -223,6 +223,11 @@ pub async fn reading_log_attribute(
 /// Everything, both tables: sessions and the record of which snapshots produced
 /// them. Anything short of that leaves a library that shows no reading and also
 /// refuses to import the archives back.
+///
+/// Not recoverable, whatever archives happen to be on disk. A device sends only
+/// what is newer than the newest session stored and clears its own copy at that
+/// mark, so reading that arrived from a Kindle goes with these rows; only days a
+/// `logbackup` snapshot still covers can be read again.
 #[tauri::command]
 pub async fn reading_log_clear(state: State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().await;
