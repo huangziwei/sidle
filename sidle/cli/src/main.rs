@@ -16,7 +16,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bokai::formats::kfx::metadata::{looks_like_real_amazon_asin, resolve_export_asin};
+use bokai::formats::kfx::metadata::{
+    generate_content_id, looks_like_real_amazon_asin, resolve_export_asin,
+};
 use bokai::formats::kfx::metadata_edit::{self, MetadataPatch};
 use rusqlite::Connection;
 use sidle_core::library::db::{self, BookRow};
@@ -141,19 +143,12 @@ fn rekey(root: Option<PathBuf>, apply: bool) -> Result<()> {
         return Ok(());
     }
 
-    let (mut done, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut done, mut failed) = (0usize, 0usize);
     for book in &affected {
         match rekey_one(&conn, book) {
-            Ok(Some(new_key)) => {
+            Ok(new_key) => {
                 done += 1;
                 println!("[{done}/{}] {} -> {new_key}", affected.len(), book.title);
-            }
-            Ok(None) => {
-                skipped += 1;
-                eprintln!(
-                    "skipped {}: the KFX names no identifier to derive from",
-                    book.title
-                );
             }
             Err(e) => {
                 failed += 1;
@@ -162,7 +157,7 @@ fn rekey(root: Option<PathBuf>, apply: bool) -> Result<()> {
         }
     }
 
-    println!("\nre-keyed {done}, skipped {skipped}, failed {failed}");
+    println!("\nre-keyed {done}, failed {failed}");
     if done > 0 {
         println!(
             "Books already on a Kindle keep their filename and pick the change up \
@@ -172,9 +167,8 @@ fn rekey(root: Option<PathBuf>, apply: bool) -> Result<()> {
     Ok(())
 }
 
-/// Re-key one book, returning the new key — or `None` when the KFX carries no
-/// identifier to derive one from.
-fn rekey_one(conn: &Connection, book: &BookRow) -> Result<Option<String>> {
+/// Re-key one book, returning the new key.
+fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     let path = PathBuf::from(
         book.kfx_path
             .as_deref()
@@ -184,12 +178,16 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<Option<String>> {
     let kfx = bokai::Book::from_bytes(&bytes, bokai::Format::Kfx)
         .with_context(|| format!("parse {}", path.display()))?;
 
-    let Some(new_key) = resolve_export_asin(kfx.metadata()) else {
-        return Ok(None);
-    };
+    // A KFX Amazon produced names no publication identifier, so there is
+    // nothing for the export rule to derive from — and those are exactly the
+    // books that carry a catalogue ASIN and most need one of their own. The
+    // library's content hash stands in: it is per-book, already the name of the
+    // directory the file lives in, and stable for as long as the bytes are.
+    let new_key =
+        resolve_export_asin(kfx.metadata()).unwrap_or_else(|| generate_content_id(&book.sha256));
     let old_key = book.asin.as_deref().unwrap_or_default().to_string();
     if new_key == old_key {
-        return Ok(Some(new_key));
+        return Ok(new_key);
     }
 
     // Both fields, to one value: they are written equal at export, and a device
@@ -213,5 +211,5 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<Option<String>> {
     }
     db::set_asin(conn, book.id, &new_key)?;
     db::relink_ink(conn, &old_key, &new_key)?;
-    Ok(Some(new_key))
+    Ok(new_key)
 }
