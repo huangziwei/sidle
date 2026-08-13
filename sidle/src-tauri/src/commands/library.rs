@@ -353,16 +353,16 @@ pub async fn library_set_asin(
     let updated = {
         let conn = state.db.lock().await;
         if let Some(other) =
-            db::book_id_with_asin(&conn, &asin, book_id).map_err(|e| e.to_string())?
+            db::book_id_with_amazon_asin(&conn, &asin, book_id).map_err(|e| e.to_string())?
         {
             return Err(format!(
                 "ASIN {asin} is already used by another book (id {other})."
             ));
         }
-        db::set_asin(&conn, book_id, &asin).map_err(|e| e.to_string())?;
+        db::set_amazon_asin(&conn, book_id, Some(&asin)).map_err(|e| e.to_string())?;
         // A user ASIN edit is curation, so move `updated_at` forward (the bump
-        // can't live in `db::set_asin` — bootstrap and the conversion worker call
-        // it mechanically). Merge's newest-wins then sees this edit.
+        // can't live in `db::set_amazon_asin` — the re-key path calls it
+        // mechanically). Merge's newest-wins then sees this edit.
         db::set_book_updated_at(&conn, book_id, &db::now_iso()).map_err(|e| e.to_string())?;
         db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
@@ -832,11 +832,11 @@ fn swap_or_insert_kfx_cover(book: &BookRow, kfx: &str, bytes: &[u8], tag: &str) 
 /// authoritative for the sidle UI. Shared by `library_recrawl_cover` (single)
 /// and `library_recrawl_covers` (bulk).
 async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
-    let Some(asin) = book.asin.as_deref() else {
+    let Some(asin) = book.amazon_asin.as_deref() else {
         return RecrawlOutcome::NoAsin;
     };
-    // Treat fabricated bokai ASINs the same as missing — neither can resolve
-    // to a real `/images/P/` cover, so "no ASIN" is more honest than "failed".
+    // A stored value that isn't catalogue-shaped can't resolve to a real
+    // `/images/P/` cover, so "no ASIN" is more honest than "failed".
     if !cover_fetch::looks_like_real_amazon_asin(asin) {
         return RecrawlOutcome::NoAsin;
     }

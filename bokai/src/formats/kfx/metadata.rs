@@ -523,21 +523,23 @@ pub fn looks_like_real_amazon_asin(s: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// Compute the ASIN the KFX export will stamp on the produced file. Pass
-/// through the source ASIN when it has the real Amazon shape; otherwise
-/// synthesize from `meta.identifier` via [`generate_content_id`]. Returns
-/// `None` only when the source has no real ASIN AND no identifier.
+/// Compute the identifier a produced file will carry, synthesized from
+/// `meta.identifier` via [`generate_content_id`]. `None` when the source has no
+/// identifier to derive from.
+///
+/// A source ASIN is deliberately **not** passed through, even when it has the
+/// real Amazon shape. The file we produce is a conversion, not the catalogue
+/// item it was made from, and a Kindle keys its catalog on this value: stamped
+/// with the original's ASIN, the two become one entry as far as the device is
+/// concerned — one covering the other in the library, sharing a series tile,
+/// sharing the sidecar that holds reading position. A synthesized value keeps
+/// the conversion distinct from the thing it was converted from.
 ///
 /// Callers downstream of the export use this to learn what value Kindle will
 /// see on the device — it becomes the on-device `<title>_<ASIN>.sdr/`
 /// directory key, so anything managing those sidecars needs it without
 /// re-parsing the produced KFX.
 pub fn resolve_export_asin(meta: &Metadata) -> Option<String> {
-    if let Some(asin) = meta.asin.as_deref()
-        && looks_like_real_amazon_asin(asin)
-    {
-        return Some(asin.to_string());
-    }
     (!meta.identifier.is_empty()).then(|| generate_content_id(&meta.identifier))
 }
 
@@ -970,6 +972,33 @@ mod tests {
             entry(&with_fonts, "override_kindle_font"),
             Some(MetadataValue::Bool(true))
         ));
+    }
+
+    #[test]
+    fn export_asin_is_synthesized_even_from_a_catalogue_source() {
+        // A conversion is not the catalogue item it was made from, and a
+        // Kindle keys its catalog on this value: stamped with the original's
+        // ASIN, the two are one entry to the device.
+        let from_store = Metadata {
+            asin: Some("B0CPJ2B88T".to_string()),
+            identifier: "urn:uuid:9f1c".to_string(),
+            ..Default::default()
+        };
+        let stamped = resolve_export_asin(&from_store).unwrap();
+        assert_ne!(stamped, "B0CPJ2B88T");
+        assert_eq!(stamped, generate_content_id("urn:uuid:9f1c"));
+        assert!(!looks_like_real_amazon_asin(&stamped));
+
+        // Derived from the identifier alone, so the same book converted twice
+        // keeps the reading position bound to it.
+        let no_asin = Metadata {
+            identifier: "urn:uuid:9f1c".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_export_asin(&no_asin).as_deref(), Some(&*stamped));
+
+        // Nothing to derive from: the caller has to supply an identifier.
+        assert_eq!(resolve_export_asin(&Metadata::default()), None);
     }
 
     #[test]

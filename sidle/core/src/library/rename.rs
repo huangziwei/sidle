@@ -136,6 +136,7 @@ mod tests {
                 epub_path: None,
                 cover_path: None,
                 asin: None,
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,

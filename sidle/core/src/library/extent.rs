@@ -180,6 +180,7 @@ mod tests {
                 file_size: 1,
                 imported_at: "2026-08-09T00:00:00Z",
                 asin: None,
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,

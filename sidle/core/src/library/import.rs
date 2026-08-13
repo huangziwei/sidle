@@ -822,6 +822,15 @@ fn insert_row(
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
+            // The same value, when it has the catalogue shape: a KFX Amazon
+            // produced carries its own ASIN, and an EPUB can name one in
+            // `<dc:identifier opf:scheme="ASIN">`. Kept for the colour-cover
+            // fetch, which is the only thing that can use it — `asin` above is
+            // the file's own key and the conversion will overwrite it.
+            amazon_asin: meta
+                .asin
+                .as_deref()
+                .filter(|a| bokai::formats::kfx::metadata::looks_like_real_amazon_asin(a)),
             publisher: meta.publisher.as_deref(),
             // meta.date comes from bokai's EPUB `<dc:date>` / KFX equivalent.
             // Stored verbatim — typically `2024-03-15` or `2024`. We filter

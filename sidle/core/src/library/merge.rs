@@ -343,6 +343,7 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
             file_size: row.file_size,
             imported_at: &row.imported_at,
             asin: row.asin.as_deref(),
+            amazon_asin: row.amazon_asin.as_deref(),
             publisher: row.publisher.as_deref(),
             published_at: row.published_at.as_deref(),
             series_name: row.series_name.as_deref(),
@@ -356,22 +357,24 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
 }
 
 /// Overwrite a duplicate book's metadata with the (newer) source's — but never
-/// its file paths (the dest's files are the ones on disk), and `asin` is
-/// prefer-non-empty: keep the dest's real ASIN, else adopt the source's, never
-/// blank it. Sets `updated_at` to the source's so a later re-merge compares right.
+/// its file paths (the dest's files are the ones on disk), and never its `asin`,
+/// which belongs to the dest's own KFX rather than to the metadata being
+/// merged. `amazon_asin` is prefer-non-empty: keep the dest's, else adopt the
+/// source's, never blank it. Sets `updated_at` to the source's so a later
+/// re-merge compares right.
 fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookRow) -> Result<()> {
-    let asin = local
-        .asin
+    let amazon_asin = local
+        .amazon_asin
         .as_deref()
         .filter(|a| !a.is_empty())
-        .or(source.asin.as_deref().filter(|a| !a.is_empty()));
+        .or(source.amazon_asin.as_deref().filter(|a| !a.is_empty()));
     let tags_json =
         serde_json::to_string(&source.tags).map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
     conn.execute(
         r#"UPDATE books SET
                title = ?1, author = ?2, language = ?3, ppd = ?4, publisher = ?5,
                published_at = ?6, series_name = ?7, series_index = ?8, tags = ?9,
-               asin = ?10, title_romaji = ?11, author_romaji = ?12, updated_at = ?13
+               amazon_asin = ?10, title_romaji = ?11, author_romaji = ?12, updated_at = ?13
            WHERE id = ?14"#,
         params![
             source.title,
@@ -383,7 +386,7 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
             source.series_name,
             source.series_index,
             tags_json,
-            asin,
+            amazon_asin,
             source.title_romaji,
             source.author_romaji,
             source.updated_at,
@@ -521,6 +524,7 @@ mod tests {
                     file_size: 0,
                     imported_at: "2026-01-01T00:00:00+00:00",
                     asin: None,
+                    amazon_asin: None,
                     publisher: None,
                     published_at: None,
                     series_name: None,
@@ -670,9 +674,11 @@ mod tests {
             &src_root,
             &[("aaa", "New Title", "2026-06-01T00:00:00+00:00")],
         );
-        // Give the source book a real ASIN to fill the dest's empty one.
+        // Give the source book a catalogue ASIN to fill the dest's empty one.
         let sid = db::find_by_sha(&src_conn, "aaa").unwrap().unwrap().id;
-        db::set_asin(&src_conn, sid, "B07ABCDEFG").unwrap();
+        db::set_amazon_asin(&src_conn, sid, Some("B07ABCDEFG")).unwrap();
+        // And a file key, which is the dest file's business and must not travel.
+        db::set_asin(&src_conn, sid, "SOURCEFILEKEYAAAAAAAAAAAAAAAAAAA").unwrap();
         let out = tempfile::tempdir().unwrap();
         let zip = backup_of(&src_conn, &src_root, out.path());
         drop(src_conn);
@@ -690,14 +696,18 @@ mod tests {
         let a = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap();
         assert_eq!(a.title, "New Title", "newer source metadata won");
         assert_eq!(
-            a.asin.as_deref(),
+            a.amazon_asin.as_deref(),
             Some("B07ABCDEFG"),
-            "empty dest ASIN filled"
+            "empty dest catalogue ASIN filled"
+        );
+        assert_eq!(
+            a.asin, None,
+            "the file key describes the dest's own KFX and does not merge"
         );
     }
 
     #[test]
-    fn older_source_does_not_overwrite_and_keeps_present_asin() {
+    fn older_source_does_not_overwrite_and_keeps_present_amazon_asin() {
         let src = tempfile::tempdir().unwrap();
         let src_root = src.path().canonicalize().unwrap();
         let src_conn = seed(
@@ -715,16 +725,16 @@ mod tests {
             &[("aaa", "Current Title", "2026-06-01T00:00:00+00:00")],
         );
         let did = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap().id;
-        db::set_asin(&dst_conn, did, "B07REALASN").unwrap();
+        db::set_amazon_asin(&dst_conn, did, Some("B07REALASN")).unwrap();
 
         let outcome = merge_into(&dst_conn, &dst_root, &zip);
         assert_eq!(outcome.books_updated, 0, "older source loses the tie");
         let a = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap();
         assert_eq!(a.title, "Current Title", "newer dest metadata kept");
         assert_eq!(
-            a.asin.as_deref(),
+            a.amazon_asin.as_deref(),
             Some("B07REALASN"),
-            "present ASIN never blanked"
+            "present catalogue ASIN never blanked"
         );
     }
 

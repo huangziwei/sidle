@@ -95,17 +95,15 @@ pub async fn run_job(
     // re-convert): if the KFX came from Amazon's monochrome-device build (KOA2 +
     // friends), its embedded cover is grayscale-baked and there's no way to
     // recover color from the file itself — refetch from the product page by
-    // ASIN. KFXes bokai produced from a color EPUB already have the original
-    // color cover; the ASIN is fabricated there, so cover_fetch skips and we
-    // just keep what's in the KFX. Skipped on `reconvert` because it rewrites
+    // ASIN — the catalogue one, which is the only value `/images/P/` answers to.
+    // KFXes bokai produced from a color EPUB already have the original color
+    // cover, and usually no catalogue ASIN either, so nothing is fetched and
+    // what's in the KFX stands. Skipped on `reconvert` because it rewrites
     // the source KFX (re-stamping `kfx_sha256`), which a force re-convert must
     // not do — see `run_job`.
     if kind == "kfx_to_epub" && !reconvert {
-        match book.asin.as_deref() {
-            None => eprintln!(
-                "[sidle/queue] book {book_id} color cover: no ASIN on row \
-                 (KFX metadata likely missing `book_id`)"
-            ),
+        match book.amazon_asin.as_deref() {
+            None => eprintln!("[sidle/queue] book {book_id} color cover: no catalogue ASIN on row"),
             Some(asin) => {
                 eprintln!(
                     "[sidle/queue] book {book_id} color cover: fetching ASIN={asin} \
@@ -793,6 +791,7 @@ mod tests {
             error: None,
             kind: Some("epub_to_kfx".into()),
             asin: None,
+            amazon_asin: None,
             publisher: None,
             published_at: None,
             series_name: None,

@@ -1,0 +1,22 @@
+[package]
+name = "sidle-cli"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+description = "sidle command line — library maintenance that would otherwise be one GUI click per book."
+publish = false
+
+[[bin]]
+name = "sidle-cli"
+path = "src/main.rs"
+
+[dependencies]
+# The library itself: paths, DB, and the same row types the desktop app edits.
+sidle-core = { path = "../core" }
+# Reads and rewrites the KFX metadata a re-key changes.
+bokai = { path = "../../bokai" }
+
+anyhow = "1"
+# `db::open` hands back a rusqlite `Connection`; the CLI needs the type to hold
+# one. Same version the rest of the workspace resolves to, so there is one copy.
+rusqlite = { version = "0.32", features = ["bundled"] }

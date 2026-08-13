@@ -396,6 +396,7 @@ mod tests {
                 file_size: 0,
                 imported_at: "t0",
                 asin: Some(asin),
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,

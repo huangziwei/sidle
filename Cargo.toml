@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "bokai",
     "jxr",
+    "sidle/cli",
     "sidle/core",
     "sidle/native",
     "sidle/server",

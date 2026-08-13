@@ -34,6 +34,7 @@ const KEY_LANGUAGE: &str = "language";
 const KEY_PUBLISHER: &str = "publisher";
 const KEY_ISSUE_DATE: &str = "issue_date";
 const KEY_ASIN: &str = "ASIN";
+const KEY_CONTENT_ID: &str = "content_id";
 
 /// Which metadata fields to set. `None` leaves a field untouched; `Some(_)`
 /// overwrites it in every metadata shape the container carries.
@@ -49,6 +50,15 @@ pub struct MetadataPatch {
     /// Publication date (KFX stores `YYYY-MM-DD`). Carried in the $490 shape.
     pub issue_date: Option<String>,
     pub asin: Option<String>,
+    /// The device-internal key (`.sdr` directory, catalog entry). Carried in
+    /// the $490 shape only — the flat $258 fragment has no symbol for it — so
+    /// setting it on a container that has just $258 is silently a no-op, the
+    /// same as any other field that shape cannot hold.
+    ///
+    /// Set it with [`Self::asin`] to the same value to re-key a file whole: the
+    /// two are written equal at export, and a device that keys on either then
+    /// sees one identity rather than two.
+    pub content_id: Option<String>,
 }
 
 impl MetadataPatch {
@@ -61,6 +71,7 @@ impl MetadataPatch {
             && self.publisher.is_none()
             && self.issue_date.is_none()
             && self.asin.is_none()
+            && self.content_id.is_none()
     }
 
     /// The single-valued ($490) key/value pairs this patch sets, in a stable
@@ -81,6 +92,9 @@ impl MetadataPatch {
         }
         if let Some(a) = &self.asin {
             v.push((KEY_ASIN, a.as_str()));
+        }
+        if let Some(c) = &self.content_id {
+            v.push((KEY_CONTENT_ID, c.as_str()));
         }
         v
     }
@@ -346,6 +360,35 @@ mod tests {
             crate::formats::kfx::converts_to_epub(&out),
             "patched KFX must still convert to EPUB"
         );
+    }
+
+    /// Re-keying a file already produced: ASIN and `content_id` set together
+    /// to one synthesized value, so a device that keys on either sees one
+    /// identity — and the book itself is untouched.
+    #[test]
+    fn rekey_sets_asin_and_content_id_together() {
+        let kfx = std::fs::read(FIXTURE).expect("read fixture");
+        let before = loader::load(&kfx).expect("load original");
+
+        let key = super::super::metadata::generate_content_id("urn:uuid:re-key");
+        let out = edit_metadata(
+            &kfx,
+            &MetadataPatch {
+                asin: Some(key.clone()),
+                content_id: Some(key.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("edit_metadata");
+        let after = loader::load(&out).expect("rewritten container must re-load");
+
+        assert_eq!(after.metadata.asin.as_deref(), Some(&*key));
+        assert_eq!(
+            before.metadata.title, after.metadata.title,
+            "a re-key is not a metadata edit"
+        );
+        assert_eq!(before.raw_media.len(), after.raw_media.len());
+        assert!(crate::formats::kfx::converts_to_epub(&out));
     }
 
     /// A single-field edit changes only that field.

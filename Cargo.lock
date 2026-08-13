@@ -5331,6 +5331,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sidle-cli"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "bokai",
+ "rusqlite",
+ "sidle-core",
+]
+
+[[package]]
 name = "sidle-core"
 version = "0.1.8"
 dependencies = [

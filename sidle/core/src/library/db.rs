@@ -74,12 +74,20 @@ pub struct BookRow {
     /// state where the row exists without a job (shouldn't happen in normal
     /// flow but `LEFT JOIN` makes it representable).
     pub kind: Option<String>,
-    /// Amazon Standard Identification Number — populated from the KFX
-    /// `book_id` field on import. Used by the color-cover fetch (the KFX
-    /// itself ships with the grayscale cover Amazon serves to monochrome
-    /// devices like the KOA2). `None` for EPUB-imported books and KFXes
-    /// without a `book_id`.
+    /// The identifier baked into the exported KFX — what the Kindle keys its
+    /// catalog, `.sdr` state directory and `.notebooks/<id>!!PDOC!!` dir on, so
+    /// annotation sync, ink sync, device-delete and series grouping all match
+    /// on it. Synthesized from the publication identifier by
+    /// `bokai::formats::kfx::metadata::resolve_export_asin`, never a catalogue
+    /// value: a copy stamped with the original's ASIN is the same entry as the
+    /// original as far as the device is concerned.
     pub asin: Option<String>,
+    /// The real Amazon catalogue ASIN, when the book has one. Its only use is
+    /// fetching the colour cover from `/images/P/<asin>` — the KFX itself ships
+    /// the grayscale cover Amazon serves to monochrome devices. Never written
+    /// into a file we produce; see [`Self::asin`]. Editable in the metadata
+    /// modal, which is how a book that arrived without one gets a cover.
+    pub amazon_asin: Option<String>,
     /// Publisher imprint — pulled from EPUB `<dc:publisher>` or KFX
     /// metadata field `publisher` (symbol 232). Optional; many self-pub or
     /// indie books have no publisher. Editable via the metadata modal.
@@ -362,6 +370,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             file_size         INTEGER NOT NULL,
             imported_at       TEXT NOT NULL,
             asin              TEXT,
+            amazon_asin       TEXT,
             publisher         TEXT,
             published_at      TEXT,
             series_name       TEXT,
@@ -448,6 +457,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // table, so we have to ALTER out-of-band.
     if !has_column(conn, "books", "asin")? {
         conn.execute("ALTER TABLE books ADD COLUMN asin TEXT", [])?;
+    }
+    if !has_column(conn, "books", "amazon_asin")? {
+        conn.execute("ALTER TABLE books ADD COLUMN amazon_asin TEXT", [])?;
+        // `asin` used to hold whichever the export stamped, which for a book
+        // converted from a store-bought source was the catalogue ASIN itself.
+        // Those are the rows with a real Amazon shape — 10 uppercase
+        // alphanumerics — and the value is worth keeping: it is the only
+        // colour-cover key the library has. The file still carries it too
+        // until it is re-keyed, which is what leaves `asin` alone here.
+        conn.execute(
+            "UPDATE books SET amazon_asin = asin
+             WHERE amazon_asin IS NULL AND asin IS NOT NULL AND length(asin) = 10
+               AND asin = upper(asin) AND asin GLOB '[A-Z0-9]*'",
+            [],
+        )?;
     }
     if !has_column(conn, "books", "publisher")? {
         conn.execute("ALTER TABLE books ADD COLUMN publisher TEXT", [])?;
@@ -1452,8 +1476,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
              series_name, series_index, tags, kfx_sha256, pdf_path, updated_at,
-             title_romaji, author_romaji)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"#,
+             title_romaji, author_romaji, amazon_asin)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"#,
         params![
             book.sha256,
             book.title,
@@ -1478,6 +1502,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.imported_at,
             book.title_romaji,
             book.author_romaji,
+            book.amazon_asin,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -2725,15 +2750,28 @@ pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusq
     Ok(())
 }
 
-/// Stamp the ASIN that bokai's KFX export wrote into the produced file.
-/// For PDOC sideloads the value is fabricated from the publication
-/// identifier (32-char Crockford-Base32), so the row holds it only after
-/// EPUB→KFX completes — the import-time value is whatever the source
-/// EPUB carried (usually `None`). Sidle's device-delete path keys
-/// catalog-style `<title>_<ASIN>.sdr/` cleanup on this column.
+/// Stamp the identifier bokai's KFX export wrote into the produced file —
+/// fabricated from the publication identifier (32-char Crockford-Base32), so
+/// the row holds it only after EPUB→KFX completes. Sidle's device-delete path
+/// keys catalog-style `<title>_<ASIN>.sdr/` cleanup on this column, and the
+/// picker groups series by it.
 pub fn set_asin(conn: &Connection, book_id: i64, asin: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE books SET asin = ?1 WHERE id = ?2",
+        params![asin, book_id],
+    )?;
+    Ok(())
+}
+
+/// Record the real Amazon catalogue ASIN, the colour-cover key. `None` clears
+/// it. Never reaches a produced file — see [`BookRow::amazon_asin`].
+pub fn set_amazon_asin(
+    conn: &Connection,
+    book_id: i64,
+    asin: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET amazon_asin = ?1 WHERE id = ?2",
         params![asin, book_id],
     )?;
     Ok(())
@@ -2757,19 +2795,18 @@ pub fn set_book_updated_at(
     Ok(())
 }
 
-/// Return the id of another book (≠ `except_id`) that already holds `asin`, if
-/// any. The metadata editor uses this to keep ASIN unique across the library:
-/// a duplicate would make the device-delete `_<ASIN>.sdr` catalog-sidecar scan
-/// (`device::push::wipe_catalog_sdrs`) wipe *both* books' sidecars on either
-/// delete. Only a non-empty ASIN is meaningful here — callers gate on the real
-/// 10-char shape before calling.
-pub fn book_id_with_asin(
+/// Return the id of another book (≠ `except_id`) that already holds
+/// `amazon_asin`, if any. The metadata editor uses this to keep the catalogue
+/// ASIN unique across the library: two books sharing one would fetch the same
+/// cover, which means one of them is mislabelled. Only a non-empty ASIN is
+/// meaningful here — callers gate on the real 10-char shape before calling.
+pub fn book_id_with_amazon_asin(
     conn: &Connection,
     asin: &str,
     except_id: i64,
 ) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
-        "SELECT id FROM books WHERE asin = ?1 AND id != ?2 LIMIT 1",
+        "SELECT id FROM books WHERE amazon_asin = ?1 AND id != ?2 LIMIT 1",
         params![asin, except_id],
         |r| r.get(0),
     )
@@ -3083,6 +3120,7 @@ pub struct NewBook<'a> {
     pub file_size: i64,
     pub imported_at: &'a str,
     pub asin: Option<&'a str>,
+    pub amazon_asin: Option<&'a str>,
     pub publisher: Option<&'a str>,
     pub published_at: Option<&'a str>,
     pub series_name: Option<&'a str>,
@@ -3109,7 +3147,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -3124,7 +3162,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -3139,7 +3177,7 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -3158,7 +3196,7 @@ const SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.series_name = ?1 AND b.series_index = ?2
@@ -3175,7 +3213,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -3195,7 +3233,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode
+           b.writing_mode, b.amazon_asin
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1 ESCAPE '\'
@@ -3310,6 +3348,9 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
         asin: row.get(11)?,
+        // Appended after the original column list rather than placed beside
+        // `asin`: every reader here indexes positionally.
+        amazon_asin: row.get(26)?,
         status: row.get(12)?,
         error: row.get(13)?,
         kind: row.get(14)?,
@@ -3646,6 +3687,26 @@ pub fn book_ink_host_pages(conn: &Connection, book_id: i64) -> rusqlite::Result<
 pub fn list_unlinked_book_ink(conn: &Connection) -> rusqlite::Result<Vec<BookInkRow>> {
     let mut stmt = conn.prepare(&format!("{SELECT_BOOK_INK} WHERE book_id IS NULL"))?;
     stmt.query_map([], row_to_book_ink)?.collect()
+}
+
+/// Carry every ink row keyed on `old_key` over to `new_key`, for when a book's
+/// baked identity changes under it. Ink identity is `(asin, container_id)` and
+/// the device names its `.notebooks/<asin>!!PDOC!!` dir after the same value,
+/// so a re-key that skipped this would strand the pages already collected.
+///
+/// The per-device tables come too: they record what was decoded for which key,
+/// and left behind they would make the next sync re-decode from scratch.
+pub fn relink_ink(conn: &Connection, old_key: &str, new_key: &str) -> rusqlite::Result<()> {
+    if old_key.is_empty() || old_key == new_key {
+        return Ok(());
+    }
+    for table in ["book_ink", "book_ink_device", "ink_sync"] {
+        conn.execute(
+            &format!("UPDATE OR IGNORE {table} SET asin = ?1 WHERE asin = ?2"),
+            params![new_key, old_key],
+        )?;
+    }
+    Ok(())
 }
 
 /// Point an ink page at a (re-)matched book. Used by ingest's relink pass.
@@ -4295,6 +4356,7 @@ mod tests {
                 file_size: 0,
                 imported_at: "2026-05-19T00:00:00Z",
                 asin: None,
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -4371,6 +4433,7 @@ mod tests {
                 file_size: 0,
                 imported_at: "2026-05-19T00:00:00Z",
                 asin: None,
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -4626,6 +4689,7 @@ mod tests {
                 file_size: 0,
                 imported_at: "t",
                 asin: None,
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -5309,32 +5373,76 @@ mod tests {
     }
 
     #[test]
-    fn set_asin_and_uniqueness() {
+    fn set_amazon_asin_and_uniqueness() {
         let conn = fresh_db();
         let a = insert_minimal(&conn, "sha-asin-a", "A");
         let b = insert_minimal(&conn, "sha-asin-b", "B");
 
-        // Fresh books have no ASIN, so the column is free.
+        // Fresh books have no catalogue ASIN, so the column is free.
         assert_eq!(
-            book_id_with_asin(&conn, "B07PXGQC1Q", a).expect("query"),
+            book_id_with_amazon_asin(&conn, "B07PXGQC1Q", a).expect("query"),
             None
         );
 
-        set_asin(&conn, a, "B07PXGQC1Q").expect("set asin a");
+        set_amazon_asin(&conn, a, Some("B07PXGQC1Q")).expect("set asin a");
         assert_eq!(
-            get_book(&conn, a).unwrap().unwrap().asin.as_deref(),
+            get_book(&conn, a).unwrap().unwrap().amazon_asin.as_deref(),
             Some("B07PXGQC1Q")
         );
 
         // Another book asking for the same ASIN now finds the collision...
         assert_eq!(
-            book_id_with_asin(&conn, "B07PXGQC1Q", b).expect("query"),
+            book_id_with_amazon_asin(&conn, "B07PXGQC1Q", b).expect("query"),
             Some(a)
         );
         // ...but the owner itself is excluded (re-saving the same ASIN is fine).
         assert_eq!(
-            book_id_with_asin(&conn, "B07PXGQC1Q", a).expect("query"),
+            book_id_with_amazon_asin(&conn, "B07PXGQC1Q", a).expect("query"),
             None
+        );
+
+        // The file's own key is a separate column and untouched by any of it.
+        assert_eq!(get_book(&conn, a).unwrap().unwrap().asin, None);
+        set_amazon_asin(&conn, a, None).expect("clear");
+        assert_eq!(get_book(&conn, a).unwrap().unwrap().amazon_asin, None);
+    }
+
+    #[test]
+    fn the_migration_lifts_a_catalogue_asin_out_of_the_file_key() {
+        // An install from before the split: `asin` held whatever the export
+        // stamped, which for a store-bought source was the catalogue ASIN.
+        // That value is the only colour-cover key the library has.
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        conn.execute("ALTER TABLE books DROP COLUMN amazon_asin", [])
+            .expect("undo the split");
+        let seed = |sha: &str, asin: &str| {
+            conn.execute(
+                "INSERT INTO books (sha256, title, author, language, file_size,
+                     imported_at, asin, tags)
+                 VALUES (?1, ?1, '', '', 0, '2026-01-01T00:00:00+00:00', ?2, '[]')",
+                params![sha, asin],
+            )
+            .expect("seed a pre-split row");
+            conn.last_insert_rowid()
+        };
+        let real = seed("sha-real", "B07PXGQC1Q");
+        let made_up = seed("sha-made-up", "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2");
+
+        migrate(&conn).expect("re-migrate");
+
+        let from_store = get_book(&conn, real).unwrap().unwrap();
+        assert_eq!(from_store.amazon_asin.as_deref(), Some("B07PXGQC1Q"));
+        assert_eq!(
+            from_store.asin.as_deref(),
+            Some("B07PXGQC1Q"),
+            "the file still carries it until it is re-keyed"
+        );
+
+        let converted = get_book(&conn, made_up).unwrap().unwrap();
+        assert_eq!(
+            converted.amazon_asin, None,
+            "a synthesized key is not a catalogue ASIN"
         );
     }
 
@@ -5471,6 +5579,7 @@ mod tests {
                     file_size: 1,
                     imported_at: "t",
                     asin: None,
+                    amazon_asin: None,
                     publisher: None,
                     published_at: None,
                     series_name: None,
@@ -6131,6 +6240,7 @@ mod tests {
                 file_size: 0,
                 imported_at: "t0",
                 asin: Some(asin),
+                amazon_asin: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -6437,6 +6547,53 @@ mod tests {
             get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(),
             Some("nbksha2")
         );
+    }
+
+    #[test]
+    fn relink_ink_carries_every_table_to_the_new_key() {
+        // A re-key changes the identity the device names its
+        // `.notebooks/<asin>!!PDOC!!` dir after. Ink already collected under
+        // the old one has to come along, or the pages are stranded and the
+        // next sync re-decodes from scratch.
+        let conn = fresh_db();
+        let book = insert_with_asin(&conn, "sha-ink", "Has Ink", "B07PXGQC1Q");
+        upsert_book_ink(
+            &conn,
+            &NewBookInk {
+                book_id: Some(book),
+                asin: "B07PXGQC1Q",
+                container_id: "c1",
+                host_page: Some(3),
+                host_eid: None,
+                host_linear: None,
+                nbk_sha256: Some("nbk1"),
+                imported_at: "t0",
+            },
+        )
+        .expect("ink");
+        set_ink_sync_sha(&conn, "DEV", "B07PXGQC1Q", "nbk1", "t0").expect("checkpoint");
+
+        relink_ink(&conn, "B07PXGQC1Q", "NEWKEYNEWKEYNEWKEYNEWKEYNEWKEY12").expect("relink");
+
+        let ink = list_book_ink(&conn, book).expect("read ink");
+        assert_eq!(ink.len(), 1);
+        assert_eq!(ink[0].asin, "NEWKEYNEWKEYNEWKEYNEWKEYNEWKEY12");
+        assert_eq!(
+            get_ink_sync_sha(&conn, "DEV", "NEWKEYNEWKEYNEWKEYNEWKEYNEWKEY12")
+                .unwrap()
+                .as_deref(),
+            Some("nbk1"),
+            "the per-device checkpoint moved with it"
+        );
+        assert_eq!(
+            get_ink_sync_sha(&conn, "DEV", "B07PXGQC1Q").unwrap(),
+            None,
+            "and nothing is left under the old key"
+        );
+
+        // A no-op key change leaves everything where it is.
+        relink_ink(&conn, "", "IRRELEVANT").expect("empty old key");
+        assert_eq!(list_book_ink(&conn, book).unwrap().len(), 1);
     }
 
     fn session(day: &str, end_position: i64, seconds: i64) -> ReadingSession {

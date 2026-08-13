@@ -295,13 +295,19 @@ pub async fn editor_save_metadata(
         let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
         match kind {
             SourceKind::Kfx => {
+                // The form's ASIN is Amazon's catalogue value, kept for the
+                // colour-cover fetch and deliberately not written here: a KFX
+                // carrying it is the catalogue item as far as a Kindle is
+                // concerned, which is the same entry as the copy Amazon sold.
+                // The file keeps the synthesized identity the export gave it.
                 let patch = KfxMetadataPatch {
                     title: Some(c_title),
                     authors: Some(c_authors),
                     language: Some(c_lang),
                     publisher: c_pub,
                     issue_date: c_date,
-                    asin: c_asin,
+                    asin: None,
+                    content_id: None,
                 };
                 metadata_edit::edit_metadata(&bytes, &patch).map_err(|e| e.to_string())
             }
@@ -335,12 +341,14 @@ pub async fn editor_save_metadata(
     .map_err(|e| e.to_string())??;
     commit_edited_source(&state, book_id, kind, &path, new_bytes).await?;
 
-    // 2) Sync the library row. ASIN isn't part of db::MetadataPatch, so set it
-    //    separately; blank romaji triggers the modal path's self-heal regenerate
-    //    (the title/author may have changed under it).
-    if let Some(asin) = asin.as_deref() {
+    // 2) Sync the library row. The ASIN isn't part of db::MetadataPatch, so set
+    //    it separately — and it lands in `amazon_asin`, the colour-cover key.
+    //    `books.asin` is the file's own identity and is not the user's to edit.
+    //    Blank romaji triggers the modal path's self-heal regenerate (the
+    //    title/author may have changed under it).
+    {
         let conn = state.db.lock().await;
-        db::set_asin(&conn, book_id, asin).map_err(|e| e.to_string())?;
+        db::set_amazon_asin(&conn, book_id, asin.as_deref()).map_err(|e| e.to_string())?;
     }
     let patch = db::MetadataPatch {
         title,
