@@ -196,6 +196,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/list.json", get(list_json))
         .route("/get/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
+        .route("/sidecar/{id}", get(get_sidecar))
         // P3 write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
         // the LAN twin of the USB import. Token-gated like the reads; body-limited
         // so an oversized POST can't exhaust memory.
@@ -430,6 +431,60 @@ async fn get_book(
         Some(&device_name),
     )
     .await
+}
+
+/// The reading-state sidecar for one book, composed from the library alone.
+///
+/// A book arriving on a device for the first time has no `.sdr` yet, so it
+/// appears in no sync bundle and the ordinary push — which answers what the
+/// device sent — has nothing to answer. Its highlights would sit in the library
+/// until the reader opened the book and synced again. This is the same
+/// composer, asked directly: give me what this book's sidecar should contain
+/// for a device holding nothing.
+///
+/// `204` when the library has nothing to write, so a caller can ask for every
+/// download without treating "no highlights yet" as a failure.
+async fn get_sidecar(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let serial = query.get("serial").cloned().unwrap_or_default();
+    let paths = state.paths.clone();
+
+    let composed = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StatusCode> {
+        let conn = open_db(&paths)?;
+        let book = db::get_book(&conn, id)
+            .map_err(|err| {
+                tracing::error!(?err, "sidecar: get_book failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let colors = db::device_uses_colors(&conn, &serial).unwrap_or(false);
+        let index = ingest::book_index(book.kfx_path.as_deref());
+        push::compose(&conn, book.id, None, &index, colors)
+            .map(|c| c.map(|c| c.bytes))
+            .map_err(|err| {
+                tracing::error!(?err, "sidecar: compose failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "sidecar: join failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })??;
+
+    match composed {
+        Some(bytes) => Ok((
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response()),
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
 }
 
 async fn get_cover(
@@ -1536,6 +1591,55 @@ mod tests {
         )
         .unwrap();
         (paths, book_id)
+    }
+
+    /// A book arriving on a device for the first time has no `.sdr`, so it is in
+    /// no sync bundle and the push that answers a bundle can never reach it.
+    /// This route is how it gets its highlights anyway.
+    #[tokio::test]
+    async fn sidecar_route_composes_for_a_device_holding_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (paths, book_id) = library_with_matching_book(tmp.path());
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState {
+            paths: paths.clone(),
+            token: Arc::from(token.as_str()),
+        };
+
+        let get = |id: i64| {
+            Request::builder()
+                .uri(format!("/sidecar/{id}?serial=DEV"))
+                .header("X-Sidle-Token", token.clone())
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Nothing in the library for it yet: not a failure, just nothing to write.
+        let resp = build_router(state.clone())
+            .oneshot(get(book_id))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // A book that isn't there is not the same as one with nothing to say.
+        let resp = build_router(state.clone())
+            .oneshot(get(book_id + 999))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Same gate as every other route — a sidecar carries the reader's own
+        // highlights and is not served to an unauthenticated caller.
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sidecar/{book_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// Build a `POST /sync/annotations` request; the `AppState` goes into

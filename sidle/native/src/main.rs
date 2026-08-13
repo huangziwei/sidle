@@ -2483,6 +2483,15 @@ fn download_flow(
     // this book until the desktop actually reconverts it (bumping `kfx_rev`).
     updates::record_download(Path::new(SYNCED_REVS_PATH), safe_name, book.kfx_rev);
     log(format!("downloaded {written} bytes to {}", path.display()));
+    // Land whatever the library already knows about this book — highlights,
+    // notes, reading position — while it is certain no reader has it open. A
+    // book downloaded with a history should arrive carrying it, not wait for a
+    // Sync it cannot benefit from until it has been opened once.
+    match api::pull_sidecar(agent, cfg, book.id, Path::new(DOWNLOAD_DIR), safe_name) {
+        Ok(true) => log("sidecar written with the download"),
+        Ok(false) => {}
+        Err(e) => log(format!("sidecar not written: {e:#}")),
+    }
     let _ = Command::new("touch").arg(CLEANINDEX).output();
     Ok((
         "Downloaded → Library will refresh shortly".to_string(),

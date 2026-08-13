@@ -459,6 +459,68 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
     })
 }
 
+/// Fetch the reading-state sidecar the library holds for one book and write it
+/// beside the freshly downloaded file.
+///
+/// A book that has never been opened has no `.sdr`, so it appears in no sync
+/// bundle and the ordinary annotation sync — which answers what this device
+/// sent — never reaches it. Its highlights would wait for the reader to open
+/// the book and sync again. Asking at download time closes that: the book
+/// arrives already carrying what the library knows about it.
+///
+/// The `.sdr` is created here rather than waited for. Writing it now is also
+/// the one moment the flush race cannot be lost — the reader cannot have this
+/// book loaded when it did not exist a moment ago.
+///
+/// Best-effort by construction: `Ok(false)` when the library has nothing to
+/// write, and every failure is the caller's to log, never to fail a download
+/// that already succeeded.
+pub fn pull_sidecar(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    book_id: i64,
+    sidle_dir: &Path,
+    device_filename: &str,
+) -> Result<bool> {
+    let Some(stem) = device_filename.strip_suffix(".kfx") else {
+        return Ok(false);
+    };
+    let url = format!(
+        "https://{}:{}/sidecar/{book_id}?serial={}",
+        cfg.host, cfg.port, cfg.serial
+    );
+    let mut res = agent
+        .get(&url)
+        .header("X-Sidle-Token", &cfg.token)
+        .call()
+        .map_err(|e| anyhow!("GET {url}: {e}"))?;
+    // 204: the library holds no annotations for this book, which is the common
+    // case and not a failure.
+    if res.status() == 204 {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    res.body_mut()
+        .as_reader()
+        .take(SIDECAR_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read body of {url}"))?;
+    if bytes.is_empty() {
+        return Ok(false);
+    }
+
+    let dir = sidle_dir.join(format!("{stem}.sdr"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{stem}.yjr"));
+    std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+/// A reading-state sidecar is records, not content — tens of KB for a heavily
+/// annotated book. The cap is generous and only there so a wrong route or a
+/// captive-portal page cannot be written into the `.sdr` as one.
+const SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Stream a [`download_book`] body to `target`, atomically: write a sibling
 /// `.part`, verify the byte count against `Content-Length`, then rename over
 /// `target`. The in-place update pass ([`crate::updates`]) uses this to overwrite

@@ -78,6 +78,12 @@ const state = {
   // status bar (and folded into the settings modal's status line). Cleared when
   // the triggering handler resolves; restore restarts so it never clears there.
   fileop: null,
+  // When non-null, books are being removed from the Kindle. `{ done, total,
+  // title }` — `done` counts `device:delete-progress` events, which the backend
+  // emits one per file. The device list can only be re-read once at the end (a
+  // per-book refresh would be an MTP round trip each), so without this a batch
+  // is minutes of a UI that looks asleep.
+  deleting: null,
   // True while a Kindle annotation sync (auto-on-connect or manual) is
   // running. Surfaced in the status bar; lower priority than importing /
   // autopull so a book pull's progress isn't hidden behind it.
@@ -2551,11 +2557,19 @@ async function deleteFromDevice(filenames, titles) {
     return;
   }
   let results = [];
+  // Light the status bar before the first round trip: the backend deletes one
+  // file at a time over MTP, so a large batch spends minutes in here and the
+  // grid can't be re-read until it ends.
+  state.deleting = { done: 0, total: filenames.length, title: titles[0] || "" };
+  renderQueue();
   try {
     results = await window.api.invoke("device_delete", { filenames });
   } catch (e) {
     showToast(`delete failed: ${e}`, true);
     return;
+  } finally {
+    state.deleting = null;
+    renderQueue();
   }
   const counts = { removed: 0, not_ours: 0, failed: 0 };
   for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
@@ -2710,6 +2724,20 @@ function subscribePullProgress() {
     const mib = (n) => (n / 1048576).toFixed(1);
     const suffix = p.total ? `  ·  ${mib(p.done)} / ${mib(p.total)} MiB` : "";
     state.importing = { message: importBase + suffix, failed: false };
+    renderQueue();
+  });
+
+  // One per file removed from the Kindle. Gated on `state.deleting` so a stray
+  // event can't resurrect the line after the batch resolves — same idiom as
+  // `importBase` above.
+  window.api.listen("device:delete-progress", (e) => {
+    const r = e.payload;
+    if (!r || !state.deleting) return;
+    state.deleting = {
+      ...state.deleting,
+      done: state.deleting.done + 1,
+      title: r.filename || state.deleting.title,
+    };
     renderQueue();
   });
 
@@ -2929,10 +2957,17 @@ function renderQueue() {
   // device-orphan path writes `importing` with no fraction at all.
   const importRow = state.importing?.label ? importQueueRow() : null;
   if (importRow) ul.appendChild(importRow);
+  // A delete batch outranks the conversion queue for the same reason an import
+  // does: the user is standing in front of it.
+  const deleteRow = state.deleting ? deleteQueueRow() : null;
+  if (deleteRow) ul.appendChild(deleteRow);
   for (const t of state.sendQueue) ul.appendChild(sendQueueRow(t));
   for (const b of active) ul.appendChild(queueRow(b));
   $("#queue-empty").hidden =
-    active.length > 0 || state.sendQueue.length > 0 || importRow != null;
+    active.length > 0 ||
+    state.sendQueue.length > 0 ||
+    importRow != null ||
+    deleteRow != null;
 }
 
 // The single status-bar line. Split out from `renderQueue` because the frequent
@@ -2985,6 +3020,14 @@ function renderStatusSummary(active) {
       summary.textContent = `Sending to Kindle…${batch}`;
     }
     toggle.classList.add("active");
+  } else if (state.deleting) {
+    const d = state.deleting;
+    const pct = d.total > 0 ? Math.round((d.done / d.total) * 100) : 0;
+    summary.textContent =
+      d.total > 1
+        ? `Removing from Kindle — ${d.done}/${d.total} (${pct}%)`
+        : "Removing from Kindle…";
+    toggle.classList.add("active");
   } else if (state.fileop) {
     const f = state.fileop;
     const pct = f.total > 0 ? Math.round((f.done / f.total) * 100) : null;
@@ -3026,6 +3069,40 @@ function renderStatusSummary(active) {
 // an import of an azw3 or mobi *is* a conversion, just one that runs before the
 // book has a row to hang a job off. Reuses the `converting` classes so the bar
 // and status text match the queue below it.
+// A determinate row for a Kindle delete batch — the same shape a converting
+// book gets, because it is the same kind of wait: a queue of files being worked
+// through one at a time with an end in sight.
+function deleteQueueRow() {
+  const d = state.deleting;
+  const pct = d.total > 0 ? Math.round((d.done / d.total) * 100) : 0;
+  const li = document.createElement("li");
+  li.dataset.deleteRow = "1";
+
+  const main = document.createElement("div");
+  main.className = "queue-row-main";
+  const title = document.createElement("div");
+  title.className = "queue-title";
+  title.textContent = d.title || "Removing from Kindle";
+  const status = document.createElement("div");
+  status.className = "queue-status converting";
+  status.textContent = `${d.done}/${d.total} removed`;
+  main.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "queue-meta";
+  meta.textContent = "Removing";
+
+  const bar = document.createElement("div");
+  bar.className = "queue-progress converting";
+  const fill = document.createElement("div");
+  fill.className = "queue-progress-fill";
+  fill.style.width = `${pct}%`;
+  bar.appendChild(fill);
+
+  li.append(main, meta, bar);
+  return li;
+}
+
 function importQueueRow() {
   const imp = state.importing;
   const li = document.createElement("li");

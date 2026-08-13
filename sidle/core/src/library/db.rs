@@ -3958,6 +3958,26 @@ fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationRow>
     })
 }
 
+/// Whether a device has ever shown us a coloured highlight.
+///
+/// The push composer needs to know before it writes, and the usual answer comes
+/// from the sidecars the device just sent. A book being written for the first
+/// time has no sidecar to read that from, so the evidence comes from what this
+/// device has already told us: a monochrome Kindle writes no colour at all, so
+/// one coloured row from this serial settles it. A device that has never
+/// reported a highlight reads as monochrome, and the first colour it does
+/// report moves it over.
+pub fn device_uses_colors(conn: &Connection, device_serial: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM annotations a
+             JOIN annotation_device d ON d.dedup_hash = a.dedup_hash
+             WHERE d.device_serial = ?1 AND a.color IS NOT NULL AND a.color <> '')",
+        params![device_serial],
+        |r| r.get(0),
+    )
+}
+
 /// Annotations for one book, ordered by reading position.
 pub fn list_annotations_for_book(
     conn: &Connection,
