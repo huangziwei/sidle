@@ -8,12 +8,13 @@ use std::io::{self, Seek, Write};
 
 use crate::export::Exporter;
 use crate::formats::kfx::auxiliary::{build_auxiliary_data_fragment, build_ruby_content_fragments};
+use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::context::{ExportContext, LandmarkTarget};
 use crate::formats::kfx::cover::{
     COVER_SECTION_NAME, build_cover_section, get_chapter_image_path, is_image_only_chapter,
     needs_standalone_cover, normalize_cover_path,
 };
-use crate::formats::kfx::fragment::KfxFragment;
+use crate::formats::kfx::fragment::{FragmentData, KfxFragment};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::metadata::{
     MetadataCategory, MetadataContext, build_category_entries, generate_book_id,
@@ -349,8 +350,15 @@ fn build_kfx_container(
     // N+. storylines ($259) - all together
     // M+. content ($145) - all together
 
-    // 2a. Content features fragment ($585)
-    fragments.push(build_content_features_fragment(&ctx));
+    // 2a. Content features fragment ($585). Its conditional entries describe
+    // resources and section lengths that only exist further down, so this holds
+    // the slot in the entity order and is rebuilt from the finished fragments
+    // once they do.
+    let content_features_index = fragments.len();
+    fragments.push(build_content_features_fragment(
+        &ctx,
+        ContentFacts::default(),
+    ));
 
     // Offering the publisher's typefaces is a metadata claim, so it has to be
     // settled before the metadata fragment is written — ahead of the font
@@ -576,6 +584,19 @@ fn build_kfx_container(
     fragments.push(build_position_id_map_fragment(&sec_pos));
     fragments.extend(build_section_position_id_map_fragments(&sec_pos));
     fragments.push(build_location_map_fragment(&ctx));
+
+    // Every resource and every section length now exists, so the real
+    // content_features replaces the placeholder pushed at 2a — in place, since
+    // the entity order is part of the format.
+    let facts = ContentFacts {
+        max_section_pids: sec_pos
+            .iter()
+            .map(|s| s.eids.iter().map(|&(_, span)| span).sum::<i64>())
+            .max()
+            .unwrap_or(0),
+        ..ContentFacts::from_fragments(&fragments)
+    };
+    fragments[content_features_index] = build_content_features_fragment(&ctx, facts);
 
     // 2l. Container metadata entities
     fragments.push(build_resource_path_fragment());
@@ -999,10 +1020,81 @@ fn content_feature(namespace: &str, key: &str, major: i64) -> IonValue {
     ])
 }
 
+/// The content facts a `content_features` declaration has to agree with.
+///
+/// A feature entry is a claim about what the book contains and the renderer
+/// acts on it, so each conditional entry is gated on the fact it asserts.
+/// These are read back off the finished fragments rather than tracked during
+/// synthesis: that way no emission path — cover, interior plate, FXL page, PDF
+/// page — can add a resource the declaration misses.
+///
+/// The mirror-image check lives in [`crate::validate::source::kfx`].
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+struct ContentFacts {
+    /// A JPEG-XR plate — `yj_jpegxr_sd`.
+    jxr_image: bool,
+    /// A JPEG payload carrying restart markers — `yj_jpg_rst_marker_present`.
+    jpeg_restart_markers: bool,
+    /// Positions in the longest section, for `reflow-section-size`.
+    max_section_pids: i64,
+}
+
+/// Positions a section may hold before the renderer needs its large-section
+/// support declared.
+const SECTION_PID_BOUND: i64 = 65536;
+
+impl ContentFacts {
+    /// Read the media facts off the built fragments: every `external_resource`
+    /// ($164) for its format, every `bcRawMedia` ($417) JPEG payload for
+    /// restart markers (`FF D0`–`FF D7`).
+    fn from_fragments(fragments: &[KfxFragment]) -> Self {
+        let mut facts = Self::default();
+        for frag in fragments {
+            match (frag.ftype, &frag.data) {
+                (t, FragmentData::Ion(ion)) if t == KfxSymbol::ExternalResource as u64 => {
+                    let format = ion
+                        .as_struct()
+                        .and_then(|f| get_field(f, KfxSymbol::Format as u64))
+                        .and_then(|v| match v.unwrap_annotated() {
+                            IonValue::Symbol(sym) => Some(*sym),
+                            _ => None,
+                        });
+                    if format == Some(KfxSymbol::Jxr as u64) {
+                        facts.jxr_image = true;
+                    }
+                }
+                // Only JPEG payloads: `FF D0`-`FF D7` is a marker inside JPEG
+                // entropy-coded data, and a font may hold those bytes for
+                // unrelated reasons.
+                (t, FragmentData::Raw(bytes))
+                    if t == KfxSymbol::Bcrawmedia as u64
+                        && !facts.jpeg_restart_markers
+                        && bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+                        && bytes
+                            .windows(2)
+                            .any(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1])) =>
+                {
+                    facts.jpeg_restart_markers = true;
+                }
+                _ => {}
+            }
+        }
+        facts
+    }
+
+    /// The `reflow-section-size` for the longest section, or `None` when no
+    /// section is long enough to need one.
+    fn reflow_section_size(&self) -> Option<i64> {
+        (self.max_section_pids > SECTION_PID_BOUND)
+            .then(|| (((self.max_section_pids - SECTION_PID_BOUND) / 16384) + 2).min(256))
+    }
+}
+
 /// Build the content features fragment ($585).
 ///
-/// This describes the content capabilities/features of the book.
-fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
+/// This describes the content capabilities/features of the book. Every
+/// conditional entry is gated on a [`ContentFacts`] flag.
+fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> KfxFragment {
     // Build feature entries matching reference KFX
     let reflow_style = IonValue::Struct(vec![
         (
@@ -1046,28 +1138,40 @@ fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
         ),
     ]);
 
-    let yj_hdv = IonValue::Struct(vec![
-        (
-            KfxSymbol::Namespace as u64,
-            IonValue::String("com.amazon.yjconversion".to_string()),
-        ),
-        (
-            KfxSymbol::Key as u64,
-            IonValue::String("yj_hdv".to_string()),
-        ),
-        (
-            KfxSymbol::VersionInfo as u64,
-            IonValue::Struct(vec![(
-                KfxSymbol::Version as u64,
-                IonValue::Struct(vec![
-                    (KfxSymbol::MajorVersion as u64, IonValue::Int(1)),
-                    (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
-                ]),
-            )]),
-        ),
-    ]);
+    let mut features = vec![reflow_style, canonical_format];
 
-    let mut features = vec![reflow_style, canonical_format, yj_hdv];
+    // `yj_hdv` is never declared: it describes *tiled* high-definition imagery,
+    // which this writer does not emit. A large image alone is not what the
+    // feature claims, so image dimensions do not gate it.
+
+    // JPEG-XR plates, which the interior-image path encodes by default.
+    if facts.jxr_image {
+        features.push(content_feature(
+            "com.amazon.yjconversion",
+            "yj_jpegxr_sd",
+            1,
+        ));
+    }
+
+    // Restart markers let a renderer decode a JPEG in segments.
+    if facts.jpeg_restart_markers {
+        features.push(content_feature(
+            "com.amazon.yjconversion",
+            "yj_jpg_rst_marker_present",
+            1,
+        ));
+    }
+
+    // Sections past 65536 positions need the renderer's large-section support
+    // declared, scaled to the overflow; deep paging and "go to page" read the
+    // declaration rather than the section.
+    if let Some(size) = facts.reflow_section_size() {
+        features.push(content_feature(
+            "com.amazon.yjconversion",
+            "reflow-section-size",
+            size,
+        ));
+    }
 
     // CJK reflow-language marker. Amazon stamps this alongside the book
     // `language` to switch the device into its per-script reflow typography
@@ -6062,39 +6166,136 @@ mod tests {
         );
     }
 
+    /// The feature keys a content_features fragment declares.
+    fn feature_keys(frag: &KfxFragment) -> Vec<String> {
+        let FragmentData::Ion(IonValue::Struct(fields)) = &frag.data else {
+            panic!("expected Ion struct");
+        };
+        let Some((_, IonValue::List(items))) = fields
+            .iter()
+            .find(|(id, _)| *id == KfxSymbol::Features as u64)
+        else {
+            panic!("content_features should contain a features list");
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                item.as_struct()
+                    .and_then(|f| get_field(f, KfxSymbol::Key as u64))
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     #[test]
     fn test_content_features_fragment() {
         let ctx = ExportContext::new();
-        let frag = build_content_features_fragment(&ctx);
+        let frag = build_content_features_fragment(&ctx, ContentFacts::default());
 
-        // Should be $585 (content_features) type
         assert_eq!(frag.ftype, KfxSymbol::ContentFeatures as u64);
         assert!(frag.is_singleton());
+        assert_eq!(feature_keys(&frag), ["reflow-style", "CanonicalFormat"]);
+    }
 
-        // Extract Ion and verify structure
-        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
-            if let IonValue::Struct(fields) = ion {
-                // Should have features field
-                let features = fields
-                    .iter()
-                    .find(|(id, _)| *id == KfxSymbol::Features as u64);
-                assert!(
-                    features.is_some(),
-                    "content_features should contain features"
-                );
-
-                // Features should be a list with 3 items
-                if let Some((_, IonValue::List(items))) = features {
-                    assert_eq!(items.len(), 3, "should have 3 feature entries");
-                } else {
-                    panic!("features should be a list");
-                }
-            } else {
-                panic!("expected Struct");
-            }
-        } else {
-            panic!("expected Ion data");
+    /// A book with no images and no long section claims nothing about media.
+    /// `yj_hdv` in particular describes tiled imagery this writer never emits,
+    /// so no book may declare it.
+    #[test]
+    fn a_plain_book_declares_no_media_features() {
+        let ctx = ExportContext::new();
+        let keys = feature_keys(&build_content_features_fragment(
+            &ctx,
+            ContentFacts::default(),
+        ));
+        for claim in [
+            "yj_hdv",
+            "yj_jpegxr_sd",
+            "yj_jpg_rst_marker_present",
+            "reflow-section-size",
+        ] {
+            assert!(
+                !keys.contains(&claim.to_string()),
+                "a plain book must not declare {claim}"
+            );
         }
+    }
+
+    #[test]
+    fn jpeg_xr_plates_are_declared() {
+        let ctx = ExportContext::new();
+        let facts = ContentFacts {
+            jxr_image: true,
+            ..Default::default()
+        };
+        assert!(
+            feature_keys(&build_content_features_fragment(&ctx, facts))
+                .contains(&"yj_jpegxr_sd".to_string())
+        );
+    }
+
+    #[test]
+    fn restart_markers_are_declared() {
+        let ctx = ExportContext::new();
+        let facts = ContentFacts {
+            jpeg_restart_markers: true,
+            ..Default::default()
+        };
+        assert!(
+            feature_keys(&build_content_features_fragment(&ctx, facts))
+                .contains(&"yj_jpg_rst_marker_present".to_string())
+        );
+    }
+
+    /// The declared size scales with how far the longest section overruns the
+    /// renderer's 65536-position bound, and is absent below it.
+    #[test]
+    fn long_sections_declare_a_scaled_reflow_section_size() {
+        assert_eq!(ContentFacts::default().reflow_section_size(), None);
+        for (pids, expected) in [
+            (65536, None),
+            (65537, Some(2)),
+            (65536 + 16384, Some(3)),
+            (65536 + 7 * 16384, Some(9)),
+            (i64::from(u32::MAX), Some(256)), // clamped
+        ] {
+            let facts = ContentFacts {
+                max_section_pids: pids,
+                ..Default::default()
+            };
+            assert_eq!(facts.reflow_section_size(), expected, "at {pids} positions");
+        }
+    }
+
+    /// The facts are read back off the finished fragments, so a resource added
+    /// by any emission path is seen.
+    #[test]
+    fn content_facts_read_media_off_the_fragments() {
+        let jxr = KfxFragment::new(
+            KfxSymbol::ExternalResource,
+            "e0",
+            IonValue::Struct(vec![(
+                KfxSymbol::Format as u64,
+                IonValue::Symbol(KfxSymbol::Jxr as u64),
+            )]),
+        );
+        // A JPEG carrying a restart marker (FF D0) after its SOI.
+        let jpeg = KfxFragment::raw(
+            KfxSymbol::Bcrawmedia,
+            "resource/r0",
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD0, 0xFF, 0xD9],
+        );
+        let facts = ContentFacts::from_fragments(&[jxr, jpeg]);
+        assert!(facts.jxr_image);
+        assert!(facts.jpeg_restart_markers);
+
+        // A font that happens to contain the same bytes is not a JPEG.
+        let font = KfxFragment::raw(
+            KfxSymbol::Bcrawmedia,
+            "resource/f0",
+            vec![0x00, 0x01, 0x00, 0x00, 0xFF, 0xD0],
+        );
+        assert!(!ContentFacts::from_fragments(&[font]).jpeg_restart_markers);
     }
 
     #[test]
@@ -6244,7 +6445,7 @@ mod tests {
     fn test_singleton_uses_null_symbol() {
         // Build a singleton fragment and serialize it
         let ctx = ExportContext::new();
-        let frag = build_content_features_fragment(&ctx);
+        let frag = build_content_features_fragment(&ctx, ContentFacts::default());
         let local_symbols: Vec<String> = vec![];
         let entities = serialize_fragments(&[frag], &local_symbols);
 
@@ -6582,7 +6783,10 @@ mod entity_structure_tests {
         // Pass 2: Build fragments in correct order
         let mut fragments = Vec::new();
 
-        fragments.push(build_content_features_fragment(&ctx));
+        fragments.push(build_content_features_fragment(
+            &ctx,
+            ContentFacts::default(),
+        ));
         fragments.push(build_book_metadata_fragment(&book, &container_id, &ctx));
         fragments.push(build_metadata_fragment(book.metadata(), &ctx));
         fragments.push(build_document_data_fragment(&ctx));

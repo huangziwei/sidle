@@ -43,6 +43,10 @@
 //!   address purely by `position_id_map` $265).
 //! - **Rule 9, cover present + resolves** — the declared cover resource exists
 //!   and has embedded bytes (missing cover = warning; dangling = error).
+//! - **Rule 11, declarations agree with content** — every `content_features`
+//!   entry is a claim about what the book contains, and the renderer acts on
+//!   it, so content the renderer is told nothing about is a defect. See
+//!   [`ContentFacts`] for how each fact is read.
 //!
 //! Rule 10 (TOC deficiency) is contributed by the cross-format `source::toc`
 //! check via [`crate::validate::source::validate`]. Not yet handled: `.kfx-zip`
@@ -82,6 +86,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_cover(&book));
     findings.extend(check_nav_reachability(bytes));
     findings.extend(check_position_map_coverage(&book));
+    findings.extend(check_feature_content_agreement(&book));
     findings
 }
 
@@ -550,6 +555,215 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
             ));
         }
     }
+    out
+}
+
+// ============================================================================
+// Rule 11 — declared features agree with the content
+// ============================================================================
+
+/// Positions a section may hold before the renderer needs its large-section
+/// support declared.
+const SECTION_PID_BOUND: i64 = 65536;
+
+/// What the book actually contains, for its `content_features` claims to be
+/// checked against. Every field is read from the container itself — never from
+/// a converted copy, and never from another implementation's account of the
+/// format.
+#[derive(Default, Debug)]
+struct ContentFacts {
+    /// A tiled image (`yj.tiles` / `yj.tile_padding` on an `external_resource`).
+    /// This — not image size — is what `yj_hdv` describes; a merely large image
+    /// does not qualify.
+    tiled_image: bool,
+    /// An `external_resource` whose format is `jxr`.
+    jxr_image: bool,
+    /// A JPEG payload carrying restart markers (`FF D0`–`FF D7`). Read from the
+    /// `bcRawMedia` bytes, so it is the real payload rather than a byte pattern
+    /// that happened to fall in an Ion struct.
+    jpeg_restart_markers: bool,
+    /// Positions in the longest section, from the `position_id_map` spans.
+    /// `None` when the container only ships the `{eid, pid}` pair shape, which
+    /// does not state section lengths — an unknown, not a zero.
+    max_section_pids: Option<i64>,
+}
+
+impl ContentFacts {
+    fn read(book: &BookData) -> Self {
+        let mut facts = Self::default();
+
+        if let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) {
+            for value in resources.values() {
+                let Some(fields) = value.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                if get_field(fields, KfxSymbol::YjTiles as u64).is_some()
+                    || get_field(fields, KfxSymbol::YjTilePadding as u64).is_some()
+                {
+                    facts.tiled_image = true;
+                }
+                if get_field(fields, KfxSymbol::Format as u64).and_then(|v| book.symbols.text_of(v))
+                    == Some("jxr")
+                {
+                    facts.jxr_image = true;
+                }
+            }
+        }
+
+        facts.jpeg_restart_markers = book.raw_media.values().any(|bytes| {
+            bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+                && bytes
+                    .windows(2)
+                    .any(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1]))
+        });
+
+        facts.max_section_pids = max_section_pids(book);
+        facts
+    }
+
+    /// The `reflow-section-size` a book this long should declare, or `None`
+    /// when no section is long enough to need one.
+    fn expected_section_size(&self) -> Option<i64> {
+        let max = self.max_section_pids?;
+        (max > SECTION_PID_BOUND).then(|| (((max - SECTION_PID_BOUND) / 16384) + 2).min(256))
+    }
+}
+
+/// Positions in the longest section, read from the `position_id_map` ($265)
+/// span shape (`{section_name, pid, length}`). The `{eid, pid}` pair shape
+/// states no section length, so it yields `None` rather than a guess — see
+/// [`crate::formats::kfx::position`] for why neither shape is a format tell.
+fn max_section_pids(book: &BookData) -> Option<i64> {
+    let maps = book.by_type.get(&(KfxSymbol::PositionIdMap as u64))?;
+    let mut max = None;
+    for value in maps.values() {
+        let Some(fields) = value.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(entries) = get_field(fields, KfxSymbol::Contains as u64)
+            .and_then(|v| v.unwrap_annotated().as_list())
+        else {
+            continue;
+        };
+        for entry in entries {
+            let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            // Only the span shape names a section; the pair shape carries eids.
+            if get_field(ef, KfxSymbol::SectionName as u64).is_none() {
+                continue;
+            }
+            if let Some(length) = get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int()) {
+                max = Some(max.map_or(length, |m: i64| m.max(length)));
+            }
+        }
+    }
+    max
+}
+
+/// The `com.amazon.yjconversion` features the book declares, keyed by feature
+/// name, valued by major version.
+fn declared_features(book: &BookData) -> HashMap<String, i64> {
+    let mut out = HashMap::new();
+    let Some(entities) = book.by_type.get(&(KfxSymbol::ContentFeatures as u64)) else {
+        return out;
+    };
+    for value in entities.values() {
+        let Some(fields) = value.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(list) = get_field(fields, KfxSymbol::Features as u64)
+            .and_then(|v| v.unwrap_annotated().as_list())
+        else {
+            continue;
+        };
+        for feature in list {
+            let Some(ff) = feature.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(key) = get_field(ff, KfxSymbol::Key as u64).and_then(|v| v.as_string()) else {
+                continue;
+            };
+            let major = get_field(ff, KfxSymbol::VersionInfo as u64)
+                .and_then(|v| v.unwrap_annotated().as_struct())
+                .and_then(|vi| get_field(vi, KfxSymbol::Version as u64))
+                .and_then(|v| v.unwrap_annotated().as_struct())
+                .and_then(|ver| get_field(ver, KfxSymbol::MajorVersion as u64))
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
+            out.insert(key.to_string(), major);
+        }
+    }
+    out
+}
+
+fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
+    let declared = declared_features(book);
+    if declared.is_empty() {
+        return Vec::new(); // no content_features — rule 2's business, not this one.
+    }
+    let facts = ContentFacts::read(book);
+    let mut out = Vec::new();
+
+    if declared.contains_key("yj_hdv") && !facts.tiled_image {
+        out.push(warning(
+            "feature-without-content",
+            "<content_features>",
+            "declares yj_hdv but carries no tiled imagery — the renderer is told to \
+             expect a high-definition variant the book does not contain",
+            Some(FixHint::new(
+                "drop-feature",
+                "remove the yj_hdv declaration, or emit the tiled resource it claims",
+            )),
+        ));
+    }
+
+    // Media features are checked in the OMISSION direction only. A declaration
+    // may legitimately outrun the bytes: it can describe the material a book
+    // was built from rather than only what survived into the container, so a
+    // feature with no matching payload is not a defect. Content the renderer is
+    // told nothing about is the half that stays checkable.
+    if facts.jxr_image && !declared.contains_key("yj_jpegxr_sd") {
+        out.push(warning(
+            "feature-undeclared",
+            "<content_features>",
+            "embeds JPEG-XR plates but declares no yj_jpegxr_sd",
+            None,
+        ));
+    }
+
+    if facts.jpeg_restart_markers && !declared.contains_key("yj_jpg_rst_marker_present") {
+        out.push(warning(
+            "feature-undeclared",
+            "<content_features>",
+            "a JPEG payload carries restart markers but the book declares no \
+             yj_jpg_rst_marker_present, so segmented decoding stays off",
+            None,
+        ));
+    }
+
+    // Section size is only checkable when the container states section lengths.
+    if facts.max_section_pids.is_some() {
+        let expected = facts.expected_section_size();
+        let actual = declared.get("reflow-section-size").copied();
+        if expected != actual {
+            let max = facts.max_section_pids.unwrap_or_default();
+            out.push(warning(
+                "feature-content-mismatch",
+                "<content_features>",
+                format!(
+                    "reflow-section-size is {actual:?} but the longest section holds {max} \
+                     positions, which calls for {expected:?} — deep paging and \"go to page\" \
+                     read the declaration, not the section"
+                ),
+                Some(FixHint::new(
+                    "restate-section-size",
+                    "declare reflow-section-size for the longest section's position count",
+                )),
+            ));
+        }
+    }
+
     out
 }
 
