@@ -83,6 +83,14 @@ pub struct Imported {
     pub sessions: usize,
     /// Sessions actually new to the library (the rest were already held).
     pub added: usize,
+    /// Sittings already held that this pass measured **further** — the same run,
+    /// seen to a later point than the events available last time could reach.
+    ///
+    /// A sitting spans as many syncs as it takes to finish, and each one carries
+    /// it forward from where the last left it (see [`Resume`]). Counted apart
+    /// from `added` because the reader is told a different thing: not that a new
+    /// sitting appeared, but that the one they are in the middle of grew.
+    pub extended: usize,
     /// Sessions that now name a book, counted across the whole table.
     ///
     /// This, not `added`, is what the reading log gained: a session on a book
@@ -122,6 +130,89 @@ pub struct Session {
     /// hour spent on one chapter before midnight becomes an even smear over the
     /// three hours the sitting happened to span.
     pub hours: Vec<(u8, i64)>,
+    /// The book's running counter where this run began and where it was last
+    /// seen, in milliseconds — the two values [`Self::seconds`] is the difference
+    /// of, kept so a later pass can carry the run forward. `None` when no event
+    /// in the run stated a counter at all.
+    ///
+    /// Stored with the session because the events are never offered twice: a
+    /// sitting that outlives the sync it started in can only be continued by a
+    /// pass that knows where the last one stopped counting. See [`Resume`].
+    pub start_counter_ms: Option<i64>,
+    pub end_counter_ms: Option<i64>,
+    /// The same two readings of the device's own word counter.
+    pub start_words: Option<i64>,
+    pub end_words: Option<i64>,
+}
+
+/// A sitting a device left open, handed back to the parser so the next batch of
+/// events continues it instead of starting over.
+///
+/// **A reader does not stop reading because a sync happened.** Events reach the
+/// library in batches — every Sync sends what the device has logged since the
+/// last one — and a sitting in progress is split across as many batches as it
+/// takes to finish. Parsed batch by batch in isolation, each piece becomes its
+/// own session: the sitting fragments, and the counter advance that fell
+/// *between* two batches is credited to neither, because a batch measures only
+/// the span of the counter it can see. A ten-minute stretch read between two
+/// syncs is exactly that case, and it is silently shed.
+///
+/// So the newest session stored for a device is read back and offered to the
+/// parser as the run already under way. Its own break rules then decide whether
+/// the next event belongs to it — same book, no half-hour gap, same day — and
+/// where it does, the session is measured from its original start to the newest
+/// event, hours and all. The result carries the same `started_at`, so it
+/// updates that row rather than adding one beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    pub started_at: String,
+    pub ended_at: String,
+    pub end_position: i64,
+    /// The counter the run began at and the last value seen for it. Both are
+    /// required: without them the run has no measurable length to continue.
+    pub start_counter_ms: i64,
+    pub end_counter_ms: i64,
+    pub start_words: Option<i64>,
+    pub end_words: Option<i64>,
+    pub page_turns: i64,
+    /// The hours already booked against the run, so a continued session rebuilds
+    /// the whole distribution rather than an incremental slice of one.
+    pub hours: Vec<(u8, i64)>,
+}
+
+impl Resume {
+    /// The sitting `device_serial` left open, or `None` when the library holds
+    /// no session for it that could still be running.
+    ///
+    /// "Could still be running" is not decided here — whether the reader came
+    /// back within the half hour, stayed in the same book, and stayed on the
+    /// same day is [`parse_sessions`]'s own judgement, made against the events
+    /// themselves. This only supplies the candidate.
+    pub fn newest(conn: &Connection, device_serial: &str) -> rusqlite::Result<Option<Self>> {
+        let Some(row) = db::newest_reading_session(conn, device_serial)? else {
+            return Ok(None);
+        };
+        // A row stored before sessions carried their counters cannot be
+        // continued — its length is known but not where on the counter it sits,
+        // so a later event states no measurable advance from it.
+        let (Some(start_counter_ms), Some(end_counter_ms)) =
+            (row.start_counter_ms, row.end_counter_ms)
+        else {
+            return Ok(None);
+        };
+        let hours = db::session_hours(conn, &row)?;
+        Ok(Some(Self {
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+            end_position: row.end_position,
+            start_counter_ms,
+            end_counter_ms,
+            start_words: row.start_words,
+            end_words: row.end_words,
+            page_turns: row.page_turns,
+            hours,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +699,12 @@ pub fn log_stamp(iso: &str) -> Option<String> {
         .then_some(out)
 }
 
+/// `YYYY-MM-DDTHH:MM:SS` as the parser's own instant, for a stored session being
+/// read back — the round trip of what [`stamp`] produced when it was written.
+fn moment(iso: &str) -> Option<Moment> {
+    stamp(&log_stamp(iso)?)
+}
+
 /// Turn an ordered, de-duplicated event stream into sessions.
 ///
 /// A session is a run of page events on one book. It ends when the book changes,
@@ -621,18 +718,35 @@ pub fn log_stamp(iso: &str) -> Option<String> {
 /// Midnight is the one break the reader did not make, and it is the only one
 /// where the interval that straddles it is **divided** rather than dropped: see
 /// [`Break`].
-pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Session> {
+///
+/// `resume` is the sitting the reader may still be in — the run these events
+/// continue rather than follow. Without it every batch of events starts a new
+/// run at its first line, which is only correct when the batch begins where the
+/// reading did; see [`Resume`].
+pub fn parse_sessions<'a>(
+    events: impl IntoIterator<Item = &'a str>,
+    resume: Option<&Resume>,
+) -> Vec<Session> {
     let mut out = Vec::new();
-    let mut open: Option<Open> = None;
-    let mut prev_abs: Option<i64> = None;
+    let mut open: Option<Open> = Open::resume(resume);
+    let mut prev_abs: Option<i64> = open.as_ref().map(|cur| cur.last.abs);
     let mut opened: Option<Opened> = None;
     // A break, once noticed, waits here until an observation can act on it.
     let mut gapped = false;
+    let mut first = true;
 
     for line in events {
         let Some(now) = stamp(line) else {
             continue;
         };
+        if std::mem::take(&mut first) && open.as_ref().is_some_and(|cur| now.abs < cur.last.abs) {
+            // Events from before the run they were offered against — a whole
+            // archive replayed host-side, say, which already includes the run.
+            // Folding them into it would count them a second time, so the run is
+            // dropped rather than continued; it stays stored exactly as it is.
+            open = None;
+            prev_abs = None;
+        }
         // The gap is measured against the previous *event of any kind*, so a
         // stretch of non-page activity still breaks a session.
         //
@@ -672,7 +786,7 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
             .and_then(|cur| cur.broken_by(&now, &obs, gapped))
         {
             None => {}
-            Some(Break::Left) => out.extend(open.take().map(Open::finish)),
+            Some(Break::Left) => out.extend(open.take().and_then(Open::emit)),
             Some(Break::Midnight(boundary)) => {
                 out.extend(open.take().map(|cur| cur.finish_at(&boundary)));
                 // The run was already under way, so nothing that happened after
@@ -684,10 +798,10 @@ pub fn parse_sessions<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<Sess
         let cur = open.get_or_insert_with(|| Open::new(obs.position, &now, seed));
         cur.observe(&now, &obs);
         if obs.closes {
-            out.extend(open.take().map(Open::finish));
+            out.extend(open.take().and_then(Open::emit));
         }
     }
-    out.extend(open.map(Open::finish));
+    out.extend(open.and_then(Open::emit));
     out
 }
 
@@ -785,6 +899,10 @@ struct Open {
     /// the intervals arrive. Kept here because this is the only place the
     /// intervals exist: a stored session has only its window and its total.
     hours_ms: [i64; 24],
+    /// Whether any event of this batch has joined the run. False only for a
+    /// resumed run no event continued, which is a stored session this batch has
+    /// nothing new to say about.
+    touched: bool,
 }
 
 impl Open {
@@ -816,7 +934,60 @@ impl Open {
             last_time: time_lo,
             last_words: words_lo,
             hours_ms: [0; 24],
+            touched: false,
         }
+    }
+
+    /// The run a previous batch of events left open, rebuilt from the session it
+    /// was stored as.
+    ///
+    /// Everything a run needs is on the row: where it started on the clock and
+    /// on the counter, where it was last seen on both, and the hours booked so
+    /// far. Restored whole rather than as a fresh run anchored at the stored end,
+    /// so the session this produces carries the *original* `started_at` — that
+    /// being the identity the row is stored under — and reports the sitting's
+    /// whole length rather than the part of it this batch could see.
+    ///
+    /// `None` for a caller with no sitting to continue, which is the ordinary
+    /// case: a device syncing for the first time, or one whose last session
+    /// finished long ago.
+    fn resume(resume: Option<&Resume>) -> Option<Self> {
+        let r = resume?;
+        let last = moment(&r.ended_at)?;
+        let mut hours_ms = [0; 24];
+        for (hour, seconds) in &r.hours {
+            if let Some(slot) = hours_ms.get_mut(*hour as usize) {
+                *slot = seconds * 1000;
+            }
+        }
+        // Both ends of the word counter or neither: one alone would have the run
+        // report the difference between a reading and nothing.
+        let (words_lo, words_hi) = match (r.start_words, r.end_words) {
+            (Some(lo), Some(hi)) => (Some(lo), hi),
+            _ => (None, 0),
+        };
+        Some(Self {
+            end_position: r.end_position,
+            started_at: r.started_at.clone(),
+            ended_at: r.ended_at.clone(),
+            time_lo: Some(r.start_counter_ms),
+            time_hi: r.end_counter_ms,
+            words_lo,
+            words_hi,
+            page_turns: r.page_turns,
+            last,
+            last_time: Some(r.end_counter_ms),
+            last_words: r.end_words,
+            hours_ms,
+            touched: false,
+        })
+    }
+
+    /// The run as a session, unless it is a resumed one this batch never
+    /// continued — that is the stored row unchanged, and re-offering it would
+    /// have every sync report a sitting it did nothing to.
+    fn emit(self) -> Option<Session> {
+        self.touched.then(|| self.finish())
     }
 
     /// Book an interval's counted reading against the clock hours it ran
@@ -853,6 +1024,7 @@ impl Open {
     }
 
     fn observe(&mut self, now: &Moment, obs: &Observation) {
+        self.touched = true;
         if let (Some(from), Some(to)) = (self.last_time, obs.total_ms) {
             self.credit(self.last.secs, now.secs, to - from);
         }
@@ -936,6 +1108,13 @@ impl Open {
             seconds,
             page_turns: self.page_turns,
             words: self.words_hi - self.words_lo.unwrap_or(self.words_hi),
+            // Both ends of the counter, not just their difference: a later batch
+            // of events continues this run from where it stopped counting, and
+            // only the values say where that is.
+            start_counter_ms: self.time_lo,
+            end_counter_ms: self.time_lo.map(|_| self.time_hi),
+            start_words: self.words_lo,
+            end_words: self.words_lo.map(|_| self.words_hi),
         }
     }
 }
@@ -1104,7 +1283,9 @@ pub fn import(
             ..Imported::default()
         });
     }
-    let mut out = store_events(conn, &found.events, found.files, device_serial, watch)?;
+    // No sitting to resume: this reads whole archives, so it holds the run's own
+    // earlier events and builds it from them rather than from a stored summary.
+    let mut out = store_events(conn, &found.events, found.files, device_serial, None, watch)?;
     out.skipped = found.skipped;
     out.truncated = found.truncated;
     // Marked only now: a file counts as read once its events are stored, so an
@@ -1128,11 +1309,17 @@ pub fn import(
 ///
 /// `events` must be de-duplicated and chronological, which a [`BTreeSet`] of raw
 /// lines gives for free.
+///
+/// `resume` is the sitting these events may continue — see [`Resume`]. A caller
+/// holding a whole archive passes `None`, because the run's own earlier events
+/// are in `events`; a caller taking a device's newest events passes what the
+/// library already stored, because they are not.
 pub fn store_events(
     conn: &Connection,
     events: &BTreeSet<String>,
     files: usize,
     device_serial: &str,
+    resume: Option<&Resume>,
     watch: job::Watch<'_>,
 ) -> rusqlite::Result<Imported> {
     // Sessions are grouped by the fingerprint every page event carries, then
@@ -1159,7 +1346,19 @@ pub fn store_events(
         let key = identity.get(&fingerprint).copied().unwrap_or(fingerprint);
         db::record_log_points(conn, key, &[(at.eid, at.offset, at.linear_pos)])?;
     }
-    let sessions = parse_sessions(events.iter().map(String::as_str));
+    // A stored row may be keyed by either of the book's two end constants: the
+    // log line states the last-word position, and [`db::resolve_reading_sessions`]
+    // re-keys the row to the last position once the pairing is known. The run is
+    // therefore offered under the name the *events* use, so the parser sees the
+    // continuation as the same book and not as a switch to another one.
+    let resume = resume.map(|r| Resume {
+        end_position: identity
+            .iter()
+            .find(|(_, key)| **key == r.end_position)
+            .map_or(r.end_position, |(raw, _)| *raw),
+        ..r.clone()
+    });
+    let sessions = parse_sessions(events.iter().map(String::as_str), resume.as_ref());
 
     let mut out = Imported {
         files,
@@ -1207,18 +1406,25 @@ pub fn store_events(
             seconds: s.seconds,
             page_turns: s.page_turns,
             words: s.words,
+            start_counter_ms: s.start_counter_ms,
+            end_counter_ms: s.end_counter_ms,
+            start_words: s.start_words,
+            end_words: s.end_words,
         };
-        if db::insert_reading_session(conn, &row)? {
-            out.added += 1;
-            // The hours the sitting's reading actually fell in — from the log's
-            // own intervals, which exist nowhere else and are never sent twice.
-            //
-            // Written with the row and only with the row. The two are one
-            // measurement: hours from a second, longer parse against totals from
-            // the first would have the clock report a day the calendar beside it
-            // does not.
-            db::record_session_hours(conn, &row, &s.hours)?;
+        // The hours the sitting's reading actually fell in — from the log's own
+        // intervals, which exist nowhere else and are never sent twice.
+        //
+        // Written with the row and only with the row. The two are one
+        // measurement: hours from a second, longer parse against totals from the
+        // first would have the clock report a day the calendar beside it does
+        // not. A continued run rebuilds its whole distribution, so the hours are
+        // replaced rather than added to.
+        match db::insert_reading_session(conn, &row)? {
+            db::Stored::Added => out.added += 1,
+            db::Stored::Extended => out.extended += 1,
+            db::Stored::Unchanged => continue,
         }
+        db::record_session_hours(conn, &row, &s.hours)?;
     }
     out.attributed = db::resolve_reading_sessions(conn)?;
     Ok(out)
@@ -1302,7 +1508,7 @@ mod tests {
             page("260803:100500", "NextPage", 148_207, 120_000, 220),
             page("260803:101000", "CloseBook", 148_207, 180_000, 300),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         // Wall clock spans 10 minutes; the counter only moved 2, and the counter
         // is what the device actually measured as reading.
@@ -1311,6 +1517,138 @@ mod tests {
         assert_eq!(out[0].words, 200);
         assert_eq!(out[0].page_turns, 2);
         assert_eq!(out[0].started_at, "2026-08-03T10:00:00");
+    }
+
+    /// A sitting interrupted by a Sync is one sitting, not two, and none of its
+    /// reading falls into the seam.
+    ///
+    /// This is the ordinary case, not an edge one: the reader taps Sync in the
+    /// middle of a book and carries on. The second batch of events holds only
+    /// what was logged after the first, so parsed on its own it starts a fresh
+    /// run at its first line — and the counter advance *between* the batches,
+    /// which is real reading, belongs to neither run and is dropped.
+    #[test]
+    fn a_sitting_interrupted_by_a_sync_keeps_its_start_and_all_of_its_time() {
+        let first = [
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            page("260803:100500", "NextPage", 148_207, 120_000, 220),
+        ];
+        let stored = parse_sessions(first.iter().map(String::as_str), None);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].seconds, 60);
+
+        let resume = Resume {
+            started_at: stored[0].started_at.clone(),
+            ended_at: stored[0].ended_at.clone(),
+            end_position: stored[0].end_position,
+            start_counter_ms: stored[0].start_counter_ms.unwrap(),
+            end_counter_ms: stored[0].end_counter_ms.unwrap(),
+            start_words: stored[0].start_words,
+            end_words: stored[0].end_words,
+            page_turns: stored[0].page_turns,
+            hours: stored[0].hours.clone(),
+        };
+
+        // What the device logs after the Sync, and only that.
+        let rest = [
+            page("260803:101000", "NextPage", 148_207, 300_000, 400),
+            page("260803:101500", "CloseBook", 148_207, 360_000, 500),
+        ];
+        let out = parse_sessions(rest.iter().map(String::as_str), Some(&resume));
+        assert_eq!(out.len(), 1, "one sitting, not one per Sync");
+        assert_eq!(
+            out[0].started_at, "2026-08-03T10:00:00",
+            "the row this updates is the one already stored"
+        );
+        // 60 s → 360 s on the device's counter. Parsed without the resume the
+        // second batch would report 60 s, and the 180 s the reader spent across
+        // the Sync would be in no session at all.
+        assert_eq!(out[0].seconds, 300);
+        assert_eq!(out[0].page_turns, 3);
+        assert_eq!(out[0].words, 400);
+        assert_eq!(out[0].hours.iter().map(|(_, s)| s).sum::<i64>(), 300);
+
+        let alone = parse_sessions(rest.iter().map(String::as_str), None);
+        assert_eq!(alone[0].seconds, 60, "the seam, measured");
+    }
+
+    /// A run offered to a batch that does not continue it says nothing. The
+    /// stored row is already right, and re-reporting it would have every Sync
+    /// claim a sitting it did nothing to.
+    #[test]
+    fn a_sitting_the_next_events_do_not_continue_is_left_alone() {
+        let resume = Resume {
+            started_at: "2026-08-03T10:00:00".into(),
+            ended_at: "2026-08-03T10:05:00".into(),
+            end_position: 148_207,
+            start_counter_ms: 60_000,
+            end_counter_ms: 120_000,
+            start_words: Some(100),
+            end_words: Some(220),
+            page_turns: 1,
+            hours: vec![(10, 60)],
+        };
+
+        // Nothing at all since.
+        assert!(parse_sessions(std::iter::empty(), Some(&resume)).is_empty());
+
+        // The reader came back hours later: a new sitting, and the old one
+        // untouched.
+        let later = [
+            page("260803:160000", "NextPage", 148_207, 180_000, 300),
+            page("260803:160500", "CloseBook", 148_207, 240_000, 400),
+        ];
+        let out = parse_sessions(later.iter().map(String::as_str), Some(&resume));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].started_at, "2026-08-03T16:00:00");
+        assert_eq!(out[0].seconds, 60);
+
+        // A different book, straight away: likewise its own sitting.
+        let other = [
+            page("260803:100600", "NextPage", 99_000, 5_000, 10),
+            page("260803:101000", "CloseBook", 99_000, 65_000, 90),
+        ];
+        let out = parse_sessions(other.iter().map(String::as_str), Some(&resume));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].end_position, 99_000);
+        assert_eq!(out[0].seconds, 60);
+    }
+
+    /// Events already folded into a run can arrive again — the dumps overlap by
+    /// design — and must not be counted twice.
+    ///
+    /// They cannot be: every figure is read from the device's own absolute
+    /// counters, so a line already seen restates a value the run already holds.
+    #[test]
+    fn replayed_events_do_not_lengthen_the_run_they_are_already_in() {
+        let all = [
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            page("260803:100500", "NextPage", 148_207, 120_000, 220),
+        ];
+        let stored = parse_sessions(all.iter().map(String::as_str), None);
+        let resume = Resume {
+            started_at: stored[0].started_at.clone(),
+            ended_at: stored[0].ended_at.clone(),
+            end_position: stored[0].end_position,
+            start_counter_ms: stored[0].start_counter_ms.unwrap(),
+            end_counter_ms: stored[0].end_counter_ms.unwrap(),
+            start_words: stored[0].start_words,
+            end_words: stored[0].end_words,
+            page_turns: stored[0].page_turns,
+            hours: stored[0].hours.clone(),
+        };
+        // The last line of the run, sent a second time.
+        let again = [all[1].clone()];
+        let out = parse_sessions(again.iter().map(String::as_str), Some(&resume));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].seconds, stored[0].seconds);
+        assert_eq!(out[0].words, stored[0].words);
+
+        // A whole archive replayed against the run it already contains is not a
+        // continuation of it at all: the run is dropped and rebuilt from the
+        // events themselves.
+        let whole = parse_sessions(all.iter().map(String::as_str), Some(&resume));
+        assert_eq!(whole, stored);
     }
 
     #[test]
@@ -1361,7 +1699,7 @@ mod tests {
             page("260803:100500", "NextPage", 148_207, 120_000, 220),
         ];
         let doubled: BTreeSet<String> = lines.iter().chain(lines.iter()).cloned().collect();
-        let out = parse_sessions(doubled.iter().map(String::as_str));
+        let out = parse_sessions(doubled.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seconds, 60);
     }
@@ -1376,7 +1714,7 @@ mod tests {
             page("260803:230000", "NextPage", 148_207, 300_000, 400),
             page("260803:230100", "NextPage", 148_207, 360_000, 500),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].seconds, out[1].seconds), (60, 60));
     }
@@ -1394,7 +1732,7 @@ mod tests {
             page("260803:230000", "NextPage", 148_207, 300_000, 400),
             page("260803:230100", "NextPage", 148_207, 360_000, 500),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].seconds, out[1].seconds), (60, 60));
     }
@@ -1410,7 +1748,7 @@ mod tests {
             nameless("260804:000100"),
             page("260804:000200", "NextPage", 148_207, 120_000, 200),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!(&out[0].started_at[..10], "2026-08-03");
         assert_eq!(&out[1].started_at[..10], "2026-08-04");
@@ -1433,7 +1771,7 @@ mod tests {
             page("260804:000500", "NextPage", 148_207, 3_900_000, 1600),
             page("260804:001000", "NextPage", 148_207, 4_200_000, 1800),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
 
         // Half the crossing interval belongs to each day, so each gets its own
@@ -1468,7 +1806,7 @@ mod tests {
             page("260803:205500", "NextPage", 148_207, 1_805_000, 405),
             page("260803:212000", "NextPage", 148_207, 1_810_000, 410),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seconds, 1810);
         // Half an hour of solid reading in the 20:00 hour and four seconds in
@@ -1495,7 +1833,7 @@ mod tests {
             page("260804:070000", "NextPage", 148_207, 3_900_000, 1600),
             page("260804:071000", "NextPage", 148_207, 4_200_000, 1800),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].ended_at, "2026-08-03T22:55:00");
         assert_eq!(out[1].started_at, "2026-08-04T07:00:00");
@@ -1511,7 +1849,7 @@ mod tests {
             page("260803:235000", "NextPage", 148_207, 3_000_000, 1000),
             page("260804:004000", "NextPage", 148_207, 3_300_000, 1200),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].ended_at, "2026-08-03T23:50:00");
         assert_eq!(out[1].started_at, "2026-08-04T00:40:00");
@@ -1525,7 +1863,7 @@ mod tests {
             page("260803:100200", "NextPage", 764_576, 5_000, 10),
             page("260803:100300", "NextPage", 764_576, 65_000, 90),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].end_position, 148_207);
         assert_eq!(out[1].end_position, 764_576);
@@ -1605,7 +1943,7 @@ mod tests {
              BookEndPosition.LastWordPos.override:YJPosition: AR4GAAAAAAAA:148207,\
              CurrentPos:YJPosition: AR4GAAAAAAAA:524,\
              EndPos:YJPosition: AR4GAAAAAAAA:148207;"];
-        assert!(parse_sessions(opened_and_shut.iter().copied()).is_empty());
+        assert!(parse_sessions(opened_and_shut.iter().copied(), None).is_empty());
         assert_eq!(
             positions_seen(opened_and_shut.iter().copied()),
             vec![(
@@ -1617,6 +1955,148 @@ mod tests {
                 }
             )],
         );
+    }
+
+    /// Two Syncs in one sitting leave one row, holding all of it.
+    ///
+    /// The whole round trip: the first push stores a partial sitting, the second
+    /// reads it back as the run under way and measures the same sitting further.
+    /// A device never sends an event twice, so the second push carries only what
+    /// was logged after the first — and without the stored row to continue, the
+    /// sitting would be two rows and the reading between the pushes would be in
+    /// neither.
+    #[test]
+    fn a_second_sync_lengthens_the_sitting_instead_of_starting_another() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+
+        let push = |lines: &[String], conn: &Connection| {
+            let events: BTreeSet<String> = lines.iter().cloned().collect();
+            let resume = Resume::newest(conn, "DEV").unwrap();
+            store_events(conn, &events, 0, "DEV", resume.as_ref(), &mut job::ignore).unwrap()
+        };
+
+        let first = push(
+            &[
+                page("260803:100000", "NextPage", 148_207, 60_000, 100),
+                page("260803:100500", "NextPage", 148_207, 120_000, 220),
+            ],
+            &conn,
+        );
+        assert_eq!((first.added, first.extended), (1, 0));
+
+        let second = push(
+            &[
+                page("260803:101000", "NextPage", 148_207, 300_000, 400),
+                page("260803:101500", "CloseBook", 148_207, 360_000, 500),
+            ],
+            &conn,
+        );
+        assert_eq!(
+            (second.added, second.extended),
+            (0, 1),
+            "the same sitting, carried further — not a second one"
+        );
+
+        let rows: Vec<(String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT started_at, ended_at, seconds, page_turns
+                   FROM reading_sessions ORDER BY started_at",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "2026-08-03T10:00:00".to_string(),
+                "2026-08-03T10:15:00".to_string(),
+                300,
+                3
+            )]
+        );
+
+        // The hours are the sitting's own, replaced whole rather than added to a
+        // stale slice of themselves.
+        let hours: i64 = conn
+            .query_row("SELECT SUM(seconds) FROM reading_session_hours", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(hours, 300);
+
+        // A third Sync with nothing new says nothing and changes nothing.
+        let idle = push(&[], &conn);
+        assert_eq!((idle.added, idle.extended, idle.sessions), (0, 0, 0));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sitting whose row has since been re-keyed is still the same sitting.
+    ///
+    /// A log line names the book by its last-word position;
+    /// [`db::resolve_reading_sessions`] moves the row to the book's last position
+    /// the moment an event states the pairing. The device knows nothing of that
+    /// and keeps sending the same fingerprint, so the run has to be offered back
+    /// under the name the events use — otherwise the next Sync reads the
+    /// continuation as a switch to a different book and files it separately.
+    #[test]
+    fn a_re_keyed_sitting_is_still_continued_by_the_events_that_name_it() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-rekey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+
+        let push = |lines: &[String], conn: &Connection| {
+            let events: BTreeSet<String> = lines.iter().cloned().collect();
+            let resume = Resume::newest(conn, "DEV").unwrap();
+            store_events(conn, &events, 0, "DEV", resume.as_ref(), &mut job::ignore).unwrap()
+        };
+
+        // The first push both starts the sitting and states the pairing, so the
+        // row lands under the book's last position (148213) while every page
+        // event goes on naming the last-word one (148207).
+        let first = push(
+            &[
+                book_end_position("260803:095900", 148_213, 148_207),
+                page("260803:100000", "NextPage", 148_207, 60_000, 100),
+                page("260803:100500", "NextPage", 148_207, 120_000, 220),
+            ],
+            &conn,
+        );
+        assert_eq!((first.added, first.extended), (1, 0));
+        let key: i64 = conn
+            .query_row("SELECT end_position FROM reading_sessions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(key, 148_213, "stored under the key the library joins on");
+
+        let second = push(
+            &[page("260803:101000", "CloseBook", 148_207, 300_000, 400)],
+            &conn,
+        );
+        assert_eq!(
+            (second.added, second.extended),
+            (0, 1),
+            "the same sitting under a name the device never sees"
+        );
+        let rows: Vec<(i64, i64)> = conn
+            .prepare("SELECT end_position, seconds FROM reading_sessions")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![(148_213, 240)]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A sitting judged not worth a row must not take its evidence with it.
@@ -1641,7 +2121,7 @@ mod tests {
             .to_string()]
         .into_iter()
         .collect();
-        let out = store_events(&conn, &events, 1, "DEV", &mut job::ignore).unwrap();
+        let out = store_events(&conn, &events, 1, "DEV", None, &mut job::ignore).unwrap();
         assert_eq!(out.added, 0, "opening and shutting a book is not reading");
 
         // Filed under the book's *last* position, the one the library joins on,
@@ -1664,7 +2144,7 @@ mod tests {
             buried_close("260803:100500", 148_207, 120_000, 220),
             page("260803:100600", "NextPage", 148_207, 130_000, 240),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         // Same book with no gap, so only the close can be splitting these.
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].seconds, out[1].seconds), (60, 0));
@@ -1676,7 +2156,7 @@ mod tests {
             headless("260803:100000", 936_689, 10_000, 50),
             headless("260803:100500", 936_689, 70_000, 150),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seconds, 60);
         assert_eq!(out[0].words, 100);
@@ -1696,7 +2176,7 @@ mod tests {
             page("260803:100300", "NextPage", 148_207, 1_180_000, 100),
             page("260803:100400", "CloseBook", 148_207, 1_240_000, 200),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         // 1240 - 1000, not 1240 - 1180: those three minutes were read too.
         assert_eq!(out[0].seconds, 240);
@@ -1713,7 +2193,7 @@ mod tests {
             page("260803:100010", "NextPage", 148_207, 3_600_000, 100),
             page("260803:100110", "CloseBook", 148_207, 3_660_000, 200),
         ];
-        let out = parse_sessions(lines.iter().map(String::as_str));
+        let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seconds, 60);
     }

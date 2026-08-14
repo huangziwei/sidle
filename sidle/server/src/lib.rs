@@ -1112,6 +1112,9 @@ struct ReadingLogRequest {
 struct ReadingLogResult {
     sessions: usize,
     added: usize,
+    /// Sittings already stored that these events carried further — the reader
+    /// was in the middle of one when the last Sync happened.
+    extended: usize,
     attributed: usize,
     /// How far this library now holds events for the pushing device, in the
     /// `YYMMDD:HHMMSS` a log line carries — the same value a subsequent `GET`
@@ -1186,11 +1189,21 @@ async fn sync_reading_log(
         // A `BTreeSet` both de-duplicates and orders, which is what the parser
         // requires — the device's own dumps overlap heavily by design.
         let events: std::collections::BTreeSet<String> = req.lines.into_iter().collect();
+        // The sitting this Kindle was in when it last synced. These events are
+        // only what it has logged since, so the run they continue is not among
+        // them and has to come from the row it was stored as — otherwise a
+        // sitting split across two Syncs is stored as two, and the reading
+        // between them is credited to neither.
+        let resume = reading_log::Resume::newest(&conn, &req.device_serial).map_err(|err| {
+            tracing::error!(?err, "sync/reading-log: open-sitting query failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let stored = reading_log::store_events(
             &conn,
             &events,
             0,
             &req.device_serial,
+            resume.as_ref(),
             &mut sidle_core::library::job::ignore,
         )
         .map_err(|err| {
@@ -1216,6 +1229,7 @@ async fn sync_reading_log(
         Ok(ReadingLogResult {
             sessions: stored.sessions,
             added: stored.added,
+            extended: stored.extended,
             attributed: stored.attributed,
             watermark,
         })

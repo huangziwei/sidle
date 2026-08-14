@@ -1000,6 +1000,14 @@ fn run() -> anyhow::Result<()> {
                                             // unopened, so the usual case reads one directory
                                             // and sends nothing. Best-effort like the backup.
                                             let rl_t0 = Instant::now();
+                                            // Archive first, then push. The
+                                            // daemon does not survive a reboot
+                                            // and the syslog chunks it reads are
+                                            // pruned within the hour, so a Sync
+                                            // is the last moment at which
+                                            // reading logged since the daemon
+                                            // died can still be captured.
+                                            archive_once(false);
                                             match api::push_reading_log(
                                                 &agent,
                                                 &cfg,
@@ -1008,12 +1016,19 @@ fn run() -> anyhow::Result<()> {
                                                 Ok(rl) => {
                                                     log(format!(
                                                         "reading log in {:?}: {} new of {} \
-                                                         sessions, {} named, {} dumps skipped",
+                                                         sessions ({} extended), {} named, {} \
+                                                         skipped; lines from live={} chunks={} \
+                                                         dumps={} archive={}",
                                                         rl_t0.elapsed(),
                                                         rl.added,
                                                         rl.sessions,
+                                                        rl.extended,
                                                         rl.attributed,
-                                                        rl.skipped
+                                                        rl.skipped,
+                                                        rl.from.live,
+                                                        rl.from.chunks,
+                                                        rl.from.dumps,
+                                                        rl.from.archive
                                                     ));
                                                     if let Some(s) = rl.summary() {
                                                         summary = format!("{summary}\n{s}");

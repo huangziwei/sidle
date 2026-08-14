@@ -81,10 +81,27 @@ const ARCHIVE_DIR: &str = "extensions/sidle/readinglog";
 /// What an archive file is called: `rl_<YYMMDDHHMMSS>.txt.gz`, stamped with the
 /// newest line it holds.
 ///
-/// Deliberately the same shape as the firmware's dumps, so the newest stamp is
-/// readable from the directory listing alone. That is the whole state this keeps
-/// — no marker file to lose, nothing to decompress to find out where it got to.
+/// Deliberately the same shape as the firmware's dumps, so what a file holds is
+/// readable from the directory listing alone, with nothing to decompress. Which
+/// file to open is decided on the name; how far the archiver has read is
+/// [`ARCHIVE_MARK`]'s to say, the files being deleted once the library has them.
 const ARCHIVE_PREFIX: &str = "rl_";
+
+/// Where the archiver records the newest line it has ever archived, beside the
+/// archive itself.
+///
+/// The filenames state the same thing while the files exist, and a sync deletes
+/// them the moment the library confirms it holds them — so on their own they
+/// answer "how far did I get?" with "nowhere" every time a sync succeeds. The
+/// next pass then re-reads every dump on the device, ~90 MB of gzip, to
+/// rediscover a month of lines it has already sent, and writes them all back as
+/// a fresh archive for the following sync to delete again.
+///
+/// This file is what the archiver actually reads its position from. It is never
+/// purged: a stamp costs 13 bytes and is the only thing that makes "nothing new"
+/// cheap. Named against [`ARCHIVE_DIR`], and deliberately not `rl_`-prefixed —
+/// that prefix is what marks a file as archive content to read and to delete.
+const ARCHIVE_MARK: &str = "mark";
 
 /// What one collection pass looked at, for the sync log.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -101,6 +118,24 @@ pub struct Collected {
     /// Dumps that decoded only partway, usually because the firmware was still
     /// writing one. Their prefix was taken; they are not reported as read.
     pub truncated: usize,
+    /// Event lines each source offered, before de-duplication across them:
+    /// dumps, the live syslog, the rotated chunks, our own archive.
+    ///
+    /// The sources overlap heavily, so these do not add up to `lines` and are not
+    /// meant to. What they answer is which of the four a sync actually reached —
+    /// the live log and the chunks are the only ones that hold the minutes since
+    /// the last rotation, and a Sync that reports no reading is either a Sync
+    /// with nothing to report or one that never saw them.
+    pub from: Sources,
+}
+
+/// Event lines taken from each of the four sources, for the sync log.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Sources {
+    pub dumps: usize,
+    pub live: usize,
+    pub chunks: usize,
+    pub archive: usize,
 }
 
 /// The `YYMMDD:HHMMSS` a dump's name encodes, matching the prefix its lines
@@ -163,7 +198,7 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
             } else {
                 out.truncated += 1;
             }
-            take_events(&dump.text, watermark, &mut out.lines);
+            out.from.dumps += take_events(&dump.text, watermark, &mut out.lines);
         }
     }
     // The live file, then the rotated chunks — the same set the firmware's own
@@ -181,14 +216,14 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     // and that returns `Err` for the whole file rather than for the offending
     // line — which would silently drop every event since the last rotation.
     if let Some(live) = read_maybe_gzip(Path::new(LIVE_LOG)) {
-        take_events(&live.text, watermark, &mut out.lines);
+        out.from.live += take_events(&live.text, watermark, &mut out.lines);
     }
     for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
         // A chunk pruned between the listing and the read simply yields nothing;
         // one caught mid-rotation yields its intact prefix. Neither needs the
         // lock, which is why not taking it is acceptable here.
         if let Some(chunk) = read_maybe_gzip(&path) {
-            take_events(&chunk.text, watermark, &mut out.lines);
+            out.from.chunks += take_events(&chunk.text, watermark, &mut out.lines);
         }
     }
     // Our own archive last. This is what makes a long trip survivable: the
@@ -197,7 +232,7 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     // sync that ignored it would silently push a truncated history.
     for path in archive_files(us_root, watermark, &mut out) {
         if let Some(old) = read_maybe_gzip(&path) {
-            take_events(&old.text, watermark, &mut out.lines);
+            out.from.archive += take_events(&old.text, watermark, &mut out.lines);
         }
     }
     out.lines.sort();
@@ -206,17 +241,23 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
 }
 
 /// The newest event this device has already archived, as the `YYMMDD:HHMMSS` a
-/// log line carries, or empty if nothing has been archived yet.
+/// log line carries, or empty if nothing has ever been archived.
 ///
-/// Read from the filenames alone — the archive is named for its contents, so
-/// this is a directory listing and no more.
+/// The greater of what the files say and what [`ARCHIVE_MARK`] says — the files
+/// because an archive written by an older build has no mark, the mark because
+/// the files are deleted at every successful sync and would otherwise reset this
+/// to "read everything again".
 pub fn archive_watermark(us_root: &Path) -> String {
+    let marked =
+        std::fs::read_to_string(us_root.join(ARCHIVE_DIR).join(ARCHIVE_MARK)).unwrap_or_default();
+    let marked = marked.trim().to_string();
     let Ok(entries) = std::fs::read_dir(us_root.join(ARCHIVE_DIR)) else {
-        return String::new();
+        return marked;
     };
     entries
         .flatten()
         .filter_map(|e| archive_stamp(&e.file_name().to_string_lossy()))
+        .chain(std::iter::once(marked))
         .max()
         .unwrap_or_default()
 }
@@ -495,6 +536,13 @@ pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<Strin
     {
         let _ = std::fs::remove_file(old);
     }
+    // Written after the archive it describes, and only ever forwards: a mark
+    // ahead of what is on disk would skip lines the next pass is the last chance
+    // to collect, and two runs can overlap on a fresh device.
+    let mark = us_root.join(ARCHIVE_DIR).join(ARCHIVE_MARK);
+    if std::fs::read_to_string(&mark).unwrap_or_default().trim() < newest {
+        let _ = std::fs::write(&mark, newest);
+    }
     Ok(Some(name))
 }
 
@@ -588,8 +636,10 @@ fn dumps(
     keep
 }
 
-/// Append every event line in `text` that is newer than `watermark`.
-fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) {
+/// Append every event line in `text` that is newer than `watermark`, and answer
+/// with how many that was.
+fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) -> usize {
+    let before = out.len();
     for line in text.lines() {
         if !line.contains(MARKER) {
             continue;
@@ -602,6 +652,7 @@ fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) {
             _ => out.push(line.to_string()),
         }
     }
+    out.len() - before
 }
 
 /// A decoded dump, and whether it decoded all the way to the end.
@@ -845,12 +896,7 @@ mod tests {
         let name = archive(&dir, &[event("260809:110000")]).unwrap().unwrap();
         assert_eq!(name, "rl_260809110000.txt.gz");
 
-        let files: Vec<String> = std::fs::read_dir(dir.join(ARCHIVE_DIR))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(files, vec!["rl_260809110000.txt.gz".to_string()]);
+        assert_eq!(archived(&dir), vec!["rl_260809110000.txt.gz".to_string()]);
 
         // Every run's events survive the folding — this is history, and losing an
         // earlier run's lines to a later one would be the whole point defeated.
@@ -866,14 +912,8 @@ mod tests {
 
         // A new day starts its own file rather than growing yesterday's.
         archive(&dir, &[event("260810:090000")]).unwrap();
-        let mut files: Vec<String> = std::fs::read_dir(dir.join(ARCHIVE_DIR))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        files.sort();
         assert_eq!(
-            files,
+            archived(&dir),
             vec![
                 "rl_260809110000.txt.gz".to_string(),
                 "rl_260810090000.txt.gz".to_string()
@@ -935,7 +975,41 @@ mod tests {
         assert_eq!(archive_watermark(&dir), "260809:120000");
 
         assert_eq!(purge_archive(&dir, "260809:120000"), 1);
-        assert_eq!(archive_watermark(&dir), "");
+        assert!(archived(&dir).is_empty(), "nothing left to keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A purge must not send the archiver back to the beginning of time.
+    ///
+    /// The archive's own filenames were the only record of how far it had got,
+    /// and a successful sync deletes them all. The next pass then read every
+    /// dump on the device — ~90 MB of gzip — to rediscover a month of lines the
+    /// library already held, and wrote them back for the next sync to delete
+    /// again. The mark is what makes "nothing new" cost a directory listing.
+    #[test]
+    fn a_purge_does_not_reset_how_far_the_archiver_has_read() {
+        let dir = tempdir();
+        archive(&dir, &[event("260809:100000"), event("260809:120000")]).unwrap();
+        assert_eq!(archive_watermark(&dir), "260809:120000");
+
+        // The library confirms it holds everything, so the files go.
+        assert_eq!(purge_archive(&dir, "260809:120000"), 1);
+        assert!(
+            collect(&dir, "", &[]).lines.is_empty(),
+            "the files are gone"
+        );
+        assert_eq!(
+            archive_watermark(&dir),
+            "260809:120000",
+            "but the archiver still knows where it got to"
+        );
+
+        // An archive written by a build that kept no mark is still read from its
+        // filenames, so the mark can only ever move the watermark forward.
+        std::fs::remove_file(dir.join(ARCHIVE_DIR).join(ARCHIVE_MARK)).unwrap();
+        archive(&dir, &[event("260810:090000")]).unwrap();
+        std::fs::write(dir.join(ARCHIVE_DIR).join(ARCHIVE_MARK), "260701:000000").unwrap();
+        assert_eq!(archive_watermark(&dir), "260810:090000");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1010,6 +1084,20 @@ mod tests {
 
         let mine = crate::selfupdate::self_build_ts().to_string();
         assert_eq!(classify(42, Some(&mine), cmdline), Archiver::Running);
+    }
+
+    /// The archive files under `us_root`, sorted — the mark that sits beside
+    /// them is state, not archive, and is never one of them.
+    fn archived(us_root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(us_root.join(ARCHIVE_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| archive_stamp(n).is_some())
+            .collect();
+        names.sort();
+        names
     }
 
     /// A unique scratch dir. The picker's tests run on the host, and the crate

@@ -187,7 +187,14 @@ pub struct BookRow {
 /// actually fell in, recorded from the log's own intervals at parse time. The
 /// events state it and are never offered twice; a session row keeps only a
 /// window and a total, from which the hours can afterwards only be guessed at.
-pub const SCHEMA_VERSION: i64 = 20;
+/// v21: added `reading_sessions.{start,end}_counter_ms` and
+/// `{start,end}_words` — both ends of the device's own counters, where the row
+/// previously kept only their difference. A sitting outlives the sync it began
+/// in, and the events behind it are never sent twice, so a later batch can only
+/// continue the run if the row says where it stopped counting (see
+/// [`super::reading_log::Resume`]). Null on rows written before this, which are
+/// finished sittings and need no continuation.
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// A borrowable handle to the library database.
 ///
@@ -774,7 +781,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             book_id       INTEGER REFERENCES books(id) ON DELETE SET NULL,
             seconds       INTEGER NOT NULL,
             page_turns    INTEGER NOT NULL DEFAULT 0,
-            words         INTEGER NOT NULL DEFAULT 0
+            words         INTEGER NOT NULL DEFAULT 0,
+            start_counter_ms INTEGER,
+            end_counter_ms   INTEGER,
+            start_words      INTEGER,
+            end_words        INTEGER
         )"#,
         [],
     )?;
@@ -786,6 +797,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE reading_sessions RENAME COLUMN pages TO page_turns",
             [],
         )?;
+    }
+    // v21: both ends of the counters the row's totals are the difference of, so
+    // a sitting can be carried across the sync that interrupted it. Null on
+    // every existing row, which is the honest answer — those sittings finished
+    // before anything recorded where they stood.
+    for column in [
+        "start_counter_ms",
+        "end_counter_ms",
+        "start_words",
+        "end_words",
+    ] {
+        if !has_column(conn, "reading_sessions", column)? {
+            conn.execute(
+                &format!("ALTER TABLE reading_sessions ADD COLUMN {column} INTEGER"),
+                [],
+            )?;
+        }
     }
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
@@ -1629,17 +1657,49 @@ pub struct ReadingSession {
     /// font size and screen, and a converted book has no pagination to count.
     pub page_turns: i64,
     pub words: i64,
+    /// Both ends of the device's own running counters over this sitting, in
+    /// milliseconds and in words. `seconds` and `words` are their differences;
+    /// the values themselves are what lets a later batch of events continue the
+    /// run instead of starting a second one beside it — see
+    /// [`super::reading_log::Resume`]. `None` on a row stored before the columns
+    /// existed, and on a run whose events never stated a counter.
+    pub start_counter_ms: Option<i64>,
+    pub end_counter_ms: Option<i64>,
+    pub start_words: Option<i64>,
+    pub end_words: Option<i64>,
 }
 
-/// Store one session, ignoring it if that (device, start, book) is already
-/// known. Returns whether a row was actually added, so an import can report how
-/// much of a re-imported archive was genuinely new.
+/// What storing one session did to the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    /// A sitting the library did not hold.
+    Added,
+    /// A sitting already held, now measured further — the reader carried on past
+    /// where the last batch of events could see.
+    Extended,
+    /// Already held, with nothing new to say about it.
+    Unchanged,
+}
+
+/// Store one session, keyed by (device, start, book).
+///
+/// A sitting the library already holds is **extended** rather than ignored when
+/// the new measurement reaches further than the stored one. Reading does not
+/// stop because a sync happened, and the same sitting is measured again — from
+/// its own start, with events the last pass did not have — every time the reader
+/// carries on past it. Ignoring the second measurement would freeze the row at
+/// whatever the first sync happened to catch, and the rest of the sitting would
+/// be shed. Only the measurement moves; `book_id` is left alone, being
+/// [`resolve_reading_sessions`]'s to decide.
+///
+/// Never backwards: a shorter measurement of a sitting already known longer is
+/// a partial view of it, not a correction, so it changes nothing.
 ///
 /// A session already held against **no** device is claimed rather than
 /// duplicated: the same reading, imported once from a copied archive of unknown
 /// provenance and again from the device that wrote it, is one session, and
 /// without this the serial in the identity would make it two.
-pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<bool> {
+pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Stored> {
     if !s.device_serial.is_empty() {
         conn.execute(
             "UPDATE reading_sessions SET device_serial = ?1
@@ -1650,8 +1710,9 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
     let n = conn.execute(
         r#"INSERT OR IGNORE INTO reading_sessions
             (device_serial, started_at, ended_at, day, end_position, book_id,
-             seconds, page_turns, words)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+             seconds, page_turns, words,
+             start_counter_ms, end_counter_ms, start_words, end_words)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#,
         params![
             s.device_serial,
             s.started_at,
@@ -1662,9 +1723,41 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.seconds,
             s.page_turns,
             s.words,
+            s.start_counter_ms,
+            s.end_counter_ms,
+            s.start_words,
+            s.end_words,
         ],
     )?;
-    Ok(n > 0)
+    if n > 0 {
+        return Ok(Stored::Added);
+    }
+    let extended = conn.execute(
+        r#"UPDATE reading_sessions
+              SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
+                  start_counter_ms = ?8, end_counter_ms = ?9,
+                  start_words = ?10, end_words = ?11
+            WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3
+              AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4)"#,
+        params![
+            s.device_serial,
+            s.started_at,
+            s.end_position,
+            s.ended_at,
+            s.seconds,
+            s.page_turns,
+            s.words,
+            s.start_counter_ms,
+            s.end_counter_ms,
+            s.start_words,
+            s.end_words,
+        ],
+    )?;
+    Ok(if extended > 0 {
+        Stored::Extended
+    } else {
+        Stored::Unchanged
+    })
 }
 
 /// Record which hours of its day a session's reading fell in.
@@ -1673,6 +1766,12 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
 /// actually stored: hours and totals are one measurement, and a set of hours
 /// against someone else's totals would have the clock report a day the calendar
 /// beside it does not.
+///
+/// The whole distribution, replacing whatever was there. A sitting extended by a
+/// later batch of events is re-measured from its own start — the parser is
+/// handed the hours already booked and rebuilds them — so the new set is the
+/// complete one and an hour missing from it is an hour that does not belong to
+/// the sitting.
 ///
 /// Keyed by the session's identity rather than a row id the caller would have to
 /// thread through. Silently does nothing when no such session is stored, which is
@@ -1686,17 +1785,13 @@ pub fn record_session_hours(
     if hours.is_empty() {
         return Ok(());
     }
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM reading_sessions
-              WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
-            params![s.device_serial, s.started_at, s.end_position],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(id) = id else {
+    let Some(id) = session_id(conn, s)? else {
         return Ok(());
     };
+    conn.execute(
+        "DELETE FROM reading_session_hours WHERE session_id = ?1",
+        params![id],
+    )?;
     for (hour, seconds) in hours {
         conn.execute(
             "INSERT OR REPLACE INTO reading_session_hours (session_id, hour, seconds)
@@ -1705,6 +1800,68 @@ pub fn record_session_hours(
         )?;
     }
     Ok(())
+}
+
+/// The row id of a stored session, by the identity its callers hold.
+fn session_id(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM reading_sessions
+          WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
+        params![s.device_serial, s.started_at, s.end_position],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// The hours already booked against a stored session, ascending.
+pub fn session_hours(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Vec<(u8, i64)>> {
+    let Some(id) = session_id(conn, s)? else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT hour, seconds FROM reading_session_hours
+          WHERE session_id = ?1 ORDER BY hour",
+    )?;
+    let rows = stmt.query_map(params![id], |r| Ok((r.get::<_, i64>(0)? as u8, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// The newest session stored for one device — the sitting it may still be in.
+///
+/// Whether the reader is in fact still in it is not decided here: that depends
+/// on the events, and [`super::reading_log::parse_sessions`] is what weighs them.
+/// This only says which row a continuation would land on.
+pub fn newest_reading_session(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<Option<ReadingSession>> {
+    conn.query_row(
+        r#"SELECT device_serial, started_at, ended_at, day, end_position, book_id,
+                  seconds, page_turns, words,
+                  start_counter_ms, end_counter_ms, start_words, end_words
+             FROM reading_sessions
+            WHERE device_serial = ?1
+            ORDER BY started_at DESC LIMIT 1"#,
+        params![device_serial],
+        |r| {
+            Ok(ReadingSession {
+                device_serial: r.get(0)?,
+                started_at: r.get(1)?,
+                ended_at: r.get(2)?,
+                day: r.get(3)?,
+                end_position: r.get(4)?,
+                book_id: r.get(5)?,
+                seconds: r.get(6)?,
+                page_turns: r.get(7)?,
+                words: r.get(8)?,
+                start_counter_ms: r.get(9)?,
+                end_counter_ms: r.get(10)?,
+                start_words: r.get(11)?,
+                end_words: r.get(12)?,
+            })
+        },
+    )
+    .optional()
 }
 
 /// One day's share of a session that ran across midnight.
@@ -6653,6 +6810,10 @@ mod tests {
             seconds,
             page_turns: 40,
             words: 9000,
+            start_counter_ms: Some(0),
+            end_counter_ms: Some(seconds * 1000),
+            start_words: Some(0),
+            end_words: Some(9000),
         }
     }
 
@@ -7274,14 +7435,15 @@ mod tests {
         // saying which device it came from.
         let mut anon = session("2026-08-01", 999, 3600);
         anon.device_serial = String::new();
-        assert!(insert_reading_session(&conn, &anon).unwrap());
+        assert_eq!(insert_reading_session(&conn, &anon).unwrap(), Stored::Added);
 
         // The device later syncs the very same session, this time stating its
         // serial. One session was read, so one row must remain.
         let mut owned = session("2026-08-01", 999, 3600);
         owned.device_serial = "GN43H2076045001X".into();
-        assert!(
-            !insert_reading_session(&conn, &owned).unwrap(),
+        assert_eq!(
+            insert_reading_session(&conn, &owned).unwrap(),
+            Stored::Unchanged,
             "the device's copy is the same session, not a new one"
         );
 
@@ -7302,10 +7464,10 @@ mod tests {
         a.device_serial = "DEVICE-A".into();
         let mut b = session("2026-08-01", 999, 3600);
         b.device_serial = "DEVICE-B".into();
-        assert!(insert_reading_session(&conn, &a).unwrap());
+        assert_eq!(insert_reading_session(&conn, &a).unwrap(), Stored::Added);
         // Same instant, same book, different device: two devices, two sessions.
         // Only a serial-less row is up for adoption.
-        assert!(insert_reading_session(&conn, &b).unwrap());
+        assert_eq!(insert_reading_session(&conn, &b).unwrap(), Stored::Added);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
             .unwrap();

@@ -26,7 +26,7 @@ const CVM: &[&str] = &[
 
 #[test]
 fn a_session_survives_a_payload_losing_its_event_name() {
-    let out = parse_sessions(CORRETTO.iter().copied());
+    let out = parse_sessions(CORRETTO.iter().copied(), None);
     assert_eq!(out.len(), 1);
     // The counter reads 462142 ms at the close and the book opened from zero,
     // so the sitting is 462 s. Keyed on the event name instead, none of these
@@ -45,7 +45,7 @@ fn a_session_survives_a_payload_losing_its_event_name() {
 
 #[test]
 fn a_named_page_event_is_read_exactly_as_before() {
-    let out = parse_sessions(CVM.iter().copied());
+    let out = parse_sessions(CVM.iter().copied(), None);
     assert_eq!(out.len(), 1);
     // 7431463 - 7390020, to the second.
     assert_eq!(out[0].seconds, 41);

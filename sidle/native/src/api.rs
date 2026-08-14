@@ -1380,6 +1380,10 @@ pub struct ReadingLogReport {
     pub sessions: usize,
     #[serde(default)]
     pub added: usize,
+    /// Sittings the library already held and these events carried further — what
+    /// a Sync in the middle of a sitting produces, rather than a new session.
+    #[serde(default)]
+    pub extended: usize,
     #[serde(default)]
     pub attributed: usize,
     /// How far the library now holds this device's events, as `YYMMDD:HHMMSS`.
@@ -1390,19 +1394,32 @@ pub struct ReadingLogReport {
     /// locally so the log can show that the watermark did its job.
     #[serde(skip)]
     pub skipped: usize,
+    /// Which of this device's four log sources the lines came from. Local, and
+    /// the one thing that separates "nothing was read" from "the minutes since
+    /// the last rotation were never reached" — the two look identical in a
+    /// report that only counts sessions.
+    #[serde(skip)]
+    pub from: crate::readinglog::Sources,
     /// Archive files deleted because the library confirmed it holds them.
     #[serde(skip)]
     pub purged: usize,
 }
 
 impl ReadingLogReport {
-    /// A terse toast fragment, or `None` when there was nothing new — which is
-    /// the normal case and does not deserve a line.
+    /// A terse toast fragment, or `None` when nothing was read since the last
+    /// Sync — which is the normal case and does not deserve a line.
+    ///
+    /// A sitting carried further says so in its own words. Tapping Sync in the
+    /// middle of one is the common case and it stores real reading; reporting it
+    /// as nothing at all is what makes a reader think the sitting was lost.
     pub fn summary(&self) -> Option<String> {
-        (self.added > 0).then(|| {
-            let plural = if self.added == 1 { "" } else { "s" };
-            format!("{} reading session{plural}", self.added)
-        })
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        match (self.added, self.extended) {
+            (0, 0) => None,
+            (0, n) => Some(format!("reading session{} extended", plural(n))),
+            (n, 0) => Some(format!("{n} reading session{}", plural(n))),
+            (n, m) => Some(format!("{n} reading session{}, {m} extended", plural(n))),
+        }
     }
 }
 
@@ -1455,6 +1472,7 @@ pub fn push_reading_log(
         // is nothing to send and no reason to make the request.
         return Ok(ReadingLogReport {
             skipped: found.skipped,
+            from: found.from,
             ..Default::default()
         });
     }
@@ -1485,6 +1503,7 @@ pub fn push_reading_log(
     let mut report: ReadingLogReport =
         serde_json::from_str(&text).with_context(|| format!("parse {base}"))?;
     report.skipped = found.skipped;
+    report.from = found.from;
     // Archive-then-purge, the same shape the misc sync uses: the local copy
     // existed only to survive a gap between syncs, and the gap just closed.
     // Against the library's own watermark, never against what was sent — the
@@ -1830,6 +1849,39 @@ mod tests {
             logs: 0,
         };
         assert_eq!(r.summary().as_deref(), Some("1 screenshot"));
+    }
+
+    /// Syncing in the middle of a sitting stores real reading and must say so.
+    ///
+    /// It is the ordinary case — a reader puts the book down, taps Sync, picks
+    /// it up again — and a toast that mentions only new sessions leaves it
+    /// looking exactly like a Sync that found nothing at all.
+    #[test]
+    fn reading_log_summary_speaks_for_a_sitting_carried_further() {
+        assert_eq!(ReadingLogReport::default().summary(), None);
+        let extended = ReadingLogReport {
+            sessions: 1,
+            extended: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            extended.summary().as_deref(),
+            Some("reading session extended")
+        );
+        let both = ReadingLogReport {
+            added: 2,
+            extended: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            both.summary().as_deref(),
+            Some("2 reading sessions, 1 extended")
+        );
+        let fresh = ReadingLogReport {
+            added: 1,
+            ..Default::default()
+        };
+        assert_eq!(fresh.summary().as_deref(), Some("1 reading session"));
     }
 
     #[test]
