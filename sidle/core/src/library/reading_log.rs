@@ -454,12 +454,31 @@ fn payloads(line: &str) -> impl Iterator<Item = &str> {
 /// with its head cut away and the book's `EndPos` gone with it, leaving the
 /// chapter's leading a payload it does not describe. The whole group is the
 /// marker, not one field of it, because a cut lands anywhere.
+///
+/// Which is why the book's is the **last** `EndPos` before that group and not
+/// the first. A cut lands mid-payload, so a line can open with the *tail* of the
+/// payload before it — a chapter block, `NextTOCEntry` long gone — and the
+/// book's own block then sits second, still correctly ahead of this payload's
+/// group. Taking the first reads a chapter boundary as the book's identity, and
+/// since that boundary moves as the reader advances, the sitting is cut into a
+/// fresh run at every chapter and each fragment measures nothing.
+///
+/// Counted over three devices' archives: on uncut payloads the two readings are
+/// the same value — 19,753 of 19,753 on a Colorsoft, 2,155 of 2,155 on a KOA2 —
+/// so this is a no-op wherever the firmware writes a whole payload, and it is
+/// only the mangled ones it rescues (3 of 9 on a Scribe, 1 of 2,155 on the
+/// KOA2). With no group in the payload at all there is no marker to read, and
+/// the first is the best available guess.
 fn end_position(payload: &str) -> Option<i64> {
-    let at = payload.find("EndPos:YJPosition: ")?;
-    if payload.find("NextTOCEntry").is_some_and(|toc| toc < at) {
-        return None;
-    }
-    let rest = &payload[at + "EndPos:YJPosition: ".len()..];
+    const KEY: &str = "EndPos:YJPosition: ";
+    let at = match payload.find("NextTOCEntry") {
+        // No `EndPos` ahead of the group means the book's was cut away, and
+        // what remains describes the chapter — no answer, rather than a wrong
+        // one.
+        Some(toc) => payload[..toc].rfind(KEY)?,
+        None => payload.find(KEY)?,
+    };
+    let rest = &payload[at + KEY.len()..];
     let colon = rest.find(':')?;
     let tail = &rest[colon + 1..];
     let end = tail

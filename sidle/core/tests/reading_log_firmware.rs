@@ -43,6 +43,30 @@ fn a_session_survives_a_payload_losing_its_event_name() {
     assert_eq!(out[0].page_turns, 0);
 }
 
+/// One page turn from the same reader, cut so the line opens with the *tail* of
+/// the payload before it: a chapter block (`EndPos` 8548, the value this
+/// payload's own `NextTOCEntryPosition` also states) standing in front of
+/// everything this event is about. The book's own block — `EndPos` 327525 — is
+/// where it belongs, ahead of the `NextTOCEntry…` group.
+const CORRETTO_CUT_PAGE: &str = "260809:124414.643 java[5602]: I ReadingTimerController:Information::CurrentPos:YJPosition: AawEAAAdAAAA:4327,EndPos:YJPosition: AXYDAAAAAAAA:8548,PosLeft:4221,%Left:0.013015826061233544,CurrentPagePosDiff:817,TimeForPage:114.59553412578684,PosPassed:false,DataSufficient:NO,TimeLeftInBookString:Learning reading speed...,TimeLeftInSectionString:Learning reading speed...,PageStartPos:YJPosition: AbAEAAAAAAAA:5145,IntervalTime:6210,IntervalWords:389,IntervalWPM:3758.454106280193,ScreenStart:YJPosition: AbAEAAAAAAAA:5145,ScreenEnd:YJPosition: AbQEAAA6AAAA:5894,SkipAvgReason:Sample out of range,Interval%:-1.0,TotalTime:0,TotalWords:0,TotalWPM:0.0,Total%:0.0,SkipAvgReason:Sample out of range,LogDataReturnCode:389,GlobalWPM:230.89905031513652,GlobalTime:0,GlobalWords:6079,CurrentPos:YJPosition: AbAEAAAAAAAA:5145,EndPos:YJPosition: AfgWAAAkAAAA:327525,PosLeft:322380,%Left:0.981511610708475,CurrentPagePosDiff:749,TimeForPage:101.0831355440614,PosPassed:false,DataSufficient:NO,NextTOCEntryPosition:YJPosition: AXYDAAAAAAAA:8548,NextTOCEntryLength:12,NextTOCEntryLevel:0,NextTOCEntryType:null,CurrentPos:YJPosition: AbAEAAAAAAAA:5145,EndPos:YJPosition: AXYDAAAAAAAA:8548,PosLeft:3403,%Left:0.010501405117586154,CurrentPagePosDiff:749,TimeForPage:101.0831355440614,PosPassed:false,DataSufficient:NO,TimeLeftInBookString:Learning reading speed...,TimeLeftInSectionString:Learning reading speed...;Reading_Interrupted,Reason:1;";
+
+/// A payload whose head was cut must still be filed under its book, not under
+/// the chapter whose block the cut left in front of it.
+///
+/// A chapter end moves as the reader advances, so reading it as the book's
+/// identity restarts the sitting at every chapter — and a run of one
+/// observation spans no counter, so each fragment is dropped as zero-length and
+/// a morning's reading stores nothing at all.
+#[test]
+fn a_cut_payload_is_filed_under_its_book_not_the_chapter_in_front_of_it() {
+    let out = parse_sessions([CORRETTO_CUT_PAGE], None);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out[0].end_position, 327_525,
+        "8548 is the chapter's end — it is also this payload's NextTOCEntryPosition"
+    );
+}
+
 #[test]
 fn a_named_page_event_is_read_exactly_as_before() {
     let out = parse_sessions(CVM.iter().copied(), None);
