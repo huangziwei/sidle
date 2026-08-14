@@ -189,6 +189,32 @@ pub struct BookRow {
 /// window and a total, from which the hours can afterwards only be guessed at.
 pub const SCHEMA_VERSION: i64 = 20;
 
+/// A borrowable handle to the library database.
+///
+/// A device sync alternates between short bursts of database work and minutes of
+/// USB IO, and must never hold the connection across the slow half — the desktop
+/// shares its one connection with the window, which would freeze. So the sync
+/// takes a handle rather than a connection, and borrows it a moment at a time;
+/// each caller passes whatever it actually holds.
+pub trait Access {
+    /// Borrow the connection for the duration of `f`.
+    fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R;
+}
+
+/// A caller with exclusive use of a connection — a one-shot tool.
+impl Access for Connection {
+    fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
+        f(self)
+    }
+}
+
+/// A caller whose worker threads share one connection.
+impl Access for std::sync::Mutex<Connection> {
+    fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
+        f(&self.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;

@@ -7,13 +7,22 @@
 //! re-parses the SQLite. Metadata (title, page count, content hash) lives in
 //! the `notebooks` DB table. Decode + render come from `bokai::formats::nbk`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use crate::library::LibraryPaths;
 use crate::library::db::{self, NotebookRow};
+
+/// Tally of importing a set of notebooks — a `.notebooks/` folder, or every
+/// notebook on a connected device.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ImportSummary {
+    pub imported: usize,
+    pub unchanged: usize,
+    pub failed: Vec<String>,
+}
 
 /// Result of importing one notebook directory.
 #[derive(Debug)]
@@ -176,6 +185,83 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Scan `folder` for notebook directories and import each. `folder` may itself
+/// be one notebook dir (holds `nbk` directly) or a parent of many — a
+/// `.notebooks/` copied off a Scribe is the latter.
+///
+/// Standalone (dashed-UUID) notebooks only: the `!!PDOC!!` / `!!EBOK!!notebook`
+/// dirs beside them are per-book handwriting, which rides the annotation sync
+/// instead.
+pub fn import_folder(conn: &Connection, paths: &LibraryPaths, folder: &Path) -> ImportSummary {
+    let mut summary = ImportSummary::default();
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    if folder.join("nbk").is_file() {
+        let uuid = folder
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("notebook")
+            .to_string();
+        candidates.push((uuid, folder.to_path_buf()));
+    } else if let Ok(entries) = std::fs::read_dir(folder) {
+        for e in entries.flatten() {
+            let dir = e.path();
+            if dir.join("nbk").is_file()
+                && let Some(uuid) = dir.file_name().and_then(|s| s.to_str())
+            {
+                candidates.push((uuid.to_string(), dir));
+            }
+        }
+    }
+
+    for (uuid, dir) in candidates {
+        if uuid.contains("!!") {
+            continue;
+        }
+        let nbk = dir.join("nbk");
+        let cover = find_cover(&dir, &uuid);
+        let updated_at = folder_updated_at(&nbk);
+        match import_notebook(conn, paths, &uuid, &nbk, cover.as_deref(), &updated_at) {
+            Ok(NotebookOutcome::Imported(_)) => summary.imported += 1,
+            Ok(NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
+            Ok(NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
+            Err(e) => summary.failed.push(format!("{uuid}: {e:#}")),
+        }
+    }
+    summary
+}
+
+/// Locate the device cover thumbnail for a notebook. The device keeps these in
+/// a sibling `thumbnails/<uuid>.png` (relative to `.notebooks/`); also accept
+/// an in-dir `thumbnail.png`. Best-effort — `None` is fine (the viewer falls
+/// back to page 0).
+fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
+    let mut candidates = vec![dir.join("thumbnail.png")];
+    if let Some(parent) = dir.parent() {
+        candidates.push(parent.join("thumbnails").join(format!("{uuid}.png")));
+        if let Some(grand) = parent.parent() {
+            candidates.push(grand.join("thumbnails").join(format!("{uuid}.png")));
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// The `nbk` file's mtime as a naive local-wall-clock ISO string — the
+/// notebook's `updated_at` for a folder import. Same shape as the device pull's
+/// `TEntry::modified`, so both render identically. Falls back to the import time
+/// when the mtime can't be read.
+fn folder_updated_at(nbk: &Path) -> String {
+    std::fs::metadata(nbk)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| {
+            chrono::DateTime::<chrono::Utc>::from(t)
+                .with_timezone(&chrono::Local)
+                .naive_local()
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(db::now_iso)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

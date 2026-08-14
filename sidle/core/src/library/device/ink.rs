@@ -1,9 +1,9 @@
 //! Pull a Scribe's handwritten ink — the pen strokes drawn *on* a sideloaded
 //! doc, stored in `.notebooks/<asin>!!PDOC!!notebook/nbk` — and import it against
 //! the host book, in the SAME pass as the annotation sync
-//! ([`crate::device::annotations::import_device_annotations`]).
+//! ([`crate::library::device::annotations::import_device_annotations`]).
 //!
-//! Like [`crate::device::annotations`], only the device-side walk lives here
+//! Like [`crate::library::device::annotations`], only the device-side walk lives here
 //! (the [`Transport`] is an app concept); the decode → join → storage is
 //! [`sidle_core::library::ink`], which the LAN server drives too. Ink is a
 //! Scribe feature, so this runs only on the MTP path — mass-storage Kindles have
@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::device::{TPath, Transport};
+use crate::library::device::{TPath, Transport};
 use crate::library::ink::CollectedInk;
 
 /// `.notebooks/` child suffix marking a sideloaded-doc ink notebook.
@@ -29,7 +29,7 @@ const PDOC_SUFFIX: &str = "!!PDOC!!notebook";
 /// taking the DB lock (slow `GetObject`s), mirroring [`collect_device_yjr`]. A
 /// device that exposes no `.notebooks/` over MTP yields nothing (harmless no-op).
 ///
-/// [`collect_device_yjr`]: crate::device::annotations::collect_device_yjr
+/// [`collect_device_yjr`]: crate::library::device::annotations::collect_device_yjr
 pub fn collect_device_ink(
     transport: &dyn Transport,
     known_asins: &HashSet<String>,
@@ -68,7 +68,7 @@ fn pdoc_asin(dir_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::mass_storage::transport::MassStorageTransport;
+    use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     #[test]
     fn pdoc_asin_extracts_the_content_id_regardless_of_alphabet() {

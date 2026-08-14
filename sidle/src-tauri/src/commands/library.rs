@@ -1,19 +1,16 @@
 //! Tauri commands for library operations.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sidle_core::library::{cover, cover_fetch, export, metadata, progress};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
-use crate::cover_fetch;
 use crate::library::db::{self, BookRow};
-use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
-use crate::library::kfx_cover;
 use crate::library::{LibraryPaths, backup, merge, relocate};
 use crate::state::AppState;
 
@@ -113,13 +110,13 @@ pub async fn library_import(
             // sit under the azw3's finished bar for as long as it took.
             emit_import_progress(&app_handle, &raw, index, file_count, 0.0, "");
 
-            let pipeline = crate::progress::import_pipeline(kind);
-            let throttle = crate::progress::Throttle::new();
+            let pipeline = progress::import_pipeline(kind);
+            let throttle = progress::Throttle::new();
             let on_progress = |phase: &str, cur: usize, total: usize, label: &str| {
                 // The formats stored as they arrive land too fast for the steps
                 // to be worth naming; their opening tick is the whole report.
                 let Some(pipeline) = pipeline else { return };
-                let fraction = crate::progress::fraction(pipeline, phase, cur, total);
+                let fraction = progress::fraction(pipeline, phase, cur, total);
                 if throttle.worth_emitting(fraction) {
                     emit_import_progress(&app_handle, &raw, index, file_count, fraction, label);
                 }
@@ -184,138 +181,14 @@ pub(crate) async fn apply_metadata_patch(
     app: &AppHandle,
     state: &AppState,
     book_id: i64,
-    mut patch: db::MetadataPatch,
+    patch: db::MetadataPatch,
 ) -> Result<BookRow, String> {
-    // Trim text fields.
-    patch.title = patch.title.trim().to_string();
-    // Canonicalize authors: split the field on `&`/「、」 (never a plain comma —
-    // that's the intra-name "Surname, Given" separator), flip Western names to
-    // natural order, and re-join with the unambiguous display separator.
-    patch.author =
-        crate::library::authors::join_display(&crate::library::authors::parse_input(&patch.author));
-    // Harmonize to a canonical code (en-US → en, eng → en, zh-TW → zh-Hant) so a
-    // hand-edit stays consistent with what import stores.
-    patch.language = crate::library::lang::normalize(&patch.language);
-    // Page progression direction: only "rtl"/"ltr" are meaningful; blank or
-    // anything else clears it to None (Auto = device/source default).
-    patch.ppd = match patch.ppd.take().map(|s| s.trim().to_ascii_lowercase()) {
-        Some(s) if s == "rtl" || s == "ltr" => Some(s),
-        _ => None,
-    };
-    // Reading layout / writing mode: canonicalize to one of the four
-    // primary-writing-mode values (or None = Auto). When set it's authoritative
-    // for the page direction — a `-rl` layout turns right-to-left — so derive
-    // `ppd` from it, keeping the two columns in agreement.
-    patch.writing_mode = normalize_writing_mode(patch.writing_mode.take());
-    if let Some(wm) = &patch.writing_mode {
-        patch.ppd = Some(if wm.ends_with("-rl") { "rtl" } else { "ltr" }.to_string());
-    }
-    // Romaji: trim + lowercase the editable search fields. A blank field
-    // self-heals by re-rendering from the (now-canonicalized) title/author via
-    // the engine — so clearing it regenerates a sensible value instead of wiping
-    // the book out of search. `title`/`author`/`language` are finalized above.
-    // The yomi isn't available here (no source file), so a regenerate is
-    // engine-only — the user then hand-corrects an ambiguous name.
-    patch.title_romaji = normalize_romaji(&patch.title_romaji, &patch.title, &patch.language);
-    patch.author_romaji = normalize_romaji(&patch.author_romaji, &patch.author, &patch.language);
-    if let Some(s) = &mut patch.publisher {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() {
-            patch.publisher = None;
-        } else {
-            *s = trimmed;
-        }
-    }
-    if let Some(s) = &mut patch.published_at {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() {
-            patch.published_at = None;
-        } else {
-            *s = trimmed;
-        }
-    }
-    if let Some(s) = &mut patch.series_name {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() {
-            patch.series_name = None;
-        } else {
-            *s = trimmed;
-        }
-    }
-
-    // Validate.
-    if patch.title.is_empty() {
-        return Err("title cannot be empty".into());
-    }
-    if let Some(idx) = patch.series_index
-        && (!idx.is_finite() || idx < 0.0)
-    {
-        return Err("series_index must be a non-negative number".into());
-    }
-    // Series index without a name has no meaning — drop it so the row
-    // stays self-consistent.
-    if patch.series_name.is_none() {
-        patch.series_index = None;
-    }
-
-    // Canonicalize tags: trim, lowercase, drop empties, dedupe in-order.
-    // Lowercasing is a no-op for CJK characters and gives consistent
-    // grouping for ASCII tags ("Sci-Fi" and "sci-fi" merge).
-    patch.tags = canonicalize_tags(std::mem::take(&mut patch.tags));
-
     let updated = {
         let conn = state.db.lock().await;
-        db::update_metadata(&conn, book_id, &patch).map_err(|e| e.to_string())?;
-        // Rename the on-disk files to match the edited `[Author] Title (Year)`
-        // (best-effort; returns the refreshed row with any new paths). Keeps the
-        // library folder and a future force-reconvert's derived basename in sync
-        // with the metadata.
-        crate::library::rename::rename_book_files(&conn, &state.paths, book_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("book {book_id} not found"))?
+        metadata::apply(&conn, &state.paths, book_id, patch).map_err(|e| format!("{e:#}"))?
     };
-
     let _ = app.emit("library:row-updated", &updated);
     Ok(updated)
-}
-
-/// Canonicalize a reading-layout / writing-mode value to one of the four
-/// `primary-writing-mode` strings (hyphenated, lowercase), or `None` (Auto) for
-/// anything else. The UI only offers valid options, so an unknown value clears
-/// to Auto rather than erroring.
-fn normalize_writing_mode(v: Option<String>) -> Option<String> {
-    let v = v?.trim().to_ascii_lowercase().replace('_', "-");
-    match v.as_str() {
-        "horizontal-lr" | "horizontal-rl" | "vertical-rl" | "vertical-lr" => Some(v),
-        _ => None,
-    }
-}
-
-fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<String> = Vec::with_capacity(tags.len());
-    for t in tags {
-        let t = t.trim().to_lowercase();
-        if t.is_empty() {
-            continue;
-        }
-        if seen.insert(t.clone()) {
-            out.push(t);
-        }
-    }
-    out
-}
-
-/// Normalize an edited romaji field: trim + lowercase, and self-heal a blank one
-/// by re-rendering from its source (title/author) via the engine — so clearing
-/// the field regenerates rather than blanking the book out of search.
-fn normalize_romaji(value: &str, source: &str, language: &str) -> String {
-    let trimmed = value.trim().to_lowercase();
-    if trimmed.is_empty() {
-        crate::library::romaji::romanize_field(source, None, language)
-    } else {
-        trimmed
-    }
 }
 
 /// Render romaji for a piece of text — backs the metadata editor's "regenerate"
@@ -423,19 +296,6 @@ fn percent_encode_query(s: &str) -> String {
     out
 }
 
-/// Trim an optional string in place; a now-empty value collapses to `None`
-/// ("leave unchanged" in bulk semantics).
-fn normalize_opt(s: &mut Option<String>) {
-    if let Some(v) = s {
-        let t = v.trim().to_string();
-        if t.is_empty() {
-            *s = None;
-        } else {
-            *v = t;
-        }
-    }
-}
-
 /// Bulk-edit metadata across many books. Sparse semantics: only the fields the
 /// user filled in change; tags are additive. See [`db::BulkMetadataPatch`].
 ///
@@ -450,61 +310,8 @@ pub async fn library_bulk_update_metadata(
     book_ids: Vec<i64>,
     patch: db::BulkMetadataPatch,
 ) -> Result<Vec<BookRow>, String> {
-    let mut patch = patch;
-    normalize_opt(&mut patch.author);
-    // Canonicalize the bulk author the same way as a single edit (split on
-    // `&`/「、」, flip Western names, re-join); empty result clears it back to None.
-    if let Some(a) = patch.author.take() {
-        let canon =
-            crate::library::authors::join_display(&crate::library::authors::parse_input(&a));
-        patch.author = (!canon.is_empty()).then_some(canon);
-    }
-    normalize_opt(&mut patch.language);
-    // Harmonize to a canonical code, same as a single edit / import.
-    if let Some(l) = patch.language.take() {
-        let canon = crate::library::lang::normalize(&l);
-        patch.language = (!canon.is_empty()).then_some(canon);
-    }
-    // Page direction: lowercase + validate. Bulk can only set rtl/ltr (the
-    // sparse "leave unchanged" semantics can't express "clear to Auto").
-    if let Some(p) = patch.ppd.take() {
-        let p = p.trim().to_ascii_lowercase();
-        patch.ppd = match p.as_str() {
-            "rtl" | "ltr" => Some(p),
-            "" => None,
-            _ => return Err("page direction must be 'rtl' or 'ltr'".into()),
-        };
-    }
-    // Reading layout / writing mode: canonicalize like a single edit; when set,
-    // it's authoritative for the page direction, so derive `ppd` from it.
-    patch.writing_mode = normalize_writing_mode(patch.writing_mode.take());
-    if let Some(wm) = &patch.writing_mode {
-        patch.ppd = Some(if wm.ends_with("-rl") { "rtl" } else { "ltr" }.to_string());
-    }
-    normalize_opt(&mut patch.publisher);
-    normalize_opt(&mut patch.published_at);
-    normalize_opt(&mut patch.series_name);
-
-    if let Some(idx) = patch.series_index
-        && (!idx.is_finite() || idx < 0.0)
-    {
-        return Err("series_index must be a non-negative number".into());
-    }
-    patch.add_tags = canonicalize_tags(std::mem::take(&mut patch.add_tags));
-    patch.remove_tags = canonicalize_tags(std::mem::take(&mut patch.remove_tags));
-
-    let updated = {
-        let conn = state.db.lock().await;
-        let mut rows = Vec::with_capacity(book_ids.len());
-        for id in &book_ids {
-            db::apply_bulk_patch(&conn, *id, &patch).map_err(|e| e.to_string())?;
-            if let Some(r) = db::get_book(&conn, *id).map_err(|e| e.to_string())? {
-                rows.push(r);
-            }
-        }
-        rows
-    };
-    Ok(updated)
+    let conn = state.db.lock().await;
+    metadata::apply_bulk(&conn, &book_ids, patch).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -578,172 +385,27 @@ pub async fn library_open_in_finder(
         .map_err(|e| e.to_string())
 }
 
-/// Summary of a multi-book export to an external folder, shown in a toast.
-#[derive(Debug, Serialize)]
-pub struct ExportSummary {
-    /// Files actually copied.
-    pub exported: usize,
-    /// Books with no file of the requested format on disk (or a copy error).
-    pub skipped: usize,
-    /// The destination folder (echoed back for the toast).
-    pub dest: String,
-    /// First few human-readable skip reasons (capped), for the toast/console.
-    pub errors: Vec<String>,
-}
-
 /// Write the chosen `format` of every book in `book_ids` directly into
 /// `dest_dir` as a flat folder of files (`<dest>/<filename>`, no per-author
-/// subfolders).
-///
-/// `"epub"` | `"pdf"` | `"kfx"` copy the stored file verbatim — each keeps its
-/// basename (already `[Author] Title (Year)`). `"txt"` has no stored file: it is
-/// generated on demand by converting the book's content to Markdown (the EPUB
-/// when present — closest to the source text — else the universal KFX side),
-/// written as `<basename>.txt`.
-///
-/// A name collision in the destination is disambiguated with a ` (n)` suffix so
-/// two same-named files never clobber each other. A book with no usable source
-/// on disk — the companion side hasn't converted yet, or the file was deleted —
-/// is skipped and counted; the export never aborts on a single failure.
+/// subfolders). See [`export::export_books`] for the per-format rules.
 #[tauri::command]
 pub async fn library_export_books(
     state: State<'_, AppState>,
     book_ids: Vec<i64>,
     format: String,
     dest_dir: String,
-) -> Result<ExportSummary, String> {
-    if !matches!(format.as_str(), "epub" | "pdf" | "kfx" | "txt") {
-        return Err(format!("unknown export format: {format}"));
-    }
-    let dest_root = Path::new(&dest_dir);
-    if !dest_root.is_dir() {
-        return Err(format!("{} is not a folder", dest_root.display()));
-    }
-
-    let books = {
-        let conn = state.db.lock().await;
-        let mut v = Vec::with_capacity(book_ids.len());
-        for &id in &book_ids {
-            if let Some(b) = db::get_book(&conn, id).map_err(|e| e.to_string())? {
-                v.push(b);
-            }
-        }
-        v
-    };
-
-    let mut exported = 0usize;
-    let mut skipped = 0usize;
-    let mut errors: Vec<String> = Vec::new();
-    let note = |errors: &mut Vec<String>, msg: String| {
-        if errors.len() < 8 {
-            errors.push(msg);
-        }
-    };
-
-    for book in books {
-        // The source file to read. The copy formats name that exact file; `txt`
-        // is generated from the best available content source — the EPUB if it's
-        // on disk, else the universal KFX side.
-        let src: Option<&Path> = match format.as_str() {
-            "kfx" => book
-                .kfx_path
-                .as_deref()
-                .map(Path::new)
-                .filter(|p| p.exists()),
-            "epub" => book
-                .epub_path
-                .as_deref()
-                .map(Path::new)
-                .filter(|p| p.exists()),
-            "pdf" => book
-                .pdf_path
-                .as_deref()
-                .map(Path::new)
-                .filter(|p| p.exists()),
-            "txt" => [book.epub_path.as_deref(), book.kfx_path.as_deref()]
-                .into_iter()
-                .flatten()
-                .map(Path::new)
-                .find(|p| p.exists()),
-            _ => unreachable!("format validated above"),
-        };
-        let Some(src) = src else {
-            skipped += 1;
-            let what = if format == "txt" {
-                "no EPUB or KFX source on disk".to_string()
-            } else {
-                format!("no {} file on disk", format.to_uppercase())
-            };
-            note(&mut errors, format!("{}: {what}", book.title));
-            continue;
-        };
-
-        // Target filename. Copy formats keep the source's name verbatim; `txt`
-        // swaps the source's extension for `.txt` (both companion sides share
-        // the same `[Author] Title (Year)` stem, so the source choice doesn't
-        // change the output name).
-        let target_name = if format == "txt" {
-            match src.file_stem() {
-                Some(stem) => {
-                    let mut n = stem.to_os_string();
-                    n.push(".txt");
-                    n
-                }
-                None => {
-                    skipped += 1;
-                    continue;
-                }
-            }
-        } else {
-            match src.file_name() {
-                Some(name) => name.to_os_string(),
-                None => {
-                    skipped += 1;
-                    continue;
-                }
-            }
-        };
-
-        let target = crate::library::paths::dedup_path(dest_root.join(target_name));
-        let outcome = if format == "txt" {
-            // KFX decode + IR walk is CPU-heavy; keep it off the async runtime.
-            let src = src.to_path_buf();
-            let target = target.clone();
-            tokio::task::spawn_blocking(move || export_book_as_txt(&src, &target))
-                .await
-                .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
-        } else {
-            std::fs::copy(src, &target)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        };
-        match outcome {
-            Ok(()) => exported += 1,
-            Err(e) => {
-                skipped += 1;
-                note(&mut errors, format!("{}: {e}", book.title));
-            }
-        }
-    }
-
-    Ok(ExportSummary {
-        exported,
-        skipped,
-        dest: dest_dir,
-        errors,
+) -> Result<export::Summary, String> {
+    let format = export::Format::parse(&format).map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    // KFX decode + IR walk (the `txt` route) is CPU-heavy; keep it off the async
+    // runtime.
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        export::export_books(&conn, &book_ids, format, Path::new(&dest_dir))
     })
-}
-
-/// Convert a book file (EPUB or KFX, auto-detected by extension) to Markdown and
-/// write it to `target`. Backs the `txt` export, which — unlike the copy formats
-/// — has no stored file. Call on a blocking thread: bokai's KFX decode and IR
-/// walk are CPU-bound.
-fn export_book_as_txt(src: &Path, target: &Path) -> Result<(), String> {
-    let mut book = bokai::Book::open(src).map_err(|e| format!("open: {e}"))?;
-    let mut file = std::fs::File::create(target).map_err(|e| format!("create: {e}"))?;
-    book.export(bokai::Format::Markdown, &mut file)
-        .map_err(|e| format!("convert: {e}"))?;
-    Ok(())
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -761,170 +423,42 @@ pub async fn library_cover_path(
 /// to pick the right toast.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RecrawlResult {
+pub enum CoverResult {
     Updated { cover_path: String },
     NoAsin,
     Failed { error: String },
 }
 
-/// Internal outcome of re-fetching one book's cover. Mirrors `RecrawlResult`
-/// but stays inside Rust: the single-book command maps it to the tagged
-/// `RecrawlResult` the frontend toasts on, the bulk command just tallies it.
-enum RecrawlOutcome {
-    Updated { cover_path: String },
-    NoAsin,
-    Failed { error: String },
-}
-
-/// Embed `bytes` as the KFX cover, returning the new sha256 (for `kfx_sha256`)
-/// or `None` on failure. Prefers an in-place swap; if the KFX declares no cover
-/// (an EPUB import whose source EPUB had none), `ensure_cover` has already
-/// inserted a cover into that EPUB, so we reconvert the KFX from it — giving the
-/// on-device tile / sleep-screen a real cover. Best-effort: failures log under
-/// `[sidle/<tag>]` and yield `None`. Shared by re-fetch and "Change cover…".
-fn swap_or_insert_kfx_cover(book: &BookRow, kfx: &str, bytes: &[u8], tag: &str) -> Option<String> {
-    let kfx_path = std::path::Path::new(kfx);
-    match kfx_cover::replace_cover(kfx_path, bytes) {
-        Ok(sha) => Some(sha),
-        Err(e) => {
-            // The KFX may be rebuilt from its EPUB only when the EPUB is the
-            // SOURCE (`kind == "epub_to_kfx"`). Conversion runs source→target
-            // only, never the reverse: a KFX-sourced book's KFX is authoritative
-            // and must never be regenerated from its derived EPUB. So a swap
-            // failure on a KFX-sourced book is just logged, not "healed".
-            let epub_is_source = book.kind.as_deref() == Some("epub_to_kfx");
-            let Some(epub) = book.epub_path.as_deref().filter(|_| epub_is_source) else {
-                eprintln!(
-                    "[sidle/{tag}] book {} kfx cover swap failed: {e:#}",
-                    book.id
-                );
-                return None;
-            };
-            let reconvert =
-                kfx_cover::reconvert_from_epub(std::path::Path::new(epub), kfx_path, |src| {
-                    crate::queue::worker::book_metadata_override(src, book)
-                });
-            match reconvert {
-                Ok(sha) => {
-                    eprintln!(
-                        "[sidle/{tag}] book {} kfx was coverless; cover inserted via reconvert",
-                        book.id
-                    );
-                    Some(sha)
-                }
-                Err(e2) => {
-                    eprintln!(
-                        "[sidle/{tag}] book {} kfx cover swap failed ({e:#}); reconvert failed: {e2:#}",
-                        book.id
-                    );
-                    None
-                }
-            }
+impl From<cover::Outcome> for CoverResult {
+    fn from(outcome: cover::Outcome) -> Self {
+        match outcome {
+            cover::Outcome::Updated { cover_path } => CoverResult::Updated { cover_path },
+            cover::Outcome::NoAsin => CoverResult::NoAsin,
+            cover::Outcome::Failed { error } => CoverResult::Failed { error },
         }
-    }
-}
-
-/// Re-fetch one book's color cover from Amazon and replace it everywhere we
-/// keep a copy: the cover sidecar (what the gallery shows), the picker
-/// thumbnail, the embedded EPUB cover (for external readers), and the embedded
-/// KFX cover (the on-device home tile / sleep-screen art). The EPUB/KFX swaps
-/// are best-effort — logged and skipped on failure, since the sidecar is
-/// authoritative for the sidle UI. Shared by `library_recrawl_cover` (single)
-/// and `library_recrawl_covers` (bulk).
-async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
-    let Some(asin) = book.amazon_asin.as_deref() else {
-        return RecrawlOutcome::NoAsin;
-    };
-    // A stored value that isn't catalogue-shaped can't resolve to a real
-    // `/images/P/` cover, so "no ASIN" is more honest than "failed".
-    if !cover_fetch::looks_like_real_amazon_asin(asin) {
-        return RecrawlOutcome::NoAsin;
-    }
-    let Some(bytes) = cover_fetch::fetch_color_cover(asin, &book.language).await else {
-        return RecrawlOutcome::Failed {
-            error: "no cover returned (404, placeholder, or network error \
-                    — see [sidle/cover-fetch] log lines)"
-                .into(),
-        };
-    };
-    let out = state.paths.cover(&book.sha256, "jpg");
-    if let Err(e) = std::fs::write(&out, &bytes) {
-        return RecrawlOutcome::Failed {
-            error: format!("write failed: {e}"),
-        };
-    }
-    let out_str = out.to_string_lossy().to_string();
-    {
-        let conn = state.db.lock().await;
-        let _ = db::set_cover_path(&conn, book.id, &out_str);
-    }
-    // Refresh the picker thumbnail to match the re-fetched cover. Best-effort
-    // (see library::thumbnail).
-    let _ = crate::library::thumbnail::ensure_thumbnail(&state.paths, &book.sha256, &out);
-    // If the previous cover lived at a different filename (e.g. cover.png
-    // from a PNG-encoded resource), tidy it up so we don't leave both on
-    // disk.
-    if let Some(old) = book.cover_path.as_deref()
-        && old != out_str.as_str()
-    {
-        let _ = std::fs::remove_file(old);
-    }
-    // Also swap the cover inside the EPUB so external readers see the color
-    // version. `ensure_cover` regenerates the EPUB from the KFX when it's the
-    // derived side and has no cover slot, else inserts one. Best-effort: log to
-    // stderr and continue on failure — the sidecar is what the sidle gallery
-    // uses, so a failed EPUB swap doesn't invalidate the user's action.
-    if let Some(epub) = book.epub_path.as_deref() {
-        match epub_cover::ensure_cover(
-            std::path::Path::new(epub),
-            book.kfx_path.as_deref().map(std::path::Path::new),
-            &bytes,
-            "jpg",
-            book.kind.as_deref() == Some("kfx_to_epub"),
-        ) {
-            Ok(()) => {}
-            Err(e) => eprintln!(
-                "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
-                book.id
-            ),
-        }
-    }
-    // And into the imported KFX — that's the copy we push to the Kindle, and
-    // its embedded cover drives the home tile / sleep-screen art. Rewriting it
-    // changes the bytes, but `kfx_sha256` is the book's frozen identity (the
-    // on-device filename infix), so `set_kfx_path_and_sha` preserves it — the
-    // new-cover KFX reaches the device under the same, stable filename.
-    if let Some(kfx) = book.kfx_path.as_deref()
-        && let Some(new_sha) = swap_or_insert_kfx_cover(book, kfx, &bytes, "recrawl")
-    {
-        let conn = state.db.lock().await;
-        let _ = db::set_kfx_path_and_sha(&conn, book.id, kfx, &new_sha);
-    }
-    RecrawlOutcome::Updated {
-        cover_path: out_str,
     }
 }
 
 /// Re-pull the color cover for one book by hitting Amazon's `/images/P/`
-/// endpoint with its ASIN. Same fetch path the kfx_to_epub worker tail uses;
+/// endpoint with its ASIN. Same fetch path the import-time enrichment uses;
 /// this command is just the manual trigger from the right-click menu.
 #[tauri::command]
 pub async fn library_recrawl_cover(
     state: State<'_, AppState>,
     book_id: i64,
-) -> Result<RecrawlResult, String> {
-    let book = {
-        let conn = state.db.lock().await;
-        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
-    };
-    let Some(book) = book else {
-        return Err("book not found".into());
-    };
-    Ok(match recrawl_one(state.inner(), &book).await {
-        RecrawlOutcome::Updated { cover_path } => RecrawlResult::Updated { cover_path },
-        RecrawlOutcome::NoAsin => RecrawlResult::NoAsin,
-        RecrawlOutcome::Failed { error } => RecrawlResult::Failed { error },
+) -> Result<CoverResult, String> {
+    let db = state.db.clone();
+    let paths = state.paths.clone();
+    // One Amazon round-trip plus an EPUB/KFX rewrite: blocking IO and CPU both.
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let book = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "book not found".to_string())?;
+        Ok(cover::refetch(&conn, &paths, &book).into())
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Per-book progress for a bulk cover re-fetch, emitted as
@@ -940,7 +474,7 @@ struct RecrawlProgress {
 /// Tally returned by `library_recrawl_covers`. `updated` got a fresh cover;
 /// `failed` returned no usable cover (404 / placeholder / network); `no_asin`
 /// had no real Amazon ASIN to fetch from and was skipped.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct RecrawlBulkSummary {
     updated: usize,
     failed: usize,
@@ -948,9 +482,8 @@ pub struct RecrawlBulkSummary {
 }
 
 /// Re-fetch covers for a set of books — the selection bar's "Re-fetch covers"
-/// action (and the multi-select / whole-series context menus). Sequential, to
-/// match `library_import` and to hold one cheap DB lock at a time; emits
-/// `library:recrawl-progress` after each book. The frontend does a single
+/// action (and the multi-select / whole-series context menus). Sequential;
+/// emits `library:recrawl-progress` after each book. The frontend does a single
 /// `library_list` refresh when this returns rather than re-rendering per book.
 #[tauri::command]
 pub async fn library_recrawl_covers(
@@ -958,177 +491,67 @@ pub async fn library_recrawl_covers(
     state: State<'_, AppState>,
     book_ids: Vec<i64>,
 ) -> Result<RecrawlBulkSummary, String> {
-    let total = book_ids.len();
-    let mut summary = RecrawlBulkSummary {
-        updated: 0,
-        failed: 0,
-        no_asin: 0,
-    };
-    for (i, id) in book_ids.iter().enumerate() {
-        let book = {
-            let conn = state.db.lock().await;
-            db::get_book(&conn, *id).map_err(|e| e.to_string())?
-        };
-        match book {
-            Some(book) => match recrawl_one(state.inner(), &book).await {
-                RecrawlOutcome::Updated { .. } => summary.updated += 1,
-                RecrawlOutcome::NoAsin => summary.no_asin += 1,
-                RecrawlOutcome::Failed { error } => {
-                    summary.failed += 1;
-                    eprintln!("[sidle/recrawl] book {} failed: {error}", book.id);
-                }
-            },
-            // Row vanished mid-run (e.g. removed by a parallel action). Count
-            // it as failed and keep going rather than aborting the batch.
-            None => summary.failed += 1,
+    let db = state.db.clone();
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let total = book_ids.len();
+        let mut summary = RecrawlBulkSummary::default();
+        for (i, id) in book_ids.iter().enumerate() {
+            match db::get_book(&conn, *id).map_err(|e| e.to_string())? {
+                Some(book) => match cover::refetch(&conn, &paths, &book) {
+                    cover::Outcome::Updated { .. } => summary.updated += 1,
+                    cover::Outcome::NoAsin => summary.no_asin += 1,
+                    cover::Outcome::Failed { error } => {
+                        summary.failed += 1;
+                        eprintln!("[sidle/recrawl] book {} failed: {error}", book.id);
+                    }
+                },
+                // Row vanished mid-run (e.g. removed by a parallel action).
+                // Count it as failed and keep going rather than aborting.
+                None => summary.failed += 1,
+            }
+            let _ = app.emit(
+                "library:recrawl-progress",
+                RecrawlProgress { done: i + 1, total },
+            );
         }
-        let _ = app.emit(
-            "library:recrawl-progress",
-            RecrawlProgress { done: i + 1, total },
-        );
-    }
-    Ok(summary)
-}
-
-/// Outcome of the user "Change cover…" action in the metadata editor.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SetCoverResult {
-    Updated { cover_path: String },
-    Failed { error: String },
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Replace the cover for one book from a user-picked image file.
 ///
-/// Modeled on `library_recrawl_cover` but takes its bytes from a local
-/// file instead of Amazon's `/images/P/` endpoint. Immediate-apply
-/// semantics: commits on file pick; the editor modal's Cancel doesn't
-/// undo this.
-///
-/// Reads bytes, sniffs the format (JPG/PNG/WebP) via magic bytes so a
-/// `.png` file mislabeled as `.jpg` still lands correctly, writes to
-/// `paths.cover(&sha, ext)`, updates `cover_path` in the DB, removes the
-/// previous file if the extension differs, best-effort EPUB embed via
-/// `epub_cover::replace_cover`, and emits `library:row-updated` so the
-/// rest of the UI refreshes.
+/// Immediate-apply semantics: commits on file pick; the editor modal's Cancel
+/// doesn't undo this. The image format is sniffed from the bytes, so a `.png`
+/// mislabeled `.jpg` still lands correctly.
 #[tauri::command]
 pub async fn library_set_cover(
     app: AppHandle,
     state: State<'_, AppState>,
     book_id: i64,
     src_path: String,
-) -> Result<SetCoverResult, String> {
-    let bytes = match std::fs::read(&src_path) {
-        Ok(b) => b,
-        Err(e) => {
-            return Ok(SetCoverResult::Failed {
-                error: format!("read {src_path}: {e}"),
-            });
-        }
-    };
+) -> Result<CoverResult, String> {
+    let db = state.db.clone();
+    let paths = state.paths.clone();
+    let (outcome, updated) = tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let book = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "book not found".to_string())?;
+        let outcome = cover::set_from_file(&conn, &paths, &book, Path::new(&src_path));
+        let updated = db::get_book(&conn, book_id).map_err(|e| e.to_string())?;
+        Ok::<_, String>((outcome, updated))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
-    let ext = match sniff_image_format(&bytes) {
-        Some(e) => e,
-        None => {
-            return Ok(SetCoverResult::Failed {
-                error: "unsupported image format (expected JPG, PNG, or WebP)".into(),
-            });
-        }
-    };
-
-    let book = {
-        let conn = state.db.lock().await;
-        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
-    };
-    let Some(book) = book else {
-        return Err("book not found".into());
-    };
-
-    let out = state.paths.cover(&book.sha256, ext);
-    if let Err(e) = std::fs::write(&out, &bytes) {
-        return Ok(SetCoverResult::Failed {
-            error: format!("write {}: {e}", out.display()),
-        });
-    }
-    let out_str = out.to_string_lossy().to_string();
-
-    {
-        let conn = state.db.lock().await;
-        let _ = db::set_cover_path(&conn, book_id, &out_str);
-    }
-
-    // Refresh the picker thumbnail to match the user-picked cover. Best-effort
-    // (see library::thumbnail).
-    let _ = crate::library::thumbnail::ensure_thumbnail(&state.paths, &book.sha256, &out);
-
-    // Old cover at a different filename (e.g. `cover.jpg` being replaced
-    // by `cover.png`) — tidy up so we don't leave both on disk.
-    if let Some(old) = book.cover_path.as_deref()
-        && old != out_str.as_str()
-    {
-        let _ = std::fs::remove_file(old);
-    }
-
-    // Embed in the EPUB so external readers see the user-chosen image.
-    // `ensure_cover` regenerates from the KFX only when the EPUB is derived,
-    // else inserts. Best-effort: failure logs and doesn't fail the command (the
-    // gallery reads from the sidecar, not the EPUB).
-    if let Some(epub) = book.epub_path.as_deref() {
-        match epub_cover::ensure_cover(
-            std::path::Path::new(epub),
-            book.kfx_path.as_deref().map(std::path::Path::new),
-            &bytes,
-            ext,
-            book.kind.as_deref() == Some("kfx_to_epub"),
-        ) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}")
-            }
-        }
-    }
-
-    // And into the imported KFX (bokai normalizes png/webp → jpeg). This is the
-    // copy pushed to the Kindle; the rewrite changes the bytes but the frozen
-    // `kfx_sha256` identity is preserved by `set_kfx_path_and_sha`, so the
-    // on-device filename is unchanged. A cover-less KFX (EPUB import with no
-    // source cover) is healed by reconvert.
-    if let Some(kfx) = book.kfx_path.as_deref()
-        && let Some(new_sha) = swap_or_insert_kfx_cover(&book, kfx, &bytes, "set-cover")
-    {
-        let conn = state.db.lock().await;
-        let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
-    }
-
-    let updated = {
-        let conn = state.db.lock().await;
-        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
-    };
     if let Some(updated) = updated {
         let _ = app.emit("library:row-updated", &updated);
     }
-
-    Ok(SetCoverResult::Updated {
-        cover_path: out_str,
-    })
-}
-
-/// Magic-byte sniff for the three image formats sidle accepts as covers.
-/// Returns the canonical lowercase extension or None if no header matches.
-pub(crate) fn sniff_image_format(bytes: &[u8]) -> Option<&'static str> {
-    // JPEG: FF D8 FF
-    if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
-        return Some("jpg");
-    }
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some("png");
-    }
-    // WebP: "RIFF" .... "WEBP"
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("webp");
-    }
-    None
+    Ok(outcome.into())
 }
 
 /// Open the system file dialog filtered to images and return one path.
@@ -1582,74 +1005,9 @@ fn dir_has_entries(dir: &Path) -> bool {
         .map(|mut it| it.next().is_some())
         .unwrap_or(false)
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_tags, percent_encode_query, sniff_image_format};
-
-    #[test]
-    fn sniff_detects_jpeg_png_webp() {
-        // JPEG SOI + APP0 (typical EXIF/JFIF prefix).
-        assert_eq!(
-            sniff_image_format(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
-            Some("jpg")
-        );
-        // PNG 8-byte signature.
-        assert_eq!(
-            sniff_image_format(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
-            Some("png")
-        );
-        // WebP container: "RIFF" + 4 size bytes + "WEBP".
-        assert_eq!(
-            sniff_image_format(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
-            Some("webp")
-        );
-    }
-
-    #[test]
-    fn sniff_rejects_non_image() {
-        assert_eq!(sniff_image_format(b""), None);
-        assert_eq!(sniff_image_format(b"PK\x03\x04"), None); // ZIP
-        assert_eq!(sniff_image_format(b"hello"), None);
-        // Too short to match anything.
-        assert_eq!(sniff_image_format(&[0xFF, 0xD8]), None);
-    }
-
-    #[test]
-    fn canonicalize_collapses_case_and_trims() {
-        let got = canonicalize_tags(vec![
-            "Sci-Fi".into(),
-            "sci-fi".into(),
-            "  Fantasy ".into(),
-            "".into(),
-            "  ".into(),
-            "FANTASY".into(),
-        ]);
-        assert_eq!(got, vec!["sci-fi", "fantasy"]);
-    }
-
-    #[test]
-    fn canonicalize_preserves_order_of_first_occurrence() {
-        let got = canonicalize_tags(vec!["bbb".into(), "aaa".into(), "BBB".into()]);
-        assert_eq!(got, vec!["bbb", "aaa"]);
-    }
-
-    #[test]
-    fn canonicalize_passes_cjk_through_unchanged() {
-        // CJK has no case, so lowercase is a no-op; trim still applies.
-        let got = canonicalize_tags(vec![
-            " 小説 ".into(),
-            "ライトノベル".into(),
-            "小説".into(), // duplicate after trim
-        ]);
-        assert_eq!(got, vec!["小説", "ライトノベル"]);
-    }
-
-    #[test]
-    fn canonicalize_mixed_cjk_and_ascii_lowercases_only_ascii() {
-        let got = canonicalize_tags(vec!["ライトSciFi".into(), "ライトscifi".into()]);
-        assert_eq!(got, vec!["ライトscifi"]);
-    }
+    use super::percent_encode_query;
 
     #[test]
     fn percent_encode_query_handles_spaces_and_cjk() {

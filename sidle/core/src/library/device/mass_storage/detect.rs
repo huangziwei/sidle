@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use nusb::MaybeFuture;
 
-use crate::device::{DeviceInfo, TransportKind};
+use crate::library::device::{DeviceInfo, TransportKind};
 
 #[cfg(target_os = "macos")]
 const VOLUMES_ROOT: &str = "/Volumes";
@@ -73,7 +73,7 @@ fn inspect(mount: &Path) -> Option<DeviceInfo> {
         .or_else(|| ensure_device_id(mount))
         .unwrap_or_else(|| anon_serial(mount));
     let model = parse_model(&raw);
-    let firmware = crate::device::parse_firmware(&raw);
+    let firmware = crate::library::device::parse_firmware(&raw);
     let (free, total) = fs_usage(mount).unwrap_or((None, None));
     Some(DeviceInfo {
         serial,

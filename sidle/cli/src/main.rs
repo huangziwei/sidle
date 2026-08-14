@@ -1,32 +1,31 @@
-//! `sidle-cli` — library maintenance across the whole library at once.
+//! `sidle-cli` — the library without the window.
 //!
-//! The desktop app edits one book at a time, which is the right shape for
-//! curation and the wrong one for a sweep over two thousand rows. This binary
-//! opens the same library — same `config.json`, same `library.db`, same files —
-//! and does the sweeps.
+//! The desktop app works one book at a time, which is right for curation and
+//! wrong for a sweep across two thousand rows. This binary opens the same
+//! library — same `config.json`, same `library.db`, same files — and does the
+//! sweeps: reconvert everything after a bokai change, retag a series, re-fetch a
+//! shelf of covers, send a selection to the Kindle, pull the annotations back.
 //!
-//! It is not a second implementation of anything: every operation here is
+//! It is not a second implementation of anything. Every operation is
 //! `sidle-core` plus `bokai`, the same calls the desktop makes.
 //!
-//! ```text
-//! sidle-cli status            what the library looks like, and what needs doing
-//! sidle-cli rekey [--apply]   give every file its own identity (dry by default)
-//! ```
+//! Two things make it scriptable: every command that acts on books takes the
+//! same [`select`] flags, and `--json` turns every report into a machine-
+//! readable object.
 
-use std::path::PathBuf;
+mod cmd;
+mod ctx;
+mod select;
 
-use anyhow::{Context, Result};
-use bokai::formats::kfx::metadata::{
-    generate_content_id, looks_like_real_amazon_asin, resolve_export_asin,
-};
-use bokai::formats::kfx::metadata_edit::{self, MetadataPatch};
-use rusqlite::Connection;
-use sidle_core::library::db::{self, BookRow};
-use sidle_core::library::import::write_bytes_atomic;
-use sidle_core::library::paths::LibraryPaths;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use crate::ctx::Ctx;
+use crate::select::Select;
 
 fn main() -> std::process::ExitCode {
-    match run() {
+    let cli = Cli::parse();
+    match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("sidle-cli: {e:#}");
@@ -35,181 +34,152 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let flag = |name: &str| args.iter().any(|a| a == name);
-    let value = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1))
-            .map(PathBuf::from)
-    };
-    let root = value("--root");
+#[derive(Parser)]
+#[command(
+    name = "sidle-cli",
+    about = "sidle's library, from a script",
+    version,
+    max_term_width = 100
+)]
+struct Cli {
+    /// Work on the library under this directory instead of the configured one.
+    /// A copy of a library is a library, so this is how a sweep gets tried
+    /// before it is run for real.
+    #[arg(long, global = true, value_name = "DIR")]
+    root: Option<std::path::PathBuf>,
 
-    match args.first().map(String::as_str) {
-        Some("status") => status(&open_library(root)?.1),
-        Some("rekey") => rekey(root, flag("--apply")),
-        Some("--help") | Some("-h") | None => {
-            println!("{USAGE}");
+    /// Report as JSON instead of prose.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// What the library holds, and what needs doing.
+    Status,
+    /// List books.
+    List {
+        #[command(flatten)]
+        select: Select,
+        /// Print one column instead of a table: `id`, `sha`, `title`, `path`,
+        /// `kfx`, `epub`, `pdf`, `asin`. Ideal for feeding another command.
+        #[arg(long, value_name = "FIELD")]
+        field: Option<String>,
+    },
+    /// Everything stored about the selected books.
+    Show {
+        #[command(flatten)]
+        select: Select,
+    },
+    /// Convert the selected books — the sweep after a bokai change.
+    Convert(cmd::convert::ConvertArgs),
+    /// Conversion job state, per book.
+    Jobs {
+        #[command(flatten)]
+        select: Select,
+    },
+    /// Add files to the library, converting each as it lands.
+    Import(cmd::library::ImportArgs),
+    /// Edit metadata on the selected books.
+    Set(Box<cmd::library::SetArgs>),
+    /// Give a book its catalogue ASIN — the key colour covers are fetched with.
+    Asin {
+        #[command(flatten)]
+        select: Select,
+        /// The 10-character Amazon id.
+        asin: String,
+    },
+    /// Give every KFX an identity of its own, so a copy of a store-bought book
+    /// stops sharing the catalogue item's ASIN.
+    Rekey {
+        /// Without this, the plan is printed and nothing is written.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Render romaji for a piece of text, the way the metadata editor does.
+    Romanize {
+        text: String,
+        #[arg(long, default_value = "ja")]
+        language: String,
+    },
+    /// Covers: re-fetch from the catalogue, or set one from a file.
+    Cover(cmd::library::CoverArgs),
+    /// Write books out as files someone else can read.
+    Export(cmd::library::ExportArgs),
+    /// Remove books from the library, files and all.
+    Remove {
+        #[command(flatten)]
+        select: Select,
+        /// Without this, the plan is printed and nothing is deleted.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Reclaim the disk space removed books freed (`VACUUM`).
+    Compact,
+    /// Split an omnibus into its volumes.
+    Split(cmd::library::SplitArgs),
+    /// Highlights, notes and bookmarks.
+    Annotations(cmd::annotations::AnnotationsArgs),
+    /// Judge — and rebuild — tables of contents.
+    Toc(cmd::toc::TocArgs),
+    /// The connected Kindle.
+    #[command(subcommand)]
+    Device(cmd::device::DeviceCmd),
+    /// Handwritten notebooks.
+    #[command(subcommand)]
+    Notebook(cmd::notebook::NotebookCmd),
+    /// Time read, as the Kindle's own logs recorded it.
+    #[command(subcommand)]
+    ReadingLog(cmd::reading_log::ReadingLogCmd),
+    /// Files backed up off the device: screenshots, picker logs.
+    #[command(subcommand)]
+    Misc(cmd::misc::MiscCmd),
+    /// The library as a whole: where it lives, backups, merges.
+    #[command(subcommand)]
+    Library(cmd::manage::LibraryCmd),
+    /// The LAN server the Kindle pulls from.
+    #[command(subcommand)]
+    Server(cmd::server::ServerCmd),
+}
+
+fn run(cli: Cli) -> Result<()> {
+    // The one command that runs without a library, because it makes one.
+    if matches!(cli.command, Command::Library(cmd::manage::LibraryCmd::Init)) {
+        return cmd::manage::init(cli.root);
+    }
+    let ctx = Ctx::open(cli.root, cli.json)?;
+    match cli.command {
+        Command::Status => cmd::library::status(&ctx),
+        Command::List { select, field } => cmd::library::list(&ctx, &select, field.as_deref()),
+        Command::Show { select } => cmd::library::show(&ctx, &select),
+        Command::Convert(args) => cmd::convert::run(&ctx, args),
+        Command::Jobs { select } => cmd::convert::jobs(&ctx, &select),
+        Command::Import(args) => cmd::library::import(&ctx, args),
+        Command::Set(args) => cmd::library::set(&ctx, *args),
+        Command::Asin { select, asin } => cmd::library::asin(&ctx, &select, &asin),
+        Command::Rekey { apply } => cmd::library::rekey(&ctx, apply),
+        Command::Romanize { text, language } => {
+            println!(
+                "{}",
+                sidle_core::library::romaji::romanize_field(&text, None, &language)
+            );
             Ok(())
         }
-        Some(other) => {
-            anyhow::bail!("unknown command {other:?}\n\n{USAGE}");
-        }
+        Command::Cover(args) => cmd::library::cover(&ctx, args),
+        Command::Export(args) => cmd::library::export(&ctx, args),
+        Command::Remove { select, apply } => cmd::library::remove(&ctx, &select, apply),
+        Command::Compact => cmd::library::compact(&ctx),
+        Command::Split(args) => cmd::library::split(&ctx, args),
+        Command::Annotations(args) => cmd::annotations::run(&ctx, args),
+        Command::Toc(args) => cmd::toc::run(&ctx, args),
+        Command::Device(sub) => cmd::device::run(&ctx, sub),
+        Command::Notebook(sub) => cmd::notebook::run(&ctx, sub),
+        Command::ReadingLog(sub) => cmd::reading_log::run(&ctx, sub),
+        Command::Misc(sub) => cmd::misc::run(&ctx, sub),
+        Command::Library(sub) => cmd::manage::run(&ctx, sub),
+        Command::Server(sub) => cmd::server::run(&ctx, sub),
     }
-}
-
-const USAGE: &str = "\
-sidle-cli — library maintenance
-
-  status          Count the library and report what needs doing.
-  rekey [--apply] Give every KFX an identity of its own, so a copy of a
-                  store-bought book stops sharing the catalogue item's ASIN.
-                  Prints the plan and changes nothing without --apply.
-
-  --root <dir>    Work on the library under <dir> instead of the configured
-                  one. A copy of a library is a library, so this is how a
-                  sweep gets tried before it is run for real.";
-
-/// Open the library the desktop app would open, or the one under `root`.
-fn open_library(root: Option<PathBuf>) -> Result<(LibraryPaths, Connection)> {
-    let paths = match root {
-        Some(root) => LibraryPaths { root },
-        None => LibraryPaths::resolve().context("resolve the library root")?,
-    };
-    let db_path = paths.db();
-    if !db_path.is_file() {
-        anyhow::bail!("no library at {}", db_path.display());
-    }
-    let conn = db::open(&db_path).with_context(|| format!("open {}", db_path.display()))?;
-    Ok((paths, conn))
-}
-
-fn status(conn: &Connection) -> Result<()> {
-    let books = db::list_books(conn).context("read the library")?;
-    let with_kfx = books.iter().filter(|b| b.kfx_path.is_some()).count();
-    let sharing = books.iter().filter(|b| shares_a_catalogue_id(b)).count();
-    let coverable = books.iter().filter(|b| b.amazon_asin.is_some()).count();
-
-    println!("{} books, {with_kfx} converted", books.len());
-    println!("{coverable} carry a catalogue ASIN for cover fetching");
-    if sharing > 0 {
-        println!(
-            "{sharing} still carry one *inside the file*, where a Kindle reads it \
-             as the catalogue item itself — `sidle-cli rekey` fixes that"
-        );
-    }
-    Ok(())
-}
-
-/// True when the file's own key is a catalogue ASIN, which means the device
-/// cannot tell this copy from the store's.
-fn shares_a_catalogue_id(book: &BookRow) -> bool {
-    book.kfx_path.is_some()
-        && book
-            .asin
-            .as_deref()
-            .is_some_and(looks_like_real_amazon_asin)
-}
-
-/// Re-key every KFX whose baked identity is a catalogue ASIN.
-///
-/// `kfx_sha256` is deliberately left alone: it is the book's frozen identity,
-/// the `<sha8>` in its on-device filename, and the Kindle binds each `.sdr` to
-/// that exact name. Rewriting the file moves its mtime instead, which is the
-/// revision the picker's update pass watches — so a re-keyed book arrives on
-/// the next Update under the name it already had, keeping the reader's
-/// highlights and position.
-fn rekey(root: Option<PathBuf>, apply: bool) -> Result<()> {
-    let (_paths, conn) = open_library(root)?;
-    let books = db::list_books(&conn).context("read the library")?;
-    let affected: Vec<&BookRow> = books.iter().filter(|b| shares_a_catalogue_id(b)).collect();
-
-    if affected.is_empty() {
-        println!("nothing to re-key: no file carries a catalogue ASIN as its own key");
-        return Ok(());
-    }
-    if !apply {
-        println!(
-            "{} books would be re-keyed. Re-run with --apply.\n",
-            affected.len()
-        );
-        for b in affected.iter().take(10) {
-            println!("  {} — {}", b.asin.as_deref().unwrap_or("?"), b.title);
-        }
-        if affected.len() > 10 {
-            println!("  … and {} more", affected.len() - 10);
-        }
-        return Ok(());
-    }
-
-    let (mut done, mut failed) = (0usize, 0usize);
-    for book in &affected {
-        match rekey_one(&conn, book) {
-            Ok(new_key) => {
-                done += 1;
-                println!("[{done}/{}] {} -> {new_key}", affected.len(), book.title);
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("failed {}: {e:#}", book.title);
-            }
-        }
-    }
-
-    println!("\nre-keyed {done}, failed {failed}");
-    if done > 0 {
-        println!(
-            "Books already on a Kindle keep their filename and pick the change up \
-             on the next Update in the picker."
-        );
-    }
-    Ok(())
-}
-
-/// Re-key one book, returning the new key.
-fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
-    let path = PathBuf::from(
-        book.kfx_path
-            .as_deref()
-            .expect("filtered to books with a KFX"),
-    );
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let kfx = bokai::Book::from_bytes(&bytes, bokai::Format::Kfx)
-        .with_context(|| format!("parse {}", path.display()))?;
-
-    // A KFX Amazon produced names no publication identifier, so there is
-    // nothing for the export rule to derive from — and those are exactly the
-    // books that carry a catalogue ASIN and most need one of their own. The
-    // library's content hash stands in: it is per-book, already the name of the
-    // directory the file lives in, and stable for as long as the bytes are.
-    let new_key =
-        resolve_export_asin(kfx.metadata()).unwrap_or_else(|| generate_content_id(&book.sha256));
-    let old_key = book.asin.as_deref().unwrap_or_default().to_string();
-    if new_key == old_key {
-        return Ok(new_key);
-    }
-
-    // Both fields, to one value: they are written equal at export, and a device
-    // that keys on either then sees one identity rather than two.
-    let patched = metadata_edit::edit_metadata(
-        &bytes,
-        &MetadataPatch {
-            asin: Some(new_key.clone()),
-            content_id: Some(new_key.clone()),
-            ..Default::default()
-        },
-    )
-    .with_context(|| format!("re-key {}", path.display()))?;
-    write_bytes_atomic(&path, &patched).with_context(|| format!("write {}", path.display()))?;
-
-    // The catalogue value the file used to carry is worth keeping — it is the
-    // only colour-cover key this book has. Never overwrite one already there:
-    // that one was curated.
-    if book.amazon_asin.is_none() && looks_like_real_amazon_asin(&old_key) {
-        db::set_amazon_asin(conn, book.id, Some(&old_key))?;
-    }
-    db::set_asin(conn, book.id, &new_key)?;
-    db::relink_ink(conn, &old_key, &new_key)?;
-    Ok(new_key)
 }

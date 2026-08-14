@@ -19,12 +19,12 @@ use anyhow::anyhow;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
-use crate::device::dedrm::{self, PullResult};
-use crate::device::detect;
-use crate::device::{DeviceInfo, Transport, TransportKind};
 use crate::library::{LibraryPaths, ingest};
 use crate::queue::QueueHandle;
 use crate::state::{DbHandle, SharedTransport};
+use sidle_core::library::device::dedrm::{self, PullResult};
+use sidle_core::library::device::detect;
+use sidle_core::library::device::{DeviceInfo, Transport, TransportKind};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -275,7 +275,7 @@ async fn sync_annotations_on_connect(
             let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
                 let _ = app_progress.emit(
                     "annotations:sync-progress",
-                    crate::device::annotations::SyncProgress {
+                    sidle_core::library::device::annotations::SyncProgress {
                         stage: stage.to_string(),
                         current,
                         total,
@@ -283,10 +283,10 @@ async fn sync_annotations_on_connect(
                     },
                 );
             };
-            crate::device::annotations::import_device_annotations(
+            sidle_core::library::device::annotations::import_device_annotations(
                 &device,
                 shared.as_ref(),
-                &db,
+                &crate::state::Borrowed(&db),
                 &paths,
                 &on_progress,
             )

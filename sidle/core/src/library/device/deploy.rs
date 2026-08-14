@@ -769,8 +769,10 @@ mod tests {
     /// Wrap a temp dir as a mass-storage [`Transport`], so the deploy tests
     /// drive the same trait the command layer uses — byte-for-byte the prior
     /// `std::fs`-against-a-mount behavior, now also shared with the MTP path.
-    fn ms(dir: &Path) -> crate::device::mass_storage::transport::MassStorageTransport {
-        crate::device::mass_storage::transport::MassStorageTransport::new(dir.to_path_buf())
+    fn ms(dir: &Path) -> crate::library::device::mass_storage::transport::MassStorageTransport {
+        crate::library::device::mass_storage::transport::MassStorageTransport::new(
+            dir.to_path_buf(),
+        )
     }
 
     /// A stand-in CA on disk. Deliberately NOT under the `device/` mirror: the

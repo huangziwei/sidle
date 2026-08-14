@@ -4601,7 +4601,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -5305,7 +5307,6 @@ dependencies = [
  "dirs",
  "futures",
  "hex",
- "jxr",
  "libc",
  "mtp-rs",
  "notify",
@@ -5327,7 +5328,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "zip",
 ]
 
 [[package]]
@@ -5336,8 +5336,14 @@ version = "0.1.8"
 dependencies = [
  "anyhow",
  "bokai",
+ "chrono",
+ "clap",
  "rusqlite",
+ "serde",
+ "serde_json",
  "sidle-core",
+ "sidle-server",
+ "tempfile",
 ]
 
 [[package]]
@@ -5347,13 +5353,20 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bokai",
+ "bytes",
  "chrono",
  "dirs",
  "flate2",
+ "futures",
+ "hex",
  "image",
  "kakasi",
+ "libc",
+ "mtp-rs",
+ "nusb",
  "pinyin",
  "rcgen",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",

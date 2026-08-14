@@ -11,12 +11,30 @@ name = "sidle-cli"
 path = "src/main.rs"
 
 [dependencies]
-# The library itself: paths, DB, and the same row types the desktop app edits.
+# The library itself: paths, DB, conversion, covers, device IO — the same calls
+# the desktop app makes.
 sidle-core = { path = "../core" }
+# The LAN daemon's own crate, for the bearer token it and the picker share.
+sidle-server = { path = "../server" }
 # Reads and rewrites the KFX metadata a re-key changes.
 bokai = { path = "../../bokai" }
 
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# `--json` output: every report is a serializable struct, so a script never has
+# to parse prose.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # `db::open` hands back a rusqlite `Connection`; the CLI needs the type to hold
 # one. Same version the rest of the workspace resolves to, so there is one copy.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Timestamps on backed-up device files, in the same shape the device transports
+# report.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Stages files pulled off a device so the extension-dispatch importer can read
+# them from a path.
+tempfile = "3"
+
+[dev-dependencies]
+# Hermetic libraries for the selection tests.
+tempfile = "3"

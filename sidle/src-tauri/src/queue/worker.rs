@@ -1,42 +1,28 @@
-//! Conversion worker: runs bokai on a blocking thread.
+//! Conversion worker: runs the library's conversion pipeline on a blocking
+//! thread and reports what it is doing to the window.
 //!
-//! Both directions share the worker shape — claim job → mark `converting` →
-//! do the heavy work → write the output to disk → record paths on the book
-//! row → mark `done`/`error`. The direction (`epub_to_kfx` or `kfx_to_epub`)
-//! is stored on the `conversion_jobs` row at import time; the worker just
-//! dispatches on it.
+//! The conversion itself — both directions, the cover-enrichment tail, the DB
+//! write-back, the re-anchor — is `sidle_core::library::convert`, which the CLI
+//! drives too. What lives here is what the desktop adds: the app's one database
+//! connection, taken only for the short half of the job, and
+//! `conversion:status` / `conversion:progress` events for the gallery's
+//! per-row bar.
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
-
+use sidle_core::library::convert::{self, Mode};
+use sidle_core::library::progress;
 use tauri::AppHandle;
 
-use crate::cover_fetch;
 use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
-use crate::library::epub_cover;
-use crate::library::extent;
-use crate::library::import::{
-    extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_bytes, sha256_of_file,
-    write_bytes_atomic,
-};
-use crate::library::kfx_cover;
-use crate::library::paths::format_basename;
-use crate::library::pdf_geom;
 use crate::queue::{emit_progress, emit_status};
 use crate::state::DbHandle;
 
-/// Run a single conversion job: mark `converting`, run bokai, write file,
-/// update `done` or `error`. Errors are recorded in the DB; never propagated
-/// to the caller (this is a fire-and-forget worker).
+/// Run a single conversion job: mark `converting`, convert, write the results
+/// back, mark `done`/`error`. Errors are recorded in the DB; never propagated to
+/// the caller (this is a fire-and-forget worker).
 ///
 /// `reconvert` = a forced re-run of the format conversion (the "Force
-/// re-convert" button), as opposed to a first import. It does **only**
-/// source→target: the import-time cover-enrichment tail-step (which re-fetches
-/// the Amazon cover and rewrites the *source* KFX, re-stamping `kfx_sha256`) is
-/// skipped — re-stamping would change the on-device filename infix and break
-/// annotation-sync matching for a book already pushed to the Kindle. The EPUB
-/// still gets the right cover: it's extracted from the (already-enriched) KFX.
+/// re-convert" button), as opposed to a first import. See [`Mode`].
 pub async fn run_job(
     app: &AppHandle,
     db: &DbHandle,
@@ -48,7 +34,7 @@ pub async fn run_job(
         eprintln!("[sidle/queue] book {book_id} vanished before conversion");
         return;
     };
-    let Some(kind) = book.kind.as_deref() else {
+    let Some(kind) = book.kind.clone() else {
         eprintln!("[sidle/queue] book {book_id} has no job kind; skipping");
         return;
     };
@@ -56,266 +42,61 @@ pub async fn run_job(
     eprintln!("[sidle/queue] book {book_id} converting ({kind})");
     mark_status(db, app, book_id, "converting", None).await;
 
-    let paths_owned = paths.clone();
-    let book_owned = book.clone();
-    let kind_owned = kind.to_string();
+    let paths = paths.clone();
+    let db_owned = db.clone();
     let app_owned = app.clone();
+    let mode = if reconvert {
+        Mode::Reconvert
+    } else {
+        Mode::Import
+    };
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        // Map bokai's per-phase reports → a monotonic 0–1 fraction (weighted per
-        // direction) and emit a throttled `conversion:progress` event.
-        let throttle = crate::progress::Throttle::new();
+        // Map the pipeline's per-phase reports → a monotonic 0–1 fraction
+        // (weighted per direction) and emit a throttled `conversion:progress`.
+        let throttle = progress::Throttle::new();
         let on_progress = |phase: &str, cur: usize, total: usize, label: &str| {
-            let f = crate::progress::fraction(&kind_owned, phase, cur, total);
+            let f = progress::fraction(&kind, phase, cur, total);
             if throttle.worth_emitting(f) {
                 emit_progress(&app_owned, book_id, f, label);
             }
         };
-        run_direction(&paths_owned, &book_owned, &kind_owned, &on_progress)
+        // The database is taken only once the slow half is finished: `run` is
+        // minutes of CPU and holds nothing, `record` is a handful of writes.
+        // Both stay on this thread — the text index `run` builds for the
+        // re-anchor is not `Send`.
+        let produced = convert::run(&paths, &book, &kind, mode, &on_progress)?;
+        let conn = db_owned.blocking_lock();
+        convert::record(&conn, &book, produced)
     })
     .await;
 
-    let mut produced = match result {
-        Ok(Ok(p)) => p,
+    match result {
+        Ok(Ok(done)) => {
+            if done.reanchored > 0 || done.stranded > 0 {
+                eprintln!(
+                    "[sidle/queue] book {book_id}: re-anchored {} annotation(s), \
+                     {} left where they were (text not found, or found in several places)",
+                    done.reanchored, done.stranded
+                );
+            }
+            eprintln!(
+                "[sidle/queue] book {book_id} done in {:.2}s",
+                started.elapsed().as_secs_f32()
+            );
+            mark_status(db, app, book_id, "done", None).await;
+        }
         Ok(Err(e)) => {
             let msg = format!("{e:#}");
             eprintln!("[sidle/queue] book {book_id} error: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
-            return;
         }
         Err(join_err) => {
             let msg = format!("worker panicked: {join_err}");
             eprintln!("[sidle/queue] book {book_id} PANIC: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
-            return;
-        }
-    };
-
-    // Tail step (kfx_to_epub, first import only — skipped on a forced
-    // re-convert): if the KFX came from Amazon's monochrome-device build (KOA2 +
-    // friends), its embedded cover is grayscale-baked and there's no way to
-    // recover color from the file itself — refetch from the product page by
-    // ASIN — the catalogue one, which is the only value `/images/P/` answers to.
-    // KFXes bokai produced from a color EPUB already have the original color
-    // cover, and usually no catalogue ASIN either, so nothing is fetched and
-    // what's in the KFX stands. Skipped on `reconvert` because it rewrites
-    // the source KFX (re-stamping `kfx_sha256`), which a force re-convert must
-    // not do — see `run_job`.
-    if kind == "kfx_to_epub" && !reconvert {
-        match book.amazon_asin.as_deref() {
-            None => eprintln!("[sidle/queue] book {book_id} color cover: no catalogue ASIN on row"),
-            Some(asin) => {
-                eprintln!(
-                    "[sidle/queue] book {book_id} color cover: fetching ASIN={asin} \
-                     language={:?}",
-                    book.language
-                );
-                match cover_fetch::fetch_color_cover(asin, &book.language).await {
-                    Some(bytes) => {
-                        let out = paths.cover(&book.sha256, "jpg");
-                        if let Err(e) = std::fs::write(&out, &bytes) {
-                            eprintln!("[sidle/queue] book {book_id} color cover write failed: {e}");
-                        } else {
-                            // If the worker had just written a grayscale
-                            // `cover.<otherext>` (rare — typically the
-                            // JXR→JPG transcode lands on .jpg too), remove
-                            // the stale file so we don't leave both on disk.
-                            if let Some(old) = &produced.cover_path
-                                && old != &out
-                                && let Err(e) = std::fs::remove_file(old)
-                            {
-                                eprintln!(
-                                    "[sidle/queue] book {book_id} couldn't remove stale {}: {e}",
-                                    old.display()
-                                );
-                            }
-                            eprintln!(
-                                "[sidle/queue] book {book_id} color cover written -> {}",
-                                out.display()
-                            );
-                            produced.cover_path = Some(out);
-
-                            // Also swap the cover inside the just-produced
-                            // EPUB so external readers see color too. Best-
-                            // effort — log and continue on failure rather
-                            // than failing the whole job over a cosmetic
-                            // EPUB tweak.
-                            if let Some(epub) = &produced.epub_path {
-                                let kfx = book.kfx_path.as_deref().map(Path::new);
-                                // This tail runs only for `kfx_to_epub`, so the
-                                // EPUB is always the derived side of the KFX.
-                                match epub_cover::ensure_cover(epub, kfx, &bytes, "jpg", true) {
-                                    Ok(()) => eprintln!(
-                                        "[sidle/queue] book {book_id} color cover \
-                                         swapped inside epub"
-                                    ),
-                                    Err(e) => eprintln!(
-                                        "[sidle/queue] book {book_id} epub cover \
-                                         swap failed: {e:#}"
-                                    ),
-                                }
-                            }
-
-                            // Swap the cover inside the imported KFX too — that's
-                            // the copy we push to the Kindle, and its embedded
-                            // cover is what the home tile / sleep-screen renders.
-                            // A store KFX can ship a publisher placeholder there
-                            // (e.g. a house-logo) instead of the real art. This is
-                            // the first-import path, so `set_kfx_path_and_sha`
-                            // mints `kfx_sha256` from `new_sha`; thereafter the
-                            // identity is frozen (COALESCE) and the swapped bytes
-                            // ride to the device under that same, stable filename.
-                            if let Some(kfx) = book.kfx_path.as_deref() {
-                                match kfx_cover::replace_cover(Path::new(kfx), &bytes) {
-                                    Ok(new_sha) => {
-                                        let conn = db.lock().await;
-                                        let _ =
-                                            db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
-                                        drop(conn);
-                                        eprintln!(
-                                            "[sidle/queue] book {book_id} color cover \
-                                             swapped inside kfx (kfx_sha256 minted if new)"
-                                        );
-                                    }
-                                    Err(e) => eprintln!(
-                                        "[sidle/queue] book {book_id} kfx cover \
-                                         swap failed: {e:#}"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        eprintln!(
-                            "[sidle/queue] book {book_id} color cover: fetch returned None; \
-                             keeping the cover embedded in the KFX"
-                        );
-                    }
-                }
-            }
         }
     }
-
-    {
-        let conn = db.lock().await;
-        if let Some(epub) = &produced.epub_path {
-            let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
-        }
-        if let Some(kfx) = &produced.kfx_path {
-            let kfx_str = kfx.to_string_lossy();
-            match book.kfx_sha256.as_deref() {
-                // Reconvert of a book that already has an identity: the fixed
-                // bytes land at the same path, but `kfx_sha256` is the book's
-                // FROZEN identity (the on-device filename embeds its `<sha8>`
-                // and the Kindle binds each `.sdr` to that exact name). Preserve
-                // it — re-stamping would rename the file on the next pull and
-                // orphan the reader's highlights + position. Only the path is
-                // (re)written; `set_kfx_path_and_sha` COALESCEs the hash anyway,
-                // but skipping the re-hash here avoids the needless I/O.
-                Some(sha) => {
-                    let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx_str, sha);
-                }
-                // First conversion: mint the identity from the fresh KFX bytes.
-                None => match sha256_of_file(kfx) {
-                    Ok(sha) => {
-                        let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx_str, &sha);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[sidle/queue] book {book_id}: hashing produced KFX failed: {e}; \
-                             row will be unsendable until reconvert"
-                        );
-                    }
-                },
-            }
-        }
-        if let Some(pdf) = &produced.pdf_path {
-            let _ = db::set_pdf_path(&conn, book_id, &pdf.to_string_lossy());
-        }
-        if let Some(cover) = &produced.cover_path {
-            let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
-            // Refresh the picker thumbnail to match the produced cover.
-            // Best-effort (see library::thumbnail).
-            let _ = crate::library::thumbnail::ensure_thumbnail(paths, &book.sha256, cover);
-        }
-        if let Some(asin) = &produced.asin {
-            let _ = db::set_asin(&conn, book_id, asin);
-        }
-    }
-
-    // Cache the book's position axis, which is what lets the Reading Log
-    // recognise it: a Kindle's session log names no book, only the position it
-    // stopped at, so a book with no cached extent can never be attributed and
-    // the time read on it is counted nowhere.
-    //
-    // Measured here because a conversion is the one moment the axis is created
-    // or changes, and because the alternative — waiting for a sweep — means a
-    // book read on the day it was added counts for nothing until then. Every
-    // route into the library ends in a job, so this covers all of them; the
-    // catch-up sweep at boot exists for rows that predate it.
-    //
-    // Whichever KFX the row will point at: the one just produced (epub→kfx), or
-    // the imported source the other direction derives from (and whose bytes the
-    // cover swap above may have rewritten). Off the lock and off the runtime —
-    // it parses the whole container.
-    let indexed = produced
-        .kfx_path
-        .clone()
-        .or_else(|| book.kfx_path.as_deref().map(PathBuf::from));
-    if let Some(kfx) = indexed {
-        let read = kfx.clone();
-        let extent = tokio::task::spawn_blocking(move || extent::of_file(&read))
-            .await
-            .unwrap_or(None);
-        // Existing annotations hold handles into the *previous* build of this
-        // book, and a rebuild moves them: one extra fragment on a page shifts
-        // every element id after it, so a highlight silently starts covering
-        // other words. Their text is what survives, so re-find it. Off the
-        // runtime — it parses the container again.
-        let reanchor = tokio::task::spawn_blocking(move || {
-            std::fs::read(&kfx)
-                .ok()
-                .and_then(|bytes| reanchor_index(&bytes))
-        })
-        .await
-        .unwrap_or(None);
-        if let Some(index) = reanchor {
-            let conn = db.lock().await;
-            match sidle_core::library::reanchor::book(&conn, book_id, &index) {
-                Ok(done) if done.moved > 0 || done.stranded > 0 => eprintln!(
-                    "[sidle/queue] book {book_id}: re-anchored {} annotation(s), \
-                     {} already correct, {} left where they were (text not found, \
-                     or found in several places)",
-                    done.moved, done.intact, done.stranded
-                ),
-                Ok(_) => {}
-                Err(e) => eprintln!("[sidle/queue] book {book_id}: re-anchor failed: {e}"),
-            }
-        }
-        // `None` is stored too (as 0, "this file has no axis") — the honest
-        // answer for a container without a position map, and the value a
-        // re-convert must overwrite a stale extent with.
-        if extent.is_none() {
-            eprintln!(
-                "[sidle/queue] book {book_id}: no position map in the produced KFX; \
-                 reading time on this book cannot be attributed"
-            );
-        }
-        let conn = db.lock().await;
-        let _ = db::set_max_position(&conn, book_id, extent);
-        // A book that can now be recognised may be the answer to sessions
-        // already stored against a position that matched nothing — reading done
-        // on a Kindle before the desktop finished converting the same book.
-        if extent.is_some() {
-            let _ = db::resolve_reading_sessions(&conn);
-        }
-    }
-
-    eprintln!(
-        "[sidle/queue] book {book_id} done in {:.2}s",
-        started.elapsed().as_secs_f32()
-    );
-    mark_status(db, app, book_id, "done", None).await;
 }
 
 async fn lookup_book(db: &DbHandle, book_id: i64) -> Option<BookRow> {
@@ -335,526 +116,4 @@ async fn mark_status(
         let _ = db::set_job_status(&conn, book_id, status, error);
     }
     emit_status(app, book_id, status, error);
-}
-
-/// Outputs the worker produced — populated columns get written back to the
-/// book row on success.
-#[derive(Default)]
-struct Produced {
-    epub_path: Option<PathBuf>,
-    kfx_path: Option<PathBuf>,
-    pdf_path: Option<PathBuf>,
-    cover_path: Option<PathBuf>,
-    /// ASIN bokai stamped into the produced KFX. For EPUB→KFX this is the
-    /// fabricated 32-char value (unless the source EPUB carried a real
-    /// one); the device-delete path keys catalog-style `.sdr/` cleanup on
-    /// it. None for the kfx→epub direction (no KFX produced).
-    asin: Option<String>,
-}
-
-fn run_direction(
-    paths: &LibraryPaths,
-    book: &BookRow,
-    kind: &str,
-    on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> anyhow::Result<Produced> {
-    match kind {
-        "epub_to_kfx" => convert_epub_to_kfx(paths, book, on_progress),
-        "kfx_to_epub" => convert_kfx_to_epub(paths, book, on_progress),
-        "pdf_to_kfx" => convert_pdf_to_kfx(paths, book, on_progress),
-        "kfx_to_pdf" => convert_kfx_to_pdf(paths, book, on_progress),
-        other => Err(anyhow::anyhow!("unknown job kind: {other}")),
-    }
-}
-
-fn convert_epub_to_kfx(
-    paths: &LibraryPaths,
-    book: &BookRow,
-    on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> anyhow::Result<Produced> {
-    let source = book
-        .epub_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("epub_to_kfx job has no epub_path"))?;
-    let source_path = Path::new(source);
-
-    paths.ensure_sha(&book.sha256)?;
-    let dir = paths.book_dir(&book.sha256);
-    let base = derived_basename(book, source_path);
-    let out_path = dir.join(format!("{base}.kfx"));
-    let tmp_path = dir.join(format!("{base}.kfx.partial"));
-
-    // Every step names itself and the file it was working on: this message is
-    // what the failure report shows the user, and a bare io error ("File not
-    // found in ZIP: …") doesn't say which book or which half of the conversion
-    // produced it.
-    let mut handle = bokai::Book::open(source_path)
-        .map_err(|e| anyhow::anyhow!("bokai epub→kfx (load {}): {e}", source_path.display()))?;
-    // Bake the library's (possibly user-edited) metadata into the KFX without
-    // rewriting the source EPUB: clone the parsed metadata, overlay the DB
-    // fields, and install it as an override the KFX exporter reads. A first
-    // import is a no-op (DB == source); only edits diverge. See
-    // `book_metadata_override`.
-    handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
-    // Interior plates: always full-color JXR (grayscale is retired). Genuinely
-    // grayscale source pages auto-collapse to `8bppGray` in the encoder, so this
-    // costs nothing on B&W books. Cover stays JPEG either way (bokai handles that).
-    handle.set_image_color_mode(jxr::ColorMode::Color);
-    let mut writer = File::create(&tmp_path)
-        .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
-    let exported = handle.export_with_progress(bokai::Format::Kfx, &mut writer, on_progress);
-    writer.sync_all().ok();
-    drop(writer);
-    if let Err(e) = exported {
-        // Don't leave the half-written `.partial` behind for a book that may
-        // never be retried; the next attempt truncates it anyway.
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(anyhow::anyhow!("bokai epub→kfx: {e}"));
-    }
-    std::fs::rename(&tmp_path, &out_path).map_err(|e| {
-        anyhow::anyhow!(
-            "rename {} -> {}: {e}",
-            tmp_path.display(),
-            out_path.display()
-        )
-    })?;
-
-    // The KFX export stamps an ASIN — either the source's (if real) or a
-    // fabricated 32-char value derived from the publication identifier.
-    // The DB row started life from the EPUB metadata which usually has no
-    // ASIN at all; we need the stamped value on the row so device-delete
-    // can wipe Kindle's `<title>_<ASIN>.sdr/` catalog sidecar.
-    let asin = bokai::formats::kfx::metadata::resolve_export_asin(handle.metadata());
-
-    Ok(Produced {
-        kfx_path: Some(out_path),
-        asin,
-        ..Default::default()
-    })
-}
-
-fn convert_kfx_to_epub(
-    paths: &LibraryPaths,
-    book: &BookRow,
-    on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> anyhow::Result<Produced> {
-    let source = book
-        .kfx_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("kfx_to_epub job has no kfx_path"))?;
-    let source_path = Path::new(source);
-
-    paths.ensure_sha(&book.sha256)?;
-    let dir = paths.book_dir(&book.sha256);
-    let base = derived_basename(book, source_path);
-    let out_path = dir.join(format!("{base}.epub"));
-
-    // IR route: KFX bytes → Book → EPUB. The intermediate `.kfx` is already
-    // persisted (import wrote it before enqueueing), so we read it back here
-    // rather than threading the bytes through the queue. `from_bytes` is the
-    // container parse (the `load` phase); `export_with_progress` emits
-    // content/resources/nav/finalize.
-    let kfx_bytes = std::fs::read(source_path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    on_progress("load", 0, 1, "Reading KFX");
-    let mut handle = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
-        .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load): {e}"))?;
-    let mut buf = std::io::Cursor::new(Vec::new());
-    handle
-        .export_with_progress(bokai::Format::Epub, &mut buf, on_progress)
-        .map_err(|e| anyhow::anyhow!("bokai kfx→epub: {e}"))?;
-    let epub_bytes = buf.into_inner();
-    write_bytes_atomic(&out_path, &epub_bytes)?;
-
-    // Cover sidecar — the exporter already transcoded any JXR to JPG and
-    // marked the manifest entry as `cover-image`, so this is a plain copy
-    // out of the produced zip.
-    let cover_path = extract_cover_from_epub(&epub_bytes).and_then(|(bytes, ext)| {
-        let out = paths.cover(&book.sha256, ext);
-        std::fs::write(&out, &bytes).ok().map(|_| out)
-    });
-
-    Ok(Produced {
-        epub_path: Some(out_path),
-        cover_path,
-        ..Default::default()
-    })
-}
-
-/// PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX for the Scribe.
-/// The book's PDF side is the source; the produced KFX is what gets pushed to
-/// the device.
-fn convert_pdf_to_kfx(
-    paths: &LibraryPaths,
-    book: &BookRow,
-    on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> anyhow::Result<Produced> {
-    let source = book
-        .pdf_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("pdf_to_kfx job has no pdf_path"))?;
-    let source_path = Path::new(source);
-
-    paths.ensure_sha(&book.sha256)?;
-    let dir = paths.book_dir(&book.sha256);
-    let base = derived_basename(book, source_path);
-    let out_path = dir.join(format!("{base}.kfx"));
-
-    on_progress("probe", 0, 1, "Reading PDF");
-    let bytes = std::fs::read(source_path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    let doc = bokai::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
-    let meta = bokai::export::PdfKfxMeta {
-        title: book.title.clone(),
-        author: (!book.author.trim().is_empty()).then(|| book.author.clone()),
-        language: if book.language.is_empty() {
-            "en".to_string()
-        } else {
-            book.language.clone()
-        },
-        // Edited publication year/publisher reach the KFX book_metadata too —
-        // not just the renamed filename — so the device's book details match.
-        date: book.published_at.clone(),
-        publisher: book.publisher.clone(),
-        // A PDF carries no reading-direction hint, so a Japanese book reads
-        // ltr until the library row's `ppd` is set (then force-reconvert).
-        page_progression_direction: book.ppd.clone(),
-    };
-    // Cover precedence: an existing sidecar — a cover the user fixed via
-    // "Change cover…", or the page-1 render from a prior convert — wins over a
-    // fresh page-1 render, so a force-reconvert never clobbers a corrected
-    // cover. (The original page-1 of a coverless PDF is just a title page; the
-    // whole point of the edit is to replace it.) Whatever we use is normalized
-    // to a sleep-screen-safe JFIF JPEG via `sanitize_for_kfx`, which also
-    // transcodes a PNG/WebP sidecar. Only when there's no usable sidecar (first
-    // import, or an unreadable file) do we render page 1. The PDF engine
-    // (PDFKit) is optional — on render failure log and proceed cover-less.
-    on_progress("cover", 0, 1, "Rendering cover");
-    let existing_cover = book
-        .cover_path
-        .as_deref()
-        .map(Path::new)
-        .filter(|p| p.exists())
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|raw| {
-            let jpeg = bokai::image::jpeg::sanitize_for_kfx(&raw).unwrap_or(raw);
-            is_jpeg(&jpeg).then_some(jpeg)
-        });
-    let cover_jpeg = match existing_cover {
-        Some(jpeg) => Some(jpeg),
-        None => match bokai::formats::pdf::render::render_pdf_page_jpeg(
-            &doc.bytes,
-            0,
-            bokai::formats::pdf::render::COVER_TARGET_WIDTH_PX,
-            bokai::formats::pdf::render::COVER_JPEG_QUALITY,
-        ) {
-            Ok(jpeg) => Some(jpeg),
-            Err(e) => {
-                eprintln!("[sidle/queue] book {} pdf cover: skipped ({e})", book.id);
-                None
-            }
-        },
-    };
-
-    // Selectable text layer (PDFKit) — optional, like the cover; on failure the
-    // book is converted visual-only. Usually the slowest step, so it gets the
-    // widest progress band.
-    on_progress("text", 0, 1, "Extracting text");
-    let text = bokai::formats::pdf::render::extract_pdf_text(&doc.bytes).ok();
-    match &text {
-        Some(pages) => {
-            let runs: usize = pages.iter().map(|p| p.runs.len()).sum();
-            eprintln!(
-                "[sidle/queue] book {} pdf text: {runs} runs / {} pages",
-                book.id,
-                pages.len()
-            );
-        }
-        None => eprintln!("[sidle/queue] book {} pdf text: skipped", book.id),
-    }
-
-    on_progress("build", 0, 1, "Building KFX");
-    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
-    write_bytes_atomic(&out_path, &kfx)?;
-
-    // Warm the ink-anchor geometry cache (eid→page map + page boxes) for this
-    // KFX, keyed by the same kfx_sha256 the row will carry. Without this, the
-    // first ink sync after a (re)convert re-parses the whole KFX per book
-    // (~0.5 s release / ~1.4 s debug each) under the DB lock — what made
-    // "sync annotations" slow. Computed from the in-memory bytes (no re-read of
-    // the 15 MB file); best-effort — a miss just falls back to the lazy parse.
-    on_progress("geom", 0, 1, "Caching geometry");
-    let kfx_sha = sha256_of_bytes(&kfx);
-    let geom = pdf_geom::compute(&kfx);
-    if let Err(e) = pdf_geom::write_sidecar(paths, &book.sha256, &kfx_sha, &geom) {
-        eprintln!(
-            "[sidle/queue] book {} pdf geom cache: skipped ({e:#})",
-            book.id
-        );
-    } else {
-        eprintln!(
-            "[sidle/queue] book {} pdf geom cache: {} pages",
-            book.id,
-            geom.len()
-        );
-    }
-
-    // Capture the content_id bokai baked into the KFX — the device names its
-    // per-book `.sdr` / `.notebooks/<id>!!PDOC!!` dir after it, so `books.asin`
-    // MUST equal it (annotation + ink sync and device-delete all match on it).
-    // Read it back from the produced file rather than recomputing, so the row
-    // always reflects what's actually in the KFX (a recompute via
-    // `resolve_export_asin` used a different input and never matched). `None` on a
-    // read failure just defers to the bootstrap backfill.
-    let asin = bokai::Book::open(&out_path)
-        .ok()
-        .and_then(|b| b.metadata().asin.clone());
-
-    // Sidecar for the library tile. Reuse an existing sidecar verbatim (it's the
-    // user's chosen image, possibly png/webp — keep its bytes for the gallery
-    // even though the KFX got a JPEG-normalized copy); only write a fresh
-    // `cover.jpg` when we rendered page 1.
-    let cover_path = match book
-        .cover_path
-        .as_deref()
-        .map(Path::new)
-        .filter(|p| p.exists())
-    {
-        Some(existing) => Some(existing.to_path_buf()),
-        None => cover_jpeg.and_then(|jpeg| {
-            let out = paths.cover(&book.sha256, "jpg");
-            match write_bytes_atomic(&out, &jpeg) {
-                Ok(()) => Some(out),
-                Err(e) => {
-                    eprintln!("[sidle/queue] book {} pdf cover write failed: {e}", book.id);
-                    None
-                }
-            }
-        }),
-    };
-
-    Ok(Produced {
-        kfx_path: Some(out_path),
-        asin,
-        cover_path,
-        ..Default::default()
-    })
-}
-
-/// KFX → PDF: extract the verbatim embedded PDF from a PDF-backed container KFX
-/// (a synced-back PDF book, or the return side of a `.kfx` import). The PDF is
-/// byte-identical to what was embedded.
-fn convert_kfx_to_pdf(
-    paths: &LibraryPaths,
-    book: &BookRow,
-    on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> anyhow::Result<Produced> {
-    let source = book
-        .kfx_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("kfx_to_pdf job has no kfx_path"))?;
-    let source_path = Path::new(source);
-
-    paths.ensure_sha(&book.sha256)?;
-    let dir = paths.book_dir(&book.sha256);
-    let base = derived_basename(book, source_path);
-    let out_path = dir.join(format!("{base}.pdf"));
-
-    let kfx_bytes = std::fs::read(source_path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    on_progress("extract", 0, 1, "Extracting PDF");
-    let pdf = bokai::formats::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
-        .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
-    write_bytes_atomic(&out_path, &pdf)?;
-
-    // Cover sidecar. Import already writes one (it pulls the cover the KFX
-    // carries built-in), so on the normal path the row has it and the worker
-    // leaves it alone; this is the self-sufficient fallback (force-reconvert, or
-    // a row that somehow lacks one). An existing sidecar — including a user's
-    // "Change cover…" — wins; only when there's none do we extract from the KFX.
-    // The PDF-backed container embeds its cover the same way a reflowable one
-    // does, so this recovers it without re-rendering page 1 (which would discard
-    // a custom cover). Best-effort: a coverless KFX just yields no sidecar.
-    let cover_path = match book
-        .cover_path
-        .as_deref()
-        .map(Path::new)
-        .filter(|p| p.exists())
-    {
-        Some(existing) => Some(existing.to_path_buf()),
-        None => extract_cover_from_kfx_bytes(&kfx_bytes).and_then(|(bytes, ext)| {
-            let out = paths.cover(&book.sha256, ext);
-            std::fs::write(&out, &bytes).ok().map(|_| out)
-        }),
-    };
-
-    Ok(Produced {
-        pdf_path: Some(out_path),
-        cover_path,
-        ..Default::default()
-    })
-}
-
-/// JPEG magic (`FF D8 FF`). `pdf_to_kfx` embeds the cover as a `format:jpg`
-/// resource and reads its JPEG dimensions, so a non-JPEG cover would corrupt it
-/// — gate on this and fall back to a page-1 render when a sidecar isn't (and
-/// couldn't be normalized to) a JPEG.
-fn is_jpeg(bytes: &[u8]) -> bool {
-    bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF]
-}
-
-/// Overlay the library row's metadata onto the source's parsed metadata,
-/// producing the [`bokai::Metadata`] the KFX export should write. Cloned from
-/// `source` so fields the DB doesn't track (identifier, ASIN, cover_image,
-/// description, writing-mode…) survive untouched; the tracked fields take the
-/// edited DB value. For an unedited book the DB still equals what import read
-/// from the source, so this is a no-op.
-pub(crate) fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
-    let mut m = source.clone();
-    m.title = book.title.clone();
-    m.authors = crate::library::authors::split_display(&book.author);
-    if !book.language.trim().is_empty() {
-        m.language = book.language.clone();
-    }
-    // An edited reading direction overrides the source's; left unset (None) the
-    // source's own page_progression_direction (captured at import) survives.
-    if let Some(ppd) = &book.ppd {
-        m.page_progression_direction = Some(ppd.clone());
-    }
-    // An edited reading layout overrides the source's writing mode: the KFX
-    // exporter bakes the vertical/horizontal text axis from primary_writing_mode
-    // (the page-turn rides on `ppd`, set above). Left unset (None), the source's
-    // own writing mode — parsed at import, else content-derived — survives.
-    if let Some(wm) = &book.writing_mode {
-        m.primary_writing_mode = Some(wm.clone());
-    }
-    m.publisher = book.publisher.clone();
-    m.date = book.published_at.clone();
-    m.collection = book
-        .series_name
-        .clone()
-        .map(|name| bokai::model::CollectionInfo {
-            name,
-            collection_type: Some("series".to_string()),
-            position: book.series_index,
-        });
-    m
-}
-
-/// Reproduce the import-time basename. The source file's stem already encodes
-/// `[Author] Title (Year)` (import writes it that way), so we fall back to
-/// the stem and only re-derive from metadata if the stem is missing or empty.
-fn derived_basename(book: &BookRow, source: &Path) -> String {
-    if let Some(stem) = source.file_stem().and_then(|s| s.to_str())
-        && !stem.is_empty()
-    {
-        return stem.to_string();
-    }
-    let authors = crate::library::authors::split_display(&book.author);
-    format_basename(&authors, &book.title, None)
-}
-
-/// The rebuilt book's text index, or `None` when it carries no readable text.
-///
-/// Split out only to keep the container parse inside the blocking task: a
-/// `BookIndex` is not `Send`-friendly to build across an await point.
-fn reanchor_index(bytes: &[u8]) -> Option<sidle_core::library::anchor::BookIndex> {
-    sidle_core::library::anchor::BookIndex::from_kfx(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(title: &str, author: &str) -> BookRow {
-        BookRow {
-            id: 1,
-            sha256: "sha".into(),
-            title: title.into(),
-            author: author.into(),
-            title_romaji: String::new(),
-            author_romaji: String::new(),
-            search_key: String::new(),
-            language: "en".into(),
-            ppd: None,
-            writing_mode: None,
-            epub_path: None,
-            cover_path: None,
-            cover_thumb_path: None,
-            cover_rev: 0,
-            kfx_path: None,
-            kfx_sha256: None,
-            pdf_path: None,
-            file_size: 0,
-            imported_at: "2026-01-01".into(),
-            status: "done".into(),
-            error: None,
-            kind: Some("epub_to_kfx".into()),
-            asin: None,
-            amazon_asin: None,
-            publisher: None,
-            published_at: None,
-            series_name: None,
-            series_index: None,
-            tags: vec![],
-            updated_at: "2026-01-01".into(),
-        }
-    }
-
-    #[test]
-    fn override_applies_db_fields_but_preserves_untracked() {
-        let mut src = bokai::Metadata {
-            title: "Old Title".into(),
-            authors: vec!["Old Author".into()],
-            language: "ja".into(),
-            ..Default::default()
-        };
-        // Untracked-by-DB fields that must survive the overlay.
-        src.identifier = "urn:isbn:9999".into();
-        src.asin = Some("B00REALASIN".into());
-        src.cover_image = Some("OEBPS/cover.xhtml".into());
-
-        let mut r = row("New Title", "Ann Author & Bob Writer");
-        r.publisher = Some("New Press".into());
-        r.published_at = Some("2021".into());
-        r.series_name = Some("Saga".into());
-        r.series_index = Some(2.0);
-
-        let m = book_metadata_override(&src, &r);
-
-        // Edited fields take the DB value.
-        assert_eq!(m.title, "New Title");
-        assert_eq!(
-            m.authors,
-            vec!["Ann Author".to_string(), "Bob Writer".to_string()]
-        );
-        assert_eq!(m.language, "en");
-        assert_eq!(m.publisher.as_deref(), Some("New Press"));
-        assert_eq!(m.date.as_deref(), Some("2021"));
-        assert_eq!(m.collection.as_ref().map(|c| c.name.as_str()), Some("Saga"));
-        assert_eq!(m.collection.as_ref().and_then(|c| c.position), Some(2.0));
-        // Untracked identity fields are untouched, so the KFX keeps its identity.
-        assert_eq!(m.identifier, "urn:isbn:9999");
-        assert_eq!(m.asin.as_deref(), Some("B00REALASIN"));
-        assert_eq!(m.cover_image.as_deref(), Some("OEBPS/cover.xhtml"));
-    }
-
-    #[test]
-    fn override_keeps_source_language_when_db_blank() {
-        let src = bokai::Metadata {
-            language: "ja".into(),
-            ..Default::default()
-        };
-        let mut r = row("T", "A");
-        r.language = String::new();
-        assert_eq!(book_metadata_override(&src, &r).language, "ja");
-    }
-
-    #[test]
-    fn is_jpeg_gates_on_magic() {
-        assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xE0]));
-        assert!(!is_jpeg(&[0x89, 0x50, 0x4E, 0x47])); // PNG
-        assert!(!is_jpeg(&[0xFF, 0xD8])); // truncated
-        assert!(!is_jpeg(&[]));
-    }
 }

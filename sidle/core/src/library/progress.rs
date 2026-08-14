@@ -100,8 +100,8 @@ pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
 /// The pipeline key for a book being converted at import time, or `None` for
 /// the formats stored as they arrive — those land in the library too fast for a
 /// bar to mean anything.
-pub fn import_pipeline(kind: sidle_core::library::import::SourceKind) -> Option<&'static str> {
-    use sidle_core::library::import::SourceKind as K;
+pub fn import_pipeline(kind: crate::library::import::SourceKind) -> Option<&'static str> {
+    use crate::library::import::SourceKind as K;
     match kind {
         K::Azw3 => Some("azw3_import"),
         K::Mobi => Some("mobi_import"),
@@ -116,6 +116,12 @@ pub fn import_pipeline(kind: sidle_core::library::import::SourceKind) -> Option<
 /// round-trip for a bar that moves less than a pixel. Anything under a percent
 /// of movement is dropped; the final 100% always gets through.
 pub struct Throttle(Cell<f32>);
+
+impl Default for Throttle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Throttle {
     pub fn new() -> Self {

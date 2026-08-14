@@ -3,7 +3,7 @@
 //! `.notebooks/` folder import (`commands::notebook::import_dir`), and the
 //! default path now that the toolbar's Import button targets the device.
 //!
-//! Mirrors [`crate::device::annotations`]: the slow USB scan + reads run BEFORE
+//! Mirrors [`crate::library::device::annotations`]: the slow USB scan + reads run BEFORE
 //! the DB lock is taken, then each notebook is imported under it.
 //!
 //! On the device, notebooks live at `.notebooks/<uuid>/nbk`, with cover
@@ -15,11 +15,9 @@
 
 use anyhow::{Context, Result};
 
-use crate::commands::notebook::NotebookImportSummary;
-use crate::device::{TPath, Transport};
-use crate::library::notebook::{self, NotebookOutcome};
+use crate::library::device::{TPath, Transport};
+use crate::library::notebook::{self, ImportSummary, NotebookOutcome};
 use crate::library::{LibraryPaths, db};
-use crate::state::DbHandle;
 
 /// One notebook pulled off the device, ready to import.
 struct Pulled {
@@ -97,15 +95,15 @@ fn pull_one(
 pub fn import_device_notebooks(
     transport: &dyn Transport,
     paths: &LibraryPaths,
-    db: &DbHandle,
+    db: &impl db::Access,
     on_progress: &dyn Fn(usize, usize),
-) -> Result<NotebookImportSummary> {
+) -> Result<ImportSummary> {
     let root = TPath::parse(".notebooks");
     let thumbs = TPath::parse(".notebooks/thumbnails");
     let candidates = list_candidates(transport, &root)?;
     let total = candidates.len();
 
-    let mut summary = NotebookImportSummary {
+    let mut summary = ImportSummary {
         imported: 0,
         unchanged: 0,
         failed: Vec::new(),
@@ -114,15 +112,19 @@ pub fn import_device_notebooks(
         on_progress(i, total);
         match pull_one(transport, &root, &thumbs, name) {
             Ok(Some(p)) => {
-                let conn = db.blocking_lock();
-                match notebook::import_notebook_bytes(
-                    &conn,
-                    paths,
-                    &p.uuid,
-                    &p.nbk,
-                    p.cover.as_deref(),
-                    &p.updated_at,
-                ) {
+                // The connection is taken per import and released across the
+                // slow USB read of the next notebook.
+                let imported = db.with(|conn| {
+                    notebook::import_notebook_bytes(
+                        conn,
+                        paths,
+                        &p.uuid,
+                        &p.nbk,
+                        p.cover.as_deref(),
+                        &p.updated_at,
+                    )
+                });
+                match imported {
                     Ok(NotebookOutcome::Imported(_)) => summary.imported += 1,
                     Ok(NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
                     Ok(NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
@@ -140,7 +142,7 @@ pub fn import_device_notebooks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::mass_storage::transport::MassStorageTransport;
+    use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     // Drives the device scan/pull through the mass-storage transport (MTP can't
     // be unit-tested without a device). Confirms `list_candidates` excludes the

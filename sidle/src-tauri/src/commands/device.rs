@@ -4,15 +4,16 @@ use serde::Serialize;
 use sidle_core::library::paths::parse_sha_infix;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::device::DeviceInfo;
-use crate::device::dedrm::{self, PullResult};
-use crate::device::deploy::{
-    self, DeployInstallReport, DeployOverall, DeployStatus, ServerConfRender,
-};
-use crate::device::monitor::{ensure_transport, evict_transport, refresh_free_space};
-use crate::device::push::{self, DeleteResult, PushResult};
+use crate::device_monitor::{ensure_transport, evict_transport, refresh_free_space};
 use crate::library::{db, ingest};
 use crate::state::AppState;
+use sidle_core::library::device::DeviceInfo;
+use sidle_core::library::device::dedrm::{self, PullResult};
+use sidle_core::library::device::deploy::{
+    self, DeployInstallReport, DeployOverall, DeployStatus, ServerConfRender,
+};
+use sidle_core::library::device::inventory;
+use sidle_core::library::device::push::{self, DeleteResult, PushResult};
 
 #[tauri::command]
 pub async fn device_status(state: State<'_, AppState>) -> Result<Option<DeviceInfo>, String> {
@@ -63,38 +64,10 @@ pub async fn device_eject(state: State<'_, AppState>) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// One on-device file under `documents/Sidle/`, plus its link back to the
-/// local library if we can find one.
-///
-/// Tagged enum so the frontend can switch on `kind`:
-///  - `sent`: file's sha8 matched a `books.sha256` prefix → we know title/
-///    author; the row shows up in the popover the same way as before.
-///  - `orphan`: file's sha8 didn't match anything in the local library
-///    (book was removed locally, or this Kindle was last paired with a
-///    different Mac). Frontend offers a one-click "Import to library".
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeviceRow {
-    Sent {
-        book_id: i64,
-        sha256: String,
-        title: String,
-        author: String,
-        filename: String,
-    },
-    Orphan {
-        sha8: String,
-        filename: String,
-    },
-}
-
-/// Scan `documents/Sidle/` on the connected device. Each `*.<sha8>.kfx`
-/// becomes one [`DeviceRow`]; the directory itself IS the source of truth
-/// (no on-device manifest, no separate per-device DB table), so the popup
-/// always reflects exactly what's on the Kindle right now — including
-/// files the user deleted via the device UI (which simply don't appear).
+/// Scan `documents/Sidle/` on the connected device — see
+/// [`inventory::list_ours`] for how each file is matched back to a library row.
 #[tauri::command]
-pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRow>, String> {
+pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<inventory::Entry>, String> {
     let Some(device) = state.device.lock().await.clone() else {
         return Ok(Vec::new());
     };
@@ -107,114 +80,9 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
     let db_handle = state.db.clone();
     let serial = device.serial.clone();
     let cell = state.transport.clone();
-    let inner_serial = serial.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeviceRow>> {
-        let docs = crate::device::TPath::parse("documents/Sidle");
-        // Surface USB/MTP errors instead of swallowing them — a silent
-        // empty `list` is exactly the "popover shows 0 books while files
-        // exist" symptom we're trying to make debuggable.
-        let entries = match transport.list(&docs) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "[sidle/device_list] {inner_serial}: list(documents/Sidle) failed: {e:#}"
-                );
-                return Err(e);
-            }
-        };
-        let total = entries.len();
+    let result = tokio::task::spawn_blocking(move || {
         let conn = db_handle.blocking_lock();
-
-        let mut out = Vec::new();
-        let mut skipped_meta = 0usize;
-        let mut sent = 0usize;
-        let mut orphan = 0usize;
-        let mut legacy_matched = 0usize;
-        let mut legacy_unmatched = 0usize;
-        let mut stem_relinked = 0usize;
-        let mut dirs = 0usize;
-        for entry in entries {
-            if entry.is_dir {
-                dirs += 1;
-                continue;
-            }
-            if is_macos_metadata(&entry.name) {
-                // `._foo.<sha>.kfx` AppleDouble companions get the same
-                // sha8 suffix as the real file and would otherwise be
-                // emitted as a duplicate row pointing at the same book.
-                // Same logic for `.DS_Store` etc.
-                skipped_meta += 1;
-                continue;
-            }
-            // Primary match: the modern `<basename>.<sha8>.kfx` shape, by
-            // `kfx_sha256` prefix. On a miss, fall back to the stem — a desktop
-            // reconvert changes `kfx_sha256`, but the device filename is frozen
-            // at the old hash (the Kindle won't re-bind a renamed `.sdr`), so the
-            // basename is the only stable link; without it a reconverted book
-            // wrongly shows "not in library". Legacy Sidle pushes (pre-sha8
-            // naming) carry the library row's kfx basename verbatim — match by
-            // `kfx_path` suffix.
-            let resolved = match parse_sha_infix(&entry.name) {
-                Some(sha8) => match db::find_by_kfx_sha_prefix(&conn, &sha8)
-                    .map_err(anyhow::Error::from)?
-                {
-                    Some(book) => Some(book),
-                    None => {
-                        let stem = entry
-                            .name
-                            .strip_suffix(".kfx")
-                            .and_then(|s| s.rsplit_once('.'))
-                            .map_or(entry.name.as_str(), |(stem, _sha)| stem);
-                        let book =
-                            db::find_by_kfx_basename(&conn, stem).map_err(anyhow::Error::from)?;
-                        if book.is_some() {
-                            stem_relinked += 1;
-                        }
-                        book
-                    }
-                },
-                None => match db::find_by_kfx_filename(&conn, &entry.name)
-                    .map_err(anyhow::Error::from)?
-                {
-                    Some(book) => {
-                        legacy_matched += 1;
-                        Some(book)
-                    }
-                    None => {
-                        legacy_unmatched += 1;
-                        None
-                    }
-                },
-            };
-            match resolved {
-                Some(book) => {
-                    sent += 1;
-                    out.push(DeviceRow::Sent {
-                        book_id: book.id,
-                        sha256: book.sha256,
-                        title: book.title,
-                        author: book.author,
-                        filename: entry.name,
-                    });
-                }
-                None => {
-                    orphan += 1;
-                    // Carry the parsed sha8 when we have one; for legacy
-                    // un-prefixed files there is no sha8 and the empty
-                    // string is the explicit sentinel for "unknown".
-                    let sha8 = parse_sha_infix(&entry.name).unwrap_or_default();
-                    out.push(DeviceRow::Orphan {
-                        sha8,
-                        filename: entry.name,
-                    });
-                }
-            }
-        }
-        eprintln!(
-            "[sidle/device_list] {inner_serial}: {total} entries → {} rows ({sent} sent, {orphan} orphan; {dirs} dirs, {skipped_meta} mac-meta skipped; legacy: {legacy_matched} matched / {legacy_unmatched} unmatched; {stem_relinked} stem-relinked)",
-            out.len(),
-        );
-        Ok(out)
+        inventory::list_ours(&conn, transport.as_ref())
     })
     .await;
 
@@ -228,7 +96,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
 
     result
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Import highlights / notes / bookmarks from the connected Kindle — either
@@ -261,7 +129,7 @@ pub async fn annotations_import_from_device(
         let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
             let _ = app.emit(
                 "annotations:sync-progress",
-                crate::device::annotations::SyncProgress {
+                sidle_core::library::device::annotations::SyncProgress {
                     stage: stage.to_string(),
                     current,
                     total,
@@ -269,10 +137,10 @@ pub async fn annotations_import_from_device(
                 },
             );
         };
-        crate::device::annotations::import_device_annotations(
+        sidle_core::library::device::annotations::import_device_annotations(
             &device,
             transport.as_ref(),
-            &db_handle,
+            &crate::state::Borrowed(&db_handle),
             &paths,
             &on_progress,
         )
@@ -323,7 +191,7 @@ pub async fn device_restore(
             let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
                 let _ = app.emit(
                     "annotations:sync-progress",
-                    crate::device::annotations::SyncProgress {
+                    sidle_core::library::device::annotations::SyncProgress {
                         stage: stage.to_string(),
                         current,
                         total,
@@ -331,19 +199,19 @@ pub async fn device_restore(
                     },
                 );
             };
-            let report = crate::device::annotations::import_device_annotations(
+            let report = sidle_core::library::device::annotations::import_device_annotations(
                 &device,
                 transport.as_ref(),
-                &db_handle,
+                &crate::state::Borrowed(&db_handle),
                 &paths,
                 &on_progress,
             )?;
             // Notebooks ride a separate import path; re-pull them too (their records
             // were just cleared, so any deleted ones come back).
-            let _ = crate::device::notebooks::import_device_notebooks(
+            let _ = sidle_core::library::device::notebooks::import_device_notebooks(
                 transport.as_ref(),
                 &paths,
-                &db_handle,
+                &crate::state::Borrowed(&db_handle),
                 &|_done, _total| {},
             );
             Ok(report)
@@ -357,14 +225,6 @@ pub async fn device_restore(
     result
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
-}
-
-/// Skip files macOS scatters into FAT/exFAT mounts as a side effect of
-/// xattr/Finder-metadata handling: `._<filename>` AppleDouble companions
-/// (the real bug — they'd otherwise be parsed as a second copy of the
-/// same book), `.DS_Store`, `.Spotlight-V100`, etc.
-fn is_macos_metadata(name: &str) -> bool {
-    name.starts_with('.')
 }
 
 #[tauri::command]
@@ -569,7 +429,8 @@ pub async fn device_import_orphan(
 
     let outer =
         tokio::task::spawn_blocking(move || -> anyhow::Result<(PullResult, Option<i64>)> {
-            let on_device = crate::device::TPath::parse("documents/Sidle").join(&filename);
+            let on_device =
+                sidle_core::library::device::TPath::parse("documents/Sidle").join(&filename);
             // Live byte-progress for the slow part: pulling the object off the
             // device. Over MTP this spans several PTP sessions (the Scribe's
             // per-session cap) and takes seconds for a multi-MiB book, which

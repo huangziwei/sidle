@@ -6,7 +6,7 @@
 //! nothing is mounted. The first hit wins — a user with two Kindles plugged in
 //! at once gets the first one detected.
 
-use crate::device::{DeviceInfo, mass_storage, mtp};
+use crate::library::device::{DeviceInfo, mass_storage, mtp};
 
 pub fn detect() -> Option<DeviceInfo> {
     // Mass-storage first: cheap (`read_dir` over `/Volumes`), and it covers

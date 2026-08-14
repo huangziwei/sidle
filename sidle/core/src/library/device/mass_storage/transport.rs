@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::device::transport::{TEntry, TPath, Transport};
+use crate::library::device::transport::{TEntry, TPath, Transport};
 
 pub struct MassStorageTransport {
     mount: PathBuf,

@@ -8,14 +8,28 @@ use rusqlite::Connection;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
-use crate::device::Transport;
-use crate::device::deploy::{self, DeploySource};
-use crate::device::monitor::{self, DeviceState};
+use crate::device_monitor::DeviceState;
 use crate::library::{LibraryPaths, db, extent};
 use crate::queue::{self, QueueHandle};
 use crate::server::ServerHandle;
+use sidle_core::library::device::Transport;
+use sidle_core::library::device::deploy::{self, DeploySource};
 
 pub type DbHandle = Arc<Mutex<Connection>>;
+
+/// The app's one connection, lent out a moment at a time.
+///
+/// Device sync spends minutes in USB IO between short bursts of database work
+/// and must not hold the connection across them, or the window freezes; it takes
+/// a [`db::Access`] and borrows through it. Blocking, so it belongs on a
+/// blocking task — the same place the sync itself belongs.
+pub struct Borrowed<'a>(pub &'a DbHandle);
+
+impl db::Access for Borrowed<'_> {
+    fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
+        f(&self.0.blocking_lock())
+    }
+}
 
 /// Long-lived, shared on-device IO handle. Opened once per device-connect by the
 /// monitor and cleared on disconnect; every Tauri command and the on-connect
@@ -121,14 +135,8 @@ pub(crate) fn find_workspace_root() -> Result<PathBuf> {
 
 impl AppState {
     pub fn bootstrap(app: AppHandle) -> Result<Self> {
-        let _ = std::fs::write("/tmp/sidle-bootstrap.log", "bootstrap: enter\n");
         let paths = LibraryPaths::resolve()?;
-        let _ = std::fs::write(
-            "/tmp/sidle-bootstrap.log",
-            format!("bootstrap: paths = {}\n", paths.root.display()),
-        );
         paths.ensure()?;
-        let _ = std::fs::write("/tmp/sidle-bootstrap.log", "bootstrap: paths ensured\n");
 
         // Capture the bundle resource dir while `app` is still ours — it's moved
         // into the device monitor below, but the deploy source resolution further
@@ -252,9 +260,9 @@ impl AppState {
         // clone `app` — `monitor::spawn` consumes it below.
         crate::sync_pulse::spawn(app.clone(), paths.clone(), queue.clone());
 
-        let device = monitor::new_state();
+        let device = crate::device_monitor::new_state();
         let transport: SharedTransport = Arc::new(Mutex::new(None));
-        monitor::spawn(
+        crate::device_monitor::spawn(
             app,
             device.clone(),
             transport.clone(),

@@ -37,16 +37,11 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "6"
 libc = "0.2"
-# rustls so we don't pull in system OpenSSL on macOS/Linux. Only used for
-# the cover-fetch path (amazon.co.jp /images/P/<ASIN>.09.LZZZZZZZ.jpg).
+# rustls so we don't pull in system OpenSSL on macOS/Linux. Used to probe the
+# LAN server over its own TLS before handing the window a "running" status.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
-# Used by the post-fetch EPUB cover swap (rewrite the zip with new cover
-# bytes). Match bokai's version so we don't pull in two zip crates.
-zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 bokai = { path = "../../bokai", default-features = false }
-# JPEG-XR codec (top-level workspace crate) — named directly for ColorMode.
-jxr = { path = "../../jxr" }
 sidle-core = { path = "../core" }
 sidle-server = { path = "../server" }
 tracing = "0.1"

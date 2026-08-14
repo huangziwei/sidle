@@ -41,7 +41,12 @@ const PLACEHOLDER_THRESHOLD: usize = 2048;
 /// Returns the cover bytes on success, `None` for any failure mode (network
 /// error, non-2xx response, placeholder-sized payload, missing or
 /// non-catalogue ASIN).
-pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
+///
+/// Blocking, like everything else on the conversion path: the callers that have
+/// an async runtime around them (the desktop queue) already run this whole
+/// pipeline on a blocking thread, and the ones that don't (the CLI) then need no
+/// runtime at all.
+pub fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
     if asin.is_empty() {
         eprintln!("[sidle/cover-fetch] skip: empty ASIN");
         return None;
@@ -59,7 +64,7 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
     let locale = locale_for_language(language);
     eprintln!("[sidle/cover-fetch] asin={asin} language={language:?} locale={locale}");
 
-    let client = match reqwest::Client::builder()
+    let client = match reqwest::blocking::Client::builder()
         .user_agent("sidle/0.1")
         .timeout(TIMEOUT)
         .build()
@@ -75,7 +80,7 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
     // module docs for why `_SCRM_` wins and when it has to fall through.
     let base = format!("https://images-na.ssl-images-amazon.com/images/P/{asin}.{locale}");
     for suffix in ["_SCRM_", "LZZZZZZZ"] {
-        if let Some(bytes) = fetch_variant(&client, &format!("{base}.{suffix}.jpg")).await {
+        if let Some(bytes) = fetch_variant(&client, &format!("{base}.{suffix}.jpg")) {
             return Some(bytes);
         }
     }
@@ -86,9 +91,9 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
 /// 2xx whose body clears `PLACEHOLDER_THRESHOLD`; any network error, non-2xx,
 /// or sub-threshold body (Amazon's "no image" / 1×1 sentinel) yields `None` so
 /// the caller can try the next variant.
-async fn fetch_variant(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
+fn fetch_variant(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
     eprintln!("[sidle/cover-fetch] GET {url}");
-    let resp = match client.get(url).send().await {
+    let resp = match client.get(url).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[sidle/cover-fetch] request failed: {e}");
@@ -100,7 +105,7 @@ async fn fetch_variant(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
         eprintln!("[sidle/cover-fetch] non-2xx status: {status}");
         return None;
     }
-    let bytes = match resp.bytes().await {
+    let bytes = match resp.bytes() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[sidle/cover-fetch] body read failed: {e}");

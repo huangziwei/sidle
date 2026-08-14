@@ -8,7 +8,7 @@
 //! descriptor read — so the Kindle's UI doesn't react. Empirically this is
 //! fine to call at the monitor's 2-second cadence.
 
-use crate::device::{DeviceInfo, TransportKind};
+use crate::library::device::{DeviceInfo, TransportKind};
 
 /// USB vendor ID for Amazon's Lab126 (every Kindle ever).
 const AMAZON_VID: u16 = 0x1949;

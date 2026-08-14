@@ -2,9 +2,9 @@
 //! mass storage.
 //!
 //! - [`detect`]: lists USB MTP devices via [`mtp_rs::MtpDevice::list_devices`],
-//!   filters to Amazon, builds a [`DeviceInfo`](crate::device::DeviceInfo)
+//!   filters to Amazon, builds a [`DeviceInfo`](crate::library::device::DeviceInfo)
 //!   with `TransportKind::Mtp`.
-//! - [`transport`]: implements [`crate::device::transport::Transport`] over
+//! - [`transport`]: implements [`crate::library::device::transport::Transport`] over
 //!   an open MTP session — push/delete/list go through the same trait the
 //!   mass-storage impl satisfies.
 

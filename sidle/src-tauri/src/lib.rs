@@ -1,9 +1,9 @@
 //! sidle desktop app — library + KFX conversion + (later) Kindle sync.
 
 mod commands;
-mod cover_fetch;
-mod device;
-mod progress;
+
+mod device_monitor;
+
 mod queue;
 mod server;
 mod state;

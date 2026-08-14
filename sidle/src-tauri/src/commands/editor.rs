@@ -54,45 +54,16 @@ use bokai::import::pdf::PdfOutlineItem;
 use bokai::model::TocEntry as EpubTocEntry;
 use bokai::validate::source::toc as toc_validate;
 
-use crate::commands::library::SetCoverResult;
+use sidle_core::library::source::{self, Source as SourceKind};
+
+use crate::commands::library::CoverResult;
 use crate::library::{authors, db, db::BookRow};
 use crate::state::AppState;
-
-/// Which editable source format a book carries, with its on-disk path. Each arm
-/// takes a different surgical-edit and save-seam path: KFX rewrites Ion in the
-/// reader/device file itself; EPUB rewrites the OPF/nav/NCX source; PDF appends
-/// an incremental update to the source. EPUB and PDF then re-derive the KFX via
-/// reconvert.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceKind {
-    Kfx,
-    Epub,
-    Pdf,
-}
 
 /// Resolve a book's editable source: its format + on-disk path. Errors for an
 /// unrecognized source format, or when the source file is missing.
 fn require_editable_source(row: &BookRow) -> Result<(SourceKind, String), String> {
-    match source_format(row.kind.as_deref()).as_str() {
-        "kfx" => row
-            .kfx_path
-            .clone()
-            .map(|p| (SourceKind::Kfx, p))
-            .ok_or_else(|| "this book has no KFX file yet".to_string()),
-        "epub" => row
-            .epub_path
-            .clone()
-            .map(|p| (SourceKind::Epub, p))
-            .ok_or_else(|| "this book has no EPUB file yet".to_string()),
-        "pdf" => row
-            .pdf_path
-            .clone()
-            .map(|p| (SourceKind::Pdf, p))
-            .ok_or_else(|| "this book has no PDF file yet".to_string()),
-        other => Err(format!(
-            "the editor edits KFX-, EPUB- and PDF-source books; this is a {other}-source book"
-        )),
-    }
+    source::of(row).map_err(|e| format!("{e:#}"))
 }
 
 /// Which editor panels an editable source can back, so the UI gates the rail on
@@ -129,15 +100,10 @@ async fn editor_source(
     require_editable_source(&row)
 }
 
-/// Source format a book was imported *from*, from its conversion `kind`
-/// (`"<source>_to_<target>"`): `"kfx"`, `"epub"`, or `"pdf"`. Mirrors the
-/// frontend `sourceFormat()` helper.
+/// Source format a book was imported *from* — the string the frontend's
+/// `sourceFormat()` helper mirrors.
 fn source_format(kind: Option<&str>) -> String {
-    kind.unwrap_or("epub_to_kfx")
-        .split("_to_")
-        .next()
-        .unwrap_or("epub")
-        .to_string()
+    source::format_of(kind).to_string()
 }
 
 /// TOC health from the source bytes — surfaced as the top-bar validate chip and
@@ -390,7 +356,7 @@ pub async fn editor_save_metadata(
 /// PDF→KFX worker prefers that sidecar over its own page-1 render, so the two
 /// agree. Then re-derives the KFX and refreshes the row.
 ///
-/// Returns [`SetCoverResult`], the same contract as `library_set_cover`, so the
+/// Returns [`CoverResult`], the same contract as `library_set_cover`, so the
 /// editor's Cover panel drives both formats through one path.
 #[tauri::command]
 pub async fn editor_set_pdf_cover(
@@ -399,7 +365,7 @@ pub async fn editor_set_pdf_cover(
     book_id: i64,
     src_path: String,
     mode: String,
-) -> Result<SetCoverResult, String> {
+) -> Result<CoverResult, String> {
     let mode = match mode.as_str() {
         "replace" => CoverMode::Replace,
         "insert" => CoverMode::Insert,
@@ -419,13 +385,13 @@ pub async fn editor_set_pdf_cover(
     let image = match std::fs::read(&src_path) {
         Ok(b) => b,
         Err(e) => {
-            return Ok(SetCoverResult::Failed {
+            return Ok(CoverResult::Failed {
                 error: format!("read {src_path}: {e}"),
             });
         }
     };
-    let Some(ext) = crate::commands::library::sniff_image_format(&image) else {
-        return Ok(SetCoverResult::Failed {
+    let Some(ext) = sidle_core::library::cover::sniff_image_format(&image) else {
+        return Ok(CoverResult::Failed {
             error: "unsupported image format (expected JPG, PNG, or WebP)".into(),
         });
     };
@@ -440,7 +406,7 @@ pub async fn editor_set_pdf_cover(
     .map_err(|e| e.to_string())?;
     let new_bytes = match edited {
         Ok(b) => b,
-        Err(error) => return Ok(SetCoverResult::Failed { error }),
+        Err(error) => return Ok(CoverResult::Failed { error }),
     };
     commit_edited_source(&state, book_id, kind, &path, new_bytes).await?;
 
@@ -471,7 +437,7 @@ pub async fn editor_set_pdf_cover(
     } {
         let _ = app.emit("library:row-updated", &updated);
     }
-    Ok(SetCoverResult::Updated {
+    Ok(CoverResult::Updated {
         cover_path: out_str,
     })
 }
@@ -1466,113 +1432,25 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
     })
 }
 
-/// Dispatch a save commit to the source format's seam.
+/// Commit a save to the book's source file.
+///
+/// The seam itself is `sidle_core::library::source::commit`, shared with the
+/// CLI; what the app adds is the blocking thread and the connection.
 async fn commit_edited_source(
-    state: &State<'_, AppState>,
+    state: &AppState,
     book_id: i64,
     kind: SourceKind,
     path: &str,
     new_bytes: Vec<u8>,
 ) -> Result<(), String> {
-    match kind {
-        SourceKind::Kfx => commit_edited_kfx(state, book_id, path, new_bytes).await,
-        // EPUB and PDF are both "source file that derives a KFX", so they share
-        // one seam: replace the source, let reconvert rebuild the KFX.
-        SourceKind::Epub | SourceKind::Pdf => commit_replaced_source(path, new_bytes).await,
-    }
-}
-
-/// The KFX save seam. Commit `new_bytes` to `kfx_path` in place: back up the
-/// original, write atomically (temp + rename), preserve the frozen `kfx_sha256`
-/// device identity, and drop the backup once the file is settled. Rolls the file
-/// back from the backup if the replace fails partway. The caller handles the
-/// library-row sync, the derived-EPUB reconvert, and the reader eviction.
-async fn commit_edited_kfx(
-    state: &AppState,
-    book_id: i64,
-    kfx_path: &str,
-    new_bytes: Vec<u8>,
-) -> Result<(), String> {
-    let path = kfx_path.to_string();
-    let new_sha = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let target = Path::new(&path);
-        let backup = sibling(target, "editbak");
-        let temp = sibling(target, "editing");
-
-        // Back up the original — required for rollback, so a failure here aborts
-        // before we've touched the live file.
-        std::fs::copy(target, &backup).map_err(|e| format!("back up {}: {e}", target.display()))?;
-
-        // Write the new bytes to a sibling temp, then atomically rename over the
-        // target so a crash mid-write can't leave a truncated KFX.
-        if let Err(e) = std::fs::write(&temp, &new_bytes) {
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("write {}: {e}", temp.display()));
-        }
-        if let Err(e) = std::fs::rename(&temp, target) {
-            let _ = std::fs::remove_file(&temp);
-            let _ = std::fs::copy(&backup, target); // best-effort restore
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("replace {}: {e}", target.display()));
-        }
-
-        let sha = sidle_core::library::import::sha256_of_file(target).map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_file(&backup); // settled — tidy the backup
-        Ok(sha)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // COALESCE keeps the existing `kfx_sha256`, so the on-device filename and
-    // annotation-sync identity stay stable even though the bytes changed.
-    {
-        let conn = state.db.lock().await;
-        db::set_kfx_path_and_sha(&conn, book_id, kfx_path, &new_sha).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// The save seam for a source file that *derives* the KFX — EPUB and PDF. Back
-/// up the source, atomically replace it, and drop the backup once settled
-/// (rolling back on a failed replace). Unlike the KFX seam it touches **no** DB
-/// identity: `sha256` (the storage key) and `kfx_sha256` (the on-device file's
-/// hash) both stay frozen. The reader/device file is the *derived* KFX, which the
-/// caller's `enqueue_reconvert` regenerates — and that path re-freezes
-/// `kfx_sha256` via COALESCE, so device-sync identity is preserved exactly as for
-/// a KFX-source edit.
-async fn commit_replaced_source(source_path: &str, new_bytes: Vec<u8>) -> Result<(), String> {
-    let path = source_path.to_string();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let target = Path::new(&path);
-        let backup = sibling(target, "editbak");
-        let temp = sibling(target, "editing");
-
-        std::fs::copy(target, &backup).map_err(|e| format!("back up {}: {e}", target.display()))?;
-        if let Err(e) = std::fs::write(&temp, &new_bytes) {
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("write {}: {e}", temp.display()));
-        }
-        if let Err(e) = std::fs::rename(&temp, target) {
-            let _ = std::fs::remove_file(&temp);
-            let _ = std::fs::copy(&backup, target); // best-effort restore
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("replace {}: {e}", target.display()));
-        }
-        let _ = std::fs::remove_file(&backup); // settled — tidy the backup
-        Ok(())
+    let db = state.db.clone();
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        source::commit(&conn, book_id, kind, &path, &new_bytes).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// `path` with an extra dot-suffix, e.g. `book.kfx` + `"editbak"` →
-/// `book.kfx.editbak`. Kept in the same directory as `path` so the temp→target
-/// rename is atomic (same filesystem).
-fn sibling(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".");
-    name.push(suffix);
-    path.with_file_name(name)
 }
 
 /// Trim a submitted optional string; an empty result clears the field (`None`).
@@ -1759,19 +1637,6 @@ mod tests {
         assert!(detail.proposed.is_empty());
         assert!(detail.note.is_some(), "explains that entries must be added");
         assert_eq!(detail.verdict, "SPARSE");
-    }
-
-    #[test]
-    fn sibling_appends_suffix_in_same_dir() {
-        let p = Path::new("/books/abc/book.kfx");
-        assert_eq!(
-            sibling(p, "editbak"),
-            Path::new("/books/abc/book.kfx.editbak")
-        );
-        assert_eq!(
-            sibling(p, "editing"),
-            Path::new("/books/abc/book.kfx.editing")
-        );
     }
 
     #[test]

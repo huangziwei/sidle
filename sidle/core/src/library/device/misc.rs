@@ -16,11 +16,11 @@
 //! root). A log grows by appending, so we always overwrite with the device's
 //! current copy.
 
+use crate::library::device_backup::{MiscKind, classify_misc, store_misc_file};
 use anyhow::{Context, Result};
-use sidle_core::library::device_backup::{MiscKind, classify_misc, store_misc_file};
 
-use crate::device::transport::{TEntry, TPath, Transport};
 use crate::library::LibraryPaths;
+use crate::library::device::transport::{TEntry, TPath, Transport};
 
 /// Counts from one misc backup, folded into the sync's `DeviceImportReport`.
 #[derive(Debug, Default, Clone)]
@@ -125,8 +125,8 @@ fn list_or_warn(transport: &dyn Transport, dir: &TPath) -> Vec<TEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::mass_storage::transport::MassStorageTransport;
     use crate::library::LibraryPaths;
+    use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     // Drive the backup through the mass-storage transport against a fake device
     // tree (MTP can't be unit-tested without hardware). Confirms screenshots are

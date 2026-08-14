@@ -19,13 +19,13 @@
 
 use std::path::Path;
 
+use crate::library::paths::{kfx_device_filename, parse_sha_infix, sha_infix};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use sidle_core::library::paths::{kfx_device_filename, parse_sha_infix, sha_infix};
 
-use crate::device::DeviceInfo;
-use crate::device::transport::{TPath, Transport};
 use crate::library::db::{self, BookRow};
+use crate::library::device::DeviceInfo;
+use crate::library::device::transport::{TPath, Transport};
 
 /// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so
 /// the Kindle's `/documents` root stays whatever the user had before and

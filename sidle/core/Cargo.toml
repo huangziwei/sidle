@@ -22,6 +22,10 @@ zip = { version = "8.1", default-features = false, features = ["deflate-flate2"]
 # `library::reading_log` names it.
 flate2 = "1"
 dirs = "6"
+# Cover fetch (library::cover_fetch) — Amazon's `/images/P/<ASIN>` endpoint.
+# rustls so we don't pull in system OpenSSL; `blocking` because the whole
+# conversion path is synchronous and its callers already own a thread for it.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "blocking"] }
 
 # Romanization for the searchable `title_romaji`/`author_romaji` metadata + the
 # picker's derived search key (library::romaji). Host-only (desktop/server), so
@@ -48,6 +52,38 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # issuer is read from the CA actually on disk rather than re-derived from
 # parameters that could drift away from it.
 rcgen = { version = "0.14.8", features = ["x509-parser"] }
+
+# Free-space reporting for a mounted Kindle: `statvfs` on the volume, which is
+# what the picker's "will it fit" check reads.
+libc = "0.2"
+# Hex-encodes the sha256 digests the on-device deploy compares source against
+# device with.
+hex = "0.4"
+# Pure-Rust MTP transport for Scribe and other 2024+ Kindles that dropped USB
+# mass storage. Pinned exact (young crate, recent API churn) — bump
+# deliberately and rerun the device round-trip when upgrading. mtp-rs's
+# nusb-backed enumeration explicitly handles Amazon Kindle's vendor-specific
+# interface descriptors.
+mtp-rs = "=0.15.0"
+# Drives mtp-rs's async API from the sync `Transport` trait via
+# `futures::executor::block_on`. mtp-rs is runtime-agnostic (no tokio in its
+# Cargo.toml main deps), so a plain futures executor is enough — avoids
+# nested-tokio-runtime panics that `tokio::runtime::Runtime::block_on` would
+# trigger inside a blocking task.
+futures = "0.3"
+# Stream chunk type for `Storage::upload` — wraps a `Vec<u8>` cheaply for the
+# single-chunk upload path. Transitive via mtp-rs; declared directly so our code
+# reads clean.
+bytes = "1"
+# USB device enumeration. Already transitive via mtp-rs; declared directly so
+# mass-storage detect can read a mounted Kindle's real serial from its USB
+# `iSerial` descriptor — the serial is NOT in system/version.txt. Pinned to the
+# locked transitive version so cargo doesn't resolve two copies of nusb.
+nusb = "=0.2.3"
+# Stages orphan KFXes pulled off the device (via MTP `GetObject`) to a real file
+# path so the extension-dispatch import pipeline can consume them —
+# mass-storage hands us a path natively; MTP needs the round-trip.
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

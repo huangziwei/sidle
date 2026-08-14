@@ -2,21 +2,19 @@
 //! abstraction so the same import works on both mass-storage (KOA2 and other
 //! jailbroken/pre-2024 Kindles) and MTP (Scribe, 2024+).
 //!
-//! The transport-agnostic import logic lives in `sidle_core::library::ingest`
-//! ([`ingest::import_collected`]); this module is the *device-side scan* that
-//! feeds it. It lives in the app (not core) because [`Transport`] is an app
-//! concept — core has its own `std::fs` collector (`ingest::import_from_device`)
-//! for mass-storage and its hermetic tests.
+//! The transport-agnostic import logic lives in [`ingest::import_collected`];
+//! this module is the *device-side scan* that feeds it. Mass-storage has a real
+//! volume, so it uses `ingest`'s own `std::fs` collector
+//! (`ingest::import_from_device`) instead — same import, cheaper scan.
 
 use anyhow::Result;
 
-use crate::device::ink;
-use crate::device::misc;
-use crate::device::{DeviceInfo, TPath, Transport};
+use crate::library::device::ink;
+use crate::library::device::misc;
+use crate::library::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
 use crate::library::ink::{handwritten_notes, import_collected_ink};
 use crate::library::{LibraryPaths, db, import, push};
-use crate::state::DbHandle;
 
 /// Per-item sync progress for the status bar, emitted as `annotations:sync-progress`.
 /// `stage` is `"annotations"` (highlights/notes/bookmarks) or `"ink"` (handwriting);
@@ -86,19 +84,18 @@ pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>
 /// checkpoint, so the next sync plans it again.
 fn push_device_annotations(
     transport: &dyn Transport,
-    db: &DbHandle,
+    db: &impl db::Access,
     collected: &[CollectedYjr],
     device_serial: &str,
     now: &str,
     report: &mut DeviceImportReport,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<()> {
-    let plan = {
-        let conn = db.blocking_lock();
-        push::plan(&conn, collected, &|book| {
+    let plan = db.with(|conn| {
+        push::plan(conn, collected, &|book| {
             ingest::book_index(book.kfx_path.as_deref())
-        })?
-    };
+        })
+    })?;
     if plan.is_empty() {
         return Ok(());
     }
@@ -120,8 +117,7 @@ fn push_device_annotations(
         // either the device added something of its own or it overwrote us from
         // memory — both of which are handled by importing and planning again.
         let sha = import::sha256_of_bytes(&outgoing.bytes);
-        let conn = db.blocking_lock();
-        db::set_yjr_sync_sha(&conn, device_serial, outgoing.book_id, &sha, now)?;
+        db.with(|conn| db::set_yjr_sync_sha(conn, device_serial, outgoing.book_id, &sha, now))?;
         report.pushed_books += 1;
         report.pushed_annotations += outgoing.added;
     }
@@ -149,7 +145,7 @@ fn push_device_annotations(
 pub fn import_device_annotations(
     device: &DeviceInfo,
     transport: &dyn Transport,
-    db: &DbHandle,
+    db: &impl db::Access,
     paths: &LibraryPaths,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<DeviceImportReport> {
@@ -160,10 +156,8 @@ pub fn import_device_annotations(
             // the `std::fs` scanner so the USB scan + DB import can happen
             // under one lock (the volume IO is local-fast). No ink: handwriting
             // is a Scribe (MTP) feature.
-            let imported = {
-                let conn = db.blocking_lock();
-                ingest::import_from_device(&conn, &mount, &device.serial, &now)
-            };
+            let imported =
+                db.with(|conn| ingest::import_from_device(conn, &mount, &device.serial, &now));
             // Push back over the transport, which for mass-storage is the same
             // local volume — a second walk here is cheap, and it keeps one push
             // implementation for both kinds of device.
@@ -186,28 +180,12 @@ pub fn import_device_annotations(
             // The library's content_ids — so the ink walk knows which
             // `.notebooks/<id>!!PDOC!!` dirs are ours (a quick read, lock released
             // before the slow USB walks).
-            let known_asins: std::collections::HashSet<String> = {
-                let conn = db.blocking_lock();
-                db::book_asins(&conn)?.into_iter().collect()
-            };
+            let known_asins: std::collections::HashSet<String> =
+                db.with(db::book_asins)?.into_iter().collect();
             // MTP: do BOTH slow USB walks (annotations + ink notebooks) BEFORE
             // taking the DB lock — see `collect_device_yjr` above.
-            // TEMP instrumentation: time each USB phase so we can see on-device
-            // exactly where the pre-import wait goes. Remove once happy.
-            let t = std::time::Instant::now();
             let collected = collect_device_yjr(transport)?;
-            eprintln!(
-                "[sidle/annsync] PHASE yjr walk: {} .sdr in {:.2}s",
-                collected.len(),
-                t.elapsed().as_secs_f32()
-            );
-            let t = std::time::Instant::now();
             let inks = ink::collect_device_ink(transport, &known_asins)?;
-            eprintln!(
-                "[sidle/annsync] PHASE ink walk: {} our nbks in {:.2}s",
-                inks.len(),
-                t.elapsed().as_secs_f32()
-            );
             // The handwritten-ink anchors live in the same `.yjr`s we just pulled.
             let notes = handwritten_notes(&collected);
 
@@ -215,18 +193,18 @@ pub fn import_device_annotations(
             // slow device walk happens once.
             let for_push = collected.clone();
 
-            let report = {
-                let t = std::time::Instant::now();
-                let conn = db.blocking_lock();
+            // One borrow for both imports — they write the same tables about the
+            // same sync — released before the push below goes back to USB.
+            let report = db.with(|conn| {
                 let mut report = ingest::import_collected_with_progress(
-                    &conn,
+                    conn,
                     collected,
                     &device.serial,
                     &now,
                     &|cur, tot, label| on_progress("annotations", cur, tot, label),
                 )?;
                 import_collected_ink(
-                    &conn,
+                    conn,
                     paths,
                     &device.serial,
                     &now,
@@ -235,12 +213,8 @@ pub fn import_device_annotations(
                     &mut report,
                     &|cur, tot, label| on_progress("ink", cur, tot, label),
                 )?;
-                eprintln!(
-                    "[sidle/annsync] PHASE import (under lock): {:.2}s",
-                    t.elapsed().as_secs_f32()
-                );
-                report
-            }; // DB lock released here, before the USB cleanup below
+                Ok::<_, anyhow::Error>(report)
+            })?;
 
             // No on-device cleanup: Sidle never deletes data on the device (a
             // backup must not mutate its source). Stranded `.notebooks/<id>!!PDOC!!`
@@ -280,7 +254,7 @@ pub fn import_device_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::mass_storage::transport::MassStorageTransport;
+    use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     // Drives the collector through the mass-storage transport (MTP can't be
     // unit-tested without a device). Confirms it finds both sidecars inside a

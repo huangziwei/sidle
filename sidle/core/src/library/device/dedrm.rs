@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 
-use crate::device::DeviceInfo;
+use crate::library::device::DeviceInfo;
 use crate::library::import::{self, ImportOutcome, sha256_of_file};
 use crate::library::paths::LibraryPaths;
 
@@ -150,7 +150,7 @@ fn is_kfx_input(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::TransportKind;
+    use crate::library::device::TransportKind;
     use std::fs;
 
     fn touch(path: &Path, content: &[u8]) {

@@ -12,11 +12,11 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
-use crate::commands::library::ExportSummary;
-use crate::device::monitor::{ensure_transport, evict_transport};
-use crate::library::LibraryPaths;
+use sidle_core::library::export::Summary as ExportSummary;
+use sidle_core::library::notebook::{self, ImportSummary};
+
+use crate::device_monitor::{ensure_transport, evict_transport};
 use crate::library::db::{self, NotebookRow};
-use crate::library::notebook;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -98,14 +98,6 @@ pub async fn notebook_remove(state: State<'_, AppState>, notebook_id: i64) -> Re
     Ok(())
 }
 
-/// Summary of a manual `.notebooks/` folder import.
-#[derive(Debug, Serialize)]
-pub struct NotebookImportSummary {
-    pub imported: usize,
-    pub unchanged: usize,
-    pub failed: Vec<String>,
-}
-
 /// Manual import: pick a folder, scan it for Scribe notebooks, ingest each.
 /// Accepts either a `.notebooks/` parent (many `<uuid>/nbk`) or a single
 /// notebook dir (one `nbk`). Returns `None` if the picker was cancelled.
@@ -113,7 +105,7 @@ pub struct NotebookImportSummary {
 pub async fn notebook_import_folder(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<NotebookImportSummary>, String> {
+) -> Result<Option<ImportSummary>, String> {
     let (tx, rx) = oneshot::channel();
     app.dialog().file().pick_folder(move |p| {
         let _ = tx.send(p);
@@ -127,94 +119,11 @@ pub async fn notebook_import_folder(
     let paths = state.paths.clone();
     let summary = tokio::task::spawn_blocking(move || {
         let conn = db.blocking_lock();
-        import_dir(&conn, &paths, &folder)
+        notebook::import_folder(&conn, &paths, &folder)
     })
     .await
     .map_err(|e| e.to_string())?;
     Ok(Some(summary))
-}
-
-/// Scan `folder` for notebook dirs and import each. `folder` may itself be one
-/// notebook dir (holds `nbk` directly) or a parent of many.
-fn import_dir(
-    conn: &rusqlite::Connection,
-    paths: &LibraryPaths,
-    folder: &Path,
-) -> NotebookImportSummary {
-    let mut summary = NotebookImportSummary {
-        imported: 0,
-        unchanged: 0,
-        failed: Vec::new(),
-    };
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    if folder.join("nbk").is_file() {
-        let uuid = folder
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("notebook")
-            .to_string();
-        candidates.push((uuid, folder.to_path_buf()));
-    } else if let Ok(entries) = std::fs::read_dir(folder) {
-        for e in entries.flatten() {
-            let dir = e.path();
-            if dir.join("nbk").is_file()
-                && let Some(uuid) = dir.file_name().and_then(|s| s.to_str())
-            {
-                candidates.push((uuid.to_string(), dir));
-            }
-        }
-    }
-
-    for (uuid, dir) in candidates {
-        // Phase 1: standalone (dashed-UUID) notebooks only. Skip the
-        // `!!PDOC!!`/`!!EBOK!!notebook` annotation dirs (Phase 4).
-        if uuid.contains("!!") {
-            continue;
-        }
-        let nbk = dir.join("nbk");
-        let cover = find_cover(&dir, &uuid);
-        let updated_at = folder_updated_at(&nbk);
-        match notebook::import_notebook(conn, paths, &uuid, &nbk, cover.as_deref(), &updated_at) {
-            Ok(notebook::NotebookOutcome::Imported(_)) => summary.imported += 1,
-            Ok(notebook::NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
-            Ok(notebook::NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
-            Err(e) => summary.failed.push(format!("{uuid}: {e:#}")),
-        }
-    }
-    summary
-}
-
-/// Locate the device cover thumbnail for a notebook. The device keeps these in
-/// a sibling `thumbnails/<uuid>.png` (relative to `.notebooks/`); also accept
-/// an in-dir `thumbnail.png`. Best-effort — `None` is fine (the viewer falls
-/// back to page 0).
-fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
-    let mut candidates = vec![dir.join("thumbnail.png")];
-    if let Some(parent) = dir.parent() {
-        candidates.push(parent.join("thumbnails").join(format!("{uuid}.png")));
-        if let Some(grand) = parent.parent() {
-            candidates.push(grand.join("thumbnails").join(format!("{uuid}.png")));
-        }
-    }
-    candidates.into_iter().find(|p| p.is_file())
-}
-
-/// The `nbk` file's mtime as a naive local-wall-clock ISO string — the notebook's
-/// `updated_at` for a folder import. Same shape as the device pull's
-/// `TEntry::modified`, so both render identically. Falls back to the import time
-/// when the mtime can't be read.
-fn folder_updated_at(nbk: &Path) -> String {
-    std::fs::metadata(nbk)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|t| {
-            chrono::DateTime::<chrono::Utc>::from(t)
-                .with_timezone(&chrono::Local)
-                .naive_local()
-                .format("%Y-%m-%dT%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_else(db::now_iso)
 }
 
 /// Progress for a notebook device-import: emitted as `notebook:import-progress`
@@ -237,7 +146,7 @@ struct NotebookImportProgress {
 pub async fn notebook_import_device(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<NotebookImportSummary, String> {
+) -> Result<ImportSummary, String> {
     let device = state
         .device
         .lock()
@@ -260,10 +169,10 @@ pub async fn notebook_import_device(
                 NotebookImportProgress { done, total },
             );
         };
-        crate::device::notebooks::import_device_notebooks(
+        sidle_core::library::device::notebooks::import_device_notebooks(
             transport.as_ref(),
             &paths,
-            &db,
+            &crate::state::Borrowed(&db),
             &on_progress,
         )
     })

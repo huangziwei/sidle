@@ -30,7 +30,7 @@ use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Progress, Storage};
 use mtp_rs::ptp::{ObjectHandle, ObjectInfo};
 
-use crate::device::transport::{ChildFiles, TEntry, TPath, Transport};
+use crate::library::device::transport::{ChildFiles, TEntry, TPath, Transport};
 
 pub struct MtpTransport {
     /// The bound MTP storage, behind a `Mutex` that serves two purposes:
@@ -91,10 +91,10 @@ impl MtpTransport {
 /// the line) yields `None` — firmware is informational and must never block or
 /// fail the session open.
 async fn read_firmware(storage: &Storage) -> Option<String> {
-    let path = TPath::parse(crate::device::VERSION_TXT_REL);
+    let path = TPath::parse(crate::library::device::VERSION_TXT_REL);
     let handle = resolve(storage, &path).await.ok().flatten()?;
     let bytes = storage.download(handle).await.ok()?;
-    crate::device::parse_firmware(&String::from_utf8_lossy(&bytes))
+    crate::library::device::parse_firmware(&String::from_utf8_lossy(&bytes))
 }
 
 /// Walk `path` segment-by-segment from storage root, returning the final
