@@ -3407,7 +3407,10 @@ const BOOK_ACTIONS = [
     id: "recrawl",
     group: "rebuild",
     scopes: ["book", "books", "series"],
-    eligible: (b) => Boolean(b.asin) && looksLikeRealAsin(b.asin),
+    // The color cover is fetched by catalogue id, so a book without one has
+    // nothing to fetch with — `asin` is the file's own identity and names no
+    // catalogue item.
+    eligible: (b) => Boolean(b.amazon_asin) && looksLikeRealAsin(b.amazon_asin),
     label: (c) =>
       ActionMenu.counted(c.items.length > 1 ? "Re-fetch covers" : "Re-fetch cover", c),
     // One book and many are two different backend calls, not one called twice:
@@ -4765,7 +4768,7 @@ let metadataBook = null;
 let metadataBulk = null;
 
 // Mirror of cover_fetch::looks_like_real_amazon_asin: a real Amazon ASIN is 10
-// chars, uppercase letters + digits. boko's fabricated fallback is 32-char, so
+// chars, uppercase letters + digits. A synthesized file identity is 32-char, so
 // length + charset distinguishes them.
 function looksLikeRealAsin(s) {
   return /^[A-Z0-9]{10}$/.test(s);
@@ -4780,7 +4783,7 @@ function wireMetadataModal() {
   $("#metadata-cover-change").addEventListener("click", onCoverChangeClick);
   $("#metadata-cover-refetch").addEventListener("click", onCoverRefetchClick);
   $("#asin-search").addEventListener("click", onAsinSearchClick);
-  $("#metadata-form").asin.addEventListener("input", renderAsinHint);
+  $("#metadata-form").amazon_asin.addEventListener("input", renderAsinHint);
   // "↻" regenerate buttons: re-render a romaji field from its source (title /
   // author) via the engine. The user reviews/corrects before saving.
   for (const btn of $("#metadata-form").querySelectorAll(".romaji-regen")) {
@@ -4854,10 +4857,12 @@ function openMetadataModal(arg, opts = {}) {
     // Every editable field starts empty → "leave unchanged".
     for (const name of BULK_FIELDS) form[name].value = "";
     setBulkPlaceholders(true);
-    // Title + ASIN + romaji are per-book-unique → hidden in bulk; disable them
-    // so they're exempt from native required-validation and aren't read on submit.
+    // Title + the identifiers + romaji are per-book-unique → hidden in bulk;
+    // disable them so they're exempt from native required-validation and aren't
+    // read on submit, and empty the one that only ever displays.
     form.title.disabled = true;
-    form.asin.disabled = true;
+    form.amazon_asin.disabled = true;
+    form.content_id.value = "";
     form.title_romaji.disabled = true;
     form.author_romaji.disabled = true;
 
@@ -4875,7 +4880,7 @@ function openMetadataModal(arg, opts = {}) {
   $("#metadata-submit").textContent = "Save";
   $("#field-tags-label").textContent = "Tags";
   form.title.disabled = false;
-  form.asin.disabled = false;
+  form.amazon_asin.disabled = false;
   form.title_romaji.disabled = false;
   form.author_romaji.disabled = false;
   setBulkPlaceholders(false);
@@ -4896,7 +4901,11 @@ function openMetadataModal(arg, opts = {}) {
   // Tags display as comma-joined; canonicalization happens on the
   // backend so case + duplicates clean themselves up on save.
   form.tags.value = (book.tags || []).join(", ");
-  form.asin.value = book.asin || "";
+  // Two identifiers, and only one of them is the user's. `amazon_asin` names an
+  // item in Amazon's catalogue and does nothing but fetch the color cover;
+  // `asin` is what the file itself carries, which the device keys everything on.
+  form.amazon_asin.value = book.amazon_asin || "";
+  form.content_id.value = book.asin || "";
   renderAsinHint();
 
   renderCoverPreview(book);
@@ -4914,7 +4923,7 @@ function closeMetadataModal() {
   const form = $("#metadata-form");
   form.classList.remove("bulk");
   form.title.disabled = false;
-  form.asin.disabled = false;
+  form.amazon_asin.disabled = false;
 }
 
 // Swap the editable fields' placeholders to "Leave unchanged" in bulk mode;
@@ -4930,18 +4939,18 @@ function setBulkPlaceholders(bulk) {
 // Live validity feedback for the ASIN field, and gate the Re-fetch button on a
 // real-looking ASIN (the recrawl backend would otherwise just return NoAsin).
 function renderAsinHint() {
-  const v = $("#metadata-form").asin.value.trim();
+  const v = $("#metadata-form").amazon_asin.value.trim();
   const hint = $("#asin-hint");
   const refetch = $("#metadata-cover-refetch");
   const real = looksLikeRealAsin(v);
   if (v === "") {
-    hint.textContent = "No ASIN — needed to fetch the color cover.";
+    hint.textContent = "Only used to fetch the color cover. Never written into the book.";
     hint.className = "field-hint";
   } else if (real) {
-    hint.textContent = "✓ Looks like a real ASIN.";
+    hint.textContent = "✓ Looks like a real ASIN — the color cover can be fetched.";
     hint.className = "field-hint";
   } else {
-    hint.textContent = "Fabricated id — paste the real 10-char ASIN to enable cover fetch.";
+    hint.textContent = "Not an Amazon ASIN — 10 characters, A–Z and 0–9.";
     hint.className = "field-hint warn";
   }
   refetch.disabled = !real;
@@ -5033,13 +5042,14 @@ async function submitMetadataForm() {
     return;
   }
 
-  // ASIN is saved by its own command (library_set_asin), and only when it
-  // actually changed to a real value — that keeps the full-patch save working
-  // on books that still carry their fabricated 32-char id.
-  const asin = form.asin.value.trim();
-  const asinChanged = asin !== (metadataBook.asin || "");
+  // The catalogue ASIN is saved by its own command (library_set_asin): it isn't
+  // part of the book's description, and it's validated rather than stored as
+  // typed. Emptying it clears it — the resting state for a book Amazon doesn't
+  // sell, and the way out of a wrong paste.
+  const asin = form.amazon_asin.value.trim();
+  const asinChanged = asin !== (metadataBook.amazon_asin || "");
   if (asinChanged && asin !== "" && !looksLikeRealAsin(asin)) {
-    showToast("ASIN must be a real 10-character Amazon id, or left unchanged.", true);
+    showToast("An Amazon ASIN is 10 characters, A–Z and 0–9 — or leave it empty.", true);
     return;
   }
 
@@ -5055,7 +5065,7 @@ async function submitMetadataForm() {
       patch,
     });
     mergeBookRow(updated);
-    if (asinChanged && looksLikeRealAsin(asin)) {
+    if (asinChanged) {
       const withAsin = await window.api.invoke("library_set_asin", {
         bookId,
         asin,
@@ -5192,13 +5202,13 @@ async function applyCoverFromPath(src) {
 // preview itself, because library_recrawl_cover does NOT emit row-updated.
 async function onCoverRefetchClick() {
   if (!metadataBook) return;
-  const asin = $("#metadata-form").asin.value.trim();
+  const asin = $("#metadata-form").amazon_asin.value.trim();
   if (!looksLikeRealAsin(asin)) {
     showToast("Enter a real 10-character ASIN first.", true);
     return;
   }
   // Save the ASIN first (if changed) so the backend recrawl reads it.
-  if (asin !== (metadataBook.asin || "")) {
+  if (asin !== (metadataBook.amazon_asin || "")) {
     try {
       const row = await window.api.invoke("library_set_asin", {
         bookId: metadataBook.id,

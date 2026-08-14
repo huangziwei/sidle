@@ -2144,7 +2144,8 @@ kbd {
 }
 
 /* Section headers grouping the metadata fields (Title & author / Publication /
-   Series / Format / Organize) — a tier above the muted field micro-labels. */
+   Series / Format / Organize / Identifiers) — a tier above the muted field
+   micro-labels. */
 .metadata-fields .field-group-title {
   font-size: 11px;
   font-weight: 600;
@@ -2211,8 +2212,18 @@ kbd {
 .modal-panel.bulk #field-title-romaji,
 .modal-panel.bulk #field-author-romaji,
 .modal-panel.bulk #field-asin,
-.modal-panel.bulk #asin-aside {
+.modal-panel.bulk #asin-aside,
+.modal-panel.bulk #field-content-id,
+.modal-panel.bulk #content-id-hint {
   display: none;
+}
+
+/* The file's own identity is shown, not edited: it reads as a value, but stays
+   selectable so it can be copied into a search or a device path. */
+.metadata-fields .field input[name="content_id"] {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }
 
 /* The "↻" regenerate button sits inline in the romaji field's label. */

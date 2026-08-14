@@ -635,14 +635,25 @@
               <span id="field-tags-label">Tags</span>
               <input name="tags" placeholder="sci-fi, to-read" autocomplete="off" />
             </label>
+            <div class="field-group-title">Identifiers</div>
             <label class="field" id="field-asin">
-              <span>ASIN</span>
-              <input name="asin" placeholder="B01ABCDEFG" autocomplete="off" spellcheck="false" />
+              <span>Amazon ASIN</span>
+              <input name="amazon_asin" placeholder="B01ABCDEFG" autocomplete="off"
+                     spellcheck="false" />
             </label>
             <div class="asin-aside" id="asin-aside">
               <small class="field-hint" id="asin-hint"></small>
               <button type="button" class="btn-link" id="asin-search">Search Amazon ↗</button>
             </div>
+            <label class="field" id="field-content-id">
+              <span>Content ID</span>
+              <input name="content_id" readonly tabindex="-1" spellcheck="false" />
+            </label>
+            <small class="field-hint" id="content-id-hint">
+              The id baked into the file. The Kindle keys this book's library entry,
+              reading position and notebooks on it, so it's the file's to state, not
+              yours to choose.
+            </small>
           </div>
         </div>
 

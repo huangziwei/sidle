@@ -199,18 +199,12 @@ pub fn library_romanize(text: String, language: String) -> String {
     crate::library::romaji::romanize_field(&text, None, &language)
 }
 
-/// Set a book's ASIN to a real 10-character Amazon catalogue id.
+/// Set — or clear — a book's Amazon catalogue id, the colour-cover key.
 ///
 /// Deliberately separate from `library_update_metadata` (the full-replacement
-/// patch). That command sends every field on every save, so validating ASIN
-/// there would reject saves on books that still carry their fabricated 32-char
-/// bokai id. A dedicated command validates only when the user actually changes
-/// the ASIN, and keeps the edit a distinct action — it has device-side
-/// consequences (the `_<ASIN>.sdr` cleanup scan in `device::push`).
-///
-/// Rejects empty / free-text values (clearing isn't a use case — the fabricated
-/// id is the resting state) and an ASIN already held by another book (the
-/// per-book unique-id invariant; see `db::book_id_with_asin`).
+/// patch): this value is not part of the book's description, it names an item in
+/// Amazon's catalogue, and it is validated rather than stored as typed. The
+/// rule, and why it is what it is, lives in `metadata::set_amazon_asin`.
 #[tauri::command]
 pub async fn library_set_asin(
     app: AppHandle,
@@ -218,30 +212,10 @@ pub async fn library_set_asin(
     book_id: i64,
     asin: String,
 ) -> Result<BookRow, String> {
-    let asin = asin.trim().to_string();
-    if !cover_fetch::looks_like_real_amazon_asin(&asin) {
-        return Err("ASIN must be a real 10-character Amazon id (A–Z, 0–9).".into());
-    }
-
     let updated = {
         let conn = state.db.lock().await;
-        if let Some(other) =
-            db::book_id_with_amazon_asin(&conn, &asin, book_id).map_err(|e| e.to_string())?
-        {
-            return Err(format!(
-                "ASIN {asin} is already used by another book (id {other})."
-            ));
-        }
-        db::set_amazon_asin(&conn, book_id, Some(&asin)).map_err(|e| e.to_string())?;
-        // A user ASIN edit is curation, so move `updated_at` forward (the bump
-        // can't live in `db::set_amazon_asin` — the re-key path calls it
-        // mechanically). Merge's newest-wins then sees this edit.
-        db::set_book_updated_at(&conn, book_id, &db::now_iso()).map_err(|e| e.to_string())?;
-        db::get_book(&conn, book_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("book {book_id} not found"))?
+        metadata::set_amazon_asin(&conn, book_id, Some(&asin)).map_err(|e| format!("{e:#}"))?
     };
-
     let _ = app.emit("library:row-updated", &updated);
     Ok(updated)
 }

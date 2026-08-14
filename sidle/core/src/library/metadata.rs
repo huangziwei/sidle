@@ -146,6 +146,53 @@ pub fn apply_bulk(
     Ok(rows)
 }
 
+/// Record the Amazon catalogue id a user typed for a book, or clear it.
+///
+/// Kept apart from the metadata patch because it is a different kind of value.
+/// The patch describes the book; this names an item in Amazon's catalogue, and
+/// its one use is fetching the colour cover from `/images/P/<asin>` — so free
+/// text is a fetch that can only fail, and it is validated rather than stored as
+/// typed. It reaches no file: what a produced file carries is `books.asin`, the
+/// identity the export or the re-key stamps, which is not the user's to choose.
+///
+/// `None` (or blank) clears — the resting state for a book that has no catalogue
+/// entry, and the way out of a wrong paste. Two books may not share one: a
+/// catalogue id names an edition, and the cover it fetches would be the other
+/// book's.
+pub fn set_amazon_asin(
+    conn: &Connection,
+    book_id: i64,
+    asin: Option<&str>,
+) -> anyhow::Result<BookRow> {
+    let asin = check_amazon_asin(conn, book_id, asin)?;
+    db::set_amazon_asin(conn, book_id, asin.as_deref())?;
+    // Curation moves `updated_at`, so a later merge keeps this edit. The bump
+    // can't live in `db::set_amazon_asin` — the re-key path calls that
+    // mechanically, and a mechanical rewrite is not an edit.
+    db::set_book_updated_at(conn, book_id, &db::now_iso())?;
+    db::get_book(conn, book_id)?.ok_or_else(|| anyhow::anyhow!("book {book_id} not found"))
+}
+
+/// What [`set_amazon_asin`] would store, or the reason it can't. Split out so a
+/// caller with other work to do — writing the edit into the source file, say —
+/// can refuse a bad value before doing it, rather than half-way through.
+pub fn check_amazon_asin(
+    conn: &Connection,
+    book_id: i64,
+    asin: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(asin) = asin.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if !crate::library::cover_fetch::looks_like_real_amazon_asin(asin) {
+        anyhow::bail!("an ASIN is 10 characters of A–Z and 0–9; got {asin:?}");
+    }
+    if let Some(other) = db::book_id_with_amazon_asin(conn, asin, book_id)? {
+        anyhow::bail!("ASIN {asin} is already on book {other}");
+    }
+    Ok(Some(asin.to_string()))
+}
+
 /// Build a full-replacement patch out of a book's current values, for a caller
 /// that wants to change one field and leave the rest alone.
 pub fn patch_from(book: &BookRow) -> MetadataPatch {
@@ -254,6 +301,71 @@ mod tests {
             title_romaji: String::new(),
             author_romaji: "  MIXED Case ".into(),
         }
+    }
+
+    /// A library holding one row per title, enough to exercise the catalogue-id
+    /// rule (which is about the row, not about any file).
+    fn library_with(titles: &[&str]) -> (tempfile::TempDir, Connection, Vec<i64>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = db::open(&tmp.path().join("library.db")).unwrap();
+        let now = db::now_iso();
+        let ids = titles
+            .iter()
+            .map(|title| {
+                db::insert_book(
+                    &conn,
+                    &db::NewBook {
+                        sha256: title,
+                        title,
+                        author: "",
+                        language: "en",
+                        ppd: None,
+                        epub_path: None,
+                        cover_path: None,
+                        kfx_path: None,
+                        kfx_sha256: None,
+                        pdf_path: None,
+                        file_size: 0,
+                        imported_at: &now,
+                        asin: None,
+                        amazon_asin: None,
+                        publisher: None,
+                        published_at: None,
+                        series_name: None,
+                        series_index: None,
+                        tags: &[],
+                        title_romaji: "",
+                        author_romaji: "",
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        (tmp, conn, ids)
+    }
+
+    #[test]
+    fn a_catalogue_id_is_validated_before_it_is_stored() {
+        let (_tmp, conn, ids) = library_with(&["A", "B"]);
+        let (a, b) = (ids[0], ids[1]);
+
+        // Free text fetches nothing, so it never lands as if it might.
+        assert!(set_amazon_asin(&conn, a, Some("not an asin")).is_err());
+        // Neither does a file's own identity: it names no item in the catalogue.
+        assert!(set_amazon_asin(&conn, a, Some("LSEAIPOJGKOLNRDWIOODBTDTEPBWBTFR")).is_err());
+
+        let row = set_amazon_asin(&conn, a, Some("  B07PXGQC1Q ")).unwrap();
+        assert_eq!(row.amazon_asin.as_deref(), Some("B07PXGQC1Q"));
+
+        // One id names one edition — on a second book it would fetch A's cover.
+        assert!(set_amazon_asin(&conn, b, Some("B07PXGQC1Q")).is_err());
+
+        // Blank clears, which is the way out of a wrong paste.
+        assert_eq!(
+            set_amazon_asin(&conn, a, Some(" ")).unwrap().amazon_asin,
+            None
+        );
+        assert_eq!(set_amazon_asin(&conn, a, None).unwrap().amazon_asin, None);
     }
 
     #[test]

@@ -406,6 +406,9 @@ fn stage(
 
     // 3. Metadata from the canonical bytes (no file re-open). PDF metadata
     //    comes from `/Info` via `probe_pdf`; everything else from bokai.
+    //    `derived_key` is the identity the export rule gives this content, which
+    //    the re-key below needs and only this parse can answer.
+    let mut derived_key: Option<String> = None;
     let mut meta = match canonical {
         Canonical::Pdf => {
             let doc = bokai::import::probe_pdf(canonical_bytes.clone())
@@ -415,6 +418,7 @@ fn stage(
         _ => {
             let book = bokai::Book::from_bytes(&canonical_bytes, canonical.bokai_format())
                 .with_context(|| format!("read metadata from {label}"))?;
+            derived_key = bokai::formats::kfx::metadata::resolve_export_asin(book.metadata());
             extract_meta(book.metadata(), stem.as_deref())
         }
     };
@@ -426,6 +430,32 @@ fn stage(
     if let Some(stamped) = direct_kfx.as_ref().and_then(|k| k.asin.as_deref()) {
         meta.asin = Some(stamped.to_string());
     }
+
+    // A KFX imported directly is the file Amazon shipped, and it carries the
+    // catalogue ASIN as its own key. A Kindle keys its catalog, its `.sdr` state
+    // directory and its `.notebooks/<id>!!PDOC!!` dir on that value, so a copy
+    // stored under it is the same entry as the one Amazon sold: the two cover
+    // each other in the library, share a series tile, and share the sidecar that
+    // holds reading position. Give it an identity of its own here — import is
+    // the one moment the file has no device state bound to it yet. The catalogue
+    // value survives in `meta.amazon_asin`, which is what fetches the colour
+    // cover.
+    let canonical_bytes = match key_to_mint(canonical, &meta, derived_key, &sha) {
+        Some(key) => match rekey_kfx(&canonical_bytes, &key) {
+            Ok(bytes) => {
+                meta.asin = Some(key);
+                bytes
+            }
+            // A container that resists the edit is still a book. It lands under
+            // the catalogue key, where the library reports it and a re-key sweep
+            // can take another run at it.
+            Err(e) => {
+                eprintln!("[sidle/import] {label}: re-key failed, storing as-is: {e:#}");
+                canonical_bytes
+            }
+        },
+        None => canonical_bytes,
+    };
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
     // The non-KFX partner of a KFX is EPUB for a reflowable book, but PDF for a
@@ -512,6 +542,44 @@ fn stage(
         job_kind: job_kind(canonical, partner),
         other_ready,
     })
+}
+
+/// The identity a KFX must be re-keyed to before the library stores it, or
+/// `None` when the file already carries one of its own.
+///
+/// Only a directly-imported KFX can be in this state: every KFX the library
+/// produces is stamped by the export rule, which synthesizes. `derived` is what
+/// that rule makes of this content; a KFX Amazon produced may name no
+/// publication identifier, leaving it nothing to derive from, and the library's
+/// own content hash stands in — per-book, already the name of the directory the
+/// file will sit in, and stable for as long as the bytes are.
+fn key_to_mint(
+    canonical: Canonical,
+    meta: &BookMeta,
+    derived: Option<String>,
+    sha: &str,
+) -> Option<String> {
+    use bokai::formats::kfx::metadata::{generate_content_id, looks_like_real_amazon_asin};
+    (canonical == Canonical::Kfx
+        && meta
+            .asin
+            .as_deref()
+            .is_some_and(looks_like_real_amazon_asin))
+    .then(|| derived.unwrap_or_else(|| generate_content_id(sha)))
+}
+
+/// Rewrite a KFX to carry `key` as its identity. `ASIN` and `content_id` are set
+/// together, so a device keying on either sees one value.
+fn rekey_kfx(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
+    use bokai::formats::kfx::metadata_edit::{MetadataPatch, edit_metadata};
+    Ok(edit_metadata(
+        bytes,
+        &MetadataPatch {
+            asin: Some(key.to_string()),
+            content_id: Some(key.to_string()),
+            ..Default::default()
+        },
+    )?)
 }
 
 /// A finished import waiting for its row: the files are already in the library
@@ -657,12 +725,18 @@ struct BookMeta {
     language: String,
     ppd: Option<String>,
     date: Option<String>,
-    /// Amazon catalogue id. Comes from bokai's dedicated `Metadata.asin` field
-    /// (populated from KFX `kindle_title_metadata.ASIN` and from EPUB
-    /// `<dc:identifier opf:scheme="ASIN">`). Distinct from `bokai::Metadata`'s
-    /// generic `identifier`, which for KFX is the per-device internal
-    /// `book_id` UUID — not the ASIN.
+    /// The identity the stored file carries. Comes from bokai's dedicated
+    /// `Metadata.asin` field (populated from KFX `kindle_title_metadata.ASIN`
+    /// and from EPUB `<dc:identifier opf:scheme="ASIN">`), then overridden by
+    /// whatever the export or the re-key actually stamped. Distinct from
+    /// `bokai::Metadata`'s generic `identifier`, which for KFX is the per-device
+    /// internal `book_id` UUID — not the ASIN.
     asin: Option<String>,
+    /// The real Amazon catalogue id the source named, when it named one. Read
+    /// off the same field as [`Self::asin`] but never overwritten by what gets
+    /// stamped, so it still holds the colour-cover key after a re-key or an
+    /// export has given the file an identity of its own.
+    amazon_asin: Option<String>,
     /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
     /// many self-pub and indie books leave it blank.
     publisher: Option<String>,
@@ -701,6 +775,10 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
         asin: m.asin.clone().filter(|s| !s.is_empty()),
+        amazon_asin: m
+            .asin
+            .clone()
+            .filter(|s| bokai::formats::kfx::metadata::looks_like_real_amazon_asin(s)),
         publisher: m.publisher.clone().filter(|s| !s.is_empty()),
         // Yomigana bokai already pulled from EPUB `opf:file-as` / KFX
         // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
@@ -735,6 +813,7 @@ fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str
         ppd: None,
         date: None,
         asin: None,
+        amazon_asin: None,
         publisher: None,
         // PDF `/Info` carries no yomi — romaji renders from the raw fields.
         title_reading: None,
@@ -822,15 +901,12 @@ fn insert_row(
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
-            // The same value, when it has the catalogue shape: a KFX Amazon
-            // produced carries its own ASIN, and an EPUB can name one in
+            // What the source named, when it named a catalogue value: a KFX
+            // Amazon produced carries its own ASIN, and an EPUB can name one in
             // `<dc:identifier opf:scheme="ASIN">`. Kept for the colour-cover
             // fetch, which is the only thing that can use it — `asin` above is
-            // the file's own key and the conversion will overwrite it.
-            amazon_asin: meta
-                .asin
-                .as_deref()
-                .filter(|a| bokai::formats::kfx::metadata::looks_like_real_amazon_asin(a)),
+            // the file's own key, which the re-key or the conversion settles.
+            amazon_asin: meta.amazon_asin.as_deref(),
             publisher: meta.publisher.as_deref(),
             // meta.date comes from bokai's EPUB `<dc:date>` / KFX equivalent.
             // Stored verbatim — typically `2024-03-15` or `2024`. We filter
@@ -1096,6 +1172,86 @@ pub(crate) mod tests {
         let meta2 = extract_meta_from_pdf(&doc2, Some("My File"));
         assert_eq!(meta2.title, "My File");
         assert!(meta2.authors.is_empty());
+    }
+
+    /// A `BookMeta` carrying nothing but the identity fields the re-key reads.
+    fn meta_with_asin(asin: Option<&str>) -> BookMeta {
+        BookMeta {
+            title: "T".to_string(),
+            authors: Vec::new(),
+            language: "en".to_string(),
+            ppd: None,
+            date: None,
+            asin: asin.map(str::to_string),
+            amazon_asin: asin
+                .filter(|a| bokai::formats::kfx::metadata::looks_like_real_amazon_asin(a))
+                .map(str::to_string),
+            publisher: None,
+            title_reading: None,
+            author_reading: None,
+            series: None,
+        }
+    }
+
+    #[test]
+    fn a_directly_imported_kfx_is_re_keyed_off_the_catalogue_id() {
+        use bokai::formats::kfx::metadata::generate_content_id;
+
+        let store = meta_with_asin(Some("B0CZ99HZ18"));
+
+        // What the export rule makes of this content is the key, so a re-key and
+        // a conversion of the same book agree on one identity.
+        assert_eq!(
+            key_to_mint(
+                Canonical::Kfx,
+                &store,
+                Some("DERIVED".to_string()),
+                "content-hash"
+            ),
+            Some("DERIVED".to_string())
+        );
+
+        // A KFX Amazon produced can name no publication identifier, leaving the
+        // rule nothing to derive from; the library's content hash stands in.
+        assert_eq!(
+            key_to_mint(Canonical::Kfx, &store, None, "content-hash"),
+            Some(generate_content_id("content-hash"))
+        );
+
+        // Whatever it is re-keyed to, the catalogue value stays reachable — it
+        // is the only thing that can fetch the colour cover.
+        assert_eq!(store.amazon_asin.as_deref(), Some("B0CZ99HZ18"));
+    }
+
+    #[test]
+    fn a_file_with_an_identity_of_its_own_is_left_alone() {
+        let synthesized = bokai::formats::kfx::metadata::generate_content_id("anything");
+        assert_eq!(
+            key_to_mint(
+                Canonical::Kfx,
+                &meta_with_asin(Some(&synthesized)),
+                None,
+                "content-hash"
+            ),
+            None
+        );
+        assert_eq!(
+            key_to_mint(Canonical::Kfx, &meta_with_asin(None), None, "content-hash"),
+            None
+        );
+
+        // An EPUB naming a catalogue ASIN is provenance, not identity: it
+        // reaches no device, and the KFX derived from it is stamped by the
+        // export rule, which synthesizes.
+        assert_eq!(
+            key_to_mint(
+                Canonical::Epub,
+                &meta_with_asin(Some("B0CZ99HZ18")),
+                None,
+                "content-hash"
+            ),
+            None
+        );
     }
 
     #[test]

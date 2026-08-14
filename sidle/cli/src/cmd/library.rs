@@ -494,10 +494,6 @@ fn apply_scalars(patch: &mut db::MetadataPatch, args: &SetArgs) {
 }
 
 pub fn asin(ctx: &Ctx, select: &Select, asin: &str) -> Result<()> {
-    let asin = asin.trim();
-    if !cover_fetch::looks_like_real_amazon_asin(asin) {
-        anyhow::bail!("an ASIN is 10 characters of A–Z and 0–9; got {asin:?}");
-    }
     let conn = ctx.conn();
     let books = select.resolve_nonempty(&conn)?;
     if books.len() > 1 {
@@ -507,16 +503,13 @@ pub fn asin(ctx: &Ctx, select: &Select, asin: &str) -> Result<()> {
             books.len()
         );
     }
-    let book = &books[0];
-    if let Some(other) = db::book_id_with_amazon_asin(&conn, asin, book.id)? {
-        anyhow::bail!("ASIN {asin} is already on book {other}");
-    }
-    db::set_amazon_asin(&conn, book.id, Some(asin))?;
-    // Curation, so the edit moves `updated_at` — a later merge then keeps it.
-    db::set_book_updated_at(&conn, book.id, &db::now_iso())?;
-    let updated = db::get_book(&conn, book.id)?.expect("just written");
+    let updated = metadata::set_amazon_asin(&conn, books[0].id, Some(asin))?;
     ctx.report(&updated, || {
-        println!("{} → {asin}", updated.title);
+        println!(
+            "{} → {}",
+            updated.title,
+            updated.amazon_asin.as_deref().unwrap_or("")
+        );
     })
 }
 

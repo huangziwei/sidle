@@ -57,7 +57,7 @@ use bokai::validate::source::toc as toc_validate;
 use sidle_core::library::source::{self, Source as SourceKind};
 
 use crate::commands::library::CoverResult;
-use crate::library::{authors, db, db::BookRow};
+use crate::library::{authors, db, db::BookRow, metadata};
 use crate::state::AppState;
 
 /// Resolve a book's editable source: its format + on-disk path. Errors for an
@@ -132,7 +132,14 @@ pub struct EditorMetadata {
     pub language: String,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
-    pub asin: Option<String>,
+    /// The Amazon catalogue id, editable. Its one use is fetching the colour
+    /// cover; it is never written into a file a device reads.
+    pub amazon_asin: Option<String>,
+    /// The identity the file carries — stamped as both `ASIN` and `content_id`,
+    /// and what a Kindle keys its catalog entry, `.sdr` state directory and
+    /// notebook dir on. Shown so the panel can say which value is which, and
+    /// read-only: it belongs to the file, not to the person editing it.
+    pub content_id: Option<String>,
 }
 
 /// The editor's opening snapshot for one book — what the shell renders from.
@@ -191,7 +198,8 @@ pub async fn editor_open(state: State<'_, AppState>, book_id: i64) -> Result<Edi
             language: row.language.clone(),
             publisher: row.publisher.clone(),
             published_at: row.published_at.clone(),
-            asin: row.asin.clone(),
+            amazon_asin: row.amazon_asin.clone(),
+            content_id: row.asin.clone(),
         },
         has_cover: row.cover_path.is_some(),
         toc,
@@ -199,8 +207,9 @@ pub async fn editor_open(state: State<'_, AppState>, book_id: i64) -> Result<Edi
 }
 
 /// Fields the metadata panel submits. All are always present (the panel is
-/// populated from the current values); an empty publisher/date/asin clears that
-/// field.
+/// populated from the current values); an empty publisher/date/ASIN clears that
+/// field. The file's own identity isn't here — the panel shows it, and nobody
+/// types it.
 #[derive(Deserialize)]
 pub struct MetadataForm {
     pub title: String,
@@ -209,7 +218,7 @@ pub struct MetadataForm {
     pub language: String,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
-    pub asin: Option<String>,
+    pub amazon_asin: Option<String>,
 }
 
 /// Write edited metadata into the KFX source *and* the library row.
@@ -243,7 +252,13 @@ pub async fn editor_save_metadata(
     let language = crate::library::lang::normalize(&form.language);
     let publisher = trim_opt(form.publisher);
     let published_at = trim_opt(form.published_at);
-    let asin = trim_opt(form.asin);
+    // Settle the catalogue id before the source is touched: a value the library
+    // would refuse must not leave an edited file behind a failed save.
+    let amazon_asin = {
+        let conn = state.db.lock().await;
+        metadata::check_amazon_asin(&conn, book_id, form.amazon_asin.as_deref())
+            .map_err(|e| format!("{e:#}"))?
+    };
 
     // 1) Surgical metadata write into the source (KFX Ion / EPUB OPF), then
     //    commit it in place. Clone the canonical fields into the blocking task so
@@ -255,7 +270,7 @@ pub async fn editor_save_metadata(
         language.clone(),
         publisher.clone(),
         published_at.clone(),
-        asin.clone(),
+        amazon_asin.clone(),
     );
     let new_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
@@ -265,7 +280,7 @@ pub async fn editor_save_metadata(
                 // colour-cover fetch and deliberately not written here: a KFX
                 // carrying it is the catalogue item as far as a Kindle is
                 // concerned, which is the same entry as the copy Amazon sold.
-                // The file keeps the synthesized identity the export gave it.
+                // The file keeps the identity it was stamped with.
                 let patch = KfxMetadataPatch {
                     title: Some(c_title),
                     authors: Some(c_authors),
@@ -314,7 +329,8 @@ pub async fn editor_save_metadata(
     //    title/author may have changed under it).
     {
         let conn = state.db.lock().await;
-        db::set_amazon_asin(&conn, book_id, asin.as_deref()).map_err(|e| e.to_string())?;
+        metadata::set_amazon_asin(&conn, book_id, amazon_asin.as_deref())
+            .map_err(|e| format!("{e:#}"))?;
     }
     let patch = db::MetadataPatch {
         title,

@@ -228,9 +228,22 @@ function renderMetadataPanel() {
 
     <div class="field-group-title">Identifiers</div>
     <label class="field">
-      <span>ASIN</span>
-      <input name="asin" placeholder="B0…" ${editable ? "" : "readonly"} />
+      <span>Amazon ASIN</span>
+      <input name="amazon_asin" placeholder="B01ABCDEFG" spellcheck="false"
+             ${editable ? "" : "readonly"} />
     </label>
+    <small class="field-hint">
+      Names this book in Amazon's catalogue. Used only to fetch the color cover —
+      it is never written into the file.
+    </small>
+    <label class="field">
+      <span>Content ID</span>
+      <input name="content_id" readonly tabindex="-1" spellcheck="false" />
+    </label>
+    <small class="field-hint">
+      The id baked into this file. The Kindle keys its library entry, reading
+      position and notebooks on it, so it's the file's to state, not yours to choose.
+    </small>
   `;
 
   form.elements.title.value = m.title || "";
@@ -238,7 +251,8 @@ function renderMetadataPanel() {
   form.elements.publisher.value = m.publisher || "";
   form.elements.published_at.value = m.published_at || "";
   form.elements.language.value = m.language || "";
-  form.elements.asin.value = m.asin || "";
+  form.elements.amazon_asin.value = m.amazon_asin || "";
+  form.elements.content_id.value = m.content_id || "";
 
   form.addEventListener("submit", (e) => e.preventDefault());
   if (editable) {
@@ -256,7 +270,8 @@ function metadataFormValues() {
     language: val("language"),
     publisher: val("publisher") || null,
     published_at: val("published_at") || null,
-    asin: val("asin") || null,
+    // The content id is shown, not submitted: it belongs to the file.
+    amazon_asin: val("amazon_asin") || null,
   };
 }
 
@@ -282,7 +297,8 @@ async function saveMetadata() {
       language: row.language,
       publisher: row.publisher,
       published_at: row.published_at,
-      asin: row.asin,
+      amazon_asin: row.amazon_asin,
+      content_id: row.asin,
     };
     $("#editor-title").textContent = row.title || "Untitled";
     renderMetadataPanel();
@@ -374,7 +390,9 @@ function paintCoverPanel(coverPath) {
     change.addEventListener("click", changeCover);
     actions.append(change);
 
-    const asin = session.data.metadata.asin;
+    // Fetching is by catalogue id — the file's own identity names nothing on
+    // Amazon, so a book without one has nothing to re-fetch with.
+    const asin = session.data.metadata.amazon_asin;
     if (asin) {
       const refetch = el("button", "btn", "Re-fetch from Amazon");
       refetch.type = "button";
