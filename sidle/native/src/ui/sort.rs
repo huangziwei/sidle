@@ -1,6 +1,6 @@
 //! Sort model for the picker.
 //!
-//! Mirrors sidle-tauri's sort (`web/library.js` `SORT_KEYS` :50-59, `sortedBooks`
+//! Mirrors the desktop app's sort (`web/library.js` `SORT_KEYS` :50-59, `sortedBooks`
 //! / `sortValue` :449-487) minus the `on_kindle` key — the picker hides
 //! already-downloaded books (`main.rs`), so that key would be constant here.
 //!

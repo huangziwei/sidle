@@ -220,7 +220,7 @@ pub struct Book {
     #[serde(default)]
     pub kfx_sha256: Option<String>,
     /// Canonical on-device filename (`<basename>.<sha8>.kfx`), computed
-    /// server-side with the same rule sidle-tauri's USB push uses — so a LAN
+    /// server-side with the same rule the desktop app's USB push uses — so a LAN
     /// download lands under a byte-identical name and isn't flagged
     /// `NotOurs` by the USB-side delete. This is the name we save the
     /// download as. `#[serde(default)]` so an older
@@ -574,7 +574,7 @@ pub fn stream_download(dl: Download, target: &std::path::Path) -> Result<u64> {
 
 /// The on-device filename, taken straight from `/list.json`'s
 /// `device_filename`. The server computes it with the same
-/// `kfx_device_filename` rule sidle-tauri's USB push uses, so a LAN download
+/// `kfx_device_filename` rule the desktop app's USB push uses, so a LAN download
 /// and a USB push land under byte-identical names — which is what lets the
 /// USB-side delete recognize a picker-downloaded file instead of treating it
 /// as foreign (`NotOurs`).

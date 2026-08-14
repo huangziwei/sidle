@@ -7,7 +7,7 @@ bench
 scripts/
 boko-kai/target/
 /target
-sidle/src-tauri/gen/
+sidle/desktop/gen/
 
 artifacts/
 
@@ -18,8 +18,8 @@ device/extensions/sidle/bin/sidle
 
 # build.sh staging: the sidle-server sidecar and on-device resources copied here
 # for `cargo tauri build` to fold into the bundle. Regenerated each build; never committed.
-sidle/src-tauri/binaries/
-sidle/src-tauri/resources/
+sidle/desktop/binaries/
+sidle/desktop/resources/
 
 # Per-machine vendored 3rd-party binaries (not source). Previously the
 # bblanchon libpdfium cache; the PDF engine is now macOS PDFKit (no bundled

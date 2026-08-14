@@ -21,7 +21,7 @@ sidle-core = { path = "../core" }
 anyhow = "1"
 axum = "0.8"
 # Annotation `.yjr`/`.yjf` blobs ride in the `POST /sync/annotations` JSON body
-# as base64. 0.22 matches sidle-core / src-tauri so we don't pull a second copy.
+# as base64. 0.22 matches sidle-core / the desktop app so we don't pull a second copy.
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,7 +36,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # axum-server: the TLS listener. `tls-rustls-no-provider` rather than
 # `tls-rustls` because the latter pulls `aws-lc-rs`, whose cmake/C build would be
 # a new toolchain requirement — `ring` is already in the workspace graph (via
-# reqwest in src-tauri), so we install that provider explicitly instead and add
+# reqwest in the desktop app), so we install that provider explicitly instead and add
 # no C dependency that wasn't already there.
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 # No `tls12`: both ends of every connection are ours — this server and the

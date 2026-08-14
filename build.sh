@@ -7,7 +7,7 @@
 #      child). Unlike the debug build, the release app does NOT build it on
 #      demand — it loads the sidecar from inside its own bundle.
 #   3. Build the Tauri desktop app for the host Mac.
-# Between 2 and 3 we stage two things under src-tauri so `cargo tauri build`
+# Between 2 and 3 we stage two things under sidle/desktop so `cargo tauri build`
 # folds them into the bundle and the installed .app is fully self-contained (no
 # reach-back into this checkout at runtime):
 #   - the sidle-server binary as a Tauri sidecar (-> Contents/MacOS/sidle-server)
@@ -72,8 +72,13 @@ HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 # libpdfium to fetch or bundle anymore.
 
 echo "==> Staging sidle-server sidecar ($HOST_TRIPLE) + device resources for bundling"
-SIDECAR_DIR="sidle/src-tauri/binaries"
-RES_DEVICE="sidle/src-tauri/resources/device"
+# The one place this path is written. Both staging dirs and the `cargo tauri
+# build` below hang off it, and .gitignore names the same two — a rename that
+# updates one and not the others stages a 40 MB sidecar somewhere nothing
+# bundles and nothing ignores.
+APP_DIR="sidle/desktop"
+SIDECAR_DIR="$APP_DIR/binaries"
+RES_DEVICE="$APP_DIR/resources/device"
 rm -rf "$SIDECAR_DIR" "$RES_DEVICE"
 mkdir -p "$SIDECAR_DIR" "$RES_DEVICE/extensions/sidle/bin" "$RES_DEVICE/documents" "$RES_DEVICE/native"
 cp target/release/sidle-server "$SIDECAR_DIR/sidle-server-$HOST_TRIPLE"
@@ -85,7 +90,12 @@ cp "target/$DEVICE_TARGET/release/sidle-native" "$RES_DEVICE/native/sidle"
 cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" "$RES_DEVICE/native/sidle.build-ts"
 
 echo "==> Building sidle desktop app"
-cargo tauri build
+# From inside the app dir, not the workspace root: with `tauri.conf.json` in the
+# cwd the CLI stops there instead of walking the tree to find one, so the build
+# never depends on the directory being named anything in particular. Paths in
+# the config are resolved against the config file either way, so `frontendDist:
+# "../web"` and the bundle's output under the workspace `target/` are unmoved.
+(cd "$APP_DIR" && cargo tauri build)
 
 echo "==> Installing to /Applications/Sidle.app"
 SRC="target/release/bundle/macos/Sidle.app"

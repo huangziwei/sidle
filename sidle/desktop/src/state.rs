@@ -103,7 +103,7 @@ pub struct AppState {
     pub reading_log_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/src-tauri`) until
+/// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/desktop`) until
 /// we hit a `Cargo.toml` declaring `[workspace]` — that's the repo
 /// root. Robust to layout changes that don't move the workspace
 /// manifest. If the desktop app is ever shipped packaged (outside the

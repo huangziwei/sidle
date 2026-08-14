@@ -7,7 +7,7 @@ members = [
     "sidle/core",
     "sidle/native",
     "sidle/server",
-    "sidle/src-tauri",
+    "sidle/desktop",
 ]
 # The fuzz harness is nightly-only and must never enter normal builds; it is
 # its own workspace (cargo-fuzz convention).

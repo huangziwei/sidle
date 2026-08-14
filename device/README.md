@@ -17,7 +17,7 @@ generation-agnostic but only verified on this device.
 This directory is a **mirror of the Kindle's mount root**: every file sits at
 the path it lands on the device, so `device/documents/Sidle.sh` is pushed to
 `<mount>/documents/Sidle.sh`. Adding a file to the deploy means dropping it
-here at its device path and adding one slot in `sidle/src-tauri/src/device/deploy.rs`.
+here at its device path and adding one slot in `sidle/desktop/src/device/deploy.rs`.
 
 ```
 device/

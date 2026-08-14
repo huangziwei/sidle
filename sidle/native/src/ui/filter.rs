@@ -1,6 +1,6 @@
 //! Facet filter model.
 //!
-//! Mirrors sidle-tauri's facets (`web/library.js` `FACETS` :61,
+//! Mirrors the desktop app's facets (`web/library.js` `FACETS` :61,
 //! `extractFacetValues` :514-537, `matchesFacets` :549-555, `facetOptions`
 //! :578-600) minus the `on_kindle` facet — the picker hides already-downloaded
 //! books, so it'd be a no-op (every visible book is off-device).

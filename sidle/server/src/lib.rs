@@ -336,7 +336,7 @@ pub(crate) fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
 /// The name is computed here, server-side, with the same
 /// [`kfx_device_filename`] rule the USB push uses — so a book pulled over the
 /// LAN lands under a byte-identical name to one pushed over USB, and
-/// sidle-tauri's USB-side delete recognizes it instead of flagging it as
+/// the desktop app's USB-side delete recognizes it instead of flagging it as
 /// foreign.
 ///
 /// Why ship it in the JSON body rather than let the client read it off the
@@ -414,7 +414,7 @@ async fn get_book(
         .ok_or(StatusCode::NOT_FOUND)?;
     let kfx_path = book.kfx_path.ok_or(StatusCode::NOT_FOUND)?;
     // The on-device name has to match the `<basename>.<sha8>.kfx` shape
-    // sidle-tauri's USB push uses, so that a book downloaded via the picker is
+    // the desktop app's USB push uses, so that a book downloaded via the picker is
     // recognized by `device_list_ours` / `delete_one` and not flagged as
     // foreign. The bootstrap backfill (`state.rs`) populates `kfx_sha256`
     // for every row before the server takes requests; the fallback only
