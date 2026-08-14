@@ -54,6 +54,14 @@ use super::job;
 /// The tag every event line carries; the cheap prefilter before any parsing.
 const MARKER: &str = "ReadingTimerController";
 
+/// The tag on the device's own power-state records, the second family of line
+/// this reads.
+///
+/// They carry no reading and name no book. What they carry is whether the
+/// device was awake, which is the only bound available on a sitting the reading
+/// timer refused to count — see [`Awake`].
+pub const POWER_MARKER: &str = "ereader_powerd_state_change";
+
 /// A page event long enough to be idle rather than reading is still counted —
 /// the device's own counter is the authority — but a session is cut when two
 /// events are further apart than this, because the reader plainly left. Without
@@ -143,6 +151,9 @@ pub struct Session {
     /// The same two readings of the device's own word counter.
     pub start_words: Option<i64>,
     pub end_words: Option<i64>,
+    /// True when [`Self::seconds`] came from [`Awake`] rather than from the
+    /// device's counter, because this book is one the device never times.
+    pub estimated: bool,
 }
 
 /// A sitting a device left open, handed back to the parser so the next batch of
@@ -168,16 +179,24 @@ pub struct Resume {
     pub started_at: String,
     pub ended_at: String,
     pub end_position: i64,
-    /// The counter the run began at and the last value seen for it. Both are
-    /// required: without them the run has no measurable length to continue.
-    pub start_counter_ms: i64,
-    pub end_counter_ms: i64,
+    /// The counter the run began at and the last value seen for it. Both or
+    /// neither: a run measured from the counter cannot be continued without
+    /// them, and a run the device never counted has none to give.
+    pub start_counter_ms: Option<i64>,
+    pub end_counter_ms: Option<i64>,
     pub start_words: Option<i64>,
     pub end_words: Option<i64>,
     pub page_turns: i64,
     /// The hours already booked against the run, so a continued session rebuilds
     /// the whole distribution rather than an incremental slice of one.
     pub hours: Vec<(u8, i64)>,
+    /// What the run has been credited so far, and how it was arrived at. An
+    /// estimated run has no counter to carry forward, so this is the only thing
+    /// that says how far it had got — the next batch adds the awake time since
+    /// [`Self::ended_at`] to it rather than remeasuring a window whose power
+    /// records have already been consumed.
+    pub seconds: i64,
+    pub estimated: bool,
 }
 
 impl Resume {
@@ -192,25 +211,27 @@ impl Resume {
         let Some(row) = db::newest_reading_session(conn, device_serial)? else {
             return Ok(None);
         };
-        // A row stored before sessions carried their counters cannot be
+        // A counted row stored before sessions carried their counters cannot be
         // continued — its length is known but not where on the counter it sits,
-        // so a later event states no measurable advance from it.
-        let (Some(start_counter_ms), Some(end_counter_ms)) =
-            (row.start_counter_ms, row.end_counter_ms)
-        else {
+        // so a later event states no measurable advance from it. An estimated
+        // row never had counters and is continued from its own total instead.
+        let counters = row.start_counter_ms.zip(row.end_counter_ms);
+        if counters.is_none() && !row.estimated {
             return Ok(None);
-        };
+        }
         let hours = db::session_hours(conn, &row)?;
         Ok(Some(Self {
             started_at: row.started_at,
             ended_at: row.ended_at,
             end_position: row.end_position,
-            start_counter_ms,
-            end_counter_ms,
+            start_counter_ms: counters.map(|(lo, _)| lo),
+            end_counter_ms: counters.map(|(_, hi)| hi),
             start_words: row.start_words,
             end_words: row.end_words,
             page_turns: row.page_turns,
             hours,
+            seconds: row.seconds,
+            estimated: row.estimated,
         }))
     }
 }
@@ -344,7 +365,11 @@ pub fn collect_events(
                     .find(|s| file.text.contains(s.as_str()))
                     .cloned();
             }
-            for line in file.text.lines().filter(|l| l.contains(MARKER)) {
+            for line in file
+                .text
+                .lines()
+                .filter(|l| l.contains(MARKER) || l.contains(POWER_MARKER))
+            {
                 out.events.insert(line.to_string());
             }
         }
@@ -614,6 +639,16 @@ fn observation(line: &str) -> Option<Observation> {
             named
                 .then(|| payloads(line).find(|p| end_position(p).is_some()))
                 .flatten()
+        })
+        // A payload that places the reader inside a book — its own end position
+        // and where they stood in it — with no counter and no name to it. On a
+        // book the device times this states nothing the counter has not already
+        // said, and contributes no counter of its own, so it moves no total.
+        // On a book the device refuses to time it is the entire record that the
+        // sitting happened, and without it such a book forms no run at all.
+        .or_else(|| {
+            payloads(line)
+                .find(|p| end_position(p).is_some() && p.contains("CurrentPos:YJPosition: "))
         })?;
     Some(Observation {
         position: end_position(chosen)?,
@@ -718,10 +753,108 @@ pub fn log_stamp(iso: &str) -> Option<String> {
         .then_some(out)
 }
 
+/// The `YYMMDD:HHMMSS` a syslog line begins with, or `None` when it begins with
+/// something else.
+///
+/// The form a watermark travels in, read straight off a line rather than routed
+/// through a stored session: what a device may drop is decided by which lines
+/// this library holds, and a line is the thing that has to be named.
+pub fn log_line_stamp(line: &str) -> Option<String> {
+    stamp(line).map(|_| line[..13].to_string())
+}
+
 /// `YYYY-MM-DDTHH:MM:SS` as the parser's own instant, for a stored session being
 /// read back — the round trip of what [`stamp`] produced when it was written.
 fn moment(iso: &str) -> Option<Moment> {
     stamp(&log_stamp(iso)?)
+}
+
+/// When the device was awake, as spans of absolute seconds.
+///
+/// **The fallback measure, and only ever a fallback.** The Kindle's reading
+/// timer is words-and-WPM driven, so a book it can count no words in — manga, a
+/// fixed-layout magazine — is never timed at all: no `TotalTime`, no
+/// `IntervalTime`, and the book's own info screen on the device reads zero.
+/// Every rule in this module measures a sitting as the span of a counter that,
+/// for such a book, does not exist.
+///
+/// What the log still states is when the device was awake. `powerd` writes a
+/// clean state machine — `ACTIVE`, then `SCREEN SAVER` once the reader stops
+/// touching it, then `READY TO SUSPEND`, `SUSPENDED`, `HIBERNATE` — so the time
+/// a book was open *and* the device `ACTIVE` is an upper bound on the reading
+/// done in it, and a tight one: measured from the last reading event to the end
+/// of an `ACTIVE` span over a 30-day archive, the screensaver follows within a
+/// median of 69 s and a p90 of 600 s. A book left open on a sleeping device
+/// contributes nothing; one abandoned awake overcounts by the idle timeout and
+/// no more.
+///
+/// Checked against 154 sittings whose counter *is* known, the bound reads 1.13×
+/// the counted time at the median (p10 1.03), against 1.18× for unbounded wall
+/// clock. Deliberately without a per-interval cap: a 120 s cap scores better on
+/// that corpus only because its page turns are ~40 s apart, and against a
+/// magazine's five-minute cadence the same cap would report six minutes for a
+/// twenty-minute sitting.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Awake {
+    spans: Vec<(i64, i64)>,
+}
+
+impl Awake {
+    /// Read the power records out of an event stream.
+    ///
+    /// A span opens at the record that enters `ACTIVE` and closes at the next
+    /// one that leaves it. One still open at the end of the batch is dropped
+    /// rather than run to infinity: the device is awake *now*, the sitting it
+    /// would bound is still in progress, and a later batch carries its own
+    /// close.
+    pub fn from_events<'a>(events: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut spans = Vec::new();
+        let mut open: Option<i64> = None;
+        for line in events {
+            if !line.contains(POWER_MARKER) {
+                continue;
+            }
+            let Some(now) = stamp(line) else { continue };
+            let entering = field_text(line, "curr_state").is_some_and(|s| s == "ACTIVE");
+            let leaving = field_text(line, "prev_state").is_some_and(|s| s == "ACTIVE");
+            match (entering, leaving, open) {
+                (true, _, None) => open = Some(now.abs),
+                (_, true, Some(from)) if now.abs > from => {
+                    spans.push((from, now.abs));
+                    open = None;
+                }
+                (_, true, Some(_)) => open = None,
+                _ => {}
+            }
+        }
+        spans.sort_unstable();
+        Self { spans }
+    }
+
+    /// Seconds of `ACTIVE` between two instants.
+    pub fn between(&self, from: i64, to: i64) -> i64 {
+        self.spans
+            .iter()
+            .map(|(s, e)| (to.min(*e) - from.max(*s)).max(0))
+            .sum()
+    }
+
+    /// Whether any power record was seen at all. With none, a sitting the
+    /// device declined to count stays unmeasured rather than being credited the
+    /// whole wall clock — an unbounded guess is worse than the honest zero the
+    /// device itself reports.
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+}
+
+/// Read `"<name>" : "<value>"` out of a metrics record's JSON-ish body.
+fn field_text<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let at = line.find(&format!("\"{name}\""))? + name.len() + 2;
+    let rest = &line[at..];
+    let open = rest.find('"')?;
+    let tail = &rest[open + 1..];
+    Some(&tail[..tail.find('"')?])
 }
 
 /// Turn an ordered, de-duplicated event stream into sessions.
@@ -746,6 +879,13 @@ pub fn parse_sessions<'a>(
     events: impl IntoIterator<Item = &'a str>,
     resume: Option<&Resume>,
 ) -> Vec<Session> {
+    // Collected because the stream is read twice: the power records have to be
+    // whole before the first sitting is closed against them, and they are
+    // interleaved with the reading events rather than preceding them. The batch
+    // is already a set held in memory, so this is one pointer per line.
+    let lines: Vec<&str> = events.into_iter().collect();
+    let awake = Awake::from_events(lines.iter().copied());
+
     let mut out = Vec::new();
     let mut open: Option<Open> = Open::resume(resume);
     let mut prev_abs: Option<i64> = open.as_ref().map(|cur| cur.last.abs);
@@ -754,7 +894,7 @@ pub fn parse_sessions<'a>(
     let mut gapped = false;
     let mut first = true;
 
-    for line in events {
+    for line in lines.iter().copied() {
         let Some(now) = stamp(line) else {
             continue;
         };
@@ -796,16 +936,24 @@ pub fn parse_sessions<'a>(
         // observations is decided at the second of them.
         let gapped = std::mem::take(&mut gapped);
 
-        // Consumed at the first observation after the open, whether or not it is
-        // used: an open belongs to the session it precedes and to no later one.
-        let mut seed = opened.take().and_then(|o| o.vouch(&now, obs.total_ms));
+        // Consumed at the first observation after the open, whether or not it
+        // is used: an open belongs to the session it precedes and to no later
+        // one. An observation carrying no counter is the exception — an open is
+        // vouched for by the counter it resumes from, and such a line cannot
+        // judge it, so it stays pending for one that can. Where none ever does,
+        // the open is still where the sitting began, and that is all a book the
+        // device never counts can be measured from.
+        let mut seed = match obs.total_ms {
+            Some(_) => opened.take().and_then(|o| o.vouch(&now, obs.total_ms)),
+            None => opened.as_ref().and_then(|o| o.opened_run(&now)),
+        };
 
         match open
             .as_ref()
             .and_then(|cur| cur.broken_by(&now, &obs, gapped))
         {
             None => {}
-            Some(Break::Left) => out.extend(open.take().and_then(Open::emit)),
+            Some(Break::Left) => out.extend(open.take().and_then(|cur| cur.emit(&awake))),
             Some(Break::Midnight(boundary)) => {
                 out.extend(open.take().map(|cur| cur.finish_at(&boundary)));
                 // The run was already under way, so nothing that happened after
@@ -814,13 +962,26 @@ pub fn parse_sessions<'a>(
                 seed = Some(boundary);
             }
         }
-        let cur = open.get_or_insert_with(|| Open::new(obs.position, &now, seed));
+        let cur = open.get_or_insert_with(|| Open::new(obs.position, &now, seed.take()));
+        // A run that began before any counter was known adopts one the moment
+        // an open vouches for it. The sitting starts where the book was opened
+        // — which a position-only line establishes without saying how long the
+        // book had been read — and the counter that arrives later is what makes
+        // its length measurable at all. Left unadopted, the first counter seen
+        // becomes both ends of the span and the sitting measures nothing.
+        if let Some(counter) = seed.take().and_then(|s| s.counter_ms)
+            && cur.time_lo.is_none()
+        {
+            cur.time_lo = Some(counter);
+            cur.time_hi = counter;
+            cur.last_time = Some(counter);
+        }
         cur.observe(&now, &obs);
         if obs.closes {
-            out.extend(open.take().and_then(Open::emit));
+            out.extend(open.take().and_then(|cur| cur.emit(&awake)));
         }
     }
-    out.extend(open.and_then(Open::emit));
+    out.extend(open.and_then(|cur| cur.emit(&awake)));
     out
 }
 
@@ -853,8 +1014,11 @@ struct Opened {
 /// Where a session begins: the counters it resumes from and the instant it
 /// started at. Either the `OpenBook` that vouched for them, or the midnight a
 /// run was cut at.
+///
+/// The counter is absent for a run in a book the device does not time. The
+/// instant is not: the reader opened it then whether or not anything counted.
 struct Start {
-    counter_ms: i64,
+    counter_ms: Option<i64>,
     /// The word counter at that same instant, where it is known. An `OpenBook`
     /// states no word count; a midnight cut interpolates one.
     words: Option<i64>,
@@ -877,10 +1041,26 @@ impl Opened {
             && self.counter_ms <= total
             && total - self.counter_ms <= (elapsed + SEED_SLACK_SECS) * 1000)
             .then_some(Start {
-                counter_ms: self.counter_ms,
+                counter_ms: Some(self.counter_ms),
                 words: None,
                 at: self.at,
             })
+    }
+
+    /// This open as the instant a run began, for a run with no counter to
+    /// vouch it against.
+    ///
+    /// The counter guards cannot be applied — there is nothing to compare — so
+    /// the day is all that stands between this and a stale open from another
+    /// book. That is enough here: the figure it produces is bounded by how long
+    /// the device was awake, so a start too early costs nothing where the
+    /// reader was not there.
+    fn opened_run(&self, now: &Moment) -> Option<Start> {
+        (self.at.day == now.day && self.at.abs <= now.abs).then(|| Start {
+            counter_ms: None,
+            words: None,
+            at: self.at.clone(),
+        })
     }
 }
 
@@ -918,6 +1098,11 @@ struct Open {
     /// the intervals arrive. Kept here because this is the only place the
     /// intervals exist: a stored session has only its window and its total.
     hours_ms: [i64; 24],
+    /// The first instant this run was seen at, and seconds it was credited
+    /// before this batch — the two an estimate is rebuilt from when the device
+    /// never counted the book. See [`Awake`].
+    began: Moment,
+    carried_secs: i64,
     /// Whether any event of this batch has joined the run. False only for a
     /// resumed run no event continued, which is a stored session this batch has
     /// nothing new to say about.
@@ -934,9 +1119,10 @@ impl Open {
     /// start.
     fn new(end_position: i64, now: &Moment, start: Option<Start>) -> Self {
         let (time_lo, words_lo, from) = match start {
-            Some(s) => (Some(s.counter_ms), s.words, s.at),
+            Some(s) => (s.counter_ms, s.words, s.at),
             None => (None, None, now.clone()),
         };
+        let from_moment = from.clone();
         Self {
             end_position,
             started_at: from.at.clone(),
@@ -953,6 +1139,8 @@ impl Open {
             last_time: time_lo,
             last_words: words_lo,
             hours_ms: [0; 24],
+            began: from_moment,
+            carried_secs: 0,
             touched: false,
         }
     }
@@ -989,13 +1177,20 @@ impl Open {
             end_position: r.end_position,
             started_at: r.started_at.clone(),
             ended_at: r.ended_at.clone(),
-            time_lo: Some(r.start_counter_ms),
-            time_hi: r.end_counter_ms,
+            time_lo: r.start_counter_ms,
+            time_hi: r.end_counter_ms.unwrap_or(0),
             words_lo,
             words_hi,
             page_turns: r.page_turns,
+            // An estimated run resumes from where it was last seen, not from
+            // where it began: the power records covering the earlier stretch
+            // were consumed by the batch that measured it, and re-measuring the
+            // whole window against a batch that no longer holds them would
+            // shrink the sitting on every sync.
+            began: last.clone(),
+            carried_secs: if r.estimated { r.seconds } else { 0 },
             last,
-            last_time: Some(r.end_counter_ms),
+            last_time: r.end_counter_ms,
             last_words: r.end_words,
             hours_ms,
             touched: false,
@@ -1005,8 +1200,8 @@ impl Open {
     /// The run as a session, unless it is a resumed one this batch never
     /// continued — that is the stored row unchanged, and re-offering it would
     /// have every sync report a sitting it did nothing to.
-    fn emit(self) -> Option<Session> {
-        self.touched.then(|| self.finish())
+    fn emit(self, awake: &Awake) -> Option<Session> {
+        self.touched.then(|| self.finish(awake))
     }
 
     /// Book an interval's counted reading against the clock hours it ran
@@ -1084,7 +1279,7 @@ impl Open {
         let elapsed = now.abs - self.last.abs;
         let before = now.abs - now.secs - self.last.abs;
         Some(Break::Midnight(Start {
-            counter_ms: from + share(to - from, elapsed, before),
+            counter_ms: Some(from + share(to - from, elapsed, before)),
             words: self
                 .last_words
                 .zip(obs.words)
@@ -1104,23 +1299,50 @@ impl Open {
     /// The stored end is one second short of the boundary, that being the last
     /// instant this day has: reading recorded at `T00:00:00` is the next day's.
     fn finish_at(mut self, boundary: &Start) -> Session {
+        // A midnight cut is only made where both sides state a counter, so this
+        // boundary carries one.
+        let at_boundary = boundary.counter_ms.unwrap_or(self.time_hi);
         if let Some(from) = self.last_time {
             // Midnight is 86400 seconds into *this* day; the same instant is
             // second zero of the next, where the run resumes.
-            self.credit(self.last.secs, 86_400, boundary.counter_ms - from);
+            self.credit(self.last.secs, 86_400, at_boundary - from);
         }
-        self.time_hi = self.time_hi.max(boundary.counter_ms);
+        self.time_hi = self.time_hi.max(at_boundary);
         if let Some(w) = boundary.words {
             self.words_hi = self.words_hi.max(w);
         }
         self.ended_at = format!("{}T23:59:59", self.last.day);
-        self.finish()
+        self.finish(&Awake::default())
     }
 
-    fn finish(self) -> Session {
-        let seconds = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
+    /// The run as a session, measured by the device's counter where it moved
+    /// and by [`Awake`] where it did not.
+    ///
+    /// The counter is always preferred: it is the device's own accounting, and
+    /// it excludes the pauses an awake reader takes. The bound stands in only
+    /// when the counter never advanced across the whole run — which is not a
+    /// gap in the log but the device declining to time a book it can count no
+    /// words in, and its own answer for such a book is zero.
+    ///
+    /// With no power records in the batch the estimate is not attempted. An
+    /// unbounded wall clock would credit a book left open overnight with the
+    /// night, and a wrong number is worse than the device's honest zero.
+    fn finish(self, awake: &Awake) -> Session {
+        let counted = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
+        let (seconds, estimated) = if counted > 0 || awake.is_empty() {
+            (counted, false)
+        } else {
+            (
+                self.carried_secs + awake.between(self.began.abs, self.last.abs),
+                true,
+            )
+        };
         Session {
-            hours: hours_in_seconds(&self.hours_ms, seconds),
+            hours: if estimated {
+                spread(&self.began, &self.last, seconds)
+            } else {
+                hours_in_seconds(&self.hours_ms, seconds)
+            },
             started_at: self.started_at,
             ended_at: self.ended_at,
             end_position: self.end_position,
@@ -1134,8 +1356,41 @@ impl Open {
             end_counter_ms: self.time_lo.map(|_| self.time_hi),
             start_words: self.words_lo,
             end_words: self.words_lo.map(|_| self.words_hi),
+            estimated,
         }
     }
+}
+
+/// Spread an estimated total evenly across the hours its window covers.
+///
+/// An estimate has no intervals behind it — that is what makes it an estimate —
+/// so there is nothing finer to place it by, and claiming otherwise would dress
+/// a guess as a measurement. Even spreading is the same assumption
+/// [`super::db::reading_clock`] already makes of a session it has to divide.
+fn spread(from: &Moment, to: &Moment, seconds: i64) -> Vec<(u8, i64)> {
+    if seconds <= 0 {
+        return Vec::new();
+    }
+    let span = (to.secs - from.secs).max(1);
+    let mut out = Vec::new();
+    let mut placed = 0;
+    for hour in (from.secs / 3600)..=((to.secs.max(from.secs + 1) - 1) / 3600).min(23) {
+        let overlap = to.secs.min((hour + 1) * 3600) - from.secs.max(hour * 3600);
+        if overlap <= 0 {
+            continue;
+        }
+        let share = seconds * overlap / span;
+        placed += share;
+        out.push((hour as u8, share));
+    }
+    match out.first_mut() {
+        Some(first) => first.1 += seconds - placed,
+        // A window covering no whole hour still happened somewhere, and the
+        // hour it began in is where.
+        None => out.push(((from.secs / 3600).min(23) as u8, seconds)),
+    }
+    out.retain(|(_, s)| *s > 0);
+    out
 }
 
 /// The hours a session's milliseconds fall in, as whole seconds summing to
@@ -1317,6 +1572,54 @@ pub fn import(
     Ok(out)
 }
 
+/// Keep the raw lines a device pushed, under `<root>/reading-log/<serial>/`.
+///
+/// **The device's copy is not a backup once this exists — it is the only other
+/// copy, and it is deleted.** A Kindle archives what it logs and purges that
+/// archive at the watermark the library hands back; the watermark is per
+/// device, so a session stored for one book carries it past another book's
+/// events, and those events are then dropped by a device that believes they are
+/// safe here. What made them unstorable is rarely permanent — a book the parser
+/// could not measure today is one a better parser measures tomorrow — so the
+/// lines are kept whether or not they became a session.
+///
+/// Written in the same shape the device's own archive uses, one gzipped file
+/// per day, so [`import`] can read the folder back with no special case: the
+/// stored history and a fresh archive are the same thing.
+///
+/// A day's file is read, merged and rewritten rather than appended to, because
+/// a torn append corrupts history that was already safe. The rename is what
+/// publishes it.
+pub fn archive_pushed(
+    root: &Path,
+    device_serial: &str,
+    lines: &BTreeSet<String>,
+) -> std::io::Result<()> {
+    let Some(newest) = lines.iter().filter_map(|l| stamp(l)).map(|m| m.day).max() else {
+        return Ok(());
+    };
+    let dir = root.join("reading-log").join(device_serial);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("rl_{}.txt.gz", newest.replace('-', "")));
+
+    let mut all: BTreeSet<String> = lines.clone();
+    if path.exists()
+        && let Some(held) = read_maybe_gzip(&path)
+    {
+        all.extend(held.text.lines().map(str::to_string));
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    for line in &all {
+        std::io::Write::write_all(&mut gz, line.as_bytes())?;
+        std::io::Write::write_all(&mut gz, b"\n")?;
+    }
+    let bytes = gz.finish()?;
+    let tmp = path.with_extension("part");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 /// Store already-collected event lines. The half of [`import`] that does not
 /// touch the filesystem.
 ///
@@ -1429,6 +1732,7 @@ pub fn store_events(
             end_counter_ms: s.end_counter_ms,
             start_words: s.start_words,
             end_words: s.end_words,
+            estimated: s.estimated,
         };
         // The hours the sitting's reading actually fell in — from the log's own
         // intervals, which exist nowhere else and are never sent twice.
@@ -1452,6 +1756,57 @@ pub fn store_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lines a device pushed survive whether or not the library could make
+    /// a session of them, and come back through the ordinary import.
+    ///
+    /// The case this exists for: a device pushes two books' events, one of
+    /// which forms a session and one of which does not. The watermark the
+    /// device purges against is per device, so it moves past both, and the
+    /// device drops its own copy of both. What the parser could not use today
+    /// has to still be here tomorrow.
+    #[test]
+    fn pushed_lines_are_kept_whether_or_not_they_became_a_session() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let unmeasurable = "260803:100000 java[1]: I ReadingTimerController:Information::\
+             BookInfo:BookInfo:Num words known in book:0:,\
+             CurrentPos:YJPosition: AR4GAAAAAAAA:57,EndPos:YJPosition: BBB:442;"
+            .to_string();
+        let events: BTreeSet<String> = [
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            page("260803:100500", "NextPage", 148_207, 120_000, 220),
+            unmeasurable.clone(),
+        ]
+        .into_iter()
+        .collect();
+
+        archive_pushed(root.path(), "DEV", &events).expect("archive the push");
+
+        // Read back the way any archive is read, since that is what it is.
+        let found = collect_events(
+            &[root.path().join("reading-log").join("DEV")],
+            &Default::default(),
+            &[],
+            &mut super::job::ignore,
+        );
+        assert!(
+            found.events.contains(&unmeasurable),
+            "the line no session was made of is the one that had to survive"
+        );
+        assert_eq!(found.events.len(), events.len());
+
+        // A second push of the same day merges rather than replacing.
+        let later: BTreeSet<String> =
+            [page("260803:101500", "NextPage", 148_207, 180_000, 300)].into();
+        archive_pushed(root.path(), "DEV", &later).expect("archive the second push");
+        let found = collect_events(
+            &[root.path().join("reading-log").join("DEV")],
+            &Default::default(),
+            &[],
+            &mut super::job::ignore,
+        );
+        assert_eq!(found.events.len(), events.len() + 1);
+    }
 
     /// A page event, shaped like the device's own. `end` is the book's last
     /// position; the second `EndPos` is the chapter's, which must be ignored.
@@ -1560,12 +1915,14 @@ mod tests {
             started_at: stored[0].started_at.clone(),
             ended_at: stored[0].ended_at.clone(),
             end_position: stored[0].end_position,
-            start_counter_ms: stored[0].start_counter_ms.unwrap(),
-            end_counter_ms: stored[0].end_counter_ms.unwrap(),
+            start_counter_ms: stored[0].start_counter_ms,
+            end_counter_ms: stored[0].end_counter_ms,
             start_words: stored[0].start_words,
             end_words: stored[0].end_words,
             page_turns: stored[0].page_turns,
             hours: stored[0].hours.clone(),
+            seconds: stored[0].seconds,
+            estimated: stored[0].estimated,
         };
 
         // What the device logs after the Sync, and only that.
@@ -1600,12 +1957,14 @@ mod tests {
             started_at: "2026-08-03T10:00:00".into(),
             ended_at: "2026-08-03T10:05:00".into(),
             end_position: 148_207,
-            start_counter_ms: 60_000,
-            end_counter_ms: 120_000,
+            start_counter_ms: Some(60_000),
+            end_counter_ms: Some(120_000),
             start_words: Some(100),
             end_words: Some(220),
             page_turns: 1,
             hours: vec![(10, 60)],
+            seconds: 60,
+            estimated: false,
         };
 
         // Nothing at all since.
@@ -1649,12 +2008,14 @@ mod tests {
             started_at: stored[0].started_at.clone(),
             ended_at: stored[0].ended_at.clone(),
             end_position: stored[0].end_position,
-            start_counter_ms: stored[0].start_counter_ms.unwrap(),
-            end_counter_ms: stored[0].end_counter_ms.unwrap(),
+            start_counter_ms: stored[0].start_counter_ms,
+            end_counter_ms: stored[0].end_counter_ms,
             start_words: stored[0].start_words,
             end_words: stored[0].end_words,
             page_turns: stored[0].page_turns,
             hours: stored[0].hours.clone(),
+            seconds: stored[0].seconds,
+            estimated: stored[0].estimated,
         };
         // The last line of the run, sent a second time.
         let again = [all[1].clone()];
@@ -1962,7 +2323,15 @@ mod tests {
              BookEndPosition.LastWordPos.override:YJPosition: AR4GAAAAAAAA:148207,\
              CurrentPos:YJPosition: AR4GAAAAAAAA:524,\
              EndPos:YJPosition: AR4GAAAAAAAA:148207;"];
-        assert!(parse_sessions(opened_and_shut.iter().copied(), None).is_empty());
+        // A run does form — the line states where the reader stood, which is
+        // what a book the device never times has in place of a counter — but
+        // with one observation there is no span to measure and nothing bounding
+        // it, so the sitting is zero and [`store_events`] keeps no row for it.
+        assert!(
+            parse_sessions(opened_and_shut.iter().copied(), None)
+                .iter()
+                .all(|s| s.seconds == 0)
+        );
         assert_eq!(
             positions_seen(opened_and_shut.iter().copied()),
             vec![(

@@ -35,8 +35,9 @@ fn a_session_survives_a_payload_losing_its_event_name() {
     assert_eq!(out[0].seconds, 462);
     assert_eq!(out[0].end_position, 938_016);
     // The open is where the sitting started, even though the line carrying it
-    // is not itself an observation — the next line states a position but no
-    // counter, so the first observation is the close nearly twelve minutes on.
+    // is not itself an observation, and even though the observation that opens
+    // the run states a position and no counter: the floor arrives with the
+    // close, twelve minutes on, and is adopted by the run already under way.
     assert_eq!(out[0].started_at, "2026-08-11T07:29:45");
     assert_eq!(out[0].ended_at, "2026-08-11T07:41:39");
     // Nothing named a turn, and none is invented.
@@ -65,6 +66,69 @@ fn a_cut_payload_is_filed_under_its_book_not_the_chapter_in_front_of_it() {
         out[0].end_position, 327_525,
         "8548 is the chapter's end — it is also this payload's NextTOCEntryPosition"
     );
+}
+
+/// A sitting in a book the device never times, as the Scribe logged one: the
+/// book is opened, states its positions, and is reopened later still declaring
+/// `TimeRead:0 sec.` — the reader's own counter has not moved because it counts
+/// words and this book has none (`Num words known in book:0`).
+///
+/// Its length is therefore not in the log at all, and the only thing that
+/// bounds it is the device's power state.
+const WORDLESS: &[&str] = &[
+    "260814:112035 java[9795]: I ReadingTimerController:Information::OpenBook,CurrentVersionUsed:0,StoredBookData:null,Title:<private>,Asin:<private>;",
+    "260814:112414 java[9795]: I ReadingTimerController:Information::BookInfo:BookInfo:Num words known in book:0:Percentage of book for the known words:0.0:,GlobalWords:12080,CurrentPos:YJPosition: AWAEAAAAAAAA:57,EndPos:YJPosition: ARsHAAAAAAAA:442,PosLeft:385,%Left:0.859375,CurrentPagePosDiff:0,TimeForPage:-4.0,PosPassed:false,DataSufficient:YES,NextTOCEntryPosition:YJPosition: AbUDAAAAAAAA:158,NextTOCEntryLength:64,CurrentPos:YJPosition: AWAEAAAAAAAA:57,EndPos:YJPosition: AbUDAAAAAAAA:158;",
+    "260814:113238 java[9795]: I ReadingTimerController:Information::OpenBook,CurrentVersionUsed:0,StoredBookData:TimeRead:0 sec. WPM:0. Version:0,Title:<private>,Asin:<private>;",
+    "260814:113240 java[9795]: I ReadingTimerController:Information::BookInfo:BookInfo:Num words known in book:0:Percentage of book for the known words:0.0:,GlobalWords:12080,CurrentPos:YJPosition: AQcFAAAAAAAA:145,EndPos:YJPosition: ARsHAAAAAAAA:442,PosLeft:297,%Left:0.671875,CurrentPagePosDiff:0,TimeForPage:-4.0,PosPassed:false,DataSufficient:YES,NextTOCEntryPosition:YJPosition: AbUDAAAAAAAA:158,NextTOCEntryLength:64,CurrentPos:YJPosition: AQcFAAAAAAAA:145,EndPos:YJPosition: AbUDAAAAAAAA:158;",
+];
+
+/// The device's own power records, verbatim in shape: awake from 11:19:00,
+/// asleep from 11:35:00.
+const POWER: &[&str] = &[
+    "260814:111900.726 fastmetrics[9842]: D fastmetrics:KindleFastMetricsPublisher:[24109.944489]: Emitting a new record. SchemaName[ereader_powerd_state_change], Fields[{ \t\"curr_state\" : \"ACTIVE\", \t\"prev_state\" : \"SCREEN SAVER\" } ]. :",
+    "260814:113500.549 fastmetrics[9842]: D fastmetrics:KindleFastMetricsPublisher:[26548.733985]: Emitting a new record. SchemaName[ereader_powerd_state_change], Fields[{ \t\"curr_state\" : \"SCREEN SAVER\", \t\"prev_state\" : \"ACTIVE\" } ]. :",
+];
+
+/// A book the device refuses to time is measured by how long the device was
+/// awake with it open, and says so.
+#[test]
+fn a_book_the_device_never_times_is_measured_by_its_awake_time() {
+    let mut all: Vec<&str> = WORDLESS.iter().chain(POWER).copied().collect();
+    all.sort();
+    let out = parse_sessions(all, None);
+
+    assert_eq!(out.len(), 1);
+    let s = &out[0];
+    assert!(
+        s.estimated,
+        "no counter moved, so this cannot be counted time"
+    );
+    // The sitting runs from the open to where the reader was last seen —
+    // 11:20:35 to 11:32:40 — and the device was ACTIVE across all of it.
+    assert_eq!(s.seconds, 12 * 60 + 5);
+    assert_eq!(s.end_position, 442, "the book, not its chapter at 158");
+    // Its hours add back up to it, so the clock and the calendar agree.
+    assert_eq!(s.hours.iter().map(|(_, sec)| sec).sum::<i64>(), s.seconds);
+}
+
+/// Without power records there is no bound, and an unbounded wall clock would
+/// credit a book left open overnight with the night. The device's own answer
+/// for such a book is zero, and zero is what it stays.
+#[test]
+fn a_book_the_device_never_times_is_not_guessed_at_without_a_bound() {
+    let out = parse_sessions(WORDLESS.iter().copied(), None);
+    assert!(out.iter().all(|s| s.seconds == 0));
+}
+
+/// The bound never displaces a figure the device did count.
+#[test]
+fn a_counted_sitting_is_untouched_by_the_power_records() {
+    let mut all: Vec<&str> = CORRETTO.iter().chain(POWER).copied().collect();
+    all.sort();
+    let out = parse_sessions(all, None);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].seconds, 462, "the counter, not the awake time");
+    assert!(!out[0].estimated);
 }
 
 #[test]

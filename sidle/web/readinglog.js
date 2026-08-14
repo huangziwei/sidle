@@ -60,6 +60,25 @@
     return `${m}m`;
   }
 
+  // A "~" on a figure the Kindle did not count itself.
+  //
+  // Its reading timer runs on words and reading speed, so a book it can count
+  // no words in — manga, a fixed-layout magazine — is never timed: the device's
+  // own book info reads zero however long it was read. What Sidle shows instead
+  // is how long the device was awake with the book open, which answers a
+  // slightly different question and is marked as such. Mixed entries take the
+  // mark too: part of the figure is still inferred.
+  function estimateMark(e) {
+    if (!e.estimated_seconds) return "";
+    const all = e.estimated_seconds >= e.seconds;
+    const title = all
+      ? "Estimated — this book has no word count, so the Kindle never timed it. " +
+        "Measured as time awake with the book open."
+      : `Estimated in part — ${fmtDuration(e.estimated_seconds)} of this was not ` +
+        "counted by the Kindle but measured as time awake with the book open.";
+    return `<span class="rl-estimate" title="${esc(title)}">~</span>`;
+  }
+
   // Word counts come straight off the device's own `TotalWords` counter, which
   // is why they can be shown at all — and why they, not any page figure, are the
   // measure of how much of a book was read.
@@ -492,7 +511,7 @@
       `<div class="meta">` +
       `<div class="t">${esc(e.title)}</div>` +
       `<div class="a">${esc(e.author || "Unknown author")}</div>` +
-      `<div class="rl-card-time">${fmtDuration(e.seconds)}</div>` +
+      `<div class="rl-card-time">${fmtDuration(e.seconds)}${estimateMark(e)}</div>` +
       `<div class="rl-card-sub">${esc(sub || "")}</div>` +
       `</div></div>`
     );
@@ -807,7 +826,7 @@
       // shown at all — nothing here is inferred from page geometry.
       const wpm = entry.seconds > 0 ? Math.round((entry.words * 60) / entry.seconds) : 0;
       q("#rl-book-stats").innerHTML = [
-        fact("Total", fmtDuration(entry.seconds)),
+        factHtml("Total", `${esc(fmtDuration(entry.seconds))}${estimateMark(entry)}`),
         fact("Days read", days.length),
         fact("Per day", fmtDuration(perDay)),
         fact("Days elapsed", span, "First to last day read"),
@@ -839,8 +858,14 @@
   // better than a strip of boxes across the top, and scales as figures are
   // added without pushing anything off the edge.
   function fact(label, value, hint) {
+    return factHtml(label, esc(value), hint);
+  }
+
+  // The same, for a value that carries markup of its own — a figure with the
+  // estimate mark on it, say.
+  function factHtml(label, valueHtml, hint) {
     const t = hint ? ` title="${esc(hint)}"` : "";
-    return `<div class="rl-fact"${t}><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+    return `<div class="rl-fact"${t}><dt>${esc(label)}</dt><dd>${valueHtml}</dd></div>`;
   }
 
   function spanDays(days) {

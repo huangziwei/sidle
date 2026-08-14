@@ -1467,7 +1467,7 @@ pub fn push_reading_log(
     };
 
     let found = crate::readinglog::collect(us_root, &mark.watermark, &mark.seen);
-    if found.lines.is_empty() && found.read.is_empty() {
+    if !crate::readinglog::has_reading(&found.lines) && found.read.is_empty() {
         // The common case: nothing has been read since the last sync, so there
         // is nothing to send and no reason to make the request.
         return Ok(ReadingLogReport {

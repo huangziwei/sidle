@@ -60,8 +60,20 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// The tag every reading event carries; the cheap prefilter before anything else.
-const MARKER: &str = "ReadingTimerController";
+/// The tags a line must carry one of to be worth sending; the cheap prefilter
+/// before anything else.
+///
+/// The reading events, and the device's own power-state records. The second
+/// family carries no reading and names no book — what it carries is whether the
+/// device was awake, which is the only measure left for a book the reading
+/// timer refuses to count. The Kindle's timer is words-and-WPM driven, so
+/// content it can count no words in (manga, a fixed-layout magazine) is never
+/// timed at all, and the desktop falls back to how long the device was awake
+/// with the book open.
+///
+/// Cheap to carry: about a hundred power records a day against a reading day's
+/// several hundred events.
+const MARKERS: [&str; 2] = ["ReadingTimerController", "ereader_powerd_state_change"];
 
 /// The live syslog the firmware appends to, and the source every dump is a
 /// snapshot of. Absolute: it is on the root filesystem, not under `/mnt/us`.
@@ -275,6 +287,17 @@ fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
     };
     out.from.live_read = true;
     out.from.live += take_events(&live.text, watermark, &mut out.lines);
+}
+
+/// Whether a collection holds any reading at all.
+///
+/// The power records ride along to bound a sitting the reading timer refused to
+/// count, and on their own they measure nothing — a device states them whether
+/// it was read on or merely woken. Without this the steady state would push on
+/// every Sync forever: a Kindle sleeps and wakes dozens of times a day, so the
+/// batch is never empty again once those lines are collected.
+pub fn has_reading(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.contains(MARKERS[0]))
 }
 
 /// The newest event this device has already archived, as the `YYMMDD:HHMMSS` a
@@ -678,7 +701,7 @@ fn dumps(
 fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) -> usize {
     let before = out.len();
     for line in text.lines() {
-        if !line.contains(MARKER) {
+        if !MARKERS.iter().any(|m| line.contains(m)) {
             continue;
         }
         // A line the desktop already holds is not worth a byte on the wire. A

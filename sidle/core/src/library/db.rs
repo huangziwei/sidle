@@ -194,7 +194,11 @@ pub struct BookRow {
 /// continue the run if the row says where it stopped counting (see
 /// [`super::reading_log::Resume`]). Null on rows written before this, which are
 /// finished sittings and need no continuation.
-pub const SCHEMA_VERSION: i64 = 21;
+/// v22: added `reading_sessions.estimated` — whether `seconds` was counted by
+/// the device or inferred from its awake time. A book the Kindle can count no
+/// words in is never timed by it at all, so an estimate is the only figure
+/// available; it must stay distinguishable from a counted one.
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// A borrowable handle to the library database.
 ///
@@ -785,7 +789,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             start_counter_ms INTEGER,
             end_counter_ms   INTEGER,
             start_words      INTEGER,
-            end_words        INTEGER
+            end_words        INTEGER,
+            estimated        INTEGER NOT NULL DEFAULT 0
         )"#,
         [],
     )?;
@@ -814,6 +819,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 [],
             )?;
         }
+    }
+    // v22: whether the row's `seconds` was counted by the device or inferred
+    // from how long it was awake with the book open. The Kindle's reading timer
+    // is words-and-WPM driven, so a book it can count no words in — manga,
+    // magazines, fixed layout — is never timed at all, and the only alternative
+    // is a bounded estimate. The two must not be added together silently, so
+    // the row says which it is. Existing rows are counted: nothing before this
+    // could produce an estimate.
+    if !has_column(conn, "reading_sessions", "estimated")? {
+        conn.execute(
+            "ALTER TABLE reading_sessions ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
@@ -1667,6 +1685,15 @@ pub struct ReadingSession {
     pub end_counter_ms: Option<i64>,
     pub start_words: Option<i64>,
     pub end_words: Option<i64>,
+    /// True when `seconds` is how long the device was awake with the book open
+    /// rather than what its own reading timer counted.
+    ///
+    /// The timer is words-and-WPM driven, so content it can count no words in
+    /// earns no time from it — a fixed-layout magazine reads as zero on the
+    /// Kindle's own book info too. An estimate is then the only figure there
+    /// is, and it answers a different question from a counted one, so the two
+    /// are kept apart rather than summed as if they were the same measurement.
+    pub estimated: bool,
 }
 
 /// What storing one session did to the table.
@@ -1711,8 +1738,8 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
         r#"INSERT OR IGNORE INTO reading_sessions
             (device_serial, started_at, ended_at, day, end_position, book_id,
              seconds, page_turns, words,
-             start_counter_ms, end_counter_ms, start_words, end_words)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#,
+             start_counter_ms, end_counter_ms, start_words, end_words, estimated)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
         params![
             s.device_serial,
             s.started_at,
@@ -1727,18 +1754,28 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_counter_ms,
             s.start_words,
             s.end_words,
+            s.estimated,
         ],
     )?;
     if n > 0 {
         return Ok(Stored::Added);
     }
+    // A counted measurement replaces an estimate whatever the two say, because
+    // it answers the question the estimate was standing in for: the device
+    // finally credited the sitting. The reverse never happens — an estimate
+    // must not overwrite a figure the device itself counted, however much
+    // longer the reader was awake with the book open.
     let extended = conn.execute(
         r#"UPDATE reading_sessions
               SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
                   start_counter_ms = ?8, end_counter_ms = ?9,
-                  start_words = ?10, end_words = ?11
+                  start_words = ?10, end_words = ?11, estimated = ?12
             WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3
-              AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4)"#,
+              AND (
+                    (estimated = 1 AND ?12 = 0)
+                 OR (estimated = ?12
+                     AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4))
+              )"#,
         params![
             s.device_serial,
             s.started_at,
@@ -1751,6 +1788,7 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_counter_ms,
             s.start_words,
             s.end_words,
+            s.estimated,
         ],
     )?;
     Ok(if extended > 0 {
@@ -1838,7 +1876,7 @@ pub fn newest_reading_session(
     conn.query_row(
         r#"SELECT device_serial, started_at, ended_at, day, end_position, book_id,
                   seconds, page_turns, words,
-                  start_counter_ms, end_counter_ms, start_words, end_words
+                  start_counter_ms, end_counter_ms, start_words, end_words, estimated
              FROM reading_sessions
             WHERE device_serial = ?1
             ORDER BY started_at DESC LIMIT 1"#,
@@ -1858,6 +1896,7 @@ pub fn newest_reading_session(
                 end_counter_ms: r.get(10)?,
                 start_words: r.get(11)?,
                 end_words: r.get(12)?,
+                estimated: r.get(13)?,
             })
         },
     )
@@ -2559,7 +2598,8 @@ pub fn reading_books(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at),
-                  GROUP_CONCAT(DISTINCT s.device_serial), {bucket}
+                  GROUP_CONCAT(DISTINCT s.device_serial), {bucket},
+                  SUM(CASE WHEN s.estimated THEN s.seconds ELSE 0 END)
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY {bucket}, s.book_id
@@ -2599,6 +2639,15 @@ pub struct ReadingEntry {
     pub cover_thumb_path: Option<String>,
     pub cover_rev: i64,
     pub seconds: i64,
+    /// How much of [`Self::seconds`] the device did not count but was inferred
+    /// from its awake time — see [`ReadingSession::estimated`].
+    ///
+    /// Reported beside the total rather than folded into it or split out of it.
+    /// A reader wants one figure for how long they spent in a book, and a book
+    /// the Kindle cannot time would otherwise read as never opened; but the two
+    /// halves answer different questions, so which part is which stays visible.
+    /// Zero for everything the device counted, which is most reading.
+    pub estimated_seconds: i64,
     /// See [`ReadingSession::page_turns`] — device page events, not pagination.
     pub page_turns: i64,
     pub words: i64,
@@ -2625,6 +2674,7 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
         cover_thumb_path,
         cover_rev,
         seconds: r.get(5)?,
+        estimated_seconds: r.get(13)?,
         page_turns: r.get(6)?,
         words: r.get(7)?,
         sessions: r.get(8)?,
@@ -6814,6 +6864,7 @@ mod tests {
             end_counter_ms: Some(seconds * 1000),
             start_words: Some(0),
             end_words: Some(9000),
+            estimated: false,
         }
     }
 

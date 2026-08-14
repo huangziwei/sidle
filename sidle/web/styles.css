@@ -4707,6 +4707,16 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
+/* Marks a duration the Kindle did not count itself. Quiet on purpose: it
+   qualifies the figure beside it rather than competing with it, and most
+   reading carries no mark at all. */
+.rl-estimate {
+  margin-left: 2px;
+  color: var(--muted);
+  font-weight: 400;
+  cursor: help;
+}
+
 .rl-card-sub {
   font-size: 11px;
   color: var(--muted);

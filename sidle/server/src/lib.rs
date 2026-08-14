@@ -1218,20 +1218,33 @@ async fn sync_reading_log(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         }
-        // Read back rather than derived from what arrived: a line that formed no
-        // storable session does not move this, and the device must only drop
-        // what the library can actually account for.
-        let watermark = db::reading_watermark(&conn, &req.device_serial)
-            .ok()
-            .flatten()
-            .and_then(|iso| reading_log::log_stamp(&iso))
-            .unwrap_or_default();
+        // What the device is cleared to drop, which is exactly what this
+        // library now holds durably — the raw lines, not the sessions made of
+        // them.
+        //
+        // The sessions cannot answer it. Their watermark is per device, so a
+        // sitting stored for one book carries it past another book's events;
+        // the device then purges the only copy of lines nothing here kept, and
+        // a book the parser could not measure this week can never be measured.
+        // Archiving the lines first is what makes the newest of them a safe
+        // thing to say, and an archive that failed to write says nothing.
+        let held = match reading_log::archive_pushed(&paths.root, &req.device_serial, &events) {
+            Ok(()) => events
+                .iter()
+                .filter_map(|l| reading_log::log_line_stamp(l))
+                .max()
+                .unwrap_or_default(),
+            Err(err) => {
+                tracing::error!(?err, "sync/reading-log: archiving the pushed lines failed");
+                String::new()
+            }
+        };
         Ok(ReadingLogResult {
             sessions: stored.sessions,
             added: stored.added,
             extended: stored.extended,
             attributed: stored.attributed,
-            watermark,
+            watermark: held,
         })
     })
     .await
