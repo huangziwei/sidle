@@ -1,7 +1,7 @@
 //! Reading-session events the Kindle logs about itself, collected for sync.
 //!
-//! The firmware writes `/var/local/log/messages` continuously and, at most once
-//! a day, gzips a snapshot of it into `system/logbackup/`. Under the `cvm` tag
+//! The firmware writes `/var/log/messages` continuously and, at most once a
+//! day, gzips a snapshot of it into `system/logbackup/`. Under the `cvm` tag
 //! those lines carry `ReadingTimerController` events — a dated record of every
 //! page turn — which the desktop turns into a per-day reading log.
 //!
@@ -25,14 +25,14 @@
 //! device.
 //!
 //! **The live file alone is nowhere near enough.** `tinyrot` rotates
-//! `/var/local/log/messages` on a size cap, and on a busy device that is roughly
-//! every ten minutes — one measured dump spanned 230 rotations in 38 hours. What
-//! it rotates away is not lost: it becomes
-//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz` beside it. Reading only
-//! the live file would therefore see about ten minutes of history and leave the
-//! rest to arrive a day later in the next dump — or not at all, since `tinyrot`
-//! prunes chunks and the dumps demonstrably skip content when it does (a real
-//! archive lost 20 h of one day between two consecutive daily dumps).
+//! `/var/log/messages` on a size cap, and on a busy device that is roughly every
+//! ten minutes — one measured dump spanned 230 rotations in 38 hours. What it
+//! rotates away is not lost: it is gzipped into
+//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz`. Reading only the live
+//! file would therefore see about ten minutes of history and leave the rest to
+//! arrive a day later in the next dump — or not at all, since `tinyrot` prunes
+//! chunks and the dumps demonstrably skip content when it does (a real archive
+//! lost 20 h of one day between two consecutive daily dumps).
 //!
 //! So the chunks are read too, filtered by the same watermark. That is not an
 //! invention: it is what the firmware's own `showlog` does, and a dump is
@@ -44,10 +44,18 @@
 //! cat /var/log/$LOG >> "$OUTFILE"
 //! ```
 //!
+//! **The two paths in that script are two filesystems, and confusing them costs
+//! exactly the reading done between two syncs.** `/var/log` is a real directory
+//! on the tmpfs; `/var/local` is a symlink to the `/var/base-local` flash mount,
+//! and `ARCHIVE_DIR` is `/var/local/log` under it. So the live file is
+//! `/var/log/messages` and nothing of that name exists beside the chunks — a
+//! sync that looks for it there reads no live log at all, sees only what has
+//! already been rotated to flash, and reports it as a quiet device.
+//!
 //! Reading the same set directly is what removes the wait for a daily snapshot,
 //! and the dumps then matter only for history older than the chunks still on
-//! disk — which is also all a host can reach, `/var/local/log` being on the root
-//! filesystem.
+//! disk — which is also all a host can reach, both log directories being on the
+//! root filesystem.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,9 +65,12 @@ const MARKER: &str = "ReadingTimerController";
 
 /// The live syslog the firmware appends to, and the source every dump is a
 /// snapshot of. Absolute: it is on the root filesystem, not under `/mnt/us`.
-const LIVE_LOG: &str = "/var/local/log/messages";
+///
+/// On the tmpfs, and **not** in [`LOG_DIR`] beside the chunks that were rotated
+/// out of it — that is the path the firmware's own `showlog` cats.
+const LIVE_LOG: &str = "/var/log/messages";
 
-/// The directory holding [`LIVE_LOG`] and its rotated chunks.
+/// The directory `tinyrot` gzips [`LIVE_LOG`]'s rotated chunks into, on flash.
 const LOG_DIR: &str = "/var/local/log";
 
 /// What a rotated chunk's name begins with: `messages_00000807_20260807101501.gz`.
@@ -134,6 +145,15 @@ pub struct Collected {
 pub struct Sources {
     pub dumps: usize,
     pub live: usize,
+    /// Whether the live syslog was there to be read at all.
+    ///
+    /// Reported separately because the count cannot say it: a file that is not
+    /// where this looked and a file with nothing new in it both offer zero
+    /// lines. The live file is the only source holding the minutes since the
+    /// last rotation, so an unread one silently costs every sync exactly the
+    /// reading done since the one before it — and a `live=0` that means
+    /// "absent" reads as a quiet device.
+    pub live_read: bool,
     pub chunks: usize,
     pub archive: usize,
 }
@@ -211,13 +231,7 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     // listed a moment too early, and those lines are in neither read. Live
     // first, and the same rotation merely delivers them twice — which costs
     // nothing, since the whole selection is de-duplicated below.
-    //
-    // Not `read_to_string`: the syslog carries bytes that are not valid UTF-8,
-    // and that returns `Err` for the whole file rather than for the offending
-    // line — which would silently drop every event since the last rotation.
-    if let Some(live) = read_maybe_gzip(Path::new(LIVE_LOG)) {
-        out.from.live += take_events(&live.text, watermark, &mut out.lines);
-    }
+    take_live(Path::new(LIVE_LOG), watermark, &mut out);
     for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
         // A chunk pruned between the listing and the read simply yields nothing;
         // one caught mid-rotation yields its intact prefix. Neither needs the
@@ -238,6 +252,29 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     out.lines.sort();
     out.lines.dedup();
     out
+}
+
+/// Take the live syslog's new events, and record that there was one to take.
+///
+/// The only source holding the minutes since the last rotation, and therefore
+/// the only one that can carry a sitting still in progress. Everything else on
+/// the device is at best one rotation behind, so a sync that misses this one
+/// reports the reading done since the last sync as nothing at all — and reports
+/// it identically to a device that was simply not read on.
+///
+/// Which is why the *reading* of the file is recorded and not only its yield: a
+/// count of zero is the answer for both, and the difference is the whole
+/// feature.
+///
+/// Not `read_to_string`: the syslog carries bytes that are not valid UTF-8, and
+/// that returns `Err` for the whole file rather than for the offending line —
+/// which would drop every event since the last rotation.
+fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
+    let Some(live) = read_maybe_gzip(path) else {
+        return;
+    };
+    out.from.live_read = true;
+    out.from.live += take_events(&live.text, watermark, &mut out.lines);
 }
 
 /// The newest event this device has already archived, as the `YYMMDD:HHMMSS` a
@@ -808,6 +845,51 @@ mod tests {
         assert_eq!(full.truncated, 0);
         assert_eq!(full.read, vec![name.to_string()]);
         assert_eq!(full.lines.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live syslog is not in the directory its own rotated chunks land in.
+    ///
+    /// `tinyrot` rotates `/var/log/messages` — a real directory on the tmpfs —
+    /// and gzips what it takes into `/var/local/log`, which is on flash under
+    /// the `/var/base-local` mount. Nothing named `messages` exists there, so
+    /// deriving the live path from [`LOG_DIR`] yields a file that is never
+    /// found, and the sync then sees only what has already been rotated: every
+    /// sitting arrives one rotation late, and the last one never arrives at all.
+    #[test]
+    fn the_live_log_is_not_looked_for_beside_its_own_chunks() {
+        assert!(
+            !LIVE_LOG.starts_with(LOG_DIR),
+            "{LIVE_LOG:?} is where the chunks are, not where the firmware writes"
+        );
+    }
+
+    /// A live log that is not there must be distinguishable from one with
+    /// nothing new in it. Both yield no lines; only one of them is a device
+    /// that was not read on.
+    #[test]
+    fn an_unread_live_log_is_not_reported_as_a_quiet_one() {
+        let dir = tempdir();
+        let live = dir.join("messages");
+
+        let mut missing = Collected::default();
+        take_live(&live, "", &mut missing);
+        assert!(!missing.from.live_read, "there was no file to read");
+        assert_eq!(missing.from.live, 0);
+
+        // Present, and holding only events the desktop already has.
+        std::fs::write(&live, format!("{}\n", event("260809:100000"))).unwrap();
+        let mut quiet = Collected::default();
+        take_live(&live, "260809:120000", &mut quiet);
+        assert!(quiet.from.live_read, "the file was read");
+        assert_eq!(quiet.from.live, 0, "and had nothing past the watermark");
+
+        // Present, and holding the minutes since the last sync — the case the
+        // whole source exists for.
+        let mut reading = Collected::default();
+        take_live(&live, "260809:090000", &mut reading);
+        assert!(reading.from.live_read);
+        assert_eq!(reading.lines, vec![event("260809:100000")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

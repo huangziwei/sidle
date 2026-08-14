@@ -1,6 +1,6 @@
 //! Recover reading sessions from a Kindle's own system logs.
 //!
-//! The device writes `/var/local/log/messages` and, at most once a day, gzips a
+//! The device writes `/var/log/messages` and, at most once a day, gzips a
 //! snapshot of it into `system/logbackup/`. Those logs carry
 //! `ReadingTimerController` events — one per page turn, plus book open/close —
 //! which together are an unbiased, dated record of every reading session. The

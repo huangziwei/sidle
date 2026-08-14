@@ -1017,7 +1017,7 @@ fn run() -> anyhow::Result<()> {
                                                     log(format!(
                                                         "reading log in {:?}: {} new of {} \
                                                          sessions ({} extended), {} named, {} \
-                                                         skipped; lines from live={} chunks={} \
+                                                         skipped; lines from live={}{} chunks={} \
                                                          dumps={} archive={}",
                                                         rl_t0.elapsed(),
                                                         rl.added,
@@ -1026,6 +1026,16 @@ fn run() -> anyhow::Result<()> {
                                                         rl.attributed,
                                                         rl.skipped,
                                                         rl.from.live,
+                                                        // The live log is the only source carrying
+                                                        // the minutes since the last rotation, so
+                                                        // a sync that never opened it is a sync
+                                                        // that cannot report the sitting in
+                                                        // progress — and says `live=0` for it.
+                                                        if rl.from.live_read {
+                                                            ""
+                                                        } else {
+                                                            " (NO LIVE LOG)"
+                                                        },
                                                         rl.from.chunks,
                                                         rl.from.dumps,
                                                         rl.from.archive
