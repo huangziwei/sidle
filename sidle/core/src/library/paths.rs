@@ -307,37 +307,41 @@ impl LibraryPaths {
         }
     }
 
-    // ── Misc device backup (screenshots + picker logs) ────────────────────────
-    // Layout: `device-backup/<serial>/{screenshots/*.png, logs/*.log}` — the
-    // diagnostic artifacts pulled off a Kindle on Sync (see
-    // `device::misc::backup_device_misc`). Keyed by device serial because logs
-    // share a filename (`sidle-native.log`) across devices and would otherwise
-    // clobber each other.
+    // ── Misc device backup (the configured sync collections) ──────────────────
+    // Layout: `device-backup/<serial>/<collection-id>/…` — the files pulled off
+    // a Kindle on Sync, one subdir per collection in `device-sync.json` (see
+    // `device_backup::SyncCollections` and `device::misc::backup_device_misc`).
+    // Keyed by device serial because filenames repeat across devices
+    // (`sidle-native.log`) and would otherwise clobber each other.
 
     /// Root holding every device's misc backup, one `<serial>/` subdir each.
     pub fn device_backup_dir(&self) -> PathBuf {
         self.root.join("device-backup")
     }
 
-    /// Screenshots pulled off one device (`screenshot_*.png`).
-    pub fn device_backup_screenshots(&self, serial: &str) -> PathBuf {
+    /// One collection's files as pulled off one device. `id` is expected to
+    /// have passed `device_backup::sanitize_id`.
+    pub fn device_backup_collection(&self, serial: &str, id: &str) -> PathBuf {
         self.device_backup_dir()
             .join(sanitize_device_id(serial))
-            .join("screenshots")
+            .join(id)
     }
 
-    /// picker logs pulled off one device (`sidle-native.log`, …).
-    pub fn device_backup_logs(&self, serial: &str) -> PathBuf {
-        self.device_backup_dir()
-            .join(sanitize_device_id(serial))
-            .join("logs")
-    }
-
-    /// Create both misc-backup subdirs for one device.
+    /// Create the misc-backup dir for one device. The per-collection subdirs
+    /// are created as files land in them — a collection whose folder isn't on
+    /// this device should leave nothing behind.
     pub fn ensure_device_backup(&self, serial: &str) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.device_backup_screenshots(serial))?;
-        std::fs::create_dir_all(self.device_backup_logs(serial))?;
-        Ok(())
+        std::fs::create_dir_all(self.device_backup_dir().join(sanitize_device_id(serial)))
+    }
+
+    /// Which device folders a Sync brings across, as edited in the app's
+    /// settings. Keyed off the active library root for the same reason as
+    /// [`device_dist`](Self::device_dist): the app writes it, the server serves
+    /// it to the picker, and both must agree on one location after a relocate.
+    /// Absent until the defaults are first edited — see
+    /// [`SyncCollections::load`](crate::library::device_backup::SyncCollections::load).
+    pub fn device_sync_config(&self) -> PathBuf {
+        self.root.join("device-sync.json")
     }
 
     // ── Handwritten ink on a sideloaded doc (PDOC) ──────────────────────────
@@ -643,19 +647,19 @@ mod tests {
         };
         for serial in ["..", ".", "...", ""] {
             assert_eq!(
-                paths.device_backup_screenshots(serial),
+                paths.device_backup_collection(serial, "screenshots"),
                 PathBuf::from("/tmp/root/device-backup/unknown-device/screenshots"),
                 "serial {serial:?} escaped the backup dir"
             );
         }
         // Separators still fold to `_`, keeping a crafted serial one segment.
         assert_eq!(
-            paths.device_backup_logs("../../etc"),
+            paths.device_backup_collection("../../etc", "logs"),
             PathBuf::from("/tmp/root/device-backup/.._.._etc/logs")
         );
         // A real serial passes through untouched.
         assert_eq!(
-            paths.device_backup_logs("G000AB12345678"),
+            paths.device_backup_collection("G000AB12345678", "logs"),
             PathBuf::from("/tmp/root/device-backup/G000AB12345678/logs")
         );
     }

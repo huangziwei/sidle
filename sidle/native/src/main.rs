@@ -48,11 +48,16 @@ use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
 
-const LOG_PATH: &str = "/mnt/us/sidle-native.log";
+/// Where every app on this Kindle that follows the convention keeps its logs —
+/// one folder rather than a growing scatter across the USB root. Also what the
+/// desktop's default `logs` sync collection scans, so a Sync brings back the
+/// neighbours' logs along with ours.
+const LOG_DIR: &str = "/mnt/us/logs";
+const LOG_PATH: &str = "/mnt/us/logs/sidle-native.log";
 /// Dedicated log for the LAN self-update, so its trail isn't interleaved with
 /// the gallery's `LOG_PATH`. Written by `update_log` from both the in-app
 /// **Update** button (inline in `run`) and the `--update` recovery launch.
-const UPDATE_LOG_PATH: &str = "/mnt/us/sidle-update.log";
+const UPDATE_LOG_PATH: &str = "/mnt/us/logs/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 /// On-device extension bundle root. `--update` stages its pulled binary under here as
 /// `bin/sidle.new` (manifest names are relative to this dir), and the launcher
@@ -2566,6 +2571,7 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 fn log(line: impl AsRef<str>) {
     let line = line.as_ref();
     let log_path = if std::path::Path::new("/mnt/us").is_dir() {
+        let _ = std::fs::create_dir_all(LOG_DIR);
         LOG_PATH
     } else {
         "./sidle-native.log"
@@ -2588,6 +2594,7 @@ fn log(line: impl AsRef<str>) {
 fn update_log(line: impl AsRef<str>) {
     let line = line.as_ref();
     let path = if std::path::Path::new("/mnt/us").is_dir() {
+        let _ = std::fs::create_dir_all(LOG_DIR);
         UPDATE_LOG_PATH
     } else {
         "./sidle-update.log"

@@ -3,7 +3,20 @@
 # this; we exec the static Rust binary.
 # Captures any stderr to a sibling log so a non-zero exit isn't silent.
 EXT=/mnt/us/extensions/sidle
-LOG=/mnt/us/sidle-native.log
+# One folder for every app's logs, rather than a scatter across the USB root.
+# This is also what a Sync scans, so the neighbours' logs come back with ours.
+LOGS=/mnt/us/logs
+mkdir -p "$LOGS"
+# Fold in the two logs older builds kept in the root. Self-limiting: once
+# they're gone this is a pair of failed tests. Done here rather than in the
+# binary because this script's own `2>>` redirect below holds the destination
+# open — moving the file out from under an open fd on FAT is how you lose it.
+for old in /mnt/us/sidle-native.log /mnt/us/sidle-update.log; do
+    if [ -f "$old" ]; then
+        cat "$old" >> "$LOGS/${old##*/}" && rm -f "$old"
+    fi
+done
+LOG=$LOGS/sidle-native.log
 echo "[$(date)] launch $(uname -m)" >> "$LOG"
 # Apply a staged self-update (written by the picker's in-app Update button) before
 # we exec — never overwrite the running binary on FAT (ETXTBSY/corruption). The

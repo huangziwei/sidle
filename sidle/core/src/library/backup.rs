@@ -48,11 +48,11 @@ const FORMAT_TAG: &str = "sidle-library-backup";
 /// of one silently dropped notebook files; v2 closes that. A v1 archive still
 /// restores into a v2 app — it simply has no `notebooks/` entries to extract.
 ///
-/// v3: every other root entry is swept in too — `device-backup/` (the Kindle
-/// screenshots and picker logs the Misc tab shows, which are files on disk and
-/// nowhere in the DB, so v2 archives carried no trace of them), `cover-thumb.fmt`,
-/// `.server-token`, and anything added later. An older archive restores into a
-/// v3 app unchanged; it simply has fewer entries to extract.
+/// v3: every other root entry is swept in too — `device-backup/` (what a Sync
+/// brings off the Kindle for the Files tab, which are files on disk and nowhere
+/// in the DB, so v2 archives carried no trace of them), `device-sync.json`,
+/// `cover-thumb.fmt`, `.server-token`, and anything added later. An older archive
+/// restores into a v3 app unchanged; it simply has fewer entries to extract.
 const FORMAT_VERSION: u32 = 3;
 
 /// The archive's `manifest.json`: enough to validate integrity, gate the schema
@@ -246,11 +246,12 @@ pub fn create_archive_with_progress(
     }
 
     // Everything else the root holds, at its own name: `device-backup/` above
-    // all — the Misc tab's screenshots and picker logs, which exist only as
-    // files and would otherwise be in no backup at all — plus `cover-thumb.fmt`,
-    // `.server-token`, and whatever lands there next. Deflated rather than
-    // stored: this is small and mostly text (logs, markers, a token), and the
-    // screenshots are the only already-compressed thing in it. v3.
+    // all — what a Sync brings off the Kindle for the Files tab, which exists
+    // only as files and would otherwise be in no backup at all — plus
+    // `device-sync.json`, `cover-thumb.fmt`, `.server-token`, and whatever lands
+    // there next. Deflated rather than stored: this is small and mostly text
+    // (logs, markers, a token), and the screenshots are the only
+    // already-compressed thing in it. v3.
     for path in &extras {
         let name = path
             .file_name()
@@ -897,7 +898,7 @@ mod tests {
             "notebook page bytes identical after roundtrip"
         );
 
-        // The swept remainder (v3): the Misc tab's screenshots — files the DB
+        // The swept remainder (v3): the Files tab's screenshots — files the DB
         // never names, so no inventory-driven archive could have found them —
         // and the root markers beside them.
         assert_eq!(

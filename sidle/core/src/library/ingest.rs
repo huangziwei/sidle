@@ -402,14 +402,15 @@ pub struct DeviceImportReport {
     pub ink_pages: usize,
     /// Ink notebooks skipped because their `nbk` was unchanged since last sync.
     pub ink_unchanged: usize,
-    /// Screenshots newly backed up off the device this sync (`screenshot_*.png`
-    /// → `device-backup/<serial>/screenshots/`). Populated by the app layer's
-    /// `device::misc::backup_device_misc`; 0 on the pure-core import paths.
-    pub misc_screenshots: usize,
-    /// picker logs refreshed off the device this sync (`*.log` at the
-    /// USB root → `device-backup/<serial>/logs/`). App-populated, like
-    /// [`misc_screenshots`](Self::misc_screenshots).
-    pub misc_logs: usize,
+    /// Files backed up off the device this sync that the library had never seen
+    /// (a screenshot, say) → `device-backup/<serial>/<collection>/`. Populated
+    /// by the app layer's `device::misc::backup_device_misc`; 0 on the pure-core
+    /// import paths.
+    pub misc_new: usize,
+    /// Files re-copied off the device this sync because they may have grown (a
+    /// log). Refreshed on every sync, so unlike
+    /// [`misc_new`](Self::misc_new) they are never news. App-populated too.
+    pub misc_refreshed: usize,
     /// Books whose sidecar was written back with annotations made in Sidle.
     /// App-populated (the write needs a transport); 0 on the pure-core paths.
     pub pushed_books: usize,

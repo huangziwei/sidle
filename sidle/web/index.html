@@ -10,7 +10,7 @@
     <header class="toolbar">
       <div class="toolbar-group">
         <!-- Reading Log is a page of its own, not a third way to look at the
-             library, so it sits outside the Books/Notes/Misc. tablist and
+             library, so it sits outside the Books/Notes/Files tablist and
              carries its own state — the mirror of the Kindle pill on the right. -->
         <button type="button" id="section-reading" class="section-pill"
                 title="What you read and for how long, recovered from your Kindle's own logs">Reading Log</button>
@@ -19,7 +19,7 @@
           <button id="section-books" class="seg-btn active" role="tab" aria-selected="true">Books</button>
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
           <button id="section-misc" class="seg-btn" role="tab" aria-selected="false"
-                  title="Screenshots and logs backed up from your Kindle on Sync">Misc.</button>
+                  title="Files backed up from your Kindle on Sync">Files</button>
         </div>
         <div class="toolbar-sep" id="section-view-sep" aria-hidden="true"></div>
         <div class="seg" id="view-seg" role="tablist" aria-label="View">
@@ -184,33 +184,20 @@
         </div>
       </section>
 
-      <!-- Misc.: screenshots + picker logs backed up off the Kindle on Sync
-           (device::misc). Two groups — a screenshot thumbnail grid and a log
-           list — both populated by misc.js (window.Misc), which owns its own
-           in-app viewers (lightbox / log <pre>). -->
-      <section id="misc" class="view misc" aria-label="Misc" hidden>
+      <!-- Files: what a Sync brings off the Kindle besides books (device::misc).
+           One group per collection in device-sync.json, in that order, built by
+           misc.js (window.Misc) — images as a thumbnail grid, everything else as
+           a list. misc.js also owns the in-app viewers (lightbox / text <pre>)
+           and the settings editor for the collections themselves. -->
+      <section id="misc" class="view misc" aria-label="Files" hidden>
         <div id="misc-empty" class="empty" hidden>
           <p>Nothing backed up yet.</p>
           <p class="empty-hint">
-            Screenshots and picker logs are pulled off your Kindle each time you Sync.
+            Files are pulled off your Kindle each time you Sync, from the folders
+            listed under <strong>Kindle folders</strong> in Library settings.
           </p>
         </div>
-        <div id="misc-content" hidden>
-          <section class="misc-group" id="misc-shots-group" hidden>
-            <header class="misc-group-header">
-              <strong>Screenshots</strong>
-              <span id="misc-shots-count" class="misc-count"></span>
-            </header>
-            <div id="misc-shots-grid" class="misc-shots-grid"></div>
-          </section>
-          <section class="misc-group" id="misc-logs-group" hidden>
-            <header class="misc-group-header">
-              <strong>Logs</strong>
-              <span id="misc-logs-count" class="misc-count"></span>
-            </header>
-            <ul id="misc-logs-list" class="misc-logs-list"></ul>
-          </section>
-        </div>
+        <div id="misc-content" hidden></div>
       </section>
 
       <!-- Reading Log: time read per day, recovered from the Kindle's own
@@ -740,12 +727,33 @@
             <button type="button" id="settings-use" class="btn">Choose folder&hellip;</button>
           </section>
 
+          <!-- Which folders on the Kindle a Sync brings back. The list is the
+               library's (device-sync.json); the picker fetches it before every
+               scan, so adding or renaming one here needs no device redeploy.
+               Rows are built by misc.js. -->
+          <section class="settings-section">
+            <h3>Kindle folders</h3>
+            <p class="settings-hint">
+              Folders under <code>/mnt/us</code> that a Sync copies into your library and
+              shows in <strong>Files</strong>. A folder that isn&rsquo;t on the Kindle is
+              skipped. Patterns match filenames, <code>*</code> standing for any run of
+              characters &mdash; <code>*.log</code>, <code>screenshot*</code>, <code>*</code>
+              for everything. Separate several folders or patterns with commas.
+            </p>
+            <div id="settings-collections" class="settings-collections"></div>
+            <div class="settings-actions">
+              <button type="button" id="settings-collections-add" class="btn">Add folder</button>
+              <button type="button" id="settings-collections-save" class="btn">Save folders</button>
+            </div>
+            <p id="settings-collections-status" class="settings-status" hidden></p>
+          </section>
+
           <section class="settings-section">
             <h3>Back up &amp; restore</h3>
             <p class="settings-hint">
               A backup is one <code>.sidlebak</code> file holding your whole library: every book
               and cover, and everything sidle keeps beside them — metadata, highlights,
-              handwriting, your reading log, and the Kindle screenshots and logs under Misc.
+              handwriting, your reading log, and the Kindle files under Files.
               <strong>Restore</strong> replaces the current library and restarts; it asks first
               whether to delete the library it replaces or set it aside as an undo.
               <strong>Merge</strong> folds another library&rsquo;s books and notebooks into this

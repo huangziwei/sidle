@@ -3589,6 +3589,72 @@ kbd {
   color: var(--accent);
 }
 
+/* One editable Kindle folder in the settings list (the rows misc.js builds).
+   Text fields wrap across rows, checkboxes take a row of their own, and Remove
+   pins top-right in reserved padding so it never overlaps a field. */
+.settings-collections {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.settings-collection {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  padding-right: 78px; /* keeps Remove clear of the fields */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.settings-collection-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 130px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.settings-collection-field input {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12.5px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.settings-collection-flags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  flex: 1 1 100%;
+}
+.settings-collection-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.settings-collection-remove {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 12px;
+}
+.settings-collection-where {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
 /* ===========================================================================
    Notes — Scribe handwritten notebooks (Books/Notes tab). Grid reuses the
    .book-card / .cover primitives; tiles are page-shaped (3:4) instead of the
@@ -3643,13 +3709,15 @@ kbd {
   padding: 1px 4px;
 }
 
-/* ── Misc. tab: screenshots + picker logs backed up on Sync ─────────────────── */
+/* ── Files tab: one group per synced Kindle folder ──────────────────────────── */
 
+/* Within a group, images come first as a thumbnail grid and everything else
+   follows as a list, so a folder of both reads as one section. */
 .misc-group {
   margin-bottom: 28px;
 }
-.misc-group[hidden] {
-  display: none;
+.misc-group .misc-shots-grid + .misc-logs-list {
+  margin-top: 16px;
 }
 .misc-group-header {
   display: flex;

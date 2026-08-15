@@ -1234,11 +1234,77 @@ pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Misc backup push — POST /sync/misc (screenshots + picker logs, the WiFi backup)
+// Misc backup — GET /sync/misc (which folders), POST /sync/misc (the files)
 // ---------------------------------------------------------------------------
 
-/// The push bundle: each screenshot / picker log, base64 in JSON. Mirrors
-/// `sidle-server`'s `MiscSyncRequest`. `device_serial` comes from `server.conf`.
+/// One folder the library asked this Kindle to back up. Mirrors `sidle-core`'s
+/// `device_backup::SyncCollection`, which this crate can't link — it
+/// cross-compiles for the device. The library owns the list; the picker holds
+/// only the copy it fetched this Sync, which is what lets a folder be added or
+/// renamed on the desktop with no redeploy here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Collection {
+    pub id: String,
+    pub label: String,
+    /// Folders to scan, relative to `/mnt/us`. `"."` (or `""`) is the root.
+    pub dirs: Vec<String>,
+    /// Filenames to send, as [`glob_match`] patterns.
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub recursive: bool,
+    /// Delete the sent files off this Kindle once the push landed.
+    #[serde(default)]
+    pub clear_device: bool,
+    /// Filenames deleted off this Kindle after the push but never sent — the
+    /// firmware's `wininfo_screenshot_*.txt` companions and the like.
+    #[serde(default)]
+    pub purge: Vec<String>,
+}
+
+impl Collection {
+    fn includes(&self, name: &str) -> bool {
+        !is_never_sent(name) && self.include.iter().any(|p| glob_match(p, name))
+    }
+
+    fn purges(&self, name: &str) -> bool {
+        self.purge.iter().any(|p| glob_match(p, name))
+    }
+}
+
+/// What the picker scans when the library can't be asked (see [`push_misc`]).
+/// Deliberately the same two the library seeds itself with.
+fn default_collections() -> Vec<Collection> {
+    vec![
+        Collection {
+            id: "screenshots".into(),
+            label: "Screenshots".into(),
+            dirs: vec!["screenshots".into(), ".".into()],
+            include: vec!["screenshot*".into()],
+            recursive: false,
+            clear_device: true,
+            purge: vec!["wininfo_screenshot*".into()],
+        },
+        Collection {
+            id: "logs".into(),
+            label: "Logs".into(),
+            dirs: vec!["logs".into()],
+            include: vec!["*.log".into()],
+            recursive: true,
+            clear_device: false,
+            purge: Vec::new(),
+        },
+    ]
+}
+
+/// The `GET /sync/misc` body: the library's collection list.
+#[derive(Deserialize)]
+struct CollectionsReply {
+    collections: Vec<Collection>,
+}
+
+/// The push bundle: each file base64 in JSON, tagged with the collection it was
+/// scanned for. Mirrors `sidle-server`'s `MiscSyncRequest`. `device_serial`
+/// comes from `server.conf`.
 #[derive(Serialize)]
 struct MiscRequest {
     device_serial: String,
@@ -1247,50 +1313,109 @@ struct MiscRequest {
 
 #[derive(Serialize)]
 struct MiscFile {
-    name: String,
+    collection: String,
+    /// The file's path relative to its collection's folder — `2026/draft.md`
+    /// for a recursive collection, a bare filename otherwise.
+    path: String,
     data_b64: String,
 }
 
-/// The server's `MiscSyncResult` — what it backed up, for the picker's toast.
-#[derive(Debug, Default, Deserialize)]
+/// The server's `MiscSyncResult`: files stored, per collection id.
+#[derive(Deserialize)]
+struct MiscReply {
+    #[serde(default)]
+    stored: std::collections::BTreeMap<String, usize>,
+}
+
+/// What the push backed up, labelled for the picker's toast.
+#[derive(Debug, Default)]
 pub struct MiscReport {
-    #[serde(default)]
-    pub screenshots: usize,
-    #[serde(default)]
-    pub logs: usize,
+    /// `(label, count)` per collection that stored something, in config order.
+    pub stored: Vec<(String, usize)>,
 }
 
 impl MiscReport {
-    /// A terse toast fragment like `2 screenshots, 1 log`, or `None` when the
+    /// A terse toast fragment like `Screenshots 2, Logs 1`, or `None` when the
     /// push backed nothing up (so the caller omits it entirely).
     pub fn summary(&self) -> Option<String> {
-        let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let mut parts = Vec::new();
-        if self.screenshots > 0 {
-            parts.push(format!(
-                "{} screenshot{}",
-                self.screenshots,
-                plural(self.screenshots)
-            ));
+        if self.stored.is_empty() {
+            return None;
         }
-        if self.logs > 0 {
-            parts.push(format!("{} log{}", self.logs, plural(self.logs)));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(", "))
+        Some(
+            self.stored
+                .iter()
+                .map(|(label, n)| format!("{label} {n}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
+
+/// Ask the desktop which folders it wants backed up. Falls back to
+/// [`default_collections`] on anything short of a clean answer — a Sidle that
+/// stops backing up screenshots because one request failed would be a worse
+/// outcome than one that backs up the defaults.
+fn fetch_collections(agent: &ureq::Agent, cfg: &ServerConfig) -> Vec<Collection> {
+    let url = format!("https://{}:{}/sync/misc", cfg.host, cfg.port);
+    let fetched = (|| -> Result<Vec<Collection>> {
+        let mut res = match agent
+            .get(&url)
+            .header("X-Sidle-Token", &cfg.token)
+            .config()
+            .timeout_global(Some(SYNC_TIMEOUT))
+            .build()
+            .call()
+        {
+            Ok(res) => res,
+            Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
+                return Err(SidleError::TokenMismatch);
+            }
+            Err(e) => return Err(anyhow!("GET {url}: {e}").into()),
+        };
+        let text =
+            read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
+        let reply: CollectionsReply =
+            serde_json::from_str(&text).with_context(|| format!("parse GET {url}"))?;
+        Ok(reply.collections)
+    })();
+    match fetched {
+        Ok(c) => c,
+        Err(e) => {
+            // eprintln lands in the picker log via sidle.sh's `2>>` redirect.
+            eprintln!("[sidle/misc] collection list unavailable ({e}) — using defaults");
+            default_collections()
         }
     }
 }
 
-/// Push the Kindle's screenshots + picker logs to `POST /sync/misc` — the WiFi
-/// backup the desktop "Misc." tab views. `us_root` is `/mnt/us`. On a successful
-/// push the screenshots are **deleted from the device** (they're safely backed
-/// up now, and a Kindle's screenshot folder is scratch space) — logs stay, since
-/// they're the live append-only diagnostic trail. That clear-on-sync also means
-/// each Sync only re-uploads screenshots taken since the last one. Returns the
-/// server's [`MiscReport`].
+/// How many file bytes one `POST /sync/misc` may carry.
+///
+/// Sized for the device, not the server: base64 inflates by a third and the
+/// serialized body is a second copy, so a batch costs roughly 2.7× this in peak
+/// RAM. Collections are the user's to configure, so the folders here have no
+/// bound of their own — batching is what keeps a big haul (or a runaway log)
+/// inside this Kindle's memory and inside the server's body limit.
+const MISC_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Back this Kindle's configured folders up to `POST /sync/misc` — the WiFi
+/// backup the desktop's Files tab views. `us_root` is `/mnt/us`.
+///
+/// The library says which folders it wants (so renaming one on the desktop needs
+/// no redeploy here), then the picker sends what it found, in batches bounded by
+/// [`MISC_BATCH_BYTES`]. Bytes are read a batch at a time rather than all at once
+/// — the scan only walks names and sizes — so a large folder costs one batch of
+/// memory, not its whole size.
+///
+/// Once **every** batch has landed, each collection's `clear_device` / `purge`
+/// files are deleted from the device: screenshots by default, since a Kindle's
+/// screenshot folder is scratch space and the library now holds them, and the
+/// firmware's `wininfo_screenshot_*.txt` companions with them. Logs stay, being
+/// the live append-only diagnostic trail.
+///
+/// Nothing is ever removed from the device without a confirmed copy on the other
+/// side: only files whose bytes went into a request that succeeded are cleared,
+/// so a file the scan saw but the push couldn't read stays put, and a failed
+/// batch deletes nothing at all (the next Sync re-sends; the library dedups).
 pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Result<MiscReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
@@ -1300,43 +1425,75 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         .into());
     }
 
-    let (files, screenshot_paths) = collect_misc_files(us_root);
-    if files.is_empty() {
-        // Nothing on the device to back up — skip the round-trip.
+    let collections = fetch_collections(agent, cfg);
+    let scan = collect_misc_files(us_root, &collections);
+    if scan.entries.is_empty() && scan.purge.is_empty() {
+        // Nothing on the device to back up or tidy — skip the round-trip.
         return Ok(MiscReport::default());
     }
 
-    let req = MiscRequest {
-        device_serial: cfg.serial.clone(),
-        files,
-    };
-    let body = serde_json::to_vec(&req).context("serialize misc request")?;
-
     let url = format!("https://{}:{}/sync/misc", cfg.host, cfg.port);
-    let mut res = match agent
-        .post(&url)
-        .header("X-Sidle-Token", &cfg.token)
-        .header("Content-Type", "application/json")
-        .config()
-        .timeout_global(Some(SYNC_TIMEOUT))
-        .build()
-        .send(&body)
-    {
-        Ok(res) => res,
-        Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
-            return Err(SidleError::TokenMismatch);
+    let mut stored: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut cleared: Vec<&std::path::PathBuf> = Vec::new();
+    for batch in misc_batches(&scan.entries, MISC_BATCH_BYTES) {
+        let mut files = Vec::with_capacity(batch.len());
+        let mut batch_cleared = Vec::new();
+        for e in batch {
+            // Read here, not during the scan: one batch in memory at a time. A
+            // file that vanished, emptied, or won't read since the scan is
+            // simply not in this push — and, having never been sent, is not one
+            // this run may delete either.
+            let Some(bytes) = std::fs::read(&e.path).ok().filter(|b| !b.is_empty()) else {
+                continue;
+            };
+            files.push(MiscFile {
+                collection: e.collection.clone(),
+                path: e.rel.clone(),
+                data_b64: BASE64.encode(&bytes),
+            });
+            if e.clear {
+                batch_cleared.push(&e.path);
+            }
         }
-        Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
-    };
-    let body =
-        read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
-    let report: MiscReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+        if files.is_empty() {
+            continue;
+        }
+        let req = MiscRequest {
+            device_serial: cfg.serial.clone(),
+            files,
+        };
+        let body = serde_json::to_vec(&req).context("serialize misc request")?;
 
-    // The server has them now (a non-2xx would have returned above) — clear the
-    // screenshots off the device. Only screenshots: logs are left in place. Best-
-    // effort; a failed unlink just leaves that file for the next Sync to re-push.
-    // eprintln lands in `sidle-native.log` via sidle.sh's `2>>` redirect.
-    for path in &screenshot_paths {
+        let mut res = match agent
+            .post(&url)
+            .header("X-Sidle-Token", &cfg.token)
+            .header("Content-Type", "application/json")
+            .config()
+            .timeout_global(Some(SYNC_TIMEOUT))
+            .build()
+            .send(&body)
+        {
+            Ok(res) => res,
+            Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
+                return Err(SidleError::TokenMismatch);
+            }
+            Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
+        };
+        let body =
+            read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
+        let reply: MiscReply =
+            serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+        for (id, n) in reply.stored {
+            *stored.entry(id).or_default() += n;
+        }
+        cleared.extend(batch_cleared);
+    }
+
+    // Every batch landed (a non-2xx would have returned above) — clear what this
+    // run is allowed to clear: the files it actually sent, plus the purge matches
+    // it never meant to send. Best-effort per file; a failed unlink just leaves
+    // that one for the next Sync.
+    for path in cleared.into_iter().chain(scan.purge.iter()) {
         if let Err(e) = std::fs::remove_file(path) {
             eprintln!(
                 "[sidle/misc] delete {} after sync failed: {e}",
@@ -1345,7 +1502,39 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         }
     }
 
-    Ok(report)
+    Ok(MiscReport {
+        stored: collections
+            .iter()
+            .filter_map(|c| {
+                stored
+                    .get(&c.id)
+                    .filter(|n| **n > 0)
+                    .map(|n| (c.label.clone(), *n))
+            })
+            .collect(),
+    })
+}
+
+/// Split scanned files into groups whose bytes sum to at most `budget`. A single
+/// file larger than the budget still goes alone rather than being dropped —
+/// sending it is the only way it is ever backed up, and the server's body limit
+/// is the real ceiling.
+fn misc_batches(entries: &[MiscEntry], budget: u64) -> Vec<Vec<&MiscEntry>> {
+    let mut out: Vec<Vec<&MiscEntry>> = Vec::new();
+    let mut cur: Vec<&MiscEntry> = Vec::new();
+    let mut used = 0u64;
+    for e in entries {
+        if !cur.is_empty() && used + e.size > budget {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(e);
+        used += e.size;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1512,86 +1701,140 @@ pub fn push_reading_log(
     Ok(report)
 }
 
-/// Read every screenshot (`screenshot*` under `screenshots/` and the USB root)
-/// and picker log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
-/// filename so a screenshot in both `screenshots/` and the root is sent once.
-/// Best-effort per file: an unreadable / empty one is skipped. Returns the push
-/// bundle plus the on-device paths of the screenshots in it — those get deleted
-/// after a successful push (see [`push_misc`]).
-fn collect_misc_files(us_root: &Path) -> (Vec<MiscFile>, Vec<std::path::PathBuf>) {
-    let mut files = Vec::new();
-    let mut screenshot_paths = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // `screenshots/` — everyone's screenshots (Sidle's own + newer stock firmware).
-    gather_misc(
-        &us_root.join("screenshots"),
-        true,
-        &mut files,
-        &mut screenshot_paths,
-        &mut seen,
-    );
-    // USB root — KOA2's stock screenshots live loose here; so do our picker logs.
-    gather_misc(us_root, false, &mut files, &mut screenshot_paths, &mut seen);
-    (files, screenshot_paths)
+/// How deep a recursive collection descends. Mirrors core's `MAX_DEPTH`: a
+/// device folder is someone else's to organize, and five levels is more nesting
+/// than a notes or drafts folder ever has.
+const MAX_DEPTH: usize = 5;
+
+/// One file the scan found: everything the push needs except its bytes, which
+/// are read a batch at a time.
+struct MiscEntry {
+    collection: String,
+    /// Path relative to the collection's scanned folder — what it is stored
+    /// under in the library.
+    rel: String,
+    path: std::path::PathBuf,
+    size: u64,
+    /// This file's collection clears the device. Only ever acted on for a file
+    /// whose bytes actually went into a request that succeeded.
+    clear: bool,
 }
 
-/// Append matching files from one directory (non-recursive) to `out`. With
-/// `shots_only`, only screenshots match; otherwise screenshots AND logs. `seen`
-/// dedups by filename across the two scanned directories. A screenshot's device
-/// path is recorded in `screenshot_paths` so [`push_misc`] can delete it after a
-/// successful push (logs are never recorded — they stay on the device).
+/// One pass over every collection's folders.
+#[derive(Default)]
+struct MiscScan {
+    entries: Vec<MiscEntry>,
+    /// On-device paths matched by a collection's `purge`: unlinked once the push
+    /// lands, never read or sent. Recorded during the scan rather than
+    /// re-derived afterwards, so a file that appears between the scan and the
+    /// delete is left alone.
+    purge: Vec<std::path::PathBuf>,
+}
+
+/// Find every file the `collections` ask for beneath `us_root`. Names and sizes
+/// only — no bytes, so the walk costs the same whatever the folders hold. Dedups
+/// per collection by relative path, so a screenshot present in both
+/// `screenshots/` and the USB root is sent once. An empty file is skipped: it
+/// carries nothing and must not clobber a good prior backup.
+fn collect_misc_files(us_root: &Path, collections: &[Collection]) -> MiscScan {
+    let mut scan = MiscScan::default();
+    for collection in collections {
+        let mut seen = std::collections::HashSet::new();
+        for dir in &collection.dirs {
+            let base = if dir == "." || dir.is_empty() {
+                us_root.to_path_buf()
+            } else {
+                us_root.join(dir)
+            };
+            gather_misc(&base, "", collection, &mut scan, &mut seen, 0);
+        }
+    }
+    scan
+}
+
+/// Append one directory's matching files to `scan`, recursing when the
+/// collection asks for it. `rel` is this directory's path relative to the
+/// collection's scanned folder — the same path the file is stored under, which
+/// is what puts a collection's two scanned folders in one namespace for `seen`.
 fn gather_misc(
     dir: &Path,
-    shots_only: bool,
-    out: &mut Vec<MiscFile>,
-    screenshot_paths: &mut Vec<std::path::PathBuf>,
+    rel: &str,
+    collection: &Collection,
+    scan: &mut MiscScan,
     seen: &mut std::collections::HashSet<String>,
+    depth: usize,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_shot = is_screenshot(&name);
-        let wanted = if shots_only {
-            is_shot
+        let child_rel = if rel.is_empty() {
+            name.clone()
         } else {
-            is_shot || is_log(&name)
+            format!("{rel}/{name}")
         };
-        if !wanted || seen.contains(&name) {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if collection.recursive && depth + 1 < MAX_DEPTH && !name.starts_with('.') {
+                gather_misc(&entry.path(), &child_rel, collection, scan, seen, depth + 1);
+            }
             continue;
         }
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue; // only files carry bytes
+        // Purge matches are cleared without ever being read — the point of them
+        // is that they're worth removing and worth nothing in the library.
+        if collection.purges(&name) {
+            scan.purge.push(entry.path());
+            continue;
         }
-        let path = entry.path();
-        match std::fs::read(&path) {
-            Ok(bytes) if !bytes.is_empty() => {
-                seen.insert(name.clone());
-                if is_shot {
-                    screenshot_paths.push(path);
-                }
-                out.push(MiscFile {
-                    name,
-                    data_b64: BASE64.encode(&bytes),
-                });
-            }
-            _ => {}
+        if !collection.includes(&name) || meta.len() == 0 || seen.contains(&child_rel) {
+            continue;
         }
+        seen.insert(child_rel.clone());
+        scan.entries.push(MiscEntry {
+            collection: collection.id.clone(),
+            rel: child_rel,
+            path: entry.path(),
+            size: meta.len(),
+            clear: collection.clear_device,
+        });
     }
 }
 
-/// A Kindle screenshot filename (either generation), case-insensitive. Mirrors
-/// `sidle_core::library::device_backup::classify_misc` — the native crate can't
-/// depend on sidle-core across the cross-compile boundary.
-fn is_screenshot(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("screenshot") && !lower.ends_with(".partial")
+/// Names no collection ever sends, whatever its patterns say: an in-flight
+/// write, and the dotfiles a desktop OS leaves behind after someone opens the
+/// Kindle in a file browser. Mirrors core's `is_never_backed_up`.
+fn is_never_sent(name: &str) -> bool {
+    name.starts_with('.') || name.to_ascii_lowercase().ends_with(".partial")
 }
 
-/// A picker log filename (`*.log`), case-insensitive. Mirrors core's `classify_misc`.
-fn is_log(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".log")
+/// Case-insensitive glob over a bare filename, `*` being the only
+/// metacharacter. Mirrors `sidle_core::library::device_backup::glob_match` —
+/// this crate can't depend on sidle-core across the cross-compile boundary, and
+/// the two must agree or a file the library asked for wouldn't be sent.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+    let text: Vec<char> = name.to_lowercase().chars().collect();
+
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star, mut retry) = (None, 0usize);
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            star = Some(p);
+            retry = t;
+            p += 1;
+        } else if let Some(s) = star {
+            p = s + 1;
+            retry += 1;
+            t = retry;
+        } else {
+            return false;
+        }
+    }
+    pat[p..].iter().all(|&c| c == '*')
 }
 
 #[cfg(test)]
@@ -1786,45 +2029,73 @@ mod tests {
     fn collect_misc_files_scans_both_locations_and_dedups() {
         let us = scratch("misc");
         std::fs::create_dir_all(us.join("screenshots")).unwrap();
-        // Newer-style screenshots under screenshots/.
+        std::fs::create_dir_all(us.join("logs")).unwrap();
+        // Newer-style screenshots under screenshots/, with the firmware's
+        // companion file beside one of them.
         std::fs::write(us.join("screenshots/screenshot_100.png"), b"A").unwrap();
         std::fs::write(us.join("screenshots/screenshot_200.png"), b"B").unwrap();
-        // KOA2 stock capture loose in the root + a picker log; and one name that
-        // appears in BOTH screenshots/ and the root (must be sent only once).
+        std::fs::write(
+            us.join("screenshots/wininfo_screenshot_2026_08_15T01_47_50+0200.txt"),
+            b"win",
+        )
+        .unwrap();
+        // KOA2 stock capture loose in the root, and one name that appears in
+        // BOTH screenshots/ and the root (must be sent only once).
         std::fs::write(us.join("Screenshot_root.png"), b"C").unwrap();
-        std::fs::write(us.join("sidle-native.log"), b"log\n").unwrap();
         std::fs::write(us.join("screenshot_100.png"), b"DUP").unwrap();
+        // Logs live in logs/ now — a stray root log is not scanned.
+        std::fs::write(us.join("logs/sidle-native.log"), b"log\n").unwrap();
+        std::fs::write(us.join("stray.log"), b"not scanned\n").unwrap();
         // Unrelated root files that must be ignored.
         std::fs::write(us.join("version.txt"), b"5.16").unwrap();
 
-        let (files, screenshot_paths) = collect_misc_files(&us);
-        let mut names: Vec<_> = files.iter().map(|f| f.name.clone()).collect();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "Screenshot_root.png",
-                "screenshot_100.png",
-                "screenshot_200.png",
-                "sidle-native.log",
-            ],
-            "both dirs scanned, dup name collapsed, non-misc ignored"
-        );
-        // The screenshots/ copy wins the dedup (its bytes, not the root DUP).
-        let hundred = files
+        let scan = collect_misc_files(&us, &default_collections());
+        let mut sent: Vec<_> = scan
+            .entries
             .iter()
-            .find(|f| f.name == "screenshot_100.png")
+            .map(|e| format!("{}:{}", e.collection, e.rel))
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            vec![
+                "logs:sidle-native.log",
+                "screenshots:Screenshot_root.png",
+                "screenshots:screenshot_100.png",
+                "screenshots:screenshot_200.png",
+            ],
+            "both screenshot dirs scanned, dup collapsed, only logs/ for logs"
+        );
+        // The screenshots/ copy wins the dedup — the first dir listed wins.
+        let hundred = scan
+            .entries
+            .iter()
+            .find(|e| e.rel == "screenshot_100.png")
             .unwrap();
-        assert_eq!(hundred.data_b64, BASE64.encode(b"A"));
+        assert_eq!(hundred.path, us.join("screenshots/screenshot_100.png"));
 
-        // Only screenshots are queued for on-device deletion — never the log.
-        let mut del: Vec<_> = screenshot_paths
+        // The wininfo companion is cleared without ever being sent.
+        let purge: Vec<_> = scan
+            .purge
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        del.sort();
         assert_eq!(
-            del,
+            purge,
+            vec!["wininfo_screenshot_2026_08_15T01_47_50+0200.txt"]
+        );
+
+        // Screenshots are the collection that clears; the log is not — and a
+        // screenshot is only ever cleared after its bytes go out (see push_misc).
+        let mut clears: Vec<_> = scan
+            .entries
+            .iter()
+            .filter(|e| e.clear)
+            .map(|e| e.rel.clone())
+            .collect();
+        clears.sort();
+        assert_eq!(
+            clears,
             vec![
                 "Screenshot_root.png",
                 "screenshot_100.png",
@@ -1836,19 +2107,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&us);
     }
 
+    /// A collection the library added: its own folder, its own pattern, its own
+    /// subfolders — and nothing of it deleted from the device.
+    #[test]
+    fn collect_misc_files_walks_a_recursive_collection() {
+        let us = scratch("misc-recursive");
+        std::fs::create_dir_all(us.join("writing/2026")).unwrap();
+        std::fs::write(us.join("writing/index.md"), b"root").unwrap();
+        std::fs::write(us.join("writing/2026/draft.md"), b"nested").unwrap();
+        std::fs::write(us.join("writing/2026/notes.txt"), b"other").unwrap();
+
+        // The id is the library's storage key, not the folder's name: the two
+        // are free to differ, and the folder is the one that gets renamed.
+        let collections = vec![Collection {
+            id: "drafts".into(),
+            label: "Drafts".into(),
+            dirs: vec!["writing".into()],
+            include: vec!["*.md".into()],
+            recursive: true,
+            clear_device: false,
+            purge: Vec::new(),
+        }];
+        let scan = collect_misc_files(&us, &collections);
+        let mut sent: Vec<_> = scan.entries.iter().map(|e| e.rel.clone()).collect();
+        sent.sort();
+        assert_eq!(sent, vec!["2026/draft.md", "index.md"]);
+        assert!(scan.purge.is_empty(), "nothing purged off the device");
+        assert!(
+            scan.entries.iter().all(|e| !e.clear),
+            "nothing cleared off the device"
+        );
+
+        // A folder that isn't on this Kindle is simply nothing to send.
+        let missing = vec![Collection {
+            id: "nowhere".into(),
+            label: "Nowhere".into(),
+            dirs: vec!["nowhere".into()],
+            include: vec!["*".into()],
+            recursive: true,
+            clear_device: false,
+            purge: Vec::new(),
+        }];
+        assert!(collect_misc_files(&us, &missing).entries.is_empty());
+
+        let _ = std::fs::remove_dir_all(&us);
+    }
+
+    /// A haul bigger than one request is split, and a single file over the
+    /// budget still goes rather than being dropped — the Kindle's memory, not
+    /// the folder's size, is what bounds a push.
+    #[test]
+    fn misc_batches_bound_one_request() {
+        let entry = |rel: &str, size: u64| MiscEntry {
+            collection: "logs".into(),
+            rel: rel.into(),
+            path: std::path::PathBuf::from(rel),
+            size,
+            clear: false,
+        };
+        let items = [entry("a", 400), entry("b", 400), entry("c", 400)];
+        let split = misc_batches(&items, 1000);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].len(), 2);
+        assert_eq!(split[1].len(), 1);
+
+        assert_eq!(misc_batches(&items, 10_000).len(), 1);
+
+        let huge = [entry("huge", 4000)];
+        let split = misc_batches(&huge, 1000);
+        assert_eq!(split.len(), 1);
+        assert_eq!(split[0].len(), 1);
+    }
+
+    #[test]
+    fn glob_matches_what_the_library_asks_for() {
+        assert!(glob_match("screenshot*", "Screenshot_ROOT.PNG"));
+        assert!(!glob_match("screenshot*", "wininfo_screenshot_1.txt"));
+        assert!(glob_match(
+            "wininfo_screenshot*",
+            "wininfo_screenshot_1.txt"
+        ));
+        assert!(glob_match("*.log", "sidle-native.log"));
+        assert!(!glob_match("*.log", "book.kfx"));
+        assert!(glob_match("*", "anything at all"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(!glob_match("a*b*c", "axxbyy"));
+        // Never sent, whatever the pattern says.
+        let all = Collection {
+            id: "x".into(),
+            label: "X".into(),
+            dirs: vec![".".into()],
+            include: vec!["*".into()],
+            recursive: false,
+            clear_device: false,
+            purge: Vec::new(),
+        };
+        assert!(all.includes("draft.md"));
+        assert!(!all.includes(".DS_Store"));
+        assert!(!all.includes("screenshot_1.png.partial"));
+    }
+
     #[test]
     fn misc_report_summary() {
         assert_eq!(MiscReport::default().summary(), None);
         let r = MiscReport {
-            screenshots: 2,
-            logs: 1,
+            stored: vec![("Screenshots".into(), 2), ("Logs".into(), 1)],
         };
-        assert_eq!(r.summary().as_deref(), Some("2 screenshots, 1 log"));
+        assert_eq!(r.summary().as_deref(), Some("Screenshots 2, Logs 1"));
         let r = MiscReport {
-            screenshots: 1,
-            logs: 0,
+            stored: vec![("Screenshots".into(), 1)],
         };
-        assert_eq!(r.summary().as_deref(), Some("1 screenshot"));
+        assert_eq!(r.summary().as_deref(), Some("Screenshots 1"));
     }
 
     /// Syncing in the middle of a sitting stores real reading and must say so.

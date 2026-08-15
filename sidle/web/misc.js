@@ -1,20 +1,31 @@
-// Misc. section: screenshots + picker logs backed up off the Kindle on Sync.
+// Files section: what a Sync brings off the Kindle besides books.
 //
 // Classic script loaded AFTER library.js. Self-contained IIFE exposing
-// `window.Misc` ({ refresh, show, hide, invalidate }); library.js's section
-// toggle drives show/hide, and each Sync path calls invalidate() to refresh.
-// A screenshot thumbnail grid + a log list, each opening an in-app viewer (the
-// shared #misc-viewer overlay — image for screenshots, <pre> for logs). Reuses
-// the global `window.api` (IPC + fileUrl) and `window.showToast`. Backend:
-// commands/misc.rs — misc_list / misc_read_text / misc_reveal.
+// `window.Misc` ({ refresh, show, hide, invalidate, editCollections }); the
+// section toggle in library.js drives show/hide, and each Sync path calls
+// invalidate() to refresh.
+//
+// One group per collection in the library's device-sync.json, in that order,
+// each hidden when it has no files. Within a group, images render as a
+// thumbnail grid and everything else as a list — inferred per file, so a folder
+// of drafts reads as a list and a folder of captures as a grid without either
+// having to say so. Both open the shared #misc-viewer overlay (image or <pre>).
+//
+// Also owns the settings editor for the collections themselves, since it is the
+// same vocabulary. Reuses the global `window.api` (IPC + fileUrl) and
+// `window.showToast`. Backend: commands/misc.rs.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
 
+  const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
   const state = {
+    groups: [], // [{id, label}] from misc_list, in config order
     list: [], // MiscFile[] from misc_list, newest first
     loaded: false,
     viewerPath: null, // absolute path of the file the overlay is showing, or null
+    editing: null, // the collections being edited in settings, or null
   };
 
   function toast(msg, isError = false) {
@@ -40,6 +51,12 @@
     return `${(kb / 1024).toFixed(1)} MB`;
   }
 
+  function isImage(f) {
+    const dot = f.name.lastIndexOf(".");
+    if (dot < 0) return false;
+    return IMAGE_EXT.includes(f.name.slice(dot + 1).toLowerCase());
+  }
+
   function isVisible() {
     const el = q("#misc");
     return !!el && !el.hidden;
@@ -49,9 +66,12 @@
 
   async function refresh() {
     try {
-      state.list = await api.invoke("misc_list");
+      const listing = await api.invoke("misc_list");
+      state.groups = listing.groups ?? [];
+      state.list = listing.files ?? [];
     } catch (e) {
-      toast(`failed to load misc backups: ${e}`, true);
+      toast(`failed to load backed-up files: ${e}`, true);
+      state.groups = [];
       state.list = [];
     }
     state.loaded = true;
@@ -79,24 +99,48 @@
   // ── Render ───────────────────────────────────────────────────────────────
 
   function render() {
-    const shots = state.list.filter((f) => f.kind === "screenshot");
-    const logs = state.list.filter((f) => f.kind === "log");
+    const content = q("#misc-content");
     const hasAny = state.list.length > 0;
-
     q("#misc-empty").hidden = hasAny;
-    q("#misc-content").hidden = !hasAny;
-
-    renderShots(shots);
-    renderLogs(logs);
+    content.hidden = !hasAny;
+    content.innerHTML = "";
+    for (const group of state.groups) {
+      const files = state.list.filter((f) => f.collection === group.id);
+      if (files.length === 0) continue; // a folder with nothing shows nothing
+      content.appendChild(groupSection(group, files));
+    }
   }
 
-  function renderShots(shots) {
-    const group = q("#misc-shots-group");
-    const grid = q("#misc-shots-grid");
-    group.hidden = shots.length === 0;
-    q("#misc-shots-count").textContent = shots.length ? `${shots.length}` : "";
-    grid.innerHTML = "";
-    for (const f of shots) grid.appendChild(shotTile(f));
+  function groupSection(group, files) {
+    const section = document.createElement("section");
+    section.className = "misc-group";
+
+    const header = document.createElement("header");
+    header.className = "misc-group-header";
+    const name = document.createElement("strong");
+    name.textContent = group.label;
+    header.appendChild(name);
+    const count = document.createElement("span");
+    count.className = "misc-count";
+    count.textContent = `${files.length}`;
+    header.appendChild(count);
+    section.appendChild(header);
+
+    const images = files.filter(isImage);
+    const rest = files.filter((f) => !isImage(f));
+    if (images.length > 0) {
+      const grid = document.createElement("div");
+      grid.className = "misc-shots-grid";
+      for (const f of images) grid.appendChild(shotTile(f));
+      section.appendChild(grid);
+    }
+    if (rest.length > 0) {
+      const list = document.createElement("ul");
+      list.className = "misc-logs-list";
+      for (const f of rest) list.appendChild(fileRow(f));
+      section.appendChild(list);
+    }
+    return section;
   }
 
   function shotTile(f) {
@@ -152,16 +196,7 @@
     }
   }
 
-  function renderLogs(logs) {
-    const group = q("#misc-logs-group");
-    const list = q("#misc-logs-list");
-    group.hidden = logs.length === 0;
-    q("#misc-logs-count").textContent = logs.length ? `${logs.length}` : "";
-    list.innerHTML = "";
-    for (const f of logs) list.appendChild(logRow(f));
-  }
-
-  function logRow(f) {
+  function fileRow(f) {
     const li = document.createElement("li");
     li.className = "misc-log-row";
 
@@ -169,7 +204,7 @@
     name.type = "button";
     name.className = "misc-log-name btn-link";
     name.textContent = f.name;
-    name.addEventListener("click", () => openLog(f));
+    name.addEventListener("click", () => openText(f));
     li.appendChild(name);
 
     const meta = document.createElement("span");
@@ -184,7 +219,7 @@
     return li;
   }
 
-  // ── Viewer overlay (image or log) ────────────────────────────────────────
+  // ── Viewer overlay (image or text) ───────────────────────────────────────
 
   function openImage(f) {
     state.viewerPath = f.path;
@@ -198,7 +233,7 @@
     openViewer();
   }
 
-  async function openLog(f) {
+  async function openText(f) {
     state.viewerPath = f.path;
     q("#misc-viewer-title").textContent = f.name;
     const img = q("#misc-viewer-img");
@@ -212,7 +247,7 @@
       log.textContent = await api.invoke("misc_read_text", { path: f.path });
       log.scrollTop = log.scrollHeight; // logs append — land on the newest lines
     } catch (e) {
-      log.textContent = `Failed to read log: ${e}`;
+      log.textContent = `Failed to read: ${e}`;
     }
   }
 
@@ -242,11 +277,215 @@
     if (state.viewerPath) await deleteFile({ path: state.viewerPath });
   }
 
+  // ── Settings: which Kindle folders a Sync brings back ─────────────────────
+
+  // Load the library's collections into the settings editor. Called when the
+  // settings modal opens, so the rows always reflect what is on disk.
+  async function editCollections() {
+    try {
+      const cfg = await api.invoke("misc_collections_get");
+      // `loadedId` is where this collection's files currently sit. Saving under
+      // a different id has to move them, and this snapshot is the only record of
+      // where they were — nothing else remembers the id before the edit.
+      state.editing = (cfg.collections ?? []).map((c) => ({ ...c, loadedId: c.id }));
+      setCollectionsStatus(null);
+    } catch (e) {
+      state.editing = [];
+      setCollectionsStatus(`failed to load folders: ${e}`, true);
+    }
+    renderCollections();
+  }
+
+  // The library folder a collection's files are stored in, derived from what the
+  // user named it. Deliberately NOT from the folder on the Kindle: that path is
+  // the volatile one — an app's folder gets renamed — while the name the user
+  // gave the collection is theirs. Either can still change, which is what
+  // `renames` is for; this only decides what the storage folder is called.
+  function storageId(label) {
+    const slug = (label ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "collection";
+  }
+
+  function setCollectionsStatus(msg, isError = false) {
+    const el = q("#settings-collections-status");
+    if (!el) return;
+    el.hidden = !msg;
+    el.textContent = msg ?? "";
+    el.classList.toggle("error", !!isError);
+  }
+
+  function renderCollections() {
+    const host = q("#settings-collections");
+    if (!host) return;
+    host.innerHTML = "";
+    (state.editing ?? []).forEach((c, i) => host.appendChild(collectionRow(c, i)));
+  }
+
+  // One editable collection. Nothing here is a permanent identity: the Kindle
+  // folder can be renamed, the name can be renamed, and saving moves whatever
+  // was already synced to match. The row shows where in the library the files
+  // land so that follow-the-name is visible rather than a surprise later.
+  function collectionRow(c, index) {
+    const row = document.createElement("div");
+    row.className = "settings-collection";
+
+    // Lists are comma-separated, not space-separated: a folder on the Kindle may
+    // well have a space in its name, and splitting on one would quietly turn it
+    // into two folders that don't exist.
+    const LISTS = ["dirs", "include", "purge"];
+    const field = (label, value, key, placeholder) => {
+      const wrap = document.createElement("label");
+      wrap.className = "settings-collection-field";
+      const span = document.createElement("span");
+      span.textContent = label;
+      wrap.appendChild(span);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = value;
+      if (placeholder) input.placeholder = placeholder;
+      input.addEventListener("input", () => {
+        state.editing[index][key] = LISTS.includes(key)
+          ? input.value.split(",").map((s) => s.trim()).filter(Boolean)
+          : input.value.trim();
+      });
+      wrap.appendChild(input);
+      return wrap;
+    };
+
+    const name = field("Name", c.label, "label", "Drafts");
+    row.appendChild(name);
+    row.appendChild(field("Folder", c.dirs.join(", "), "dirs", "writing"));
+    row.appendChild(field("Files", c.include.join(", "), "include", "*.md"));
+
+    // Where the files land, kept live as the name is typed. A rename moves what
+    // was already synced, so this is a preview of the move, not a warning.
+    const where = document.createElement("p");
+    where.className = "settings-collection-where";
+    const showWhere = () => {
+      const id = storageId(state.editing[index].label);
+      const from = state.editing[index].loadedId;
+      where.textContent = from && from !== id
+        ? `In your library: ${id} — moved from ${from} when you save`
+        : `In your library: ${id}`;
+    };
+    showWhere();
+    name.querySelector("input").addEventListener("input", showWhere);
+    row.appendChild(where);
+
+    const flags = document.createElement("div");
+    flags.className = "settings-collection-flags";
+    flags.appendChild(checkbox("Subfolders", c.recursive, (v) => {
+      state.editing[index].recursive = v;
+    }));
+    flags.appendChild(checkbox("Only copy new files", c.update === "once", (v) => {
+      state.editing[index].update = v ? "once" : "always";
+    }, "Leave a file alone once it's been copied. Off means each Sync takes the Kindle's current copy — right for anything that grows or gets edited."));
+    flags.appendChild(checkbox("Delete from Kindle after Sync", c.clear_device, (v) => {
+      state.editing[index].clear_device = v;
+    }, "The library keeps the only copy afterwards."));
+    row.appendChild(flags);
+
+    row.appendChild(field("Also delete, never copy", (c.purge ?? []).join(", "), "purge",
+      "wininfo_screenshot*"));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn-link settings-collection-remove";
+    remove.textContent = "Remove";
+    remove.title = "Stop syncing this folder. Files already copied stay in your library.";
+    remove.addEventListener("click", () => {
+      state.editing.splice(index, 1);
+      renderCollections();
+    });
+    row.appendChild(remove);
+    return row;
+  }
+
+  function checkbox(label, checked, onChange, title) {
+    const wrap = document.createElement("label");
+    wrap.className = "settings-collection-check";
+    if (title) wrap.title = title;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    wrap.appendChild(input);
+    const span = document.createElement("span");
+    span.textContent = label;
+    wrap.appendChild(span);
+    return wrap;
+  }
+
+  // A new row has no `loadedId`: nothing is stored for it yet, so its first save
+  // is a create rather than a move.
+  function addCollection() {
+    if (!state.editing) state.editing = [];
+    state.editing.push({
+      id: "",
+      label: "",
+      dirs: [],
+      include: ["*"],
+      recursive: true,
+      update: "always",
+      clear_device: false,
+      purge: [],
+    });
+    renderCollections();
+  }
+
+  async function saveCollections() {
+    const rows = state.editing ?? [];
+    if (rows.some((c) => !c.label || c.dirs.length === 0)) {
+      setCollectionsStatus("every folder needs a name and a path on the Kindle", true);
+      return;
+    }
+    // No patterns means nothing matches, which would read as "synced, empty".
+    if (rows.some((c) => c.include.length === 0)) {
+      setCollectionsStatus("every folder needs a file pattern — use * for everything", true);
+      return;
+    }
+    // The storage folder follows the name. `renames` is what makes that safe:
+    // it tells the backend where each collection's files are now, so they move
+    // with it rather than being stranded under an id nothing refers to.
+    const collections = rows.map(({ loadedId: _drop, ...c }) => ({
+      ...c,
+      id: storageId(c.label),
+    }));
+    const ids = collections.map((c) => c.id);
+    const dup = ids.find((id, i) => ids.indexOf(id) !== i);
+    if (dup) {
+      setCollectionsStatus(`two folders would both be stored as “${dup}” — rename one`, true);
+      return;
+    }
+    const renames = rows
+      .map((c, i) => [c.loadedId, collections[i].id])
+      .filter(([from, to]) => from && from !== to);
+    try {
+      const saved = await api.invoke("misc_collections_set", { config: { collections }, renames });
+      state.editing = (saved.collections ?? []).map((c) => ({ ...c, loadedId: c.id }));
+      renderCollections();
+      setCollectionsStatus(
+        renames.length > 0
+          ? `Saved — ${renames.length} folder${renames.length === 1 ? "" : "s"} renamed, ` +
+            "carrying everything already synced into them. Takes effect on the next Sync."
+          : "Saved — takes effect on the next Sync.",
+      );
+      invalidate(); // group labels, order, and storage folders may all have changed
+    } catch (e) {
+      setCollectionsStatus(`save failed: ${e}`, true);
+    }
+  }
+
   function wireViewer() {
     q("#misc-viewer-close")?.addEventListener("click", closeViewer);
     q("#misc-viewer-backdrop")?.addEventListener("click", closeViewer);
     q("#misc-viewer-reveal")?.addEventListener("click", revealCurrent);
     q("#misc-viewer-delete")?.addEventListener("click", deleteCurrent);
+    q("#settings-collections-add")?.addEventListener("click", addCollection);
+    q("#settings-collections-save")?.addEventListener("click", saveCollections);
     // Esc closes the overlay when it's open. Capture-phase + stopPropagation so
     // it beats library.js's global Esc (clear-selection) while the viewer is up;
     // when the viewer is closed this is inert and Esc falls through as usual.
@@ -268,5 +507,5 @@
     wireViewer();
   }
 
-  window.Misc = { refresh, show, hide, invalidate };
+  window.Misc = { refresh, show, hide, invalidate, editCollections };
 })();

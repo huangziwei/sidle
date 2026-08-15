@@ -167,6 +167,8 @@ pub fn run() {
             commands::misc::misc_read_text,
             commands::misc::misc_reveal,
             commands::misc::misc_delete,
+            commands::misc::misc_collections_get,
+            commands::misc::misc_collections_set,
             commands::reading_log::reading_log_overview,
             commands::reading_log::reading_log_books,
             commands::reading_log::reading_log_clear,

@@ -14,7 +14,7 @@ use crate::library::device::misc;
 use crate::library::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
 use crate::library::ink::{handwritten_notes, import_collected_ink};
-use crate::library::{LibraryPaths, db, import, push};
+use crate::library::{LibraryPaths, db, device_backup, import, push};
 
 /// Per-item sync progress for the status bar, emitted as `annotations:sync-progress`.
 /// `stage` is `"annotations"` (highlights/notes/bookmarks) or `"ink"` (handwriting);
@@ -236,16 +236,20 @@ pub fn import_device_annotations(
         }
     }?;
 
-    // Additive backup of the device's screenshots + picker logs, over whichever
-    // transport this Kindle uses. Best-effort: a misc-backup failure must never
-    // fail the annotation sync it rides along with — log it and move on with the
-    // counts we did get. Runs on every Sync (manual button + auto-on-connect).
-    match misc::backup_device_misc(transport, &device.serial, paths) {
-        Ok(m) => {
-            report.misc_screenshots = m.screenshots_added;
-            report.misc_logs = m.logs_updated;
-        }
-        Err(e) => eprintln!("[sidle/annsync] misc backup failed (non-fatal): {e:#}"),
+    // Additive backup of the device folders the library is configured to sync,
+    // over whichever transport this Kindle uses. Best-effort at every step: a
+    // config that won't parse, or a backup failure, must never fail the
+    // annotation sync it rides along with — log it and move on with the counts
+    // we did get. Runs on every Sync (manual button + auto-on-connect).
+    match device_backup::SyncCollections::load(paths) {
+        Ok(config) => match misc::backup_device_misc(transport, &device.serial, paths, &config) {
+            Ok(m) => {
+                report.misc_new = m.new_files;
+                report.misc_refreshed = m.refreshed;
+            }
+            Err(e) => eprintln!("[sidle/annsync] misc backup failed (non-fatal): {e:#}"),
+        },
+        Err(e) => eprintln!("[sidle/annsync] device-sync.json unreadable (skipping): {e:#}"),
     }
 
     Ok(report)

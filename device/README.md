@@ -93,7 +93,7 @@ mirrors the mount, it's a straight copy:
 4. Eject the Kindle. Tap the **Sidle** tile.
 
 If the picker launches but blanks back to the home screen with no toast, tail
-`/mnt/us/sidle-native.log` on the next plug — a "token rejected" line
+`/mnt/us/logs/sidle-native.log` on the next plug — a "token rejected" line
 means `.server-token` rotated and the on-device `server.conf` is
 stale. Click **Update on Kindle** in the desktop app to resync.
 
@@ -139,8 +139,11 @@ it.
 
 ## Logs
 
-Every launch appends to `/mnt/us/sidle-native.log`. Inspect over USB
-when something goes wrong.
+Every launch appends to `/mnt/us/logs/sidle-native.log`; the LAN self-update
+keeps its own trail in `/mnt/us/logs/sidle-update.log`. Inspect over USB when
+something goes wrong, or read them in the desktop app's Files tab — a Sync
+brings back everything under `/mnt/us/logs/`, this picker's logs and any other
+app's that writes there.
 
 ## Architecture
 

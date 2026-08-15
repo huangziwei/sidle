@@ -338,10 +338,10 @@ fn sync(ctx: &Ctx, restore: bool) -> Result<()> {
                 report.pushed_annotations, report.pushed_books
             );
         }
-        if report.misc_screenshots > 0 || report.misc_logs > 0 {
+        if report.misc_new > 0 || report.misc_refreshed > 0 {
             println!(
-                "backed up {} screenshot(s) and {} log file(s)",
-                report.misc_screenshots, report.misc_logs
+                "backed up {} new file(s) and refreshed {} more",
+                report.misc_new, report.misc_refreshed
             );
         }
         if !report.unmatched.is_empty() {

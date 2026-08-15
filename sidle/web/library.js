@@ -16,7 +16,7 @@ const state = {
   seriesView: null, // string | null
   // Top-level tab. 'device' is the Kindle page, reached from the upper-right
   // pill rather than the tab strip.
-  section: "books", // 'books' | 'notes' | 'misc' | 'reading' | 'device'
+  section: "books", // 'books' | 'notes' | 'misc' (the Files tab) | 'reading' | 'device'
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
   // currently-selected values for that facet. See extractFacetValues for
@@ -144,7 +144,7 @@ const booksSelection = new window.SelectionController({
 // keyboard handlers in wireSelection() are written against this, so they're
 // section-agnostic.
 function activeController() {
-  // The Kindle page, the Misc tab and the Reading Log have no selectable items —
+  // The Kindle page, the Files tab and the Reading Log have no selectable items —
   // return no controller so the lasso and the Esc/Cmd-A handlers (which bail on
   // a null controller) stay inert there.
   //
@@ -361,7 +361,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.Notebooks.setView(state.view);
     window.Notebooks.show();
   }
-  // Likewise for the Misc tab (screenshots + logs backed up on Sync).
+  // Likewise for the Files tab (what a Sync backs up off the Kindle).
   if (state.section === "misc") window.Misc?.show();
   // And the Reading Log, which loads its overview on first show.
   if (state.section === "reading") window.ReadingLog?.show();
@@ -561,10 +561,10 @@ function restoreScroll(key) {
   $("#main").scrollTop = scrollMarks.get(key) || 0;
 }
 
-// Top-level Books / Notes / Misc / Kindle split. Books and Notes share the
+// Top-level Books / Notes / Files / Kindle split. Books and Notes share the
 // Gallery/List view toggle; switching swaps the action button (Add → Import) and
 // hides the Books-only filter chrome. Notes shows the Scribe notebook grid/list
-// (owned by notebooks.js); Misc shows the screenshots + logs backed up on Sync
+// (owned by notebooks.js); Files shows what a Sync backs up off the Kindle
 // (owned by misc.js). 'device' is the full-screen Kindle page (entered via the
 // upper-right pill or `\`) — transient: never persisted, never the boot home.
 function setSection(s) {
@@ -619,10 +619,10 @@ function applySection() {
   const device = state.section === "device";
   const books = state.section === "books";
   // Neither the Gallery/List toggle nor a library filter belongs on the Kindle
-  // page or the Misc tab (both are read-only surfaces, not a book library), so
+  // page or the Files tab (both are read-only surfaces, not a book library), so
   // they collapse the toolbar to just the section tabs.
   const bare = device || misc || reading;
-  // Section tabs light up for their own section. None of Books/Notes/Misc is
+  // Section tabs light up for their own section. None of Books/Notes/Files is
   // active on the Kindle page — the upper-right pill carries that state instead.
   $("#section-books").classList.toggle("active", books);
   $("#section-notes").classList.toggle("active", notes);
@@ -639,7 +639,7 @@ function applySection() {
   // Add… (Books only) and Import (Notes only); both gone elsewhere.
   $("#btn-add").hidden = !books;
   $("#btn-notes-import").hidden = !notes;
-  // Notes keeps the Gallery/List toggle + separators; the Kindle page and Misc
+  // Notes keeps the Gallery/List toggle + separators; the Kindle page and Files
   // hide the view toggle and both toolbar separators (the section↔view one and
   // #view-sep) so the toolbar-group collapses to just the section tabs.
   $("#filter-bar").hidden = notes || bare;
@@ -2785,8 +2785,7 @@ function subscribePullProgress() {
 function annotationSyncSummary(report) {
   const added = report?.annotations?.inserted ?? 0;
   const inkPages = report?.ink_pages ?? 0;
-  const shots = report?.misc_screenshots ?? 0;
-  const logs = report?.misc_logs ?? 0;
+  const files = report?.misc_new ?? 0;
 
   const parts = [];
   if (added > 0) {
@@ -2795,7 +2794,7 @@ function annotationSyncSummary(report) {
     parts.push(`${added} annotation${added === 1 ? "" : "s"}${from}`);
   }
   if (inkPages > 0) parts.push(`${inkPages} handwritten page${inkPages === 1 ? "" : "s"}`);
-  if (shots > 0) parts.push(`${shots} screenshot${shots === 1 ? "" : "s"}`);
+  if (files > 0) parts.push(`${files} file${files === 1 ? "" : "s"}`);
   if (parts.length > 0) return `Synced ${parts.join("; ")}`;
 
   // Nothing new to sync. Logs refresh on every sync (they grow by appending), so
@@ -2824,7 +2823,7 @@ async function syncAnnotations() {
     const report = await window.api.invoke("annotations_import_from_device");
     showToast(annotationSyncSummary(report));
     window.sidleReader?.reloadAnnotations?.();
-    window.Misc?.invalidate(); // new screenshots/logs may have landed
+    window.Misc?.invalidate(); // new files may have landed
   } catch (e) {
     showToast(`annotation sync failed: ${e}`, true);
   } finally {
@@ -2910,14 +2909,14 @@ function subscribeAnnotationSync() {
     const report = e.payload;
     const added = report?.annotations?.inserted ?? 0;
     const inkPages = report?.ink_pages ?? 0;
-    const shots = report?.misc_screenshots ?? 0;
+    const files = report?.misc_new ?? 0;
     // Only toast when the sync actually pulled something new — a no-op reconnect
-    // shouldn't nag. New screenshots count; refreshed logs don't (they update on
-    // every sync, so they'd toast on every connect).
-    if (added > 0 || inkPages > 0 || shots > 0) showToast(annotationSyncSummary(report));
+    // shouldn't nag. Files the library had never seen count; refreshed ones
+    // don't (a log updates on every sync, so it would toast on every connect).
+    if (added > 0 || inkPages > 0 || files > 0) showToast(annotationSyncSummary(report));
     // If the user is reading one of the synced books, repaint in place.
     window.sidleReader?.reloadAnnotations?.();
-    // New screenshots/logs may have landed — refresh the Misc tab if it's open.
+    // New files may have landed — refresh the Files tab if it's open.
     window.Misc?.invalidate();
   });
   window.api.listen("annotations:sync-error", (e) => {
@@ -4272,6 +4271,9 @@ async function openSettings() {
   resetRelocateConfirm();
   $("#settings-status").hidden = true;
   $("#settings-modal").hidden = false;
+  // The Kindle-folders rows are misc.js's — load them fresh each open so they
+  // show what's on disk, not what a cancelled edit left behind.
+  window.Misc?.editCollections?.();
   try {
     const loc = await window.api.invoke("library_location");
     $("#settings-location").textContent = loc.is_default ? `${loc.root}  (default)` : loc.root;
