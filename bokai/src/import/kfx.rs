@@ -1713,15 +1713,17 @@ impl KfxImporter {
     /// Derive the book-level writing mode and page-progression direction
     /// onto `metadata.{primary_writing_mode, page_progression_direction}`.
     ///
-    /// `document_data.writing_mode` is only a default (see
-    /// `kfx::writing_mode`): when it reads `horizontal_tb`, the style pool's
-    /// majority vertical mode corrects it. Any `-rl` writing mode forces an
-    /// RTL page turn — the common case for CJK vertical books, whose
+    /// `document_data.writing_mode` states the book's axis and is taken as
+    /// written; the style pool (see `kfx::writing_mode`) only answers for the
+    /// containers that omit the field. A horizontally-set book may still carry
+    /// vertical passages — those are styles within a horizontal document, not
+    /// evidence against what the document says. Any `-rl` writing mode forces
+    /// an RTL page turn — the common case for CJK vertical books, whose
     /// `direction` field literally says `ltr` — while an explicit
     /// `reading_orders[*].page_progression_direction` (captured by
-    /// `parse_spine`) outranks both heuristics.
+    /// `parse_spine`) outranks both.
     fn derive_writing_direction(&mut self) {
-        let mut writing_mode = "horizontal-tb".to_string();
+        let mut writing_mode = None;
         let mut ppd = "ltr".to_string();
 
         if let Some(loc) = self
@@ -1736,7 +1738,7 @@ impl KfxImporter {
                 get_field(fields, sym!(WritingMode)).and_then(|v| self.symbols.text_of(v))
             {
                 writing_mode =
-                    crate::formats::kfx::writing_mode::normalize_writing_mode(wm).to_string();
+                    Some(crate::formats::kfx::writing_mode::normalize_writing_mode(wm).to_string());
             }
             if let Some(dir) =
                 get_field(fields, sym!(Direction)).and_then(|v| self.symbols.text_of(v))
@@ -1745,20 +1747,16 @@ impl KfxImporter {
             }
         }
 
-        if writing_mode == "horizontal-tb" {
+        let writing_mode = writing_mode.unwrap_or_else(|| {
             let styles: Vec<IonValue> = self
                 .entities
                 .iter()
                 .filter(|e| e.type_id == KfxSymbol::Style as u32)
                 .filter_map(|loc| self.parse_entity_ion(*loc).ok())
                 .collect();
-            if let Some(vertical) = crate::formats::kfx::writing_mode::majority_vertical_mode(
-                styles.iter(),
-                &self.symbols,
-            ) {
-                writing_mode = vertical;
-            }
-        }
+            crate::formats::kfx::writing_mode::majority_vertical_mode(styles.iter(), &self.symbols)
+                .unwrap_or_else(|| "horizontal-tb".to_string())
+        });
         if writing_mode.ends_with("-rl") {
             ppd = "rtl".to_string();
         }

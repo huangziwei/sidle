@@ -1009,6 +1009,18 @@ impl ExportContext {
         )
     }
 
+    /// Whether the book carries vertical text anywhere — either as the document
+    /// default or in the source's own authored axis. The two diverge only when
+    /// `primary-writing-mode` forces a document horizontal over vertical
+    /// content, which is what separates this from [`Self::is_vertical_document`].
+    pub fn has_vertical_content(&self) -> bool {
+        self.is_vertical_document()
+            || matches!(
+                self.style_writing_mode_baseline,
+                KfxSymbol::VerticalRl | KfxSymbol::VerticalLr
+            )
+    }
+
     /// Rotate a style's physical box-model margins/padding into the document's
     /// writing axis when the style was authored in a different one — i.e. when
     /// the document mode is force-set (a horizontal EPUB converted to

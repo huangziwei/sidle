@@ -31,7 +31,8 @@ struct Args {
     /// Print detailed report for specified field/fragment (can be specified multiple times)
     /// Supported: anchors, container, content, dependencies, document, features,
     /// locations, metadata, navigation, positions, raw_storylines, reading_orders,
-    /// resources, ruby (= ruby_content), ruby_pairs, sections, storylines
+    /// resources, ruby (= ruby_content), ruby_pairs, sections, storylines, symbols,
+    /// writing_mode
     #[arg(short = 'f', long = "field")]
     field: Vec<String>,
 }
@@ -104,12 +105,14 @@ fn main() -> IonResult<()> {
                 "positions" => report_positions(&data)?,
                 "content" => report_content(&data)?,
                 "dependencies" => report_dependencies(&data)?,
+                "symbols" => report_symbols(&data)?,
+                "writing_mode" => report_writing_mode(&data)?,
                 "ruby" | "ruby_content" => report_ruby_content(&data)?,
                 "raw_storylines" => report_raw_storylines(&data)?,
                 "ruby_pairs" => report_ruby_pairs(&data)?,
                 other => {
                     eprintln!(
-                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, raw_storylines, reading_orders, resources, ruby, ruby_pairs, sections, storylines",
+                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, raw_storylines, reading_orders, resources, ruby, ruby_pairs, sections, storylines, symbols, writing_mode",
                         other
                     );
                     std::process::exit(1);
@@ -927,7 +930,11 @@ fn report_anchors(data: &[u8]) -> IonResult<()> {
                 };
                 if let Some(dest_text) = text {
                     let dest_preview: String = dest_text.chars().take(40).collect();
-                    let ellipsis = if dest_text.len() > 40 { "..." } else { "" };
+                    let ellipsis = if dest_text.chars().count() > 40 {
+                        "..."
+                    } else {
+                        ""
+                    };
                     println!(
                         "{:<30} {:>10} → {} \"{}{}\"",
                         anchor.name,
@@ -2662,6 +2669,159 @@ fn element_to_ion_text_inner(
 }
 
 /// Report container header and info from a KFX file
+/// Report the shared-table revision a container declares against the ids it
+/// actually names.
+///
+/// The two differ: `declared` fixes where document-local symbols start and so
+/// must be read from the file, while `highest_used` is the only figure that
+/// bounds which readers can name everything the file references.
+fn report_symbols(data: &[u8]) -> IonResult<()> {
+    use bokai::formats::kfx::container::{
+        parse_container_header, parse_container_info, parse_entity, parse_imports_max_id,
+        parse_index_table,
+    };
+    use bokai::formats::kfx::symbols::{KfxSymbol, symbol_name};
+
+    let Ok(header) = parse_container_header(data) else {
+        eprintln!("Not a KFX container");
+        return Ok(());
+    };
+    let info_bytes = &data
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let Ok(info) = parse_container_info(info_bytes) else {
+        eprintln!("Unreadable container info");
+        return Ok(());
+    };
+    let declared = info
+        .doc_symbols
+        .and_then(|(off, len)| parse_imports_max_id(&data[off..off + len]));
+    let local_base = declared.map_or(u64::MAX, |d| d + 1);
+
+    let mut highest: Option<(u64, &'static str)> = None;
+    let mut consider = |id: u64| {
+        if id < local_base && highest.is_none_or(|(best, _)| id > best) {
+            highest = Some((id, symbol_name(id).unwrap_or("<past the table>")));
+        }
+    };
+    // An entity whose payload does not parse contributes no ids, which would
+    // silently understate the maximum. Count what was read, not only what it
+    // yielded, so an unopened entity cannot pass for an empty one.
+    let (mut entities, mut opaque, mut unparsed) = (0usize, 0usize, 0usize);
+    if let Some((idx_off, idx_len)) = info.index {
+        for ent in parse_index_table(&data[idx_off..idx_off + idx_len], header.header_len) {
+            entities += 1;
+            consider(ent.type_id as u64);
+            consider(ent.id as u64);
+            let raw = ent.type_id == KfxSymbol::Bcrawmedia as u32
+                || ent.type_id == KfxSymbol::Bcrawfont as u32;
+            match parse_entity(data, &ent) {
+                // Media and font payloads are bytes by design, not Ion.
+                _ if raw => opaque += 1,
+                Some(value) => {
+                    if let Some(max) = value.max_symbol_id() {
+                        consider(max);
+                    }
+                }
+                None => unparsed += 1,
+            }
+        }
+    }
+
+    println!("=== Symbols ===\n");
+    match declared {
+        Some(d) => println!("declared YJ_symbols max_id: {d}"),
+        None => println!("declared YJ_symbols max_id: (none — no import declared)"),
+    }
+    match highest {
+        Some((id, name)) => println!("highest shared id used:     {id} ({name})"),
+        None => println!("highest shared id used:     (none)"),
+    }
+    println!("entities: {entities} ({opaque} opaque, {unparsed} unparsed)");
+    Ok(())
+}
+
+/// Report how a book-level writing mode is derived: what `document_data`
+/// declares, what the `$style` pool tallies, and which of the two an importer
+/// ends up with.
+fn report_writing_mode(data: &[u8]) -> IonResult<()> {
+    use bokai::formats::kfx::container::{
+        get_field, parse_container_header, parse_container_info, parse_entity, parse_index_table,
+    };
+    use bokai::formats::kfx::symbols::KfxSymbol;
+    use bokai::formats::kfx::writing_mode::{
+        count_writing_modes, majority_vertical_mode, normalize_writing_mode,
+    };
+
+    let Ok(header) = parse_container_header(data) else {
+        eprintln!("Not a KFX container");
+        return Ok(());
+    };
+    let info_bytes = &data
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let Ok(info) = parse_container_info(info_bytes) else {
+        eprintln!("Unreadable container info");
+        return Ok(());
+    };
+    let symbols = match info.doc_symbols {
+        Some((off, len)) if off + len <= data.len() => {
+            SymbolTable::from_fragment(Some(&data[off..off + len]))
+        }
+        _ => SymbolTable::from_fragment(None),
+    };
+
+    let mut declared: Option<String> = None;
+    let mut styles = Vec::new();
+    if let Some((idx_off, idx_len)) = info.index {
+        for ent in parse_index_table(&data[idx_off..idx_off + idx_len], header.header_len) {
+            if ent.type_id == KfxSymbol::DocumentData as u32 {
+                if let Some(value) = parse_entity(data, &ent)
+                    && let Some(fields) = value.unwrap_annotated().as_struct()
+                    && let Some(wm) = get_field(fields, KfxSymbol::WritingMode as u64)
+                        .and_then(|v| symbols.text_of(v))
+                {
+                    declared = Some(normalize_writing_mode(wm).to_string());
+                }
+            } else if ent.type_id == KfxSymbol::Style as u32
+                && let Some(value) = parse_entity(data, &ent)
+            {
+                styles.push(value);
+            }
+        }
+    }
+
+    let mut counts = HashMap::new();
+    for style in &styles {
+        count_writing_modes(style, &symbols, &mut counts);
+    }
+    let majority = majority_vertical_mode(styles.iter(), &symbols);
+    let derived = match declared.as_deref() {
+        Some("horizontal-tb") | None => majority
+            .clone()
+            .unwrap_or_else(|| "horizontal-tb".to_string()),
+        Some(other) => other.to_string(),
+    };
+
+    println!("=== Writing Mode ===\n");
+    println!(
+        "document_data:        {}",
+        declared.as_deref().unwrap_or("(absent)")
+    );
+    println!("styles:               {}", styles.len());
+    for mode in ["vertical-rl", "vertical-lr", "horizontal-tb"] {
+        println!(
+            "  {:<18} {}",
+            format!("{mode}:"),
+            counts.get(mode).copied().unwrap_or(0)
+        );
+    }
+    println!(
+        "style-pool majority:  {}",
+        majority.as_deref().unwrap_or("(none — horizontal)")
+    );
+    println!("derived:              {derived}");
+    Ok(())
+}
+
 fn report_container(data: &[u8]) -> IonResult<()> {
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3149,11 +3309,11 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
                                 if !cat_name.is_empty() {
                                     println!("=== {} ===\n", cat_name);
                                     for (key, val) in &metadata_list {
-                                        // Truncate long values
-                                        let display_val = if val.len() > 60 {
-                                            format!("{}...", &val[..60])
-                                        } else {
-                                            val.clone()
+                                        // Truncate long values on a character
+                                        // boundary — titles are frequently CJK.
+                                        let display_val = match val.char_indices().nth(60) {
+                                            Some((cut, _)) => format!("{}...", &val[..cut]),
+                                            None => val.clone(),
                                         };
                                         println!("{:<25} {}", format!("{}:", key), display_val);
                                     }
@@ -3833,6 +3993,7 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
     println!("=== External Resources ===\n");
 
     let mut resource_count = 0;
+    let mut tiled_count = 0;
     for i in 0..num_entries {
         let entry_offset = index_offset + i * entry_size;
         if entry_offset + entry_size > data.len() {
@@ -3898,10 +4059,14 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
                 let mut location = String::new();
                 let mut width: Option<i64> = None;
                 let mut height: Option<i64> = None;
+                let mut tiled = false;
 
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
                     match field_name.as_str() {
+                        "yj.tiles" | "yj.tile_padding" | "yj.tile_width" | "yj.tile_height" => {
+                            tiled = true;
+                        }
                         "resource_name" => {
                             if let bokai::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 resource_name = resolve_sym(*s);
@@ -3933,17 +4098,27 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
 
                 if !resource_name.is_empty() {
                     resource_count += 1;
+                    if tiled {
+                        tiled_count += 1;
+                    }
                     let dims = match (width, height) {
                         (Some(w), Some(h)) => format!(" {}x{}", w, h),
                         _ => String::new(),
                     };
-                    println!("{:<10} {:<6}{} → {}", resource_name, format, dims, location);
+                    let tiles = if tiled { " tiled" } else { "" };
+                    println!(
+                        "{:<10} {:<6}{}{} → {}",
+                        resource_name, format, dims, tiles, location
+                    );
                 }
             }
         }
     }
 
-    println!("\nTotal resources: {}", resource_count);
+    println!(
+        "\nTotal resources: {} ({} tiled)",
+        resource_count, tiled_count
+    );
     Ok(())
 }
 

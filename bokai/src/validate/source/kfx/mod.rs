@@ -573,8 +573,8 @@ const SECTION_PID_BOUND: i64 = 65536;
 #[derive(Default, Debug)]
 struct ContentFacts {
     /// A tiled image (`yj.tiles` / `yj.tile_padding` on an `external_resource`).
-    /// This — not image size — is what `yj_hdv` describes; a merely large image
-    /// does not qualify.
+    /// Tiling is the content `yj_hdv` covers; it is not a precondition for the
+    /// declaration, which Amazon also stamps on books that carry no tiles.
     tiled_image: bool,
     /// An `external_resource` whose format is `jxr`.
     jxr_image: bool,
@@ -705,24 +705,20 @@ fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
     let facts = ContentFacts::read(book);
     let mut out = Vec::new();
 
-    if declared.contains_key("yj_hdv") && !facts.tiled_image {
-        out.push(warning(
-            "feature-without-content",
-            "<content_features>",
-            "declares yj_hdv but carries no tiled imagery — the renderer is told to \
-             expect a high-definition variant the book does not contain",
-            Some(FixHint::new(
-                "drop-feature",
-                "remove the yj_hdv declaration, or emit the tiled resource it claims",
-            )),
-        ));
-    }
-
     // Media features are checked in the OMISSION direction only. A declaration
     // may legitimately outrun the bytes: it can describe the material a book
     // was built from rather than only what survived into the container, so a
     // feature with no matching payload is not a defect. Content the renderer is
     // told nothing about is the half that stays checkable.
+    if facts.tiled_image && !declared.contains_key("yj_hdv") {
+        out.push(warning(
+            "feature-undeclared",
+            "<content_features>",
+            "carries tiled imagery but declares no yj_hdv",
+            None,
+        ));
+    }
+
     if facts.jxr_image && !declared.contains_key("yj_jpegxr_sd") {
         out.push(warning(
             "feature-undeclared",

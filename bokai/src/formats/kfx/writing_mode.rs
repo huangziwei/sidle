@@ -1,10 +1,8 @@
 //! Book-level writing-mode derivation shared by every KFX reader.
 //!
-//! A KFX `document_data`'s `writing_mode` field is an unreliable default: a
-//! mixed book can report `horizontal_tb` while every text block is styled
-//! vertical-rl (the doc-level field tracks the first/dominant section, not
-//! the body). Consumers correct that default with the mode the book's own
-//! `$style` pool predominantly declares — [`majority_vertical_mode`].
+//! `document_data`'s `writing_mode` field states the book's axis and is what a
+//! reader honours. [`majority_vertical_mode`] recovers an axis from the book's
+//! own `$style` pool for the containers that omit the field.
 
 use std::collections::HashMap;
 
@@ -25,22 +23,27 @@ pub fn normalize_writing_mode(name: &str) -> &str {
 /// The vertical writing mode (`"vertical-rl"` / `"vertical-lr"`) the given
 /// style values predominantly declare, or `None` when horizontal text
 /// dominates (or no style declares a mode). Counting the style pool — not
-/// every entity — keeps the cost bounded and matches what becomes CSS
-/// classes; a book whose document-level mode is genuinely horizontal is left
-/// alone unless its own styles say otherwise by majority.
+/// every entity — keeps the cost bounded and matches what becomes CSS classes.
+///
+/// The majority is taken over **every** style, not over the styles that name a
+/// mode. `horizontal_tb` is the CSS initial value, so a horizontal style
+/// normally declares nothing at all; weighing vertical declarations against
+/// only the explicit `horizontal_tb` ones lets a single vertical passage
+/// outvote a book that is horizontal throughout.
 pub fn majority_vertical_mode<'a>(
     styles: impl Iterator<Item = &'a IonValue>,
     symbols: &SymbolTable,
 ) -> Option<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut total = 0usize;
     for style in styles {
+        total += 1;
         count_writing_modes(style, symbols, &mut counts);
     }
     let vrl = *counts.get("vertical-rl").unwrap_or(&0);
     let vlr = *counts.get("vertical-lr").unwrap_or(&0);
-    let htb = *counts.get("horizontal-tb").unwrap_or(&0);
     let vertical = vrl + vlr;
-    if vertical > 0 && vertical > htb {
+    if vertical > 0 && vertical * 2 > total {
         Some(
             if vlr > vrl {
                 "vertical-lr"
@@ -105,6 +108,17 @@ mod tests {
             majority_vertical_mode(styles.iter(), &symbols),
             Some("vertical-rl".to_string())
         );
+    }
+
+    /// A horizontal book carrying one vertical passage stays horizontal. Its
+    /// horizontal styles declare no mode at all, so they are invisible to a
+    /// tally of declarations and only the full style count reveals them.
+    #[test]
+    fn one_vertical_passage_does_not_carry_a_horizontal_book() {
+        let symbols = SymbolTable::new(700, Vec::new());
+        let mut styles = vec![style_with_mode(KfxSymbol::VerticalRl as u64)];
+        styles.resize_with(45, || IonValue::Struct(Vec::new()));
+        assert_eq!(majority_vertical_mode(styles.iter(), &symbols), None);
     }
 
     #[test]

@@ -1140,9 +1140,8 @@ fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> 
 
     let mut features = vec![reflow_style, canonical_format];
 
-    // `yj_hdv` is never declared: it describes *tiled* high-definition imagery,
-    // which this writer does not emit. A large image alone is not what the
-    // feature claims, so image dimensions do not gate it.
+    // `yj_hdv` is never declared. It covers tiled high-definition imagery, which
+    // this writer does not emit; image dimensions do not gate it.
 
     // JPEG-XR plates, which the interior-image path encodes by default.
     if facts.jxr_image {
@@ -1186,18 +1185,28 @@ fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> 
 
         // Japanese vertical layout has a dedicated feature (no Chinese analog
         // exists in Amazon's table — Chinese vertical rides on the base marker
-        // plus `document_data.writing_mode`).
-        let vertical = matches!(
-            ctx.document_writing_mode,
-            KfxSymbol::VerticalRl | KfxSymbol::VerticalLr
-        );
-        if vertical && key == "jp-reflow-language" {
+        // plus `document_data.writing_mode`). It tracks the presence of vertical
+        // runs, not the document default: a horizontally-set Japanese book that
+        // carries vertical passages declares it too.
+        if ctx.has_vertical_content() && key == "jp-reflow-language" {
             features.push(content_feature(
                 "com.amazon.yjconversion",
                 "jpvertical-reflow-language",
                 6,
             ));
         }
+    }
+
+    // A book whose document default is horizontal while its content runs
+    // vertical is the only shape that needs the axes announced. When the
+    // document itself is vertical the reader already takes its vertical path,
+    // and inline horizontal spans (tate-chu-yoko) do not count as mixing.
+    if !ctx.is_vertical_document() && ctx.has_vertical_content() {
+        features.push(content_feature(
+            "com.amazon.yjconversion",
+            "yj_mixed_writing_mode",
+            1,
+        ));
     }
 
     let content_features =
@@ -6199,8 +6208,8 @@ mod tests {
     }
 
     /// A book with no images and no long section claims nothing about media.
-    /// `yj_hdv` in particular describes tiled imagery this writer never emits,
-    /// so no book may declare it.
+    /// `yj_hdv` in particular covers tiled imagery this writer never emits, so
+    /// no book may declare it.
     #[test]
     fn a_plain_book_declares_no_media_features() {
         let ctx = ExportContext::new();
@@ -6219,6 +6228,53 @@ mod tests {
                 "a plain book must not declare {claim}"
             );
         }
+    }
+
+    /// `yj_mixed_writing_mode` announces that the two axes coexist, which only
+    /// a horizontally-set document carrying vertical runs needs to say. A
+    /// vertical document says it through `document_data.writing_mode`, and a
+    /// wholly horizontal one has nothing to announce.
+    #[test]
+    fn mixed_writing_mode_follows_a_horizontal_document_over_vertical_content() {
+        let mut ctx = ExportContext::new();
+        ctx.content_language = "ja".to_string();
+
+        for (document, baseline, expected) in [
+            (KfxSymbol::HorizontalTb, KfxSymbol::VerticalRl, true),
+            (KfxSymbol::HorizontalTb, KfxSymbol::HorizontalTb, false),
+            (KfxSymbol::VerticalRl, KfxSymbol::VerticalRl, false),
+            (KfxSymbol::VerticalRl, KfxSymbol::HorizontalTb, false),
+        ] {
+            ctx.document_writing_mode = document;
+            ctx.style_writing_mode_baseline = baseline;
+            let keys = feature_keys(&build_content_features_fragment(
+                &ctx,
+                ContentFacts::default(),
+            ));
+            assert_eq!(
+                keys.contains(&"yj_mixed_writing_mode".to_string()),
+                expected,
+                "document {document:?} over baseline {baseline:?}"
+            );
+        }
+    }
+
+    /// The Japanese vertical marker tracks vertical runs, not the document
+    /// default, so a book forced horizontal over vertical content still carries
+    /// it.
+    #[test]
+    fn the_jp_vertical_marker_follows_vertical_content() {
+        let mut ctx = ExportContext::new();
+        ctx.content_language = "ja".to_string();
+        ctx.document_writing_mode = KfxSymbol::HorizontalTb;
+        ctx.style_writing_mode_baseline = KfxSymbol::VerticalRl;
+
+        let keys = feature_keys(&build_content_features_fragment(
+            &ctx,
+            ContentFacts::default(),
+        ));
+        assert!(keys.contains(&"jp-reflow-language".to_string()));
+        assert!(keys.contains(&"jpvertical-reflow-language".to_string()));
     }
 
     #[test]

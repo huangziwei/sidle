@@ -87,6 +87,41 @@ pub enum IonValue {
 }
 
 impl IonValue {
+    /// The highest symbol id anywhere in this value, or `None` if it names no
+    /// symbol at all.
+    ///
+    /// Counts every place an id can appear: symbol values, struct field keys,
+    /// and annotations. Ids are reported raw, so a caller separating shared
+    /// from document-local ones compares against the container's own local
+    /// base rather than expecting this to do it.
+    pub fn max_symbol_id(&self) -> Option<u64> {
+        fn take(best: &mut Option<u64>, id: u64) {
+            *best = Some(best.map_or(id, |b: u64| b.max(id)));
+        }
+        fn fold(v: &IonValue, best: &mut Option<u64>) {
+            match v {
+                IonValue::Symbol(id) => take(best, *id),
+                IonValue::List(items) | IonValue::Sexp(items) => {
+                    items.iter().for_each(|i| fold(i, best))
+                }
+                IonValue::Struct(fields) => {
+                    for (key, value) in fields {
+                        take(best, *key);
+                        fold(value, best);
+                    }
+                }
+                IonValue::Annotated(annotations, inner) => {
+                    annotations.iter().for_each(|a| take(best, *a));
+                    fold(inner, best);
+                }
+                _ => {}
+            }
+        }
+        let mut best = None;
+        fold(self, &mut best);
+        best
+    }
+
     /// Get as string if this is a String value.
     #[inline]
     pub fn as_string(&self) -> Option<&str> {
