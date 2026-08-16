@@ -39,37 +39,6 @@ To install the Kindle native app for the first time, plug in the Kindle via USB,
 
 Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 5.16.2.1.1), Kindle Colorsoft (1st Gen; 5.18.0.2), and Kindle Scribe (1st Gen; 5.19.4.0.1).
 
-## Command line
-
-The app works one book at a time, which is right for curation and wrong for a
-sweep over two thousand rows. `sidle-cli` opens the same library — same
-`config.json`, same `library.db`, same files — and does the sweeps.
-
-```sh
-cargo build --release -p sidle-cli     # target/release/sidle-cli
-
-sidle-cli status                       # what the library holds, and what needs doing
-sidle-cli convert --all --force        # rebuild every book, e.g. after a bokai change
-sidle-cli import ~/Downloads/*.epub    # add files, converting each as it lands
-sidle-cli list --lang ja --missing kfx # what has no Kindle-side file yet
-sidle-cli toc --all                    # whose table of contents is broken
-sidle-cli device send --tag to-read    # put a shelf on the Kindle
-sidle-cli device sync                  # bring back highlights, positions, handwriting
-```
-
-Every command that acts on books takes the same selection flags — `--all`,
-`--id`, `--sha`, `--asin`, `--title-like`, `--author-like`, `--series`, `--tag`,
-`--lang`, `--status`, `--kind`, `--has kfx`, `--missing cover`, `--limit` — so
-`list` is how you check what a `convert` or a `remove` is about to touch.
-Destructive commands print their plan and change nothing without `--apply`.
-`--json` turns any report into a machine-readable object, and `--root DIR`
-points the whole run at a copy of the library instead of the real one.
-
-`sidle-cli help <command>` lists the rest: metadata edits (single and bulk),
-covers, exports, table-of-contents audit and repair, omnibus splitting,
-annotations, notebooks, the reading log, device deploys, backups and merges, and
-the LAN server.
-
 ## But Why?
 
 To sideload books to Kindle, one might just use Send-to-Kindle. But I don't want to use more Amazon services. 
