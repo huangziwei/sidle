@@ -33,7 +33,7 @@ fi
 
 # Stamp the unified workspace version into the KUAL menu entry's config.xml —
 # the one release artifact outside Cargo's reach. The desktop app pushes this
-# file verbatim to the Kindle, and KUAL shows <version> on its info screen.
+# file verbatim to the Kindle, where it is inert until a menu exists to read it.
 # Source of truth is [workspace.package].version in the root Cargo.toml; the
 # sidle-* crates (incl. the on-device binary) inherit it via
 # `version.workspace = true`, so this keeps the cosmetic XML in lockstep.

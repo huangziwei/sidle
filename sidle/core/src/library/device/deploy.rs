@@ -20,9 +20,9 @@
 //!
 //! The picker is not a KUAL app: `documents/Sidle.sh` is a jailbreak-hotfix
 //! scriptlet the library indexes as a tile, and tapping it runs
-//! `extensions/sidle/bin/sidle.sh` directly. KUAL is a second, optional front
-//! door onto the same wrapper — `config.xml` and `menu.json` are the only two
-//! slots it owns, and dropping them would cost the menu entry and nothing else.
+//! `extensions/sidle/bin/sidle.sh` directly. That tile is the only front door;
+//! KUAL does not run on this firmware, so `config.xml` and `menu.json` are
+//! inert and dropping them would cost nothing.
 //!
 //! Why this exists: the manual workflow (`cargo build ... && cp ...`) was
 //! easy to forget after every native change, and `etc/server.conf` would
@@ -304,8 +304,8 @@ fn slots<'a>(source: &'a DeploySource, conf: &ServerConfRender, ca_cert: &Path) 
             source: Source::File(ca_cert.to_path_buf()),
         },
         mirrored(source, "extensions/sidle/bin/sidle.sh"),
-        // The KUAL menu entry — the optional second front door. Everything
-        // else here works without it.
+        // KUAL menu metadata, inert on this firmware. Pushed so a device that
+        // ever gains a menu finds a current entry rather than a stale one.
         mirrored(source, "extensions/sidle/config.xml"),
         mirrored(source, "extensions/sidle/menu.json"),
         // Not mirrored: per-install secret, rendered live. The mirror holds

@@ -1,6 +1,7 @@
 #!/bin/sh
-# The home-screen tile (documents/Sidle.sh) and the KUAL menu entry both launch
-# this; we exec the static Rust binary.
+# The home-screen tile (documents/Sidle.sh) launches this; it runs the static
+# Rust binary and outlives it, so the picker's status and the screen it hands
+# back to are both decided here.
 # Captures any stderr to a sibling log so a non-zero exit isn't silent.
 EXT=/mnt/us/extensions/sidle
 # One folder for every app's logs, rather than a scatter across the USB root.
@@ -46,4 +47,28 @@ fi
 # self-update ships `bin/sidle` alone, so anything the launcher sets up would be
 # absent on a device updated over Wi-Fi.
 "$EXT/bin/sidle" "$@" 2>> "$LOG"
-echo "[$(date)] exit=$?" >> "$LOG"
+# The picker's status, held in a variable: `$?` after the landing below is the
+# app manager's answer, and the log and this script's own exit both want the
+# picker's.
+STATUS=$?
+echo "[$(date)] exit=$STATUS" >> "$LOG"
+
+# The screen the tap came from, asked for once the picker is gone. The app
+# manager holds nothing of sidle's on its history stack — a `documents/`
+# scriptlet is registered without a `lipcId`, so nothing is ever put there —
+# and its own fallback is the home screen. The tile carries the originating
+# view in; with neither variable set, the manager chooses.
+#
+# `startView` takes `<view_name>:<layer>:<app_uri>` and acts on the view name,
+# so the address is built from the same name it carries. Layer 0 is the top
+# level, which the home screen and the library both are.
+echo "[$(date)] origin ${SIDLE_ORIGIN_VIEW:-none}" >> "$LOG"
+case "${SIDLE_ORIGIN_VIEW:-}" in
+    KPP_*|LEGACY_*)
+        lipc-set-prop com.lab126.appmgrd startView \
+            "$SIDLE_ORIGIN_VIEW:0:app://com.lab126.KPPMainApp?view=$SIDLE_ORIGIN_VIEW" \
+            2>/dev/null
+        ;;
+esac
+
+exit "$STATUS"

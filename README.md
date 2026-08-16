@@ -12,7 +12,7 @@ Sidle contains three main parts:
 2. a native Kindle app to pull books from the library and sync annotations back to the library via WIFI;
 3. `sidle-cli`, which does the same things to the same library from a script — see [Command line](#command-line).
 
-The Tauri app doesn't require the Kindle to be jailbroken, but the Kindle app does. It installs as a home-screen tile (a jailbreak-hotfix scriptlet) with a KUAL menu entry as an optional second way in — KUAL itself is not required.
+The Tauri app doesn't require the Kindle to be jailbroken, but the Kindle app does.
 
 There's also a bonus: a [pure rust JPEG XR encoder/decoder](./jxr/README.md) as a standalone crate.
 

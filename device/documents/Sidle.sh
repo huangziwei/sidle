@@ -5,9 +5,8 @@
 # DontUseFBInk
 
 # One tap from the home library straight into the picker. This tile is the
-# app's primary launcher; KUAL > Sidle is the fallback front door and runs the
-# very same wrapper, so the staged self-update swap and the launch logging stay
-# single-sourced in the extension.
+# app's only launcher. The wrapper it hands off to holds the staged
+# self-update swap and the launch logging, so neither is duplicated here.
 #
 # The body is hand-edited. Only the `# Icon:` line above is generated — rerun
 # device/make-tile.sh after changing assets/cover.svg.
@@ -22,4 +21,19 @@
 if pidof sidle >/dev/null 2>&1; then
     exit 0
 fi
+
+# The view the tap came from. A `documents/` scriptlet is registered without a
+# `lipcId`, so nothing of the picker's reaches the app manager's history stack,
+# and the manager's own fallback is the home screen whichever tile was tapped.
+# The stack still names the originating view, which the framework's shell saved
+# there when the tap paused it.
+#
+# The view name is what the manager acts on, and the URI stored beside it on the
+# stack can lag a transition behind, so the launcher builds its own from the
+# name. The tile is the last point before the handoff below, and the environment
+# is what reaches the launcher across it. A launch that does not come through
+# here sets nothing, and the manager then chooses the screen.
+SIDLE_ORIGIN_VIEW=$(lipc-get-prop com.lab126.appmgrd peekHistoryView 2>/dev/null)
+export SIDLE_ORIGIN_VIEW
+
 nohup sh -c 'sleep 1; exec /mnt/us/extensions/sidle/bin/sidle.sh' >/dev/null 2>&1 &
