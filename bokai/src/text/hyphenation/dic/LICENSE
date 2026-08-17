@@ -1,0 +1,47 @@
+Hyphenation dictionaries in this directory
+==========================================
+
+Two stock pattern sets, redistributed under their own terms, and one file of
+bokai's own. Each pattern file repeats its licence in its own header; this
+file records where each came from and what was changed.
+
+
+hyph_en_US.dic — American English
+---------------------------------
+
+From the LibreOffice dictionaries collection, `en/hyph_en_US.dic`, verbatim.
+
+    https://github.com/LibreOffice/dictionaries
+
+BSD-style: unlimited copying, redistribution and modification are permitted
+with the copyright and licence information the file carries. It is the plain
+TeX hyphenation table (`hyphen.tex`, Copyright Donald E. Knuth) together with
+the TUGboat hyphenation exception log (Copyright 2007 TeX Users Group, freely
+usable, modifiable and distributable), converted by László Németh.
+
+
+hyph_de_1996.dic — German, reformed (1996) orthography
+------------------------------------------------------
+
+From the `hyph-utf8` distribution of TeX hyphenation patterns, pattern list
+`hyph-de-1996.pat.txt`.
+
+    https://github.com/hyphenation/tex-hyphen
+
+MIT, Copyright (c) 2013-2024 Stephan Hennig, Werner Lemberg, Günter Milde,
+Sander van Geloven, Georg Pfeiffer, Gisbert W. Selke, Tobias Wendorf and Keno
+Wehr, by the Deutschsprachige Trennmustermannschaft. The full notice is in the
+file's own header.
+
+Changed: a `UTF-8` character set line and the `LEFTHYPHENMIN` /
+`RIGHTHYPHENMIN` keywords, so that a pattern list reads as a libhyphen
+dictionary. The values are the typesetting minimums the source states. No
+pattern is altered, added or removed.
+
+
+en.curation — English break decisions
+-------------------------------------
+
+bokai's own, under the licence of the crate. It states nothing about any other
+dictionary and is derived from none: it is a list of words with the breaks
+chosen for them by hand, and the file explains what those choices are for.

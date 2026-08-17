@@ -1,0 +1,205 @@
+% English break decisions, over the stock patterns of hyph_en_US.dic.
+%
+% Liang patterns are generated from a word list by machine and are judged on
+% aggregate. That is the right way to cover a language, but it takes no view of
+% how often a word is read, and the commonest few hundred words of English are
+% on every page of every book. A division that reads poorly in one of those is
+% seen constantly, so those words are decided one at a time here.
+%
+% Two rules produced the list, applied to the English vocabulary of this
+% library ranked by how often each word occurs.
+%
+%   1. A word of five letters or fewer is not divided at all — the division
+%      would save less than it costs to read. This is MINWORDLENGTH below and
+%      is the rule the Oxford style manuals state.
+%
+%   2. A division that leaves two letters is kept only where those two letters
+%      are a unit of the word: a prefix (re-turn, ex-plain, in-stead), a word
+%      in its own right (my-self, no-body, an-other), or the first half of a
+%      doubled consonant (of-fice, ap-pear, ac-count). Where they are instead
+%      the opening syllable of a stem that means nothing without the rest, the
+%      division is dropped: the reader is left holding a fragment that carries
+%      no sense, for the width of two letters.
+%
+% Dropping such a division moves it to the next place the word divides, or
+% leaves the word whole where there is no other. Both groups are below.
+
+MINWORDLENGTH 6
+
+% Divided later, off the opening: the word is built on a stem or a part
+% that the stock division cuts through.
+activ-i-ties
+activ-ity
+actu-ally
+after-noon
+after-ward
+alter-na-tive
+ances-tors
+ani-mals
+argu-ment
+argu-ments
+arti-cles
+atmos-phere
+audi-ence
+author-i-ties
+author-ity
+aver-age
+capa-ble
+capac-ity
+curios-ity
+decem-ber
+dia-logue
+dimen-sion
+dimen-sional
+dimen-sions
+direc-tion
+direc-tions
+direc-tor
+divi-sion
+edi-tor
+edu-ca-tion
+ele-ment
+ele-ments
+ele-va-tor
+empha-sis
+ene-mies
+enve-lope
+espe-cially
+essen-tial
+essen-tially
+estab-lish
+estab-lished
+every-body
+every-one
+every-thing
+every-where
+evi-dence
+evi-dent
+evi-dently
+famil-iar
+finan-cial
+geom-e-try
+human-ity
+impe-rial
+japa-nese
+loca-tion
+major-ity
+mate-rial
+mate-ri-als
+octo-ber
+oper-a-tion
+oper-a-tor
+orga-ni-za-tion
+orga-nized
+patri-archy
+polit-i-cal
+posi-tion
+poten-tial
+ratio-nal
+real-ity
+real-ize
+real-ized
+roman-tic
+secu-rity
+seri-ous
+seri-ously
+soci-eties
+soci-ety
+solu-tion
+solu-tions
+ulti-mately
+under-stand
+under-stand-ing
+under-stood
+vari-ety
+vehi-cle
+veloc-ity
+vio-lence
+vio-lent
+
+% Left whole: the opening syllable was the only place the word divided.
+action
+actions
+active
+actual
+ancient
+angels
+answer
+answered
+answers
+argued
+august
+author
+avenue
+career
+direct
+directed
+directly
+divided
+divine
+divorce
+either
+emperor
+empire
+energy
+engine
+entered
+entire
+entirely
+escape
+estate
+europe
+famous
+father
+favorite
+female
+finally
+finite
+focused
+future
+hebrew
+humans
+ignored
+images
+indian
+islamic
+island
+israel
+israelite
+israelites
+library
+located
+machine
+moment
+moments
+motion
+motive
+museum
+nation
+national
+nations
+native
+nature
+notice
+noticed
+notion
+orange
+ordered
+orders
+oxford
+papers
+patient
+period
+poetry
+police
+really
+sacred
+secret
+secure
+sequence
+series
+silence
+social
+tables
+vision
+waters
