@@ -247,11 +247,9 @@ impl MobiImporter {
         // Find cover image using discovered asset path
         if let Some(ref exth) = exth
             && let Some(cover_idx) = exth.cover_offset
+            && let Some(cover_path) = asset_at_record_offset(&assets, cover_idx)
         {
-            // cover_offset is 0-indexed relative to first image
-            if let Some(cover_path) = assets.get(cover_idx as usize) {
-                metadata.cover_image = Some(cover_path.to_string_lossy().to_string());
-            }
+            metadata.cover_image = Some(cover_path.to_string_lossy().to_string());
         }
 
         // Parse NCX index BEFORE text transformation (needed for anchor insertion
@@ -1196,6 +1194,27 @@ fn is_bare_filename_link(href: &[u8]) -> bool {
 // Helpers
 // ============================================================================
 
+/// The asset stored `offset` records past `first_image_index`.
+///
+/// EXTH 201 (cover) and 202 (thumbnail) count **raw records**, including the
+/// non-image ones — `RESC`, `DATP`, `FLIS`, `FCIS` — that asset discovery
+/// filters out. So the offset is not a position in the asset list, and indexing
+/// the list with it walks off by however many records were skipped ahead of the
+/// target. In a file whose image run begins with a `RESC` (the New Yorker
+/// issues, among others) that is one: `assets[cover_offset]` lands on the next
+/// record, which is exactly the low-resolution thumbnail EXTH 202 declares. The
+/// book then ships a 174×240 cover where its real one is 221 KB.
+///
+/// Asset filenames encode the raw offset (`images/image_0018.jpg`), which is
+/// what makes the lookup possible after filtering — and it is the same index
+/// [`MobiImporter::load_asset`] parses back out to read the record.
+fn asset_at_record_offset(assets: &[PathBuf], offset: u32) -> Option<&PathBuf> {
+    let stem = format!("image_{offset:04}");
+    assets
+        .iter()
+        .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()))
+}
+
 /// Discover asset paths by scanning image records (standalone function for early use).
 fn discover_assets_from_source(
     source: &Arc<dyn ByteSource>,
@@ -1682,6 +1701,43 @@ mod tests {
 
         let split = split_mobi_html(html, None, "T");
         assert_eq!(split.chapters.len(), 3, "falls back to every pagebreak");
+    }
+
+    #[test]
+    fn test_asset_at_record_offset() {
+        // The New Yorker shape: record +0 is a `RESC` that asset discovery
+        // filters out, so the surviving assets start at raw +1 and the list
+        // position is one behind the record offset from here on.
+        let assets: Vec<PathBuf> = (1..=19)
+            .map(|i| PathBuf::from(format!("images/image_{i:04}.jpg")))
+            .collect();
+
+        // EXTH 201 said 18 — the 221 KB cover, not the 15.8 KB thumbnail at 19
+        // that plain positional indexing (`assets[18]`) returns.
+        assert_eq!(
+            asset_at_record_offset(&assets, 18),
+            Some(&PathBuf::from("images/image_0018.jpg"))
+        );
+        assert_eq!(assets[18], PathBuf::from("images/image_0019.jpg"));
+
+        // A book whose images start at record +0 is unshifted, and the lookup
+        // agrees with positional indexing there.
+        let unshifted: Vec<PathBuf> = (0..3)
+            .map(|i| PathBuf::from(format!("images/image_{i:04}.jpg")))
+            .collect();
+        assert_eq!(
+            asset_at_record_offset(&unshifted, 0),
+            Some(&unshifted[0]),
+            "offset 0 is the first asset when nothing was skipped"
+        );
+
+        // An offset pointing at a record that was filtered out has no asset.
+        assert_eq!(asset_at_record_offset(&assets, 0), None);
+        assert_eq!(asset_at_record_offset(&assets, 99), None);
+
+        // The extension is whatever the record's magic bytes said.
+        let png = vec![PathBuf::from("images/image_0007.png")];
+        assert_eq!(asset_at_record_offset(&png, 7), Some(&png[0]));
     }
 
     #[test]

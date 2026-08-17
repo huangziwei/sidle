@@ -35,7 +35,38 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
         apply_exth(&mut metadata, exth);
     }
     metadata.periodical = periodical_kind(mobi, exth);
+    if metadata.periodical.is_some() {
+        metadata.title = issue_title(&metadata.title, metadata.date.as_deref());
+    }
     metadata
+}
+
+/// Name the *issue*, not just the publication.
+///
+/// A periodical's title field holds the publication — every New Yorker issue
+/// says `The New Yorker` and nothing more, because the format expects the
+/// catalogue to group issues under a parent and distinguish them by date. A
+/// sideload gets no such grouping (see `Metadata::periodical`), so without the
+/// date the library shows a row of identical tiles with no way to tell which
+/// issue is which.
+///
+/// The date goes on in ISO form so a plain title sort is also chronological.
+/// Applied at import rather than in one exporter, so the EPUB side, the KFX
+/// side and any library row built from them agree on what the book is called.
+///
+/// Idempotent: a title that already ends with the date is returned unchanged,
+/// so a re-import of a converted file does not accumulate suffixes.
+fn issue_title(title: &str, date: Option<&str>) -> String {
+    let Some(date) = date
+        .map(crate::util::truncate_to_date)
+        .filter(|d| !d.is_empty())
+    else {
+        return title.to_string();
+    };
+    if title.trim_end().ends_with(&date) {
+        return title.to_string();
+    }
+    format!("{} — {}", title.trim_end(), date)
 }
 
 /// Is this an issue of a periodical, and of what kind?
@@ -229,6 +260,24 @@ mod tests {
         assert_eq!(kind(258, None), Some(PeriodicalKind::Blog));
         assert_eq!(kind(2, Some("nwpr")), Some(PeriodicalKind::Newspaper));
         assert_eq!(kind(2, Some("FEED")), Some(PeriodicalKind::Blog));
+    }
+
+    #[test]
+    fn an_issue_is_titled_by_its_date() {
+        // Every issue's title field says only the publication, so the date is
+        // the only thing that tells two tiles apart.
+        assert_eq!(
+            issue_title("The New Yorker", Some("2014-12-14 23:00:00+00:00")),
+            "The New Yorker — 2014-12-14"
+        );
+        // Idempotent — a converted file re-imported does not grow a second date.
+        assert_eq!(
+            issue_title("The New Yorker — 2014-12-14", Some("2014-12-14")),
+            "The New Yorker — 2014-12-14"
+        );
+        // Nothing to add without a date.
+        assert_eq!(issue_title("The New Yorker", None), "The New Yorker");
+        assert_eq!(issue_title("The New Yorker", Some("")), "The New Yorker");
     }
 
     #[test]

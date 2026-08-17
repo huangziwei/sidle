@@ -199,23 +199,6 @@ pub enum MetadataField {
     /// Whether the book ships typefaces of its own — from context, not
     /// Metadata. Emitted as `override_kindle_font`.
     PublisherFonts,
-    /// The Kindle catalogue's content type: the periodical's own
-    /// `MAGZ`/`NWPR`/`FEED` when the book is an issue of one, else `PDOC`.
-    CdeContentType,
-    /// `itemType` — `MAGZ`, and only for a magazine. Amazon's schema admits no
-    /// other value for this key (`ref/calibre-kfx-input/kfxlib/yj_versions.py:811`),
-    /// so a newspaper or a blog emits nothing rather than something invalid.
-    ItemType,
-    /// `periodicals_generation_V2` — the string `"true"` on a periodical,
-    /// absent otherwise.
-    ///
-    /// A `kindle_title_metadata` key, **not** a `content_features` entry: the
-    /// calibre KFX Input plugin reads it from that category
-    /// (`yj_to_epub_metadata.py:222`) and admits only `"true"`
-    /// (`yj_versions.py:815`). The `libYJR-shared.so` string table has it next
-    /// to `kindle_capability_metadata`, which is what makes it look like a
-    /// capability flag.
-    PeriodicalsGeneration,
 }
 
 impl MetadataField {
@@ -265,22 +248,6 @@ impl MetadataField {
             // emits one repeated `author_pronunciation` entry per element.
             MetadataField::AuthorSort => meta.author_sorts.first().map(|s| s.as_str()),
             MetadataField::SeriesName => meta.collection.as_ref().map(|c| c.name.as_str()),
-            // PDOC (Personal Document) is what calibre emits for a sideloaded
-            // book. A periodical states its own type instead: the library reads
-            // it to shelve the file under Periodicals and to stack back issues
-            // (`periodicals_virtual_collections.lua` selects
-            // `p_cdetype IN ('NWPR','MAGZ')`).
-            //
-            // EBOK is deliberately never emitted — it signals an
-            // Amazon-purchased book and makes the device try an ASIN-catalogue
-            // cover lookup that fails for sideloads, leaving the library tile
-            // and sleep-screen cover blank.
-            MetadataField::CdeContentType => Some(meta.periodical.map_or("PDOC", |k| k.cde_type())),
-            MetadataField::ItemType => meta
-                .periodical
-                .filter(|k| *k == crate::model::PeriodicalKind::Magazine)
-                .map(|k| k.cde_type()),
-            MetadataField::PeriodicalsGeneration => meta.periodical.map(|_| "true"),
             // These are context-driven or need special handling
             MetadataField::AssetId
             | MetadataField::BookId
@@ -354,23 +321,24 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             category: MetadataCategory::KindleTitle,
             source: MetadataSource::Dynamic(MetadataField::ContentId),
         },
-        // `PDOC` for a book, the periodical's own type for an issue of one —
-        // see `MetadataField::CdeContentType`.
+        // Always PDOC — `cde_content_type` states a file's **provenance**, not
+        // its genre, and everything this writer produces is a personal
+        // document. The device reads it as provenance too: any store type
+        // (EBOK, MAGZ, …) makes it try an ASIN-catalogue lookup, which fails
+        // for a sideload and leaves the library tile and sleep-screen art blank.
+        //
+        // Measured on a Scribe (5.19.4.0.1, 2026-08-17): three MAGZ-declaring
+        // issues showed **no** cover while a PDOC control built from the same
+        // pipeline, with the same 500×687 cover embedded, showed its own. The
+        // MAGZ files bought nothing for it — no Periodicals shelf, no
+        // back-issue stacking, no periodical reading UI. So a periodical is
+        // declared PDOC like everything else, and `Metadata::periodical`
+        // survives only as a fact about the content (it names the issue — see
+        // `formats/mobi/metadata.rs::issue_title`), never as a declaration.
         MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Dynamic(MetadataField::CdeContentType),
-        },
-        // Periodical-only, absent from every book.
-        MetadataRule {
-            key: "itemType",
-            category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Dynamic(MetadataField::ItemType),
-        },
-        MetadataRule {
-            key: "periodicals_generation_V2",
-            category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Dynamic(MetadataField::PeriodicalsGeneration),
+            source: MetadataSource::Static("PDOC"),
         },
         MetadataRule {
             key: "is_sample",
@@ -988,53 +956,40 @@ mod tests {
         }
     }
 
+    /// A periodical is a personal document like everything else this writer
+    /// produces. Declaring its genre (`MAGZ`/`NWPR`/`FEED`) costs the cover and
+    /// buys nothing — measured on a Scribe, see the `cde_content_type` rule.
     #[test]
-    fn a_periodical_declares_its_own_type() {
+    fn a_periodical_is_still_declared_pdoc() {
         use crate::model::PeriodicalKind;
-        let title_entries = |kind: Option<PeriodicalKind>| {
+        for kind in [
+            PeriodicalKind::Magazine,
+            PeriodicalKind::Newspaper,
+            PeriodicalKind::Blog,
+        ] {
             let meta = Metadata {
                 title: "The New Yorker".to_string(),
                 language: "en".to_string(),
-                periodical: kind,
+                periodical: Some(kind),
                 ..Default::default()
             };
-            build_category_entries(
+            let entries = build_category_entries(
                 MetadataCategory::KindleTitle,
                 &meta,
                 &MetadataContext::default(),
-            )
-        };
-        let value = |entries: &[(&str, MetadataValue)], key: &str| {
-            entries
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-        };
-
-        let mag = title_entries(Some(PeriodicalKind::Magazine));
-        assert!(value(&mag, "cde_content_type").unwrap() == "MAGZ");
-        assert!(value(&mag, "itemType").unwrap() == "MAGZ");
-        // The string "true", not an Ion bool — Amazon's schema admits only that
-        // (`ref/calibre-kfx-input/kfxlib/yj_versions.py:815`), unlike the
-        // genuinely boolean `is_sample`.
-        assert!(matches!(
-            value(&mag, "periodicals_generation_V2"),
-            Some(MetadataValue::Text(ref s)) if s == "true"
-        ));
-
-        // A newspaper and a blog carry their own cdetype and the generation
-        // flag, but not `itemType` — Amazon admits `MAGZ` there and nothing else.
-        for (kind, cde) in [
-            (PeriodicalKind::Newspaper, "NWPR"),
-            (PeriodicalKind::Blog, "FEED"),
-        ] {
-            let entries = title_entries(Some(kind));
-            assert!(value(&entries, "cde_content_type").unwrap() == cde);
-            assert!(value(&entries, "periodicals_generation_V2").is_some());
-            assert!(
-                value(&entries, "itemType").is_none(),
-                "{cde} declares no itemType"
             );
+            assert!(
+                entries
+                    .iter()
+                    .any(|(k, v)| *k == "cde_content_type" && v == "PDOC"),
+                "{kind:?} is declared PDOC"
+            );
+            for key in ["itemType", "periodicals_generation_V2"] {
+                assert!(
+                    !entries.iter().any(|(k, _)| *k == key),
+                    "{kind:?} declares no {key}"
+                );
+            }
         }
     }
 
