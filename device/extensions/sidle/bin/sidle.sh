@@ -19,6 +19,33 @@ for old in /mnt/us/sidle-native.log /mnt/us/sidle-update.log; do
 done
 LOG=$LOGS/sidle-native.log
 echo "[$(date)] launch $(uname -m)" >> "$LOG"
+
+# The screen the tap came from, asked for once the picker is gone. The app
+# manager holds nothing of sidle's on its history stack — a `documents/`
+# scriptlet is registered without a `lipcId`, so nothing is ever put there —
+# and its own fallback is the home screen. The tile carries the originating
+# view in; with neither variable set, the manager chooses.
+#
+# `startView` takes `<view_name>:<layer>:<app_uri>` and acts on the view name,
+# so the address is built from the same name it carries. Layer 0 is the top
+# level, which the home screen and the library both are.
+#
+# **On the trap rather than on the last line**, so that it is not something a
+# later exit can step over. Whatever ends this script — the picker returning, or
+# something above it giving up before the picker ever runs — the writer is put
+# back on the screen they tapped from instead of on the manager's fallback.
+land() {
+    echo "[$(date)] origin ${SIDLE_ORIGIN_VIEW:-none}" >> "$LOG"
+    case "${SIDLE_ORIGIN_VIEW:-}" in
+        KPP_*|LEGACY_*) ;;
+        *) return 0 ;;
+    esac
+    lipc-set-prop com.lab126.appmgrd startView \
+        "$SIDLE_ORIGIN_VIEW:0:app://com.lab126.KPPMainApp?view=$SIDLE_ORIGIN_VIEW" \
+        2>/dev/null
+}
+trap land EXIT
+
 # Apply a staged self-update (written by the picker's in-app Update button) before
 # we exec — never overwrite the running binary on FAT (ETXTBSY/corruption). The
 # picker sha256-verifies the download before staging it as .new, so this swap is
@@ -47,28 +74,10 @@ fi
 # self-update ships `bin/sidle` alone, so anything the launcher sets up would be
 # absent on a device updated over Wi-Fi.
 "$EXT/bin/sidle" "$@" 2>> "$LOG"
-# The picker's status, held in a variable: `$?` after the landing below is the
-# app manager's answer, and the log and this script's own exit both want the
-# picker's.
+# The picker's status, held in a variable: the log line below replaces `$?` with
+# its own and the landing runs later still, while the log and this script's exit
+# both want the picker's.
 STATUS=$?
 echo "[$(date)] exit=$STATUS" >> "$LOG"
-
-# The screen the tap came from, asked for once the picker is gone. The app
-# manager holds nothing of sidle's on its history stack — a `documents/`
-# scriptlet is registered without a `lipcId`, so nothing is ever put there —
-# and its own fallback is the home screen. The tile carries the originating
-# view in; with neither variable set, the manager chooses.
-#
-# `startView` takes `<view_name>:<layer>:<app_uri>` and acts on the view name,
-# so the address is built from the same name it carries. Layer 0 is the top
-# level, which the home screen and the library both are.
-echo "[$(date)] origin ${SIDLE_ORIGIN_VIEW:-none}" >> "$LOG"
-case "${SIDLE_ORIGIN_VIEW:-}" in
-    KPP_*|LEGACY_*)
-        lipc-set-prop com.lab126.appmgrd startView \
-            "$SIDLE_ORIGIN_VIEW:0:app://com.lab126.KPPMainApp?view=$SIDLE_ORIGIN_VIEW" \
-            2>/dev/null
-        ;;
-esac
 
 exit "$STATUS"
