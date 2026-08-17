@@ -46,6 +46,52 @@ use std::collections::BTreeSet;
 /// The character marking a permitted break inside a word.
 pub const SOFT_HYPHEN: char = '\u{00ad}';
 
+/// Which dictionary hyphenates a language, by the name the set uses.
+///
+/// Twelve dictionaries cover the set: eight named for a language, four named
+/// for an Indic script and so shared by every language written in it. A Kindle
+/// stores them in its reader resource bundle — itself a KFX container — as
+/// `bcRawMedia` under `dicts/bin/hyph_<name>.bin`.
+///
+/// `language` is a BCP-47 tag; region and other subtags are ignored, so
+/// `en-GB` and `en-US` resolve alike. An explicit script subtag decides on its
+/// own, which is what lets a Devanagari-written language be named as such.
+/// `None` means no dictionary covers the language and it must not be
+/// hyphenated — including every language that does not hyphenate at all.
+pub fn dictionary_name(language: &str) -> Option<&'static str> {
+    let lower = language.to_ascii_lowercase();
+    let mut parts = lower.split(['-', '_']).filter(|p| !p.is_empty());
+    let primary = parts.next()?;
+    // A script subtag is four letters and outranks the language: the Indic
+    // dictionaries are per script, and one script serves many languages.
+    for part in parts {
+        match part {
+            "deva" => return Some("deva"),
+            "gujr" => return Some("gujr"),
+            "taml" => return Some("taml"),
+            "mlym" => return Some("mlym"),
+            _ => {}
+        }
+    }
+    Some(match primary {
+        "en" => "en_YJ",
+        "de" => "de",
+        "nl" => "nl",
+        "ru" => "ru",
+        "es" => "es",
+        "fr" => "fr",
+        "it" => "it",
+        "pt" => "pt",
+        // Devanagari: Hindi, Marathi, Nepali, Sanskrit, Konkani, Maithili,
+        // Bodo, Dogri, Bhojpuri.
+        "hi" | "mr" | "ne" | "sa" | "kok" | "mai" | "brx" | "doi" | "bho" => "deva",
+        "gu" => "gujr",
+        "ta" => "taml",
+        "ml" => "mlym",
+        _ => return None,
+    })
+}
+
 /// Why a byte string is not a usable hyphenation dictionary.
 #[derive(Debug)]
 pub enum HyphenationError {
@@ -613,5 +659,30 @@ mod tests {
                 "break at {at} splits a character"
             );
         }
+    }
+
+    #[test]
+    fn language_tags_resolve_to_a_dictionary() {
+        assert_eq!(dictionary_name("en"), Some("en_YJ"));
+        // Region and case are not part of the choice.
+        assert_eq!(dictionary_name("EN-gb"), Some("en_YJ"));
+        assert_eq!(dictionary_name("pt-BR"), Some("pt"));
+        // The Indic dictionaries are per script, so many languages share one.
+        assert_eq!(dictionary_name("hi"), Some("deva"));
+        assert_eq!(dictionary_name("mr-IN"), Some("deva"));
+        assert_eq!(dictionary_name("ta"), Some("taml"));
+        // An explicit script subtag decides on its own.
+        assert_eq!(dictionary_name("sa-Deva"), Some("deva"));
+        assert_eq!(dictionary_name("und-Gujr"), Some("gujr"));
+    }
+
+    #[test]
+    fn an_uncovered_language_is_never_hyphenated() {
+        // No dictionary, rather than a wrong one: Japanese and Chinese do not
+        // hyphenate, and Polish simply is not in the set.
+        assert_eq!(dictionary_name("ja"), None);
+        assert_eq!(dictionary_name("zh-Hant"), None);
+        assert_eq!(dictionary_name("pl"), None);
+        assert_eq!(dictionary_name(""), None);
     }
 }
