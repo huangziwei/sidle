@@ -106,6 +106,11 @@ pub struct ElementStart {
     /// export the IR's `<colgroup>` collapses into this and emits no content
     /// element of its own. Empty for every other element.
     pub column_format: Vec<ColumnFormat>,
+    /// `$104 list_start_offset` — the ordinal this list, or this item, counts
+    /// from. A publisher's numbered list interrupted by prose arrives as one
+    /// list per item, each stating where it resumes, so dropping the offset
+    /// restarts every fragment at one.
+    pub list_start: Option<u32>,
 }
 
 /// One column-geometry entry of a table's `column_format`.
@@ -142,6 +147,7 @@ impl ElementStart {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }
     }
 
@@ -277,6 +283,7 @@ impl TokenStream {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
     }
 

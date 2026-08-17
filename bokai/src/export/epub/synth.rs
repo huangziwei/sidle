@@ -168,7 +168,15 @@ fn synthesize_xhtml_from_body(
     doc.push_str(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml""#,
+    );
+    // The prefix has to be bound where it is used, and a document that states
+    // no semantics declares nothing.
+    if body_result.body.contains(" epub:type=\"") {
+        doc.push_str(" xmlns:epub=\"http://www.idpf.org/2007/ops\"");
+    }
+    doc.push_str(
+        r#">
 <head>
   <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=utf-8"/>
   <title>"#,
@@ -327,11 +335,25 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
         escape_xml_into(&mut attrs, lang);
         attrs.push('"');
     }
+    // The element's own structural semantics — what makes a note a note to a
+    // reader, and what a landmark entry points at.
+    if let Some(epub_type) = ctx.ir.semantics.epub_type(id) {
+        attrs.push_str(" epub:type=\"");
+        escape_xml_into(&mut attrs, epub_type);
+        attrs.push('"');
+    }
     // Emit start attribute for ordered lists
     if role == Role::OrderedList
         && let Some(start) = ctx.ir.semantics.list_start(id)
     {
         write!(attrs, " start=\"{}\"", start).unwrap();
+    }
+    // An item states its own ordinal where the list's start cannot: a list
+    // whose numbering resumes mid-item, or one item counted out of sequence.
+    if role == Role::ListItem
+        && let Some(value) = ctx.ir.semantics.list_start(id)
+    {
+        write!(attrs, " value=\"{}\"", value).unwrap();
     }
     // Emit rowspan/colspan for table cells
     if role == Role::TableCell {

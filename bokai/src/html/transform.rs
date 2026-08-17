@@ -286,6 +286,12 @@ impl<'a> TransformContext<'a> {
                                 self.chapter.semantics.set_list_start(ir_id, start);
                             }
                         }
+                        // An item's own ordinal (li@value)
+                        "value" if name.local.as_ref() == "li" => {
+                            if let Ok(value) = attr.value.parse::<u32>() {
+                                self.chapter.semantics.set_list_start(ir_id, value);
+                            }
+                        }
                         // Semantic fidelity attributes
                         // epub:type attribute - handle both namespaced and prefixed forms
                         // html5ever parses "epub:type" as literal name with empty namespace

@@ -39,7 +39,8 @@ pub struct SemanticMap {
     aria_role: HashMap<NodeId, TextRange>,
     /// datetime attribute (for `<time>` elements).
     datetime: HashMap<NodeId, TextRange>,
-    /// start attribute (for ordered lists, ol@start).
+    /// The ordinal a list counts from (ol@start) or an item counts as
+    /// (li@value).
     list_start: HashMap<NodeId, u32>,
     /// rowspan attribute (for table cells).
     row_span: HashMap<NodeId, u32>,
@@ -230,14 +231,15 @@ impl SemanticMap {
 
     // --- list_start ---
 
-    /// Set the start number for an ordered list (from `<ol start="N">`).
+    /// Set the ordinal a list counts from (`<ol start="N">`) or an item
+    /// counts as (`<li value="N">`). One is the default and is not stored.
     pub fn set_list_start(&mut self, node: NodeId, start: u32) {
         if start != 1 {
             self.list_start.insert(node, start);
         }
     }
 
-    /// Get the start number for an ordered list.
+    /// Get the ordinal a list counts from, or an item counts as.
     /// Returns None if not set (defaults to 1).
     pub fn list_start(&self, node: NodeId) -> Option<u32> {
         self.list_start.get(&node).copied()

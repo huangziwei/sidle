@@ -101,6 +101,7 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
         hints: HashMap::new(),
         opts,
         assets,
+        used_epub_type: false,
     };
     for child in ir.children(crate::model::NodeId::ROOT) {
         b.walk(child, body_id);
@@ -111,8 +112,16 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
         mut classes,
         mut styles,
         mut hints,
+        used_epub_type,
         ..
     } = b;
+
+    // The prefix has to be bound where it is used, and a document that states
+    // no semantics declares nothing.
+    if used_epub_type {
+        dom.get_mut(html_id)
+            .set("xmlns:epub", "http://www.idpf.org/2007/ops");
+    }
 
     // A document whose whole content is one container: that container IS the
     // page, so it becomes `<body>` rather than a box inside it. See
@@ -182,6 +191,9 @@ struct Builder<'a, 'b> {
     hints: LayoutHints,
     opts: &'a ChapterEmit<'b>,
     assets: &'a mut HashSet<String>,
+    /// Whether any element took an `epub:type`, which is what decides if the
+    /// document has to bind the prefix.
+    used_epub_type: bool,
 }
 
 impl Builder<'_, '_> {
@@ -255,6 +267,18 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// Carry the node's `epub:type` onto its element. It is what a reader
+    /// keys a popup note on, and what states the role of a section the
+    /// landmarks nav cannot name — both facts about the element, not about
+    /// the document.
+    fn stamp_epub_type(&mut self, id: IrNodeId, el: dom::NodeId) {
+        let Some(epub_type) = self.ir.semantics.epub_type(id).map(str::to_string) else {
+            return;
+        };
+        self.dom.get_mut(el).set("epub:type", epub_type);
+        self.used_epub_type = true;
+    }
+
     /// Emit an image, or the degradation for one whose bytes aren't there.
     ///
     /// A source can reference an image it does not ship: an `<img src>` whose
@@ -286,6 +310,7 @@ impl Builder<'_, '_> {
             }
             self.stamp_source_element(id, span);
             self.stamp_id(id, span);
+            self.stamp_epub_type(id, span);
             return;
         }
         let img = self.dom.sub_element(parent, "img");
@@ -296,6 +321,7 @@ impl Builder<'_, '_> {
         self.dom.get_mut(img).set("alt", &alt);
         self.stamp_source_element(id, img);
         self.stamp_id(id, img);
+        self.stamp_epub_type(id, img);
         self.attach_block_style(id, img);
     }
 
@@ -332,6 +358,7 @@ impl Builder<'_, '_> {
                 self.attach_inline_class(id, ruby);
                 self.stamp_source_element(id, ruby);
                 self.stamp_id(id, ruby);
+                self.stamp_epub_type(id, ruby);
                 // Base content wraps in `<rb>`; the annotation children
                 // (`RubyText`) follow as `<rt>` — calibre's rb/rt shape.
                 let children: Vec<IrNodeId> = self.ir.children(id).collect();
@@ -381,6 +408,7 @@ impl Builder<'_, '_> {
                 self.attach_inline_class(id, a);
                 self.stamp_source_element(id, a);
                 self.stamp_id(id, a);
+                self.stamp_epub_type(id, a);
                 for child in self.ir.children(id).collect::<Vec<_>>() {
                     self.walk(child, a);
                 }
@@ -394,11 +422,13 @@ impl Builder<'_, '_> {
                     // div but leaves its attribute plumbing alone.
                     self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
+                    self.stamp_epub_type(id, span);
                     self.attach_block_style(id, span);
                 } else {
                     self.attach_inline_class(id, span);
                     self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
+                    self.stamp_epub_type(id, span);
                 }
                 for child in self.ir.children(id).collect::<Vec<_>>() {
                     self.walk(child, span);
@@ -418,6 +448,7 @@ impl Builder<'_, '_> {
                 let el = self.dom.sub_element(parent, tag);
                 self.stamp_source_element(id, el);
                 self.stamp_id(id, el);
+                self.stamp_epub_type(id, el);
                 self.attach_block_style(id, el);
                 // A spanning cell keeps its geometry: dropping the attribute
                 // shifts every following cell in the row into the wrong
@@ -435,6 +466,18 @@ impl Builder<'_, '_> {
                     "col" | "colgroup" => {
                         if let Some(n) = self.ir.semantics.col_span(id) {
                             self.dom.get_mut(el).set("span", n.to_string());
+                        }
+                    }
+                    // A numbered list interrupted by prose resumes at a stated
+                    // ordinal; without it every fragment restarts at one.
+                    "ol" => {
+                        if let Some(n) = self.ir.semantics.list_start(id) {
+                            self.dom.get_mut(el).set("start", n.to_string());
+                        }
+                    }
+                    "li" => {
+                        if let Some(n) = self.ir.semantics.list_start(id) {
+                            self.dom.get_mut(el).set("value", n.to_string());
                         }
                     }
                     _ => {}

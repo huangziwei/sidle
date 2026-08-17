@@ -164,6 +164,13 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         role = override_role;
     }
 
+    // `$104 list_start_offset` — where this list, or this item, resumes
+    // counting.
+    let list_start = get_field(fields, sym!(ListStartOffset))
+        .and_then(|v| v.as_int())
+        .filter(|n| *n > 0)
+        .map(|n| n as u32);
+
     // List tag parity with calibre's LIST_STYLE_TYPES:
     // only the five alpha/roman/decimal styles make an `<ol>`; everything
     // else — including KFX's own `numeric`, whose numbering rides the CSS
@@ -176,6 +183,9 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
             "lower_alpha" | "upper_alpha" | "decimal" | "lower_roman" | "upper_roman" => {
                 Role::OrderedList
             }
+            // A stated offset is an ordinal, and only an ordered list can
+            // carry one.
+            _ if list_start.is_some() => Role::OrderedList,
             _ => Role::UnorderedList,
         };
     }
@@ -184,7 +194,18 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let id = get_field(fields, sym!(Id)).and_then(|v| v.as_int());
 
     // Extract ALL semantic attributes using schema rules (GENERIC!)
-    let semantics = extract_all_element_attrs(fields, kfx_type_id, ctx);
+    let mut semantics = extract_all_element_attrs(fields, kfx_type_id, ctx);
+
+    // A note's body states which kind of note it is, which is what makes the
+    // reader offer it as a popup.
+    if let Some(epub_type) = get_field(fields, sym!(YjClassification))
+        .and_then(|v| v.as_symbol())
+        .and_then(note_epub_type)
+    {
+        semantics
+            .entry(SemanticTarget::EpubType)
+            .or_insert_with(|| epub_type.to_string());
+    }
 
     // Get content reference (for text)
     let content_ref = get_field(fields, sym!(Content))
@@ -259,6 +280,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         column_span,
         row_span,
         column_format: Vec::new(),
+        list_start,
     }));
 
     // A table's column geometry precedes its rows, as `<colgroup>` must.
@@ -326,6 +348,43 @@ fn tokenize_column_format(
         stream.push(KfxToken::EndElement);
     }
     stream.push(KfxToken::EndElement);
+}
+
+/// The EPUB structural-semantics token for a KFX note classification.
+///
+/// `$615 yj.classification` marks a note's body, which is what lets a reader
+/// show it in a popup when its reference is tapped. The three note kinds are
+/// distinct — a single book uses all of them — so each keeps its own token,
+/// and the mapping is the inverse of the one export applies.
+fn note_epub_type(classification: u64) -> Option<&'static str> {
+    match classification {
+        x if x == KfxSymbol::Footnote as u64 => Some("footnote"),
+        x if x == KfxSymbol::YjChapternote as u64 => Some("endnote"),
+        x if x == KfxSymbol::YjEndnote as u64 => Some("rearnote"),
+        x if x == KfxSymbol::YjSidenote as u64 => Some("sidebar"),
+        _ => None,
+    }
+}
+
+/// The KFX note classification for an `epub:type`, the inverse of
+/// [`note_epub_type`].
+///
+/// An `epub:type` may carry several tokens; the most specific note kind in it
+/// wins. Everything that names no note kind stays unclassified.
+fn note_classification(epub_type: &str) -> Option<u64> {
+    let tokens: Vec<&str> = epub_type.split_whitespace().collect();
+    let has = |t: &str| tokens.contains(&t);
+    if has("rearnote") {
+        Some(KfxSymbol::YjEndnote as u64)
+    } else if has("endnote") {
+        Some(KfxSymbol::YjChapternote as u64)
+    } else if has("sidebar") || has("marginalia") {
+        Some(KfxSymbol::YjSidenote as u64)
+    } else if has("footnote") {
+        Some(KfxSymbol::Footnote as u64)
+    } else {
+        None
+    }
 }
 
 /// Extract the semantic type annotation (yj.semantics.type) if present.
@@ -765,6 +824,10 @@ where
                 }
                 if let Some(n) = elem.row_span.or(style_rows) {
                     chapter.semantics.set_row_span(node_id, n);
+                }
+
+                if let Some(n) = elem.list_start {
+                    chapter.semantics.set_list_start(node_id, n);
                 }
 
                 // Anchored element: stamp the html id registered at
@@ -1480,18 +1543,22 @@ fn split_text_run(chapter: &mut Chapter, node: NodeId, char_offset: i64) -> Node
     span
 }
 
-/// Emit a cell's `$148 table_column_span` / `$149 table_row_span` fields, and
-/// a table's `$152 column_format` list.
+/// Emit the fields an element states about its place in a structure: a cell's
+/// `$148 table_column_span` / `$149 table_row_span`, a table's `$152
+/// column_format` list, and a list's `$104 list_start_offset`.
 ///
 /// KFX gives a cell no element type of its own, so the span sits on whatever
 /// element occupies the row's content list. A span of 1 is the default and is
 /// left unwritten.
-fn push_cell_spans(fields: &mut Vec<(u64, IonValue)>, elem: &ElementStart) {
+fn push_structural_fields(fields: &mut Vec<(u64, IonValue)>, elem: &ElementStart) {
     if let Some(n) = elem.column_span.filter(|n| *n > 1) {
         fields.push((sym!(TableColumnSpan), IonValue::Int(n as i64)));
     }
     if let Some(n) = elem.row_span.filter(|n| *n > 1) {
         fields.push((sym!(TableRowSpan), IonValue::Int(n as i64)));
+    }
+    if let Some(n) = elem.list_start {
+        fields.push((sym!(ListStartOffset), IonValue::Int(n as i64)));
     }
     if !elem.column_format.is_empty() {
         let entries = elem
@@ -2158,6 +2225,8 @@ fn walk_node_for_export(
     if node.role == Role::Table {
         elem.column_format = collect_column_format(chapter, node_id, ctx);
     }
+
+    elem.list_start = chapter.semantics.list_start(node_id);
 
     stream.push(KfxToken::StartElement(elem));
 
@@ -2901,29 +2970,12 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     }
 
                     // Add yj.classification for footnote/endnote popup support
-                    if let Some(epub_type) = elem.get_semantic(SemanticTarget::EpubType) {
-                        let types: Vec<&str> = epub_type.split_whitespace().collect();
-                        let is_footnote = types.contains(&"footnote");
-                        let is_endnote = types.contains(&"endnote") || types.contains(&"rearnote");
-                        let is_sidenote =
-                            types.contains(&"sidebar") || types.contains(&"marginalia");
-
-                        if is_endnote {
-                            outer_fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::YjEndnote as u64),
-                            ));
-                        } else if is_sidenote {
-                            outer_fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::YjSidenote as u64),
-                            ));
-                        } else if is_footnote {
-                            outer_fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::Footnote as u64),
-                            ));
-                        }
+                    if let Some(classification) = elem
+                        .get_semantic(SemanticTarget::EpubType)
+                        .and_then(note_classification)
+                    {
+                        outer_fields
+                            .push((sym!(YjClassification), IonValue::Symbol(classification)));
                     }
 
                     // Add schema-driven attributes from kfx_attrs
@@ -2943,7 +2995,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
 
                     // The span belongs to the cell box, which is the outer
                     // container here — the inner text element is its content.
-                    push_cell_spans(&mut outer_fields, elem);
+                    push_structural_fields(&mut outer_fields, elem);
 
                     // Push outer container builder
                     stack.push(IonBuilder::with_fields(outer_fields, outer_id));
@@ -3091,35 +3143,11 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Add yj.classification for footnote/endnote popup support
                     // This marks the element so Kindle can show its content in a popup
                     // when a noteref link is tapped
-                    //
-                    // Mapping:
-                    // - epub:type="footnote" → yj.chapternote ($618)
-                    // - epub:type="endnote" or "rearnote" → yj.endnote ($619)
-                    // - epub:type="sidebar" or "marginalia" → yj.sidenote ($620)
-                    if let Some(epub_type) = elem.get_semantic(SemanticTarget::EpubType) {
-                        let types: Vec<&str> = epub_type.split_whitespace().collect();
-                        let is_footnote = types.contains(&"footnote");
-                        let is_endnote = types.contains(&"endnote") || types.contains(&"rearnote");
-                        let is_sidenote =
-                            types.contains(&"sidebar") || types.contains(&"marginalia");
-
-                        // Prefer endnote classification if both are present (common in EPUBs)
-                        if is_endnote {
-                            fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::YjEndnote as u64),
-                            ));
-                        } else if is_sidenote {
-                            fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::YjSidenote as u64),
-                            ));
-                        } else if is_footnote {
-                            fields.push((
-                                sym!(YjClassification),
-                                IonValue::Symbol(KfxSymbol::Footnote as u64),
-                            ));
-                        }
+                    if let Some(classification) = elem
+                        .get_semantic(SemanticTarget::EpubType)
+                        .and_then(note_classification)
+                    {
+                        fields.push((sym!(YjClassification), IonValue::Symbol(classification)));
                     }
 
                     // Add schema-driven attributes from kfx_attrs
@@ -3143,7 +3171,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         }
                     }
 
-                    push_cell_spans(&mut fields, elem);
+                    push_structural_fields(&mut fields, elem);
 
                     let mut builder = IonBuilder::with_fields(fields, container_id);
                     builder.is_image = elem.role == Role::Image;
@@ -3577,6 +3605,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
 
@@ -3617,6 +3646,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
 
@@ -3664,6 +3694,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
 
@@ -3716,6 +3747,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
 
@@ -3783,6 +3815,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
         // Nested tate-chu-yoko run — its own text is 2 chars long but it
@@ -3811,6 +3844,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
         stream.push(KfxToken::Text("　お互いです".to_string()));
@@ -3890,6 +3924,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
         stream.push(KfxToken::StartElement(ElementStart {
@@ -3916,6 +3951,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
         stream.push(KfxToken::Text("　お互いです".to_string()));
@@ -4505,8 +4541,8 @@ mod tests {
 
     #[test]
     fn test_yj_classification_for_footnote_popup() {
-        // Elements with epub:type="endnote" or "footnote" should emit
-        // yj.classification: yj.endnote ($615: $619) for popup support
+        // A note's body carries yj.classification ($615), which is what makes
+        // the device offer it as a popup.
         let mut chapter = Chapter::new();
 
         // Create a list item that represents an endnote
@@ -4565,9 +4601,78 @@ mod tests {
         );
         assert_eq!(
             classification.unwrap(),
-            KfxSymbol::YjEndnote as u64,
-            "yj.classification should be yj.endnote ($619) for endnote elements"
+            KfxSymbol::YjChapternote as u64,
+            "an endnote is a note at the end of its section"
         );
+    }
+
+    #[test]
+    fn each_kind_of_note_keeps_its_own_classification() {
+        // Books use all three side by side, so neither direction may collapse
+        // them into one.
+        for (epub_type, classification) in [
+            ("footnote", KfxSymbol::Footnote),
+            ("endnote", KfxSymbol::YjChapternote),
+            ("rearnote", KfxSymbol::YjEndnote),
+            ("sidebar", KfxSymbol::YjSidenote),
+        ] {
+            assert_eq!(
+                note_classification(epub_type),
+                Some(classification as u64),
+                "{epub_type} exports as its own classification"
+            );
+            assert_eq!(
+                note_epub_type(classification as u64),
+                Some(epub_type),
+                "{epub_type} comes back from its own classification"
+            );
+        }
+        assert_eq!(note_classification("bodymatter chapter"), None);
+        assert_eq!(note_epub_type(KfxSymbol::Text as u64), None);
+    }
+
+    #[test]
+    fn a_note_body_arrives_as_its_epub_type() {
+        let symbols = no_symbols();
+        let storyline = IonValue::Struct(vec![(
+            sym!(ContentList),
+            IonValue::List(vec![IonValue::Struct(vec![
+                (sym!(Type), IonValue::Symbol(KfxSymbol::Text as u64)),
+                (
+                    sym!(YjClassification),
+                    IonValue::Symbol(KfxSymbol::YjChapternote as u64),
+                ),
+            ])]),
+        )]);
+
+        let stream = tokenize_storyline(&storyline, &symbols, None, None, None);
+        let Some(KfxToken::StartElement(elem)) = stream.iter().next() else {
+            panic!("expected an element");
+        };
+        assert_eq!(elem.get_semantic(SemanticTarget::EpubType), Some("endnote"));
+    }
+
+    #[test]
+    fn a_list_that_resumes_counting_stays_ordered() {
+        // A numbered list broken by prose arrives as one list per item, each
+        // stating where it resumes; without the offset every fragment would
+        // restart at one, and a `numeric` list alone would not even be ordered.
+        let symbols = no_symbols();
+        let storyline = IonValue::Struct(vec![(
+            sym!(ContentList),
+            IonValue::List(vec![IonValue::Struct(vec![
+                (sym!(Type), IonValue::Symbol(KfxSymbol::List as u64)),
+                (sym!(ListStyle), IonValue::Symbol(KfxSymbol::Numeric as u64)),
+                (sym!(ListStartOffset), IonValue::Int(7)),
+            ])]),
+        )]);
+
+        let stream = tokenize_storyline(&storyline, &symbols, None, None, None);
+        let Some(KfxToken::StartElement(elem)) = stream.iter().next() else {
+            panic!("expected an element");
+        };
+        assert_eq!(elem.role, Role::OrderedList);
+        assert_eq!(elem.list_start, Some(7));
     }
 
     #[test]
@@ -5012,6 +5117,7 @@ mod tests {
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
+            list_start: None,
         }));
         stream.end_element();
 
