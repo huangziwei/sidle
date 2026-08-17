@@ -210,7 +210,13 @@ pub fn transform_mobi_html(
     // Step 6: Remove empty anchors (like KindleUnpack does)
     remove_empty_anchors(&mut output);
 
-    // Step 7: Legacy layout attributes (`<p height width align>`) → inline
+    // Step 7: Canonicalize element names and escape bare ampersands. MOBI6
+    // markup is case-free HTML4 with unescaped `&` in running text; every
+    // consumer downstream of here treats the result as XHTML.
+    let output = super::transform::lowercase_tag_names(&output);
+    let output = super::transform::escape_bare_ampersands(&output);
+
+    // Step 8: Legacy layout attributes (`<p height width align>`) → inline
     // CSS, so the spacing/indent/justification kindlegen encoded as
     // attributes survives into valid XHTML5.
     super::transform::convert_legacy_block_attrs(&output)

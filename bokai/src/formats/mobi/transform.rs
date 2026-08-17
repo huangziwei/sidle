@@ -692,6 +692,149 @@ fn attr_spans(attrs: &[u8], name: &[u8]) -> Vec<(usize, usize)> {
     spans
 }
 
+/// Escape ampersands that do not begin a character or entity reference.
+///
+/// MOBI6 text carries literal ampersands — `“Pranks & Fails,”`, `A. T. & T.` —
+/// which HTML4 tolerates and XML does not (`entity or character reference not
+/// closed` — epubcheck RSC-016). A bare `&` becomes `&amp;`; anything already
+/// well-formed (`&amp;`, `&#x25A0;`, `&#8212;`) is left exactly as written, so
+/// nothing is double-escaped and no existing reference is disturbed.
+///
+/// Comments, CDATA sections and processing instructions are copied whole: an
+/// `&` inside them needs no escaping, and the XML parser never reads them as
+/// markup.
+pub fn escape_bare_ampersands(html: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(html.len());
+    let mut pos = 0;
+    while pos < html.len() {
+        if html[pos] == b'<'
+            && let Some(end) = verbatim_span(html, pos)
+        {
+            out.extend_from_slice(&html[pos..end]);
+            pos = end;
+            continue;
+        }
+        if html[pos] == b'&' && !starts_reference(&html[pos..]) {
+            out.extend_from_slice(b"&amp;");
+        } else {
+            out.push(html[pos]);
+        }
+        pos += 1;
+    }
+    out
+}
+
+/// End offset of a comment / CDATA / processing-instruction span opening at
+/// `pos`, or `None` when nothing of the kind starts there. An unterminated
+/// span runs to end of input — the same recovery an XML parser has no choice
+/// about.
+fn verbatim_span(html: &[u8], pos: usize) -> Option<usize> {
+    const SPANS: [(&[u8], &[u8]); 3] = [(b"<!--", b"-->"), (b"<![CDATA[", b"]]>"), (b"<?", b"?>")];
+    let rest = &html[pos..];
+    SPANS.iter().find_map(|&(open, close)| {
+        let body = rest.strip_prefix(open)?;
+        Some(
+            body.windows(close.len())
+                .position(|w| w == close)
+                .map_or(html.len(), |p| pos + open.len() + p + close.len()),
+        )
+    })
+}
+
+/// Does `s` begin a syntactically well-formed XML character or entity
+/// reference — `&#1234;`, `&#x25A0;`, or `&name;`?
+///
+/// Syntax only. Whether a named reference is *declared* is the document's
+/// problem, not this function's: preserving an undeclared `&nbsp;` keeps the
+/// source's bytes, while rewriting it to `&amp;nbsp;` would corrupt the text.
+fn starts_reference(s: &[u8]) -> bool {
+    let Some(body) = s.strip_prefix(b"&") else {
+        return false;
+    };
+    let terminated = |digits: &[u8], accept: fn(u8) -> bool| {
+        let n = digits
+            .iter()
+            .position(|&b| !accept(b))
+            .unwrap_or(digits.len());
+        n > 0 && digits.get(n) == Some(&b';')
+    };
+    if let Some(hex) = body
+        .strip_prefix(b"#x")
+        .or_else(|| body.strip_prefix(b"#X"))
+    {
+        terminated(hex, |b| b.is_ascii_hexdigit())
+    } else if let Some(dec) = body.strip_prefix(b"#") {
+        terminated(dec, |b| b.is_ascii_digit())
+    } else {
+        body.first().is_some_and(|b| b.is_ascii_alphabetic())
+            && terminated(body, |b| b.is_ascii_alphanumeric())
+    }
+}
+
+/// Lowercase every element name, on opening and closing tags alike.
+///
+/// MOBI6 bodies are HTML4 tag soup, where element casing is free and pairs do
+/// not have to agree: kindlegen output routinely writes `<h2 …>…</H2>` and
+/// `<img …> </IMG>`. An HTML parser folds the case and never notices. An XML
+/// parser does not, so copying those bytes into an `.xhtml` chapter yields a
+/// document that is not well-formed (`expected </h2>, but </H2> was found` —
+/// epubcheck RSC-016), which a strict reader reports as a broken chapter.
+///
+/// Only the name is touched. Attribute names, attribute values, text content,
+/// and everything that is not an element — `<!DOCTYPE …>`, comments, CDATA,
+/// processing instructions — pass through byte for byte. A `<` that does not
+/// open a real tag is text (`X<Y`, `a < b`) and is left alone: the whole point
+/// is to make the markup parseable, so corrupting content to get there would
+/// defeat it.
+pub fn lowercase_tag_names(html: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(html.len());
+    let mut pos = 0;
+    while let Some(rel) = memchr::memchr(b'<', &html[pos..]) {
+        let start = pos + rel;
+        out.extend_from_slice(&html[pos..start]);
+
+        // Comments, CDATA and processing instructions are not elements, and
+        // their contents are not markup — copy the whole span so a `<TAG>`
+        // written inside a comment keeps its bytes.
+        if let Some(end) = verbatim_span(html, start) {
+            out.extend_from_slice(&html[start..end]);
+            pos = end;
+            continue;
+        }
+
+        let is_close = html.get(start + 1) == Some(&b'/');
+        let name_start = if is_close { start + 2 } else { start + 1 };
+        // A tag needs a name and a `>` to close it, with no intervening `<`
+        // (which would mean this `<` was text and the next one starts the tag).
+        let closes = memchr::memchr(b'>', &html[start..]).map(|p| start + p);
+        let is_tag = html
+            .get(name_start)
+            .is_some_and(|b| b.is_ascii_alphabetic())
+            && closes.is_some_and(|gt| memchr::memchr(b'<', &html[start + 1..gt]).is_none());
+        if !is_tag {
+            out.push(b'<');
+            pos = start + 1;
+            continue;
+        }
+
+        // Namespaced names (`mbp:pagebreak`) and hyphenated custom elements
+        // are one name, not a name plus punctuation.
+        let name_end = html[name_start..]
+            .iter()
+            .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_')))
+            .map_or(html.len(), |p| name_start + p);
+        out.extend_from_slice(&html[start..name_start]);
+        out.extend(
+            html[name_start..name_end]
+                .iter()
+                .map(|b| b.to_ascii_lowercase()),
+        );
+        pos = name_end;
+    }
+    out.extend_from_slice(&html[pos..]);
+    out
+}
+
 /// Convert legacy MOBI6 block-layout attributes to inline CSS.
 ///
 /// Kindlegen's MOBI6 paragraph model puts layout in attributes —
@@ -701,7 +844,9 @@ fn attr_spans(attrs: &[u8], name: &[u8]) -> Vec<(usize, usize)> {
 /// MOBI periodical format docs and calibre's reader): `height` →
 /// `margin-top`, `width` → `text-indent` (paragraphs only), `align` →
 /// `text-align`, merged into any existing `style` attribute. Applies to
-/// `<p>`, `<div>`, `<blockquote>`; unit-less values get `px`.
+/// `<p>`, `<div>`, `<blockquote>` and `<h1>`–`<h6>` — periodical article
+/// headings are written `<h2 align="center">`, which is the same legacy
+/// attribute on a different element; unit-less values get `px`.
 pub fn convert_legacy_block_attrs(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -721,7 +866,7 @@ pub fn convert_legacy_block_attrs(html: &[u8]) -> Vec<u8> {
 }
 
 /// [`convert_legacy_block_attrs`] helper: rewrite one
-/// `<p|div|blockquote|img …>` open tag, translating its legacy layout
+/// `<p|div|blockquote|h1..h6|img …>` open tag, translating its legacy layout
 /// attributes into a `style` attr.
 fn convert_block_tag(tag: &[u8]) -> Vec<u8> {
     let name_end = tag[1..]
@@ -732,8 +877,10 @@ fn convert_block_tag(tag: &[u8]) -> Vec<u8> {
     let name = &tag[1..name_end];
     let is_para = name.eq_ignore_ascii_case(b"p");
     let is_img = name.eq_ignore_ascii_case(b"img");
+    let is_heading = matches!(name, [h, level] if h.eq_ignore_ascii_case(&b'h') && (b'1'..=b'6').contains(level));
     if !(is_para
         || is_img
+        || is_heading
         || name.eq_ignore_ascii_case(b"div")
         || name.eq_ignore_ascii_case(b"blockquote"))
     {
@@ -1556,6 +1703,85 @@ mod tests {
         assert!(
             s.contains("<img src=\"b.jpg\" style=\"float: left\"/>"),
             "img left float: {s}"
+        );
+    }
+
+    #[test]
+    fn test_convert_legacy_block_attrs_headings() {
+        // Periodical article headings carry the same legacy `align`, on an
+        // element that only accepts phrasing content — so leaving the
+        // attribute in place is epubcheck RSC-005.
+        let html = b"<h2  align=\"center\">T</h2><h6 align=\"left\" height=\"2em\">S</h6>";
+        let out = convert_legacy_block_attrs(html);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("<h2 style=\"text-align: center\">T</h2>"),
+            "h2 align converted: {s}"
+        );
+        // Declarations come out in mapping order (height, width, align), not
+        // in the order the source happened to write the attributes.
+        assert!(
+            s.contains("<h6 style=\"margin-top: 2em; text-align: left\">S</h6>"),
+            "h6 align + height converted: {s}"
+        );
+        // `h7` is not a heading; nothing to convert, tag passes through.
+        let out = convert_legacy_block_attrs(b"<h7 align=\"center\">x</h7>");
+        assert_eq!(&out, b"<h7 align=\"center\">x</h7>");
+    }
+
+    #[test]
+    fn test_lowercase_tag_names() {
+        // The real MOBI6 shapes: a heading closed in the other case, and a
+        // void element written as a pair.
+        let out = lowercase_tag_names(b"<h2  align=\"center\">SAFER STREETS</H2>");
+        assert_eq!(&out, b"<h2  align=\"center\">SAFER STREETS</h2>");
+
+        let out = lowercase_tag_names(b"<DIV> <IMG SRC=\"a.jpg\"> </IMG> </DIV>");
+        assert_eq!(&out, b"<div> <img SRC=\"a.jpg\"> </img> </div>");
+
+        // Namespaced names lowercase whole; doctype, comments and PIs are not
+        // elements and keep their bytes; text is untouched.
+        let out = lowercase_tag_names(
+            b"<!DOCTYPE HTML><!-- <KEEP> --><?XML-STUFF?><MBP:PAGEBREAK/>A < B and X<Y",
+        );
+        assert_eq!(
+            &out,
+            b"<!DOCTYPE HTML><!-- <KEEP> --><?XML-STUFF?><mbp:pagebreak/>A < B and X<Y"
+        );
+    }
+
+    #[test]
+    fn test_escape_bare_ampersands() {
+        // Literal ampersands from running text are escaped; every already
+        // well-formed reference is left exactly as written.
+        let out = escape_bare_ampersands("“Pranks & Fails,” A. T. & T.".as_bytes());
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "“Pranks &amp; Fails,” A. T. &amp; T."
+        );
+
+        let refs = b"&amp; &#8212; &#x25A0; &#X25a0; &nbsp;";
+        assert_eq!(&escape_bare_ampersands(refs), refs, "no double-escaping");
+
+        // Malformed near-references are bare ampersands.
+        let out = escape_bare_ampersands(b"&# &#x; &; &no-semicolon x&");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "&amp;# &amp;#x; &amp;; &amp;no-semicolon x&amp;"
+        );
+
+        // Attribute values are escaped too — XML requires it there as well.
+        let out = escape_bare_ampersands(b"<img src=\"a.jpg?x=1&y=2\"/>");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "<img src=\"a.jpg?x=1&amp;y=2\"/>"
+        );
+
+        // A comment needs no escaping and must not be rewritten.
+        let cmt = b"<!-- a & b --> c & d";
+        assert_eq!(
+            String::from_utf8_lossy(&escape_bare_ampersands(cmt)),
+            "<!-- a & b --> c &amp; d"
         );
     }
 

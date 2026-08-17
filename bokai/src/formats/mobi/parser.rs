@@ -620,27 +620,30 @@ mod tests {
         assert!(!is_metadata_record(b"abc")); // too short
     }
 
+    /// One entry of a plain book's flat NCX — just the fields the TOC-tree
+    /// tests below care about. The periodical-only tags stay empty.
+    fn ncx(name: &str, text: &str, pos: u32, length: u32, level: i32, parent: i32) -> NcxEntry {
+        NcxEntry {
+            name: name.to_string(),
+            text: text.to_string(),
+            pos,
+            length,
+            level,
+            parent,
+            pos_fid: None,
+            kind: None,
+            children: None,
+            description: None,
+            author: None,
+            image: None,
+        }
+    }
+
     #[test]
     fn test_build_toc_from_ncx_flat() {
         let ncx = vec![
-            NcxEntry {
-                name: "0000".to_string(),
-                text: "Chapter 1".to_string(),
-                pos: 0,
-                length: 1000,
-                level: 0,
-                parent: -1,
-                pos_fid: None,
-            },
-            NcxEntry {
-                name: "0001".to_string(),
-                text: "Chapter 2".to_string(),
-                pos: 1000,
-                length: 1000,
-                level: 0,
-                parent: -1,
-                pos_fid: None,
-            },
+            ncx("0000", "Chapter 1", 0, 1000, 0, -1),
+            ncx("0001", "Chapter 2", 1000, 1000, 0, -1),
         ];
 
         let toc = build_toc_from_ncx(&ncx, |e| format!("ch{}.html", e.pos));
@@ -655,33 +658,9 @@ mod tests {
     #[test]
     fn test_build_toc_from_ncx_nested() {
         let ncx = vec![
-            NcxEntry {
-                name: "0000".to_string(),
-                text: "Part 1".to_string(),
-                pos: 0,
-                length: 2000,
-                level: 0,
-                parent: -1,
-                pos_fid: None,
-            },
-            NcxEntry {
-                name: "0001".to_string(),
-                text: "Chapter 1.1".to_string(),
-                pos: 0,
-                length: 1000,
-                level: 1,
-                parent: 0,
-                pos_fid: None,
-            },
-            NcxEntry {
-                name: "0002".to_string(),
-                text: "Chapter 1.2".to_string(),
-                pos: 1000,
-                length: 1000,
-                level: 1,
-                parent: 0,
-                pos_fid: None,
-            },
+            ncx("0000", "Part 1", 0, 2000, 0, -1),
+            ncx("0001", "Chapter 1.1", 0, 1000, 1, 0),
+            ncx("0002", "Chapter 1.2", 1000, 1000, 1, 0),
         ];
 
         let toc = build_toc_from_ncx(&ncx, |e| format!("#{}", e.pos));
@@ -701,15 +680,7 @@ mod tests {
 
     #[test]
     fn test_build_toc_from_ncx_unescapes_html() {
-        let ncx = vec![NcxEntry {
-            name: "0000".to_string(),
-            text: "Tom &amp; Jerry".to_string(),
-            pos: 0,
-            length: 100,
-            level: 0,
-            parent: -1,
-            pos_fid: None,
-        }];
+        let ncx = vec![ncx("0000", "Tom &amp; Jerry", 0, 100, 0, -1)];
 
         let toc = build_toc_from_ncx(&ncx, |_| "#0".to_string());
         assert_eq!(toc[0].title, "Tom & Jerry");

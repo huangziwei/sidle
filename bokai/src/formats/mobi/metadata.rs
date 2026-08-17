@@ -34,7 +34,31 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
     if let Some(exth) = exth {
         apply_exth(&mut metadata, exth);
     }
+    metadata.periodical = periodical_kind(mobi, exth);
     metadata
+}
+
+/// Is this an issue of a periodical, and of what kind?
+///
+/// Two independent declarations say so, and either alone is enough. The MOBI
+/// header type is what the reader switches its book model on; EXTH 501 is what
+/// the catalogue shelves by. They agree in every `.pobi` on hand, but a file
+/// rebuilt by a third-party tool can easily keep one and drop the other, so
+/// neither is required to confirm the other.
+///
+/// The third signal — the NCX's own tag-5 `kind` string — is not consulted here
+/// because it lives in the index, not the headers. An importer that has already
+/// read the index can override this with what the structure says.
+fn periodical_kind(
+    mobi: &MobiHeader,
+    exth: &Option<ExthHeader>,
+) -> Option<crate::model::PeriodicalKind> {
+    use crate::model::PeriodicalKind;
+    PeriodicalKind::from_mobi_type(mobi.mobi_type).or_else(|| {
+        exth.as_ref()
+            .and_then(|e| e.cde_type.as_deref())
+            .and_then(PeriodicalKind::from_cde_type)
+    })
 }
 
 /// Everything the EXTH records say beyond the title.
@@ -124,6 +148,8 @@ fn parse_resolution(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formats::mobi::NULL_INDEX;
+    use crate::model::PeriodicalKind;
 
     /// What the EXTH records make of a book, starting from nothing.
     fn read(exth: ExthHeader) -> Metadata {
@@ -176,5 +202,68 @@ mod tests {
         assert_eq!(parse_resolution("1444x2048"), Some((1444, 2048)));
         assert_eq!(parse_resolution(" 800 X 600 "), Some((800, 600)));
         assert_eq!(parse_resolution("wide"), None);
+    }
+
+    /// What a periodical looks like from the headers alone.
+    fn kind(mobi_type: u32, cde_type: Option<&str>) -> Option<PeriodicalKind> {
+        let mobi = MobiHeader {
+            mobi_type,
+            ..header()
+        };
+        let exth = cde_type.map(|t| ExthHeader {
+            cde_type: Some(t.to_string()),
+            ..Default::default()
+        });
+        periodical_kind(&mobi, &exth)
+    }
+
+    #[test]
+    fn either_declaration_alone_marks_a_periodical() {
+        // The real `.pobi` shape: both signals agree.
+        assert_eq!(kind(259, Some("MAGZ")), Some(PeriodicalKind::Magazine));
+        // Either alone is enough — a rebuild can keep one and drop the other.
+        assert_eq!(kind(259, None), Some(PeriodicalKind::Magazine));
+        assert_eq!(kind(2, Some("MAGZ")), Some(PeriodicalKind::Magazine));
+        // The other two flavours, by header type and by cdetype.
+        assert_eq!(kind(257, None), Some(PeriodicalKind::Newspaper));
+        assert_eq!(kind(258, None), Some(PeriodicalKind::Blog));
+        assert_eq!(kind(2, Some("nwpr")), Some(PeriodicalKind::Newspaper));
+        assert_eq!(kind(2, Some("FEED")), Some(PeriodicalKind::Blog));
+    }
+
+    #[test]
+    fn an_ordinary_book_is_not_a_periodical() {
+        // Type 2 is `Book`; EBOK and PDOC are the book cdetypes.
+        assert_eq!(kind(2, None), None);
+        assert_eq!(kind(2, Some("EBOK")), None);
+        assert_eq!(kind(2, Some("PDOC")), None);
+        assert_eq!(kind(2, Some("")), None);
+    }
+
+    /// A `MobiHeader` with nothing set — only `mobi_type` matters here.
+    fn header() -> MobiHeader {
+        MobiHeader {
+            compression: crate::formats::mobi::Compression::None,
+            text_record_count: 0,
+            text_record_size: 0,
+            encryption: 0,
+            mobi_type: 2,
+            encoding: crate::formats::mobi::Encoding::Utf8,
+            mobi_version: 6,
+            first_image_index: NULL_INDEX,
+            title: String::new(),
+            language: 0,
+            exth_flags: 0,
+            extra_data_flags: 0,
+            huff_record_index: NULL_INDEX,
+            huff_record_count: 0,
+            skel_index: NULL_INDEX,
+            div_index: NULL_INDEX,
+            oth_index: NULL_INDEX,
+            fdst_index: NULL_INDEX,
+            fdst_count: 0,
+            ncx_index: NULL_INDEX,
+            header_length: 232,
+        }
     }
 }

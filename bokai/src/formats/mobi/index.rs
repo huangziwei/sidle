@@ -396,7 +396,12 @@ pub struct DivElement {
     pub reassembled_pos: u32,
 }
 
-/// NCX entry for table of contents
+/// NCX entry for table of contents.
+///
+/// A book's NCX is a flat list using tags 1–6 and 21. A **periodical's** is a
+/// three-level tree that adds the periodical-only tags — 5 (`kind`), 22/23
+/// (child range) and 69/70/71 (per-article metadata) — which is what the
+/// article-list screen of a magazine renders from.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are part of MOBI format spec
 pub struct NcxEntry {
@@ -407,6 +412,34 @@ pub struct NcxEntry {
     pub level: i32,
     pub parent: i32,
     pub pos_fid: Option<(u32, u32)>,
+    /// Tag 5 — the entry's class, as the file names it: `periodical` at depth 0,
+    /// `section` at depth 1, `article` at depth 2. `None` in a plain book.
+    ///
+    /// The most reliable periodical signal there is: it is the structure stating
+    /// its own kind, rather than a header declaration that can disagree with the
+    /// index below it.
+    pub kind: Option<String>,
+    /// Tags 22/23 — the index range of this entry's children, i.e. the articles
+    /// a section owns. The tree can be rebuilt from tag 21 (`parent`) alone, so
+    /// this is the source's own statement of the same relation.
+    pub children: Option<(u32, u32)>,
+    /// Tag 69 — the article's standfirst/blurb, the line under the headline on
+    /// the article-list screen.
+    ///
+    /// Note the tag numbering: calibre's reader maps 69 to `image_index` and 70
+    /// to the description (`ref/calibre-mobi-input/reader/ncx.py:25`), but in
+    /// real New Yorker issues 69 resolves through the CNCX to prose and 70 to a
+    /// byline. Decoded from the bytes, not from that table.
+    pub description: Option<String>,
+    /// Tag 70 — the article's byline, e.g. `BY AMY DAVIDSON`.
+    pub author: Option<String>,
+    /// Tag 71 — an image reference for the article's list-screen thumbnail.
+    ///
+    /// Kept raw: in the issues on hand these values do not line up with the
+    /// file's own image records under any 0- or 1-based reading, most likely
+    /// because the files were rebuilt and the indices never remapped. Resolve it
+    /// against an un-rebuilt Amazon periodical before treating it as a resource.
+    pub image: Option<u32>,
 }
 
 /// Parse skeleton index into file entries
@@ -554,6 +587,28 @@ pub fn parse_ncx_index(entries: &[IndexEntry], cncx: &Cncx) -> Vec<NcxEntry> {
             .map(|&v| v as i32)
             .unwrap_or(-1);
 
+        // Periodical-only tags. `cncx_string` resolves a CNCX offset the way
+        // tag 3 above does.
+        let cncx_string = |tag: u8| -> Option<String> {
+            entry
+                .tags
+                .get(&tag)
+                .and_then(|v| v.first())
+                .and_then(|&off| cncx.get(off).cloned())
+        };
+        let kind = cncx_string(5);
+        // Tags 22/23 = first/last child index.
+        let children = match (
+            entry.tags.get(&22).and_then(|v| v.first()).copied(),
+            entry.tags.get(&23).and_then(|v| v.first()).copied(),
+        ) {
+            (Some(first), Some(last)) => Some((first, last)),
+            _ => None,
+        };
+        let description = cncx_string(69);
+        let author = cncx_string(70);
+        let image = entry.tags.get(&71).and_then(|v| v.first()).copied();
+
         ncx_entries.push(NcxEntry {
             name: entry.name.clone(),
             text,
@@ -562,6 +617,11 @@ pub fn parse_ncx_index(entries: &[IndexEntry], cncx: &Cncx) -> Vec<NcxEntry> {
             level,
             parent,
             pos_fid,
+            kind,
+            children,
+            description,
+            author,
+            image,
         });
     }
 
@@ -1355,5 +1415,109 @@ mod tests {
         assert_eq!(count_set_bits(1), 1);
         assert_eq!(count_set_bits(0b1010), 2);
         assert_eq!(count_set_bits(0xFF), 8);
+    }
+
+    /// The tags and CNCX offsets here are the decoded values of a real New
+    /// Yorker issue's NCX (`TAGX: 1,2,3,4,5 | 21,22,23 | 69,70,71`), so this
+    /// pins the tag→meaning mapping the periodical model depends on.
+    #[test]
+    fn test_parse_ncx_index_periodical_tags() {
+        let mut cncx = Cncx::new();
+        for (off, s) in [
+            (0u32, "periodical"),
+            (13, "section"),
+            (23, "article"),
+            (33, "Table of Contents"),
+            (52, "The Talk of the Town"),
+            (74, "COMMENT: SAFER STREETS"),
+            (194, "On June 3, 1999, Loretta Lynch…"),
+            (288, "BY AMY DAVIDSON"),
+        ] {
+            cncx.strings.insert(off, s.to_string());
+        }
+        let entry = |name: &str, tags: &[(u8, u32)]| IndexEntry {
+            name: name.to_string(),
+            tags: tags.iter().map(|&(t, v)| (t, vec![v])).collect(),
+        };
+        let entries = vec![
+            // depth 0: the periodical root, owning sections 1..9.
+            entry("00", &[(1, 184), (3, 33), (4, 0), (5, 0), (22, 1), (23, 9)]),
+            // depth 1: a section, owning articles 10..14.
+            entry(
+                "01",
+                &[
+                    (1, 381),
+                    (3, 52),
+                    (4, 1),
+                    (5, 13),
+                    (21, 0),
+                    (22, 10),
+                    (23, 14),
+                ],
+            ),
+            // depth 2: an article with a blurb (69) and a byline (70).
+            entry(
+                "0A",
+                &[
+                    (1, 391),
+                    (3, 74),
+                    (4, 2),
+                    (5, 23),
+                    (21, 1),
+                    (69, 194),
+                    (70, 288),
+                ],
+            ),
+            // depth 2: a cartoon — an image reference (71) and nothing else.
+            entry("2A", &[(1, 337140), (4, 2), (5, 23), (21, 1), (71, 11)]),
+        ];
+
+        let parsed = parse_ncx_index(&entries, &cncx);
+        assert_eq!(parsed.len(), 4);
+
+        assert_eq!(parsed[0].kind.as_deref(), Some("periodical"));
+        assert_eq!(parsed[0].children, Some((1, 9)));
+        assert_eq!(parsed[0].text, "Table of Contents");
+
+        assert_eq!(parsed[1].kind.as_deref(), Some("section"));
+        assert_eq!(parsed[1].children, Some((10, 14)));
+        assert_eq!(parsed[1].parent, 0);
+
+        // Tag 69 is the blurb and tag 70 the byline — the opposite of what
+        // calibre's reader map claims (`reader/ncx.py:25`).
+        assert_eq!(parsed[2].kind.as_deref(), Some("article"));
+        assert_eq!(
+            parsed[2].description.as_deref(),
+            Some("On June 3, 1999, Loretta Lynch…")
+        );
+        assert_eq!(parsed[2].author.as_deref(), Some("BY AMY DAVIDSON"));
+        assert_eq!(parsed[2].image, None);
+        assert_eq!(parsed[2].children, None, "an article owns no children");
+
+        assert_eq!(parsed[3].image, Some(11));
+        assert_eq!(parsed[3].description, None);
+        assert_eq!(parsed[3].author, None);
+    }
+
+    /// A plain book's NCX uses tags 1–4 and 21 only; every periodical field
+    /// stays empty, which is what marks it as not a periodical.
+    #[test]
+    fn test_parse_ncx_index_book_has_no_periodical_tags() {
+        let mut cncx = Cncx::new();
+        cncx.strings.insert(0, "Chapter 1".to_string());
+        let entries = vec![IndexEntry {
+            name: "0000".to_string(),
+            tags: [(1u8, vec![0]), (2, vec![1000]), (3, vec![0]), (4, vec![0])]
+                .into_iter()
+                .collect(),
+        }];
+
+        let parsed = parse_ncx_index(&entries, &cncx);
+        assert_eq!(parsed[0].text, "Chapter 1");
+        assert!(parsed[0].kind.is_none());
+        assert!(parsed[0].children.is_none());
+        assert!(parsed[0].description.is_none());
+        assert!(parsed[0].author.is_none());
+        assert!(parsed[0].image.is_none());
     }
 }
