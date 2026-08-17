@@ -1147,6 +1147,7 @@ pub(crate) mod tests {
             pages: vec![bokai::import::PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("THE STREET WAS MINE".to_string()),
             author: Some("MEGAN E. ABBOTT".to_string()),
@@ -1163,6 +1164,7 @@ pub(crate) mod tests {
             pages: vec![bokai::import::PdfPage {
                 width: 1.0,
                 height: 1.0,
+                rotation: 0,
             }],
             title: None,
             author: None,

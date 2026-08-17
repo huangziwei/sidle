@@ -160,10 +160,12 @@ mod tests {
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 595.0,
                     height: 842.0,
+                    rotation: 0,
                 },
             ],
             title: Some("Round Trip".to_string()),
@@ -206,6 +208,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("T".to_string()),
             author: None,
@@ -321,10 +324,12 @@ mod tests {
                 PdfPage {
                     width: 600.0,
                     height: 800.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 600.0,
                     height: 800.0,
+                    rotation: 0,
                 },
             ],
             title: Some("T".to_string()),
@@ -433,6 +438,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("With Cover".to_string()),
             author: None,
@@ -477,10 +483,12 @@ mod tests {
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
             ],
             title: Some("Nav".to_string()),
@@ -530,6 +538,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("Dated".to_string()),
             author: None,
@@ -564,6 +573,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("Undated".to_string()),
             author: None,
@@ -596,10 +606,12 @@ mod tests {
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
             ],
             title: Some("Paged".to_string()),
@@ -642,6 +654,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("NoToc".to_string()),
             author: None,

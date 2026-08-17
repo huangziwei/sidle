@@ -14,11 +14,17 @@ use std::io;
 use lopdf::xref::XrefEntry;
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Stream, StringFormat};
 
-/// One PDF page's display size, in PDF points (1/72 inch).
+/// One PDF page's display geometry.
 #[derive(Debug, Clone, Copy)]
 pub struct PdfPage {
+    /// Displayed width in PDF points (1/72 inch), `/Rotate` applied.
     pub width: f32,
+    /// Displayed height in PDF points, `/Rotate` applied.
     pub height: f32,
+    /// `/Rotate` as quarter turns clockwise (0..=3). `width`/`height` are the
+    /// post-rotation extents, so this says how the page's own coordinate space
+    /// is oriented inside them, not that they need swapping.
+    pub rotation: u8,
 }
 
 /// One entry in the PDF document outline (bookmarks), resolved to a page. The
@@ -256,15 +262,16 @@ fn pdfdoc_to_char(b: u8) -> char {
 /// US Letter (612×792 pt), matching lopdf's own creator default.
 const DEFAULT_MEDIABOX: [f32; 4] = [0.0, 0.0, 612.0, 792.0];
 
-/// Compute a page's displayed size in points: resolve `/MediaBox` (walking the
-/// `/Pages` tree for the inherited value) and apply `/Rotate`.
+/// Compute a page's displayed geometry: resolve `/MediaBox` (walking the
+/// `/Pages` tree for the inherited value), apply `/Rotate` to the extents, and
+/// report the rotation as quarter turns clockwise.
 ///
 /// Uses the **MediaBox** (not the CropBox): it is the page a viewer renders (=
 /// Preview), and `render.rs` rasterizes it MediaBox origin-relative — so the
 /// container dimensions, the rendered image, and the text-layer overlay share one
 /// box. (A press PDF whose CropBox is larger than its MediaBox carries trim marks
 /// in the difference; the MediaBox is the trimmed page.)
-pub(crate) fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
+pub(crate) fn page_geometry(doc: &Document, page_id: ObjectId) -> (f32, f32, u8) {
     let mut media: Option<[f32; 4]> = None;
     let mut rotate: i64 = 0;
     let mut found_rotate = false;
@@ -310,17 +317,19 @@ pub(crate) fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
     let mut w = (urx - llx).abs();
     let mut h = (ury - lly).abs();
 
-    // Normalize rotation to [0,360) and swap axes for quarter turns.
-    let rot = rotate.rem_euclid(360);
-    if rot == 90 || rot == 270 {
+    // Normalize rotation to whole quarter turns in 0..=3 and swap the axes for
+    // the odd ones. A `/Rotate` that isn't a multiple of 90 is invalid; round it
+    // to the nearest quarter turn rather than dropping the page.
+    let quarters = ((rotate as f64 / 90.0).round() as i64).rem_euclid(4) as u8;
+    if quarters % 2 == 1 {
         std::mem::swap(&mut w, &mut h);
     }
 
     // Guard against degenerate boxes.
     if w <= 0.0 || h <= 0.0 {
-        (612.0, 792.0)
+        (612.0, 792.0, quarters)
     } else {
-        (w, h)
+        (w, h, quarters)
     }
 }
 

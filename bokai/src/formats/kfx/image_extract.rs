@@ -244,6 +244,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("Backed".into()),
             author: None,

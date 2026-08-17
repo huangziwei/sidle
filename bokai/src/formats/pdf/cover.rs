@@ -33,7 +33,7 @@ use std::io;
 
 use lopdf::{Dictionary, Object, ObjectId, Stream};
 
-use super::doc::{deref, encode_pdf_string, page_dimensions};
+use super::doc::{deref, encode_pdf_string, page_geometry};
 use super::edit::PdfPackage;
 
 /// JPEG quality for the embedded cover. Deliberately a few points above what a
@@ -86,7 +86,7 @@ pub fn set_cover_page(pdf_bytes: &[u8], image: &[u8], mode: CoverMode) -> io::Re
 
     // Match the book's own page size (rotation already applied), so the cover
     // sits in the same frame as everything after it.
-    let (pw, ph) = page_dimensions(pkg.original(), first_page);
+    let (pw, ph, _) = page_geometry(pkg.original(), first_page);
 
     let image_id = pkg.add_object(Object::Stream(image_xobject(&jpeg, iw, ih)));
     let content_id = pkg.add_object(Object::Stream(

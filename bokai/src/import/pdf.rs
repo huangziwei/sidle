@@ -6,8 +6,8 @@
 //! the structural shape of a fixed-layout book:
 //!
 //! - page **count**,
-//! - each page's **MediaBox** size in points (with `/Rotate` applied and
-//!   inheritance from the page tree resolved), and
+//! - each page's **MediaBox** size in points and its `/Rotate` (both with
+//!   inheritance from the page tree resolved; the size is post-rotation), and
 //! - the document `/Info` **title** / **author** (best effort).
 //!
 //! The original bytes are carried through untouched for embedding.
@@ -17,7 +17,7 @@ use std::io;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::formats::pdf::doc::{decode_pdf_string, deref, load_pdf, page_dimensions};
+use crate::formats::pdf::doc::{decode_pdf_string, deref, load_pdf, page_geometry};
 
 // The probed-document vocabulary lives in the format layer so both directions
 // and the format-internal repairs can name it without reaching up into `import`.
@@ -36,8 +36,12 @@ pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
     let pages: Vec<PdfPage> = page_ids
         .iter()
         .map(|&page_id| {
-            let (width, height) = page_dimensions(&doc, page_id);
-            PdfPage { width, height }
+            let (width, height, rotation) = page_geometry(&doc, page_id);
+            PdfPage {
+                width,
+                height,
+                rotation,
+            }
         })
         .collect();
 

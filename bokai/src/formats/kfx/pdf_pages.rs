@@ -511,14 +511,17 @@ mod tests {
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 595.0,
                     height: 842.0,
+                    rotation: 0,
                 },
                 PdfPage {
                     width: 612.0,
                     height: 792.0,
+                    rotation: 0,
                 },
             ],
             title: Some("Nav Round Trip".to_string()),

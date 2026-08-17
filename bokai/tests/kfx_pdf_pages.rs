@@ -36,18 +36,22 @@ fn pdf_backed_kfx() -> Vec<u8> {
             PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             },
             PdfPage {
                 width: 595.0,
                 height: 842.0,
+                rotation: 0,
             },
             PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             },
             PdfPage {
                 width: 421.0,
                 height: 595.0,
+                rotation: 0,
             },
         ],
         title: Some("Parity".to_string()),

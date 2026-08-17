@@ -195,6 +195,11 @@ mod macos {
     /// KFX fixed-layout unit: points × 100.
     const SCALE: f32 = 100.0;
 
+    /// A page's `/Rotate` as quarter turns clockwise (0..=3).
+    fn quarter_turns(page: &PDFPage) -> u8 {
+        (((unsafe { page.rotation() } as f64 / 90.0).round() as i64).rem_euclid(4)) as u8
+    }
+
     /// Parse the in-memory PDF into a `PDFDocument` (a copy — PDFKit owns it).
     fn load(pdf_bytes: &[u8]) -> Result<Retained<PDFDocument>, RenderError> {
         let data = NSData::with_bytes(pdf_bytes);
@@ -222,7 +227,14 @@ mod macos {
             // x=72 on a page with MediaBox `[9 9 441 657]` is stored at 63), so the
             // overlay lines up when we draw the MediaBox origin-relative.
             let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
-            let (pw, ph) = (bounds.size.width, bounds.size.height);
+            // `boundsForBox` reports the page's own box, *un*rotated, while
+            // `drawWithBox` draws the page as displayed — so a quarter-turn page
+            // must be measured with its axes swapped or the drawing lands outside
+            // the bitmap entirely.
+            let (mut pw, mut ph) = (bounds.size.width, bounds.size.height);
+            if quarter_turns(&page) % 2 == 1 {
+                std::mem::swap(&mut pw, &mut ph);
+            }
             if pw <= 0.0 || ph <= 0.0 {
                 return Err(RenderError::Render(format!("unusable page size {pw}x{ph}")));
             }
@@ -256,14 +268,13 @@ mod macos {
             let ctx: &CGContext = &ctx_owned;
 
             // Scale points → pixels. `drawWithBox(MediaBox)` already maps the
-            // MediaBox's lower-left to the context origin (so a non-(0,0) MediaBox
-            // origin is handled by PDFKit) and clips to the MediaBox — exactly
-            // Preview's output, so a press PDF's bleed/trim marks outside the
-            // MediaBox don't render. Do NOT also translate by the origin: that
-            // double-subtracts it, shifting the page left/up off the bitmap (the
-            // original bug — Street's gutter clipped, Peter offset 9 pt).
-            // `extract_text` measures from the same MediaBox origin, so the overlay
-            // spans line up with the rendered glyphs.
+            // displayed MediaBox's lower-left to the context origin (so a
+            // non-(0,0) MediaBox origin is handled by PDFKit) and clips to the
+            // MediaBox — exactly Preview's output, so a press PDF's bleed/trim
+            // marks outside the MediaBox don't render. Do NOT also translate by
+            // the origin: that double-subtracts it, shifting the page left/up off
+            // the bitmap. `extract_text` maps glyph boxes into the same displayed
+            // space, so the overlay spans line up with the rendered glyphs.
             CGContext::scale_ctm(Some(ctx), scale, scale);
             unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) };
             drop(ctx_owned); // flush + release before we read `buf`
@@ -348,12 +359,21 @@ mod macos {
     fn extract_page(page: &PDFPage) -> PageText {
         let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
         // KFX positions are measured from the **MediaBox** top-left, Y down —
-        // matching Amazon's S2K text layer (verified: on a page with MediaBox
+        // matching Amazon's S2K text layer (on a page with MediaBox
         // `[9 9 441 657]`, a glyph at absolute x=72 is stored at 63 = 72−9, and a
-        // line at absolute y=384 at top 263 = (9+648)−384). The renderer draws the
-        // MediaBox origin-relative too, so glyph boxes and the image line up.
-        let box_left = bounds.origin.x as f32;
-        let box_top = (bounds.origin.y + bounds.size.height) as f32;
+        // line at absolute y=384 at top 263 = (9+648)−384).
+        //
+        // `characterBoundsAtIndex` reports the page's own space, ignoring
+        // `/Rotate`, so every glyph box is mapped into displayed space below
+        // before anything reads it. Line grouping then works on what the reader
+        // sees: a sideways-drawn page reads as horizontal lines once turned.
+        let turns = quarter_turns(page);
+        let (x0, y0) = (bounds.origin.x as f32, bounds.origin.y as f32);
+        let (bw, bh) = (bounds.size.width as f32, bounds.size.height as f32);
+        // The displayed page, origin at its bottom-left, Y up — the same
+        // convention `Unit` and `finish` already use.
+        let box_left = 0.0f32;
+        let box_top = if turns % 2 == 1 { bw } else { bh };
 
         let text = match unsafe { page.string() } {
             Some(s) => s.to_string(),
@@ -374,19 +394,34 @@ mod macos {
             return PageText::default();
         }
 
+        // Page space → displayed space, both origin-at-bottom-left and Y up. The
+        // quarter turn is clockwise, so the page's bottom-left corner becomes the
+        // displayed top-left at one turn, the bottom-right at two, and so on.
+        let map = |x: f32, y: f32| -> (f32, f32) {
+            match turns {
+                1 => (y - y0, (x0 + bw) - x),
+                2 => ((x0 + bw) - x, (y0 + bh) - y),
+                3 => ((y0 + bh) - y, x - x0),
+                _ => (x - x0, y - y0),
+            }
+        };
+
         let mut units: Vec<Unit> = Vec::with_capacity(n);
         for (i, &u) in utf16.iter().enumerate().take(n) {
             let r = unsafe { page.characterBoundsAtIndex(i as isize) };
             let w = r.size.width as f32;
             let h = r.size.height as f32;
-            let left = r.origin.x as f32;
-            let bottom = r.origin.y as f32;
+            let x = r.origin.x as f32;
+            let y = r.origin.y as f32;
+            // Map opposite corners, then re-order: a turn can swap which is which.
+            let (ax, ay) = map(x, y);
+            let (bx, by) = map(x + w, y + h);
             units.push(Unit {
                 unit: u,
-                left,
-                right: left + w,
-                top: bottom + h,
-                bottom,
+                left: ax.min(bx),
+                right: ax.max(bx),
+                top: ay.max(by),
+                bottom: ay.min(by),
                 boxed: w > 0.0 && h > 0.0,
             });
         }
@@ -548,5 +583,137 @@ mod macos {
         }
 
         PageText { runs }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Assemble a one-page PDF with the given MediaBox and `/Rotate`, drawing a
+    /// short line of Helvetica text near the page's lower left. Object offsets
+    /// and the xref table are computed as the objects are appended, so the file
+    /// is well-formed for any reader.
+    fn one_page_pdf(media: [i32; 4], rotate: i64) -> Vec<u8> {
+        let content = "BT /F1 24 Tf 40 30 Td (Hi) Tj ET\n";
+        let objects: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [{} {} {} {}] /Rotate {rotate} \
+                 /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+                media[0], media[1], media[2], media[3]
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+
+        let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// `/Rotate` reaches the probed page as quarter turns, with the extents
+    /// already swapped for the odd ones. Values off the quarter grid, and the
+    /// negative and past-360 spellings real PDFs use, all fold into 0..=3.
+    #[test]
+    fn page_geometry_reports_quarter_turns() {
+        use crate::formats::pdf::doc::{load_pdf, page_geometry};
+
+        for (rotate, want) in [
+            (0, (400.0, 200.0, 0)),
+            (90, (200.0, 400.0, 1)),
+            (180, (400.0, 200.0, 2)),
+            (270, (200.0, 400.0, 3)),
+            (-90, (200.0, 400.0, 3)),
+            (450, (200.0, 400.0, 1)),
+            (75, (200.0, 400.0, 1)),
+        ] {
+            let pdf = one_page_pdf([0, 0, 400, 200], rotate);
+            let doc = load_pdf(&pdf).unwrap();
+            let page_id = *doc.get_pages().values().next().unwrap();
+            assert_eq!(page_geometry(&doc, page_id), want, "/Rotate {rotate}");
+        }
+    }
+
+    /// The rendered page and the text overlay must agree on a rotated page:
+    /// PDFKit draws the page as displayed but reports both its box and its glyph
+    /// boxes unrotated, so the raster is sized from the turned extents and the
+    /// glyph boxes are mapped into the same space.
+    ///
+    /// The assertion is alignment rather than fixed numbers: the one run's box,
+    /// scaled into raster pixels, must land on the ink the rasterizer drew.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rotated_page_overlay_lands_on_the_rendered_ink() {
+        use crate::formats::pdf::doc::{load_pdf, page_geometry};
+
+        const TARGET_W: u32 = 400;
+
+        for rotate in [0, 90, 180, 270] {
+            let pdf = one_page_pdf([0, 0, 400, 200], rotate);
+
+            let doc = load_pdf(&pdf).unwrap();
+            let page_id = *doc.get_pages().values().next().unwrap();
+            let (pw, ph, _) = page_geometry(&doc, page_id);
+
+            // The raster carries the displayed page's aspect, not the stored box.
+            let (rgb, rw, rh) = super::macos::render_page_rgb(&pdf, 0, TARGET_W).unwrap();
+            let scale = TARGET_W as f32 / pw;
+            assert_eq!(rw, TARGET_W, "/Rotate {rotate} raster width");
+            assert_eq!(
+                rh,
+                (ph * scale).round() as u32,
+                "/Rotate {rotate} raster height"
+            );
+
+            // Bounding box of the drawn glyphs.
+            let (mut l, mut t, mut r, mut b) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            for y in 0..rh {
+                for x in 0..rw {
+                    if rgb[((y * rw + x) * 3) as usize] < 128 {
+                        l = l.min(x);
+                        t = t.min(y);
+                        r = r.max(x);
+                        b = b.max(y);
+                    }
+                }
+            }
+            assert!(l <= r && t <= b, "/Rotate {rotate} rendered no ink");
+
+            // The same glyphs as the overlay places them, in raster pixels.
+            let pages = super::macos::extract_text(&pdf).unwrap();
+            let run = pages[0].runs.first().expect("one run");
+            let px = |v: i64| v as f32 / 100.0 * scale;
+            for (name, want, got) in [
+                ("left", l as f32, px(run.left)),
+                ("top", t as f32, px(run.top)),
+                ("right", r as f32, px(run.left + run.width)),
+                ("bottom", b as f32, px(run.top + run.height)),
+            ] {
+                assert!(
+                    (want - got).abs() <= 2.0,
+                    "/Rotate {rotate} {name}: ink {want} vs overlay {got}"
+                );
+            }
+        }
     }
 }

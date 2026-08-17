@@ -4731,7 +4731,10 @@ pub fn pdf_to_kfx(
     let mut fragments: Vec<KfxFragment> = Vec::new();
 
     // 1. content_features ($585)
-    fragments.push(build_pdf_content_features_fragment(has_text));
+    fragments.push(build_pdf_content_features_fragment(
+        has_text,
+        pdf.pages.iter().any(|p| p.rotation != 0),
+    ));
     // 2. book_metadata ($490) — PDOC (with cover_image when a cover is present)
     fragments.push(build_pdf_book_metadata_fragment(
         meta,
@@ -4787,12 +4790,12 @@ pub fn pdf_to_kfx(
     // none of those, nothing reads them back, and on this book they were 14023
     // fragments against Amazon's 352 — 15787 container entity refs against
     // 2123.
-    for rec in &recs {
+    for (i, rec) in recs.iter().enumerate() {
         fragments.push(build_kv_aux_fragment(
             &format!("{}-ad", rec.section_name),
             rec.rotation_aux_sym,
             "page_rotation",
-            IonValue::Int(0),
+            IonValue::Int(pdf.pages[i].rotation as i64),
         ));
     }
 
@@ -5316,9 +5319,12 @@ fn build_pdf_cover_external_resource(
     )
 }
 
-/// content_features ($585) for a PDF-backed fixed-layout book. Mirrors Amazon's
-/// set minus `yj_custom_word_iterator` (which needs the P3 text layer).
-fn build_pdf_content_features_fragment(has_text: bool) -> KfxFragment {
+/// content_features ($585) for a PDF-backed fixed-layout book.
+///
+/// The device's own PDF converter stamps `yj_pdf_links` alongside these from a
+/// pass over each page's link annotations; nothing here extracts those, so the
+/// key stays off until the links themselves exist.
+fn build_pdf_content_features_fragment(has_text: bool, has_rotated_pages: bool) -> KfxFragment {
     fn feature(namespace: &str, key: &str, major: i64) -> IonValue {
         IonValue::Struct(vec![
             (
@@ -5350,6 +5356,9 @@ fn build_pdf_content_features_fragment(has_text: bool) -> KfxFragment {
     // only advertise it when there actually is a text layer.
     if has_text {
         feats.push(feature(YJ, "yj_custom_word_iterator", 1));
+    }
+    if has_rotated_pages {
+        feats.push(feature(YJ, "yj_rotated_pages", 1));
     }
     let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(feats))]);
     KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)

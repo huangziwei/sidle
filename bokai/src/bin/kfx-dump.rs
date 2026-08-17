@@ -2,10 +2,12 @@ use bokai::formats::kfx::container::SymbolTable;
 use bokai::formats::kfx::symbols::KFX_SYMBOL_TABLE;
 use clap::Parser;
 use ion_rs::{
-    AnyEncoding, Decoder, ElementReader, IonResult, MapCatalog, Reader, SharedSymbolTable,
+    AnyEncoding, Catalog, Decoder, ElementReader, IonResult, MapCatalog, Reader, SharedSymbolTable,
+    Symbol,
 };
 use std::collections::HashMap;
 use std::fs;
+use std::sync::Arc;
 
 /// Ion 1.0 Binary Version Marker
 const ION_BVM: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
@@ -276,6 +278,10 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                 }
             };
 
+            // One catalog for the whole container: every entity reads through
+            // the same document symbols.
+            let catalog = EntityCatalog::new(&extended_symbols, base_symbol_count)?;
+
             // Second pass: dump entities
             for i in 0..num_entries {
                 let entry_offset = index_offset + i * entry_size;
@@ -336,13 +342,7 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                 let abs_offset = header_len + entity_offset;
                 if abs_offset + entity_len <= data.len() {
                     let entity_data = &data[abs_offset..abs_offset + entity_len];
-                    dump_entity(
-                        entity_data,
-                        &extended_symbols,
-                        base_symbol_count,
-                        &maps,
-                        resolve,
-                    )?;
+                    dump_entity(entity_data, &catalog, &maps, resolve)?;
                 }
                 eprintln!();
             }
@@ -2236,8 +2236,7 @@ fn ion_value_to_string(
 /// Parse and dump an entity (ENTY format)
 fn dump_entity(
     data: &[u8],
-    extended_symbols: &[String],
-    base_symbol_count: usize,
+    catalog: &EntityCatalog,
     maps: &ResolutionMaps,
     resolve: bool,
 ) -> IonResult<()> {
@@ -2252,13 +2251,7 @@ fn dump_entity(
         // Maybe it's raw Ion?
         if data[0..4] == ION_BVM {
             eprintln!("  Raw Ion data:");
-            return dump_ion_data_extended(
-                data,
-                extended_symbols,
-                base_symbol_count,
-                maps,
-                resolve,
-            );
+            return dump_ion_data_extended(data, catalog, maps, resolve);
         }
         return Ok(());
     }
@@ -2281,7 +2274,7 @@ fn dump_entity(
     if entity_header_len < data.len() {
         let ion_data = &data[entity_header_len..];
         eprintln!("  Ion data ({} bytes):", ion_data.len());
-        dump_ion_data_extended(ion_data, extended_symbols, base_symbol_count, maps, resolve)?;
+        dump_ion_data_extended(ion_data, catalog, maps, resolve)?;
     }
 
     Ok(())
@@ -2294,72 +2287,116 @@ fn dump_ion_data(data: &[u8]) -> IonResult<()> {
         fragment_map: HashMap::new(),
     };
     // No doc symbols in play, so the base is the whole static table.
-    dump_ion_data_extended(data, &[], KFX_SYMBOL_TABLE.len(), &empty_maps, false)
+    let catalog = EntityCatalog::new(&[], KFX_SYMBOL_TABLE.len())?;
+    dump_ion_data_extended(data, &catalog, &empty_maps, false)
 }
 
-/// Dump Ion data using the KFX symbol table plus extended document symbols
+/// A shareable view of one prepared [`MapCatalog`].
 ///
-/// `base_symbol_count` is the container's declared import size (the id of its
-/// first doc-local symbol), not the static table's length — see
-/// [`SymbolTable`], which resolves through the same base. A container built
-/// against an older YJ_symbols declares fewer imports than our table carries,
-/// and seating its doc symbols at the static length renders every doc-local id
-/// as a base-table tail name (section names coming out as `snap_block`,
-/// `end_x`, …).
+/// `Decoder::with_catalog` takes an owned `'static` catalog, so each reader
+/// needs its own value; handing out reference-counted clones keeps every reader
+/// on the one table that was built for the container.
+#[derive(Clone)]
+struct CatalogHandle(Arc<MapCatalog>);
+
+impl Catalog for CatalogHandle {
+    fn get_table(&self, name: &str) -> Option<&SharedSymbolTable> {
+        self.0.get_table(name)
+    }
+
+    fn get_table_with_version(&self, name: &str, version: usize) -> Option<&SharedSymbolTable> {
+        self.0.get_table_with_version(name, version)
+    }
+}
+
+/// The KFX symbol table plus a container's document symbols, seated for reading.
+///
+/// Build it once per container: the shared table copies every symbol name, so a
+/// container with tens of thousands of document symbols would pay that cost
+/// once per entity if each entity built its own.
+struct EntityCatalog {
+    catalog: Arc<MapCatalog>,
+    preamble: Vec<u8>,
+}
+
+impl EntityCatalog {
+    /// `base_symbol_count` is the container's declared import size (the id of
+    /// its first doc-local symbol), not the static table's length — see
+    /// [`SymbolTable`], which resolves through the same base. A container built
+    /// against an older YJ_symbols declares fewer imports than our table
+    /// carries, and seating its doc symbols at the static length renders every
+    /// doc-local id as a base-table tail name (section names coming out as
+    /// `snap_block`, `end_x`, …).
+    fn new(extended_symbols: &[String], base_symbol_count: usize) -> IonResult<Self> {
+        // Build combined symbol table: base KFX symbols + extended doc symbols
+        //
+        // Our KFX_SYMBOL_TABLE includes Ion system symbols at indices 0-9 which Amazon's
+        // YJ_symbols doesn't have. So our table[413] = Amazon's YJ[403] = "bcIndexTabLength".
+        //
+        // Ion-rs maps imported symbols: SST[N] → SID $(10+N).
+        // For SID $413 to resolve to "bcIndexTabLength" (our table[413]):
+        //   SID $413 → SST[403] → we need SST[403] = table[413]
+        // So we skip our first 10 entries: SST[N] = table[N+10].
+        //
+        // Doc-local symbols follow at `base_symbol_count`, so the base slice stops
+        // there: SST[base_symbol_count - 10 + k] = extended_symbols[k] → SID
+        // $(base_symbol_count + k), which is where the container put them.
+        let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
+
+        // The other direction: a container built against a *newer* YJ_symbols
+        // declares more imports than our static table carries (Amazon's own
+        // PDF conversions declare 854 against our 852). Stopping at the table's
+        // length would seat every doc symbol that many ids early — names silently
+        // shifted throughout, and the highest ids past the end of the table, which
+        // aborts the whole fragment. Fill the shortfall so a doc symbol keeps the
+        // id the container gave it and only the unnamed base ids print bare.
+        let unnamed: Vec<String> = (base_end..base_symbol_count)
+            .map(|id| format!("${id}"))
+            .collect();
+
+        let mut all_symbols: Vec<&str> = KFX_SYMBOL_TABLE[10..base_end].to_vec();
+        all_symbols.extend(unnamed.iter().map(String::as_str));
+        for sym in extended_symbols {
+            all_symbols.push(sym.as_str());
+        }
+
+        // The import allocates exactly as many ids as the table defines, so every
+        // id in range has text and none is left undefined.
+        let max_id = all_symbols.len() as i64;
+
+        // Every reader that imports this table copies its symbols wholesale, so
+        // hold the text behind `Arc`s: an import then costs a refcount bump per
+        // symbol instead of a fresh allocation. A container with tens of
+        // thousands of document symbols pays that on each of its entities.
+        let mut catalog = MapCatalog::new();
+        catalog.insert_table(SharedSymbolTable::new(
+            "YJ_symbols",
+            10,
+            all_symbols
+                .iter()
+                .map(|s| Symbol::shared(Arc::from(*s)))
+                .collect::<Vec<_>>(),
+        )?);
+
+        Ok(Self {
+            catalog: Arc::new(catalog),
+            preamble: build_symbol_table_preamble_with_max_id(max_id),
+        })
+    }
+
+    fn handle(&self) -> CatalogHandle {
+        CatalogHandle(Arc::clone(&self.catalog))
+    }
+}
+
+/// Dump Ion data through a catalog already seated for its container.
 fn dump_ion_data_extended(
     data: &[u8],
-    extended_symbols: &[String],
-    base_symbol_count: usize,
+    catalog: &EntityCatalog,
     maps: &ResolutionMaps,
     resolve: bool,
 ) -> IonResult<()> {
-    // Build combined symbol table: base KFX symbols + extended doc symbols
-    //
-    // Our KFX_SYMBOL_TABLE includes Ion system symbols at indices 0-9 which Amazon's
-    // YJ_symbols doesn't have. So our table[413] = Amazon's YJ[403] = "bcIndexTabLength".
-    //
-    // Ion-rs maps imported symbols: SST[N] → SID $(10+N).
-    // For SID $413 to resolve to "bcIndexTabLength" (our table[413]):
-    //   SID $413 → SST[403] → we need SST[403] = table[413]
-    // So we skip our first 10 entries: SST[N] = table[N+10].
-    //
-    // Doc-local symbols follow at `base_symbol_count`, so the base slice stops
-    // there: SST[base_symbol_count - 10 + k] = extended_symbols[k] → SID
-    // $(base_symbol_count + k), which is where the container put them.
-    let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
-
-    // The other direction: a container built against a *newer* YJ_symbols
-    // declares more imports than our static table carries (Amazon's own
-    // PDF conversions declare 854 against our 852). Stopping at the table's
-    // length would seat every doc symbol that many ids early — names silently
-    // shifted throughout, and the highest ids past the end of the table, which
-    // aborts the whole fragment. Fill the shortfall so a doc symbol keeps the
-    // id the container gave it and only the unnamed base ids print bare.
-    let unnamed: Vec<String> = (base_end..base_symbol_count)
-        .map(|id| format!("${id}"))
-        .collect();
-
-    let mut all_symbols: Vec<&str> = KFX_SYMBOL_TABLE[10..base_end].to_vec();
-    all_symbols.extend(unnamed.iter().map(String::as_str));
-    for sym in extended_symbols {
-        all_symbols.push(sym.as_str());
-    }
-
-    // The import allocates exactly as many ids as the table defines, so every
-    // id in range has text and none is left undefined.
-    let max_id = all_symbols.len() as i64;
-
-    // Create catalog with extended symbol table
-    let mut catalog = MapCatalog::new();
-    catalog.insert_table(SharedSymbolTable::new(
-        "YJ_symbols",
-        10,
-        all_symbols.iter().copied(),
-    )?);
-
-    // Build preamble with extended max_id
-    let preamble = build_symbol_table_preamble_with_max_id(max_id);
-    let mut full_data = preamble;
+    let mut full_data = catalog.preamble.clone();
 
     if data.len() >= 4 && data[0..4] == ION_BVM {
         full_data.extend_from_slice(&data[4..]);
@@ -2367,8 +2404,7 @@ fn dump_ion_data_extended(
         full_data.extend_from_slice(data);
     }
 
-    // Create reader with catalog
-    let mut reader = Reader::new(AnyEncoding.with_catalog(catalog), &full_data[..])?;
+    let mut reader = Reader::new(AnyEncoding.with_catalog(catalog.handle()), &full_data[..])?;
 
     // Read and print each element as Ion text
     let mut count = 0;
@@ -2376,7 +2412,7 @@ fn dump_ion_data_extended(
         match element {
             Ok(elem) => {
                 // Convert to Ion text format
-                let text = element_to_ion_text(&elem, &all_symbols, maps, resolve);
+                let text = element_to_ion_text(&elem, maps, resolve);
                 println!("{}", text);
                 count += 1;
             }
@@ -2396,12 +2432,7 @@ fn dump_ion_data_extended(
 }
 
 /// Convert an Element to Ion text format, using $NNN for unknown symbols
-fn element_to_ion_text(
-    elem: &ion_rs::Element,
-    _symbols: &[&str], // Unused: symbol resolution handled by ion_rs catalog
-    maps: &ResolutionMaps,
-    resolve: bool,
-) -> String {
+fn element_to_ion_text(elem: &ion_rs::Element, maps: &ResolutionMaps, resolve: bool) -> String {
     element_to_ion_text_inner(elem, maps, resolve, 0, None)
 }
 

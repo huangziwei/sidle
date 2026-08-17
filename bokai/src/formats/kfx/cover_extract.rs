@@ -201,6 +201,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("Backed".to_string()),
             author: None,
@@ -246,6 +247,7 @@ mod tests {
             pages: vec![PdfPage {
                 width: 612.0,
                 height: 792.0,
+                rotation: 0,
             }],
             title: Some("NoCover".to_string()),
             author: None,
