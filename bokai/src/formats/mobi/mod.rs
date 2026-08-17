@@ -7,6 +7,7 @@ pub(crate) mod index;
 pub mod metadata;
 pub mod palmdoc;
 pub mod parser;
+pub mod periodical;
 pub mod skeleton;
 pub mod tbs;
 pub mod writer_transform;

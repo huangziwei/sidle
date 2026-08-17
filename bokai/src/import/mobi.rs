@@ -305,6 +305,69 @@ impl MobiImporter {
             }
         };
 
+        let mut split = split;
+
+        // An index entry's link target, resolved through the chapter the
+        // anchor landed in.
+        let href_for = |entry: &crate::formats::mobi::index::NcxEntry| {
+            let chapter_idx = split
+                .filepos_to_chapter
+                .get(&format!("filepos{}", entry.pos))
+                .copied()
+                .unwrap_or(0);
+            format!("{}#filepos{}", split.chapter_paths[chapter_idx], entry.pos)
+        };
+
+        // Build TOC from NCX entries (using split result for chapter mapping)
+        let mut toc = if let Some(ref ncx) = ncx_entries {
+            let nodes = build_toc_from_ncx(ncx, &href_for);
+            nodes.into_iter().map(toc_node_to_entry).collect()
+        } else {
+            vec![TocEntry::new(&metadata.title, &split.chapter_paths[0])]
+        };
+
+        // A periodical carries no contents page of its own — the index is the
+        // whole of its navigation, and only Amazon's periodical reader draws a
+        // page from it. Render one, so the issue opens on what is in it.
+        if metadata.periodical.is_some()
+            && let Some(ref ncx) = ncx_entries
+            && let Some(page) = crate::formats::mobi::periodical::issue_front_matter(
+                ncx,
+                crate::formats::mobi::metadata::publication_title(
+                    &metadata.title,
+                    metadata.date.as_deref(),
+                ),
+                metadata
+                    .date
+                    .as_deref()
+                    .map(crate::util::truncate_to_date)
+                    .as_deref(),
+                href_for,
+                |offset| {
+                    asset_at_record_offset(&assets, offset)
+                        .map(|p| p.to_string_lossy().into_owned())
+                },
+            )
+        {
+            let path = ISSUE_FRONT_MATTER_PATH.to_string();
+            // The index's own root entry means "the contents of this issue",
+            // so it is the natural link to the page rather than a second entry
+            // saying the same thing.
+            if let Some(root) = toc.first_mut()
+                && ncx.first().is_some_and(|e| {
+                    e.kind
+                        .as_deref()
+                        .is_some_and(|k| k.eq_ignore_ascii_case("periodical"))
+                })
+            {
+                root.href = path.clone();
+            }
+            split
+                .chapters
+                .insert(0, wrap_front_matter(&page, &metadata.title));
+            split.chapter_paths.insert(0, path);
+        }
+
         // Build spine from split chapters
         let spine: Vec<SpineEntry> = (0..split.chapters.len())
             .map(|i| SpineEntry {
@@ -314,23 +377,6 @@ impl MobiImporter {
                 viewport: None,
             })
             .collect();
-
-        // Build TOC from NCX entries (using split result for chapter mapping)
-        let toc = if let Some(ref ncx) = ncx_entries {
-            let nodes = build_toc_from_ncx(ncx, |entry| {
-                let filepos_key = format!("filepos{}", entry.pos);
-                let chapter_idx = split
-                    .filepos_to_chapter
-                    .get(&filepos_key)
-                    .copied()
-                    .unwrap_or(0);
-                let chapter_path = &split.chapter_paths[chapter_idx];
-                format!("{}#filepos{}", chapter_path, entry.pos)
-            });
-            nodes.into_iter().map(toc_node_to_entry).collect()
-        } else {
-            vec![TocEntry::new(&metadata.title, &split.chapter_paths[0])]
-        };
 
         let mut importer = Self {
             source,
@@ -1283,6 +1329,26 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Chapter path for the generated issue contents page. Distinct from the
+/// `chapter_N.xhtml` run so inserting it renames nothing.
+const ISSUE_FRONT_MATTER_PATH: &str = "issue.xhtml";
+
+/// Wrap generated front matter in the same XHTML skeleton the split gives
+/// every other chapter.
+fn wrap_front_matter(body: &str, title: &str) -> Vec<u8> {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <!DOCTYPE html>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head>\n<title>{}</title>\n</head>\n\
+         <body>\n{}</body>\n\
+         </html>",
+        html_escape(title),
+        body
+    )
+    .into_bytes()
 }
 
 /// Convert TocNode to TocEntry recursively.

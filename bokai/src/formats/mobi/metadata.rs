@@ -65,7 +65,21 @@ fn issue_title(title: &str, date: Option<&str>) -> String {
     if title.trim_end().ends_with(&date) {
         return title.to_string();
     }
-    format!("{} — {}", title.trim_end(), date)
+    format!("{}{}{}", title.trim_end(), ISSUE_DATE_SEPARATOR, date)
+}
+
+/// What [`issue_title`] joins the publication and the date with.
+const ISSUE_DATE_SEPARATOR: &str = " — ";
+
+/// [`issue_title`] undone: the publication name inside an issue title.
+///
+/// Somewhere that shows the date in its own right — a masthead — wants the
+/// publication rather than the issue, and would otherwise print the date twice.
+pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a str {
+    date.map(crate::util::truncate_to_date)
+        .filter(|d| !d.is_empty())
+        .and_then(|d| title.strip_suffix(&format!("{ISSUE_DATE_SEPARATOR}{d}")))
+        .unwrap_or(title)
 }
 
 /// Is this an issue of a periodical, and of what kind?
@@ -277,6 +291,26 @@ mod tests {
         // Nothing to add without a date.
         assert_eq!(issue_title("The New Yorker", None), "The New Yorker");
         assert_eq!(issue_title("The New Yorker", Some("")), "The New Yorker");
+    }
+
+    #[test]
+    fn the_publication_can_be_recovered_from_the_issue_title() {
+        let dated = issue_title("The New Yorker", Some("2014-12-14 23:00:00+00:00"));
+        assert_eq!(
+            publication_title(&dated, Some("2014-12-14 23:00:00+00:00")),
+            "The New Yorker"
+        );
+        // A title that never carried a date, or a date that is not its suffix,
+        // is returned whole rather than trimmed on a guess.
+        assert_eq!(
+            publication_title("The New Yorker", Some("2014-12-14")),
+            "The New Yorker"
+        );
+        assert_eq!(
+            publication_title("2014-12-14 in Review", Some("2014-12-14")),
+            "2014-12-14 in Review"
+        );
+        assert_eq!(publication_title(&dated, None), &dated);
     }
 
     #[test]
