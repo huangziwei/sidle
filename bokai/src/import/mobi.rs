@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
-    build_toc_from_ncx, detect_image_type, filepos, is_metadata_record, palmdoc, parse_exth,
-    parse_ncx_index, read_index, strip_trailing_data,
+    asset_record_offset, build_toc_from_ncx, detect_image_type, filepos, is_metadata_record,
+    palmdoc, parse_exth, parse_ncx_index, read_index, strip_trailing_data,
 };
 use crate::html::Stylesheet;
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
@@ -117,19 +117,14 @@ impl Importer for MobiImporter {
     fn load_asset(&mut self, path: &Path) -> io::Result<Vec<u8>> {
         let key = path.to_string_lossy();
 
-        // Parse index from path (images/image_XXXX.ext)
-        let idx: usize = key
-            .strip_prefix("images/image_")
-            .and_then(|s| s.split('.').next())
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Invalid asset path: {}", key),
-                )
-            })?;
+        let idx = asset_record_offset(path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Invalid asset path: {}", key),
+            )
+        })?;
 
-        self.load_image_record(idx)
+        self.load_image_record(idx as usize)
     }
 
     fn load_stylesheet(&mut self, path: &Path) -> Option<Stylesheet> {
@@ -1196,23 +1191,15 @@ fn is_bare_filename_link(href: &[u8]) -> bool {
 
 /// The asset stored `offset` records past `first_image_index`.
 ///
-/// EXTH 201 (cover) and 202 (thumbnail) count **raw records**, including the
+/// EXTH 201 (cover) and 202 (thumbnail) count raw records, including the
 /// non-image ones — `RESC`, `DATP`, `FLIS`, `FCIS` — that asset discovery
-/// filters out. So the offset is not a position in the asset list, and indexing
-/// the list with it walks off by however many records were skipped ahead of the
-/// target. In a file whose image run begins with a `RESC` (the New Yorker
-/// issues, among others) that is one: `assets[cover_offset]` lands on the next
-/// record, which is exactly the low-resolution thumbnail EXTH 202 declares. The
-/// book then ships a 174×240 cover where its real one is 221 KB.
-///
-/// Asset filenames encode the raw offset (`images/image_0018.jpg`), which is
-/// what makes the lookup possible after filtering — and it is the same index
+/// filters out, so the offset is not a position in the asset list. Match on the
+/// offset the filename encodes instead, the same index
 /// [`MobiImporter::load_asset`] parses back out to read the record.
 fn asset_at_record_offset(assets: &[PathBuf], offset: u32) -> Option<&PathBuf> {
-    let stem = format!("image_{offset:04}");
     assets
         .iter()
-        .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()))
+        .find(|p| asset_record_offset(p) == Some(offset))
 }
 
 /// Discover asset paths by scanning image records (standalone function for early use).
@@ -1705,9 +1692,9 @@ mod tests {
 
     #[test]
     fn test_asset_at_record_offset() {
-        // The New Yorker shape: record +0 is a `RESC` that asset discovery
-        // filters out, so the surviving assets start at raw +1 and the list
-        // position is one behind the record offset from here on.
+        // Record +0 is a `RESC` that asset discovery filters out, so the
+        // surviving assets start at raw +1 and the list position trails the
+        // record offset by one from there on.
         let assets: Vec<PathBuf> = (1..=19)
             .map(|i| PathBuf::from(format!("images/image_{i:04}.jpg")))
             .collect();

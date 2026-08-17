@@ -321,20 +321,14 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             category: MetadataCategory::KindleTitle,
             source: MetadataSource::Dynamic(MetadataField::ContentId),
         },
-        // Always PDOC — `cde_content_type` states a file's **provenance**, not
-        // its genre, and everything this writer produces is a personal
-        // document. The device reads it as provenance too: any store type
-        // (EBOK, MAGZ, …) makes it try an ASIN-catalogue lookup, which fails
-        // for a sideload and leaves the library tile and sleep-screen art blank.
-        //
-        // Measured on a Scribe (5.19.4.0.1, 2026-08-17): three MAGZ-declaring
-        // issues showed **no** cover while a PDOC control built from the same
-        // pipeline, with the same 500×687 cover embedded, showed its own. The
-        // MAGZ files bought nothing for it — no Periodicals shelf, no
-        // back-issue stacking, no periodical reading UI. So a periodical is
-        // declared PDOC like everything else, and `Metadata::periodical`
-        // survives only as a fact about the content (it names the issue — see
-        // `formats/mobi/metadata.rs::issue_title`), never as a declaration.
+        // Always PDOC — `cde_content_type` states a file's provenance, not its
+        // genre, and everything this writer produces is a personal document.
+        // The device reads it as provenance too: any store type (EBOK, MAGZ, …)
+        // makes it try an ASIN-catalogue lookup, which fails for a sideload and
+        // leaves the library tile and sleep-screen art blank. So a periodical is
+        // declared PDOC like everything else, and `Metadata::periodical` stays a
+        // fact about the content — it names the issue, see
+        // `formats/mobi/metadata.rs::issue_title` — never a declaration.
         MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
@@ -946,8 +940,8 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "cde_content_type" && v == "PDOC")
         );
-        // The three periodical keys are absent from a book entirely — emitting
-        // them empty would declare it a magazine.
+        // The periodical keys are absent entirely — emitting them empty would
+        // declare the book a magazine.
         for key in ["itemType", "periodicals_generation_V2"] {
             assert!(
                 !entries.iter().any(|(k, _)| *k == key),
@@ -957,8 +951,8 @@ mod tests {
     }
 
     /// A periodical is a personal document like everything else this writer
-    /// produces. Declaring its genre (`MAGZ`/`NWPR`/`FEED`) costs the cover and
-    /// buys nothing — measured on a Scribe, see the `cde_content_type` rule.
+    /// produces; its genre never reaches `cde_content_type`. See that rule for
+    /// why declaring `MAGZ`/`NWPR`/`FEED` blanks the cover.
     #[test]
     fn a_periodical_is_still_declared_pdoc() {
         use crate::model::PeriodicalKind;

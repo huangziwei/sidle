@@ -172,8 +172,8 @@ mod tests {
     use image::{ImageFormat, Rgb, RgbImage};
     use std::io::Cursor;
 
-    /// A synthetic color cover at the given dimensions — keeps the test off any
-    /// gitignored fixture under `books/`.
+    /// A synthetic color cover at the given dimensions, so the test needs no
+    /// fixture file.
     fn synth_cover(w: u32, h: u32) -> Vec<u8> {
         let mut img = RgbImage::new(w, h);
         for (x, y, px) in img.enumerate_pixels_mut() {

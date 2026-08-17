@@ -412,33 +412,22 @@ pub struct NcxEntry {
     pub level: i32,
     pub parent: i32,
     pub pos_fid: Option<(u32, u32)>,
-    /// Tag 5 — the entry's class, as the file names it: `periodical` at depth 0,
-    /// `section` at depth 1, `article` at depth 2. `None` in a plain book.
-    ///
-    /// The most reliable periodical signal there is: it is the structure stating
-    /// its own kind, rather than a header declaration that can disagree with the
-    /// index below it.
+    /// Tag 5 — the entry's class: `periodical` at depth 0, `section` at depth 1,
+    /// `article` at depth 2. `None` in a plain book.
     pub kind: Option<String>,
-    /// Tags 22/23 — the index range of this entry's children, i.e. the articles
-    /// a section owns. The tree can be rebuilt from tag 21 (`parent`) alone, so
-    /// this is the source's own statement of the same relation.
+    /// Tags 22/23 — the inclusive index range of this entry's children, i.e. the
+    /// articles a section owns. Equivalent to the tree tag 21 (`parent`) builds.
     pub children: Option<(u32, u32)>,
-    /// Tag 69 — the article's standfirst/blurb, the line under the headline on
-    /// the article-list screen.
-    ///
-    /// Note the tag numbering: calibre's reader maps 69 to `image_index` and 70
-    /// to the description (`ref/calibre-mobi-input/reader/ncx.py:25`), but in
-    /// real New Yorker issues 69 resolves through the CNCX to prose and 70 to a
-    /// byline. Decoded from the bytes, not from that table.
+    /// Tag 69 — the article's standfirst, shown under the headline on an
+    /// article-list screen.
     pub description: Option<String>,
-    /// Tag 70 — the article's byline, e.g. `BY AMY DAVIDSON`.
+    /// Tag 70 — the article's byline.
     pub author: Option<String>,
-    /// Tag 71 — an image reference for the article's list-screen thumbnail.
-    ///
-    /// Kept raw: in the issues on hand these values do not line up with the
-    /// file's own image records under any 0- or 1-based reading, most likely
-    /// because the files were rebuilt and the indices never remapped. Resolve it
-    /// against an un-rebuilt Amazon periodical before treating it as a resource.
+    /// Tag 71 — the article's thumbnail, as a raw record offset from
+    /// `first_image_index`. This is the 0-based numbering EXTH 201/202 use and
+    /// that asset filenames encode — not the 1-based `recindex` numbering — so
+    /// [`asset_record_offset`](crate::formats::mobi::asset_record_offset)
+    /// resolves it directly.
     pub image: Option<u32>,
 }
 
@@ -1483,8 +1472,7 @@ mod tests {
         assert_eq!(parsed[1].children, Some((10, 14)));
         assert_eq!(parsed[1].parent, 0);
 
-        // Tag 69 is the blurb and tag 70 the byline — the opposite of what
-        // calibre's reader map claims (`reader/ncx.py:25`).
+        // Tag 69 is the standfirst and tag 70 the byline, in that order.
         assert_eq!(parsed[2].kind.as_deref(), Some("article"));
         assert_eq!(
             parsed[2].description.as_deref(),

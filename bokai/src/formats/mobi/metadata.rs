@@ -43,12 +43,11 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
 
 /// Name the *issue*, not just the publication.
 ///
-/// A periodical's title field holds the publication — every New Yorker issue
-/// says `The New Yorker` and nothing more, because the format expects the
-/// catalogue to group issues under a parent and distinguish them by date. A
-/// sideload gets no such grouping (see `Metadata::periodical`), so without the
-/// date the library shows a row of identical tiles with no way to tell which
-/// issue is which.
+/// A periodical's title field holds the publication, the same string on every
+/// issue, because the format expects the catalogue to group issues under a
+/// parent and distinguish them by date. A sideload gets no such grouping (see
+/// `Metadata::periodical`), so without the date the library shows a row of
+/// identical tiles with no way to tell which issue is which.
 ///
 /// The date goes on in ISO form so a plain title sort is also chronological.
 /// Applied at import rather than in one exporter, so the EPUB side, the KFX

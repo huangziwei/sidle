@@ -80,9 +80,37 @@ pub fn parse_base32(s: &[u8]) -> usize {
     result
 }
 
+/// The raw record offset an asset filename encodes, or `None` for a path that
+/// is not one of ours.
+///
+/// Asset paths are minted as `images/image_{offset:04}.{ext}`, where `offset`
+/// counts records from `first_image_index` and includes the non-image records
+/// (`RESC`, `DATP`, `FLIS`, `FCIS`, …) that discovery drops. Carrying the offset
+/// in the name is what lets a caller address a record after filtering: a
+/// position in the filtered list is not the offset, and the two diverge by
+/// however many records were skipped ahead of the target.
+pub fn asset_record_offset(path: &std::path::Path) -> Option<u32> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("image_"))
+        .and_then(|s| s.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_offsets_round_trip_through_the_filename() {
+        use std::path::Path;
+        assert_eq!(
+            asset_record_offset(Path::new("images/image_0018.jpg")),
+            Some(18)
+        );
+        assert_eq!(asset_record_offset(Path::new("image_0000.png")), Some(0));
+        assert_eq!(asset_record_offset(Path::new("images/cover.jpg")), None);
+        assert_eq!(asset_record_offset(Path::new("images/image_.jpg")), None);
+    }
 
     #[test]
     fn test_parse_base32() {
