@@ -62,6 +62,52 @@ pub struct CollectionInfo {
     pub position: Option<f64>,
 }
 
+/// Which flavour of periodical a book is — the distinction Amazon's catalogue
+/// makes, and the reason a `.pobi` is shelved apart from a book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodicalKind {
+    /// MOBI header type 259, `cdetype = MAGZ`.
+    Magazine,
+    /// MOBI header type 257, `cdetype = NWPR`.
+    Newspaper,
+    /// MOBI header type 258, `cdetype = FEED`.
+    Blog,
+}
+
+impl PeriodicalKind {
+    /// The Kindle catalogue's four-letter content type. Drives KFX
+    /// `cde_content_type` and, on device, which shelf the library uses and
+    /// whether back issues stack.
+    pub fn cde_type(self) -> &'static str {
+        match self {
+            PeriodicalKind::Magazine => "MAGZ",
+            PeriodicalKind::Newspaper => "NWPR",
+            PeriodicalKind::Blog => "FEED",
+        }
+    }
+
+    /// From an EXTH 501 / KFX `cde_content_type` value.
+    pub fn from_cde_type(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "MAGZ" => Some(PeriodicalKind::Magazine),
+            "NWPR" => Some(PeriodicalKind::Newspaper),
+            "FEED" => Some(PeriodicalKind::Blog),
+            _ => None,
+        }
+    }
+
+    /// From a MOBI header type: 257 `News`, 258 `News_Feed`, 259
+    /// `News_Magazine`. Everything else is a book.
+    pub fn from_mobi_type(t: u32) -> Option<Self> {
+        match t {
+            257 => Some(PeriodicalKind::Newspaper),
+            258 => Some(PeriodicalKind::Blog),
+            259 => Some(PeriodicalKind::Magazine),
+            _ => None,
+        }
+    }
+}
+
 /// Book metadata (Dublin Core + extensions)
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
@@ -119,6 +165,17 @@ pub struct Metadata {
     /// `fixed-layout-jp:viewport` / KF8 `original-resolution`. Every FXL page
     /// is authored to this box unless it carries its own viewport.
     pub default_viewport: Option<(u32, u32)>,
+    /// Set when the book is an issue of a periodical rather than a book. `None`
+    /// for every ordinary title.
+    ///
+    /// The kind is all a periodical needs carried separately. Its issue date is
+    /// `date`, and the publication that groups its back issues is `title` —
+    /// which for a periodical names the magazine, not the issue, and is
+    /// literally what the device groups on: the Kindle's own
+    /// `periodicals_virtual_collections.lua` matches
+    /// `p_cdeGroup = ? or p_titles_0_nominal = ?`, so a sideload with no
+    /// cdeGroup stacks on the shared title.
+    pub periodical: Option<PeriodicalKind>,
 }
 
 /// Which half of a two-page spread a fixed-layout page occupies — the OPF
@@ -342,7 +399,12 @@ impl Format {
             .and_then(|ext| match ext.to_lowercase().as_str() {
                 "epub" => Some(Format::Epub),
                 "azw3" => Some(Format::Azw3),
-                "mobi" => Some(Format::Mobi),
+                // `.pobi` is a periodical delivery — a plain MOBI6 book at the
+                // container level, distinguished only by its MOBI header type,
+                // EXTH 501 `cdetype` and a hierarchical NCX. Amazon used the
+                // extension so the device could route it without opening the
+                // file; there is no separate container to parse.
+                "mobi" | "pobi" => Some(Format::Mobi),
                 // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
                 // importer auto-detects and dispatches it via its `open()`.
                 "kfx" | "kfx-zip" => Some(Format::Kfx),
@@ -387,12 +449,13 @@ impl Book {
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::open(path)?),
             Format::Azw3 => Box::new(Azw3Importer::open(path)?),
-            // `.mobi` covers three on-disk shapes: pure MOBI6, pure KF8, and
-            // MOBI6+KF8 combo (older Amazon kindlegen output). The KF8-aware
-            // shapes route through `Azw3Importer` so the source CSS, KF8
-            // spine, and per-chapter `xml:lang` make it into the EPUB —
+            // `Format::Mobi` covers three on-disk shapes: pure MOBI6, pure
+            // KF8, and MOBI6+KF8 combo (older Amazon kindlegen output). The
+            // KF8-aware shapes route through `Azw3Importer` so the source CSS,
+            // KF8 spine, and per-chapter `xml:lang` make it into the EPUB —
             // strict readers (Apple Books, KOReader) need that for vertical
-            // Japanese rendering. Pure MOBI6 stays on `MobiImporter`.
+            // Japanese rendering. Pure MOBI6 — every `.pobi` periodical among
+            // it — stays on `MobiImporter`.
             Format::Mobi => {
                 let file = std::fs::File::open(path)?;
                 let source: Arc<dyn crate::io::ByteSource> =

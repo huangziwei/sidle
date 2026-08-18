@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
-    build_toc_from_ncx, detect_image_type, filepos, is_metadata_record, palmdoc, parse_exth,
-    parse_ncx_index, read_index, strip_trailing_data,
+    asset_record_offset, build_toc_from_ncx, detect_image_type, filepos, is_metadata_record,
+    palmdoc, parse_exth, parse_ncx_index, read_index, strip_trailing_data,
 };
 use crate::html::Stylesheet;
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
@@ -117,19 +117,14 @@ impl Importer for MobiImporter {
     fn load_asset(&mut self, path: &Path) -> io::Result<Vec<u8>> {
         let key = path.to_string_lossy();
 
-        // Parse index from path (images/image_XXXX.ext)
-        let idx: usize = key
-            .strip_prefix("images/image_")
-            .and_then(|s| s.split('.').next())
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Invalid asset path: {}", key),
-                )
-            })?;
+        let idx = asset_record_offset(path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Invalid asset path: {}", key),
+            )
+        })?;
 
-        self.load_image_record(idx)
+        self.load_image_record(idx as usize)
     }
 
     fn load_stylesheet(&mut self, path: &Path) -> Option<Stylesheet> {
@@ -247,11 +242,9 @@ impl MobiImporter {
         // Find cover image using discovered asset path
         if let Some(ref exth) = exth
             && let Some(cover_idx) = exth.cover_offset
+            && let Some(cover_path) = asset_at_record_offset(&assets, cover_idx)
         {
-            // cover_offset is 0-indexed relative to first image
-            if let Some(cover_path) = assets.get(cover_idx as usize) {
-                metadata.cover_image = Some(cover_path.to_string_lossy().to_string());
-            }
+            metadata.cover_image = Some(cover_path.to_string_lossy().to_string());
         }
 
         // Parse NCX index BEFORE text transformation (needed for anchor insertion
@@ -285,30 +278,95 @@ impl MobiImporter {
         let text = extract_text_from_source(&source, &pdb, &mobi, file_len)?;
         let wrapped = wrap_text_as_html(&text, &metadata.title, &mobi);
 
-        // Transform HTML (without NCX anchors initially for clean pagebreak splitting)
-        let transformed = filepos::transform_mobi_html(&wrapped, &assets, &[]);
+        // Transform HTML with an anchor at every NCX target. The anchors are
+        // inert `<a id="fileposN" />` markers, but they are the only thing
+        // `collect_filepos_anchors` can read to learn which chapter each NCX
+        // target landed in. A source whose NCX targets are also `filepos=`
+        // link targets gets them either way; one that navigates purely through
+        // the index (every periodical does) has no `filepos=` at all, and
+        // without these every TOC entry resolves to chapter 0.
+        let transformed = filepos::transform_mobi_html(&wrapped, &assets, &ncx_positions);
 
-        // Try pagebreak-based splitting first. If it produces only 1 chapter
-        // and NCX positions are available, re-transform with NCX anchors and
-        // force NCX-based splitting (bypassing the pagebreak check that failed).
-        let (split, transformed) = {
+        // Pagebreaks are the primary split. NCX positions are the fallback for
+        // a source that carries none — the anchors are already in place, so
+        // this only has to choose which boundaries to cut on.
+        let split = {
             let initial = split_mobi_html(&transformed, None, &metadata.title);
             if initial.chapters.len() > 1 || ncx_positions.is_empty() {
-                (initial, transformed)
+                initial
             } else {
-                // Re-transform with NCX anchors at byte positions, force NCX split
-                let with_ncx = filepos::transform_mobi_html(&wrapped, &assets, &ncx_positions);
                 let ncx_split =
-                    split_mobi_html_ncx_only(&with_ncx, &ncx_positions, &metadata.title);
+                    split_mobi_html_ncx_only(&transformed, &ncx_positions, &metadata.title);
                 if ncx_split.chapters.len() > 1 {
-                    (ncx_split, with_ncx)
+                    ncx_split
                 } else {
-                    (initial, transformed)
+                    initial
                 }
             }
         };
-        // Keep transformed for potential later use
-        let _ = transformed;
+
+        let mut split = split;
+
+        // An index entry's link target, resolved through the chapter the
+        // anchor landed in.
+        let href_for = |entry: &crate::formats::mobi::index::NcxEntry| {
+            let chapter_idx = split
+                .filepos_to_chapter
+                .get(&format!("filepos{}", entry.pos))
+                .copied()
+                .unwrap_or(0);
+            format!("{}#filepos{}", split.chapter_paths[chapter_idx], entry.pos)
+        };
+
+        // Build TOC from NCX entries (using split result for chapter mapping)
+        let mut toc = if let Some(ref ncx) = ncx_entries {
+            let nodes = build_toc_from_ncx(ncx, &href_for);
+            nodes.into_iter().map(toc_node_to_entry).collect()
+        } else {
+            vec![TocEntry::new(&metadata.title, &split.chapter_paths[0])]
+        };
+
+        // A periodical carries no contents page of its own — the index is the
+        // whole of its navigation, and only Amazon's periodical reader draws a
+        // page from it. Render one, so the issue opens on what is in it.
+        if metadata.periodical.is_some()
+            && let Some(ref ncx) = ncx_entries
+            && let Some(page) = crate::formats::mobi::periodical::issue_front_matter(
+                ncx,
+                crate::formats::mobi::metadata::publication_title(
+                    &metadata.title,
+                    metadata.date.as_deref(),
+                ),
+                metadata
+                    .date
+                    .as_deref()
+                    .map(crate::util::truncate_to_date)
+                    .as_deref(),
+                href_for,
+                |offset| {
+                    asset_at_record_offset(&assets, offset)
+                        .map(|p| p.to_string_lossy().into_owned())
+                },
+            )
+        {
+            let path = ISSUE_FRONT_MATTER_PATH.to_string();
+            // The index's own root entry means "the contents of this issue",
+            // so it is the natural link to the page rather than a second entry
+            // saying the same thing.
+            if let Some(root) = toc.first_mut()
+                && ncx.first().is_some_and(|e| {
+                    e.kind
+                        .as_deref()
+                        .is_some_and(|k| k.eq_ignore_ascii_case("periodical"))
+                })
+            {
+                root.href = path.clone();
+            }
+            split
+                .chapters
+                .insert(0, wrap_front_matter(&page, &metadata.title));
+            split.chapter_paths.insert(0, path);
+        }
 
         // Build spine from split chapters
         let spine: Vec<SpineEntry> = (0..split.chapters.len())
@@ -319,23 +377,6 @@ impl MobiImporter {
                 viewport: None,
             })
             .collect();
-
-        // Build TOC from NCX entries (using split result for chapter mapping)
-        let toc = if let Some(ref ncx) = ncx_entries {
-            let nodes = build_toc_from_ncx(ncx, |entry| {
-                let filepos_key = format!("filepos{}", entry.pos);
-                let chapter_idx = split
-                    .filepos_to_chapter
-                    .get(&filepos_key)
-                    .copied()
-                    .unwrap_or(0);
-                let chapter_path = &split.chapter_paths[chapter_idx];
-                format!("{}#filepos{}", chapter_path, entry.pos)
-            });
-            nodes.into_iter().map(toc_node_to_entry).collect()
-        } else {
-            vec![TocEntry::new(&metadata.title, &split.chapter_paths[0])]
-        };
 
         let mut importer = Self {
             source,
@@ -495,8 +536,11 @@ fn split_mobi_html(html: &[u8], ncx_positions: Option<&[u32]>, title: &str) -> C
     let (head_content, body_content) = extract_head_and_body(&html_str);
     let head_content = sanitize_mobi_head(&head_content, title);
 
-    // Find pagebreak positions in the body content
-    let pagebreak_positions = find_pagebreaks(body_content.as_bytes());
+    // Find pagebreak positions in the body content, preferring the ones that
+    // separate top-level siblings so no element is cut in half.
+    let all_pagebreaks = find_pagebreaks(body_content.as_bytes());
+    let pagebreak_positions =
+        pagebreaks_at_top_level(body_content.as_bytes(), &all_pagebreaks).unwrap_or(all_pagebreaks);
 
     // Split body: pagebreaks first, NCX fallback, then single chapter
     let body_chunks = if !pagebreak_positions.is_empty() {
@@ -512,11 +556,15 @@ fn split_mobi_html(html: &[u8], ncx_positions: Option<&[u32]>, title: &str) -> C
         vec![body_content.to_string()]
     };
 
-    // Filter out empty chunks
-    let body_chunks: Vec<String> = body_chunks
-        .into_iter()
-        .filter(|chunk| !chunk.trim().is_empty())
-        .collect();
+    // Rewrite any pagebreak the split did not consume into a page-break div
+    // (`mbp:` is unbound in an XHTML chapter), then fold away the chunks that
+    // hold nothing a reader could see.
+    let body_chunks = coalesce_contentless_chunks(
+        body_chunks
+            .into_iter()
+            .map(|chunk| replace_leftover_pagebreaks(&chunk))
+            .collect(),
+    );
 
     // Build chapter documents and filepos map
     let mut chapters = Vec::with_capacity(body_chunks.len());
@@ -580,11 +628,15 @@ fn split_mobi_html_ncx_only(html: &[u8], ncx_positions: &[u32], title: &str) -> 
         }
     };
 
-    // Filter out empty chunks
-    let body_chunks: Vec<String> = body_chunks
-        .into_iter()
-        .filter(|chunk| !chunk.trim().is_empty())
-        .collect();
+    // Rewrite any pagebreak the split did not consume into a page-break div
+    // (`mbp:` is unbound in an XHTML chapter), then fold away the chunks that
+    // hold nothing a reader could see.
+    let body_chunks = coalesce_contentless_chunks(
+        body_chunks
+            .into_iter()
+            .map(|chunk| replace_leftover_pagebreaks(&chunk))
+            .collect(),
+    );
 
     // Build chapter documents and filepos map
     let mut chapters = Vec::with_capacity(body_chunks.len());
@@ -733,6 +785,118 @@ fn find_pagebreaks(body: &[u8]) -> Vec<PagebreakPos> {
     results
 }
 
+/// HTML elements that never have content, so a closing tag for them opens
+/// nothing and closes nothing.
+///
+/// MOBI6 writes several of these as pairs — `<br> </br>`, `<img …> </IMG>` —
+/// which is why both halves have to be ignored rather than just the open tag:
+/// counting `</br>` as a close would drive the element depth negative and make
+/// every later boundary look wrong.
+const VOID_ELEMENTS: &[&[u8]] = &[
+    b"area",
+    b"base",
+    b"br",
+    b"col",
+    b"embed",
+    b"hr",
+    b"img",
+    b"input",
+    b"link",
+    b"mbp:pagebreak",
+    b"meta",
+    b"param",
+    b"source",
+    b"track",
+    b"wbr",
+];
+
+/// Keep only the pagebreaks that separate **top-level siblings** — the ones
+/// where no element is open around them.
+///
+/// A MOBI6 body is one HTML stream and `<mbp:pagebreak>` is a rendering hint,
+/// not a structural boundary: it appears wherever kindlegen wanted a new page,
+/// including in the middle of an element. Cutting there splits that element
+/// across two XHTML documents, so one chapter ends with an unclosed open tag
+/// and the next begins with an orphaned close — a document that is not
+/// well-formed (epubcheck RSC-016), plus a content-free husk chapter holding
+/// nothing but the stray close tag.
+///
+/// Periodicals do this on every article: the separator sits just inside the
+/// article's `<block>`, immediately before `</block>`. Filtering to depth zero
+/// moves the cut to the real article boundary and the husks stop existing.
+///
+/// Returns `None` when no pagebreak qualifies, leaving the caller to fall back
+/// to the unfiltered set — a book whose whole body sits inside one wrapper
+/// element has no depth-zero break at all and must still split somewhere.
+fn pagebreaks_at_top_level(body: &[u8], all: &[PagebreakPos]) -> Option<Vec<PagebreakPos>> {
+    // Element depth immediately before each byte offset of interest, walked
+    // once over the body.
+    let mut depth: i32 = 0;
+    let mut kept = Vec::new();
+    let mut next = all.iter().peekable();
+    let mut pos = 0;
+
+    while pos < body.len() {
+        // Record the depth at each pagebreak as its offset is reached.
+        while let Some(pb) = next.peek() {
+            if pb.start > pos {
+                break;
+            }
+            if depth == 0 {
+                kept.push(PagebreakPos {
+                    start: pb.start,
+                    end: pb.end,
+                });
+            }
+            next.next();
+        }
+
+        if body[pos] != b'<' {
+            pos += 1;
+            continue;
+        }
+        let Some(close_rel) = body[pos..].iter().position(|&b| b == b'>') else {
+            break;
+        };
+        let tag = &body[pos..pos + close_rel + 1];
+        pos += close_rel + 1;
+
+        // `<!…>` and `<?…>` are not elements.
+        let is_close = tag.get(1) == Some(&b'/');
+        let name_start = if is_close { 2 } else { 1 };
+        if !tag.get(name_start).is_some_and(|b| b.is_ascii_alphabetic()) {
+            continue;
+        }
+        let name_end = tag[name_start..]
+            .iter()
+            .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_')))
+            .map_or(tag.len(), |p| name_start + p);
+        let name = &tag[name_start..name_end];
+        if VOID_ELEMENTS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        // `<foo/>` opens and closes in one tag.
+        let self_closing = tag.len() >= 2 && tag[tag.len() - 2] == b'/';
+        if is_close {
+            depth = depth.saturating_sub(1);
+        } else if !self_closing {
+            depth += 1;
+        }
+    }
+
+    // Any pagebreaks past the last tag sit at whatever depth the walk ended on.
+    for pb in next {
+        if depth == 0 {
+            kept.push(PagebreakPos {
+                start: pb.start,
+                end: pb.end,
+            });
+        }
+    }
+
+    (!kept.is_empty()).then_some(kept)
+}
+
 /// Split body content at pagebreak positions.
 ///
 /// The pagebreak tags themselves are removed. Content before the first
@@ -750,6 +914,105 @@ fn split_at_pagebreaks(body: &str, pagebreaks: &[PagebreakPos]) -> Vec<String> {
     chunks.push(body[last_end..].to_string());
 
     chunks
+}
+
+/// Fold chunks that hold nothing a reader could see into their neighbour.
+///
+/// Splitting one HTML stream leaves filler between boundaries: MOBI6 puts a
+/// `<p> </p>` spacer between consecutive page breaks, so a chunk can consist
+/// of markup and no content at all. Each one would otherwise become a chapter
+/// — a real spine entry and a real "page" the reader can turn to, showing
+/// nothing. Periodicals produce a run of them between cartoons.
+///
+/// Folded rather than dropped: an empty-looking chunk can still carry the
+/// `<a id="fileposN"/>` anchor a TOC entry targets, and appending its markup to
+/// the previous chapter keeps that anchor reachable. The leading chunk has no
+/// previous, so it folds forward instead.
+///
+/// A chunk counts as content when it has text (ignoring the zero-width and
+/// non-breaking spaces MOBI uses as spacers) or embeds media.
+fn coalesce_contentless_chunks(chunks: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(chunks.len());
+    let mut pending = String::new();
+    for chunk in chunks {
+        if chunk_has_content(&chunk) {
+            out.push(std::mem::take(&mut pending) + &chunk);
+        } else if let Some(last) = out.last_mut() {
+            last.push_str(&chunk);
+        } else {
+            // Nothing before it yet — carry it onto the first real chunk.
+            pending.push_str(&chunk);
+        }
+    }
+    // Trailing filler with no chapter to attach to, or an all-filler body.
+    if !pending.is_empty() {
+        out.push(pending);
+    }
+    out
+}
+
+/// Does this chunk show the reader anything — text, or embedded media?
+fn chunk_has_content(chunk: &str) -> bool {
+    const MEDIA: [&str; 5] = ["<img", "<image", "<svg", "<audio", "<video"];
+    let lower = chunk.to_ascii_lowercase();
+    if MEDIA.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    let mut in_tag = false;
+    chunk.chars().any(|c| {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            // U+200B zero-width space and U+00A0 no-break space are spacers
+            // in MOBI6 markup, not content.
+            _ if !in_tag && !c.is_whitespace() && c != '\u{200b}' && c != '\u{a0}' => return true,
+            _ => {}
+        }
+        false
+    })
+}
+
+/// Replace every `<mbp:pagebreak>` left inside a chunk with a page-break div.
+///
+/// Only the pagebreaks chosen as chapter boundaries are consumed by the split;
+/// the rest stay in the text. `mbp:` is not a bound namespace prefix in an
+/// XHTML chapter, so each survivor is a namespace-well-formedness error
+/// (epubcheck RSC-016) — and dropping them outright would lose a page break the
+/// publisher asked for.
+///
+/// Mirrors calibre's `MobiReader.replace_page_breaks`
+/// (`reader/mobi6.py:841`), which rewrites the same tag to
+/// `<div class="mbp_pagebreak" />` against a `page-break-after: always; margin:
+/// 0; display: block` rule, and collapses a run of adjacent pagebreaks into
+/// one. The rule is inlined here because the passthrough export route ships no
+/// stylesheet of its own. Calibre carries the tag's original attributes onto
+/// the div and cleans them up later; this route has no such pass, so they are
+/// dropped rather than left to fail attribute validation.
+fn replace_leftover_pagebreaks(chunk: &str) -> String {
+    const DIV: &str = "<div style=\"page-break-after: always; margin: 0; display: block\"></div>";
+    let breaks = find_pagebreaks(chunk.as_bytes());
+    if breaks.is_empty() {
+        return chunk.to_string();
+    }
+    let mut out = String::with_capacity(chunk.len());
+    let mut last_end = 0;
+    let mut iter = breaks.iter().peekable();
+    while let Some(pb) = iter.next() {
+        out.push_str(&chunk[last_end..pb.start]);
+        let mut end = pb.end;
+        // Collapse a run: further pagebreaks separated only by whitespace.
+        while let Some(next) = iter.peek() {
+            if !chunk[end..next.start].trim().is_empty() {
+                break;
+            }
+            end = next.end;
+            iter.next();
+        }
+        out.push_str(DIV);
+        last_end = end;
+    }
+    out.push_str(&chunk[last_end..]);
+    out
 }
 
 /// Scan a chapter chunk for `<a id="fileposN"` anchors and record them.
@@ -972,6 +1235,19 @@ fn is_bare_filename_link(href: &[u8]) -> bool {
 // Helpers
 // ============================================================================
 
+/// The asset stored `offset` records past `first_image_index`.
+///
+/// EXTH 201 (cover) and 202 (thumbnail) count raw records, including the
+/// non-image ones — `RESC`, `DATP`, `FLIS`, `FCIS` — that asset discovery
+/// filters out, so the offset is not a position in the asset list. Match on the
+/// offset the filename encodes instead, the same index
+/// [`MobiImporter::load_asset`] parses back out to read the record.
+fn asset_at_record_offset(assets: &[PathBuf], offset: u32) -> Option<&PathBuf> {
+    assets
+        .iter()
+        .find(|p| asset_record_offset(p) == Some(offset))
+}
+
 /// Discover asset paths by scanning image records (standalone function for early use).
 fn discover_assets_from_source(
     source: &Arc<dyn ByteSource>,
@@ -1053,6 +1329,26 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Chapter path for the generated issue contents page. Distinct from the
+/// `chapter_N.xhtml` run so inserting it renames nothing.
+const ISSUE_FRONT_MATTER_PATH: &str = "issue.xhtml";
+
+/// Wrap generated front matter in the same XHTML skeleton the split gives
+/// every other chapter.
+fn wrap_front_matter(body: &str, title: &str) -> Vec<u8> {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <!DOCTYPE html>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head>\n<title>{}</title>\n</head>\n\
+         <body>\n{}</body>\n\
+         </html>",
+        html_escape(title),
+        body
+    )
+    .into_bytes()
 }
 
 /// Convert TocNode to TocEntry recursively.
@@ -1414,6 +1710,191 @@ mod tests {
         let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 1);
+    }
+
+    #[test]
+    fn test_split_prefers_top_level_pagebreaks() {
+        // The periodical shape: each article is a `<block>` whose page break
+        // sits just inside it, before `</block>`, followed by a top-level
+        // break between articles. Cutting on the inner break strands the
+        // `</block>` in a content-free husk chapter; cutting on the outer one
+        // lands on the real article boundary.
+        let html = br#"<html><head></head><body>
+<block><p>Article one</p><mbp:pagebreak/></block><p> </p><mbp:pagebreak/>
+<block><p>Article two</p><mbp:pagebreak/></block><p> </p>
+</body></html>"#;
+
+        let split = split_mobi_html(html, None, "T");
+
+        assert_eq!(split.chapters.len(), 2, "one chapter per article");
+        for (i, ch) in split.chapters.iter().enumerate() {
+            let s = String::from_utf8_lossy(ch);
+            assert_eq!(
+                s.matches("<block").count(),
+                s.matches("</block>").count(),
+                "chapter {i} keeps <block> balanced: {s}"
+            );
+            assert!(
+                !s.contains("mbp:"),
+                "chapter {i} carries no unbound mbp: prefix: {s}"
+            );
+        }
+        assert!(String::from_utf8_lossy(&split.chapters[0]).contains("Article one"));
+        assert!(String::from_utf8_lossy(&split.chapters[1]).contains("Article two"));
+    }
+
+    #[test]
+    fn test_split_falls_back_when_no_top_level_pagebreak() {
+        // A book whose whole body sits inside one wrapper has no depth-zero
+        // break at all. It must still split — losing the chapter structure
+        // would be worse than an unbalanced cut.
+        let html = br#"<html><head></head><body><div>
+<p>One</p><mbp:pagebreak/><p>Two</p><mbp:pagebreak/><p>Three</p>
+</div></body></html>"#;
+
+        let split = split_mobi_html(html, None, "T");
+        assert_eq!(split.chapters.len(), 3, "falls back to every pagebreak");
+    }
+
+    #[test]
+    fn test_asset_at_record_offset() {
+        // Record +0 is a `RESC` that asset discovery filters out, so the
+        // surviving assets start at raw +1 and the list position trails the
+        // record offset by one from there on.
+        let assets: Vec<PathBuf> = (1..=19)
+            .map(|i| PathBuf::from(format!("images/image_{i:04}.jpg")))
+            .collect();
+
+        // EXTH 201 said 18 — the 221 KB cover, not the 15.8 KB thumbnail at 19
+        // that plain positional indexing (`assets[18]`) returns.
+        assert_eq!(
+            asset_at_record_offset(&assets, 18),
+            Some(&PathBuf::from("images/image_0018.jpg"))
+        );
+        assert_eq!(assets[18], PathBuf::from("images/image_0019.jpg"));
+
+        // A book whose images start at record +0 is unshifted, and the lookup
+        // agrees with positional indexing there.
+        let unshifted: Vec<PathBuf> = (0..3)
+            .map(|i| PathBuf::from(format!("images/image_{i:04}.jpg")))
+            .collect();
+        assert_eq!(
+            asset_at_record_offset(&unshifted, 0),
+            Some(&unshifted[0]),
+            "offset 0 is the first asset when nothing was skipped"
+        );
+
+        // An offset pointing at a record that was filtered out has no asset.
+        assert_eq!(asset_at_record_offset(&assets, 0), None);
+        assert_eq!(asset_at_record_offset(&assets, 99), None);
+
+        // The extension is whatever the record's magic bytes said.
+        let png = vec![PathBuf::from("images/image_0007.png")];
+        assert_eq!(asset_at_record_offset(&png, 7), Some(&png[0]));
+    }
+
+    #[test]
+    fn test_chunk_has_content() {
+        assert!(chunk_has_content("<p>text</p>"));
+        assert!(chunk_has_content("<img src=\"a.jpg\"/>"), "media counts");
+        assert!(chunk_has_content("<div><SVG><rect/></SVG></div>"));
+
+        // MOBI6's inter-pagebreak spacer, and its spacer characters.
+        assert!(!chunk_has_content(" <p> </p>"));
+        assert!(!chunk_has_content("<p>\u{200b}\u{a0}</p>"));
+        assert!(!chunk_has_content("<a id=\"filepos99\" />"));
+        assert!(!chunk_has_content(""));
+        // Attribute text is not content.
+        assert!(!chunk_has_content(
+            "<div style=\"page-break-after: always\"></div>"
+        ));
+    }
+
+    #[test]
+    fn test_coalesce_contentless_chunks() {
+        // The cartoon run: a spacer chunk between every pair of real ones.
+        let chunks = ["<p>A</p>", " <p> </p>", "<p>B</p>", " <p> </p>"]
+            .map(String::from)
+            .to_vec();
+        let out = coalesce_contentless_chunks(chunks);
+        assert_eq!(out.len(), 2, "spacers folded away: {out:?}");
+        assert!(out[0].contains('A') && out[1].contains('B'));
+        // The trailing spacer joined the chapter before it.
+        assert!(
+            out[1].ends_with("<p> </p>"),
+            "trailing spacer kept: {out:?}"
+        );
+
+        // A leading spacer has no previous chapter, so it folds forward and
+        // its anchor stays reachable.
+        let out = coalesce_contentless_chunks(
+            ["<a id=\"filepos1\" />", "<p>A</p>"]
+                .map(String::from)
+                .to_vec(),
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("filepos1") && out[0].contains('A'));
+
+        // An all-filler body still yields one chapter rather than none.
+        let out = coalesce_contentless_chunks(vec![" <p> </p>".to_string()]);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn test_replace_leftover_pagebreaks() {
+        // A break the split did not consume becomes a page-break div; `mbp:`
+        // is not a bound prefix in an XHTML chapter.
+        let out = replace_leftover_pagebreaks("<p>a</p><mbp:pagebreak/><p>b</p>");
+        assert!(!out.contains("mbp:"), "prefix gone: {out}");
+        assert!(
+            out.contains("page-break-after: always"),
+            "intent kept: {out}"
+        );
+        assert_eq!(out.matches("<div").count(), 1);
+
+        // A run separated only by whitespace collapses to one div, like
+        // calibre's PAGE_BREAK_PAT does.
+        let out =
+            replace_leftover_pagebreaks("a<mbp:pagebreak/> <mbp:pagebreak/>\n<MBP:PAGEBREAK>b");
+        assert_eq!(out.matches("<div").count(), 1, "run collapsed: {out}");
+        assert!(
+            out.starts_with('a') && out.ends_with('b'),
+            "text kept: {out}"
+        );
+
+        // Nothing to do is a cheap no-op that preserves the input exactly.
+        assert_eq!(replace_leftover_pagebreaks("<p>x</p>"), "<p>x</p>");
+    }
+
+    #[test]
+    fn test_ncx_anchors_map_to_pagebreak_chapters() {
+        // A periodical navigates purely through its index: the body carries
+        // `<mbp:pagebreak>` separators but no `filepos=` links at all, so the
+        // only anchors that can exist are the ones inserted at NCX positions.
+        // Transform must insert them even when the pagebreak split wins, or
+        // every NCX target resolves to chapter 0 (the `unwrap_or(0)` in
+        // `from_source`'s TOC builder).
+        let body = "<html><head></head><body><p>One</p><mbp:pagebreak/><p>Two</p><mbp:pagebreak/><p>Three</p></body></html>";
+        // Byte offsets of the three `<p>` starts in the source above.
+        let positions: Vec<u32> = ["<p>One", "<p>Two", "<p>Three"]
+            .iter()
+            .map(|needle| body.find(needle).unwrap() as u32)
+            .collect();
+
+        let transformed = filepos::transform_mobi_html(body.as_bytes(), &[], &positions);
+        let split = split_mobi_html(&transformed, None, "T");
+
+        assert_eq!(split.chapters.len(), 3, "pagebreaks still drive the split");
+        for (i, pos) in positions.iter().enumerate() {
+            assert_eq!(
+                split.filepos_to_chapter.get(&format!("filepos{}", pos)),
+                Some(&i),
+                "NCX position {} should map to chapter {}, map: {:?}",
+                pos,
+                i,
+                split.filepos_to_chapter
+            );
+        }
     }
 
     #[test]

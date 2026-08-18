@@ -34,7 +34,75 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
     if let Some(exth) = exth {
         apply_exth(&mut metadata, exth);
     }
+    metadata.periodical = periodical_kind(mobi, exth);
+    if metadata.periodical.is_some() {
+        metadata.title = issue_title(&metadata.title, metadata.date.as_deref());
+    }
     metadata
+}
+
+/// Name the *issue*, not just the publication.
+///
+/// A periodical's title field holds the publication, the same string on every
+/// issue, because the format expects the catalogue to group issues under a
+/// parent and distinguish them by date. A sideload gets no such grouping (see
+/// `Metadata::periodical`), so without the date the library shows a row of
+/// identical tiles with no way to tell which issue is which.
+///
+/// The date goes on in ISO form so a plain title sort is also chronological.
+/// Applied at import rather than in one exporter, so the EPUB side, the KFX
+/// side and any library row built from them agree on what the book is called.
+///
+/// Idempotent: a title that already ends with the date is returned unchanged,
+/// so a re-import of a converted file does not accumulate suffixes.
+fn issue_title(title: &str, date: Option<&str>) -> String {
+    let Some(date) = date
+        .map(crate::util::truncate_to_date)
+        .filter(|d| !d.is_empty())
+    else {
+        return title.to_string();
+    };
+    if title.trim_end().ends_with(&date) {
+        return title.to_string();
+    }
+    format!("{}{}{}", title.trim_end(), ISSUE_DATE_SEPARATOR, date)
+}
+
+/// What [`issue_title`] joins the publication and the date with.
+const ISSUE_DATE_SEPARATOR: &str = " — ";
+
+/// [`issue_title`] undone: the publication name inside an issue title.
+///
+/// Somewhere that shows the date in its own right — a masthead — wants the
+/// publication rather than the issue, and would otherwise print the date twice.
+pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a str {
+    date.map(crate::util::truncate_to_date)
+        .filter(|d| !d.is_empty())
+        .and_then(|d| title.strip_suffix(&format!("{ISSUE_DATE_SEPARATOR}{d}")))
+        .unwrap_or(title)
+}
+
+/// Is this an issue of a periodical, and of what kind?
+///
+/// Two independent declarations say so, and either alone is enough. The MOBI
+/// header type is what the reader switches its book model on; EXTH 501 is what
+/// the catalogue shelves by. They agree in every `.pobi` on hand, but a file
+/// rebuilt by a third-party tool can easily keep one and drop the other, so
+/// neither is required to confirm the other.
+///
+/// The third signal — the NCX's own tag-5 `kind` string — is not consulted here
+/// because it lives in the index, not the headers. An importer that has already
+/// read the index can override this with what the structure says.
+fn periodical_kind(
+    mobi: &MobiHeader,
+    exth: &Option<ExthHeader>,
+) -> Option<crate::model::PeriodicalKind> {
+    use crate::model::PeriodicalKind;
+    PeriodicalKind::from_mobi_type(mobi.mobi_type).or_else(|| {
+        exth.as_ref()
+            .and_then(|e| e.cde_type.as_deref())
+            .and_then(PeriodicalKind::from_cde_type)
+    })
 }
 
 /// Everything the EXTH records say beyond the title.
@@ -124,6 +192,8 @@ fn parse_resolution(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formats::mobi::NULL_INDEX;
+    use crate::model::PeriodicalKind;
 
     /// What the EXTH records make of a book, starting from nothing.
     fn read(exth: ExthHeader) -> Metadata {
@@ -176,5 +246,106 @@ mod tests {
         assert_eq!(parse_resolution("1444x2048"), Some((1444, 2048)));
         assert_eq!(parse_resolution(" 800 X 600 "), Some((800, 600)));
         assert_eq!(parse_resolution("wide"), None);
+    }
+
+    /// What a periodical looks like from the headers alone.
+    fn kind(mobi_type: u32, cde_type: Option<&str>) -> Option<PeriodicalKind> {
+        let mobi = MobiHeader {
+            mobi_type,
+            ..header()
+        };
+        let exth = cde_type.map(|t| ExthHeader {
+            cde_type: Some(t.to_string()),
+            ..Default::default()
+        });
+        periodical_kind(&mobi, &exth)
+    }
+
+    #[test]
+    fn either_declaration_alone_marks_a_periodical() {
+        // The real `.pobi` shape: both signals agree.
+        assert_eq!(kind(259, Some("MAGZ")), Some(PeriodicalKind::Magazine));
+        // Either alone is enough — a rebuild can keep one and drop the other.
+        assert_eq!(kind(259, None), Some(PeriodicalKind::Magazine));
+        assert_eq!(kind(2, Some("MAGZ")), Some(PeriodicalKind::Magazine));
+        // The other two flavours, by header type and by cdetype.
+        assert_eq!(kind(257, None), Some(PeriodicalKind::Newspaper));
+        assert_eq!(kind(258, None), Some(PeriodicalKind::Blog));
+        assert_eq!(kind(2, Some("nwpr")), Some(PeriodicalKind::Newspaper));
+        assert_eq!(kind(2, Some("FEED")), Some(PeriodicalKind::Blog));
+    }
+
+    #[test]
+    fn an_issue_is_titled_by_its_date() {
+        // Every issue's title field says only the publication, so the date is
+        // the only thing that tells two tiles apart.
+        assert_eq!(
+            issue_title("The New Yorker", Some("2014-12-14 23:00:00+00:00")),
+            "The New Yorker — 2014-12-14"
+        );
+        // Idempotent — a converted file re-imported does not grow a second date.
+        assert_eq!(
+            issue_title("The New Yorker — 2014-12-14", Some("2014-12-14")),
+            "The New Yorker — 2014-12-14"
+        );
+        // Nothing to add without a date.
+        assert_eq!(issue_title("The New Yorker", None), "The New Yorker");
+        assert_eq!(issue_title("The New Yorker", Some("")), "The New Yorker");
+    }
+
+    #[test]
+    fn the_publication_can_be_recovered_from_the_issue_title() {
+        let dated = issue_title("The New Yorker", Some("2014-12-14 23:00:00+00:00"));
+        assert_eq!(
+            publication_title(&dated, Some("2014-12-14 23:00:00+00:00")),
+            "The New Yorker"
+        );
+        // A title that never carried a date, or a date that is not its suffix,
+        // is returned whole rather than trimmed on a guess.
+        assert_eq!(
+            publication_title("The New Yorker", Some("2014-12-14")),
+            "The New Yorker"
+        );
+        assert_eq!(
+            publication_title("2014-12-14 in Review", Some("2014-12-14")),
+            "2014-12-14 in Review"
+        );
+        assert_eq!(publication_title(&dated, None), &dated);
+    }
+
+    #[test]
+    fn an_ordinary_book_is_not_a_periodical() {
+        // Type 2 is `Book`; EBOK and PDOC are the book cdetypes.
+        assert_eq!(kind(2, None), None);
+        assert_eq!(kind(2, Some("EBOK")), None);
+        assert_eq!(kind(2, Some("PDOC")), None);
+        assert_eq!(kind(2, Some("")), None);
+    }
+
+    /// A `MobiHeader` with nothing set — only `mobi_type` matters here.
+    fn header() -> MobiHeader {
+        MobiHeader {
+            compression: crate::formats::mobi::Compression::None,
+            text_record_count: 0,
+            text_record_size: 0,
+            encryption: 0,
+            mobi_type: 2,
+            encoding: crate::formats::mobi::Encoding::Utf8,
+            mobi_version: 6,
+            first_image_index: NULL_INDEX,
+            title: String::new(),
+            language: 0,
+            exth_flags: 0,
+            extra_data_flags: 0,
+            huff_record_index: NULL_INDEX,
+            huff_record_count: 0,
+            skel_index: NULL_INDEX,
+            div_index: NULL_INDEX,
+            oth_index: NULL_INDEX,
+            fdst_index: NULL_INDEX,
+            fdst_count: 0,
+            ncx_index: NULL_INDEX,
+            header_length: 232,
+        }
     }
 }

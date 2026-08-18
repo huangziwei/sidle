@@ -101,7 +101,7 @@ pub fn detect_kind(src: &Path) -> Result<SourceKind> {
     let kind = SourceKind::detect(src);
     if matches!(kind, SourceKind::Unknown) {
         bail!(
-            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, .mobi, or .pdf)",
+            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, .mobi, .pobi, or .pdf)",
             src.display()
         );
     }
@@ -247,6 +247,10 @@ pub enum SourceKind {
     /// AZW3: bokai's MOBI importer + EPUB exporter, detected purely by
     /// extension. Japanese MOBIs carry vertical-writing-mode and PPD in
     /// EXTH 525/527, which the bokai importer propagates into the EPUB.
+    ///
+    /// `.pobi` — an Amazon periodical delivery — lands here too: it is a plain
+    /// MOBI6 book at the container level, so the same importer reads it and
+    /// builds the hierarchical section/article TOC from its NCX.
     Mobi,
     /// `.pdf` — wrapped verbatim into a fixed-layout PDOC KFX for the Scribe
     /// (the device renders the PDF; the pen draws over it). PDF is the
@@ -281,7 +285,7 @@ impl SourceKind {
             Some("kfx") => Self::Kfx,
             Some("kfx-zip") => Self::KfxZip,
             Some("azw3") => Self::Azw3,
-            Some("mobi") => Self::Mobi,
+            Some("mobi") | Some("pobi") => Self::Mobi,
             Some("pdf") => Self::Pdf,
             Some("zip") => Self::AozoraZip,
             _ => Self::Unknown,

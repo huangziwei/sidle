@@ -1548,6 +1548,9 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     if let Some(ref publisher) = meta.publisher {
         println!("Publisher: {publisher}");
     }
+    if let Some(kind) = meta.periodical {
+        println!("Periodical: {kind:?} ({})", kind.cde_type());
+    }
     if let Some(ref date) = meta.date {
         println!("Date: {date}");
     }

@@ -24,7 +24,7 @@ pub mod toc_shape;
 // Re-export book types
 pub use book::{
     Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, PageSpread,
-    Resource, TocEntry,
+    PeriodicalKind, Resource, TocEntry,
 };
 
 // Re-export chapter and iteration

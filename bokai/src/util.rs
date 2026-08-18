@@ -521,19 +521,23 @@ pub fn detect_mime_type(filename: &str, data: &[u8]) -> Option<&'static str> {
 /// Truncate an ISO date/timestamp to just the date portion (YYYY-MM-DD).
 ///
 /// Many ebook formats expect dates in YYYY-MM-DD format, but source metadata
-/// often includes full ISO timestamps like "2022-05-26T16:26:51Z".
+/// often includes full ISO timestamps like "2022-05-26T16:26:51Z". Both
+/// separators real sources use are handled: the `T` of strict ISO 8601, and the
+/// space of the SQL-ish form calibre writes into MOBI EXTH 106
+/// (`2014-12-14 23:00:00+00:00`).
 ///
 /// # Examples
 ///
 /// ```ignore
 /// assert_eq!(truncate_to_date("2022-05-26T16:26:51Z"), "2022-05-26");
+/// assert_eq!(truncate_to_date("2014-12-14 23:00:00+00:00"), "2014-12-14");
 /// assert_eq!(truncate_to_date("2022-05-26"), "2022-05-26");
 /// ```
 pub fn truncate_to_date(s: &str) -> String {
-    if let Some(t_pos) = s.find('T') {
-        s[..t_pos].to_string()
-    } else {
-        s.to_string()
+    let s = s.trim();
+    match s.find(['T', ' ']) {
+        Some(pos) => s[..pos].to_string(),
+        None => s.to_string(),
     }
 }
 
@@ -754,6 +758,11 @@ mod tests {
         assert_eq!(truncate_to_date("2022-05-26"), "2022-05-26");
         // With timezone offset
         assert_eq!(truncate_to_date("2022-05-26T16:26:51+00:00"), "2022-05-26");
+        // Space-separated, the form calibre writes into MOBI EXTH 106 — the
+        // `T`-only rule let this through whole and KFX `issue_date` carried a
+        // full timestamp where the device expects a date.
+        assert_eq!(truncate_to_date("2014-12-14 23:00:00+00:00"), "2014-12-14");
+        assert_eq!(truncate_to_date("  2014-12-14  "), "2014-12-14");
     }
 
     #[test]

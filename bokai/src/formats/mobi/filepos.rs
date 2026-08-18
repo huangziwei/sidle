@@ -7,7 +7,7 @@
 //! 2. Insert `<a id="fileposNNNNN" />` anchor tags at exact byte positions
 //! 3. Convert `filepos=NNNNN` to `href="#fileposNNNNN"`
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Collect all filepos target values from `<a filepos=NNNNN>` attributes.
 ///
@@ -105,11 +105,18 @@ pub fn transform_mobi_html(
         }
     }
 
-    // Step 3: Build recindex -> asset path mapping
-    let mut recindex_map: HashMap<String, String> = HashMap::new();
-    for (i, asset) in assets.iter().enumerate() {
-        let recindex = format!("{:05}", i + 1);
-        recindex_map.insert(recindex, asset.to_string_lossy().to_string());
+    // Step 3: Build recindex -> asset path mapping.
+    //
+    // `recindex` is 1-based over every record from `first_image_index`,
+    // counting the non-image ones (`RESC`, `DATP`, `FLIS`, …) that asset
+    // discovery drops. It is therefore not a position in the filtered list —
+    // the two diverge by however many records were skipped — so key on the raw
+    // offset the filename carries.
+    let mut recindex_map: HashMap<u32, String> = HashMap::new();
+    for asset in assets {
+        if let Some(offset) = super::asset_record_offset(asset) {
+            recindex_map.insert(offset + 1, asset.to_string_lossy().to_string());
+        }
     }
 
     // Step 4: Insert anchors at positions (like KindleUnpack's dataList building)
@@ -189,10 +196,11 @@ pub fn transform_mobi_html(
             let val_start = pos + 10;
             if let Some(val_end_rel) = with_anchors[val_start..].iter().position(|&b| b == b'"') {
                 let val_end = val_start + val_end_rel;
-                let recindex =
-                    String::from_utf8_lossy(&with_anchors[val_start..val_end]).to_string();
+                let recindex = std::str::from_utf8(&with_anchors[val_start..val_end])
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
 
-                if let Some(path) = recindex_map.get(&recindex) {
+                if let Some(path) = recindex.and_then(|n| recindex_map.get(&n)) {
                     output.extend_from_slice(b"src=\"");
                     output.extend_from_slice(path.as_bytes());
                     output.push(b'"');
@@ -200,6 +208,26 @@ pub fn transform_mobi_html(
                     continue;
                 }
             }
+        }
+
+        // An `<img>` may carry any of `lowrecindex` / `recindex` /
+        // `hirecindex`; resolve the tag as a whole so the three collapse into
+        // one `src` instead of the plain-`recindex` branch above firing on the
+        // tail of `hirecindex=` and leaving a bogus `hisrc`.
+        if with_anchors[pos] == b'<'
+            && with_anchors[pos + 1..].starts_with(b"img")
+            && with_anchors
+                .get(pos + 4)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+            && let Some(end_rel) = memchr::memchr(b'>', &with_anchors[pos..])
+        {
+            let end = pos + end_rel + 1;
+            output.extend_from_slice(&resolve_image_record(
+                &with_anchors[pos..end],
+                &recindex_map,
+            ));
+            pos = end;
+            continue;
         }
 
         // Copy byte as-is
@@ -210,10 +238,79 @@ pub fn transform_mobi_html(
     // Step 6: Remove empty anchors (like KindleUnpack does)
     remove_empty_anchors(&mut output);
 
-    // Step 7: Legacy layout attributes (`<p height width align>`) → inline
+    // Step 7: Canonicalize element names and escape bare ampersands. MOBI6
+    // markup is case-free HTML4 with unescaped `&` in running text; every
+    // consumer downstream of here treats the result as XHTML.
+    let output = super::transform::lowercase_tag_names(&output);
+    let output = super::transform::escape_bare_ampersands(&output);
+
+    // Step 8: Legacy layout attributes (`<p height width align>`) → inline
     // CSS, so the spacing/indent/justification kindlegen encoded as
     // attributes survives into valid XHTML5.
-    super::transform::convert_legacy_block_attrs(&output)
+    let output = super::transform::convert_legacy_block_attrs(&output);
+
+    // Step 9: The same treatment for whole elements HTML5 no longer defines
+    // (`<font>`, `<center>`) and MOBI's periodical-only ones (`<block>`,
+    // `<articlename>`, `<contributor>`), which were never HTML at all.
+    super::transform::convert_obsolete_elements(&output)
+}
+
+/// Rewrite one `<img>` tag, turning its record references into a single `src`.
+///
+/// MOBI6 offers the same picture at up to three resolutions —
+/// `lowrecindex`, `recindex`, `hirecindex` — and none of the three is a valid
+/// XHTML attribute. All are consumed and the best available one wins, matching
+/// the precedence in calibre's reader. A tag naming no resolvable record keeps
+/// whatever it already had.
+fn resolve_image_record(tag: &[u8], recindex_map: &HashMap<u32, String>) -> Vec<u8> {
+    const NAME_END: usize = 4; // `<img`
+    let mut attrs_end = tag.len() - 1;
+    let self_closing = attrs_end > NAME_END && tag[attrs_end - 1] == b'/';
+    if self_closing {
+        attrs_end -= 1;
+    }
+    let attrs = &tag[NAME_END..attrs_end];
+
+    let mut src: Option<&String> = None;
+    let mut drop_spans: Vec<(usize, usize)> = Vec::new();
+    for attr in [&b"lowrecindex"[..], b"recindex", b"hirecindex"] {
+        for (s, e) in super::transform::attr_spans(attrs, attr) {
+            if let Some(v) = super::transform::extract_attr_value(&attrs[s..e], attr)
+                && let Ok(n) = String::from_utf8_lossy(v).trim().parse::<u32>()
+                && let Some(path) = recindex_map.get(&n)
+            {
+                src = Some(path);
+            }
+            drop_spans.push((s, e));
+        }
+    }
+    if drop_spans.is_empty() {
+        return tag.to_vec();
+    }
+
+    drop_spans.sort_unstable();
+    let mut out = Vec::with_capacity(tag.len() + 32);
+    out.extend_from_slice(&tag[..NAME_END]);
+    let mut cursor = 0;
+    for (s, e) in &drop_spans {
+        let mut s = *s;
+        while s > cursor && attrs[s - 1].is_ascii_whitespace() {
+            s -= 1;
+        }
+        out.extend_from_slice(&attrs[cursor..s]);
+        cursor = *e;
+    }
+    out.extend_from_slice(&attrs[cursor..]);
+    if let Some(path) = src {
+        out.extend_from_slice(b" src=\"");
+        out.extend_from_slice(path.as_bytes());
+        out.push(b'"');
+    }
+    if self_closing {
+        out.push(b'/');
+    }
+    out.push(b'>');
+    out
 }
 
 /// Remove empty anchor tags: `<a />` and `<a></a>`
@@ -301,6 +398,63 @@ mod tests {
 
         assert!(result_str.contains("src=\"images/image_0000.jpg\""));
         assert!(!result_str.contains("recindex"));
+    }
+
+    #[test]
+    fn recindex_counts_the_records_asset_discovery_skipped() {
+        // A `RESC` at the head of the resource run takes offset 0, so the first
+        // image is `image_0001` and its `recindex` is 2. Keying on the asset's
+        // position in the list instead resolves to the next image along.
+        let assets = vec![
+            PathBuf::from("images/image_0001.jpg"),
+            PathBuf::from("images/image_0002.jpg"),
+        ];
+        let result = transform_mobi_html(b"<img recindex=\"00002\">", &assets, &[]);
+        let result_str = String::from_utf8_lossy(&result);
+
+        assert!(result_str.contains("src=\"images/image_0001.jpg\""));
+        assert!(!result_str.contains("image_0002"));
+    }
+
+    #[test]
+    fn an_img_collapses_its_three_record_references_into_one_src() {
+        // Matching `recindex="` as a substring also fires on the tail of
+        // `hirecindex="`, which leaves a bogus `hisrc` beside the real `src`.
+        let assets = vec![
+            PathBuf::from("images/image_0000.jpg"),
+            PathBuf::from("images/image_0001.jpg"),
+        ];
+        let result = transform_mobi_html(
+            b"<img hirecindex=\"00002\" recindex=\"00001\">",
+            &assets,
+            &[],
+        );
+        let s = String::from_utf8_lossy(&result);
+
+        assert!(
+            !s.contains("hisrc"),
+            "no attribute made of a partial match: {s}"
+        );
+        assert_eq!(s.matches("src=").count(), 1, "exactly one src: {s}");
+        // Highest resolution available wins, whatever order they were written.
+        assert!(s.contains("src=\"images/image_0001.jpg\""), "{s}");
+    }
+
+    #[test]
+    fn an_img_with_no_resolvable_record_is_left_alone() {
+        let result = transform_mobi_html(b"<img src=\"kept.jpg\" alt=\"a\">", &[], &[]);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<img src=\"kept.jpg\" alt=\"a\">"
+        );
+    }
+
+    #[test]
+    fn an_unpadded_recindex_still_resolves() {
+        let assets = vec![PathBuf::from("images/image_0000.png")];
+        let result = transform_mobi_html(b"<img recindex=\"1\">", &assets, &[]);
+
+        assert!(String::from_utf8_lossy(&result).contains("src=\"images/image_0000.png\""));
     }
 
     #[test]

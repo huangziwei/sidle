@@ -254,6 +254,12 @@ pub struct ExthHeader {
     pub fixed_layout: Option<String>,
     /// EXTH 123 — "comic" (double-page-spread manga) / "children".
     pub book_type: Option<String>,
+    /// EXTH 501 — the Kindle catalogue's content type: `EBOK` (book), `PDOC`
+    /// (personal document), `MAGZ` (magazine), `NWPR` (newspaper), `FEED`
+    /// (blog). The library reads it to shelve the file and to stack back issues
+    /// of a periodical; it is one of the three independent signals that mark a
+    /// `.pobi` (with the MOBI header type and the hierarchical NCX).
+    pub cde_type: Option<String>,
     /// EXTH 124 — "none" / "portrait" / "landscape" orientation lock.
     pub orientation_lock: Option<String>,
     /// EXTH 126 — the fixed-layout page resolution, e.g. "1444x2048".
@@ -344,6 +350,7 @@ impl ExthHeader {
                         exth.thumbnail_offset = Some(val);
                     }
                 }
+                501 => exth.cde_type = Some(decode(content).trim().to_string()),
                 503 => {
                     let (title, series) = split_series_annotation(decode(content).trim());
                     exth.title = Some(title);

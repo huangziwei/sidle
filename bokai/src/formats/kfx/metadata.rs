@@ -321,10 +321,14 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             category: MetadataCategory::KindleTitle,
             source: MetadataSource::Dynamic(MetadataField::ContentId),
         },
-        // PDOC (Personal Document) is what calibre emits for sideloaded
-        // KFX. EBOK signals an Amazon-purchased book and makes the device
-        // try an ASIN-catalog cover lookup that fails for sideloads,
-        // leaving the library tile and sleep-screen cover blank.
+        // Always PDOC — `cde_content_type` states a file's provenance, not its
+        // genre, and everything this writer produces is a personal document.
+        // The device reads it as provenance too: any store type (EBOK, MAGZ, …)
+        // makes it try an ASIN-catalogue lookup, which fails for a sideload and
+        // leaves the library tile and sleep-screen art blank. So a periodical is
+        // declared PDOC like everything else, and `Metadata::periodical` stays a
+        // fact about the content — it names the issue, see
+        // `formats/mobi/metadata.rs::issue_title` — never a declaration.
         MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
@@ -936,6 +940,51 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "cde_content_type" && v == "PDOC")
         );
+        // The periodical keys are absent entirely — emitting them empty would
+        // declare the book a magazine.
+        for key in ["itemType", "periodicals_generation_V2"] {
+            assert!(
+                !entries.iter().any(|(k, _)| *k == key),
+                "a book declares no {key}"
+            );
+        }
+    }
+
+    /// A periodical is a personal document like everything else this writer
+    /// produces; its genre never reaches `cde_content_type`. See that rule for
+    /// why declaring `MAGZ`/`NWPR`/`FEED` blanks the cover.
+    #[test]
+    fn a_periodical_is_still_declared_pdoc() {
+        use crate::model::PeriodicalKind;
+        for kind in [
+            PeriodicalKind::Magazine,
+            PeriodicalKind::Newspaper,
+            PeriodicalKind::Blog,
+        ] {
+            let meta = Metadata {
+                title: "The New Yorker".to_string(),
+                language: "en".to_string(),
+                periodical: Some(kind),
+                ..Default::default()
+            };
+            let entries = build_category_entries(
+                MetadataCategory::KindleTitle,
+                &meta,
+                &MetadataContext::default(),
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|(k, v)| *k == "cde_content_type" && v == "PDOC"),
+                "{kind:?} is declared PDOC"
+            );
+            for key in ["itemType", "periodicals_generation_V2"] {
+                assert!(
+                    !entries.iter().any(|(k, _)| *k == key),
+                    "{kind:?} declares no {key}"
+                );
+            }
+        }
     }
 
     #[test]

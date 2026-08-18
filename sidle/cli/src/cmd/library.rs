@@ -212,7 +212,8 @@ fn shares_a_catalogue_id(book: &BookRow) -> bool {
 
 #[derive(Args)]
 pub struct ImportArgs {
-    /// Files to add: `.epub`, `.kfx`, `.kfx-zip`, `.azw3`, `.mobi`, `.pdf`, or
+    /// Files to add: `.epub`, `.kfx`, `.kfx-zip`, `.azw3`, `.mobi`, `.pobi`,
+    /// `.pdf`, or
     /// an Aozora `.zip`. A directory is walked one level deep.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,

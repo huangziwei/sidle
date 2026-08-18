@@ -558,7 +558,10 @@ pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, St
     let (tx, rx) = oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Ebooks", &["epub", "kfx", "kfx-zip", "mobi", "azw3", "pdf"])
+        .add_filter(
+            "Ebooks",
+            &["epub", "kfx", "kfx-zip", "mobi", "pobi", "azw3", "pdf"],
+        )
         .pick_files(move |paths| {
             let _ = tx.send(paths);
         });
