@@ -36,4 +36,4 @@ fi
 SIDLE_ORIGIN_VIEW=$(lipc-get-prop com.lab126.appmgrd peekHistoryView 2>/dev/null)
 export SIDLE_ORIGIN_VIEW
 
-nohup sh -c 'sleep 1; exec /mnt/us/extensions/sidle/bin/sidle.sh' >/dev/null 2>&1 &
+exec /mnt/us/extensions/sidle/bin/sidle.sh

@@ -58,6 +58,7 @@
 //! root filesystem.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 
 /// The tags a line must carry one of to be worth sending; the cheap prefilter
@@ -425,10 +426,25 @@ pub fn stop_archiver(pid: u32) {
 pub fn start_archiver() -> std::io::Result<u32> {
     let bin = Path::new(DAEMON_BIN);
     stage_binary(&std::env::current_exe()?, bin)?;
-    Ok(std::process::Command::new(bin)
-        .arg(DAEMON_FLAG)
-        .spawn()?
-        .id())
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg(DAEMON_FLAG);
+    // Its own session, so it does not depend on the launcher's for its life.
+    // The archiver is meant to outlive the picker by weeks, and a process left
+    // in the launcher's session goes when the framework closes that session —
+    // which is every time the picker is exited from the tile.
+    //
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe calls are allowed. `setsid` is one, and it neither
+    // allocates nor touches this process. A failure is left alone: it means the
+    // child already leads a group, and a daemon in the wrong session still
+    // archives, while returning `Err` here would abort the spawn entirely.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    Ok(cmd.spawn()?.id())
 }
 
 /// Copy `src` over `dst`, through a scratch name beside it.
