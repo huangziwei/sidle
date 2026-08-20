@@ -16,42 +16,42 @@ use crate::util::strip_ebook_chars;
 
 /// A book's content as a hierarchical section tree.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "cli", derive(serde::Serialize))]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct SectionTree {
     pub title: String,
     pub authors: Vec<String>,
     pub language: String,
-    #[cfg_attr(feature = "cli", serde(skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(feature = "bin", serde(skip_serializing_if = "Vec::is_empty"))]
     pub preamble: Vec<ContentBlock>,
     pub sections: Vec<SectionNode>,
 }
 
 /// A section defined by a heading and its content.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "cli", derive(serde::Serialize))]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct SectionNode {
     /// Heading level (1-6).
     pub level: u8,
     /// Heading text.
     pub title: String,
     /// Content blocks before any child section.
-    #[cfg_attr(feature = "cli", serde(skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(feature = "bin", serde(skip_serializing_if = "Vec::is_empty"))]
     pub content: Vec<ContentBlock>,
     /// Subsections (headings at a deeper level).
-    #[cfg_attr(feature = "cli", serde(skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(feature = "bin", serde(skip_serializing_if = "Vec::is_empty"))]
     pub children: Vec<SectionNode>,
 }
 
 /// An atomic content block.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "cli", derive(serde::Serialize))]
-#[cfg_attr(feature = "cli", serde(tag = "type", rename_all = "snake_case"))]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
+#[cfg_attr(feature = "bin", serde(tag = "type", rename_all = "snake_case"))]
 pub enum ContentBlock {
     Paragraph {
         text: String,
     },
     CodeBlock {
-        #[cfg_attr(feature = "cli", serde(skip_serializing_if = "Option::is_none"))]
+        #[cfg_attr(feature = "bin", serde(skip_serializing_if = "Option::is_none"))]
         language: Option<String>,
         code: String,
     },
@@ -63,7 +63,7 @@ pub enum ContentBlock {
         items: Vec<String>,
     },
     Table {
-        #[cfg_attr(feature = "cli", serde(skip_serializing_if = "Vec::is_empty"))]
+        #[cfg_attr(feature = "bin", serde(skip_serializing_if = "Vec::is_empty"))]
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },

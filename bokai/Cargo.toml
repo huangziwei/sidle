@@ -10,21 +10,25 @@ readme = "README.md"
 [lib]
 crate-type = ["rlib"]
 
-# Features name a capability, never a consumer. `kfx` and `epub` are the floor
-# and are not gated: every configuration converts between those two.
+# Two layers: the install targets a build selects, and the capabilities they are
+# assembled from. `kfx` and `epub` are the floor and are not gated — every
+# configuration converts between those two.
 [features]
-default = ["cli"]
-# The `bokai` and `kfx-dump` binaries, plus every optional capability their
-# subcommands reach.
-cli = [
-    "dep:clap",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:ion-rs",
-    "aozora",
-    "pdf",
-    "validate",
-]
+# --- install targets: one per build -----------------------------------------
+default = ["desktop"]
+# The host build: the complete CLI.
+desktop = ["cli"]
+# The Kindle build: KFX↔EPUB and the subcommands over it. `aozora`, `pdf` (a
+# macOS-only renderer) and `validate` (2.7 MB of schemas) are absent, and the
+# subcommands reaching them compile out along with their help text.
+native = ["bin"]
+
+# --- capabilities: named by a library consumer, bundled by the targets above -
+# The complete command line: every subcommand over every format.
+cli = ["bin", "aozora", "pdf", "validate"]
+# The floor a `bokai` binary needs before any format capability: a command line
+# to parse, a JSON writer to report through.
+bin = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs"]
 # Aozora Bunko TXT → EPUB. The source format is markup-heavy and the parser is
 # regex-heavy in turn; the generated cover is SVG, rasterized to JPEG.
 aozora = ["dep:regex", "svg"]
@@ -162,12 +166,12 @@ proptest = "1.6"
 [[bin]]
 name = "bokai"
 path = "src/main.rs"
-required-features = ["cli"]
+required-features = ["bin"]
 
 [[bin]]
 name = "kfx-dump"
 path = "src/bin/kfx-dump.rs"
-required-features = ["cli"]
+required-features = ["bin"]
 
 # Integration tests that exercise an optional capability. A subset build skips
 # each one it lacks the feature for.

@@ -37,7 +37,7 @@ enum Command {
         /// Output file (default: stdout for text formats)
         output: Option<String>,
 
-        /// Input format (epub, azw3, mobi, txt). Required when reading from stdin.
+        /// Input format (epub, azw3, mobi, kfx). Required when reading from stdin.
         #[arg(short = 'f', long = "from")]
         from_format: Option<String>,
 
@@ -59,6 +59,7 @@ enum Command {
         /// Page progression direction for PDF → KFX: `rtl` (Japanese/manga,
         /// turn pages right-to-left) or `ltr`. Omit for the device default
         /// (ltr). A scanned/text PDF has no such metadata, so set it here.
+        #[cfg(feature = "pdf")]
         #[arg(long = "ppd")]
         ppd: Option<String>,
 
@@ -73,6 +74,7 @@ enum Command {
         /// Skip the native EPUB validator pass on EPUB output. By default a
         /// `→ epub` conversion validates what it wrote and prints the
         /// error-level findings; the conversion succeeds either way.
+        #[cfg(feature = "validate")]
         #[arg(long = "no-validate")]
         no_validate: bool,
 
@@ -126,6 +128,7 @@ enum Command {
     /// Validate a conversion. Works in both directions: EPUB→KFX (default)
     /// or KFX→EPUB (via `--direction kfx-to-epub`). The ground truth is
     /// always the source format of the named direction.
+    #[cfg(feature = "validate")]
     Validate {
         /// Which conversion direction to interpret. `epub-to-kfx` (default)
         /// treats the EPUB as ground truth; `kfx-to-epub` treats the KFX as
@@ -178,6 +181,7 @@ enum Command {
     },
 }
 
+#[cfg(feature = "validate")]
 fn parse_direction(s: &str) -> Result<bokai::validate::Direction, String> {
     match s {
         "epub-to-kfx" | "epub2kfx" | "e2k" => Ok(bokai::validate::Direction::EpubToKfx),
@@ -209,6 +213,7 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
                 bokai::formats::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
             std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
             println!("wrote repaired EPUB → {out} ({} bytes)", repaired.len());
+            #[cfg(feature = "validate")]
             report_edit_regressions(&bytes, &repaired, "EPUB TOC repair");
         }
         return Ok(());
@@ -292,6 +297,7 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
         let repaired = spine::repair_spine(&bytes).map_err(|e| e.to_string())?;
         std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
         println!("\nwrote reordered EPUB → {out} ({} bytes)", repaired.len());
+        #[cfg(feature = "validate")]
         report_edit_regressions(&bytes, &repaired, "EPUB spine reorder");
     }
     Ok(())
@@ -345,13 +351,18 @@ fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(),
         );
         let path = format!("{dir}/{name}");
         std::fs::write(&path, epub).map_err(|e| format!("write {path}: {e}"))?;
-        let report = bokai::validate::source::epub::validate(epub);
-        let errors = report.count(bokai::validate::Severity::Error);
-        let verdict = if errors == 0 {
-            "valid".to_string()
-        } else {
-            format!("{errors} ERROR(s):\n{}", report.errors_display())
+        #[cfg(feature = "validate")]
+        let verdict = {
+            let report = bokai::validate::source::epub::validate(epub);
+            let errors = report.count(bokai::validate::Severity::Error);
+            if errors == 0 {
+                "valid".to_string()
+            } else {
+                format!("{errors} ERROR(s):\n{}", report.errors_display())
+            }
         };
+        #[cfg(not(feature = "validate"))]
+        let verdict = "written";
         println!("  {:>10}  {name}  ({verdict})", human_size(epub.len()));
     }
     Ok(())
@@ -390,6 +401,7 @@ fn human_size(bytes: usize) -> String {
 }
 
 /// How many levels deep a TOC tree goes; 0 when there is none.
+#[cfg(feature = "validate")]
 fn toc_depth(entries: &[bokai::model::TocEntry]) -> usize {
     entries
         .iter()
@@ -435,6 +447,7 @@ fn print_kfx_toc(
     }
 }
 
+#[cfg(feature = "validate")]
 #[derive(Subcommand)]
 enum ValidateCheck {
     /// Verify every `<ruby>` pair in the EPUB is preserved in the KFX
@@ -597,22 +610,36 @@ fn main() -> ExitCode {
             to_format,
             quiet,
             merge_mode,
+            #[cfg(feature = "pdf")]
             ppd,
             writing_mode,
+            #[cfg(feature = "validate")]
             no_validate,
             max_workers,
-        } => convert(
-            &input,
-            output.as_deref(),
-            from_format.as_deref(),
-            to_format.as_deref(),
-            quiet,
-            &merge_mode,
-            ppd.as_deref(),
-            writing_mode.as_deref(),
-            !no_validate,
-            max_workers,
-        ),
+        } => {
+            // A build without the capability has no flag to read, and takes the
+            // value the absent flag's default would have produced.
+            #[cfg(feature = "pdf")]
+            let ppd = ppd.as_deref();
+            #[cfg(not(feature = "pdf"))]
+            let ppd: Option<&str> = None;
+            #[cfg(feature = "validate")]
+            let validate_epub = !no_validate;
+            #[cfg(not(feature = "validate"))]
+            let validate_epub = false;
+            convert(
+                &input,
+                output.as_deref(),
+                from_format.as_deref(),
+                to_format.as_deref(),
+                quiet,
+                &merge_mode,
+                ppd,
+                writing_mode.as_deref(),
+                validate_epub,
+                max_workers,
+            )
+        }
         Command::Dump {
             file,
             json,
@@ -634,6 +661,7 @@ fn main() -> ExitCode {
                 depth,
             },
         ),
+        #[cfg(feature = "validate")]
         Command::Validate { direction, check } => match parse_direction(&direction) {
             Err(e) => Err(e),
             Ok(dir) => match check {
@@ -783,6 +811,7 @@ struct LandmarkInfo {
     label: String,
 }
 
+#[cfg(feature = "validate")]
 fn validate_ruby(
     epub_path: &str,
     kfx_path: &str,
@@ -813,6 +842,7 @@ fn validate_ruby(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_text(
     epub_path: &str,
     kfx_path: &str,
@@ -844,6 +874,7 @@ fn validate_text(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_style(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
@@ -869,6 +900,7 @@ fn validate_style(epub_path: &str, kfx_path: &str, details: usize) -> Result<(),
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let report = bokai::validate::coverage::tags::validate(&epub_bytes)?;
@@ -888,6 +920,7 @@ fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_links(
     epub_path: &str,
     kfx_path: &str,
@@ -920,6 +953,7 @@ fn validate_links(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_images(
     epub_path: &str,
     kfx_path: &str,
@@ -946,6 +980,7 @@ fn validate_images(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_nav(
     epub_path: &str,
     kfx_path: &str,
@@ -972,6 +1007,7 @@ fn validate_nav(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_metadata(
     epub_path: &str,
     kfx_path: &str,
@@ -996,6 +1032,7 @@ fn validate_metadata(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_writing_mode(
     epub_path: &str,
     kfx_path: &str,
@@ -1021,6 +1058,7 @@ fn validate_writing_mode(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_page_progression(
     epub_path: &str,
     kfx_path: &str,
@@ -1046,6 +1084,7 @@ fn validate_page_progression(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_fxl(
     epub_path: &str,
     kfx_path: &str,
@@ -1064,6 +1103,7 @@ fn validate_fxl(
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_all(
     epub_path: &str,
     kfx_path: &str,
@@ -1281,6 +1321,7 @@ fn show_sections(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "validate")]
 fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path, e))?;
     let audit = bokai::validate::source::toc::validate(&bytes)?;
@@ -1346,6 +1387,7 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     Err(problems.join("; "))
 }
 
+#[cfg(feature = "validate")]
 fn validate_source(path: &str, json: bool) -> Result<(), String> {
     use bokai::validate::Severity;
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path, e))?;
@@ -1395,6 +1437,7 @@ fn validate_source(path: &str, json: bool) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_epub_diff(
     a_path: &str,
     b_path: &str,
@@ -1689,6 +1732,7 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
 /// (an invalid EPUB is worth surfacing even under `--quiet`); warnings print
 /// only when not `quiet`. Advisory by policy — it prints, it never fails, so
 /// the conversion always succeeds.
+#[cfg(feature = "validate")]
 fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
     if !validate {
         return;
@@ -1716,6 +1760,7 @@ fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
 /// A file sink takes the container's entries as the exporter produces them;
 /// `book` drops before the validator reads the result back from disk. Stdout
 /// is not seekable and buffers the container in memory.
+#[cfg_attr(not(feature = "validate"), allow(unused_variables))]
 fn write_export(
     mut book: Book,
     output_format: Format,
@@ -1732,6 +1777,7 @@ fn write_export(
         std::io::stdout()
             .write_all(cursor.get_ref())
             .map_err(|e| format!("Write failed: {e}"))?;
+        #[cfg(feature = "validate")]
         report_epub_validation(cursor.get_ref(), validate_epub, quiet);
         return Ok(());
     }
@@ -1744,6 +1790,7 @@ fn write_export(
     drop(file);
     drop(book);
 
+    #[cfg(feature = "validate")]
     if validate_epub {
         let bytes =
             std::fs::read(output_path).map_err(|e| format!("read back {output_path}: {e}"))?;
@@ -1756,6 +1803,7 @@ fn write_export(
 /// differential gate: a wild book stays wild, but an edit must not add a
 /// defect). Non-blocking, like every other validation seam — the edited file is
 /// already written by the time this runs.
+#[cfg(feature = "validate")]
 fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
     let added = bokai::validate::source::added_errors(before, after);
     if added.is_empty() {
@@ -1777,6 +1825,7 @@ fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
 // A CLI command entry point: each argument mirrors a distinct flag, so bundling
 // them into a struct would just add indirection over the parsed options.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "pdf"), allow(unused_variables))]
 fn convert(
     input: &str,
     output: Option<&str>,
@@ -1899,6 +1948,7 @@ fn convert(
     // sniff (a `.txt` with `底本：` or `［＃` markers). When matched, runs
     // the dedicated `aozora` pipeline (parse → cover → build_epub) instead
     // of any generic format detection.
+    #[cfg(feature = "aozora")]
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)
@@ -1948,6 +1998,7 @@ fn convert(
     // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The PDF
     // is embedded and the *device* renders each page (which lets the Scribe
     // pen draw over it). Not a content conversion.
+    #[cfg(feature = "pdf")]
     if !from_stdin
         && output_format == Format::Kfx
         && std::path::Path::new(input)
@@ -2371,6 +2422,7 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 // PDF → KFX dispatch (called from `convert` when input is .pdf → .kfx)
 // =========================================================================
 
+#[cfg(feature = "pdf")]
 fn convert_pdf_to_kfx(
     input: &str,
     output: Option<&str>,
@@ -2495,6 +2547,7 @@ fn convert_kfx_to_pdf(input: &str, output: &str, quiet: bool) -> Result<(), Stri
 
 /// Title-case a string only if it is "shouting" (has letters and no lowercase),
 /// matching what Amazon does to an ALL-CAPS `/Info` title.
+#[cfg(feature = "pdf")]
 fn title_case_if_shouting(s: &str) -> String {
     let has_lower = s.chars().any(|c| c.is_lowercase());
     let has_alpha = s.chars().any(|c| c.is_alphabetic());
@@ -2515,6 +2568,7 @@ fn title_case_if_shouting(s: &str) -> String {
         .join(" ")
 }
 
+#[cfg(feature = "pdf")]
 fn pdf_file_stem(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()
@@ -2527,6 +2581,7 @@ fn pdf_file_stem(path: &str) -> String {
 // Aozora dispatch (called from `convert` when input is .zip → .epub)
 // =========================================================================
 
+#[cfg(feature = "aozora")]
 fn aozora_dispatch(
     input: &str,
     output: Option<&str>,

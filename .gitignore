@@ -15,6 +15,7 @@ artifacts/
 # values fill in `etc/server.conf` at install time and stay out of git.
 device/extensions/sidle/etc/server.conf
 device/extensions/sidle/bin/sidle
+device/extensions/bokai/bin/bokai
 
 # build.sh staging: the sidle-server sidecar and on-device resources copied here
 # for `cargo tauri build` to fold into the bundle. Regenerated each build; never committed.

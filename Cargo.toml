@@ -35,3 +35,12 @@ incremental = true
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The on-device build (`--profile device`). `panic = "abort"` drops the unwind
+# tables a Kindle has no use for; `bokai::util::parallel_map` joins its workers
+# with `expect`, so a worker panic ends the process here and unwinds on release.
+[profile.device]
+inherits = "release"
+lto = "fat"
+panic = "abort"
+strip = true
