@@ -205,8 +205,8 @@ fn set_creators(opf: &str, authors: &[String]) -> String {
 
 /// Remove every `<meta … refines="#<id>" …>…</meta>` (and self-closing form)
 /// whose `refines` fragment names one of `ids`, taking the element's whole
-/// indented line with it. Used to drop refinements orphaned when their
-/// `<dc:creator>` target is replaced. No-op when `ids` is empty.
+/// indented line with it. Drops refinements orphaned when their `<dc:creator>`
+/// target is replaced. No-op when `ids` is empty.
 fn strip_meta_refines(opf: &str, ids: &[String]) -> String {
     if ids.is_empty() {
         return opf.to_string();

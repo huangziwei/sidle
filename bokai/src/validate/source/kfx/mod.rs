@@ -9,7 +9,7 @@
 //! resolution questions the converter answers — and flags the cases the
 //! converter silently tolerates (a dropped image, a chapterless nav).
 //!
-//! Rule catalog (see the validator-architecture plan). Each rule re-asks a
+//! Rule catalog. Each rule re-asks a
 //! resolution question the converter answers, so it can never flag a shape the
 //! converter itself resolves.
 //!

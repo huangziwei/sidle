@@ -11,7 +11,7 @@
 //!   - **this module** joins them into a [`Resolved`] record;
 //!   - `ingest.rs` folds in book identity + a dedup hash and writes the DB.
 //!
-//! Kindle handle semantics (locked in P0): the end offset is **inclusive**, so
+//! Kindle handle semantics: the end offset is **inclusive**, so
 //! a range extraction passes `off_end + 1` to [`BookIndex::extract`], which is
 //! half-open. A bookmark anchors a point, not a span, so its "text" is the
 //! containing element's text — a location preview for the bookmark list.

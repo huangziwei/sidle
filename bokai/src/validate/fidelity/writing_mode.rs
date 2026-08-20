@@ -211,7 +211,7 @@ fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, St
     let mut modes: HashMap<Mode, usize> = HashMap::new();
 
     // 1. External stylesheets — every manifest item with media-type text/css.
-    for (_, (href, media_type)) in opf.manifest.iter() {
+    for (href, media_type) in opf.manifest.values() {
         if !media_type.eq_ignore_ascii_case("text/css") {
             continue;
         }

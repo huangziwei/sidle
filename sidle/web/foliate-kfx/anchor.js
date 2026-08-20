@@ -4,7 +4,7 @@
 //
 // bokai stamps `data-eid="<eid>"` on every addressable element; the char offset
 // indexes the element's *base text* (ruby <rt>/<rp> excluded), exactly as the
-// KFX content text does — proven char-exact against My Clippings in P0.
+// KFX content text does — char-exact with what My Clippings records.
 
 // Element's descendant text nodes in document order, skipping ruby annotation
 // text (<rt>/<rp>) but keeping ruby base (<rb>) and ordinary text.

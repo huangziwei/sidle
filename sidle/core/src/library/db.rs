@@ -232,7 +232,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     // WAL lets the standalone `sidle-server` daemon share this file with the
-    // desktop app (P3's LAN-sync writer + the GUI). `busy_timeout` makes a second
+    // desktop app (the LAN-sync writer + the GUI). `busy_timeout` makes a second
     // concurrent writer wait for the lock instead of failing immediately with
     // SQLITE_BUSY; writes are idempotent (UNIQUE dedup_hash, per-device
     // checkpoints), so serialized contention converges rather than corrupts.
@@ -6523,7 +6523,7 @@ mod tests {
         };
         let id1 = upsert_book_ink(&conn, &mk("sha1")).unwrap();
         // Re-import the same page from a grown nbk (new whole-file sha): same row,
-        // refreshed content hash — NOT a duplicate. (The plan's core idempotency.)
+        // refreshed content hash — NOT a duplicate.
         let id2 = upsert_book_ink(&conn, &mk("sha2")).unwrap();
         assert_eq!(id1, id2);
         let rows = list_book_ink(&conn, book).unwrap();

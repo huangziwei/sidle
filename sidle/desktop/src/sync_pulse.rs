@@ -7,11 +7,11 @@
 //! - `.sync-pulse.json` (`{ts, device_serial, report}`) after a changed
 //!   annotation import → re-emit the **same** `annotations:sync-done` event the
 //!   USB sync path emits (`device/monitor.rs`); the frontend toasts and repaints
-//!   an open reader. See sidle-reader.md P3.
+//!   an open reader.
 //! - `.book-pulse.json` (`{ts, books:[{id, needs_enqueue}]}`) after a WiFi book
 //!   import (`POST /sync/book`) → enqueue the pending `kfx_to_epub` conversion and
 //!   re-emit `device:autopull-done` so the shelf refreshes, exactly as the USB
-//!   `/dedrm` auto-pull does. See kfxdedrm-gallery.md P4.
+//!   `/dedrm` auto-pull does.
 
 use std::sync::mpsc;
 

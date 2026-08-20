@@ -505,7 +505,7 @@ pub fn inline_svg_flows(
 ///
 /// Native Amazon AZW3 stylesheets often chain-load each other with
 /// `@import url(kindle:flow:0001?mime=text/css);`. Bokai emits the flow-table
-/// CSS verbatim (P1.1), which preserves these unresolvable URLs — Apple Books
+/// CSS verbatim, which preserves these unresolvable URLs — Apple Books
 /// silently drops the import and the chained rules (writing-mode among them)
 /// never load. Calibre-exported AZW3s don't have this defect because calibre
 /// pre-resolves imports during its EPUB → AZW3 stage.

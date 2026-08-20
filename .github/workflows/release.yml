@@ -31,9 +31,13 @@
 # generated links is shared.
 #
 # Nothing about the build is CI-specific — build-bokai.sh assembles the same
-# device/extensions/bokai a workstation does. The zip is not part of that tree
-# and is made here alone: locally the tree is what gets dragged to the Kindle,
-# and an archive of it would be a build product nobody opens.
+# device/extensions/bokai a workstation does, with the same compiler:
+# rust-toolchain.toml pins it, and rustup honours that file here exactly as it
+# does on a workstation. A runner that took "whatever stable is newest" would
+# fail the lint gate below on the day Rust adds a lint, for code that passed
+# locally an hour earlier. The zip is not part of that tree and is made here
+# alone: locally the tree is what gets dragged to the Kindle, and an archive of
+# it would be a build product nobody opens.
 #
 # One consequence of `release`: the workflow that runs is the one on the
 # **tagged commit**. Tag a commit made before this file existed and nothing
@@ -94,8 +98,14 @@ jobs:
                   echo "$product release — sidle $sidle, bokai $bokai"
                   echo "name=bokai-v$bokai-kindle" >> "$GITHUB_OUTPUT"
 
-            - name: Install the cross target
-              run: rustup target add armv7-unknown-linux-musleabihf
+            # Materializes the pinned toolchain, its components and its cross
+            # target before anything builds, so a toolchain problem fails here
+            # with the version printed rather than deep inside a build.
+            - name: Show the pinned toolchain
+              run: |
+                  rustup show active-toolchain
+                  rustc -vV
+                  cargo clippy --version
 
             # .cargo/config.toml names `rust-lld` as the linker for that target
             # and rustup keeps it inside the toolchain rather than on PATH. The
@@ -112,7 +122,7 @@ jobs:
                       ~/.cargo/registry
                       ~/.cargo/git
                       target
-                  key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
             # Gated on what actually ships. `--features native` is the Kindle
             # build's exact feature set, so this is the code in the artifact and

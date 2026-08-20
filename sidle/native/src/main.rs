@@ -514,7 +514,7 @@ fn run() -> anyhow::Result<()> {
     let mut lib_stash: Vec<api::Book> = Vec::new();
 
     // `all_books` is the master (hide-downloaded) set. The picker is **grouped
-    // by series, always** (no flat toggle — see series-grouping.md): the master
+    // by series, always** (there is no flat toggle): the master
     // is filtered+sorted by `rebuild_view`, then folded into `entries` (series
     // collections + standalone books) at each series' first-seen position so the
     // active sort drives tile order for free. `cells` is what the grid pages over

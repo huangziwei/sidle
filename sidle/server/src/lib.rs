@@ -199,7 +199,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/get/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
         .route("/sidecar/{id}", get(get_sidecar))
-        // P3 write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
+        // Write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
         // the LAN twin of the USB import. Token-gated like the reads; body-limited
         // so an oversized POST can't exhaust memory.
         // The GET is the ink half's watermark: what this library already holds
@@ -530,7 +530,7 @@ async fn get_cover(
 }
 
 // ---------------------------------------------------------------------------
-// P3 write surface — POST /sync/annotations
+// Write surface — POST /sync/annotations
 // ---------------------------------------------------------------------------
 
 /// The push bundle the Kindle picker (or any USB-less client) sends: each
@@ -651,7 +651,7 @@ async fn ink_manifest(
 /// Ingest pushed annotations — the LAN twin of the USB import. Token-gated, then
 /// base64-decode → `Vec<CollectedYjr>` → the **exact** USB-path function
 /// [`ingest::import_collected`], so a LAN import is byte-for-byte the same DB
-/// operation as a USB sync (that is the P3 gate). Returns the `DeviceImportReport`
+/// operation as a USB sync. Returns the `DeviceImportReport`
 /// so the picker can show "N new highlights", mirroring the USB report.
 ///
 /// `Json` is the last parameter because it consumes the request body (axum
@@ -765,9 +765,10 @@ async fn sync_annotations(
             }
         };
         // Live-repaint signal — only when the import changed annotation state worth
-        // repainting an open reader for. The GUI watches this file (sidle-reader.md
-        // P3) and re-emits the `annotations:sync-done` event the USB path already
-        // fires; the daemon can't emit a Tauri event into the app directly.
+        // repainting an open reader for. The GUI watches this file (see the
+        // desktop app's `sync_pulse`) and re-emits the `annotations:sync-done`
+        // event the USB path already fires; the daemon cannot emit a Tauri event
+        // into the app directly.
         if import_changed_anything(&report) {
             write_sync_pulse(&paths, &device_serial, &report);
         }
@@ -1593,7 +1594,7 @@ mod tests {
         assert!(refused, "port {port} never freed after shutdown");
     }
 
-    // --- POST /sync/annotations (the P3 LAN==USB gate) ---------------------
+    // --- POST /sync/annotations (the LAN==USB gate) ------------------------
 
     /// A synthetic bookmark `.yjr`: `[marker][len:3 BE][payload]` tokens — the
     /// same recipe `sidle-core`'s ingest tests use. One bookmark = the marker
@@ -1742,7 +1743,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The decisive P3 gate: a `.yjr` pushed through `POST /sync/annotations`
+    /// The decisive LAN==USB gate: a `.yjr` pushed through `POST /sync/annotations`
     /// produces the **identical** `DeviceImportReport` and the **identical**
     /// stored annotation rows as calling `import_collected` on the same bundle
     /// directly (the USB path) — because the handler routes through that exact

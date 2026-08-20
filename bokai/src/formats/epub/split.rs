@@ -1317,11 +1317,11 @@ fn read_numerals(s: &str) -> Option<f64> {
     for c in s.chars() {
         if let Some(d) = kanji_digit(c) {
             digit = Some(d);
-        } else if let Some(unit) = kanji_unit(c) {
+        } else {
+            // Neither a kanji digit nor a kanji unit: the run is not a number.
+            let unit = kanji_unit(c)?;
             total += digit.unwrap_or(1.0) * unit;
             digit = None;
-        } else {
-            return None;
         }
     }
     Some(total + digit.unwrap_or(0.0))

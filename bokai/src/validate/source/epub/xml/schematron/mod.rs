@@ -286,13 +286,12 @@ impl Schema {
         let mut assertions = Vec::new();
         for child in doc.element_children(node) {
             match local_name(doc, child) {
-                Some("let") => match self.let_binding(doc, child, params) {
-                    Some(binding) => lets.push(binding),
+                Some("let") => {
                     // A `let` that will not compile leaves every expression
                     // referring to it undefined, so the whole rule goes rather
                     // than a silently weakened subset of its assertions.
-                    None => return None,
-                },
+                    lets.push(self.let_binding(doc, child, params)?);
+                }
                 Some(kind @ ("assert" | "report")) => {
                     let Some(test_source) = doc.attr(child, None, "test") else {
                         continue;

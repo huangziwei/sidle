@@ -1,0 +1,19 @@
+# The compiler this repo builds with, on every machine that builds it.
+#
+# **This exists because CI and a workstation must not disagree.** Without it each
+# side takes whatever stable it happens to have — a GitHub runner takes the
+# newest, a workstation takes whatever it last updated to — and the release
+# workflow's `clippy -D warnings` gate turns every new Rust release into a
+# release-time failure for a lint that never fired locally. rustup honours this
+# file in this directory, so `cargo` here is the same compiler in both places
+# regardless of what `rustup default` says.
+#
+# Staying current is a one-line bump here, which moves CI and every workstation
+# together. Run `cargo clippy --workspace --all-targets -- -D warnings` when you
+# bump it: a new release is exactly when new lints arrive.
+[toolchain]
+channel = "1.97"
+components = ["clippy", "rustfmt"]
+# The Kindle cross target. Declaring it here means `build.sh` and
+# `build-bokai.sh` find it installed rather than stopping on their preflight.
+targets = ["armv7-unknown-linux-musleabihf"]
