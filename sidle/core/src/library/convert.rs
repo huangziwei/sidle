@@ -391,10 +391,9 @@ fn convert_kfx_to_epub(
     let out_path = dir.join(format!("{base}.epub"));
     let tmp_path = dir.join(format!("{base}.epub.partial"));
 
-    // IR route: the `.kfx` import wrote → Book → EPUB. `open_format` is the
-    // container parse (the `load` phase), reading each entity's payload off the
-    // file as the export asks for it; `export_with_progress` emits
-    // content/resources/nav/finalize straight into the output file.
+    // IR route: the row's `.kfx` → Book → EPUB. `open_format` is the container
+    // parse (the `load` phase), reading entity payloads on demand;
+    // `export_with_progress` emits content/resources/nav/finalize into the file.
     on_progress("load", 0, 1, "Reading KFX");
     let mut handle = bokai::Book::open_format(source_path, bokai::Format::Kfx)
         .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load {}): {e}", source_path.display()))?;

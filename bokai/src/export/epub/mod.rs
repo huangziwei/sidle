@@ -103,8 +103,7 @@ pub struct PackageAsset {
     /// the source's declared type otherwise.
     pub media_type: String,
     /// Pixel size: read out of the bytes on a build that loaded them, taken
-    /// from the source's declaration on one that did not. A consumer reserves
-    /// layout space from this.
+    /// from the source's declaration on one that did not.
     pub width: Option<u32>,
     pub height: Option<u32>,
     /// `None` on a build that only described the assets — see [`Assets`] — and
@@ -115,9 +114,8 @@ pub struct PackageAsset {
 /// Where a build sends each asset's bytes.
 ///
 /// [`build_package_into`] hands over one asset at a time, in manifest
-/// registration order, and keeps only the description in the package it
-/// returns. A sink that writes straight into the container leaves one
-/// transcode chunk resident; the whole image payload never is.
+/// registration order, keeping only the description on the package it
+/// returns. A sink writing into the container leaves one chunk resident.
 pub trait AssetSink {
     /// Take one asset's post-transcode bytes. `asset` describes them and is
     /// the entry that reaches the package and the manifest.
@@ -125,7 +123,7 @@ pub trait AssetSink {
 }
 
 /// The [`AssetSink`] behind [`build_package`]: every asset's bytes, in the
-/// order they were produced, for the caller to put back on the package.
+/// order they were produced, for [`build_package`] to put back on the package.
 #[derive(Default)]
 struct CollectAssets(Vec<Vec<u8>>);
 
@@ -539,14 +537,13 @@ impl EpubExporter {
         Ok(())
     }
 
-    /// Export with normalized content (IR pipeline produces clean, consistent
-    /// output). Reports coarse phase progress to `on_progress`; the emission
-    /// order is `content → resources → nav → finalize`: `load_assets`
-    /// transcodes inline, so the manifest already knows each image's
-    /// post-transcode MIME by the time it is written.
+    /// Export with normalized content: the IR pipeline's clean, consistent
+    /// output. Reports coarse phase progress to `on_progress` as
+    /// `content → resources → nav → finalize`.
     ///
-    /// Each asset goes into the container as it comes off the transcode. The
-    /// export's resident image bytes are one chunk.
+    /// `load_assets` transcodes inline, giving the manifest each image's
+    /// post-transcode MIME. Each asset enters the container as it comes off
+    /// the transcode; one chunk of image bytes is resident.
     fn export_normalized<W: Write + Seek>(
         &self,
         book: &mut Book,
@@ -713,10 +710,9 @@ impl<W: Write + Seek> AssetSink for ZipAssets<'_, W> {
 /// Build a normalized book into EPUB shape without writing a container,
 /// keeping every asset's bytes on the package it returns.
 ///
-/// This is the whole normalized pipeline — chapter synthesis, style
-/// unification, asset transcode, package document, navigation — stopping
-/// short of the zip. Reports coarse phase progress to `on_progress` as
-/// `(phase_key, current, total, human_label)`.
+/// The whole normalized pipeline — chapter synthesis, style unification,
+/// asset transcode, package document, navigation — stopping short of the zip.
+/// Reports coarse phase progress as `(phase_key, current, total, label)`.
 pub fn build_package(
     book: &mut Book,
     opts: PackageOptions,
@@ -771,9 +767,9 @@ pub fn build_package_into(
             .collect()
     }
 
-    /// Describe one loaded asset and hand its bytes to `sink`. `None` for an
-    /// asset that came back empty: the load failed, and an entry the manifest
-    /// names without a file behind it is a container defect (RSC-001).
+    /// Describe one loaded asset and hand its bytes to `sink`. `None` for
+    /// empty `bytes`: a manifest entry with no file behind it is a container
+    /// defect (RSC-001).
     fn describe_loaded(
         href: String,
         bytes: Vec<u8>,
@@ -1555,10 +1551,9 @@ fn toc_to_navpoints(
 /// this package should reach the same page, so the row is synthesized here when
 /// the list doesn't already reach the cover document.
 ///
-/// This is deliberately the *renderer's* view only. The nav doc and NCX describe
-/// a container, which ships its own `cover.xhtml` and whose landmarks already
-/// name it; and the source's own TOC is left as the publisher wrote it, so
-/// nothing here can put a second Cover row in front of a reader.
+/// The row reaches the *renderer's* view only. The nav doc and NCX describe a
+/// container, which ships its own `cover.xhtml` under its own landmarks; the
+/// source's own TOC stays as the publisher wrote it.
 fn cover_nav_point(
     book: &Book,
     cover_section_idx: Option<usize>,
@@ -1683,9 +1678,8 @@ pub(crate) fn resolve_nav_href(
     // A target inside the dropped cover section keeps its file (remapped to the
     // synthesized cover page) but loses its fragment: that page is a bare SVG
     // wrapper carrying no ids, so any `#…` on it dangles (epubcheck RSC-012).
-    // This is a second route to a dangling fragment, independent of the
-    // `stamped` test below — there the anchor was never written into content;
-    // here the content it was written into is gone.
+    // A second route to a dangling fragment, independent of the `stamped` test
+    // below: there the anchor never reached content, here its content is gone.
     if Some(pos) == dropped_idx {
         return Some(file);
     }

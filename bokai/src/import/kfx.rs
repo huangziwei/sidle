@@ -625,8 +625,8 @@ impl KfxImporter {
 
         // Read and parse document symbols (optional). `from_fragment` reads
         // the container's declared import max_id as the doc-symbol base —
-        // never assume our static table's length (older containers declare a
-        // smaller base and would mis-resolve every doc-local name).
+        // never the static table's length. An older container declares a
+        // smaller base and mis-resolves every doc-local name against it.
         let symbols = if let Some((offset, length)) = container_info.doc_symbols {
             if length > 0 {
                 let doc_sym_data = source.read_at(offset as u64, length)?;
@@ -1922,7 +1922,7 @@ impl KfxImporter {
     ///
     /// Walks both `document_data` ($538) and `metadata` ($258) — bokai's own
     /// exports put ppd only on the `metadata` fragment while sections are in
-    /// both, so we collect from each rather than returning on the first hit.
+    /// both, and the walk collects from each: a first hit ends nothing.
     fn get_reading_order_sections(&self) -> io::Result<(Vec<String>, Option<String>)> {
         let candidate_types = [KfxSymbol::DocumentData as u32, KfxSymbol::Metadata as u32];
         let mut found_sections: Vec<String> = Vec::new();
@@ -1977,8 +1977,8 @@ impl KfxImporter {
     }
 
     /// Extract `page_progression_direction` from a reading_order struct.
-    /// The KFX value is a symbol (`$rtl`/`$ltr`/`$default`); we strip the
-    /// leading `$` for the EPUB `<spine>` attribute.
+    /// The KFX value is a symbol (`$rtl`/`$ltr`/`$default`); the EPUB `<spine>`
+    /// attribute takes it with the leading `$` stripped.
     fn extract_ppd(&self, order_fields: &[(u64, IonValue)]) -> Option<String> {
         let raw = get_field(order_fields, sym!(PageProgressionDirection))
             .and_then(|v| self.get_symbol_text(v))?;
@@ -2297,8 +2297,8 @@ impl KfxImporter {
 
     /// Index anchor entities to build anchor_name → uri/position maps.
     ///
-    /// This enables resolution of both external and internal links where
-    /// `link_to` contains an anchor name.
+    /// The map resolves an external or internal link whose `link_to` names an
+    /// anchor.
     fn index_anchor_entities(&mut self) -> io::Result<()> {
         if self.anchors_indexed {
             return Ok(());
@@ -2382,8 +2382,8 @@ impl KfxImporter {
 
     /// Index style entities to build style_name → properties map.
     ///
-    /// This enables resolution of style references in storyline elements.
-    /// Style entities ($157) contain properties like font_weight, text_alignment, margins, etc.
+    /// The map resolves a storyline element's style reference. A style entity
+    /// ($157) carries font_weight, text_alignment, margins and the rest.
     fn index_styles(&mut self) -> io::Result<()> {
         if self.styles_indexed {
             return Ok(());

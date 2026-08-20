@@ -201,20 +201,9 @@ pub struct SourceStyles<'a> {
 
 /// Normalize all chapters in a book through the IR pipeline.
 ///
-/// This is the main entry point for normalized export. It:
-/// 1. Loads each chapter as IR
-/// 2. Merges all styles into a global pool
-/// 3. Generates a unified CSS stylesheet
-/// 4. Synthesizes XHTML for each chapter with remapped styles
-/// 5. Collects all asset references
-///
-/// # Arguments
-///
-/// * `book` - Mutable reference to the book to normalize
-///
-/// # Returns
-///
-/// A `NormalizedContent` containing all normalized data ready for export.
+/// The entry point for normalized export, in five passes: each chapter to IR,
+/// every style into a global pool, a unified CSS stylesheet, per-chapter XHTML
+/// with remapped styles, and the asset references those name.
 pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     normalize_book_with(book, SourceElements::Omit)
 }

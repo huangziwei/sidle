@@ -264,8 +264,8 @@ pub trait Importer: Send + Sync {
     /// names to font files. The returned font-faces have their `src` paths
     /// resolved to canonical paths within the book archive.
     ///
-    /// This is used by KFX export to create font entities linking font-family
-    /// names to resource locations.
+    /// KFX export builds its font entities from these, linking a font-family
+    /// name to a resource location.
     fn font_faces(&mut self) -> Vec<FontFace> {
         let mut font_faces = Vec::new();
 
@@ -333,12 +333,11 @@ pub trait Importer: Send + Sync {
 
     /// Index all anchor targets after chapters are loaded.
     ///
-    /// This method is called once with all loaded chapters, allowing the importer
-    /// to build format-specific anchor maps. The default implementation builds
-    /// a path#id → GlobalNodeId map suitable for EPUB-style linking.
+    /// One call carries every loaded chapter, from which an importer builds
+    /// its format-specific anchor map. The default builds the path#id →
+    /// `GlobalNodeId` map EPUB-style linking resolves against.
     ///
-    /// Importers should override this to handle format-specific anchor systems
-    /// (e.g., KFX anchor entities, AZW3 fragment IDs).
+    /// KFX anchor entities and AZW3 fragment ids each get their own override.
     fn index_anchors(&mut self, _chapters: &[(ChapterId, Arc<Chapter>)]) {
         // Default: no-op. Path-based resolution in resolve_href() handles EPUB.
         // Format-specific importers override to build their anchor maps.
@@ -346,9 +345,9 @@ pub trait Importer: Send + Sync {
 
     /// Resolve TOC href fragments after chapters are loaded.
     ///
-    /// This method is called after `index_anchors()` to fix up TOC entries
-    /// that were built without fragment identifiers (e.g., AZW3/MOBI).
-    /// The default implementation does nothing (EPUB/KFX have correct hrefs).
+    /// Runs after `index_anchors`, filling the fragment identifiers a TOC
+    /// entry was built without (AZW3/MOBI). The default does nothing: EPUB
+    /// and KFX hrefs arrive complete.
     fn resolve_toc(&mut self) {
         // Default: no-op. EPUB and KFX have correct TOC hrefs from source.
     }

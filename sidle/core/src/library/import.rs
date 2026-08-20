@@ -35,11 +35,11 @@
 //!  3. Read metadata from those bytes.
 //!  4. Persist the canonical file into `books/<sha>/<basename>.<ext>`,
 //!     plus the direct-derived KFX sibling when step 2 produced one.
-//!  5. Extract the cover sidecar if we already have a readable EPUB on
-//!     hand. EPUB input always does; KFX input only does on an idempotent
-//!     re-import where the EPUB already exists. The fresh KFX path leaves
-//!     `cover_path` empty for the worker to fill once the KFX→EPUB
-//!     conversion produces an EPUB whose JXR cover has been transcoded to JPG.
+//!  5. Extract the cover sidecar from a readable EPUB on hand. EPUB input
+//!     always has one; KFX input only on an idempotent re-import where the
+//!     EPUB exists. The fresh KFX path leaves `cover_path` empty for the
+//!     worker to fill once the KFX→EPUB conversion produces an EPUB whose
+//!     JXR cover has been transcoded to JPG.
 //!  6. Insert book + conversion job. If the *other* side is already on
 //!     disk (a direct-derived sibling, or an idempotent re-import) the job
 //!     is marked `done`; otherwise it's `pending` and the caller enqueues
@@ -73,15 +73,13 @@ use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 //
 // Wires bokai's aozora pipeline into the import flow. Aozora source
 // archives are unstructured .zip files: a Shift_JIS text file with
-// ［＃markers］ + 底本 colophon, plus accompanying image files. We open
-// the zip, sniff for those markers, parse → Document, render a
-// programmatic cover JPEG (resvg), and build the EPUB. From there
-// `import_one` continues with Canonical::Epub bytes, so the import is
-// indistinguishable from a regular EPUB drop.
+// ［＃markers］ + 底本 colophon, plus accompanying image files. The zip is
+// opened, sniffed for those markers, parsed → Document, given a programmatic
+// cover JPEG (resvg), and built into an EPUB. `import_one` continues with
+// Canonical::Epub bytes, matching a regular EPUB drop.
 //
-// "Secret feature" per user request: no UI affordance, no help text. A
-// non-aozora .zip falls out as an "import failed" toast like any other
-// bad input.
+// No UI affordance and no help text. A non-aozora .zip falls out as an
+// "import failed" toast like any other bad input.
 // ---------------------------------------------------------------------------
 
 pub fn import_file(
@@ -398,9 +396,9 @@ fn stage(
     // 2b. Repair EPUBs whose producer (e.g. ScribdMpubToEpubConverter) wrote
     //     spurious ZIP64 extra fields the `zip` crate rejects. Doing it here —
     //     before metadata, cover, persist, and the downstream `epub_to_kfx`
-    //     job — means the file we store is a clean archive, valid in external
-    //     readers too, rather than relying on bokai's read-time repair each
-    //     time. A no-op (returns the bytes unchanged) for well-formed EPUBs and
+    //     job — means the stored file is a clean archive, valid in external
+    //     readers too, and independent of bokai's read-time repair. A no-op
+    //     (returns the bytes unchanged) for well-formed EPUBs and
     //     for the freshly-built EPUBs the azw3/mobi/aozora paths produce.
     let canonical_bytes = if canonical == Canonical::Epub {
         bokai::formats::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
@@ -675,8 +673,8 @@ pub fn extract_cover_from_epub(epub_bytes: &[u8]) -> Option<(Vec<u8>, &'static s
 }
 
 /// Pull the cover bytes (and extension) out of an EPUB on disk, holding only
-/// the zip index and the cover asset. The route the worker takes after
-/// `kfx_to_epub` produces an EPUB whose JXR cover has been transcoded to JPG.
+/// the zip index and the cover asset. `kfx_to_epub` reaches it with an EPUB
+/// whose JXR cover has been transcoded to JPG.
 pub fn extract_cover_from_epub_file(epub_path: &Path) -> Option<(Vec<u8>, &'static str)> {
     epub_cover_asset(bokai::Book::open_format(epub_path, bokai::Format::Epub).ok()?)
 }

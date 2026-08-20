@@ -28,8 +28,8 @@ pub enum PdfExtractError {
     NotPdfBacked,
     /// PDF-backed, but no embedded PDF blob was found (corrupt container).
     NoPdfBlob,
-    /// Multiple embedded PDF blobs (per-page slices) — not handled. We
-    /// detect-and-raise rather than silently pick one.
+    /// Multiple embedded PDF blobs (per-page slices) — not handled. Raised
+    /// on detection; no blob is picked.
     MultipleSlices(usize),
 }
 
@@ -90,8 +90,8 @@ fn is_pdf_resource(v: &IonValue) -> bool {
 /// Whether `kfx` is a PDF-backed container: it has at least one
 /// `external_resource` with `format: pdf` (calibre's `has_pdf_resource`).
 ///
-/// This is the routing signal — a `true` here means the canonical sibling
-/// format is PDF, and KFX→EPUB conversion must be skipped.
+/// The routing signal: on `true` the canonical sibling format is PDF and
+/// KFX→EPUB conversion is skipped.
 pub fn kfx_is_pdf_backed(kfx: &[u8]) -> bool {
     let Some(ents) = entities(kfx) else {
         return false;
@@ -103,11 +103,8 @@ pub fn kfx_is_pdf_backed(kfx: &[u8]) -> bool {
 }
 
 /// [`kfx_is_pdf_backed`] over a random-access source, reading the container
-/// header, its index table and the `external_resource` fragments alone.
-///
-/// A routing question is worth those few kilobytes and never the whole file:
-/// the caller that asks it is about to open the book, and a manga answers it
-/// off a container whose embedded images run to tens of megabytes.
+/// header, its index table and the `external_resource` fragments alone —
+/// kilobytes of a container whose embedded media runs to tens of megabytes.
 pub fn source_is_pdf_backed(source: &dyn ByteSource) -> bool {
     let Some(ents) = source_entities(source) else {
         return false;
@@ -156,9 +153,9 @@ pub fn kfx_extract_pdf(kfx: &[u8]) -> Result<Vec<u8>, PdfExtractError> {
         return Err(PdfExtractError::NotPdfBacked);
     }
 
-    // The PDF is stored as a `bcRawMedia` blob; for our output and Amazon's S2K
-    // it's a single whole-PDF entity. Locate it by its `%PDF-` magic, which is
-    // robust across symbol-naming differences between encoders.
+    // The PDF is stored as a `bcRawMedia` blob, one whole-PDF entity in both
+    // `pdf_to_kfx` output and Amazon S2K. The `%PDF-` magic locates it across
+    // encoders that name symbols differently.
     let raw_type = KfxSymbol::Bcrawmedia as u32;
     let mut pdfs = ents
         .iter()
@@ -181,8 +178,8 @@ mod tests {
     use crate::formats::pdf::doc::{PdfDoc, PdfOutlineItem, PdfPage};
 
     /// A byte string that passes the `%PDF-` magic check. The round-trip gate
-    /// is about *embedding fidelity*, so we embed these bytes directly via a
-    /// hand-built `PdfDoc` (bypassing `probe_pdf`) and assert we get them back.
+    /// is about *embedding fidelity*: a hand-built `PdfDoc` carries these bytes
+    /// directly, bypassing `probe_pdf`, and the test asserts they come back.
     fn fake_pdf() -> Vec<u8> {
         let mut v = b"%PDF-1.4\n% round-trip fixture\n".to_vec();
         v.extend_from_slice(&[0u8, 1, 2, 3, 255, 254, 253]); // arbitrary binary
@@ -221,7 +218,7 @@ mod tests {
             page_progression_direction: None,
         };
 
-        // No cover/text here: neither affects the embedded-PDF extraction we test
+        // No cover/text here: neither affects embedded-PDF extraction
         // (both need the PDFKit engine, exercised by the gitignored harness).
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         assert!(

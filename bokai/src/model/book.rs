@@ -504,16 +504,15 @@ impl Book {
     }
 
     /// Create a Book from borrowed in-memory bytes with an explicit format,
-    /// copying them into the handle. A caller that owns its bytes hands them
-    /// over with [`Book::from_vec`] and pays no copy.
+    /// copying them into the handle. [`Book::from_vec`] takes ownership and
+    /// copies nothing.
     pub fn from_bytes(data: &[u8], format: Format) -> io::Result<Self> {
         Self::from_vec(data.to_vec(), format)
     }
 
     /// Create a Book from owned in-memory bytes with an explicit format,
-    /// taking the buffer as the handle's byte source.
-    ///
-    /// This is useful for reading from stdin or other non-file sources.
+    /// taking the buffer as the handle's byte source. The entry point for
+    /// stdin and other non-file sources.
     pub fn from_vec(data: Vec<u8>, format: Format) -> io::Result<Self> {
         let source: Arc<dyn crate::io::ByteSource> = Arc::new(MemorySource::new(data));
         let backend: Box<dyn Importer> = match format {
@@ -575,10 +574,8 @@ impl Book {
     /// Cap the worker threads any one parallel stage of an import or export
     /// may run at once; `0` restores the platform's reported parallelism.
     ///
-    /// Every worker holds one job's working set — a decoded image, a
-    /// chapter's DOM — so this is the knob that bounds a conversion's peak
-    /// memory. A host with cores to spare leaves it alone; a caller working
-    /// inside a few hundred megabytes sets it low.
+    /// Each worker holds one job's working set: a decoded image, a chapter's
+    /// DOM. The cap bounds a conversion's peak memory.
     pub fn set_max_workers(&mut self, workers: usize) {
         self.max_workers = workers;
         self.backend.set_max_workers(workers);
@@ -666,9 +663,9 @@ impl Book {
 
     /// Load a chapter as IR with caching.
     ///
-    /// This method caches parsed IR chapters to avoid re-parsing when the same
-    /// chapter is loaded multiple times (e.g., during normalized export).
-    /// Returns an `Arc<Chapter>` for cheap cloning and thread-safe sharing.
+    /// The cache holds each parsed chapter, so a second load of the same id
+    /// re-parses nothing. The `Arc<Chapter>` clones cheaply and crosses
+    /// threads.
     ///
     /// # Example
     ///
@@ -854,8 +851,8 @@ impl Book {
     /// entries and sets each `target` so the KFX exporter can look up its
     /// content position. Called internally by `resolve_links()`.
     pub(crate) fn resolve_page_list_targets(&mut self) {
-        // Clone hrefs first so the resolve pass holds no borrow of the page
-        // list while we later take it mutably to write the targets back.
+        // Cloned hrefs: the resolve pass holds no borrow of the page list,
+        // which the write-back below takes mutably.
         let hrefs: Vec<String> = self
             .backend
             .page_list()
@@ -1049,7 +1046,7 @@ mod tests {
 
         // The override is what every later read (and thus every exporter) sees…
         assert_eq!(book.metadata().title, "SHADOWED");
-        // …while fields we copied from the backend are unchanged.
+        // …while the fields copied from the backend are unchanged.
         assert_eq!(book.metadata().language, backend_lang);
     }
 }

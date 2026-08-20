@@ -1,17 +1,16 @@
 //! Replace the cover image inside an existing EPUB.
 //!
-//! Used by the cover-fetch flow: after `cover_fetch::fetch_color_cover` gives
-//! us the color JPG from amazon.<region>, we both write the sidecar (for the
-//! sidle gallery) and call into here to swap the cover entry inside the EPUB
-//! itself. That way any external reader the user opens the EPUB with also
-//! sees the color cover, not the grayscale baked-in one from a monochrome
-//! Kindle build.
+//! The cover-fetch flow calls this: `cover_fetch::fetch_color_cover` returns
+//! the color JPG from amazon.<region>, the sidecar is written for the gallery,
+//! and the cover entry inside the EPUB is swapped here. An external reader
+//! then shows the color cover in place of the grayscale one a monochrome
+//! Kindle build bakes in.
 //!
 //! Approach: rewrite the EPUB zip entry-by-entry. The cover entry is
 //! replaced with the new bytes (renamed if the extension changes, e.g.
 //! `cover.png` → `cover.jpg`); the OPF gets a targeted edit to the matching
 //! `<item>` `href` and `media-type` attributes; every other entry is
-//! `raw_copy_file`d through verbatim so we preserve compression methods and
+//! `raw_copy_file`d through verbatim, preserving compression methods and
 //! — critically — the EPUB-required uncompressed first `mimetype` entry.
 
 use std::io::{Cursor, Read, Seek, Write};
@@ -24,7 +23,7 @@ use crate::library::import::write_bytes_atomic;
 /// Replace the cover image inside `epub_path` with `new_bytes`. `new_ext` is
 /// the lowercased extension matching the format of those bytes (e.g. `"jpg"`)
 /// — used to compute the new `media-type` for the OPF manifest entry. The
-/// in-zip filename is **kept** (we overwrite at the original path); only the
+/// in-zip filename is **kept** (the overwrite lands at the original path); only the
 /// media-type attribute is updated. Renaming would orphan internal
 /// references like `<image xlink:href="cover.jpeg"/>` inside
 /// `titlepage.xhtml` and break the cover render in Apple Books.
@@ -37,7 +36,7 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
 
     // bokai's EPUB importer resolves cover_image to the zip-absolute path,
-    // which is exactly what we need to look up the entry below.
+    // the key the entry lookup below takes.
     let cover_href: String = {
         let book = bokai::Book::from_bytes(&epub_bytes, bokai::Format::Epub)
             .with_context(|| "open epub for cover swap")?;
@@ -298,9 +297,8 @@ fn rewrite_zip(
     }
 
     let mut cursor = writer.finish().with_context(|| "finish epub zip")?;
-    // `start_file` advances the cursor; rewinding isn't necessary because
-    // we own the underlying Vec, but be explicit so the caller's `out`
-    // reflects the final length without extra capacity slop being read.
+    // `start_file` advances the cursor. The explicit rewind leaves the
+    // caller's `out` at its final length, with no capacity slop read past it.
     let _ = cursor.seek(std::io::SeekFrom::Start(0));
     Ok(())
 }
@@ -343,10 +341,9 @@ fn media_type_for_ext(ext: &str) -> &'static str {
 }
 
 /// Rewrite the OPF so the manifest `<item>` whose `href` ends with
-/// `cover_basename` carries the new `media-type` (the href is unchanged —
-/// we keep the cover file at its original path to avoid orphaning internal
-/// references like `<image xlink:href="cover.jpeg"/>` inside
-/// `titlepage.xhtml`). The OPF references files relative to its own
+/// `cover_basename` carries the new `media-type`. The href is unchanged: the
+/// cover file stays at its original path, leaving internal references like
+/// `<image xlink:href="cover.jpeg"/>` inside `titlepage.xhtml` intact. The OPF references files relative to its own
 /// directory, so a basename match is correct for the same-directory case
 /// (which is what bokai's KFX→EPUB conversion emits — `OEBPS/content.opf`
 /// plus `OEBPS/cover.<ext>` next to it).
@@ -365,8 +362,8 @@ fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) 
 
 /// Replace the value of `attr="..."` on a single line. Returns the line
 /// unchanged if the attribute isn't found. Matches the leading-space form
-/// (`" attr=\""`) so we don't accidentally match a longer attribute name
-/// ending in `attr` (e.g. `mime-media-type=`).
+/// (`" attr=\""`), which excludes a longer attribute name ending in `attr`
+/// (e.g. `mime-media-type=`).
 fn replace_attr_value(line: &str, attr: &str, new_value: &str) -> String {
     let needle = format!(" {attr}=\"");
     let Some(start) = line.find(&needle) else {

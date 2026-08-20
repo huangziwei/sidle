@@ -79,9 +79,8 @@ pub fn time_now_iso8601_utc() -> String {
 /// Worker threads a parallel stage runs under a `max_workers` cap, where `0`
 /// asks for the platform's reported parallelism.
 ///
-/// Every worker holds one job's working set — a decoded image, a chapter's
-/// DOM — so the cap is what bounds a stage's peak memory as well as its CPU
-/// share.
+/// Each worker holds one job's working set: a decoded image, a chapter's DOM.
+/// The cap bounds a stage's peak memory as much as its CPU share.
 pub fn resolve_workers(max_workers: usize) -> usize {
     let platform = std::thread::available_parallelism()
         .map(|n| n.get())

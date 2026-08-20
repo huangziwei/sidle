@@ -70,17 +70,15 @@ enum Command {
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
 
-        /// Skip the native EPUB validator pass on EPUB output. By default any
+        /// Skip the native EPUB validator pass on EPUB output. By default a
         /// `→ epub` conversion validates what it wrote and prints the
-        /// error-level findings (so a broken EPUB never leaves the tool
-        /// unnoticed); the conversion succeeds either way.
+        /// error-level findings; the conversion succeeds either way.
         #[arg(long = "no-validate")]
         no_validate: bool,
 
         /// Worker threads any one parallel stage may run at once (chapter
         /// build, image transcode, document synthesis). Each worker holds one
-        /// job's working set, so this bounds peak memory as well as CPU
-        /// share. Default 0 = every core the platform reports.
+        /// job's working set. Default 0 = every core the platform reports.
         #[arg(short = 'j', long = "max-workers", default_value_t = 0)]
         max_workers: usize,
     },
@@ -1712,13 +1710,12 @@ fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
     }
 }
 
-/// Export `book` and, for an EPUB, run [`report_epub_validation`] over what was
-/// written.
+/// Export `book` and, for an EPUB, run [`report_epub_validation`] over what
+/// was written.
 ///
 /// A file sink takes the container's entries as the exporter produces them;
-/// `book` is dropped, and the validator reads the result back from disk. The
-/// export's working set and the validator's are never resident together.
-/// Stdout is not seekable: that route assembles the container in memory.
+/// `book` drops before the validator reads the result back from disk. Stdout
+/// is not seekable and buffers the container in memory.
 fn write_export(
     mut book: Book,
     output_format: Format,
@@ -2448,8 +2445,8 @@ fn convert_pdf_to_kfx(
         }
     };
 
-    // Extract the selectable text layer (PDFKit). Like the cover it's optional —
-    // on failure (or a non-macOS build) we ship a visual-only KFX.
+    // Extract the selectable text layer (PDFKit). Optional, like the cover: a
+    // failure (or a non-macOS build) leaves a visual-only KFX.
     let text = bokai::formats::pdf::render::extract_pdf_text(&doc.bytes);
     let text_pages = match &text {
         Ok(pages) => {
