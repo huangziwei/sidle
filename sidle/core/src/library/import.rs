@@ -9,12 +9,12 @@
 //!  - KFX  → library (merging `.kfx-zip` first if needed); pending a
 //!    `kfx_to_epub` job.
 //!
-//! Three formats are converted at import time rather than stored as-is:
+//! Three formats are converted at import time, never stored as-is:
 //!
 //!  - `.azw3` → bokai's AZW3 importer feeding BOTH exporters: the EPUB
 //!    and the KFX are each exported directly from the azw3's IR (the azw3
 //!    itself is not persisted, so import is the only moment both can be
-//!    derived without chaining). The book lands with its job already
+//!    derived without chaining). The book lands with its job marked
 //!    `done` — no background hop through the derived EPUB. A later
 //!    metadata-edit *reconvert* re-derives the KFX from the retained EPUB
 //!    (the two-hop path, keyed on the `epub_to_kfx` job kind) since the
@@ -40,14 +40,13 @@
 //!     EPUB exists. The fresh KFX path leaves `cover_path` empty for the
 //!     worker to fill once the KFX→EPUB conversion produces an EPUB whose
 //!     JXR cover has been transcoded to JPG.
-//!  6. Insert book + conversion job. If the *other* side is already on
-//!     disk (a direct-derived sibling, or an idempotent re-import) the job
-//!     is marked `done`; otherwise it's `pending` and the caller enqueues
-//!     it.
+//!  6. Insert book + conversion job. With the *other* side on disk (a
+//!     direct-derived sibling, or an idempotent re-import) the job is marked
+//!     `done`; without it, `pending`, and the caller enqueues it.
 //!
-//! A book the app produced rather than found — a volume carved out of a
-//! collection — enters by the same steps through [`import_bytes`], which stands
-//! a name in for the file it never had.
+//! A book the app produced — a volume carved out of a collection — enters by
+//! the same steps through [`import_bytes`], which stands a name in for the file
+//! it never had.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 //! Only steps 1 and 6 touch the library database, and the conversions in step 2
@@ -68,20 +67,6 @@ use crate::library::authors;
 use crate::library::db::{self, BookRow, NewBook};
 use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 
-// ---------------------------------------------------------------------------
-// Aozora Bunko .zip → EPUB
-//
-// Wires bokai's aozora pipeline into the import flow. Aozora source
-// archives are unstructured .zip files: a Shift_JIS text file with
-// ［＃markers］ + 底本 colophon, plus accompanying image files. The zip is
-// opened, sniffed for those markers, parsed → Document, given a programmatic
-// cover JPEG (resvg), and built into an EPUB. `import_one` continues with
-// Canonical::Epub bytes, matching a regular EPUB drop.
-//
-// No UI affordance and no help text. A non-aozora .zip falls out as an
-// "import failed" toast like any other bad input.
-// ---------------------------------------------------------------------------
-
 pub fn import_file(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
@@ -92,9 +77,8 @@ pub fn import_file(
 }
 
 /// The extension-detected format of a file the user is importing, or an error
-/// naming what this app accepts. Exposed so a caller running the phases of an
-/// import separately (see [`stage_file`]) can reject an unsupported drop before
-/// hashing it.
+/// naming what this app accepts. Public for a caller running the phases apart
+/// (see [`stage_file`]): an unsupported drop is rejected before it is hashed.
 pub fn detect_kind(src: &Path) -> Result<SourceKind> {
     let kind = SourceKind::detect(src);
     if matches!(kind, SourceKind::Unknown) {
@@ -136,9 +120,8 @@ pub fn import_bytes(
 }
 
 /// The dedupe identity of a file about to be imported: the hash of its bytes as
-/// they arrived (before any conversion) and their size. Cheap — a few tens of
-/// milliseconds even for a large book — and needs no database, so a caller can
-/// run it before taking a lock and hand the result to [`stage_file`].
+/// they arrived (before any conversion) and their size. Tens of milliseconds
+/// even for a large book, and no database — cheap to run before taking a lock.
 pub fn identify_file(src: &Path) -> Result<(String, i64)> {
     Source::File(src).identity()
 }
@@ -148,11 +131,10 @@ pub fn identify_file(src: &Path) -> Result<(String, i64)> {
 /// write both sides into the library slot. The row this produced is inserted
 /// separately by [`record`].
 ///
-/// Split out because the conversion an `.azw3`, `.mobi` or `.zip` runs inline
-/// can take minutes, and an app that holds one connection behind a lock must
-/// not hold it for that long — every other reader would stall behind a single
-/// import. `identity` is what [`identify_file`] returned, the caller having
-/// already checked it against the dedupe index.
+/// Separate from [`record`]: the conversion an `.azw3`, `.mobi` or `.zip` runs
+/// inline can take minutes, and one connection held behind a lock for that long
+/// stalls every other reader. `identity` is what [`identify_file`] returned,
+/// checked by the caller against the dedupe index.
 ///
 /// `on_progress` receives `(phase_key, current, total, human_label)`, the same
 /// shape bokai's exporters report in. The keys are:
@@ -448,9 +430,9 @@ fn stage(
                 meta.asin = Some(key);
                 bytes
             }
-            // A container that resists the edit is still a book. It lands under
-            // the catalogue key, where the library reports it and a re-key sweep
-            // can take another run at it.
+            // A container that resists the edit is a book all the same. It lands
+            // under the catalogue key, where the library reports it and a re-key
+            // sweep can take another run at it.
             Err(e) => {
                 eprintln!("[sidle/import] {label}: re-key failed, storing as-is: {e:#}");
                 canonical_bytes
@@ -494,9 +476,8 @@ fn stage(
     }
     // The direct-derived KFX sibling (azw3 import). Written before the
     // `other_ready` probe below, so the row gets `kfx_path`/`kfx_sha256` and a
-    // `done` job in one pass — the same shape as an idempotent re-import that
-    // found the partner already on disk. An existing file wins (re-import of a
-    // book whose KFX identity is already frozen must not re-stamp it).
+    // `done` job in one pass — the shape an idempotent re-import produces. An
+    // existing file wins: a frozen KFX identity must not be re-stamped.
     if let Some(kfx) = &direct_kfx
         && !dest_kfx.exists()
     {
@@ -506,11 +487,10 @@ fn stage(
     // 5. Cover sidecar. A KFX always carries its cover built-in (reflowable
     //    books embed the EPUB's cover, PDF-backed books the PDF's, and a "Change
     //    cover…" override replaces either), so pull it straight from the
-    //    container — that gives a PDF-backed re-import a cover (its kfx→pdf side
-    //    has no EPUB to harvest, which is why these used to land cover-less) and
-    //    a reflowable one its cover immediately, instead of after the kfx→epub
-    //    job. A direct PDF import has no embedded cover; its page-1 render waits
-    //    on the pdf→kfx worker.
+    //    container. That covers a PDF-backed re-import, whose kfx→pdf side has
+    //    no EPUB to harvest, and gives a reflowable one its cover at import
+    //    time. A direct PDF import has no embedded cover; its page-1 render
+    //    waits on the pdf→kfx worker.
     let cover_path: Option<PathBuf> = match canonical {
         Canonical::Epub => write_cover_from_epub_bytes(paths, &sha, &canonical_bytes),
         Canonical::Kfx => write_cover_from_kfx_bytes(paths, &sha, &canonical_bytes),
@@ -520,17 +500,17 @@ fn stage(
     // 6. Describe what the row will say. Every field is settled here; only the
     //    INSERT is left, and that is `record`'s job.
     let other_ready = other_dest.exists();
-    // Record the KFX byte-hash whenever a KFX is on disk (canonical or the
-    // already-present partner). That hash drives the on-device filename infix;
-    // without it a re-import off the Kindle can't be linked back to the row.
+    // Record the KFX byte-hash whenever a KFX is on disk (canonical or a partner
+    // an idempotent re-import found). That hash drives the on-device filename
+    // infix; without it a Kindle re-import links back to no row.
     let kfx_bytes_sha: Option<String> = match canonical {
         Canonical::Kfx => Some(sha256_of_bytes(&canonical_bytes)),
-        // EPUB/PDF canonical → partner is KFX; hash it if already present.
+        // EPUB/PDF canonical → partner is KFX; hash whatever is on disk.
         _ if other_ready => fs::read(&dest_kfx).ok().map(|b| sha256_of_bytes(&b)),
         _ => None,
     };
-    // Which sides are on disk now: the canonical always, the partner only on an
-    // idempotent re-import where it already existed.
+    // Which sides are on disk: the canonical always, the partner only on an
+    // idempotent re-import that found one.
     let has = |c: Canonical| canonical == c || (partner == c && other_ready);
     Ok(StagedImport {
         sha,
@@ -547,14 +527,14 @@ fn stage(
 }
 
 /// The identity a KFX must be re-keyed to before the library stores it, or
-/// `None` when the file already carries one of its own.
+/// `None` for a file that carries one of its own.
 ///
 /// Only a directly-imported KFX can be in this state: every KFX the library
 /// produces is stamped by the export rule, which synthesizes. `derived` is what
 /// that rule makes of this content; a KFX Amazon produced may name no
 /// publication identifier, leaving it nothing to derive from, and the library's
-/// own content hash stands in — per-book, already the name of the directory the
-/// file will sit in, and stable for as long as the bytes are.
+/// own content hash stands in — per-book, the name of the directory the file
+/// sits in, and stable for as long as the bytes are.
 fn key_to_mint(
     canonical: Canonical,
     meta: &BookMeta,
@@ -584,9 +564,9 @@ fn rekey_kfx(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
     )?)
 }
 
-/// A finished import waiting for its row: the files are already in the library
-/// slot, and everything the row will say is settled. Opaque to the caller —
-/// hand it straight to [`record`].
+/// A finished import waiting for its row: the files sit in the library slot and
+/// every field the row carries is settled. Opaque to the caller — hand it
+/// straight to [`record`].
 pub struct StagedImport {
     sha: String,
     file_size: i64,
@@ -598,8 +578,8 @@ pub struct StagedImport {
     kfx_sha256: Option<String>,
     /// The conversion that fills in the side this import didn't produce.
     job_kind: &'static str,
-    /// Whether that side is already on disk — a direct-derived sibling, or an
-    /// idempotent re-import that found it there. The job lands `done` if so.
+    /// Whether that side is on disk — a direct-derived sibling, or an idempotent
+    /// re-import that found one. A true here lands the job `done`.
     other_ready: bool,
 }
 
@@ -610,8 +590,8 @@ pub fn record(conn: &rusqlite::Connection, staged: StagedImport) -> Result<Impor
     // The dedupe probe that cleared this import ran before the conversion, which
     // for a large `.azw3` is minutes ago — long enough for the LAN server or a
     // device autopull to have landed the same book. Re-check inside the window
-    // the insert will use: `books.sha256` is UNIQUE, so the alternative is a
-    // constraint error where "already in the library" is the honest answer.
+    // the insert will use: `books.sha256` is UNIQUE, and the alternative is a
+    // constraint error over a book the library holds.
     if let Some(existing) = db::find_by_sha(conn, &staged.sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
     }
@@ -659,9 +639,9 @@ fn write_cover_from_epub_bytes(
     let (bytes, ext) = extract_cover_from_epub(epub_bytes)?;
     let out = paths.cover(sha, ext);
     fs::write(&out, &bytes).ok()?;
-    // Derive the picker thumbnail now, at import. Best-effort: a thumbnail
-    // failure must not fail the import — the full-res cover still works and the
-    // server falls back to it (see library::thumbnail).
+    // Derive the picker thumbnail at import. Best-effort: a thumbnail failure
+    // must not fail the import — `library::thumbnail` lets the server fall back
+    // to the full-res cover.
     let _ = super::thumbnail::ensure_thumbnail(paths, sha, &out);
     Some(out)
 }
@@ -746,9 +726,9 @@ struct BookMeta {
     /// internal `book_id` UUID — not the ASIN.
     asin: Option<String>,
     /// The real Amazon catalogue id the source named, when it named one. Read
-    /// off the same field as [`Self::asin`] but never overwritten by what gets
-    /// stamped, so it still holds the colour-cover key after a re-key or an
-    /// export has given the file an identity of its own.
+    /// off the same field as [`Self::asin`], never overwritten by what gets
+    /// stamped: it holds the colour-cover key across a re-key or an export that
+    /// gives the file an identity of its own.
     amazon_asin: Option<String>,
     /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
     /// many self-pub and indie books leave it blank.
@@ -793,8 +773,8 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
             .clone()
             .filter(|s| bokai::formats::kfx::metadata::looks_like_real_amazon_asin(s)),
         publisher: m.publisher.clone().filter(|s| !s.is_empty()),
-        // Yomigana bokai already pulled from EPUB `opf:file-as` / KFX
-        // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
+        // Yomigana bokai pulled from EPUB `opf:file-as` / KFX `*_pronunciation`
+        // — romanized at `insert_row` (yomigana-aware when kana).
         title_reading: m.title_sort.clone(),
         author_reading: m.author_sorts.first().cloned(),
         series: m.collection.as_ref().and_then(|c| {
@@ -858,9 +838,9 @@ fn title_case_if_shouting(s: &str) -> String {
         .join(" ")
 }
 
-/// The on-disk artifacts an import produced (or found already present): the
-/// paths and KFX hash to persist on the book row. Grouped into one struct so
-/// `insert_row` stays under clippy's argument-count lint.
+/// The on-disk artifacts an import produced or found: the paths and KFX hash to
+/// persist on the book row. One struct, keeping `insert_row` under clippy's
+/// argument-count lint.
 struct Persisted<'a> {
     epub_path: Option<&'a Path>,
     cover_path: Option<&'a Path>,
@@ -880,14 +860,14 @@ fn insert_row(
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
     let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
     let pdf_path_str = files.pdf_path.map(|p| p.to_string_lossy().to_string());
-    // `meta.authors` is already canonical (flipped, 「、」-unpacked) from
-    // `extract_meta`; join with the unambiguous display separator so readers
+    // `meta.authors` arrives canonical (flipped, 「、」-unpacked) from
+    // `extract_meta`. The join uses the unambiguous display separator: readers
     // split on `[&、]`, never a comma. See [`authors`].
     let authors_joined = authors::join_display(&meta.authors);
     // Render the editable, searchable romaji yomigana-aware. The author reading
-    // (first of bokai's `author_sorts`) covers only the first creator, so it's
-    // used only when there's a single author; otherwise the engine romanizes
-    // the join.
+    // (first of bokai's `author_sorts`) covers only the first creator, and
+    // applies to a single-author book alone. Past one, the engine romanizes the
+    // join.
     let title_romaji =
         super::romaji::romanize_field(&meta.title, meta.title_reading.as_deref(), &meta.language);
     let author_reading = (meta.authors.len() == 1)
@@ -978,16 +958,16 @@ struct Azw3Derived {
 /// Convert a decrypted `.azw3` into BOTH library sides — EPUB and KFX — each
 /// exported directly from the azw3's parsed IR. The azw3 itself is not
 /// persisted, so import is the only moment both derivations can happen
-/// without chaining (the KFX would otherwise be re-derived from the exported
-/// EPUB by the background `epub_to_kfx` job).
+/// without chaining. Past this point the background `epub_to_kfx` job re-derives
+/// the KFX from the exported EPUB.
 ///
-/// Caller has already extension-detected `.azw3`; if the file isn't a real
-/// AZW3 (bad PalmDOC header, etc.), bokai's `Book::from_bytes` returns the
-/// error and the caller's `?` surfaces it as a normal import failure.
+/// The caller extension-detects `.azw3`. On a file that is no real AZW3 (bad
+/// PalmDOC header, etc.), bokai's `Book::from_bytes` returns the error and the
+/// caller's `?` surfaces it as a normal import failure.
 ///
 /// EPUB validity is NOT gated here: an import always produces a book, even an
-/// imperfect one, so the user gets a usable result and a reconvert/edit target
-/// rather than a failed import. Invalid output is a bokai converter bug to fix
+/// imperfect one: the result is usable and a reconvert/edit target, never a
+/// failed import. Invalid output is a bokai converter bug to fix
 /// (surfaced by the CLI validator and the A/B harness) or a source defect for
 /// the book editor to repair — never a reason to drop the import. The KFX side
 /// is exported from a fresh parse of the same bytes — not the handle the EPUB
@@ -1021,10 +1001,9 @@ fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> R
 }
 
 /// Convert a decrypted `.mobi` to EPUB bytes via bokai's MOBI importer +
-/// EPUB exporter. EPUB-only, unlike `convert_azw3`: the KFX side of a mobi
-/// import is still filled by the background `epub_to_kfx` job from the
-/// exported EPUB (mobi→kfx direct hasn't been through the fidelity harness
-/// the azw3 pairs have).
+/// EPUB exporter. EPUB-only, beside `convert_azw3`: the background
+/// `epub_to_kfx` job fills a mobi import's KFX side from the exported EPUB
+/// (mobi→kfx direct has not been through the fidelity harness azw3 pairs have).
 fn convert_mobi(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Vec<u8>> {
     on_progress("epub/parse", 0, 1, "Reading MOBI");
     let mut book = bokai::Book::open_format(src, bokai::Format::Mobi)
@@ -1036,9 +1015,9 @@ fn convert_mobi(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> R
     Ok(buf.into_inner())
 }
 
-/// Re-report an exporter's phases under a leg of this import, so that
-/// `finalize` from the EPUB export and `finalize` from the KFX export stay
-/// distinguishable to whoever is drawing the bar.
+/// Re-report an exporter's phases under a leg of this import: `finalize` from
+/// the EPUB export and `finalize` from the KFX export stay distinguishable in
+/// the drawn bar.
 fn leg<'a>(
     prefix: &'a str,
     on_progress: &'a dyn Fn(&str, usize, usize, &str),
@@ -1124,9 +1103,9 @@ pub(crate) mod tests {
     /// The cheapest input `import_file` will accept: a structurally valid PDF
     /// with one blank page. It is here to give the pipeline *something* to
     /// ingest — the tests below are about rows, paths and job pairing, not
-    /// about PDF. Kept inline because a few hundred bytes of scaffolding is
-    /// not a document worth committing. The `xref` offsets are absolute, so
-    /// edit the body only by regenerating the whole literal.
+    /// about PDF. A few hundred bytes of scaffolding is no document to commit.
+    /// The `xref` offsets are absolute: edit the body only by regenerating the
+    /// whole literal.
     const MINIMAL_INPUT: &[u8] = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n4 0 obj\n<< /Title (Tiny Test PDF) /Author (A. Tester) >>\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000015 00000 n \n0000000064 00000 n \n0000000121 00000 n \n0000000192 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\nstartxref\n256\n%%EOF\n";
 
     /// Drop [`MINIMAL_INPUT`] into `dir` and hand back the path to import from.
@@ -1350,8 +1329,8 @@ pub(crate) mod tests {
         let conn = db::open(&paths.db()).unwrap();
 
         // Two importers clear the dedupe check on the same file, then convert.
-        // Whoever finishes second must report the book as already here — the
-        // alternative is a UNIQUE violation surfacing as an import failure.
+        // Whoever finishes second must report the book as one the library holds;
+        // the alternative is a UNIQUE violation surfacing as an import failure.
         let src = minimal_input_in(tmp.path());
         let first = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();
         let second = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();

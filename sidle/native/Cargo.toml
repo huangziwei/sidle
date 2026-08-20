@@ -10,86 +10,58 @@ name = "sidle_native"
 path = "src/lib.rs"
 
 [[bin]]
-# Named after the package. The desktop app's bin target is `sidle`, and two
-# same-named bins in one workspace share one target/release/<name>. build.sh
-# renames this to `native/sidle` at copy time.
+# Named after the package. The desktop app's bin is `sidle`; two same-named bins
+# in one workspace share one `target/release/<name>`. build.sh renames this to
+# `native/sidle` at copy time.
 name = "sidle-native"
 path = "src/main.rs"
 
 [dependencies]
-# libc: raw open/ioctl/mmap. Pure Rust, no C build script — keeps the
-# rust-lld cross path working without zig.
+# libc: raw open/ioctl/mmap. Pure Rust, no C build script — the rust-lld cross
+# path holds without zig.
 libc = "0.2"
 # anyhow: error propagation in the on-device run loop, which captures context
 # strings and logs the full chain on failure.
 anyhow = "1"
-# ureq: small sync HTTP client over TLS. `rustls-no-provider` is load-bearing,
-# and is what ureq 3 has and ureq 2 lacks: ureq 2's one TLS feature pulls rustls
-# *with* ring, and Cargo's feature unification then runs ring's C build script
-# whether or not a byte of it is called — which takes the pure-Rust rust-lld
-# cross path out. ureq 3 splits the provider out; the crypto is supplied below.
-#
-# NO `rustls-webpki-roots`: the Mozilla root set is absent from this binary, and
-# `etc/ca.pem` is the only root in it. The pin is structural.
+# ureq: small sync HTTP client over TLS. `rustls-no-provider` is load-bearing —
+# a TLS feature bundling ring runs ring's C build script and ends the rust-lld
+# cross path. NO `rustls-webpki-roots`: `etc/ca.pem` is this binary's only root.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
 # rustls with no provider features of its own, same constraint. `tls12` is off:
 # both ends of every connection here are this project's, and TLS 1.3 alone is a
 # smaller surface.
 rustls = { version = "0.23", default-features = false, features = ["std"] }
-# The crypto provider, RustCrypto's — a pure-Rust graph and a static musl
-# cross-link with no C toolchain.
-#
-# Pinned to a git rev, matching sidle-server's dev-dependency rev exactly: that
-# server test drives this same stack to prove the leaf it issues is one this
-# client accepts, and a drift between the two ends that. The crates.io release
-# is 0.0.2-alpha, April 2024, far behind the repo. The crate is glue — it maps
-# `aes-gcm`, `chacha20poly1305`, `p256`, `rsa`, the `*-dalek` crates and `sha2`
-# onto rustls' provider traits — and lives under the RustCrypto org. Not
-# independently audited; accepted knowingly for a closed two-party system.
+# RustCrypto's provider: a pure-Rust graph and a static musl cross-link with no C
+# toolchain. `rev` matches sidle-server's dev-dependency pin, whose test drives
+# both ends. Unaudited glue over `aes-gcm`/`p256`/`sha2`, for two-party traffic.
 rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "7b44a2de957b6596d267a920d3aec0d4137defb1", default-features = false, features = ["std"] }
 # serde + serde_json: JSON deserialize of the server's `/list.json`, and
-# serialize of the `/sync/annotations` push bundle. The `derive` feature is
-# proc-macro-driven (pure Rust at build time).
+# serialize of the `/sync/annotations` push bundle. `derive` is proc-macro
+# driven, pure Rust at build time.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # flate2: gunzip the firmware's own `system/logbackup/*.txt.gz` reading logs.
-# rust_backend (miniz_oxide), not the default zlib — the static musl cross-link
-# admits no C dependency. Read-only, over the dumps the desktop's watermark
-# marks as possibly new, which in the steady state is none of them.
+# `rust_backend` (miniz_oxide), not the default zlib: the static musl cross-link
+# admits no C dependency. Read-only.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # base64: encode `.yjr`/`.yjf` bytes for the `/sync/annotations` JSON body
-# (STANDARD alphabet, with padding — matches the server's decoder). Pure Rust,
-# no_std-capable, keeping the musl cross-link static. 0.22 matches the desktop.
+# (STANDARD alphabet, with padding — matching the server's decoder). Pure Rust,
+# no_std-capable. 0.22 matches the desktop.
 base64 = "0.22"
 # sha2 + hex: hash the on-device picker binary against the LAN self-update
 # manifest, and sha256-verify a download before staging it as `bin/sidle.new`.
-# Both pure Rust — sha2 uses its portable soft backend on armv7, with the `asm`
-# feature off by default. The versions match the desktop side, which makes
-# device and Mac hashes byte-identical.
+# Pure Rust, `asm` off; the desktop's versions, giving device and Mac one digest.
 sha2 = "0.10"
 hex = "0.4"
 # ab_glyph: TTF rasterizer over the Kindle's own bundled faces in
-# /usr/java/lib/fonts/, with no font shipped. Coverage is thresholded for crisp
-# eink rendering — the DU waveform is B/W and antialiased gray turns muddy.
-#
-# It outlines a glyph on request; fontdue outlines every glyph in a face's cmap
-# at parse time and keeps the geometry. Measured on one 23.5 MB CJK face:
-# fontdue 308 MB resident and 0.5s to parse, ab_glyph 24 MB (the file itself)
-# and no measurable parse. The floor device holds ~482 MB shared with the
-# framework, which puts a second CJK face inside one budget and outside the
-# other.
-#
-# Pure Rust all the way down — ab_glyph_rasterizer has no deps, owned_ttf_parser
-# wraps ttf-parser — holding the static musl cross-link.
+# /usr/java/lib/fonts/, with no font shipped. It outlines a glyph on request,
+# holding a 23.5 MB CJK face in 24 MB. ab_glyph_rasterizer has no deps.
 ab_glyph = "0.2"
 # image: cover JPG/PNG decode + resize. Feature-gated to just the two
 # formats the server returns (.jpg from EPUB / Amazon, occasional .png).
 # All sub-deps (jpeg-decoder, png) are pure Rust.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # x11rb: pure-Rust X11 client. RustConnection speaks the wire protocol over the
-# socket, with no libxcb and no C, holding the rust-lld cross path. It makes
-# Sidle a WM-managed window, which the framework composites and tears down on
-# exit — the kterm model, against raw /dev/fb0 writes.
-# NB: NO `allow-unsafe-code` feature. It pulls `as-raw-xcb-connection`, which
-# links the system `libxcb` (`-lxcb`) and breaks the static musl cross-link.
+# socket, making Sidle a WM-managed window the framework composites and tears
+# down. NO `allow-unsafe-code`: it links the system `libxcb` (`-lxcb`).
 x11rb = { version = "0.13", default-features = false }
