@@ -4,18 +4,18 @@
 # Three cargo invocations, run sequentially from the workspace root:
 #   1. Cross-compile sidle-native for the Kindle (armv7 musl static).
 #   2. Build sidle-server (the LAN daemon the release app spawns as a detached
-#      child). Unlike the debug build, the release app does NOT build it on
-#      demand — it loads the sidecar from inside its own bundle.
+#      child). The release app loads that sidecar from inside its own bundle;
+#      the debug build is the one that builds it on demand.
 #   3. Build the Tauri desktop app for the host Mac.
-# Between 2 and 3 we stage two things under sidle/desktop so `cargo tauri build`
-# folds them into the bundle and the installed .app is fully self-contained (no
-# reach-back into this checkout at runtime):
+# Two things are staged under sidle/desktop between 2 and 3, which `cargo tauri
+# build` folds into the bundle. The installed .app then reaches back into this
+# checkout for nothing at runtime:
 #   - the sidle-server binary as a Tauri sidecar (-> Contents/MacOS/sidle-server)
 #   - the device/ mount mirror + armv7 picker as resources (-> Contents/Resources)
 # Then ditto the bundle into /Applications, replacing any prior copy.
 #
-# Why a script and not `cargo tauri build`'s build.rs: nesting cargo
-# inside cargo livelocks on the shared workspace lockfile. 
+# A script, not `cargo tauri build`'s build.rs: cargo nested inside cargo
+# livelocks on the shared workspace lockfile.
 
 set -eu
 
@@ -23,59 +23,58 @@ cd "$(dirname "$0")"
 
 DEVICE_TARGET="armv7-unknown-linux-musleabihf"
 
-# Precheck: surface a one-liner if the cross target isn't installed,
-# instead of cargo's opaque "can't find core for armv7-..." panic.
+# Precheck naming the missing cross target, ahead of cargo's opaque "can't find
+# core for armv7-..." panic.
 if ! rustup target list --installed | grep -qx "$DEVICE_TARGET"; then
     echo "error: rustup target '$DEVICE_TARGET' is not installed" >&2
     echo "       fix: rustup target add $DEVICE_TARGET" >&2
     exit 1
 fi
 
-# Stamp the unified workspace version into the KUAL menu entry's config.xml —
-# the one release artifact outside Cargo's reach. The desktop app pushes this
-# file verbatim to the Kindle, where it is inert until a menu exists to read it.
-# Source of truth is [workspace.package].version in the root Cargo.toml; the
-# sidle-* crates (incl. the on-device binary) inherit it via
-# `version.workspace = true`, so this keeps the cosmetic XML in lockstep.
+# Stamp the workspace version into the KUAL menu entry's config.xml, the one
+# release artifact outside Cargo's reach. The desktop app pushes the file
+# verbatim to the Kindle, where a menu reads it.
+#
+# [workspace.package].version in the root Cargo.toml is the source of truth. The
+# sidle-* crates, the on-device binary among them, take it through
+# `version.workspace = true`.
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
 [ -n "$VERSION" ] || { echo "error: no version found in root Cargo.toml [workspace.package]" >&2; exit 1; }
 echo "==> Stamping config.xml version ($VERSION)"
 sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" device/extensions/sidle/config.xml
 
-# Single build timestamp (unix seconds) for this run: baked into the picker
-# binary (build.rs reads SIDLE_BUILD_TS) AND written to the sidle.build-ts
-# sidecar the server folds into the LAN-update manifest as `built_at`. One clock
-# on both sides lets the device refuse a self-update that isn't strictly newer —
-# a stale device-dist can't downgrade it over Wi-Fi.
+# One build timestamp (unix seconds) per run, baked into the picker binary
+# (build.rs reads SIDLE_BUILD_TS) and written to the sidle.build-ts sidecar the
+# server folds into the LAN-update manifest as `built_at`. One clock on both
+# sides is what the device compares a self-update against.
 BUILD_TS="$(date +%s)"
 echo "==> Cross-compiling sidle-native for Kindle ($DEVICE_TARGET)  [build_ts=$BUILD_TS]"
 SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$DEVICE_TARGET" -p sidle-native
-# Stamp the build time next to the binary DeploySource points at (dev path);
-# build.rs baked the same value into the binary itself.
+# The build time next to the binary DeploySource points at on the dev path.
+# build.rs bakes the same value into the binary.
 printf '%s' "$BUILD_TS" > "target/$DEVICE_TARGET/release/sidle-native.build-ts"
 
 echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
 cargo build --release -p sidle-server
 
-# Stage everything the bundle must carry so the installed .app runs standalone.
-# Tauri names sidecars `<path>-<target-triple>` and strips the suffix when copying
-# into Contents/MacOS, so host-native builds use the host triple. The device
-# resources reproduce the `device/` mount mirror DeploySource::from_resource_root()
-# expects under Contents/Resources/resources/device — only the files pushed to the
-# device, NOT the gitignored etc/server.conf (rendered per-device at install time)
-# nor etc/server.conf.example (a template for humans, never deployed).
+# Everything the bundle carries for a standalone .app. Tauri names sidecars
+# `<path>-<target-triple>` and strips the suffix when copying into
+# Contents/MacOS; a host-native build takes the host triple.
+#
+# The device resources reproduce the `device/` mount mirror
+# DeploySource::from_resource_root() reads under Contents/Resources/resources/
+# device: the files pushed to the device, and NOT the gitignored etc/server.conf
+# (rendered per-device at install time) or etc/server.conf.example (a template).
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "$HOST_TRIPLE" ] || { echo "error: could not read host target triple from rustc -vV" >&2; exit 1; }
 
-# The PDF→KFX cover + selectable-text layer render through macOS PDFKit / Core
-# Graphics (the system engine Preview uses) — a system framework, so there is NO
-# libpdfium to fetch or bundle anymore.
+# The PDF→KFX cover and selectable-text layer render through macOS PDFKit / Core
+# Graphics, system frameworks. No libpdfium is fetched or bundled.
 
 echo "==> Staging sidle-server sidecar ($HOST_TRIPLE) + device resources for bundling"
 # The one place this path is written. Both staging dirs and the `cargo tauri
-# build` below hang off it, and .gitignore names the same two — a rename that
-# updates one and not the others stages a 40 MB sidecar somewhere nothing
-# bundles and nothing ignores.
+# build` below hang off it, and .gitignore names the same two. A rename touches
+# all four together.
 APP_DIR="sidle/desktop"
 SIDECAR_DIR="$APP_DIR/binaries"
 RES_DEVICE="$APP_DIR/resources/device"
@@ -90,11 +89,10 @@ cp "target/$DEVICE_TARGET/release/sidle-native" "$RES_DEVICE/native/sidle"
 cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" "$RES_DEVICE/native/sidle.build-ts"
 
 echo "==> Building sidle desktop app"
-# From inside the app dir, not the workspace root: with `tauri.conf.json` in the
-# cwd the CLI stops there instead of walking the tree to find one, so the build
-# never depends on the directory being named anything in particular. Paths in
-# the config are resolved against the config file either way, so `frontendDist:
-# "../web"` and the bundle's output under the workspace `target/` are unmoved.
+# From inside the app dir. With `tauri.conf.json` in the cwd the CLI stops there
+# and walks no further up the tree, leaving the build independent of what the
+# directories are named. Config paths resolve against the config file, which
+# holds `frontendDist: "../web"` and the bundle output under workspace `target/`.
 (cd "$APP_DIR" && cargo tauri build)
 
 echo "==> Installing to /Applications/Sidle.app"

@@ -1,42 +1,34 @@
-# Workspace cargo config.
-#
-# Target-specific only — keeps host (macOS) builds untouched and only kicks in
-# when cross-compiling sidle-native to the Kindle.
+# Workspace cargo config. Target-specific only: host (macOS) builds are
+# untouched, and this applies when cross-compiling sidle-native to the Kindle.
 #
 # Build the on-device picker:
 #   cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
 # Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
 #
-# armv7-unknown-linux-musleabihf = hardfloat NEON. One binary covers the fleet:
-# the primary target is the Colorsoft, and the newer devices (Colorsoft, Scribe)
-# run a 32-bit armv7 userspace just as the legacy KOA2 does.
+# armv7-unknown-linux-musleabihf = hardfloat NEON, one binary for the fleet. The
+# Colorsoft and Scribe run a 32-bit armv7 userspace, as the KOA2 does. musl links
+# statically, which makes the binary firmware-version-agnostic.
 #
-# The KOA2 is a **Cortex-A7** (Freescale i.MX7 Dual, `CPU part: 0xc07`, kernel
-# 4.1) — read off the device 2026-08-12, correcting a long-standing "Cortex-A9"
-# claim here. It genuinely has no ARMv8 crypto extensions, where the newer two
-# advertise `aes pmull sha1 sha2` (unusable from an armv7 build, but present).
-# Size and speed decisions should be weighed against the Colorsoft; the KOA2 is
-# the slow floor we still support, not the device to design for.
-# musl = static link so the binary is firmware-version-agnostic.
+# Per-device CPU facts (read off each device 2026-08-12): the KOA2 is a
+# Cortex-A7 (Freescale i.MX7 Dual, `CPU part: 0xc07`, kernel 4.1) with no ARMv8
+# crypto extensions; the Colorsoft and Scribe advertise `aes pmull sha1 sha2`,
+# which an armv7 build cannot reach. The KOA2 is the floor of the fleet.
 #
-# Linker: rustc's bundled rust-lld via `link-self-contained=yes`. This is the
-# pure-Rust cross path — no zig, no GNU cross-binutils. Works as long as no
-# crate in our graph has a C build-script. If that changes, the fallback is
-# `brew install zig && cargo install cargo-zigbuild` and switching to
-# `cargo zigbuild`.
+# Linker: rustc's bundled rust-lld via `link-self-contained=yes` — the pure-Rust
+# cross path, with no zig and no GNU cross-binutils. It holds for a dependency
+# graph with no C build-script in it. A graph that gains one links through
+# `brew install zig && cargo install cargo-zigbuild` + `cargo zigbuild`.
 #
-# Prerequisite (one-time, host-architecture-agnostic): rust-lld is bundled with
-# rustup but lives inside the active toolchain at
-# `$(rustc --print sysroot)/lib/rustlib/<host-triple>/bin/rust-lld` — the host
+# Prerequisite, one-time: rust-lld ships with rustup inside the active toolchain
+# at `$(rustc --print sysroot)/lib/rustlib/<host-triple>/bin/rust-lld`. The host
 # triple differs between Intel (`x86_64-apple-darwin`) and Apple Silicon
-# (`aarch64-apple-darwin`) Macs, so this file must not hardcode it. Make it
-# discoverable on PATH with one symlink that resolves the host triple at link
-# time:
+# (`aarch64-apple-darwin`), and this file hardcodes neither. One symlink
+# resolves it at link time and puts rust-lld on PATH:
 #
 #   ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
 #       ~/.cargo/bin/rust-lld
 #
-# Re-run if you `rustup update` to a release that reshuffles bundled tools.
+# A `rustup update` that reshuffles bundled tools needs it re-run.
 [target.armv7-unknown-linux-musleabihf]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]

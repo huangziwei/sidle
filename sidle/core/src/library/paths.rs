@@ -37,10 +37,9 @@ impl LibraryPaths {
         })
     }
 
-    /// The fixed app-local state dir, `<data_dir>/Sidle` — never moves with the
-    /// library. Holds `config.json` (the root pointer), and is also the library
-    /// root the app falls back to when no pointer is set. (Legacy installs used
-    /// a lowercase `sidle`; [`resolve`](Self::resolve) renames it on launch.)
+    /// The fixed app-local state dir, `<data_dir>/Sidle`, unmoved by a library
+    /// relocate. Holds `config.json`, and is the library root an unset pointer
+    /// resolves to. [`resolve`](Self::resolve) renames a lowercase `sidle`.
     pub fn state_dir() -> anyhow::Result<PathBuf> {
         let base = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
@@ -52,29 +51,24 @@ impl LibraryPaths {
         Ok(Self::state_dir()?.join("config.json"))
     }
 
-    /// Resolve the active library root: the `config.json` pointer if set, else
-    /// the default (the state dir). Errors if the config is present but
-    /// malformed, or names a root that doesn't currently exist (e.g. an
-    /// unplugged external drive, or a hand-edited bad path) — failing loudly
-    /// beats silently opening the empty default library in the wrong place.
+    /// The active library root: the `config.json` pointer if set, else the
+    /// state dir. `Err` for a malformed config, and for a pointer naming a root
+    /// that does not exist — an unplugged external drive, a hand-edited path.
     ///
-    /// Used by `bootstrap` (Tauri app) and the LAN server's default branch, so
-    /// both agree on a relocated library. First fixes the legacy lowercase
-    /// app-support dir (`sidle` → `Sidle`).
+    /// The entry point for `bootstrap` and the LAN server's default branch.
+    /// Renames a lowercase `sidle` app-support dir first.
     pub fn resolve() -> anyhow::Result<Self> {
         Self::migrate_legacy_state_dir();
         Self::resolve_in(&Self::state_dir()?)
     }
 
-    /// Point the library root at `new` and persist it in `config.json`. Does
-    /// NOT move any files — the relocate flow (§6) copies data to `new` first,
-    /// then calls this, then relaunches.
+    /// Point the library root at `new` and persist it in `config.json`. Moves
+    /// no files: the relocate flow copies data to `new`, calls this, relaunches.
     pub fn set_root(new: &Path) -> anyhow::Result<()> {
         Self::set_root_in(&Self::state_dir()?, new)
     }
 
-    /// [`resolve`](Self::resolve) against an explicit state dir — the testable
-    /// core, so tests never touch the real `~/Library/Application Support`.
+    /// [`resolve`](Self::resolve) against an explicit `state_dir`.
     fn resolve_in(state_dir: &Path) -> anyhow::Result<Self> {
         let cfg_path = state_dir.join("config.json");
         let bytes = match std::fs::read(&cfg_path) {
@@ -109,7 +103,7 @@ impl LibraryPaths {
         }
     }
 
-    /// [`set_root`](Self::set_root) against an explicit state dir (testable core).
+    /// [`set_root`](Self::set_root) against an explicit `state_dir`.
     fn set_root_in(state_dir: &Path, new: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -122,14 +116,12 @@ impl LibraryPaths {
         Ok(())
     }
 
-    /// One-time fixup of the legacy lowercase app-support dir (`sidle` → the
-    /// proper-cased `Sidle`). Safe because book paths are stored root-relative
-    /// (§4a), so the library resolves under whatever the root is named. On
-    /// macOS's default case-insensitive APFS this is a case-only rename (same
-    /// inode); on a case-sensitive volume it's a real move. Best-effort and
-    /// idempotent — a no-op once the stored name is `Sidle`, and a failure
-    /// leaves the existing dir in place (still resolvable on a case-insensitive
-    /// volume).
+    /// Rename a lowercase `sidle` app-support dir to `Sidle`. Book paths are
+    /// stored root-relative, and the library resolves under either name. A
+    /// case-only rename on case-insensitive APFS, a move elsewhere.
+    ///
+    /// Best-effort and idempotent: a no-op against a stored `Sidle`, and a
+    /// failure leaves the dir where it is.
     fn migrate_legacy_state_dir() {
         if let Some(base) = dirs::data_dir() {
             Self::migrate_legacy_state_dir_in(&base);
@@ -137,8 +129,8 @@ impl LibraryPaths {
     }
 
     fn migrate_legacy_state_dir_in(base: &Path) {
-        // Inspect the *stored* case (a case-insensitive FS preserves it) so we
-        // can tell a not-yet-renamed `sidle` from an already-fixed `Sidle`.
+        // The stored case, which a case-insensitive FS preserves, separates
+        // `sidle` from `Sidle`.
         let (mut has_lower, mut has_proper) = (false, false);
         if let Ok(entries) = std::fs::read_dir(base) {
             for e in entries.flatten() {
@@ -174,18 +166,16 @@ impl LibraryPaths {
         self.book_dir(sha).join(format!("cover.{ext}"))
     }
 
-    /// Cached per-page anchor geometry for a PDF-backed KFX (eid→page map + page
-    /// boxes), keyed by the book's `kfx_sha256` inside the file. See
-    /// [`crate::library::pdf_geom`] — a derived-asset sidecar so ink sync needn't
-    /// re-parse the whole KFX on every connect.
+    /// Cached per-page anchor geometry for a PDF-backed KFX (eid→page map, page
+    /// boxes), keyed inside the file by the book's `kfx_sha256`. A derived-asset
+    /// sidecar; see [`crate::library::pdf_geom`].
     pub fn pdf_geom(&self, sha: &str) -> PathBuf {
         self.book_dir(sha).join("pdf_geom.json")
     }
 
-    /// Thumbnail sidecar: the small color JPEG derived from the cover at
-    /// import time and served to the Kindle picker (`/cover/{id}?thumb=1`).
-    /// Always `.jpg` regardless of the source cover's extension — the
-    /// thumbnail is re-encoded, so its format is fixed. See
+    /// Thumbnail sidecar: the small color JPEG derived from the cover at import
+    /// time and served to the Kindle picker (`/cover/{id}?thumb=1`). Re-encoded
+    /// to `.jpg` whatever the source cover's extension. See
     /// [`crate::library::thumbnail`].
     pub fn cover_thumb(&self, sha: &str) -> PathBuf {
         self.book_dir(sha).join("cover.thumb.jpg")
@@ -199,19 +189,16 @@ impl LibraryPaths {
         self.root.join("cover-thumb.fmt")
     }
 
-    /// Directory the desktop app stages the on-device app's self-update bundle
-    /// into, and `sidle-server` serves over `/device/...` for an untethered LAN
-    /// pull. Keyed off the active library root so the app (writer) and the
-    /// server (reader) agree on one location even after a relocate — the same
-    /// way both already share [`db`](Self::db). Holds `bin/sidle` +
-    /// `manifest.json`.
+    /// Staging directory for the on-device app's self-update bundle (`bin/sidle`
+    /// + `manifest.json`), which `sidle-server` serves over `/device/...`. Keyed
+    /// off the active library root, as [`db`](Self::db) is.
     pub fn device_dist(&self) -> PathBuf {
         self.root.join("device-dist")
     }
 
     /// TLS material for the LAN server: the private CA and the server leaf it
-    /// signs. Keyed off the active library root for the same reason as
-    /// [`device_dist`](Self::device_dist) — the app issues, the server reads.
+    /// signs. Keyed off the active library root, as
+    /// [`device_dist`](Self::device_dist) is.
     pub fn tls_dir(&self) -> PathBuf {
         self.root.join("tls")
     }
@@ -248,14 +235,9 @@ impl LibraryPaths {
         std::fs::create_dir_all(self.book_dir(sha))
     }
 
-    /// Remove the per-sha directory. Surfaces IO errors so callers can roll
-    /// back the matching `books` row delete — a silent swallow here was the
-    /// source of orphan `books/<sha>/` dirs left after `library_remove`
-    /// (Spotlight/Quicklook/Books.app holding a handle on the EPUB returned
-    /// EBUSY, the error went nowhere, the row was already gone).
-    ///
-    /// Treats `NotFound` as success: a re-run after a partial failure should
-    /// be a no-op rather than an error.
+    /// Remove the per-sha directory. An IO error surfaces to the caller, which
+    /// rolls the matching `books` row delete back. `NotFound` is success, and a
+    /// re-run after a partial failure is a no-op.
     pub fn remove_sha(&self, sha: &str) -> std::io::Result<()> {
         match std::fs::remove_dir_all(self.book_dir(sha)) {
             Ok(()) => Ok(()),
@@ -265,9 +247,9 @@ impl LibraryPaths {
     }
 
     // ── Notebooks (Scribe handwriting) ──────────────────────────────────────
-    // Layout: `notebooks/<uuid>/{nbk, cover.png, pages/page-<n>.svg}` — keyed by
-    // the device `.notebooks/<uuid>` dir name (not a content sha; a notebook's
-    // bytes change as it's edited, but its identity is the uuid).
+    // Layout: `notebooks/<uuid>/{nbk, cover.png, pages/page-<n>.svg}`, keyed by
+    // the device `.notebooks/<uuid>` dir name. A notebook's identity is that
+    // uuid; its bytes change under edits.
 
     /// Per-notebook directory: raw `nbk` backup + cover + cached page SVGs.
     pub fn notebook_dir(&self, uuid: &str) -> PathBuf {
@@ -308,11 +290,10 @@ impl LibraryPaths {
     }
 
     // ── Misc device backup (the configured sync collections) ──────────────────
-    // Layout: `device-backup/<serial>/<collection-id>/…` — the files pulled off
-    // a Kindle on Sync, one subdir per collection in `device-sync.json` (see
-    // `device_backup::SyncCollections` and `device::misc::backup_device_misc`).
-    // Keyed by device serial because filenames repeat across devices
-    // (`sidle-native.log`) and would otherwise clobber each other.
+    // Layout: `device-backup/<serial>/<collection-id>/…`, the files a Sync pulls
+    // off a Kindle, one subdir per collection in `device-sync.json`. See
+    // `device_backup::SyncCollections`. A filename repeats across devices
+    // (`sidle-native.log`); the `<serial>` segment separates them.
 
     /// Root holding every device's misc backup, one `<serial>/` subdir each.
     pub fn device_backup_dir(&self) -> PathBuf {
@@ -327,18 +308,16 @@ impl LibraryPaths {
             .join(id)
     }
 
-    /// Create the misc-backup dir for one device. The per-collection subdirs
-    /// are created as files land in them — a collection whose folder isn't on
-    /// this device should leave nothing behind.
+    /// Create the misc-backup dir for one device. Each per-collection subdir is
+    /// created as files land in it.
     pub fn ensure_device_backup(&self, serial: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(self.device_backup_dir().join(sanitize_device_id(serial)))
     }
 
     /// Which device folders a Sync brings across, as edited in the app's
-    /// settings. Keyed off the active library root for the same reason as
-    /// [`device_dist`](Self::device_dist): the app writes it, the server serves
-    /// it to the picker, and both must agree on one location after a relocate.
-    /// Absent until the defaults are first edited — see
+    /// settings. Keyed off the active library root, as
+    /// [`device_dist`](Self::device_dist) is. Absent until the defaults are
+    /// edited; see
     /// [`SyncCollections::load`](crate::library::device_backup::SyncCollections::load).
     pub fn device_sync_config(&self) -> PathBuf {
         self.root.join("device-sync.json")
@@ -346,10 +325,9 @@ impl LibraryPaths {
 
     // ── Handwritten ink on a sideloaded doc (PDOC) ──────────────────────────
     // Layout: `books/<sha>/ink/<asin>/{nbk, <container>.overlay.svg,
-    // <container>.plain.svg}` — the raw nbk backup (survives a device wipe) plus
-    // the per-page renders, keyed by the ink notebook's page-container id.
-    // Nested under the host book's own `books/<sha>/` so removing the book takes
-    // its ink with it.
+    // <container>.plain.svg}` — the raw nbk backup plus the per-page renders,
+    // keyed by the ink notebook's page-container id. Nested under the host
+    // book's `books/<sha>/`, which [`remove_sha`](Self::remove_sha) takes whole.
 
     /// Per-book ink directory for one ink notebook (one `asin`).
     pub fn book_ink_dir(&self, sha: &str, asin: &str) -> PathBuf {
@@ -389,9 +367,9 @@ impl LibraryPaths {
     }
 }
 
-/// Filesystem-safe form of an ink page-container id (a KFX `kfx_id`, in practice
-/// already `[A-Za-z0-9_-]`; sanitized defensively). The true id is kept in the
-/// `book_ink` row — this only names the cached SVG on disk.
+/// Filesystem-safe form of an ink page-container id (a KFX `kfx_id`, which in
+/// practice holds `[A-Za-z0-9_-]`). Names the cached SVG on disk; the `book_ink`
+/// row holds the true id.
 fn sanitize_ink_id(id: &str) -> String {
     id.chars()
         .map(|c| {
@@ -405,13 +383,10 @@ fn sanitize_ink_id(id: &str) -> String {
 }
 
 /// A device serial as a single path segment for `device-backup/<serial>/`.
-/// Serials are alphanumeric in practice ([`sanitize_ink_id`] keeps those), but
-/// fall back to a fixed name when the segment would not be a name at all:
-/// empty (the transport read no serial), or all dots — `sanitize_ink_id` keeps
-/// `.`, so a serial of `..` survives it as traversal and would hoist the backup
-/// dirs a level out of `device-backup/`. On the WiFi push the serial arrives
-/// verbatim in the request body, so this is a bound on untrusted input, not a
-/// formality.
+/// [`sanitize_ink_id`] keeps the alphanumerics a serial holds in practice, and
+/// keeps `.` — an empty or all-dot result becomes `unknown-device`, bounding
+/// `..` as traversal. The WiFi push carries this serial verbatim from the
+/// request body.
 fn sanitize_device_id(serial: &str) -> String {
     let s = sanitize_ink_id(serial);
     if s.is_empty() || s.chars().all(|c| c == '.') {
@@ -422,32 +397,26 @@ fn sanitize_device_id(serial: &str) -> String {
 }
 
 /// Length of the sha256 prefix used as the on-device filename infix
-/// (`<basename>.<sha8>.kfx`). 8 hex chars = 32 bits — collision-free for
-/// any realistic personal library (50% chance at ~93k books per the
-/// birthday bound) and short enough to stay readable.
+/// (`<basename>.<sha8>.kfx`). 8 hex chars = 32 bits; the birthday bound puts a
+/// 50% collision chance at ~93k books.
 pub const SHA_INFIX_LEN: usize = 8;
 
 /// First [`SHA_INFIX_LEN`] hex chars of a KFX sha256.
 ///
-/// Panics if `kfx_sha256.len() < SHA_INFIX_LEN`. The caller is responsible
-/// for ensuring this — every code path either reads from `books.kfx_sha256`
-/// (a full sha256, 64 hex chars) or short-circuits when the column is
-/// `NULL`.
+/// Panics for `kfx_sha256.len() < SHA_INFIX_LEN`. Every caller reads
+/// `books.kfx_sha256` (64 hex chars) or short-circuits on `NULL`.
 pub fn sha_infix(kfx_sha256: &str) -> &str {
     &kfx_sha256[..SHA_INFIX_LEN]
 }
 
 /// Build the canonical on-device basename for a KFX: `<stem>.<sha8>.kfx`.
 ///
-/// `kfx_path` is the on-disk file in the local library (under
-/// `books/<sha>/`); we take its file_stem so the device-side name mirrors
-/// the Mac-side name. Falls back to `book-<sha8>` if the path has no
-/// usable stem (shouldn't happen for library-managed files; defense in
-/// depth).
+/// `<stem>` is the file_stem of `kfx_path`, the local library file under
+/// `books/<sha>/`, which makes the device-side name mirror the Mac-side one. A
+/// path with no usable stem yields `book-<sha8>`.
 ///
-/// Used by both the USB push (`device::push::push_one`) and the LAN
-/// server's Content-Disposition header so the same file shows up under
-/// the same name regardless of how it got onto the Kindle.
+/// The USB push (`device::push::push_one`) and the LAN server's
+/// Content-Disposition header both name a file through here.
 pub fn kfx_device_filename(kfx_path: &str, kfx_sha256: &str) -> String {
     let stem = Path::new(kfx_path)
         .file_stem()
@@ -472,7 +441,7 @@ pub fn parse_sha_infix(filename: &str) -> Option<String> {
     }
 }
 
-/// Map a media type or filename to an image extension we want on disk.
+/// The on-disk image extension for a media type or filename.
 pub fn cover_ext_from(media_or_path: &str) -> &'static str {
     let lower = media_or_path.to_ascii_lowercase();
     if lower.contains("png") {
@@ -501,7 +470,7 @@ pub fn cover_ext_from(media_or_path: &str) -> &'static str {
 /// - Drops the ` (Year)` suffix if no year can be extracted.
 /// - Falls back to `Untitled` for an empty title.
 /// - Strips characters that Finder/macOS reject and collapses whitespace.
-/// - Truncates to ~180 chars to stay well under HFS+ filename limits.
+/// - Truncates to 180 chars, under the HFS+ filename limit.
 pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> String {
     let title = sanitize_segment(title);
     let title = if title.is_empty() {
@@ -548,11 +517,9 @@ pub fn sanitize_segment(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// If `path` is free, return it unchanged; otherwise insert ` (2)`, ` (3)`, …
-/// before the extension until a free name is found (giving up after a sane cap,
-/// returning the original). Shared by the library export (per-author folders)
-/// and the notebook PDF export (flat folder) so neither clobbers an existing
-/// file in the destination.
+/// A free path: `path` itself, else ` (2)`, ` (3)`, … inserted before the
+/// extension until one is free. Returns `path` at the attempt cap. Shared by the
+/// library export and the notebook PDF export.
 pub fn dedup_path(path: PathBuf) -> PathBuf {
     if !path.exists() {
         return path;
@@ -582,10 +549,8 @@ fn extract_year(date: &str) -> Option<String> {
     while i + 4 <= bytes.len() {
         let window = &bytes[i..i + 4];
         if window.iter().all(|b| b.is_ascii_digit()) {
-            // Require the 4-digit run to be exactly 4 digits — not part of a
-            // longer number like `20230412` (don't want "2023" out of that;
-            // an explicit ISO date like `2023-04-12` parses fine because of
-            // the dash separator).
+            // A digit on either side makes this window part of a longer run
+            // (`20230412`). A dash-separated `2023-04-12` has neither.
             let prev_digit = i > 0 && bytes[i - 1].is_ascii_digit();
             let next_digit = i + 4 < bytes.len() && bytes[i + 4].is_ascii_digit();
             if !prev_digit && !next_digit {
@@ -637,9 +602,9 @@ mod tests {
         assert_eq!(s, "[A_B_C] Title_ With_Slashes_ (2020)");
     }
 
-    /// The serial reaches this from the network verbatim (the WiFi misc push),
-    /// so a dot-only segment must not survive as traversal — `..` would put the
-    /// backup dirs a level out of `device-backup/`.
+    /// The WiFi misc push carries the serial from the network verbatim. A
+    /// dot-only segment resolves to `unknown-device`, not to traversal out of
+    /// `device-backup/`.
     #[test]
     fn device_id_rejects_traversal_segments() {
         let paths = LibraryPaths {
@@ -652,12 +617,12 @@ mod tests {
                 "serial {serial:?} escaped the backup dir"
             );
         }
-        // Separators still fold to `_`, keeping a crafted serial one segment.
+        // Separators fold to `_`, keeping a crafted serial one segment.
         assert_eq!(
             paths.device_backup_collection("../../etc", "logs"),
             PathBuf::from("/tmp/root/device-backup/.._.._etc/logs")
         );
-        // A real serial passes through untouched.
+        // An alphanumeric serial passes through untouched.
         assert_eq!(
             paths.device_backup_collection("G000AB12345678", "logs"),
             PathBuf::from("/tmp/root/device-backup/G000AB12345678/logs")
@@ -729,14 +694,14 @@ mod tests {
 
     #[test]
     fn parse_sha_infix_handles_basename_with_dots() {
-        // basename can contain dots ("v1.2"); only the LAST `.`-separated
+        // A basename holds dots ("v1.2"); the LAST `.`-separated
         // segment before `.kfx` is the sha.
         let name = "[A] Series v1.2 (2024).deadbeef.kfx";
         assert_eq!(parse_sha_infix(name).as_deref(), Some("deadbeef"));
     }
 
-    // §4b root pointer. Exercised against an explicit state dir so the real
-    // `~/Library/Application Support/Sidle/config.json` is never touched.
+    // Root pointer, against an explicit state dir. The real
+    // `~/Library/Application Support/Sidle/config.json` is untouched.
 
     #[test]
     fn resolve_defaults_to_state_dir_when_no_config() {
