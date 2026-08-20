@@ -4,9 +4,9 @@
 //! (kfxlib's `yj_to_epub_notebook.py`): point coords are
 //! `position + stroke_bounds origin`; the polyline is split into sub-paths
 //! whenever per-point thickness changes (re-including up to two prior points so
-//! segments stay continuous). v1 renders variable-density (pencil) strokes as a
-//! plain path rather than the feathered density-map raster, and omits page
-//! templates (white background) — both deferred to a later fidelity pass.
+//! segments stay continuous). Variable-density (pencil) strokes render as a
+//! plain path, not the feathered density-map raster, and page templates (the
+//! white background) are not drawn.
 
 use std::fmt::Write;
 

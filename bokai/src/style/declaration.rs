@@ -385,9 +385,9 @@ impl Declaration {
             // The `text-emphasis` shorthand sets style (+ optional color). Aozora
             // EPUBs (and most real ones) write the style-only form — `filled
             // sesame`, `open circle`, … — whose value is identical to the
-            // longhand, so reuse the same parser. Without this the very common
-            // 圏点 (emphasis dots) were silently dropped at CSS-parse time, so no
-            // `text_emphasis_style` ever reached the KFX. A trailing color is
+            // longhand, so reuse the same parser. Without these arms the very
+            // common 圏点 (emphasis dots) are dropped at CSS-parse time and no
+            // `text_emphasis_style` reaches the KFX. A trailing color is
             // ignored (rare); `text-emphasis: "<str>"` is left for the longhand.
             | "text-emphasis" | "-webkit-text-emphasis" | "-epub-text-emphasis" => {
                 parse_text_emphasis_style(input).map(Self::TextEmphasisStyle)

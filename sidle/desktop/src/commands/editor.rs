@@ -867,7 +867,7 @@ fn read_spine_detail(source_path: &str, kind: SourceKind) -> Result<EditorSpineD
 
 /// One embedded image for the Images panel (KFX/EPUB): identity + dimensions +
 /// an on-disk preview copy the webview loads through the asset protocol. The
-/// panel offers extract/export only; image *replacement* is a later tier.
+/// panel offers extract/export only; an image cannot be *replaced* through it.
 #[derive(Serialize)]
 pub struct EditorImage {
     /// Position in the source's image list — the stable key

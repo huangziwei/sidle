@@ -452,8 +452,8 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         // CSS-wide keywords. For inherited properties the cascade has already
         // copied the parent value via `inherit_from_parent`, so dropping the
         // declaration here yields the spec-correct result. Non-inherited
-        // properties with `inherit`/`unset`/`revert` would need parent lookup
-        // to be fully correct; we no-op for now (rare in practice).
+        // properties with `inherit`/`unset`/`revert` would need a parent lookup
+        // to be fully correct; those no-op (rare in practice).
         Declaration::UniversalKeyword { .. } => {}
         Declaration::WritingMode(w) => style.writing_mode = *w,
         Declaration::TextOrientation(o) => style.text_orientation = *o,

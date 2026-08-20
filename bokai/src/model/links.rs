@@ -144,9 +144,9 @@ impl Link {
             });
         }
 
-        // Relative path with fragment (file.xhtml#id)
-        // For now, store as Unknown since we need spine resolution
-        // The importer should handle this with full context
+        // Relative path with fragment (file.xhtml#id). Resolving one needs the
+        // spine, which this function does not have, so it stays Unknown and the
+        // importer resolves it with the full context.
         if href.contains('#') || href.ends_with(".xhtml") || href.ends_with(".html") {
             return Link::Unknown(href.to_string());
         }
@@ -174,8 +174,9 @@ impl Link {
                 // Parse offset using Kindle's base32
                 if let Some(offset) = kindle_base32_decode(off_str) {
                     return Link::Internal(LinkTarget {
-                        // FID maps to spine index, but we'd need the book's
-                        // fragment map to do this properly. For now, store raw.
+                        // FID maps to a spine index through the book's fragment
+                        // map, which this function does not have; the raw FID
+                        // is what gets stored.
                         spine_index: Some(fid as usize),
                         location: InternalLocation::TextOffset(offset),
                     });

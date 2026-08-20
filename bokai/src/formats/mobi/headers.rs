@@ -292,7 +292,8 @@ impl ExthHeader {
             match encoding {
                 Encoding::Utf8 => String::from_utf8_lossy(bytes).to_string(),
                 _ => {
-                    // CP1252 - just use lossy UTF-8 for now
+                    // CP1252 and friends are decoded as lossy UTF-8, so their
+                    // high bytes arrive as U+FFFD.
                     String::from_utf8_lossy(bytes).to_string()
                 }
             }

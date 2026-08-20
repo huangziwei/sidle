@@ -10,7 +10,9 @@
 //! [`draw_download`] is the taller live variant: a title line, a
 //! `transferred / total` progress line, and a tappable Cancel button.
 //! [`draw_progress`] is the batch-step variant: a title, an `n / total` count,
-//! and a filled progress bar (no Cancel) — the DRM Decrypt-All step indicator.
+//! and a filled progress bar. [`draw_progress_stop`] adds a Stop button to it —
+//! the DRM Decrypt-All step indicator, which can be told to end after the book
+//! it is on.
 
 use crate::eink::fb::{Framebuffer, MxcfbRect};
 use crate::ui::text::TextRenderer;
@@ -28,8 +30,14 @@ const BANNER_PAD_Y: u32 = 20;
 const DL_BANNER_HEIGHT: u32 = 300;
 
 /// Banner for the batch-progress overlay ([`draw_progress`]) — fits a title, an
-/// `n / total` count, and the progress bar.
-const PROGRESS_BANNER_HEIGHT: u32 = 260;
+/// `n / total` count, the progress bar, and the Stop button
+/// [`draw_progress_stop`] adds under it. Same footprint as the download
+/// overlay, so the two never leave each other's edges behind.
+const PROGRESS_BANNER_HEIGHT: u32 = DL_BANNER_HEIGHT;
+/// Stop button footprint in [`draw_progress_stop`]. Wider than [`CANCEL_W`]
+/// because the label is a sentence, not a word.
+const STOP_W: u32 = 460;
+const STOP_H: u32 = 76;
 /// Horizontal inset of the progress bar from the banner's side edges.
 const PROGRESS_BAR_INSET: u32 = 60;
 /// Progress-bar track height.
@@ -183,10 +191,58 @@ pub fn draw_download_done(
 
 /// Batch-progress overlay: a `title` line, an `n / total` count line, and a
 /// progress bar filled to `done / total`. White-on-black to match the other
-/// banners; no Cancel (a decrypt runs to completion). Used by the DRM view's
-/// Decrypt-All button, which steps through every on-device purchase. Returns the
+/// banners, and with no button — [`draw_progress_stop`] is the variant that
+/// offers one, and painting this over it is what erases it. Returns the
 /// banner's dirty rect. `total == 0` draws an empty track (no divide-by-zero).
 pub fn draw_progress(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    title: &str,
+    done: usize,
+    total: usize,
+) -> MxcfbRect {
+    progress_body(fb, renderer, title, done, total)
+}
+
+/// [`draw_progress`] plus a Stop button. Returns the banner's dirty rect and
+/// the button's hit rect.
+///
+/// The label carries the contract, because the engine itself cannot be
+/// interrupted: a decrypt already in flight runs to its end, and the batch is
+/// what stops. The caller polls for the tap between the engine's exit checks.
+pub fn draw_progress_stop(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    title: &str,
+    done: usize,
+    total: usize,
+) -> (MxcfbRect, MxcfbRect) {
+    let banner = progress_body(fb, renderer, title, done, total);
+
+    // Filled white box with a black label, mirroring the download Cancel.
+    let stop_x = banner.left + (banner.width.saturating_sub(STOP_W)) / 2;
+    let stop_y = banner.top + PROGRESS_BANNER_HEIGHT - STOP_H - 12;
+    fb.fill_rect(stop_y, stop_x, STOP_W, STOP_H, 0xFF);
+
+    let label = "Stop after this book";
+    let lw = renderer.measure_width(label);
+    let lx = stop_x as i32 + ((STOP_W as i32 - lw as i32) / 2).max(0);
+    renderer.draw(fb, lx, (stop_y + STOP_H * 66 / 100) as i32, label, false);
+
+    let stop_rect = MxcfbRect {
+        top: stop_y,
+        left: stop_x,
+        width: STOP_W,
+        height: STOP_H,
+    };
+    (banner, stop_rect)
+}
+
+/// The banner both progress variants share: title, count, bar. The bar hangs
+/// off the top of the banner, leaving the space beneath it for the Stop button
+/// [`draw_progress_stop`] adds there — so painting a [`draw_progress`] over a
+/// [`draw_progress_stop`] blacks the button out and moves nothing else.
+fn progress_body(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
     title: &str,
@@ -206,15 +262,15 @@ pub fn draw_progress(
 
     // Title + count, white-on-black, stacked in the upper half.
     let tx = centered(renderer, title);
-    renderer.draw(fb, tx, (banner_y + 72) as i32, title, true);
+    renderer.draw(fb, tx, (banner_y + 66) as i32, title, true);
     let count = format!("{done} / {total}");
     let cx = centered(renderer, &count);
-    renderer.draw(fb, cx, (banner_y + 140) as i32, &count, true);
+    renderer.draw(fb, cx, (banner_y + 126) as i32, &count, true);
 
     // Progress track: a white outline, filled white to `done / total`.
     let bar_x = banner_x + PROGRESS_BAR_INSET;
     let bar_w = banner_w.saturating_sub(PROGRESS_BAR_INSET * 2);
-    let bar_y = banner_y + PROGRESS_BANNER_HEIGHT - PROGRESS_BAR_H - 40;
+    let bar_y = banner_y + 156;
     const T: u32 = 3;
     fb.fill_rect(bar_y, bar_x, bar_w, T, 0xFF); // top
     fb.fill_rect(bar_y + PROGRESS_BAR_H - T, bar_x, bar_w, T, 0xFF); // bottom

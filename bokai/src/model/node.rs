@@ -101,8 +101,8 @@ pub enum Role {
     /// Caption for figures or tables (`<figcaption>`, `<caption>`).
     Caption,
     /// HTML `<ruby>` container — wraps base text and one or more annotations
-    /// (typically furigana over Japanese kanji). For now treated as a styled
-    /// inline; future versions may emit KFX ruby_content (symbol 756).
+    /// (typically furigana over Japanese kanji). Treated as a styled inline
+    /// rather than KFX `ruby_content` (symbol 756).
     Ruby,
     /// HTML `<rt>` — ruby annotation text. Rendered as a smaller inline span
     /// adjacent to the base text via the cascade-applied style.

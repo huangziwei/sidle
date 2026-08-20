@@ -4119,8 +4119,8 @@ async function open(id) {
     doc.addEventListener("mouseup", () => onSelection(doc));
     // The paginator focuses the section iframe after navigating (`focusView`),
     // so arrow/space keydowns land in the iframe document, not the parent — the
-    // parent-document listener alone would go deaf until you click out (the bug
-    // where arrows stop turning pages). Listen on each section's doc too.
+    // parent-document listener alone goes deaf until you click out, and the
+    // arrows stop turning pages. Listen on each section's doc too.
     doc.addEventListener("keydown", onKey, true);
     // Kill the native context menu inside the section iframe — its only items
     // are the useless "Open Frame in New Window" and a Reload that boots you

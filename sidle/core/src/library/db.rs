@@ -536,7 +536,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     // Reading layout / writing mode, editable in the metadata modal (the axis the
     // generated KFX bakes into `document_data.writing_mode`; `ppd` mirrors its
-    // page-turn). NULL = Auto/derive, matching the old behaviour for every book.
+    // page-turn). NULL = Auto/derive, which is what every row predating the
+    // column carries.
     if !has_column(conn, "books", "writing_mode")? {
         conn.execute("ALTER TABLE books ADD COLUMN writing_mode TEXT", [])?;
     }

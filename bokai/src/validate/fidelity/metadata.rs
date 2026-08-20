@@ -961,8 +961,8 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
 
     let mut out = KfxMetadata::default();
     // Ordered (key, value) pairs preserve repeated `author` entries in source
-    // order — the HashMap-based collector above silently dropped all but the
-    // last when multiple authors were declared.
+    // order. A map keyed on the name keeps only the last of them, which is
+    // every author but one gone from a multi-author book.
     let mut kvs: Vec<(String, String)> = Vec::new();
 
     for ent in &entities {

@@ -608,7 +608,8 @@ fn expand_box_shorthand(prefix: &str, parts: &[&str]) -> Vec<(String, String)> {
 /// Expand font shorthand (complex, partial support).
 fn expand_font_shorthand(value: &str) -> Option<Vec<(String, String)>> {
     // font: [style] [weight] size[/line-height] family
-    // This is complex; for now just extract what we can
+    // Positional parse over a whitespace split — whatever the arms below do not
+    // recognize is left out of the expansion.
     let mut result = Vec::new();
     let parts: Vec<&str> = value.split_whitespace().collect();
 
@@ -634,7 +635,8 @@ fn expand_font_shorthand(value: &str) -> Option<Vec<(String, String)>> {
                 result.push(("font-size".to_string(), part.to_string()));
             }
         }
-        // Font family is harder to parse reliably, skip for now
+        // Font family is not extracted: it is the comma-separated tail, and a
+        // whitespace split cannot delimit it.
     }
 
     if result.is_empty() {

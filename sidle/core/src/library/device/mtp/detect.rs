@@ -29,8 +29,9 @@ pub fn detect() -> Option<DeviceInfo> {
     // different port), location_id as fallback. Mass-storage's
     // `ensure_device_id` writes a `.sidle/device_id` when the firmware doesn't
     // expose a serial; the MTP equivalent would mean opening a session and
-    // writing to the device, which is Phase 3 work — for now an anon serial
-    // gets the device tile populated without crashing.
+    // writing to the device, which this probe does not do. The anon serial
+    // below falls back to `location_id`, so it holds only while the device
+    // stays on the same port.
     let serial = dev
         .serial_number
         .clone()

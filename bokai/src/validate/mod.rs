@@ -2,10 +2,9 @@
 //! consumes the answer:
 //!
 //! - [`source`] — **is one book file well-formed on its own?** Single-input
-//!   structural checks (`source::epub` = a Rust epubcheck replacement;
-//!   `source::toc` = a cross-format declared-TOC audit; a KFX structural
-//!   checker is planned). These flag defects **in the source book** and feed
-//!   the book editor's repair list.
+//!   structural checks (`source::epub` = a Rust epubcheck replacement,
+//!   `source::toc` = a cross-format declared-TOC audit). These flag defects
+//!   **in the source book** and feed the book editor's repair list.
 //! - [`fidelity`] — **did EPUB ⇄ KFX conversion lose anything?** Pair-input
 //!   diffs (`validate(epub_bytes, kfx_bytes)`) comparing semantic preservation
 //!   across a conversion. A loss here is a bokai converter bug, so these are the

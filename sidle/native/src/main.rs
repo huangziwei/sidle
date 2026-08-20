@@ -462,14 +462,12 @@ fn run() -> anyhow::Result<()> {
     input.set_orientation(orient);
     let mut current_orient = orient;
 
-    // Fetch the library, retrying through the Diagnostics screen on
-    // failure. The old behavior here was draw_boot_toast + return (the home
-    // screen flashes back, no recourse). Now a failure renders diag::run, which
-    // blocks on a Retry/Exit tap: Retry re-runs list_books (server may now
-    // be up), Exit returns cleanly (window torn down on drop → WM recomposites
-    // the home + status bar). diag::run is
-    // called fresh each failed attempt, so its "Last" row tracks the
-    // latest error across retries.
+    // Fetch the library, retrying through the Diagnostics screen on failure —
+    // a toast and a return would flash the home screen back with no recourse.
+    // diag::run blocks on a Retry/Exit tap: Retry re-runs list_books (the server
+    // may now be up), Exit returns cleanly (window torn down on drop → WM
+    // recomposites the home + status bar). It is called fresh on each failed
+    // attempt, so its "Last" row tracks the latest error across retries.
     let t0 = Instant::now();
     let books = loop {
         match api::list_books(&agent, &cfg) {
@@ -2075,9 +2073,10 @@ fn sync_decrypted(
 /// Handle one input event that arrives while a decrypt flow owns the screen.
 /// The two-corner gesture captures right now, while the toast it should show
 /// is still up (`capture` restores the screen itself, so the toast survives
-/// the flash); everything else is consumed and dropped — the decrypt flows
-/// have no cancel affordance, and letting taps queue would fire them as grid
-/// actions on whatever the screen shows once the flow returns.
+/// the flash); everything else is consumed and dropped, because letting taps
+/// queue would fire them as grid actions on whatever the screen shows once the
+/// flow returns. The batch flow's Stop button is the one tap that means
+/// something here, and [`decrypt_all_stop_tap`] takes it before this sees it.
 fn decrypt_input_event(fb: &mut Framebuffer, ev: InputEvent) {
     log(format!("decrypt input: {ev:?}"));
     if ev == InputEvent::Touch(TouchEvent::Screenshot) {
@@ -2220,8 +2219,8 @@ fn decrypt_flow(
 /// Decrypt every on-device DRM purchase in `books` and push each result to the
 /// desktop — the batch twin of [`decrypt_flow`], run from the DRM view's right
 /// action button (the slot the library view gives to self-update). Steps through
-/// the list behind a [`toast::draw_progress`] `n / total` bar that advances one
-/// book at a time. The ABI binary is probed once up front. Each book's decrypt
+/// the list behind a [`toast::draw_progress_stop`] `n / total` bar that advances
+/// one book at a time. The ABI binary is probed once up front. Each book's decrypt
 /// is `<exe> dedrm <kfx>` with stdio inherited (it lands in `sidle.sh`'s log —
 /// no pipe to drain, unlike the single-book streaming flow), spawned and waited
 /// on in a poll loop that keeps input serviced: the touchscreen is grabbed, so
@@ -2232,8 +2231,15 @@ fn decrypt_flow(
 /// `Other` error is logged and the book still counts as decrypted; a token
 /// mismatch stops further pushes (every one would hit the same wall) but
 /// decryption continues — a decrypted book is still useful and re-pushable via
-/// the DRM Sync button. Returns the summary toast; the caller re-scans to drop
-/// the now-decrypted tiles.
+/// the DRM Sync button.
+///
+/// **The batch is interruptible; a decrypt is not.** kfxdedrm has no cancel, so
+/// the Stop button ends the *loop*: the engine in flight runs to its exit, that
+/// book is pushed and counted like any other, and the batch stops there rather
+/// than starting the next one. The same poll loop that keeps the screenshot
+/// gesture alive is what notices the tap, so it registers during a book instead
+/// of queueing on the grabbed fd until the batch is over. Returns the summary
+/// toast; the caller re-scans to drop the now-decrypted tiles.
 fn decrypt_all_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -2249,11 +2255,15 @@ fn decrypt_all_flow(
     let t0 = Instant::now();
     let (mut decrypted, mut synced, mut failed) = (0u32, 0u32, 0u32);
     let mut token_bad = false;
+    // Set by a completed tap on the Stop button; `stop_armed` carries the
+    // Down half of that tap between events.
+    let (mut stopping, mut stop_armed) = (false, false);
     for (i, book) in books.iter().enumerate() {
         // Draw progress before the book so the bar reflects completed work while
         // the title names the one now in flight.
         let short = truncate_title(&book.book.title, 28);
-        let rect = toast::draw_progress(fb, renderer, &format!("Decrypting {short}…"), i, total);
+        let (rect, stop_rect) =
+            toast::draw_progress_stop(fb, renderer, &format!("Decrypting {short}…"), i, total);
         fb.send_update(rect, WAVEFORM_MODE_GC16)?;
 
         // Spawn + wait-poll rather than a blocking `status()`, so input stays
@@ -2271,7 +2281,25 @@ fn decrypt_all_flow(
                 }
                 match input.next_deadline(Some(Instant::now() + DEDRM_WAIT_POLL))? {
                     InputEvent::Tick => {}
-                    ev => decrypt_input_event(fb, ev),
+                    // Once stopped the banner is redrawn without the button, so
+                    // there is nothing left on screen to arm.
+                    ev if stopping => decrypt_input_event(fb, ev),
+                    ev => {
+                        if decrypt_all_stop_tap(fb, ev, &stop_rect, &mut stop_armed) {
+                            stopping = true;
+                            log("decrypt-all: stop requested");
+                            // Dropping the button is what marks the tap as taken;
+                            // the label says what the batch is now doing.
+                            let rect = toast::draw_progress(
+                                fb,
+                                renderer,
+                                "Stopping after this book…",
+                                i,
+                                total,
+                            );
+                            fb.send_update(rect, WAVEFORM_MODE_GC16)?;
+                        }
+                    }
                 }
             },
             Err(e) => Err(e),
@@ -2284,58 +2312,130 @@ fn decrypt_all_flow(
             book.book.title,
             out_path.exists()
         ));
-        if !matches!(status, Ok(ref s) if s.success()) {
-            failed += 1;
-            continue;
-        }
-        decrypted += 1;
+        // Counted either way, then one exit check for both — a failure must not
+        // duck out of the loop body early, or a stop requested during a book
+        // that then failed would be dropped and the batch would run on.
+        if matches!(status, Ok(ref s) if s.success()) {
+            decrypted += 1;
 
-        // Push the fresh output (best effort; skipped once the token is known bad).
-        if out_path.exists() && !token_bad {
-            match api::push_book(agent, cfg, &out_path) {
-                Ok(api::BookPush::Imported | api::BookPush::Duplicate) => {
-                    synced += 1;
-                    // Confirmed on the desktop → drop this book's leftovers (its
-                    // `.kfx-zip` output plus the `.kfx`/`.sdr` under Items01),
-                    // scoped to this stem. Best effort — failures are just logged.
-                    for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
-                        log(format!("decrypt-all cleanup {}: {err}", path.display()));
+            // Push the fresh output (best effort; skipped once the token is known bad).
+            if out_path.exists() && !token_bad {
+                match api::push_book(agent, cfg, &out_path) {
+                    Ok(api::BookPush::Imported | api::BookPush::Duplicate) => {
+                        synced += 1;
+                        // Confirmed on the desktop → drop this book's leftovers (its
+                        // `.kfx-zip` output plus the `.kfx`/`.sdr` under Items01),
+                        // scoped to this stem. Best effort — failures are just logged.
+                        for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
+                            log(format!("decrypt-all cleanup {}: {err}", path.display()));
+                        }
+                    }
+                    Err(api::SidleError::TokenMismatch) => {
+                        log("decrypt-all: token rejected — pausing pushes, still decrypting");
+                        token_bad = true;
+                    }
+                    Err(api::SidleError::Other(err)) => {
+                        log(format!("decrypt-all push {}: {err:#}", out_path.display()));
                     }
                 }
-                Err(api::SidleError::TokenMismatch) => {
-                    log("decrypt-all: token rejected — pausing pushes, still decrypting");
-                    token_bad = true;
-                }
-                Err(api::SidleError::Other(err)) => {
-                    log(format!("decrypt-all push {}: {err:#}", out_path.display()));
+                // A gesture during the push queued behind the blocking send —
+                // capture it while this book's bar is still the live screen. A
+                // Stop tap among them still counts: the loop has not moved on yet.
+                while let Some(ev) = input.poll_now()? {
+                    if stopping {
+                        decrypt_input_event(fb, ev);
+                    } else if decrypt_all_stop_tap(fb, ev, &stop_rect, &mut stop_armed) {
+                        stopping = true;
+                        log("decrypt-all: stop requested during push");
+                    }
                 }
             }
-            // A gesture during the push queued behind the blocking send —
-            // capture it while this book's bar is still the live screen.
-            drain_decrypt_input(input, fb)?;
+        } else {
+            failed += 1;
+        }
+
+        if stopping {
+            break;
         }
     }
-    // Settle the bar at 100% so the batch visibly completes before the caller's
-    // summary panel replaces it.
-    let rect = toast::draw_progress(fb, renderer, "Done", total, total);
+    // Settle the bar where the batch got to — `total` when it ran out, short of
+    // it when a stop cut it — so the batch visibly completes before the caller's
+    // summary panel replaces it. Redrawn without the button, which also erases
+    // one still on screen from the last book.
+    let ran = (decrypted + failed) as usize;
+    let rect = toast::draw_progress(fb, renderer, "Done", ran, total);
     fb.send_update(rect, WAVEFORM_MODE_GC16)?;
     log(format!(
-        "decrypt-all done in {:?}: {decrypted} decrypted, {synced} synced, {failed} failed, token_bad={token_bad}",
-        t0.elapsed()
+        "decrypt-all done in {:?}: {decrypted} decrypted, {synced} synced, {failed} failed, {} left, token_bad={token_bad}",
+        t0.elapsed(),
+        total - ran
     ));
 
-    // A token mismatch means the decrypts landed but nothing synced — point the
-    // user at the re-provision step. Short enough to read on one line; the
-    // toast breaks on `\n` when a message needs more. The books are on disk;
-    // the DRM Sync button re-pushes them once the token is refreshed.
-    if token_bad {
-        return Ok(format!(
-            "Decrypted {decrypted}; sync blocked — plug into sidle, Update on Kindle"
-        ));
-    }
-    Ok(format!(
-        "Decrypted {decrypted}, synced {synced}, {failed} failed"
+    Ok(decrypt_all_summary(
+        decrypted,
+        synced,
+        failed,
+        total - ran,
+        token_bad,
     ))
+}
+
+/// One input event arriving while a decrypt-all step owns the screen, answering
+/// whether it completed a tap on the Stop button. Everything else goes to
+/// [`decrypt_input_event`], which keeps the two-corner screenshot working and
+/// drops the rest.
+///
+/// Down-inside-then-Up-inside, the same arming the download overlay's Cancel
+/// uses: a Down elsewhere disarms, and so does the Up of a finger that went
+/// down before this button was drawn.
+fn decrypt_all_stop_tap(
+    fb: &mut Framebuffer,
+    ev: InputEvent,
+    stop_rect: &MxcfbRect,
+    armed: &mut bool,
+) -> bool {
+    match ev {
+        InputEvent::Touch(TouchEvent::Down { x, y }) => {
+            *armed = rect_hit(stop_rect, x, y);
+            false
+        }
+        InputEvent::Touch(TouchEvent::Up { x, y }) => {
+            let fired = *armed && rect_hit(stop_rect, x, y);
+            *armed = false;
+            fired
+        }
+        ev => {
+            decrypt_input_event(fb, ev);
+            false
+        }
+    }
+}
+
+/// The summary toast [`decrypt_all_flow`] ends on. `left` counts the books a
+/// stop skipped, and is what tells the user the batch ended early rather than
+/// running out.
+///
+/// A token mismatch means the decrypts landed but nothing synced, so the head
+/// points at the re-provision step instead of a sync count — the books are on
+/// disk, and the DRM Sync button re-pushes them once the token is refreshed.
+/// Each clause is short enough to read on one line; the toast breaks on `\n`.
+fn decrypt_all_summary(
+    decrypted: u32,
+    synced: u32,
+    failed: u32,
+    left: usize,
+    token_bad: bool,
+) -> String {
+    let head = if token_bad {
+        format!("Decrypted {decrypted}; sync blocked — plug into sidle, Update on Kindle")
+    } else {
+        format!("Decrypted {decrypted}, synced {synced}, {failed} failed")
+    };
+    if left == 0 {
+        head
+    } else {
+        format!("{head}\nStopped, {left} left")
+    }
 }
 
 /// Download a book to `/mnt/us/documents/Sidle/<filename>` while showing a live
@@ -2606,6 +2706,27 @@ fn update_log(line: impl AsRef<str>) {
 
 #[cfg(test)]
 mod tests {
+    use super::decrypt_all_summary;
+
+    #[test]
+    fn decrypt_all_summary_reports_a_stop() {
+        // Ran to the end: no stop clause.
+        assert_eq!(
+            decrypt_all_summary(3, 3, 0, 0, false),
+            "Decrypted 3, synced 3, 0 failed"
+        );
+        // Stopped: the skipped count is what says it ended early.
+        assert_eq!(
+            decrypt_all_summary(2, 2, 1, 5, false),
+            "Decrypted 2, synced 2, 1 failed\nStopped, 5 left"
+        );
+        // A bad token replaces the sync count, and still reports the stop.
+        assert_eq!(
+            decrypt_all_summary(2, 0, 0, 4, true),
+            "Decrypted 2; sync blocked — plug into sidle, Update on Kindle\nStopped, 4 left"
+        );
+    }
+
     use super::{human_mb, progress_line, rect_hit};
     use crate::eink::fb::MxcfbRect;
 

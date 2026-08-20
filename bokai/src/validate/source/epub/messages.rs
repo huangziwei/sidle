@@ -1226,8 +1226,8 @@ pub fn lookup(id: &str) -> Option<&'static KnownMessage> {
 }
 
 /// How many catalog messages epubcheck emits at Error severity (its ERROR +
-/// FATAL). This is the parity-gate denominator: bokai must eventually flag every
-/// one of these on the file epubcheck would.
+/// FATAL). This is the parity-gate denominator — the count bokai's own
+/// error-level findings are measured against.
 pub fn error_level_count() -> usize {
     CATALOG
         .iter()
