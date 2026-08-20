@@ -27,16 +27,7 @@ use crate::style::{self as ir_style, ToCss};
 /// 16px is the standard browser default.
 pub const DEFAULT_BASE_FONT_SIZE: f64 = ir_style::ROOT_FONT_SIZE_PX as f64;
 
-/// KFX points per CSS pixel: `72 / 160`, a CSS pixel read at the 160 dpi
-/// baseline the Kindle firmware inherits from Android.
-///
-/// KFX carries a `px` unit and the renderer reads it as a device dot, so a
-/// length written across as `px` shrinks by the panel's pixel density — a
-/// 220px logo drew 220 of a Scribe's 1860 dots. Amazon's own converter never
-/// writes `px`: across the six books it built as both AZW3 and KFX, the
-/// `border-width: 1px` in its own stylesheet is `border_weight: 0.45pt` in
-/// its own KFX, and 0.45 is the only non-zero point value any of them carry.
-/// Absolute lengths convert through this constant in both directions.
+/// KFX points per CSS pixel: `72 / 160`, both directions.
 pub const KFX_PT_PER_CSS_PX: f64 = 72.0 / 160.0;
 
 // ============================================================================
@@ -1643,9 +1634,7 @@ impl ValueTransform {
                     "rem" => (num, KfxSymbol::Rem),
                     "%" => (num, KfxSymbol::Percent),
                     "lh" => (num, KfxSymbol::Lh),
-                    // Absolute lengths become points, the unit Amazon states
-                    // them in; see `KFX_PT_PER_CSS_PX` for why `px` cannot go
-                    // across as itself.
+                    // px, pt, in, cm and mm convert through KFX_PT_PER_CSS_PX.
                     _ => {
                         let pixels = convert_to_pixels(num, &css_unit, DEFAULT_BASE_FONT_SIZE);
                         let pt = pixels * KFX_PT_PER_CSS_PX;
@@ -1895,25 +1884,11 @@ fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool
     value == default || matches!(value, ir_style::Length::Px(v) if v == 0.0)
 }
 
-/// The side margin that centers a block the source narrowed to a percentage
-/// of its container and left `margin-left: auto; margin-right: auto` on —
-/// half the leftover width, stated on both sides.
-///
-/// CSS centers such a block by splitting the leftover between the two auto
-/// margins. KFX has no `auto` margin, and `box_align` — the property that
-/// places a box within its container — rides `image` elements only in
-/// Amazon's own books; a text block carrying it lays out flush to the inline
-/// start, so a 75%-wide imprint page sat against the left edge with the whole
-/// remainder as one right margin. Percentage margins resolve against the same
-/// container width the percentage width does, so the split is exact.
-///
-/// Nothing is resolved for a width in any other unit: `auto` margins are a
-/// runtime split against a container width no exporter knows, and only the
-/// percentage case makes it a constant.
+/// Half of what a `Percent` `width` leaves over, when `margin_left` and
+/// `margin_right` are both `Auto`.
 fn auto_centering_side_margin(ir_style: &ir_style::ComputedStyle) -> Option<String> {
     if ir_style.margin_left != ir_style::Length::Auto
         || ir_style.margin_right != ir_style::Length::Auto
-        // An inline box takes no auto-margin centering in CSS either.
         || ir_style.display == ir_style::Display::Inline
     {
         return None;
@@ -2588,9 +2563,8 @@ impl ValueTransform {
                     })?;
                 let unit_sym = get_field_by_symbol(fields, KfxSymbol::Unit)?.as_symbol()? as u32;
 
-                // Convert unit symbol back to CSS unit string. Points come
-                // back as the CSS pixels they were written from — see
-                // `KFX_PT_PER_CSS_PX`.
+                // Unit symbol back to a CSS unit; Pt divides by
+                // KFX_PT_PER_CSS_PX into px.
                 let (num, unit_str) = match unit_sym {
                     id if id == KfxSymbol::Em as u32 => (num, "em"),
                     id if id == KfxSymbol::Rem as u32 => (num, "rem"),
@@ -3788,8 +3762,7 @@ mod tests {
         ]);
         assert_eq!(rule.transform.inverse(&kfx_value), Some("2em".to_string()));
 
-        // {value: "1.8", unit: pt} → "4px" (Decimal - Amazon uses it for
-        // border_weight, at the 160 dpi baseline `KFX_PT_PER_CSS_PX` names)
+        // {value: "1.8", unit: pt} → "4px" (Decimal)
         let kfx_value = IonValue::Struct(vec![
             (
                 KfxSymbol::Value as u64,
@@ -4453,9 +4426,7 @@ mod tests {
     fn auto_margins_on_a_percentage_width_resolve_to_the_split() {
         use crate::style::{ComputedStyle, Length};
 
-        // `p { width: 75%; margin: 1em auto 0 }` — the Standard Ebooks imprint
-        // page. The renderer places a text block by its margins, so the auto
-        // split has to be stated: 12.5% on each side.
+        // width: 75% with both margins Auto splits 12.5% to each side.
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
@@ -4478,22 +4449,21 @@ mod tests {
 
         let wm = ir_style::WritingMode::default();
 
-        // A width in any other unit leaves the split to the renderer: the
-        // container width is not known here.
+        // A Px width yields no split.
         let mut absolute = ComputedStyle::default();
         absolute.margin_left = Length::Auto;
         absolute.margin_right = Length::Auto;
         absolute.width = Length::Px(220.0);
         assert_eq!(extract_ir_field(&absolute, IrField::MarginLeft, wm), None);
 
-        // A full-width block has nothing to split.
+        // Percent(100.0) yields no split.
         let mut full = ComputedStyle::default();
         full.margin_left = Length::Auto;
         full.margin_right = Length::Auto;
         full.width = Length::Percent(100.0);
         assert_eq!(extract_ir_field(&full, IrField::MarginLeft, wm), None);
 
-        // An inline box is not centered by auto margins in CSS either.
+        // Display::Inline yields no split.
         let mut inline = ComputedStyle::default();
         inline.margin_left = Length::Auto;
         inline.margin_right = Length::Auto;
@@ -4501,7 +4471,7 @@ mod tests {
         inline.display = Display::Inline;
         assert_eq!(extract_ir_field(&inline, IrField::MarginLeft, wm), None);
 
-        // A margin the source stated keeps its own value.
+        // A stated margin_left passes through.
         let mut stated = ComputedStyle::default();
         stated.margin_left = Length::Percent(5.0);
         stated.margin_right = Length::Auto;
@@ -4517,8 +4487,7 @@ mod tests {
     fn absolute_lengths_leave_as_points() {
         use crate::style::{ComputedStyle, Length};
 
-        // A KFX `px` is a device dot: the 220px Standard Ebooks logo drew 220
-        // of a Scribe's 1860 across. Absolute lengths leave as points.
+        // Length::Px(220.0) leaves as 99pt.
         let mut style = ComputedStyle::default();
         style.width = Length::Px(220.0);
         let raw = extract_ir_field(&style, IrField::Width, ir_style::WritingMode::default())
@@ -4533,10 +4502,7 @@ mod tests {
 
     #[test]
     fn a_css_pixel_round_trips_through_the_point_it_is_written_as() {
-        // The width Amazon states as `border-width: 1px` in its own AZW3
-        // stylesheet is `border_weight: 0.45pt` in its own KFX of the same
-        // book. Both directions have to agree on that, or a KFX→EPUB→KFX
-        // round trip shrinks every absolute length each time.
+        // "1px" applies to 0.45pt, and 0.45pt inverts to "1px".
         let rule = StyleSchema::standard()
             .get_first("border-spacing")
             .expect("border-spacing rule");
@@ -4592,7 +4558,7 @@ mod tests {
         assert!(symbols.contains(&KfxSymbol::BorderSpacingVertical));
         assert!(symbols.contains(&KfxSymbol::BorderSpacingHorizontal));
 
-        // Both should transform "10px" to the points that state it
+        // Each rule transforms "10px" to 4.5pt
         for rule in rules {
             let result = rule.transform.apply("10px");
             assert!(matches!(
@@ -4760,13 +4726,11 @@ mod tests {
         let rules = schema.get("border-spacing").unwrap();
         let rule = &rules[0];
 
-        // Relative units are preserved; absolute ones become points, since a
-        // KFX `px` is a device dot rather than a CSS pixel.
+        // em, % and lh pass through; px and pt convert to Pt.
         assert!(matches!(
             rule.transform.apply("10px"),
             Some(KfxValue::Dimensioned { value, unit }) if value == 4.5 && unit == KfxSymbol::Pt
         ));
-        // A CSS point is 4/3 of a CSS pixel before it converts.
         assert!(matches!(
             rule.transform.apply("12pt"),
             Some(KfxValue::Dimensioned { value, unit }) if value == 7.2 && unit == KfxSymbol::Pt
@@ -4788,8 +4752,7 @@ mod tests {
 
         let schema = StyleSchema::standard();
 
-        // Simulate KFX: border_weight_top: { value: 0.45, unit: pt } — the
-        // shape Amazon writes a 1px border in.
+        // border_weight_top: { value: 0.45, unit: pt }
         let props = vec![(
             KfxSymbol::BorderWeightTop as u64,
             IonValue::Struct(vec![
@@ -4809,7 +4772,7 @@ mod tests {
             style.border_width_top
         );
 
-        // 0.45pt is the 1px the same book's own stylesheet declares.
+        // 0.45pt is 1px.
         if let Length::Px(px) = style.border_width_top {
             assert!((px - 1.0).abs() < 0.01, "Expected ~1px, got {}px", px);
         } else {
@@ -4821,8 +4784,6 @@ mod tests {
     fn test_import_border_width_verifies_schema_lookup() {
         use crate::formats::kfx::ion::IonValue;
 
-        // The border-weight symbol resolves to a rule, and that rule reads a
-        // point value back as the CSS pixels it was written from.
         let schema = StyleSchema::standard();
 
         let rule = schema.get_by_kfx_symbol(94); // BorderWeightTop

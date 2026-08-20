@@ -1485,16 +1485,10 @@ fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec
         }
         let attr_name = &tag[attr_start..i];
 
-        // Check if this is an attribute to strip
+        // A `srcset` names files no `kindle:` URL reaches.
         let should_strip = attr_name == b"aid"
             || attr_name.starts_with(b"data-Amzn")
             || attr_name.starts_with(b"data-amzn")
-            // A KF8 book names every resource it holds with a `kindle:` URL,
-            // so a `srcset` — which its renderer ignores and its producer
-            // therefore left pointing at the pre-Kindle source tree — cites
-            // files no container holds. Carried through, it wins over `src`
-            // in every reader that implements it and the picture goes
-            // missing (epubcheck RSC-007 for the same reason).
             || attr_name.eq_ignore_ascii_case(b"srcset");
 
         if should_strip {
@@ -1723,11 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn srcset_naming_the_pre_kindle_source_tree_is_stripped() {
-        // A Standard Ebooks build leaves the retina `srcset` alone while
-        // calibre rewrites `src` to a `kindle:embed:` ref, so the 2x file is
-        // not in the book at all. Every reader that implements `srcset`
-        // prefers it over `src`, and the picture goes missing.
+    fn srcset_is_stripped_and_src_and_alt_survive() {
         let input = b"<img src=\"kindle:embed:0003?mime=image/png\" \
 srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
         let out = strip_kindle_attributes_fast(input, &Default::default());

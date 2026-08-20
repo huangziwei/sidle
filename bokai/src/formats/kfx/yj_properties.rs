@@ -445,10 +445,7 @@ fn format_length_struct(fields: &[(u64, IonValue)], symbols: &SymbolTable) -> Op
         }
     }
     match (value, unit) {
-        // A point is an absolute CSS length written at the Kindle's 160 dpi
-        // baseline (`style_schema::KFX_PT_PER_CSS_PX`), so it reads back as
-        // the pixel count it was made from: Amazon's own `0.45pt` borders are
-        // the `1px` its own stylesheet for the same book declares.
+        // pt divides by KFX_PT_PER_CSS_PX into px.
         (Some(v), Some("pt")) => Some(match v.parse::<f64>() {
             Ok(pt) => format!(
                 "{}px",
@@ -1696,9 +1693,7 @@ mod tests {
         );
     }
 
-    /// Amazon states an absolute length in points read at 160 dpi: the
-    /// `border-width: 1px` in its own AZW3 stylesheet is `0.45pt` in its own
-    /// KFX of the same book. Relative units carry their own meaning across.
+    /// `pt` lengths come out as `px`; `em` and `percent` keep their unit.
     #[test]
     fn a_point_length_reads_back_as_the_pixels_it_states() {
         let symbols = SymbolTable::from_fragment(None);
