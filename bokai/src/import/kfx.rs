@@ -196,6 +196,10 @@ pub struct KfxImporter {
     /// stylesheet's `body { writing-mode: … }` header;
     /// `metadata.primary_writing_mode` carries the OPF-vocabulary form.
     css_writing_mode: String,
+
+    /// Worker-thread cap for the parallel chapter build and image transcode,
+    /// `0` for the platform's reported parallelism.
+    max_workers: usize,
 }
 
 impl From<ContainerError> for io::Error {
@@ -295,7 +299,7 @@ impl Importer for KfxImporter {
         // order-sensitive (first-wins in spine order), so it stays serial,
         // applied in `ids` order after the parallel phase — the same map
         // the one-at-a-time loads produce.
-        let built = crate::util::parallel_map(ids, |id| self.build_chapter(*id));
+        let built = crate::util::parallel_map(ids, self.max_workers, |id| self.build_chapter(*id));
         built
             .into_iter()
             .zip(ids)
@@ -411,7 +415,7 @@ impl Importer for KfxImporter {
                 _ => results.push(Some(self.load_asset(path))),
             }
         }
-        let transcoded = crate::util::parallel_map(&jxr_jobs, |(_, idx, raw)| {
+        let transcoded = crate::util::parallel_map(&jxr_jobs, self.max_workers, |(_, idx, raw)| {
             crate::formats::kfx::jxr::transcode(raw, &self.images[*idx].resource_name)
                 .map(|(bytes, _format, _timing)| bytes)
                 .map_err(|e| io::Error::other(e.to_string()))
@@ -468,6 +472,10 @@ impl Importer for KfxImporter {
             return None;
         }
         Some(SourceText::new(text_of, &positions))
+    }
+
+    fn set_max_workers(&mut self, workers: usize) {
+        self.max_workers = workers;
     }
 
     fn index_anchors(&mut self, chapters: &[(ChapterId, Arc<Chapter>)]) {
@@ -692,6 +700,7 @@ impl KfxImporter {
             element_id_map: HashMap::new(),
             eid_chapters: HashMap::new(),
             css_writing_mode: "horizontal-tb".to_string(),
+            max_workers: 0,
         };
 
         importer.parse_metadata()?;

@@ -189,9 +189,9 @@ impl LibraryPaths {
         self.root.join("cover-thumb.fmt")
     }
 
-    /// Staging directory for the on-device app's self-update bundle (`bin/sidle`
-    /// + `manifest.json`), which `sidle-server` serves over `/device/...`. Keyed
-    /// off the active library root, as [`db`](Self::db) is.
+    /// Staging directory for the on-device app's self-update bundle
+    /// (`bin/sidle` and `manifest.json`), which `sidle-server` serves over
+    /// `/device/...`. Keyed off the active library root, as [`db`](Self::db) is.
     pub fn device_dist(&self) -> PathBuf {
         self.root.join("device-dist")
     }
@@ -203,8 +203,8 @@ impl LibraryPaths {
         self.root.join("tls")
     }
 
-    /// The private CA certificate. This is the one file that also travels to the
-    /// device (as `etc/ca.pem`), where it is the picker's *sole* trust root.
+    /// The private CA certificate, and the one file here that also travels to
+    /// the device as `etc/ca.pem`, the picker's *sole* trust root.
     pub fn ca_cert(&self) -> PathBuf {
         self.tls_dir().join("ca.pem")
     }

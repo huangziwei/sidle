@@ -105,20 +105,20 @@ pub fn ensure_cover(
     }
     // Case 2: regenerate — but only from a KFX that is the source (EPUB derived)
     // and actually has a cover to carry over.
-    if epub_is_derived && let Some(kfx) = kfx_path {
-        let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
-        if kfx_declares_cover(&kfx_bytes) {
-            // IR route (byte-identical to calibre).
-            let mut book = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
-                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
-            let mut buf = std::io::Cursor::new(Vec::new());
-            book.export(bokai::Format::Epub, &mut buf)
-                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e}"))?;
-            let epub_bytes = buf.into_inner();
-            write_bytes_atomic(epub_path, &epub_bytes)?;
-            replace_cover(epub_path, new_bytes, new_ext)?;
-            return Ok(());
-        }
+    if epub_is_derived
+        && let Some(kfx) = kfx_path
+        && kfx_declares_cover(kfx)
+    {
+        // IR route (byte-identical to calibre).
+        let mut book = bokai::Book::open_format(kfx, bokai::Format::Kfx)
+            .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        book.export(bokai::Format::Epub, &mut buf)
+            .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e}"))?;
+        let epub_bytes = buf.into_inner();
+        write_bytes_atomic(epub_path, &epub_bytes)?;
+        replace_cover(epub_path, new_bytes, new_ext)?;
+        return Ok(());
     }
     // Case 3: the EPUB is the source (or has no covered KFX to derive from) —
     // insert a cover in place rather than regenerating it.
@@ -128,8 +128,8 @@ pub fn ensure_cover(
 /// True if the KFX declares a resolvable cover. Used by [`ensure_cover`] to
 /// decide between regenerating the EPUB from the KFX (cover present) and
 /// inserting one directly (cover absent).
-fn kfx_declares_cover(kfx_bytes: &[u8]) -> bool {
-    bokai::Book::from_bytes(kfx_bytes, bokai::Format::Kfx)
+fn kfx_declares_cover(kfx_path: &Path) -> bool {
+    bokai::Book::open_format(kfx_path, bokai::Format::Kfx)
         .map(|b| b.metadata().cover_image.is_some())
         .unwrap_or(false)
 }

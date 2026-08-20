@@ -76,19 +76,32 @@ pub fn time_now_iso8601_utc() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
 }
 
-/// Map `f` over `items` across `available_parallelism` workers, preserving
-/// input order. Each worker takes one contiguous chunk. Empty, single-item and
-/// single-core input maps serially.
-pub fn parallel_map<T, R, F>(items: &[T], f: F) -> Vec<R>
+/// Worker threads a parallel stage runs under a `max_workers` cap, where `0`
+/// asks for the platform's reported parallelism.
+///
+/// Every worker holds one job's working set — a decoded image, a chapter's
+/// DOM — so the cap is what bounds a stage's peak memory as well as its CPU
+/// share.
+pub fn resolve_workers(max_workers: usize) -> usize {
+    let platform = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    match max_workers {
+        0 => platform,
+        n => n.min(platform),
+    }
+}
+
+/// Map `f` over `items` across [`resolve_workers`]`(max_workers)` workers,
+/// preserving input order. Each worker takes one contiguous chunk. Empty,
+/// single-item and single-core input maps serially.
+pub fn parallel_map<T, R, F>(items: &[T], max_workers: usize, f: F) -> Vec<R>
 where
     T: Sync,
     R: Send,
     F: Fn(&T) -> R + Sync,
 {
-    let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(items.len());
+    let n_workers = resolve_workers(max_workers).min(items.len());
     if n_workers <= 1 {
         return items.iter().map(f).collect();
     }

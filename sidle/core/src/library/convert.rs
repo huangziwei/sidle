@@ -18,7 +18,7 @@ use rusqlite::Connection;
 
 use crate::library::db::{self, BookRow};
 use crate::library::import::{
-    extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_bytes, sha256_of_file,
+    extract_cover_from_epub_file, extract_cover_from_kfx_bytes, sha256_of_bytes, sha256_of_file,
     write_bytes_atomic,
 };
 use crate::library::paths::{LibraryPaths, format_basename};
@@ -389,25 +389,36 @@ fn convert_kfx_to_epub(
     let dir = paths.book_dir(&book.sha256);
     let base = derived_basename(book, source_path);
     let out_path = dir.join(format!("{base}.epub"));
+    let tmp_path = dir.join(format!("{base}.epub.partial"));
 
-    // IR route: KFX bytes → Book → EPUB, off the `.kfx` import wrote.
-    // `from_bytes` is the container parse (the `load` phase);
-    // `export_with_progress` emits content/resources/nav/finalize.
-    let kfx_bytes = std::fs::read(source_path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
+    // IR route: the `.kfx` import wrote → Book → EPUB. `open_format` is the
+    // container parse (the `load` phase), reading each entity's payload off the
+    // file as the export asks for it; `export_with_progress` emits
+    // content/resources/nav/finalize straight into the output file.
     on_progress("load", 0, 1, "Reading KFX");
-    let mut handle = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
-        .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load): {e}"))?;
-    let mut buf = std::io::Cursor::new(Vec::new());
-    handle
-        .export_with_progress(bokai::Format::Epub, &mut buf, on_progress)
-        .map_err(|e| anyhow::anyhow!("bokai kfx→epub: {e}"))?;
-    let epub_bytes = buf.into_inner();
-    write_bytes_atomic(&out_path, &epub_bytes)?;
+    let mut handle = bokai::Book::open_format(source_path, bokai::Format::Kfx)
+        .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load {}): {e}", source_path.display()))?;
+    let mut writer = File::create(&tmp_path)
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
+    let exported = handle.export_with_progress(bokai::Format::Epub, &mut writer, on_progress);
+    writer.sync_all().ok();
+    drop(writer);
+    if let Err(e) = exported {
+        // The half-written `.partial` is removed.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(anyhow::anyhow!("bokai kfx→epub: {e}"));
+    }
+    std::fs::rename(&tmp_path, &out_path).map_err(|e| {
+        anyhow::anyhow!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            out_path.display()
+        )
+    })?;
 
     // Cover sidecar: a plain copy out of the produced zip, whose manifest entry
     // the exporter marked `cover-image` and whose JXR it transcoded to JPG.
-    let cover_path = extract_cover_from_epub(&epub_bytes).and_then(|(bytes, ext)| {
+    let cover_path = extract_cover_from_epub_file(&out_path).and_then(|(bytes, ext)| {
         let out = paths.cover(&book.sha256, ext);
         std::fs::write(&out, &bytes).ok().map(|_| out)
     });

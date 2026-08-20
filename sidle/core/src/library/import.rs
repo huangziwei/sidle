@@ -668,11 +668,22 @@ fn write_cover_from_epub_bytes(
     Some(out)
 }
 
-/// Pull the cover bytes (and extension) out of an in-memory EPUB. Used both
-/// for direct EPUB imports and by the worker after `kfx_to_epub` produces an
-/// EPUB whose JXR cover has been transcoded to JPG.
+/// Pull the cover bytes (and extension) out of an in-memory EPUB, for a caller
+/// holding the whole file.
 pub fn extract_cover_from_epub(epub_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    let mut book = bokai::Book::from_bytes(epub_bytes, bokai::Format::Epub).ok()?;
+    epub_cover_asset(bokai::Book::from_bytes(epub_bytes, bokai::Format::Epub).ok()?)
+}
+
+/// Pull the cover bytes (and extension) out of an EPUB on disk, holding only
+/// the zip index and the cover asset. The route the worker takes after
+/// `kfx_to_epub` produces an EPUB whose JXR cover has been transcoded to JPG.
+pub fn extract_cover_from_epub_file(epub_path: &Path) -> Option<(Vec<u8>, &'static str)> {
+    epub_cover_asset(bokai::Book::open_format(epub_path, bokai::Format::Epub).ok()?)
+}
+
+/// The asset an EPUB's metadata names as its cover, with the extension its
+/// href carries. `None` for a book that names none.
+fn epub_cover_asset(mut book: bokai::Book) -> Option<(Vec<u8>, &'static str)> {
     let cref = book.metadata().cover_image.as_deref()?.to_string();
     if cref.is_empty() {
         return None;
@@ -985,19 +996,18 @@ struct Azw3Derived {
 /// export ran on — keeping it the same artifact as `bokai convert <azw3> <kfx>`
 /// produces.
 fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Azw3Derived> {
-    let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
-
     on_progress("epub/parse", 0, 1, "Reading AZW3");
-    let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
+    let mut book = bokai::Book::open_format(src, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
     bokai::EpubExporter::new()
         .export_with_progress(&mut book, &mut buf, &leg("epub/", on_progress))
         .context("azw3 -> epub export")?;
     let epub_bytes = buf.into_inner();
+    drop(book);
 
     on_progress("kfx/parse", 0, 1, "Reading AZW3");
-    let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
+    let mut book = bokai::Book::open_format(src, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut kfx_buf = Cursor::new(Vec::<u8>::new());
     book.export_with_progress(bokai::Format::Kfx, &mut kfx_buf, &leg("kfx/", on_progress))
@@ -1018,9 +1028,8 @@ fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> R
 /// exported EPUB (mobi→kfx direct hasn't been through the fidelity harness
 /// the azw3 pairs have).
 fn convert_mobi(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Vec<u8>> {
-    let mobi_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
     on_progress("epub/parse", 0, 1, "Reading MOBI");
-    let mut book = bokai::Book::from_bytes(&mobi_bytes, bokai::Format::Mobi)
+    let mut book = bokai::Book::open_format(src, bokai::Format::Mobi)
         .with_context(|| format!("parse mobi {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
     bokai::EpubExporter::new()

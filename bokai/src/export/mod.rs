@@ -44,8 +44,8 @@ pub use epub::synth::{
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_links,
 };
 pub use epub::{
-    Assets, EpubConfig, EpubExporter, EpubPackage, PackageAsset, PackageDocument, PackageOptions,
-    build_package,
+    AssetSink, Assets, EpubConfig, EpubExporter, EpubPackage, PackageAsset, PackageDocument,
+    PackageOptions, build_package, build_package_into,
 };
 pub use epub::{
     ChapterContent, GlobalStylePool, NormalizedContent, SourceElements, normalize_book,

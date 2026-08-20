@@ -226,6 +226,7 @@ pub fn normalize_book_with(
     source_elements: SourceElements,
 ) -> io::Result<NormalizedContent> {
     let spine: Vec<_> = book.spine().to_vec();
+    let max_workers = book.max_workers();
 
     // =========================================================================
     // Pass 1: Load all chapters and merge styles
@@ -485,7 +486,7 @@ pub fn normalize_book_with(
             .map(|(id, sp, _)| book.chapter_title(*id).unwrap_or(sp).to_string())
             .collect();
         let jobs: Vec<usize> = (0..ir_chapters.len()).collect();
-        let emitted = crate::util::parallel_map(&jobs, |&idx| {
+        let emitted = crate::util::parallel_map(&jobs, max_workers, |&idx| {
             let (_, _, ir) = &ir_chapters[idx];
             let resolver = |href: &str| -> LinkOutcome {
                 link_map.get(href).cloned().unwrap_or(LinkOutcome::DropHref)

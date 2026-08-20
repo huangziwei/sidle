@@ -388,6 +388,10 @@ pub struct Book {
     /// channels are identical (a grayscale source) to `8bppGray`, so only
     /// genuinely-color images carry chroma. Set via [`Book::set_image_color_mode`].
     image_color_mode: jxr::ColorMode,
+    /// Worker-thread cap for every parallel stage of an import or export off
+    /// this handle. `0` = the platform's reported parallelism. Set via
+    /// [`Book::set_max_workers`].
+    max_workers: usize,
 }
 
 impl Format {
@@ -495,14 +499,23 @@ impl Book {
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
             image_color_mode: jxr::ColorMode::Color,
+            max_workers: 0,
         })
     }
 
-    /// Create a Book from in-memory bytes with an explicit format.
+    /// Create a Book from borrowed in-memory bytes with an explicit format,
+    /// copying them into the handle. A caller that owns its bytes hands them
+    /// over with [`Book::from_vec`] and pays no copy.
+    pub fn from_bytes(data: &[u8], format: Format) -> io::Result<Self> {
+        Self::from_vec(data.to_vec(), format)
+    }
+
+    /// Create a Book from owned in-memory bytes with an explicit format,
+    /// taking the buffer as the handle's byte source.
     ///
     /// This is useful for reading from stdin or other non-file sources.
-    pub fn from_bytes(data: &[u8], format: Format) -> io::Result<Self> {
-        let source: Arc<dyn crate::io::ByteSource> = Arc::new(MemorySource::new(data.to_vec()));
+    pub fn from_vec(data: Vec<u8>, format: Format) -> io::Result<Self> {
+        let source: Arc<dyn crate::io::ByteSource> = Arc::new(MemorySource::new(data));
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::from_source(source)?),
             Format::Azw3 => Box::new(Azw3Importer::from_source(source)?),
@@ -529,6 +542,7 @@ impl Book {
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
             image_color_mode: jxr::ColorMode::Color,
+            max_workers: 0,
         })
     }
 
@@ -553,9 +567,27 @@ impl Book {
         self.meta_override = Some(meta);
     }
 
-    /// How raster images are encoded into a KFX export (default `Grayscale`).
+    /// How raster images are encoded into a KFX export (default `Color`).
     pub fn image_color_mode(&self) -> jxr::ColorMode {
         self.image_color_mode
+    }
+
+    /// Cap the worker threads any one parallel stage of an import or export
+    /// may run at once; `0` restores the platform's reported parallelism.
+    ///
+    /// Every worker holds one job's working set — a decoded image, a
+    /// chapter's DOM — so this is the knob that bounds a conversion's peak
+    /// memory. A host with cores to spare leaves it alone; a caller working
+    /// inside a few hundred megabytes sets it low.
+    pub fn set_max_workers(&mut self, workers: usize) {
+        self.max_workers = workers;
+        self.backend.set_max_workers(workers);
+    }
+
+    /// The worker cap in force, `0` for the platform's reported parallelism.
+    /// See [`Book::set_max_workers`].
+    pub fn max_workers(&self) -> usize {
+        self.max_workers
     }
 
     /// Choose how raster images are encoded into a KFX export. `Grayscale`

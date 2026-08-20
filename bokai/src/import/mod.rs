@@ -191,6 +191,11 @@ pub trait Importer: Send + Sync {
         ids.iter().map(|id| self.load_chapter(*id)).collect()
     }
 
+    /// Cap the worker threads this importer's parallel stages may run at
+    /// once, `0` for the platform's reported parallelism. The default ignores
+    /// it: an importer with no parallel stage has nothing to bound.
+    fn set_max_workers(&mut self, _workers: usize) {}
+
     // --- Track 2: Raw Access (The Converter) ---
 
     /// Returns the internal source path for a chapter (e.g., "OEBPS/text/ch01.xhtml").

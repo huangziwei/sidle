@@ -102,13 +102,38 @@ pub struct PackageAsset {
     /// that failed to decode passes through as `image/jxr` despite its name);
     /// the source's declared type otherwise.
     pub media_type: String,
-    /// Declared pixel size, when the source states one and the build did not
-    /// load the bytes. A consumer reserves layout space from this.
+    /// Pixel size: read out of the bytes on a build that loaded them, taken
+    /// from the source's declaration on one that did not. A consumer reserves
+    /// layout space from this.
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// `None` when the build only described the assets — see [`Assets`]. An
-    /// empty vector means a load was attempted and failed.
+    /// `None` on a build that only described the assets — see [`Assets`] — and
+    /// on one whose bytes left through an [`AssetSink`].
     pub bytes: Option<Vec<u8>>,
+}
+
+/// Where a build sends each asset's bytes.
+///
+/// [`build_package_into`] hands over one asset at a time, in manifest
+/// registration order, and keeps only the description in the package it
+/// returns. A sink that writes straight into the container leaves one
+/// transcode chunk resident; the whole image payload never is.
+pub trait AssetSink {
+    /// Take one asset's post-transcode bytes. `asset` describes them and is
+    /// the entry that reaches the package and the manifest.
+    fn take(&mut self, asset: &PackageAsset, bytes: Vec<u8>) -> io::Result<()>;
+}
+
+/// The [`AssetSink`] behind [`build_package`]: every asset's bytes, in the
+/// order they were produced, for the caller to put back on the package.
+#[derive(Default)]
+struct CollectAssets(Vec<Vec<u8>>);
+
+impl AssetSink for CollectAssets {
+    fn take(&mut self, _asset: &PackageAsset, bytes: Vec<u8>) -> io::Result<()> {
+        self.0.push(bytes);
+        Ok(())
+    }
 }
 
 /// One spine document of a built package.
@@ -519,58 +544,43 @@ impl EpubExporter {
     /// order is `content → resources → nav → finalize`: `load_assets`
     /// transcodes inline, so the manifest already knows each image's
     /// post-transcode MIME by the time it is written.
+    ///
+    /// Each asset goes into the container as it comes off the transcode. The
+    /// export's resident image bytes are one chunk.
     fn export_normalized<W: Write + Seek>(
         &self,
         book: &mut Book,
         writer: &mut W,
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
-        // A shipped container never carries source element ids.
-        let package = build_package(book, PackageOptions::container(), on_progress)?;
-        self.write_package(&package, writer)
+        let opts = ContainerOptions::new(&self.config);
+        let mut zip = ZipWriter::new(writer);
+        start_container(&mut zip, &opts)?;
+        let package = {
+            let mut sink = ZipAssets {
+                zip: &mut zip,
+                opts: &opts,
+            };
+            // A shipped container never carries source element ids.
+            build_package_into(book, PackageOptions::container(), &mut sink, on_progress)?
+        };
+        finish_container(&mut zip, &package, &opts)?;
+        zip.finish().map_err(io_error)?;
+        Ok(())
     }
 
     /// Write a built package into an EPUB container.
     ///
-    /// The OEBPS payload goes in manifest registration order — assets,
-    /// stylesheet, chapters, titlepage last — the same file order the
-    /// calibre's `finalize` walks, so the container is byte-identical to
-    /// calibre's, not merely entry-identical. Already-compressed image
-    /// types are `Stored`: deflate over them gains <5% at ~10-15 ms per MB,
-    /// most of an image-heavy book's export cost.
+    /// Each member is byte-identical to calibre's; the zip entry order is
+    /// [`finish_container`]'s, and a reader takes entries by name.
     pub fn write_package<W: Write + Seek>(
         &self,
         package: &EpubPackage,
         writer: &mut W,
     ) -> io::Result<()> {
+        let opts = ContainerOptions::new(&self.config);
         let mut zip = ZipWriter::new(writer);
-
-        let compression_level = self.config.compression_level.unwrap_or(6);
-        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        let deflated = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .compression_level(Some(compression_level as i64));
-
-        // mimetype must be first and uncompressed.
-        zip.start_file("mimetype", stored).map_err(io_error)?;
-        zip.write_all(b"application/epub+zip")?;
-
-        zip.start_file("META-INF/container.xml", deflated)
-            .map_err(io_error)?;
-        zip.write_all(CONTAINER_XML)?;
-
-        zip.start_file("OEBPS/content.opf", deflated)
-            .map_err(io_error)?;
-        zip.write_all(package.opf.as_bytes())?;
-
-        zip.start_file("OEBPS/nav.xhtml", deflated)
-            .map_err(io_error)?;
-        zip.write_all(package.nav.as_bytes())?;
-
-        zip.start_file("OEBPS/toc.ncx", deflated)
-            .map_err(io_error)?;
-        zip.write_all(package.ncx.as_bytes())?;
-
+        start_container(&mut zip, &opts)?;
         for asset in &package.assets {
             // A described-only package names assets it never loaded. Writing
             // it would produce a container whose manifest promises files it
@@ -582,49 +592,126 @@ impl EpubExporter {
                     asset.href
                 )));
             };
-            if bytes.is_empty() {
-                continue;
-            }
-            let opts = if is_precompressed_mime(&asset.media_type) {
-                stored
-            } else {
-                deflated
-            };
-            let zip_path = format!("OEBPS/{}", sanitize_path(&asset.href));
-            zip.start_file(&zip_path, opts).map_err(io_error)?;
-            zip.write_all(bytes)?;
+            write_asset(&mut zip, &opts, asset, bytes)?;
         }
-
-        if !package.css.is_empty() {
-            zip.start_file("OEBPS/style.css", deflated)
-                .map_err(io_error)?;
-            zip.write_all(package.css.as_bytes())?;
-        }
-
-        for (i, doc) in package.documents.iter().enumerate() {
-            // ONE cover in the shipped container: the titlepage below is the
-            // page that fills a foreign reader's viewport, so the source's own
-            // cover page goes (see `EpubPackage::redundant_cover`).
-            if Some(i) == package.redundant_cover {
-                continue;
-            }
-            let zip_path = format!("OEBPS/{}", doc.href);
-            zip.start_file(&zip_path, deflated).map_err(io_error)?;
-            zip.write_all(doc.xhtml.as_bytes())?;
-        }
-
-        if let Some(xhtml) = &package.titlepage {
-            zip.start_file("OEBPS/cover.xhtml", deflated)
-                .map_err(io_error)?;
-            zip.write_all(xhtml.as_bytes())?;
-        }
-
+        finish_container(&mut zip, package, &opts)?;
         zip.finish().map_err(io_error)?;
         Ok(())
     }
 }
 
-/// Build a normalized book into EPUB shape without writing a container.
+/// The zip entry options an EPUB container is written with.
+struct ContainerOptions {
+    stored: SimpleFileOptions,
+    deflated: SimpleFileOptions,
+}
+
+impl ContainerOptions {
+    fn new(config: &EpubConfig) -> Self {
+        let compression_level = config.compression_level.unwrap_or(6);
+        Self {
+            stored: SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            deflated: SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .compression_level(Some(compression_level as i64)),
+        }
+    }
+}
+
+/// The two entries every EPUB opens with.
+fn start_container<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    opts: &ContainerOptions,
+) -> io::Result<()> {
+    // mimetype must be first and uncompressed.
+    zip.start_file("mimetype", opts.stored).map_err(io_error)?;
+    zip.write_all(b"application/epub+zip")?;
+
+    zip.start_file("META-INF/container.xml", opts.deflated)
+        .map_err(io_error)?;
+    zip.write_all(CONTAINER_XML)?;
+    Ok(())
+}
+
+/// One asset entry. An image type carrying its own compression is `Stored`:
+/// deflate over it gains <5% at ~10-15 ms per MB, most of an image-heavy
+/// book's export cost.
+fn write_asset<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    opts: &ContainerOptions,
+    asset: &PackageAsset,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let method = if is_precompressed_mime(&asset.media_type) {
+        opts.stored
+    } else {
+        opts.deflated
+    };
+    let zip_path = format!("OEBPS/{}", sanitize_path(&asset.href));
+    zip.start_file(&zip_path, method).map_err(io_error)?;
+    zip.write_all(bytes)?;
+    Ok(())
+}
+
+/// Everything after the assets, in manifest registration order: package
+/// document, navigation, stylesheet, spine documents, titlepage last.
+fn finish_container<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    package: &EpubPackage,
+    opts: &ContainerOptions,
+) -> io::Result<()> {
+    zip.start_file("OEBPS/content.opf", opts.deflated)
+        .map_err(io_error)?;
+    zip.write_all(package.opf.as_bytes())?;
+
+    zip.start_file("OEBPS/nav.xhtml", opts.deflated)
+        .map_err(io_error)?;
+    zip.write_all(package.nav.as_bytes())?;
+
+    zip.start_file("OEBPS/toc.ncx", opts.deflated)
+        .map_err(io_error)?;
+    zip.write_all(package.ncx.as_bytes())?;
+
+    if !package.css.is_empty() {
+        zip.start_file("OEBPS/style.css", opts.deflated)
+            .map_err(io_error)?;
+        zip.write_all(package.css.as_bytes())?;
+    }
+
+    for (i, doc) in package.documents.iter().enumerate() {
+        // ONE cover in the shipped container: the titlepage below is the
+        // page that fills a foreign reader's viewport, so the source's own
+        // cover page goes (see `EpubPackage::redundant_cover`).
+        if Some(i) == package.redundant_cover {
+            continue;
+        }
+        let zip_path = format!("OEBPS/{}", doc.href);
+        zip.start_file(&zip_path, opts.deflated).map_err(io_error)?;
+        zip.write_all(doc.xhtml.as_bytes())?;
+    }
+
+    if let Some(xhtml) = &package.titlepage {
+        zip.start_file("OEBPS/cover.xhtml", opts.deflated)
+            .map_err(io_error)?;
+        zip.write_all(xhtml.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// The [`AssetSink`] that writes each asset straight into the container.
+struct ZipAssets<'a, W: Write + Seek> {
+    zip: &'a mut ZipWriter<W>,
+    opts: &'a ContainerOptions,
+}
+
+impl<W: Write + Seek> AssetSink for ZipAssets<'_, W> {
+    fn take(&mut self, asset: &PackageAsset, bytes: Vec<u8>) -> io::Result<()> {
+        write_asset(self.zip, self.opts, asset, &bytes)
+    }
+}
+
+/// Build a normalized book into EPUB shape without writing a container,
+/// keeping every asset's bytes on the package it returns.
 ///
 /// This is the whole normalized pipeline — chapter synthesis, style
 /// unification, asset transcode, package document, navigation — stopping
@@ -633,6 +720,23 @@ impl EpubExporter {
 pub fn build_package(
     book: &mut Book,
     opts: PackageOptions,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> io::Result<EpubPackage> {
+    let mut collected = CollectAssets::default();
+    let mut package = build_package_into(book, opts, &mut collected, on_progress)?;
+    for (asset, bytes) in package.assets.iter_mut().zip(collected.0) {
+        asset.bytes = Some(bytes);
+    }
+    Ok(package)
+}
+
+/// [`build_package`] with each asset's bytes sent to `sink`. The assets on the
+/// returned package carry their href, media type and pixel size with
+/// `bytes: None`.
+pub fn build_package_into(
+    book: &mut Book,
+    opts: PackageOptions,
+    sink: &mut dyn AssetSink,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<EpubPackage> {
     /// Assets described from the importer's declared manifest, in the given
@@ -665,6 +769,38 @@ pub fn build_package(
                 }
             })
             .collect()
+    }
+
+    /// Describe one loaded asset and hand its bytes to `sink`. `None` for an
+    /// asset that came back empty: the load failed, and an entry the manifest
+    /// names without a file behind it is a container defect (RSC-001).
+    fn describe_loaded(
+        href: String,
+        bytes: Vec<u8>,
+        sink: &mut dyn AssetSink,
+    ) -> io::Result<Option<PackageAsset>> {
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
+        // failed to decode passes through as image/jxr despite its .jpg name).
+        // Extension guess covers unsniffable formats (SVG).
+        let media_type = sniff_image_media_type(&bytes)
+            .map(str::to_string)
+            .unwrap_or_else(|| guess_media_type(&href));
+        let (width, height) = match crate::util::extract_image_dimensions(&bytes) {
+            Some((w, h)) => (Some(w), Some(h)),
+            None => (None, None),
+        };
+        let asset = PackageAsset {
+            href,
+            media_type,
+            width,
+            height,
+            bytes: None,
+        };
+        sink.take(&asset, bytes)?;
+        Ok(Some(asset))
     }
 
     {
@@ -783,30 +919,16 @@ pub fn build_package(
                     .collect();
                 return_described(asset_list, &declared)
             } else {
-                let workers = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4);
-                let chunk_size = (workers * 2).max(1);
+                let chunk_size = (crate::util::resolve_workers(book.max_workers()) * 2).max(1);
                 let mut loaded: Vec<PackageAsset> = Vec::with_capacity(total);
                 let mut done = 0usize;
                 for chunk in asset_list.chunks(chunk_size) {
                     for (path, bytes) in chunk.iter().zip(book.load_assets(chunk)) {
-                        let bytes = bytes.unwrap_or_default();
                         let href = path.to_string_lossy().to_string();
-                        // Sniff first: post-transcode bytes are the truth (a
-                        // JPEG-XR that failed to decode passes through as
-                        // image/jxr despite its .jpg name). Extension guess
-                        // covers unsniffable formats (SVG).
-                        let media_type = sniff_image_media_type(&bytes)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| guess_media_type(&href));
-                        loaded.push(PackageAsset {
-                            href,
-                            media_type,
-                            width: None,
-                            height: None,
-                            bytes: Some(bytes),
-                        });
+                        if let Some(asset) = describe_loaded(href, bytes.unwrap_or_default(), sink)?
+                        {
+                            loaded.push(asset);
+                        }
                     }
                     done += chunk.len();
                     on_progress("resources", done, total, "Decoding images");
@@ -838,24 +960,16 @@ pub fn build_package(
             {
                 asset_paths.push(cover.clone());
             }
-            asset_paths
-                .into_iter()
-                .map(|path| {
-                    let bytes = book
-                        .load_asset(std::path::Path::new(&path))
-                        .unwrap_or_default();
-                    let media_type = sniff_image_media_type(&bytes)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| guess_media_type(&path));
-                    PackageAsset {
-                        href: path,
-                        media_type,
-                        width: None,
-                        height: None,
-                        bytes: Some(bytes),
-                    }
-                })
-                .collect()
+            let mut loaded: Vec<PackageAsset> = Vec::with_capacity(asset_paths.len());
+            for path in asset_paths {
+                let bytes = book
+                    .load_asset(std::path::Path::new(&path))
+                    .unwrap_or_default();
+                if let Some(asset) = describe_loaded(path, bytes, sink)? {
+                    loaded.push(asset);
+                }
+            }
+            loaded
         };
         for asset in &asset_bytes {
             let href = sanitize_path(&asset.href);
@@ -904,8 +1018,8 @@ pub fn build_package(
 
         // 4. Build titlepage from the cover (same rationale as export_raw —
         // Apple Books needs a spine-positioned cover doc to render the cover
-        // page in the reading flow). Asset bytes are already pre-loaded above
-        // for MIME sniffing, so we don't pay a second `load_asset`.
+        // page in the reading flow). The `viewBox` reads the cover's pixel size
+        // off its `PackageAsset`, at no second `load_asset`.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         if let Some(cid) = &cover_id
             && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
@@ -926,8 +1040,7 @@ pub fn build_package(
                 let dims = asset_bytes
                     .iter()
                     .find(|a| sanitize_path(&a.href) == item.href)
-                    .and_then(|a| a.bytes.as_deref())
-                    .and_then(crate::util::extract_image_dimensions);
+                    .and_then(|a| Some((a.width?, a.height?)));
                 build_titlepage(&item.href, dims)
             })
         } else {

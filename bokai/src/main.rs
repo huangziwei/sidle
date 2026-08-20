@@ -70,12 +70,19 @@ enum Command {
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
 
-        /// Skip the native EPUB validator gate on EPUB output. By default any
-        /// `→ epub` conversion validates its output and exits non-zero on
+        /// Skip the native EPUB validator pass on EPUB output. By default any
+        /// `→ epub` conversion validates what it wrote and prints the
         /// error-level findings (so a broken EPUB never leaves the tool
-        /// unnoticed); pass this to emit the bytes regardless.
+        /// unnoticed); the conversion succeeds either way.
         #[arg(long = "no-validate")]
         no_validate: bool,
+
+        /// Worker threads any one parallel stage may run at once (chapter
+        /// build, image transcode, document synthesis). Each worker holds one
+        /// job's working set, so this bounds peak memory as well as CPU
+        /// share. Default 0 = every core the platform reports.
+        #[arg(short = 'j', long = "max-workers", default_value_t = 0)]
+        max_workers: usize,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -368,7 +375,7 @@ fn as_epub(input: &str) -> Result<Vec<u8>, String> {
     if !format.can_import() {
         return Err(format!("{input}: {format:?} can't be read as a book"));
     }
-    let mut book = Book::from_bytes(&bytes, format).map_err(|e| format!("read {input}: {e}"))?;
+    let mut book = Book::from_vec(bytes, format).map_err(|e| format!("read {input}: {e}"))?;
     let mut epub = std::io::Cursor::new(Vec::new());
     bokai::EpubExporter::new()
         .export(&mut book, &mut epub)
@@ -595,6 +602,7 @@ fn main() -> ExitCode {
             ppd,
             writing_mode,
             no_validate,
+            max_workers,
         } => convert(
             &input,
             output.as_deref(),
@@ -605,6 +613,7 @@ fn main() -> ExitCode {
             ppd.as_deref(),
             writing_mode.as_deref(),
             !no_validate,
+            max_workers,
         ),
         Command::Dump {
             file,
@@ -1703,6 +1712,49 @@ fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
     }
 }
 
+/// Export `book` and, for an EPUB, run [`report_epub_validation`] over what was
+/// written.
+///
+/// A file sink takes the container's entries as the exporter produces them;
+/// `book` is dropped, and the validator reads the result back from disk. The
+/// export's working set and the validator's are never resident together.
+/// Stdout is not seekable: that route assembles the container in memory.
+fn write_export(
+    mut book: Book,
+    output_format: Format,
+    output: Option<&str>,
+    to_stdout: bool,
+    validate_epub: bool,
+    quiet: bool,
+) -> Result<(), String> {
+    if to_stdout {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        book.export(output_format, &mut cursor)
+            .map_err(|e| format!("Conversion failed: {e}"))?;
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(cursor.get_ref())
+            .map_err(|e| format!("Write failed: {e}"))?;
+        report_epub_validation(cursor.get_ref(), validate_epub, quiet);
+        return Ok(());
+    }
+
+    let output_path = output.ok_or("Output path required")?;
+    let mut file =
+        std::fs::File::create(output_path).map_err(|e| format!("Failed to create output: {e}"))?;
+    book.export(output_format, &mut file)
+        .map_err(|e| format!("Conversion failed: {e}"))?;
+    drop(file);
+    drop(book);
+
+    if validate_epub {
+        let bytes =
+            std::fs::read(output_path).map_err(|e| format!("read back {output_path}: {e}"))?;
+        report_epub_validation(&bytes, validate_epub, quiet);
+    }
+    Ok(())
+}
+
 /// Report the error-level findings a book-mutating edit *introduced* (the
 /// differential gate: a wild book stays wild, but an edit must not add a
 /// defect). Non-blocking, like every other validation seam — the edited file is
@@ -1738,6 +1790,7 @@ fn convert(
     ppd: Option<&str>,
     writing_mode: Option<&str>,
     validate: bool,
+    max_workers: usize,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1825,32 +1878,20 @@ fn convert(
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
     {
-        let kfx_bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
-        if bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
+        let source = std::fs::File::open(input)
+            .and_then(bokai::io::FileSource::new)
+            .map_err(|e| format!("Failed to read input: {e}"))?;
+        if bokai::formats::kfx::pdf_container::source_is_pdf_backed(&source) {
             return Err(
                 "this KFX is a PDF-backed container; extract it with a .pdf output \
                  (e.g. `bokai convert in.kfx out.pdf`), not EPUB"
                     .to_string(),
             );
         }
-        let bytes = {
-            let mut book = Book::from_bytes(&kfx_bytes, Format::Kfx)
-                .map_err(|e| format!("Failed to open input: {e}"))?;
-            let mut cursor = std::io::Cursor::new(Vec::new());
-            book.export(Format::Epub, &mut cursor)
-                .map_err(|e| format!("Conversion failed: {e}"))?;
-            cursor.into_inner()
-        };
-        if to_stdout {
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(&bytes)
-                .map_err(|e| format!("Write failed: {e}"))?;
-        } else {
-            std::fs::write(output.unwrap(), &bytes)
-                .map_err(|e| format!("Failed to write output: {e}"))?;
-        }
-        report_epub_validation(&bytes, validate, quiet);
+        let mut book = Book::open_format(input, Format::Kfx)
+            .map_err(|e| format!("Failed to open input: {e}"))?;
+        book.set_max_workers(max_workers);
+        write_export(book, Format::Epub, output, to_stdout, validate, quiet)?;
         if !quiet && !to_stdout {
             eprintln!("Done.");
         }
@@ -1926,7 +1967,7 @@ fn convert(
         std::io::stdin()
             .read_to_end(&mut data)
             .map_err(|e| format!("Failed to read stdin: {e}"))?;
-        Book::from_bytes(&data, input_format.unwrap())
+        Book::from_vec(data, input_format.unwrap())
             .map_err(|e| format!("Failed to parse input: {e}"))?
     } else {
         let fmt = input_format.or_else(|| Format::from_path(input));
@@ -1936,6 +1977,7 @@ fn convert(
             Book::open(input).map_err(|e| format!("Failed to open input: {e}"))?
         }
     };
+    book.set_max_workers(max_workers);
 
     // Force the writing mode via a metadata override (EPUB → KFX) — the same
     // `Book::set_metadata` hook an embedding caller uses to bake its own edited
@@ -1949,37 +1991,9 @@ fn convert(
     }
 
     // Validate only EPUB output; a `→ kfx`/`→ md`/`→ txt` conversion is out of
-    // this validator's scope. When validating an EPUB to a file we must buffer
-    // the output to run the check, so only take that path when it applies —
-    // other formats keep streaming straight to disk.
+    // this validator's scope.
     let validate_epub = validate && output_format == Format::Epub;
-    if to_stdout {
-        // Write to stdout (already buffered so stdout gets one write).
-        let mut stdout = std::io::stdout();
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        book.export(output_format, &mut cursor)
-            .map_err(|e| format!("Conversion failed: {e}"))?;
-        use std::io::Write;
-        stdout
-            .write_all(cursor.get_ref())
-            .map_err(|e| format!("Write failed: {e}"))?;
-        report_epub_validation(cursor.get_ref(), validate_epub, quiet);
-    } else if validate_epub {
-        // Buffer so the produced EPUB can be validated after it is written.
-        let output_path = output.unwrap();
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        book.export(output_format, &mut cursor)
-            .map_err(|e| format!("Conversion failed: {e}"))?;
-        let bytes = cursor.into_inner();
-        std::fs::write(output_path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
-        report_epub_validation(&bytes, validate_epub, quiet);
-    } else {
-        let output_path = output.unwrap();
-        let mut file = std::fs::File::create(output_path)
-            .map_err(|e| format!("Failed to create output: {e}"))?;
-        book.export(output_format, &mut file)
-            .map_err(|e| format!("Conversion failed: {e}"))?;
-    }
+    write_export(book, output_format, output, to_stdout, validate_epub, quiet)?;
 
     if !quiet && !to_stdout {
         eprintln!("Done.");

@@ -10,10 +10,11 @@
 
 use super::container::{
     EntityLoc, entity_media, parse_container_header, parse_container_info, parse_entity,
-    parse_index_table,
+    parse_index_table, skip_enty_header,
 };
-use super::ion::IonValue;
+use super::ion::{IonParser, IonValue};
 use super::symbols::KfxSymbol;
+use crate::io::ByteSource;
 
 /// PDF file magic.
 const PDF_MAGIC: &[u8] = b"%PDF-";
@@ -99,6 +100,44 @@ pub fn kfx_is_pdf_backed(kfx: &[u8]) -> bool {
     ents.iter()
         .filter(|e| e.type_id == ext_type)
         .any(|e| parse_entity(kfx, e).as_ref().is_some_and(is_pdf_resource))
+}
+
+/// [`kfx_is_pdf_backed`] over a random-access source, reading the container
+/// header, its index table and the `external_resource` fragments alone.
+///
+/// A routing question is worth those few kilobytes and never the whole file:
+/// the caller that asks it is about to open the book, and a manga answers it
+/// off a container whose embedded images run to tens of megabytes.
+pub fn source_is_pdf_backed(source: &dyn ByteSource) -> bool {
+    let Some(ents) = source_entities(source) else {
+        return false;
+    };
+    let ext_type = KfxSymbol::ExternalResource as u32;
+    ents.iter().filter(|e| e.type_id == ext_type).any(|e| {
+        source
+            .read_at(e.offset as u64, e.length)
+            .ok()
+            .and_then(|raw| IonParser::new(skip_enty_header(&raw)).parse().ok())
+            .as_ref()
+            .is_some_and(is_pdf_resource)
+    })
+}
+
+/// [`entities`] read through a byte source.
+fn source_entities(source: &dyn ByteSource) -> Option<Vec<EntityLoc>> {
+    // `parse_container_header` reads the fixed 18-byte `CONT` header.
+    let head = source.read_at(0, 18).ok()?;
+    let header = parse_container_header(&head).ok()?;
+    let info_bytes = source
+        .read_at(
+            header.container_info_offset as u64,
+            header.container_info_length,
+        )
+        .ok()?;
+    let info = parse_container_info(&info_bytes).ok()?;
+    let (idx_off, idx_len) = info.index?;
+    let idx_bytes = source.read_at(idx_off as u64, idx_len).ok()?;
+    Some(parse_index_table(&idx_bytes, header.header_len))
 }
 
 /// Extract the embedded PDF from a PDF-backed KFX, verbatim.
