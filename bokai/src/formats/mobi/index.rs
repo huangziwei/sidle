@@ -1308,9 +1308,9 @@ pub fn build_ncx_indx(entries: &[NcxBuildEntry]) -> io::Result<IndxAndCncxRecord
     ];
     // libmobi / Kindle compute control_byte_count from the TAGX itself by
     // counting EOF-terminator entries. NCX TAGX has exactly one EOF, so the
-    // entry uses one control byte. Using 2 here previously produced a
-    // "Wrong count of control bytes: 2 != 1" parse failure and Kindle
-    // refused to open the file as corrupt.
+    // entry uses one control byte. Pass 2 and the parse fails with
+    // "Wrong count of control bytes: 2 != 1", and Kindle refuses the file as
+    // corrupt.
     let mut builder = IndxBuilder::new(tagx, 1);
 
     // Build CNCX with labels

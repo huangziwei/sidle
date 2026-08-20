@@ -1,7 +1,7 @@
 //! Relocate the library to a new root, or adopt one that already lives
 //! elsewhere. The copy is a consistent DB snapshot (`VACUUM INTO`, so it's
 //! transactionally consistent and WAL-free even while the conversion queue /
-//! device monitor write concurrently — the §3 H1 hazard) plus the `books/`
+//! device monitor write concurrently) plus the `books/`
 //! tree. Copy, not move, so a failure is non-destructive.
 //!
 //! Nothing here touches the source or the root pointer: the Tauri command layer

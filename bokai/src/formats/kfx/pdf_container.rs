@@ -322,9 +322,7 @@ mod tests {
             "text page: image + text storyline"
         );
         // auxiliary_data is one `<section>-ad` per page stating `page_rotation`,
-        // and nothing else — a text layer adds none. (Earlier builds emitted a
-        // `text_baseline` per run and a `links_extracted` per page; Amazon emits
-        // neither, and nothing read them back.)
+        // and nothing else — a text layer adds none.
         assert_eq!(
             count(&with_text, aux),
             count(&without, aux),

@@ -1,4 +1,4 @@
-//! Regression: a table cell's `colspan` / `rowspan` survives EPUB → KFX → EPUB.
+//! A table cell's `colspan` / `rowspan` survives EPUB → KFX → EPUB.
 //!
 //! A cell has no element type of its own in KFX — it is whatever `type` its
 //! content wants, sitting in a `table_row`'s content list — so its span rides

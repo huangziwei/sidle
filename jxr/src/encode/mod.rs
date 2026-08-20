@@ -2805,12 +2805,12 @@ mod tests {
         }
     }
 
-    /// Scaled-mode LOSSY quantization regression: the QP→scaling-factor map
-    /// is mode-dependent (decoder `quant_map` scaled branch; chroma DC/LP one
+    /// Scaled-mode LOSSY quantization: the QP→scaling-factor map is
+    /// mode-dependent (decoder `quant_map` scaled branch; chroma DC/LP one
     /// order below luma), so a scaled lossy encode must land in the same
-    /// quality regime as the unscaled one at the same QP — not garbage.
-    /// (The 4b scaled gates were all lossless-exactness or decoder-agreement;
-    /// this pins the lossy fidelity that those could not see.)
+    /// quality regime as the unscaled one at the same QP — not garbage. The
+    /// other scaled tests gate lossless exactness or decoder agreement, and
+    /// neither of those sees lossy fidelity.
     #[test]
     fn scaled_lossy_quantizes_with_scaled_factors() {
         use crate::decode::container::parse;
@@ -3662,8 +3662,8 @@ mod tests {
         }
     }
 
-    /// 7a coherence fix: `chroma_qp` applies to the 4-plane (alpha) path's
-    /// PRIMARY plane — previously the alpha drivers silently ignored it.
+    /// `chroma_qp` applies to the 4-plane (alpha) path's PRIMARY plane, and the
+    /// alpha drivers must honour it.
     /// Zero-chroma content stays exact under a harsh chroma quantizer;
     /// colored content shrinks; equal bytes derive `COMP_UNIFORM`
     /// byte-stably.

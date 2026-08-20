@@ -1,9 +1,8 @@
 //! `Transport` over a mounted Kindle volume.
 //!
-//! 1:1 lift of what the pre-Transport `push.rs`/`manifest.rs`/`dedrm.rs`
-//! used to do with `std::fs`. No new behavior — atomic writes still go
-//! through `<dest>.partial` + `rename`, deletes still succeed silently on
-//! `NotFound`, listing returns `[]` when the parent dir is absent.
+//! Plain `std::fs` under the hood. Atomic writes go through `<dest>.partial` +
+//! `rename`, deletes succeed silently on `NotFound`, and listing returns `[]`
+//! when the parent dir is absent.
 
 use std::ffi::CString;
 use std::io::{Read, Write};

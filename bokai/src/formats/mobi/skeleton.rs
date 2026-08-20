@@ -291,7 +291,7 @@ impl Chunker {
         let mut search_pos = 0;
         // Aids are discovered in ascending offset order and chunks are sorted
         // by insert_pos, so a persistent cursor resolves each aid without
-        // rescanning the chunk table (previously O(aids × chunks)).
+        // rescanning the chunk table, which would be O(aids × chunks).
         let mut chunk_cursor = 0usize;
 
         while let Some(rel_pos) = finder.find(&text[search_pos..]) {
@@ -357,9 +357,9 @@ impl Chunker {
     /// of scaffold from the rawML, then inserts each chunk at its
     /// `insert_pos` into that scaffold.
     ///
-    /// Earlier versions packed the whole file into a single chunk and used
-    /// an empty skeleton, which freezes the device's renderer: Kindle's
-    /// layout engine seems to require real HTML scaffolding bytes per skel.
+    /// Every skel needs real scaffolding bytes of its own: Kindle's layout
+    /// engine freezes on the whole file packed into one chunk behind an empty
+    /// skeleton.
     fn process_file(
         &mut self,
         file_number: usize,

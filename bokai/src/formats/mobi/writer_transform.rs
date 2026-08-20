@@ -70,8 +70,8 @@ pub fn rewrite_html_references_fast(
     // Finders for tag detection, with memoized next-match positions. A
     // cached hit stays valid while it lies at or ahead of `pos`, so
     // consuming an `<a>` tag doesn't force the `<img>`/`<link>` finders to
-    // re-scan the rest of the document (previously O(tags × document) on
-    // anchor-heavy chapters with no images).
+    // re-scan the rest of the document, which would be O(tags × document) on
+    // anchor-heavy chapters with no images.
     let link_finder = memmem::Finder::new(b"<link ");
     let img_finder = memmem::Finder::new(b"<img ");
     let a_finder = memmem::Finder::new(b"<a ");

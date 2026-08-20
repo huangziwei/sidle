@@ -645,8 +645,8 @@ pub async fn library_relocate_move(
     let copied = {
         let conn = state.db.lock().await;
         // Gate on an idle queue: a conversion finishing mid-move would write its
-        // output into the old root and be stranded. (Relaunch is why no queue
-        // *pause* is needed — §6.)
+        // output into the old root and be stranded. The relaunch afterwards is
+        // why no queue *pause* is needed.
         if !db::pending_or_error_book_ids(&conn)
             .map_err(|e| e.to_string())?
             .is_empty()

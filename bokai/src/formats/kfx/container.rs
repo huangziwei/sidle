@@ -547,8 +547,8 @@ mod tests {
         // A container built against an older YJ_symbols table declares a
         // smaller import max_id; its doc symbols start BELOW our static
         // table's length. Resolving them at a hardcoded
-        // KFX_SYMBOL_TABLE.len() base was the bug that made section names
-        // come out as `character_width` etc.
+        // KFX_SYMBOL_TABLE.len() base misreads them, and section names come
+        // out as `character_width` and the like.
         let base = KFX_SYMBOL_TABLE.len() as u64 - 13;
         let table = SymbolTable::new(base, vec!["jZK3Kk0dQPOTMEngNHyfig1".to_string()]);
         assert_eq!(table.resolve_opt(base), Some("jZK3Kk0dQPOTMEngNHyfig1"));

@@ -11,7 +11,7 @@
 //! 2. **CJK OPFs pack multiple authors into one `<dc:creator>`** with the
 //!    ideographic comma `「、」` (`"村上春樹、夏目漱石"`).
 //!
-//! Joining authors with a plain ASCII comma (the old behaviour) is therefore
+//! Joining authors with a plain ASCII comma is therefore
 //! ambiguous: once `"Kafka, Franz"` is joined and re-split it's indistinguishable
 //! from two authors. We resolve it by (a) flipping a Western `Surname, Given` to
 //! natural `Given Surname` so a single author never carries a comma, and (b)

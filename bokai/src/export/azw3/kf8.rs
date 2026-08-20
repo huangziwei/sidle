@@ -774,9 +774,8 @@ impl Kf8Builder {
             // The thumbnail URI in EXTH 129 must base32-encode the *same*
             // value as EXTH 202 (thumbnail_offset). Calibre:
             //   `kindle:embed:{to_base(thumbnail_offset, base=32, min_num_digits=4)}`
-            // Earlier we had `off + 1` here, off-by-one against EXTH 202;
-            // Kindle then spins trying to resolve a nonexistent resource for
-            // the home-screen thumbnail.
+            // Off by one and Kindle spins, resolving a resource that is not
+            // there for the home-screen thumbnail.
             let mut buf = [0u8; 4];
             write_base32_4(off as usize, &mut buf);
             let uri = format!(

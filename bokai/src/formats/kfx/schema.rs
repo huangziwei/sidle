@@ -589,8 +589,8 @@ impl KfxSchema {
             }],
         });
 
-        // Note: Additional span rules (emphasis, strong) would check style
-        // definitions. For now, anything without link_to becomes Inline.
+        // Additional span rules (emphasis, strong) would have to consult style
+        // definitions; anything without link_to becomes Inline.
     }
 
     /// Register landmark type mappings.

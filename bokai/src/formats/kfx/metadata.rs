@@ -606,7 +606,7 @@ pub fn build_category_entries(
                     MetadataField::ContentId => {
                         // Device-internal `.sdr` key. Always synthesized from
                         // the identifier so PDOC sideloads have stable per-book
-                        // state. Decoupled from ASIN as of 2026-05-20.
+                        // state. Independent of the ASIN.
                         ctx.content_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Author => {

@@ -1528,8 +1528,8 @@ function toggleSearchPanel() {
 function hideSearchPanel() {
   const p = $("#reader-search-panel");
   if (p) p.hidden = true;
-  // Closing the panel drops the transient paint AND the results. Per the plan,
-  // there's no last-search memory across opens.
+  // Closing the panel drops the transient paint AND the results: there is no
+  // last-search memory across opens.
   clearTimeout(searchDebounceTimer);
   searchSeq++; // invalidate any in-flight request
   searchResults = [];
@@ -1993,13 +1993,12 @@ function mix(a, b, t) {
 // layout so the image fills the page instead of shrinking into a text column.)
 
 // The CSS injected into each section iframe via the paginator's `setStyles`. It
-// lands in the last <style> of the head, so `!important` here beats both the
-// book's synthesized stylesheet and the static READER_CSS. font-size rides the
-// root because boko emits text sizes in rem/% (root-relative) — one anchor
-// scales everything, like Kindle's slider. At DEFAULT settings this emits the
-// exact equivalent of the old READER_CSS (white bg, non-important #111 body
-// color, no font-size/family override) so a default book renders identically to
-// before customization existed; only changed fields override.
+// lands in the last <style> of the head, so `!important` here beats the book's
+// own synthesized stylesheet. font-size rides the root because bokai emits text
+// sizes in rem/% (root-relative) — one anchor scales everything, like Kindle's
+// slider. At DEFAULT settings it emits a white background, a non-important #111
+// body color and no font-size/family override, which leaves the book rendering
+// on its own styling; only changed fields override.
 function buildSectionCss(s) {
   const customFg = s.fg.toLowerCase() !== DEFAULT_STYLE.fg;
   const out = [
@@ -3231,7 +3230,7 @@ async function pdfRenderCurrent() {
 
   // Prefetch the neighbouring spreads (best-effort, off the critical path). Use
   // the spread starts so the warm targets match real turns — notably cover →
-  // (1,2), which the old even-aligned `left ± step` would have missed.
+  // (1,2), which an even-aligned `left ± step` would miss.
   const step = half ? 2 : 1;
   const nextStart = pdfSpreadStart(left + step);
   const prevStart = pdfSpreadStart(left - step);
@@ -3598,9 +3597,9 @@ function handleZoomKey(e) {
 // viewBox and self-sizes (`.reader-notebook-page`), so there's no raster pipeline
 // and no JS sizing: the renderer is simpler than the PDF's.
 //
-// Phase-gated capability list — everything a handwritten page can't act on is
-// hidden. Go-to-page and the page bookmark arrive in later phases and re-reveal
-// their controls then. (Aa / display settings is wired as of Phase 2.)
+// Everything a handwritten page can't act on, hidden: it has no TOC, nothing to
+// bookmark, no text to search and nothing to annotate. Aa / display settings is
+// deliberately absent from the list — a notebook honours it.
 const NOTEBOOK_HIDDEN = [
   "#reader-toc",
   "#reader-bookmark",

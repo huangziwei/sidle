@@ -100,8 +100,8 @@ pub(super) fn flatten_toc(
 
     // Recompute lengths from the hierarchy: each entry covers up to the next
     // entry at the same or shallower depth (matches calibre's writer8/main.py).
-    // The old default of `text_length - pos` made every entry span the whole
-    // book, which breaks TBS strand classification and Kindle navigation.
+    // A default of `text_length - pos` makes every entry span the whole book,
+    // which breaks TBS strand classification and Kindle navigation.
     let n = result.len();
     let mut new_lengths = vec![0u32; n];
     for i in 0..n {

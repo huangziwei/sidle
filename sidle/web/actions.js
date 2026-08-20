@@ -6,7 +6,7 @@
 // contains. It hands this module an action list and a target, and gets back the
 // actions that apply, laid out for that surface. Two surfaces over one list
 // cannot disagree about which actions exist, what they are called, or when they
-// are available — which is the whole point, since they used to.
+// are available.
 //
 // An ACTION is a plain object:
 //   id       unique, for debugging and for a surface that pins a specific one

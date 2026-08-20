@@ -2,7 +2,7 @@
 // Range inside a rendered section. Pure given the section `doc` + annotation,
 // so it's unit-testable independent of the reader coordinator.
 //
-// boko stamps `data-eid="<eid>"` on every addressable element; the char offset
+// bokai stamps `data-eid="<eid>"` on every addressable element; the char offset
 // indexes the element's *base text* (ruby <rt>/<rp> excluded), exactly as the
 // KFX content text does — proven char-exact against My Clippings in P0.
 

@@ -44,7 +44,7 @@ pub struct BookRow {
     /// full cover), or 0 with no cover. Changes iff the file changes, so a
     /// recrawl / set-cover / worker color-fetch / thumbnail rebuild — each
     /// rewrites the sidecar — self-invalidates the stale image. The desktop
-    /// gallery appends it as `?v=` per book (replaces the old global counter);
+    /// gallery appends it as `?v=` per book;
     /// the Kindle picker folds it into its on-device cover-cache filename
     /// (`sidle/native/src/cover_cache.rs`). Computed alongside
     /// [`Self::cover_thumb_path`] from the same single stat.
@@ -129,7 +129,7 @@ pub struct BookRow {
 
 /// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Bump on
 /// each schema change. Backups record it; restore refuses an archive whose
-/// version exceeds the running app's (§4c).
+/// version exceeds the running app's.
 ///
 /// v2: dropped the `My Clippings.txt` ingest path entirely — see the DELETE
 /// near the end of [`migrate`].
@@ -243,7 +243,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 // ---------------------------------------------------------------------------
-// Path portability (§4a). The three `*_path` columns are stored ROOT-RELATIVE
+// Path portability. The three `*_path` columns are stored ROOT-RELATIVE
 // (`books/<sha>/<file>`) so the library folder can be moved; we resolve to
 // absolute on read and relativize on write. The root is the directory holding
 // `library.db`, derived from the connection itself — so no caller threads it in,
@@ -285,7 +285,7 @@ fn resolve_opt(root: Option<&Path>, stored: Option<String>) -> Option<String> {
 /// new folder, or the legacy lowercase `…/sidle/…` root that `strip_prefix` can't
 /// match against today's case-corrected `…/Sidle` — slice from the last
 /// `books`/`notebooks` component instead. Without this, such a path stays
-/// absolute and dangles the moment the library moves (§4a portability defeated).
+/// absolute and dangles the moment the library moves — portability defeated.
 ///
 /// A path with no managed component (a foreign cover, say) and a `None` root
 /// (in-memory test conn) are stored unchanged. Idempotent: an already-relative
@@ -314,8 +314,8 @@ fn managed_relative_tail(p: &Path) -> Option<String> {
     Some(tail.to_string_lossy().into_owned())
 }
 
-/// `(id, epub_path, cover_path, kfx_path, pdf_path)` for the §4a path-
-/// relativization migration sweep.
+/// `(id, epub_path, cover_path, kfx_path, pdf_path)` for the path-relativization
+/// migration sweep.
 type PathColumns = (
     i64,
     Option<String>,
@@ -324,7 +324,7 @@ type PathColumns = (
     Option<String>,
 );
 
-/// One-time migration: rewrite absolute `*_path` columns (pre-§4a rows stored
+/// One-time migration: rewrite absolute `*_path` columns (older rows stored
 /// `<root>/books/<sha>/...`, including legacy rows whose `<root>` no longer
 /// matches today's — a relocated library, or the old lowercase `sidle` dir) to
 /// root-relative. Gated on actually finding an absolute value, so steady-state
@@ -1087,7 +1087,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         split_sessions_at_midnight(conn)?;
     }
 
-    // §4c: stamp the schema version. migrate() always brings the DB up to the
+    // Stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
@@ -1528,7 +1528,7 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
     let tags_json = serde_json::to_string(book.tags)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    // Store the three file paths root-relative (§4a) so the library is movable;
+    // Store the three file paths root-relative so the library is movable;
     // `row_to_book` resolves them back to absolute on read.
     let root = conn_root(conn);
     let epub_rel = book
@@ -3556,7 +3556,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         &title_romaji,
         &author_romaji,
     );
-    // Resolve the stored (root-relative, §4a) cover path up front — it feeds
+    // Resolve the stored root-relative cover path up front — it feeds
     // both the struct field and the served-image rev's fallback stat.
     let cover_path = resolve_opt(root, row.get(7)?);
     // Derived (not columns): the thumbnail sidecar (when present on disk) and
@@ -3572,7 +3572,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         language,
         ppd: row.get(5)?,
         writing_mode: row.get(25)?,
-        // Stored root-relative (§4a); resolve to absolute against the live root.
+        // Stored root-relative; resolve to absolute against the live root.
         epub_path: resolve_opt(root, row.get(6)?),
         cover_path,
         cover_thumb_path,
@@ -5784,8 +5784,8 @@ mod tests {
         assert!(!apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply"));
     }
 
-    /// §4a path portability: paths are stored root-relative, resolved to
-    /// absolute on read, stay relative across a read-modify-write, and a pre-§4a
+    /// Path portability: paths are stored root-relative, resolved to
+    /// absolute on read, stay relative across a read-modify-write, and an older
     /// absolute row is migrated to relative on the next `open`. Uses an on-disk
     /// DB because the root is derived from `conn.path()` (empty for in-memory).
     #[test]
@@ -5864,13 +5864,13 @@ mod tests {
             );
 
             // Read-modify-write invariant: feeding the resolved ABSOLUTE path back
-            // into the setter must NOT re-absolutize the column (this is the bug
-            // the §4a centralization fixes — set_cover/recrawl/worker all do this).
+            // into the setter must NOT re-absolutize the column. set_cover,
+            // recrawl and the worker all do exactly this.
             let resolved_kfx = row.kfx_path.clone().unwrap();
             set_kfx_path_and_sha(&conn, id, &resolved_kfx, "cafe").expect("set kfx");
             assert_eq!(stored(&conn, "kfx_path").as_deref(), Some(rel_kfx));
 
-            // Simulate a pre-§4a absolute row via a raw UPDATE (bypasses the setter).
+            // Simulate an older absolute row via a raw UPDATE (bypasses the setter).
             conn.execute(
                 "UPDATE books SET epub_path = ?1 WHERE id = ?2",
                 rusqlite::params![epub_abs.to_string_lossy(), id],
@@ -5891,8 +5891,8 @@ mod tests {
     }
 
     /// `relativize_for_store` must relativize a managed path even when it was
-    /// written under a DIFFERENT root than today's — the bug behind books going
-    /// missing after a relocate. `strip_prefix` alone can't: the stored paths
+    /// written under a DIFFERENT root than today's, or books go missing after a
+    /// relocate. `strip_prefix` alone can't: the stored paths
     /// sat under the legacy lowercase `…/sidle/…` (case-mismatched against the
     /// live `…/Sidle`) or under the pre-move folder entirely.
     #[test]

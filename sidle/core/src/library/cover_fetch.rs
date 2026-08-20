@@ -189,8 +189,7 @@ mod tests {
         // Real catalogue ASINs (KDP "B0..." + older digit-leading).
         assert!(looks_like_real_amazon_asin("B07PXGQC1Q"));
         assert!(looks_like_real_amazon_asin("4087718654"));
-        // Fabricated 32-char Crockford-Base32 from bokai EPUB→KFX (the
-        // exact shape from the bug report).
+        // Fabricated 32-char Crockford-Base32 — the shape bokai EPUB→KFX bakes.
         assert!(!looks_like_real_amazon_asin(
             "J3AHLRDVFTGEMNBWMPPYB6CCANPXNWH6"
         ));

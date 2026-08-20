@@ -1,4 +1,4 @@
-//! Regression: repair flat EPUB TOCs that dropped their `#fragment`.
+//! Repair flat EPUB TOCs that dropped their `#fragment`.
 //!
 //! calibre (and some retail) EPUBs pack several chapters into one `partNNNN.html`
 //! but emit a fragment-less TOC href for each, so every entry in that file jumps

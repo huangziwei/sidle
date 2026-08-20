@@ -351,7 +351,7 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     // content_list when KFX inlines the content rather than referencing a
     // separate Content entity. Skipping storylines under-counts the source
     // (e.g., on horror.bokai.kfx 35 Content entities cover only 35 of 40
-    // storylines; the other 5 inline their text and were previously missed).
+    // storylines; the other 5 inline their text).
     let text_types: [u32; 2] = [KfxSymbol::Content as u32, KfxSymbol::Storyline as u32];
 
     let mut out = String::new();

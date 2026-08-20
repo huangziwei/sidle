@@ -1657,7 +1657,7 @@ mod tests {
         assert!(proposed.iter().all(|e| e.children.is_empty()));
     }
 
-    /// The regression: a book with an image 目次 and image chapter headings (no
+    /// A book with an image 目次 and image chapter headings (no
     /// links, no heading text) still proposes its chapters — from the declared
     /// NCX — instead of coming up empty. Repair then writes them so it reopens
     /// with a real TOC.

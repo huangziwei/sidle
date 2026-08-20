@@ -349,7 +349,7 @@ mod tests {
             should_stage(Some(installed), &entry_for_ts(newer, 200), 100),
             StageDecision::Stage,
         );
-        // Older build → refuse (the bug we're guarding: stale device-dist).
+        // Older build → refuse; a stale device-dist must not downgrade the device.
         assert_eq!(
             should_stage(Some(installed), &entry_for_ts(older, 50), 100),
             StageDecision::RefuseOlder,

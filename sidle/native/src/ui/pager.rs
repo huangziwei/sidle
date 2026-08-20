@@ -91,10 +91,10 @@ pub fn hit(
         return None;
     }
     // Split the NAV REGION (NAV_LEFT..xres) in half: left = Prev, right = Next.
-    // The bug was splitting at `fb_xres / 2` (~632px) — the whole *screen's*
-    // midpoint, which sits just left of NAV_LEFT (620) on the 1264px panel, so
-    // the Prev zone was a ~12px sliver and every nav tap fell through to Next.
-    // Splitting the region itself gives two real halves on any panel width.
+    // NOT `fb_xres / 2` (~632px), the whole *screen's* midpoint: it sits just
+    // left of NAV_LEFT (620) on the 1264px panel, which leaves Prev a ~12px
+    // sliver and drops every nav tap through to Next. Splitting the region
+    // itself gives two real halves on any panel width.
     let nav_mid = (NAV_LEFT + fb_xres) / 2;
     if tx < nav_mid {
         Some(PagerHit::Prev)

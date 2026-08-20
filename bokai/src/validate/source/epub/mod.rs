@@ -8402,8 +8402,7 @@ mod tests {
         assert!(!url_has_illegal_space("ok.xhtml#a b"));
         assert!(!url_has_illegal_space("data:text/plain, a b"));
         // The URL parser strips leading/trailing space and removes tab/newline
-        // before parsing, so those are never RSC-020 (regression: a trailing space
-        // on `http://www.ylib.com ` was a real corpus false positive).
+        // before parsing, so those are never RSC-020.
         assert!(!url_has_illegal_space("http://www.ylib.com "));
         assert!(!url_has_illegal_space("  ../style.css\n"));
         assert!(!url_has_illegal_space("a\tb.xhtml"));
@@ -10022,8 +10021,8 @@ mod tests {
 
         #[test]
         fn detects_non_linear_cover_without_hyperlink() {
-            // Re-introduce the bug locally: take a valid aozora epub and rewrite
-            // the OPF to set `linear="no"` on the cover. Validator must catch it.
+            // Take a valid aozora epub and rewrite the OPF to set `linear="no"`
+            // on the cover. The validator must catch it.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
                 opf.replace(

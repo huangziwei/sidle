@@ -1,8 +1,8 @@
 // Book editor — a Calibre "Edit book"-style surface built into Sidle. Full-screen
-// #editor-view, parallel to #reader-view, driven entirely from the built
-// boko-kai source-edit primitives via the `editor_*` Tauri commands. Edits
-// KFX-, EPUB- and PDF-source books through the Metadata / Cover / Images / TOC
-// panels; the rail's Text panel lights up in a later phase. Exposed as
+// #editor-view, parallel to #reader-view, driven entirely from bokai's
+// source-edit primitives via the `editor_*` Tauri commands. Edits KFX-, EPUB-
+// and PDF-source books through the Metadata / Cover / Images / TOC panels; the
+// backend reports which of them a given source format can back. Exposed as
 // `window.sidleEditor`.
 
 const $ = (sel) => document.querySelector(sel);

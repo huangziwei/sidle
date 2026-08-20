@@ -228,8 +228,8 @@ mod tests {
 
     #[test]
     fn a_fixed_layout_record_survives_the_reading_both_importers_share() {
-        // The KF8-only records used to be read on one route and dropped on the
-        // other; one reading is what keeps them in step.
+        // Both importers share one reading of the KF8-only records, so neither
+        // route can drop what the other keeps.
         let meta = read(ExthHeader {
             book_type: Some("comic".to_string()),
             original_resolution: Some("1444x2048".to_string()),

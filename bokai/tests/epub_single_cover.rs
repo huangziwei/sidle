@@ -1,4 +1,4 @@
-//! Regression: converting must not add a redundant cover page.
+//! Converting must not add a redundant cover page.
 //!
 //! The raw passthrough route synthesizes an SVG `cover.xhtml` from the cover
 //! image whenever metadata names one. A source that already ships its own cover

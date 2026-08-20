@@ -78,7 +78,7 @@ fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, KfxError> {
     let n_color: usize = match buf.color {
         ColorModel::Gray => 1,
         ColorModel::Rgb => 3,
-        // N-channel: treat 3+ as RGB, 1 as gray (legacy behavior).
+        // N-channel: treat 3+ as RGB, 1 as gray.
         ColorModel::NChannel(k) if k >= 3 => 3,
         ColorModel::NChannel(1) => 1,
         other => {

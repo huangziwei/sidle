@@ -453,7 +453,7 @@ class View {
                 // `width: 20%` floated box), and a forced `width/height: auto`
                 // re-inflates those to intrinsic pixel size — a full-column
                 // arrow where a small glyph belongs, painting over the text
-                // beside its float box. boko's converter never emits width/
+                // beside its float box. bokai's converter never emits width/
                 // height ATTRIBUTES on <img>, so author CSS (or the `auto`
                 // initial value for unsized figures) is the whole story, and
                 // the max-* caps below still bound whatever it computes to.

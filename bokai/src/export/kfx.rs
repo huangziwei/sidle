@@ -1288,12 +1288,12 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
                 ),
             ]),
         ),
-        // NOTE: `spacing_percent_base: width` was emitted here historically
-        // but pins percentage-spacing to the horizontal axis. In vertical-rl
-        // books that locks the device's Layout > Spacing slider to the wrong
-        // axis — it ends up adjusting left/right page margins instead of the
-        // column-to-column line spacing. Calibre-generated KFX omits this
-        // field entirely; we follow suit and let the device default rule.
+        // No `spacing_percent_base` here. Setting it to `width` pins
+        // percentage-spacing to the horizontal axis, and in a vertical-rl book
+        // that locks the device's Layout > Spacing slider to the wrong one — it
+        // adjusts left/right page margins instead of column-to-column line
+        // spacing. Calibre-generated KFX omits the field entirely; we follow
+        // suit and let the device default rule.
         (
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),
@@ -4562,11 +4562,9 @@ fn build_manga_container_entity_map_fragment(
 // PDF blob with a `page_index`, plus PDOC metadata and the `yj_pdf_support` /
 // `yj_fixed_layout` feature flags.
 //
-// P0 scope (round-trip proof): embed + skeleton only. Deferred to later phases:
-//   - portrait+landscape page_template pair (needs an SExp IonValue variant for
-//     the `condition:(isPortrait)` s-expression) — P1
-//   - page-1 cover render — P2
-//   - selectable text layer + per-word auxiliary_data — P3
+// One page_template per page, not the portrait+landscape pair Amazon authors:
+// that needs an SExp IonValue variant for the `condition:(isPortrait)`
+// s-expression, which the writer has no way to emit.
 // ============================================================================
 
 /// Metadata stamped into a PDF→KFX (PDOC) conversion.
@@ -4823,12 +4821,11 @@ pub fn pdf_to_kfx(
     // of them `page_rotation`). Standalone, not referenced from the section;
     // the reader finds it by the name.
     //
-    // Earlier builds instead emitted a `text_baseline` entry per run and a
-    // `links_extracted` entry per page, plus `d6`/`d7` resource descriptors
-    // referenced from `external_resource` and `document_data`. Amazon emits
-    // none of those, nothing reads them back, and on this book they were 14023
-    // fragments against Amazon's 352 — 15787 container entity refs against
-    // 2123.
+    // Nothing else belongs in the aux set. A `text_baseline` entry per run, a
+    // `links_extracted` entry per page, `d6`/`d7` resource descriptors hung off
+    // `external_resource` and `document_data`: Amazon emits none of them and
+    // nothing reads them back, while they cost 14023 fragments against Amazon's
+    // 352 on a 352-page book.
     for (i, rec) in recs.iter().enumerate() {
         fragments.push(build_kv_aux_fragment(
             &format!("{}-ad", rec.section_name),
@@ -5531,10 +5528,10 @@ fn build_pdf_book_metadata_fragment(
 
 /// Deterministic content_id/ASIN for a PDOC — in the SAME 32-char Crockford-style
 /// base32 shape as every other sideload, via the single canonical
-/// [`crate::formats::kfx::metadata::generate_content_id`]. (Previously this rolled its own
-/// 32-hex value, so a PDF→KFX baked a *different alphabet* than `resolve_export_asin`
-/// recomputes — `books.asin` never matched the on-device `.sdr`/`.notebooks` key.
-/// One fabricator now.) Seeded by the PDF's stable identity (title + author + byte
+/// [`crate::formats::kfx::metadata::generate_content_id`] — the one fabricator, so
+/// the id baked into a PDF→KFX shares an alphabet with what `resolve_export_asin`
+/// recomputes and `books.asin` matches the on-device `.sdr`/`.notebooks` key.
+/// Seeded by the PDF's stable identity (title + author + byte
 /// size + page count) since a PDF carries no publication identifier, so
 /// re-converting the same PDF yields the same id.
 #[cfg(feature = "pdf")]
@@ -7175,7 +7172,7 @@ mod resource_export_tests {
 
     #[test]
     fn test_kfx_cover_jpeg_interiors_jxr() {
-        // Phase 5: EPUB→KFX re-encodes interior raster plates as grayscale JXR
+        // EPUB→KFX re-encodes interior raster plates as grayscale JXR
         // but keeps the COVER as JPEG — matching Amazon's own KFX (its pristine
         // download is a grayscale-JPEG cover + JXR plates) and what the Kindle
         // library-gallery / sleep-screen thumbnailer can read.

@@ -1,5 +1,5 @@
 //! The RELAX NG, Schematron and NVDL schemas epubcheck validates against,
-//! vendored from `ref/epubcheck/src/main/resources/com/adobe/epubcheck/schema`.
+//! vendored from epubcheck's `src/main/resources/com/adobe/epubcheck/schema`.
 //!
 //! They are compiled into the binary rather than read from disk: bokai has no
 //! data directory at runtime, and a validator whose grammars could go missing

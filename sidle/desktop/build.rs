@@ -4,8 +4,8 @@ use std::path::Path;
 fn main() {
     // `generate_context!` embeds the frontend (`frontendDist = ../web`) into the
     // binary at compile time. Cargo doesn't reliably treat those files as inputs
-    // to this crate, so a frontend-only edit could leave `cargo run` serving the
-    // previously-embedded (stale) assets — which is exactly what bit us.
+    // to this crate, so a frontend-only edit would leave `cargo run` serving the
+    // stale assets embedded by the last compile.
     //
     // Fingerprint the whole web tree into a rustc env var: when any file's bytes
     // change, the fingerprint changes, which is a crate compilation input, so the

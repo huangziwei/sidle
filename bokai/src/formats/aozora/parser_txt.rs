@@ -756,8 +756,7 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         // (end-aligned) on its own line so it reads as a signature rather than
         // running on inline. The N of 地からN字上げ (gap from the bottom) is a
         // print-precise offset with no reflowable equivalent — recording the
-        // class is the meaningful part. Previously the catch-all just dropped
-        // the marker.
+        // class is the meaningful part.
         static JIAGE_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃地から[０-９0-9]+字上げ］(.*)$").unwrap());
         s = re_replace_cow(&JIAGE_RE, s, |caps| {

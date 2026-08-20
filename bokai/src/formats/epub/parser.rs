@@ -1720,8 +1720,8 @@ mod tests {
 
     #[test]
     fn test_parse_ncx_tolerates_unescaped_angle_brackets() {
-        // Regression: mobiunpack-generated NCX embed unescaped `<`/`>` in the
-        // docTitle (here `業物語 <物語>`), which is invalid XML. End-name checking
+        // mobiunpack-generated NCX embed unescaped `<`/`>` in the docTitle
+        // (here `業物語 <物語>`), which is invalid XML. End-name checking
         // would abort at the following `</text>` and drop the entire TOC; the
         // parser must recover and still return the navMap entries.
         let ncx = r#"<?xml version='1.0' encoding='utf-8'?>

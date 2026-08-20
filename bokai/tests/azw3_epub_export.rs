@@ -1,4 +1,4 @@
-//! Regression: a real Amazon AZW3 must convert to a *clean* EPUB-3.
+//! A real Amazon AZW3 must convert to a *clean* EPUB-3.
 //!
 //! This is the gate an importing application applies: run
 //! `bokai::validate::source::epub` on the freshly-synthesized EPUB and reject

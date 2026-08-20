@@ -620,7 +620,7 @@ mod tests {
         // A self-closed <dc:subject/> is captured with an empty value.
         let subject = pkg.metadata.iter().find(|m| m.name == "subject").unwrap();
         assert!(subject.value.is_empty());
-        // Derived views still hold after the refactor.
+        // The derived views agree with the parsed metadata.
         assert_eq!(pkg.identifier_ids, vec!["uid"]);
         assert_eq!(
             pkg.unique_identifier_value.as_deref(),

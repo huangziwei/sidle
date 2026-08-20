@@ -104,9 +104,8 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
         "rb" => Role::Inline,
         // <rp> contains fallback parentheses for renderers that don't support
         // ruby — we always render ruby, so they should be skipped. None of
-        // the reference EPUBs use <rp>; if encountered as Role::Inline its
-        // text leaks into base inline content. TODO: dedicated skip role
-        // when an actual <rp>-using book shows up.
+        // the reference EPUBs use <rp>; mapped to Role::Inline as it is here,
+        // its text leaks into base inline content.
         "rp" => Role::Inline,
 
         "label" | "legend" | "output" | "data" | "bdi" | "bdo" | "wbr" => Role::Inline,

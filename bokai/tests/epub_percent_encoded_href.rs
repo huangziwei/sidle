@@ -1,4 +1,4 @@
-//! Regression: EPUB hrefs are URI references and may percent-encode reserved
+//! EPUB hrefs are URI references and may percent-encode reserved
 //! bytes, while the container's ZIP entries are stored under their literal
 //! decoded names.
 //!

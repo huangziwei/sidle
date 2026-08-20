@@ -189,8 +189,7 @@ mod tests {
     #[cfg(feature = "pdf")]
     #[test]
     fn extracts_cover_from_pdf_backed_kfx() {
-        // The bug this module fixes: a PDF-backed (PDF→KFX) container used to
-        // re-import cover-less. `pdf_to_kfx` embeds the cover the same way the
+        // `pdf_to_kfx` embeds the cover the same way the
         // reflowable path does (book_metadata.cover_image → external_resource →
         // bcRawMedia), so the extractor must return that embedded JPEG verbatim.
         use crate::export::{PdfKfxMeta, pdf_to_kfx};

@@ -1129,9 +1129,8 @@ where
 
 /// Walk `book_metadata` ($490): `{categorised_metadata: [{category, metadata: [{key, value}, ...]}, ...]}`.
 /// Collect all (key, value) pairs into an ordered `Vec` so repeated keys
-/// (like `author` for multi-author books) keep source order. Earlier versions
-/// used a HashMap, which silently dropped all but the last value of any
-/// repeated key.
+/// (like `author` for multi-author books) keep source order. A HashMap here
+/// would keep only the last value of any repeated key.
 fn extract_categorised<F>(value: &IonValue, resolve_sym: &F, out: &mut Vec<(String, String)>)
 where
     F: Fn(u64) -> String,

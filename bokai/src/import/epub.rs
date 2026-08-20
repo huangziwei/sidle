@@ -361,8 +361,8 @@ impl EpubImporter {
         // EPUB 2 NCX is a fallback. Retail Japanese EPUBs (Kadokawa/EBPAJ)
         // routinely ship BOTH — a full nav doc AND a stub NCX that lists only
         // cover/目次/奥付 — so we parse both and keep whichever is richer,
-        // preferring the nav on a tie. The old NCX-first-unless-empty order made
-        // those books lose every chapter: the 3-entry stub NCX shadowed the
+        // preferring the nav on a tie. An NCX-first-unless-empty order loses
+        // every chapter on those books: the 3-entry stub NCX shadows the
         // 7-entry nav. A book with only one source gets that one; with neither,
         // the TOC is empty (a headings-only book is handled downstream).
         let read_toc = |href: Option<&String>, parse: fn(&str) -> io::Result<Vec<TocEntry>>| {
@@ -888,9 +888,9 @@ mod tests {
 
     #[test]
     fn manifest_hrefs_that_escape_the_opf_directory_resolve() {
-        // Regression: joining `opf_base` to the href by concatenation produced
-        // `OEBPS/../ch2.xhtml`, which names no zip entry — the whole conversion
-        // died with "File not found in ZIP". `..` has to be collapsed.
+        // Joining `opf_base` to the href by concatenation produces
+        // `OEBPS/../ch2.xhtml`, which names no zip entry and kills the whole
+        // conversion with "File not found in ZIP". `..` has to be collapsed.
         let bytes = epub_with_parent_escaping_hrefs();
         let mut importer =
             EpubImporter::from_source(Arc::new(MemorySource::new(bytes))).expect("opens");
@@ -958,10 +958,10 @@ mod tests {
 
     #[test]
     fn test_toc_base_is_document_dir_not_opf_dir() {
-        // Regression: a nav doc in a subdirectory (OPF+NCX at the archive root,
-        // nav at `xhtml/nav.xhtml`) resolves its fragment-less chapter hrefs
-        // against the nav doc's own directory, not the OPF's. Prepending the
-        // OPF base (empty here) once dropped every chapter from the KFX TOC.
+        // A nav doc in a subdirectory (OPF+NCX at the archive root, nav at
+        // `xhtml/nav.xhtml`) resolves its fragment-less chapter hrefs against
+        // the nav doc's own directory, not the OPF's. Prepending the OPF base
+        // (empty here) drops every chapter from the KFX TOC.
         let nav_path = "e9781668011799/xhtml/nav.xhtml";
         let doc_base = dir_of(nav_path);
         let entries = vec![

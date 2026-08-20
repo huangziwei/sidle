@@ -1074,9 +1074,9 @@ impl ExportContext {
     /// for vertical writing (縦書き — vertical-rl/lr) and *vertically* for
     /// horizontal-tb. Amazon's KFXGEN follows this — every bordered box in a
     /// vertical-rl book carries `layout: horizontal`. Emitting `vertical`
-    /// unconditionally (the old behaviour) put a vertical-book box in the wrong
-    /// formatting axis: its inline size filled the container (an oversized,
-    /// full-block box) and its content pinned to the inline start (left) edge.
+    /// unconditionally puts a vertical-book box in the wrong formatting axis:
+    /// its inline size fills the container (an oversized, full-block box) and
+    /// its content pins to the inline start (left) edge.
     pub fn container_layout_symbol(&self) -> KfxSymbol {
         match self.document_writing_mode {
             KfxSymbol::VerticalRl | KfxSymbol::VerticalLr => KfxSymbol::Horizontal,

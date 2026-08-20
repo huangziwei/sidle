@@ -12,18 +12,18 @@
 //!
 //! `books/` and `notebooks/` are enumerated from the DB snapshot, so the archived
 //! file set matches the archived rows exactly. Everything else at the root is
-//! swept in by default and only a named exclusion list keeps anything out — the
-//! opposite default from the first two versions of this format, which named what
-//! to include and silently dropped user data twice for it (notebook files until
-//! v2, `device-backup/` until v3).
+//! swept in by default and only a named exclusion list keeps anything out. An
+//! include list is the wrong default here: anything added to the root that
+//! nobody remembers to name leaves the archive silently, and the user finds out
+//! at restore.
 //!
-//! Two hazards drive the design (§3): **H1** — a live WAL DB can't be copied
+//! Two hazards drive the design: **H1** — a live WAL DB can't be copied
 //! file-by-file, so we snapshot with `VACUUM INTO` (shared with
 //! [`crate::library::relocate`]); **H5** — the running app holds an open
 //! `Connection`, so restore does restore-then-relaunch: it swaps files on disk
 //! and the command layer calls `app.restart()` so the next process opens them.
-//! Cross-root portability is free because book paths are stored root-relative
-//! (§4a) — the restored DB resolves under whatever root it lands in.
+//! Cross-root portability is free because book paths are stored root-relative —
+//! the restored DB resolves under whatever root it lands in.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -43,14 +43,14 @@ const FORMAT_TAG: &str = "sidle-library-backup";
 /// Archive layout version (independent of the DB schema's `user_version`). Bump
 /// only if the archive *shape* changes; restore refuses a newer one.
 ///
-/// v2: the archive now also carries the `notebooks/<uuid>/` tree (Scribe
-/// handwriting). v1 archives stored only `library.db` + `books/`, so a restore
-/// of one silently dropped notebook files; v2 closes that. A v1 archive still
-/// restores into a v2 app — it simply has no `notebooks/` entries to extract.
+/// v2: carries the `notebooks/<uuid>/` tree (Scribe handwriting). v1 archives
+/// hold only `library.db` + `books/`, so they have no notebook files in them at
+/// all. A v1 archive still restores into a v2 app — it simply has no
+/// `notebooks/` entries to extract.
 ///
 /// v3: every other root entry is swept in too — `device-backup/` (what a Sync
 /// brings off the Kindle for the Files tab, which are files on disk and nowhere
-/// in the DB, so v2 archives carried no trace of them), `device-sync.json`,
+/// in the DB, so no earlier archive holds them), `device-sync.json`,
 /// `cover-thumb.fmt`, `.server-token`, and anything added later. An older archive
 /// restores into a v3 app unchanged; it simply has fewer entries to extract.
 const FORMAT_VERSION: u32 = 3;
@@ -64,10 +64,10 @@ pub struct Manifest {
     pub created_at: String,
     pub app_version: String,
     /// DB schema version (`PRAGMA user_version`) at backup time; restore refuses
-    /// an archive whose value exceeds the running app's (§4c).
+    /// an archive whose value exceeds the running app's.
     pub db_user_version: i64,
     /// Absolute library root at backup time — informational; restore needs no
-    /// path rewrite because stored paths are already root-relative (§4a).
+    /// path rewrite because stored paths are already root-relative.
     pub source_root: String,
     pub counts: Counts,
     /// SHA-256 of the archived `library.db` bytes; verified on restore.
@@ -394,7 +394,7 @@ pub fn restore_with_progress(
     let manifest = stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
     // (3) Restore-specific verify: the staged DB opens as a sidle library with
-    //     the manifest's book count. Paths are already relative (§4a), so there
+    //     the manifest's book count. Paths are already relative, so there
     //     is nothing to rewrite. Failure clears staging, leaving the target
     //     untouched.
     let staged_books = match relocate::validate_existing(&staging) {
@@ -725,8 +725,8 @@ fn move_payload(from: &Path, to: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Build a 2-book library under `root` (canonicalized — see the §4a symlink
-    /// caveat: a `/var`→`/private/var` root would make relativization a no-op).
+    /// Build a 2-book library under `root`, canonicalized: an uncanonicalized
+    /// `/var`→`/private/var` root would make relativization a no-op.
     /// Returns the open connection and the `books/` dir.
     fn seed_library(root: &Path) -> (Connection, PathBuf) {
         let conn = db::open(&root.join("library.db")).unwrap();
@@ -796,8 +796,8 @@ mod tests {
             db::set_reading_position(&conn, id, Some(2), Some(7), Some(42), "sidle", "").unwrap();
         }
         // One Scribe notebook with a rendered page — guards the v2 archive: the
-        // `notebooks/` tree was previously omitted, so a restore silently dropped
-        // notebook files. It lives a level up from `books/`, under the same root.
+        // `notebooks/` tree has to be swept in or a restore drops notebook files.
+        // It lives a level up from `books/`, under the same root.
         let pages = root.join("notebooks").join("nb-1").join("pages");
         fs::create_dir_all(&pages).unwrap();
         fs::write(pages.join("page-0.svg"), "svg-nb-1").unwrap();
@@ -863,7 +863,7 @@ mod tests {
         for row in &rows {
             assert_eq!(row.tags, vec!["fav".to_string()], "user tag carried");
             let epub = row.epub_path.as_ref().expect("epub path");
-            // Resolved to absolute UNDER the new root (cross-root portability, §4a).
+            // Resolved to absolute UNDER the new root — cross-root portability.
             assert!(
                 Path::new(epub).starts_with(&dst_root),
                 "{epub} under {dst_root:?}"

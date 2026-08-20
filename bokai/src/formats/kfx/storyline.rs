@@ -2020,9 +2020,9 @@ fn walk_node_for_export(
     // synthetic Paragraph. Loose inline content directly under <body> (which
     // some EPUBs produce — e.g. a final sentence without a wrapping <p>) would
     // otherwise emit Text/StartSpan/EndSpan tokens onto the root IonBuilder,
-    // whose build() throws away accumulated_text since it has no fields.
-    // The classic symptom: a single ruby pair silently dropped at the tail of
-    // a chapter that ends without a closing <p>.
+    // whose build() throws away accumulated_text since it has no fields. The
+    // visible cost is a ruby pair at the tail of a chapter that ends without a
+    // closing <p>: it disappears.
     if node.role == Role::Root {
         for child_id in chapter.children(node_id) {
             let Some(child) = chapter.node(child_id) else {
@@ -2819,8 +2819,8 @@ fn emit_definition_list(
 
 /// Emit inline content (Link, Inline, Text) using the flattening algorithm.
 ///
-/// This replaces the old StartSpan/EndSpan nesting approach with proper
-/// "Push Down, Emit at Bottom" that produces non-overlapping style_events.
+/// "Push Down, Emit at Bottom": styles are pushed to the innermost run and
+/// emitted there, so the resulting style_events never overlap.
 fn emit_inline_content_flat(
     chapter: &Chapter,
     node_id: NodeId,
@@ -5265,7 +5265,7 @@ mod tests {
 
     #[test]
     fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
-        // Regression: `<a id="map1"><img/></a>` used as a TOC/nav target. A KFX
+        // `<a id="map1"><img/></a>` used as a TOC/nav target. A KFX
         // image element can't hold the anchor, so the flattener must emit a
         // zero-width-space segment carrying the id + node_id just before the
         // image; otherwise the id's content position is never recorded and any

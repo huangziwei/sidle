@@ -1906,8 +1906,8 @@ mod tests {
 
     #[test]
     fn passthrough_normalize_handles_multibyte_content_without_panicking() {
-        // Regression: an earlier version sliced at byte 1024 to find the DOCTYPE,
-        // which splits a multi-byte char in CJK content and panics.
+        // The DOCTYPE search must not slice at a fixed byte offset: byte 1024
+        // lands mid-character in CJK content.
         let filler = "字".repeat(2000); // ~6 KB of 3-byte chars, crosses byte 1024
         let doc = format!(
             "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x.dtd\">\n\

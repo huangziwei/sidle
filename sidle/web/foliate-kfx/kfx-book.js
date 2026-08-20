@@ -1,7 +1,7 @@
 // kfx-book.js — adapt a `reader_open` DTO into the foliate paginator's "book
 // interface": { dir, sections: [{ load, unload, linear, size }] }.
 //
-// boko returns each section as a complete XHTML string plus the non-spine
+// bokai returns each section as a complete XHTML string plus the non-spine
 // resources. `style.css` arrives inline (base64) with the DTO; images arrive
 // *lazily* — the DTO carries only their manifest (href/mime/size), and the
 // reader's resource loader streams the bytes in around the reading position.

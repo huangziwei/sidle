@@ -2066,7 +2066,7 @@ impl KfxImporter {
     }
 
     /// Build the content (`$145`) name → location index: one pass, parsing
-    /// each content entity once. The old lookup scanned and parsed every
+    /// each content entity once. Looking one up on demand instead parses every
     /// content entity per cache miss — O(entities) per distinct story name.
     fn index_content_entities(&mut self) {
         let locs: Vec<EntityLoc> = self

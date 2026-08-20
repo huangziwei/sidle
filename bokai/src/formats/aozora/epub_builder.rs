@@ -64,7 +64,7 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
     zip.start_file("OEBPS/style.css", deflated)?;
     zip.write_all(STYLE_CSS.as_bytes())?;
 
-    // 4. Cover image (always JPEG — user constraint, see plan).
+    // 4. Cover image (always JPEG).
     zip.start_file("OEBPS/images/cover.jpg", stored)?;
     zip.write_all(input.cover_jpeg)?;
 
@@ -849,9 +849,9 @@ mod tests {
 
     #[test]
     fn parses_pub_date_from_colophon() {
-        // Print publisher is no longer surfaced — `<dc:publisher>` is
-        // hardcoded to 青空文庫. Only the print date is extracted, and
-        // we use it as `<dc:date>` for the work.
+        // The print publisher is not surfaced: `<dc:publisher>` is hardcoded to
+        // 青空文庫. Only the print date is extracted, and it becomes the work's
+        // `<dc:date>`.
         let d = parse_pub_date("底本：「タイトル」テスト出版社、1990（平成2）年5月1日初版");
         assert_eq!(d, "1990-05");
     }
@@ -877,7 +877,7 @@ mod tests {
     fn splits_at_shallowest_level_when_no_h2() {
         // 中見出し-only book: parser emits all <h3> (level 3), zero <h2>.
         // Must split at <h3> into one file per heading — NOT collapse into the
-        // title page (the bug: hardcoded <h2> split → 0 splits → 1 file).
+        // title page, which is what a hardcoded <h2> split would produce.
         let doc = Document {
             title: "本".to_string(),
             author: "著".to_string(),

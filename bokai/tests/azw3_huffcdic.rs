@@ -1,11 +1,11 @@
-//! Regression: HUFF/CDIC-compressed AZW3 must import and decompress correctly.
+//! HUFF/CDIC-compressed AZW3 must import and decompress correctly.
 //!
 //! `[太宰 治] 人間失格.azw3` is a real Amazon AZW3 that uses HUFF/CDIC Huffman
-//! compression. Before the u64 rewrite of `mobi::huffcdic`, `Book::open` panicked
-//! here (`attempt to add with overflow` in `Azw3Importer::extract_text`); the
-//! prior u32 layout also truncated the code-space thresholds and would have
-//! decoded garbage. This guards both ends: the book imports, and the text it
-//! decompresses is real Japanese (correct kanji in the TOC, not mojibake).
+//! compression. Its code-space thresholds need the full u64 width
+//! `mobi::huffcdic` gives them: a u32 layout truncates them and overflows in
+//! `Azw3Importer::extract_text`. This guards both ends — the book imports, and
+//! the text it decompresses is real Japanese (correct kanji in the TOC, not
+//! mojibake).
 
 use bokai::Book;
 use bokai::model::TocEntry;
@@ -43,15 +43,15 @@ fn huff_azw3_imports_and_decompresses_toc_text() {
     }
 }
 
-/// The TOC test above passes even with a subtly broken decoder, because the
-/// short TOC strings happened to land on correctly-decoded codes. The real
-/// regression is in the *body*: an off-by-one in the `mincode`/`maxcode`
-/// tables mis-thresholded some Huffman codes, so the dictionary returned the
-/// wrong phrase intermittently — most text stayed correct, but periodic runs
-/// turned to mojibake (and unrelated CSS/attribute fragments spliced in).
+/// The TOC test above can pass with a subtly broken decoder, because its short
+/// strings are few enough to land on correctly-decoded codes. The *body* is
+/// where a mis-thresholded Huffman code shows: an off-by-one in the
+/// `mincode`/`maxcode` tables makes the dictionary return the wrong phrase
+/// intermittently, so most text stays correct while periodic runs turn to
+/// mojibake, with unrelated CSS/attribute fragments spliced in.
 ///
-/// This decodes every chapter's reconstructed HTML and asserts that passages
-/// from the previously-corrupted regions come through intact. Each is a long
+/// This decodes every chapter's reconstructed HTML and asserts that long
+/// passages come through intact. Each is a long
 /// contiguous run of plain body text (no ruby tags), so a single wrong code
 /// anywhere inside it breaks the match. Verified byte-for-byte against
 /// calibre's own HUFF/CDIC reader on the same fixture.

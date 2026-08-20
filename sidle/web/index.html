@@ -398,12 +398,11 @@
         </div>
       </section>
 
-      <!-- Kindle / device-management page. Promoted from the old upper-right
-           popover (it had outgrown a 380px panel). The pill in the header is the
-           entry point; this is a full-width section like #gallery / #notes. Every
-           id here is preserved from the popover so the device JS
-           (updateDeviceUI / refreshDeviceList / refreshDeviceAppStatus /
-           refreshServerStatus) populates it unchanged. -->
+      <!-- Kindle / device-management page. The pill in the header is the entry
+           point; this is a full-width section like #gallery / #notes. The ids
+           here are the ones the device JS (updateDeviceUI / refreshDeviceList /
+           refreshDeviceAppStatus / refreshServerStatus) queries, so renaming
+           one silently stops it populating. -->
       <section id="device-page" class="view device-page" aria-label="Kindle" hidden>
         <header class="device-page-header">
           <div class="device-page-title">

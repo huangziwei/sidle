@@ -159,7 +159,7 @@ pub fn render_pdf_page_jpeg(
     _quality: u8,
 ) -> Result<Vec<u8>, RenderError> {
     Err(RenderError::Unavailable(
-        "PDF rasterization needs macOS PDFKit — see pdf-to-kfx.md".into(),
+        "PDF rasterization needs macOS PDFKit; this build has no PDF renderer".into(),
     ))
 }
 
@@ -178,7 +178,7 @@ pub fn extract_pdf_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> 
 #[cfg(not(target_os = "macos"))]
 pub fn extract_pdf_text(_pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
     Err(RenderError::Unavailable(
-        "PDF text extraction needs macOS PDFKit — see pdf-to-kfx.md".into(),
+        "PDF text extraction needs macOS PDFKit; this build has no PDF text layer".into(),
     ))
 }
 

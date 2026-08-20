@@ -8,8 +8,8 @@
 //!   describe per-section spans as `{section_name, pid, length}`, and the
 //!   eid-level mapping is replayed from each `section_position_id_map` ($609).
 //!   The span shape is **not** peculiar to fixed-layout books — ordinary
-//!   reflowable text books ship it too (observed on two vertical-CJK novels,
-//!   2026-08-09) — so neither shape may be treated as a format tell. Only the
+//!   reflowable text books ship it too, vertical-CJK novels among them — so
+//!   neither shape may be treated as a format tell. Only the
 //!   span shape states the last element's length, which is what ends the axis.
 //! - `location_map` ($550) / `yj.location_pid_map` ($621) — the pid boundaries
 //!   dividing the book into the human "Location" numbers a Kindle displays. A
@@ -180,8 +180,8 @@ impl<'a> PositionFragments<'a> {
     /// container states no spans (the `{eid, pid}` shape carries none).
     ///
     /// Amazon's own reading timer reports the book end as the last *valid*
-    /// position, which is this value minus one — verified 2026-08-09 against a
-    /// device's `ReadingTimerController` line on two books.
+    /// position, which is this value minus one — the figure a device's
+    /// `ReadingTimerController` line prints.
     fn span_extent(&self) -> Option<i64> {
         let mut end: Option<i64> = None;
         for frag in &self.position_id_maps {
@@ -412,8 +412,7 @@ mod tests {
     /// `position_id_map`'s per-section `length` is the only statement of that
     /// last length, and `max(pid + length)` is the axis end. Checked against
     /// Amazon's own arithmetic: a device's `ReadingTimerController` reports the
-    /// book's last valid position as exactly this extent minus one (verified on
-    /// two other books, 2026-08-09).
+    /// book's last valid position as exactly this extent minus one.
     #[test]
     fn the_axis_ends_past_the_last_elements_start() {
         let Ok(kfx) = std::fs::read(FIXTURE) else {

@@ -3,7 +3,7 @@
 //! epubcheck hand-codes only a minority of what it reports about a package
 //! document or a content document. The rest it gets by validating them against
 //! **RELAX NG** grammars and **Schematron** assertion sets (vendored under
-//! `ref/epubcheck/.../schema/`), funnelling every violation through one message
+//! `xml/schema/`), funnelling every violation through one message
 //! id. Reproducing that channel means reproducing the two engines.
 //!
 //! Why an engine rather than more hand-ported rules: a hand-written check covers

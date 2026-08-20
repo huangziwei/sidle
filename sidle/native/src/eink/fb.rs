@@ -324,10 +324,10 @@ impl Framebuffer {
 
     /// Drain the X event queue, reporting whether the server asked us to redraw.
     ///
-    /// Two distinct problems live in this queue, and nothing used to read it.
+    /// Two distinct problems live in this queue.
     ///
-    /// **Exposures.** We select `EXPOSURE` when creating the window, but with the
-    /// queue unread the damage was never repaired: the framework paints over our
+    /// **Exposures.** We select `EXPOSURE` when creating the window, and with the
+    /// queue unread the damage is never repaired: the framework paints over our
     /// window as it hands off, and nothing puts it back. We do not ask for
     /// backing store (see `open` for why that request is actively harmful here),
     /// so repairing damage is our job and this is how we learn of it.

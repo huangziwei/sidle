@@ -103,7 +103,7 @@ fn every_toc_entry_names_a_document_the_package_holds() {
         .expect("build the package");
 
     // Non-vacuity: this fixture is one of the books whose cover section the
-    // container suppresses, so it exercises the remap the bug lived in.
+    // container suppresses, so it exercises the remap.
     assert!(
         package.redundant_cover.is_some(),
         "fixture no longer has a cover overlap — the assertion below is vacuous"

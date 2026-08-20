@@ -163,7 +163,7 @@ function activeController() {
 
 // Sort keys exposed in the gallery-visible sort popover and as
 // data-sort attrs on the list-view column headers. Order here is the
-// order shown in the popover. Series will be added in Phase 5.
+// order shown in the popover.
 const SORT_KEYS = [
   ["title", "Title"],
   ["author", "Author"],
@@ -989,8 +989,8 @@ function showImportErrorReport(failures) {
 
 // Why a conversion failed, with its Retry one click away. Reached from the
 // failed format badge, the queue drawer's "Failed", and automatically when a
-// `conversion:status` error arrives — the reason is the point, and a book that
-// silently sits at "failed" is the bug this replaces.
+// `conversion:status` error arrives — the reason is the point, because a book
+// silently sitting at "failed" tells the user nothing.
 function showConversionErrorReport(bookIds) {
   const books = bookIds
     .map((id) => state.books.find((b) => b.id === id))
@@ -1982,8 +1982,9 @@ function coverUrlFor(b, { thumb = false } = {}) {
   if (!base) return null;
   // Per-book cache token = the served image's mtime (`cover_rev`, from the
   // backend). It changes iff THIS book's cover file changes, so replacing one
-  // cover re-fetches only its tile — not the whole gallery, as the old global
-  // `coverCacheBust` counter did. `|| 0` for a coverless/unstattable row.
+  // cover re-fetches only its tile — not the whole gallery, which is what a
+  // single global cache-bust counter would cost. `|| 0` for a
+  // coverless/unstattable row.
   return `${base}?v=${b.cover_rev || 0}`;
 }
 
@@ -2599,8 +2600,8 @@ async function ejectDevice() {
 
 // Status-bar feedback for a device orphan import. The backend's read is the
 // slow part (an MTP pull spans several PTP sessions), so we light up the status
-// bar the instant the user clicks — closing the gap that used to look like
-// nothing was happening between the click and the final toast. `importBase` is
+// bar the instant the user clicks, so the stretch between the click and the
+// final toast does not read as nothing happening. `importBase` is
 // the label the handler sets ("Importing X…"); the `device:import-progress`
 // listener appends a live MiB counter to it (see `subscribePullProgress`).
 let importBase = null;
@@ -2742,9 +2743,8 @@ function subscribePullProgress() {
   });
 
   // Status-bar progress counter. The backend emits this once on autopull
-  // start (`done: 0`) and once per book completed thereafter — covers the
-  // gap that used to look like a freeze where nothing rendered until the
-  // whole pull was done.
+  // start (`done: 0`) and once per book completed thereafter, so the pull does
+  // not read as a freeze with nothing rendering until it finishes.
   window.api.listen("device:autopull-progress", (e) => {
     const p = e.payload;
     if (!p) return;
@@ -4760,8 +4760,7 @@ function wireSortPopover() {
 // All text fields commit together on Save (the form always submits the
 // full set — matches the Rust MetadataPatch shape). Cover changes commit
 // immediately when the user picks a file via library_set_cover; Cancel
-// does NOT revert the cover. See library-navigation.md Phase 4 for the
-// "immediate-apply" rationale.
+// does NOT revert the cover.
 // ---------------------------------------------------------------------------
 
 let metadataBook = null;

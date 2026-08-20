@@ -416,13 +416,13 @@ fn run() -> anyhow::Result<()> {
     // call. The Diagnostics screen (shown when list_books can't reach the
     // server) needs the surface to render and `input` to take taps, so all
     // device setup is hoisted above list_books and the call is wrapped in a
-    // retry loop below. The surface is now a real WM-managed X window (see
+    // retry loop below. The surface is a real WM-managed X window (see
     // eink::fb): on every exit path the window is torn down on Drop and the
     // lab126 compositor recomposites the screen (home library + status bar
-    // repaint) — no cvm freeze, no chrome poking. The old `Pillow` guard is
-    // gone for that reason.
+    // repaint), so nothing here freezes cvm or pokes the chrome, and no
+    // `Pillow` guard is needed.
     let mut renderer = TextRenderer::load(FONT_PX)?;
-    // Which faces this firmware turned out to have. A device missing one drops
+    // Which faces this firmware actually has. A device missing one drops
     // it silently from the chain, and the only other symptom is a character
     // that doesn't draw.
     log(format!("fonts: {}", renderer.chain_description()));

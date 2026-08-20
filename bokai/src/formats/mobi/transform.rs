@@ -584,10 +584,9 @@ pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
     let attrs = &html[after_html..tag_end];
 
     // A repeated `lang`/`xml:lang` is malformed XML (epubcheck RSC-016
-    // fatal, which kills all content checks for the file). Earlier versions
-    // of this pass produced exactly that whenever the source `<html>` led
-    // with a lang attribute, so already-converted books can carry the dup —
-    // keep only the first occurrence of each before filling in gaps.
+    // fatal, which kills all content checks for the file). An already-converted
+    // book can arrive carrying the dup, so keep only the first occurrence of
+    // each before filling in gaps.
     let mut lang_spans = attr_spans(attrs, b"lang");
     let mut xml_lang_spans = attr_spans(attrs, b"xml:lang");
     if lang_spans.len() > 1 || xml_lang_spans.len() > 1 {
@@ -1764,7 +1763,7 @@ mod tests {
         assert_eq!(s.matches("lang=\"ja\"").count(), 2, "lang + xml:lang: {s}");
         assert!(s.contains("xml:lang=\"ja\""));
 
-        // No duplicates: byte-identical to the old behavior.
+        // No duplicates: the input passes through byte-identical.
         let html = b"<html lang=\"en\" xml:lang=\"en\"><head></head></html>";
         assert_eq!(ensure_html_lang_dual(html, ""), html);
     }

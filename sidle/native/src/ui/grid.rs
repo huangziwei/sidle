@@ -81,7 +81,7 @@ impl Layout {
         }
     }
 
-    /// Cells per page — what used to be the `PAGE_SIZE` constant.
+    /// Cells per page.
     pub fn page_size(&self) -> usize {
         self.cols * self.rows
     }

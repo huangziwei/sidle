@@ -1,11 +1,11 @@
-//! Regression: EPUB 3 nav TOC handling across EPUB→KFX and back.
+//! EPUB 3 nav TOC handling across EPUB→KFX and back.
 //!
 //! Three failure modes seen on real retail EPUBs:
 //!
 //!  1. A book ships BOTH a full EPUB 3 nav doc and a stub EPUB 2 NCX (or vice
 //!     versa). The importer must validate against — and convert — the *richer*
-//!     of the two. Preferring the NCX unless it was empty made a 3-entry stub
-//!     NCX shadow a 7-entry nav, so every chapter vanished from the device TOC.
+//!     of the two. Prefer the NCX unless it is empty and a 3-entry stub NCX
+//!     shadows a 7-entry nav, emptying the device TOC of every chapter.
 //!
 //!  2. A nested nav points at intra-chapter headings, but the content carries no
 //!     `<a href>` cross-references to those positions — so bokai's e2k KFX emits
@@ -260,7 +260,7 @@ fn nested_nav_anchors_survive_the_epub_kfx_epub_round_trip() {
         frags.push(frag.to_string());
     }
 
-    // The three must be DISTINCT — the bug made them collapse to the same href.
+    // The three must be DISTINCT; collapsing onto one href is the failure here.
     frags.sort();
     frags.dedup();
     assert_eq!(

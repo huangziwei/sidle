@@ -32,8 +32,7 @@
 //! `/Info` only, not XMP (`/Metadata`). A PDF carrying both can therefore end up
 //! with an XMP title disagreeing with the `/Info` title, and PDF 2.0 readers
 //! prefer XMP. This crate's own consumer (`probe_pdf`) reads `/Info`, so the
-//! edit is authoritative everywhere bokai reads it back; full XMP sync is a
-//! later tier.
+//! edit is authoritative everywhere bokai reads it back. XMP is not synced.
 
 use lopdf::Object;
 

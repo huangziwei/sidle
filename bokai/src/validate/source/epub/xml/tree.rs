@@ -215,7 +215,7 @@ impl Document {
     /// an `id` — so the walk happens as many times as the document has ids.
     /// Reusing it removes the walk and its allocation, not the repetition:
     /// that assertion is a self-join and stays quadratic until the evaluator
-    /// can answer it from an index (see the plan's note on `*[@id]`).
+    /// can answer `*[@id]` from an index.
     pub fn all_nodes(&self) -> &[NodeId] {
         self.all.get_or_init(|| {
             let mut out = Vec::with_capacity(self.nodes.len());

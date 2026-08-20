@@ -285,8 +285,8 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
     // struct on others. Calibre dispatches on the VALUE's type before ever
     // consulting the enum map (`property_value`,
     // yj_to_epub_properties.py:1174 — the IonStruct branch precedes the
-    // value_map lookup); matching the table first and bailing on a miss
-    // silently dropped every numeric value of an enum-carrying property.
+    // value_map lookup). Matching the table first and bailing on a miss would
+    // drop every numeric value of an enum-carrying property.
     if let Some(table) = prop.values {
         // The lookup key can be a symbol id (most common) or a bool.
         match inner {
@@ -548,8 +548,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // (yj_to_epub_properties.py:238), keyed by symbol: $350 normal, $355 thin→100,
     // $356 ultra_light→200, $357 light→300, $359 medium→500, $360 semi_bold→600,
     // $361 bold, $362 ultra_bold→800, $363 heavy→900. ($358 "book" is unmapped, as
-    // in calibre.) bokai's prior `font_weight_100…` keys never matched a real symbol
-    // name, so the whole family silently dropped.
+    // in calibre.) The keys have to be symbol names: a `font_weight_100…` key
+    // matches no real symbol and drops the whole family.
     (
         "font_weight",
         Prop {
@@ -833,9 +833,9 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // ---- borders ----
     // Keys are the canonical YJ symbol names (per `symbols.rs`): `border_color_top`,
     // `border_style_top`, `border_weight_top` — NOT the CSS-style `border_top_color`
-    // ordering. The old keys never matched any KFX field, so every per-side border was
-    // silently dropped on import (no box rendered in the reader). The CSS property name
-    // (`name:`) is the correct CSS spelling.
+    // ordering. A key in the CSS ordering matches no KFX field, and every per-side
+    // border is then dropped on import — no box rendered in the reader. The CSS
+    // property name (`name:`) is the correct CSS spelling.
     (
         "border_color",
         Prop {
@@ -943,8 +943,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ),
     // ---- text emphasis (圏点) ----
     // Reverse of the export `ValueTransform::Map` in style_schema.rs. Common in
-    // Japanese; previously absent here, so 圏点 was dropped on the reader path
-    // (the matching export shorthand-parse gap is fixed in declaration.rs).
+    // Japanese, and with no entry here 圏点 is dropped on the reader path. The
+    // matching export shorthand parse lives in declaration.rs.
     (
         "text_emphasis_style",
         Prop {
@@ -1491,11 +1491,11 @@ pub fn style_fields_layout_hints(
                 // List of symbols. Key by symbol ID — calibre's
                 // `LAYOUT_HINT_ELEMENT_NAMES` maps `$760`/`$282`/`$453`, and
                 // bokai's symbol table names `$760` "treat_as_title" (calibre
-                // leaves it nameless). The previous code matched the resolved
-                // NAME "heading", which no real symbol carries, so every
-                // named-style heading was silently dropped — the root cause of
-                // 0 `<hN>` on Amazon KFX whose heading-ness lives on a `$style`
-                // entity rather than inline. Mirror `layout_hints_from_element_fields`.
+                // leaves it nameless). Matching the resolved NAME "heading"
+                // instead drops every named-style heading, since no real symbol
+                // carries that name — and Amazon KFX whose heading-ness lives on
+                // a `$style` entity rather than inline then exports 0 `<hN>`.
+                // Mirror `layout_hints_from_element_fields`.
                 if let IonValue::List(items) = v.unwrap_annotated() {
                     for item in items {
                         if let IonValue::Symbol(id) = item.unwrap_annotated() {

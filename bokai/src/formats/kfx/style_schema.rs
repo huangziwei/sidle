@@ -236,17 +236,17 @@ pub enum IrField {
     VerticalAlign,
     TextDecorationUnderline,
     TextDecorationStrikethrough,
-    // Phase 1: Text properties
+    // Text properties
     LetterSpacing,
     WordSpacing,
     TextTransform,
     Hyphens,
     WhiteSpace,
-    // Phase 2: Text decoration extensions
+    // Text decoration extensions
     UnderlineStyle,
     Overline,
     UnderlineColor,
-    // Phase 3: Layout properties
+    // Layout properties
     Width,
     Height,
     MaxWidth,
@@ -254,11 +254,11 @@ pub enum IrField {
     Float,
     /// Derived from margin-left: auto + margin-right: auto
     BoxAlign,
-    // Phase 4: Page break properties
+    // Page break properties
     BreakBefore,
     BreakAfter,
     BreakInside,
-    // Phase 5: Border properties
+    // Border properties
     BorderStyleTop,
     BorderStyleRight,
     BorderStyleBottom,
@@ -275,31 +275,31 @@ pub enum IrField {
     BorderRadiusTopRight,
     BorderRadiusBottomLeft,
     BorderRadiusBottomRight,
-    // Phase 6: List properties
+    // List properties
     ListStylePosition,
     ListStyleType,
-    // Phase 7: Font family (string value)
+    // Font family (string value)
     FontFamily,
-    // Phase 8: Amazon properties
+    // Amazon properties
     Language,
     Visibility,
     /// Maps CSS box-sizing to KFX sizing_bounds
     SizingBounds,
-    // Phase 9: Additional layout properties
+    // Additional layout properties
     Clear,
     MinWidth,
     MaxHeight,
-    // Phase 10: Pagination control
+    // Pagination control
     Orphans,
     Widows,
-    // Phase 11: Text wrapping
+    // Text wrapping
     WordBreak,
-    // Phase 12: Table properties
+    // Table properties
     BorderCollapse,
     BorderSpacing,
-    // Phase 13: Writing mode (vertical-RTL Japanese, vertical-LR Mongolian, etc.)
+    // Writing mode (vertical-RTL Japanese, vertical-LR Mongolian, etc.)
     WritingMode,
-    // Phase 14: Text emphasis (圏点 / sesame-dot etc.)
+    // Text emphasis (圏点 / sesame-dot etc.)
     TextEmphasisStyle,
     TextEmphasisColor,
     // text-combine-upright (縦中横 / tate-chu-yoko) — combine a run of chars
@@ -820,7 +820,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 1: High-Priority Text Properties
+        // High-Priority Text Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -876,7 +876,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 2: Text Decoration Extensions
+        // Text Decoration Extensions
         // ====================================================================
 
         // Underline style (solid/dotted/dashed/double)
@@ -919,7 +919,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 3: Layout Properties
+        // Layout Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -995,7 +995,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 4: Page Break Properties
+        // Page Break Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -1065,7 +1065,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 5: Border Properties
+        // Border Properties
         // ====================================================================
 
         // Border style transform (shared by all sides)
@@ -1221,7 +1221,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 6: List Properties
+        // List Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -1276,7 +1276,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 7: Font Family (string value, not symbol)
+        // Font Family (string value, not symbol)
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -1288,7 +1288,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 8: Amazon Properties
+        // Amazon Properties
         // ====================================================================
 
         // Language (maps to HTML lang attribute in CSS, stored as string in KFX)
@@ -1333,7 +1333,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 8: Additional Layout Properties
+        // Additional Layout Properties
         // ====================================================================
 
         // clear → yj.float_clear
@@ -1351,7 +1351,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 9: Pagination Control (orphans/widows)
+        // Pagination Control (orphans/widows)
         // ====================================================================
 
         // orphans → keep_lines_together: { first: N }
@@ -1379,7 +1379,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 10: Text Wrapping
+        // Text Wrapping
         // ====================================================================
 
         // word-break → word_break
@@ -1397,7 +1397,7 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Phase 12: Table Properties
+        // Table Properties
         // ====================================================================
 
         // border-collapse → table_border_collapse (boolean: true=collapse, false=separate)
@@ -2082,7 +2082,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 1: Text properties
+        // Text properties
         IrField::LetterSpacing => {
             if !is_default_length(ir_style.letter_spacing, default.letter_spacing) {
                 Some(ir_style.letter_spacing.to_css_string())
@@ -2118,7 +2118,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 2: Text decoration extensions
+        // Text decoration extensions
         IrField::UnderlineStyle => {
             if ir_style.underline_style != default.underline_style {
                 Some(ir_style.underline_style.to_css_string())
@@ -2134,7 +2134,7 @@ pub fn extract_ir_field(
             }
         }
         IrField::UnderlineColor => ir_style.underline_color.map(|c| c.to_css_string()),
-        // Phase 3: Layout properties
+        // Layout properties
         IrField::Width => {
             if ir_style.width != default.width {
                 Some(ir_style.width.to_css_string())
@@ -2184,7 +2184,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 4: Page break properties
+        // Page break properties
         IrField::BreakBefore => {
             if ir_style.break_before != default.break_before {
                 Some(ir_style.break_before.to_css_string())
@@ -2206,7 +2206,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 5: Border properties
+        // Border properties
         IrField::BorderStyleTop => {
             if ir_style.border_style_top != default.border_style_top {
                 Some(ir_style.border_style_top.to_css_string())
@@ -2295,7 +2295,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 6: List properties
+        // List properties
         IrField::ListStylePosition => {
             // Only applies to display: list-item
             if ir_style.display == ir_style::Display::ListItem
@@ -2316,12 +2316,12 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 7: Font family
+        // Font family
         IrField::FontFamily => ir_style
             .font_family
             .as_deref()
             .map(crate::style::compact_font_stack),
-        // Phase 8: Amazon properties
+        // Amazon properties
         IrField::Language => ir_style.language.clone(),
         IrField::Visibility => {
             if ir_style.visibility != default.visibility {
@@ -2366,7 +2366,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 8: Additional layout properties
+        // Additional layout properties
         IrField::Clear => {
             if ir_style.clear != default.clear {
                 Some(ir_style.clear.to_css_string())
@@ -2374,7 +2374,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 9: Pagination control
+        // Pagination control
         IrField::Orphans => {
             if ir_style.orphans != default.orphans {
                 Some(ir_style.orphans.to_string())
@@ -2389,7 +2389,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 10: Text wrapping
+        // Text wrapping
         IrField::WordBreak => {
             if ir_style.word_break != default.word_break {
                 Some(ir_style.word_break.to_css_string())
@@ -2397,7 +2397,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 12: Table properties
+        // Table properties
         IrField::BorderCollapse => {
             if ir_style.border_collapse != default.border_collapse {
                 Some(ir_style.border_collapse.to_css_string())
@@ -2412,7 +2412,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 13: Writing mode
+        // Writing mode
         //
         // Compare against `doc_writing_mode`, not the CSS-spec default.
         // For horizontal books these coincide and behavior is unchanged;
@@ -2427,7 +2427,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Phase 14: Text emphasis
+        // Text emphasis
         IrField::TextEmphasisStyle => {
             if ir_style.text_emphasis_style != default.text_emphasis_style {
                 Some(ir_style.text_emphasis_style.to_css_string())
@@ -2738,7 +2738,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
         IrField::TextDecorationStrikethrough => {
             ir_style.text_decoration_line_through = css_value == "line-through";
         }
-        // Phase 1: Text properties
+        // Text properties
         IrField::LetterSpacing => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 ir_style.letter_spacing = len;
@@ -2774,7 +2774,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WhiteSpace::Normal,
             };
         }
-        // Phase 2: Text decoration extensions
+        // Text decoration extensions
         IrField::UnderlineStyle => {
             ir_style.underline_style = match css_value {
                 "solid" => ir_style::DecorationStyle::Solid,
@@ -2792,7 +2792,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.underline_color = Some(ir_style::Color::rgb(r, g, b));
             }
         }
-        // Phase 3: Layout properties
+        // Layout properties
         IrField::Width => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 ir_style.width = len;
@@ -2830,7 +2830,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::Float::None,
             };
         }
-        // Phase 4: Page break properties
+        // Page break properties
         IrField::BreakBefore => {
             ir_style.break_before = match css_value {
                 "always" | "page" => ir_style::BreakValue::Always,
@@ -2853,7 +2853,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::BreakValue::Auto,
             };
         }
-        // Phase 5: Border properties
+        // Border properties
         IrField::BorderStyleTop => {
             ir_style.border_style_top = parse_border_style(css_value);
         }
@@ -2926,7 +2926,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.border_radius_bottom_right = len;
             }
         }
-        // Phase 6: List properties
+        // List properties
         IrField::ListStylePosition => {
             ir_style.list_style_position = match css_value {
                 "inside" => ir_style::ListStylePosition::Inside,
@@ -2947,11 +2947,11 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::ListStyleType::Disc, // CSS default
             };
         }
-        // Phase 7: Font family
+        // Font family
         IrField::FontFamily => {
             ir_style.font_family = Some(css_value.to_string());
         }
-        // Phase 8: Amazon properties
+        // Amazon properties
         IrField::Language => {
             ir_style.language = Some(css_value.to_string());
         }
@@ -2975,7 +2975,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::BoxSizing::ContentBox,
             };
         }
-        // Phase 8: Additional layout properties
+        // Additional layout properties
         IrField::Clear => {
             ir_style.clear = match css_value {
                 "left" => ir_style::Clear::Left,
@@ -2984,7 +2984,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::Clear::None,
             };
         }
-        // Phase 9: Pagination control
+        // Pagination control
         IrField::Orphans => {
             if let Ok(n) = css_value.parse::<u32>() {
                 ir_style.orphans = n;
@@ -2995,7 +2995,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.widows = n;
             }
         }
-        // Phase 10: Text wrapping
+        // Text wrapping
         IrField::WordBreak => {
             ir_style.word_break = match css_value {
                 "break-all" => ir_style::WordBreak::BreakAll,
@@ -3004,7 +3004,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WordBreak::Normal,
             };
         }
-        // Phase 12: Table properties
+        // Table properties
         IrField::BorderCollapse => {
             ir_style.border_collapse = match css_value {
                 "collapse" => ir_style::BorderCollapse::Collapse,
@@ -3016,7 +3016,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.border_spacing = len;
             }
         }
-        // Phase 13: Writing mode
+        // Writing mode
         IrField::WritingMode => {
             ir_style.writing_mode = match css_value {
                 "vertical-rl" => ir_style::WritingMode::VerticalRl,
@@ -3024,7 +3024,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WritingMode::HorizontalTb,
             };
         }
-        // Phase 14: Text emphasis
+        // Text emphasis
         IrField::TextEmphasisStyle => {
             ir_style.text_emphasis_style = match css_value {
                 "filled dot" => ir_style::TextEmphasisStyle::FilledDot,
@@ -3947,7 +3947,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Phase 1-7: New Style Properties Tests
+    // Style property tests
     // ========================================================================
 
     #[test]
@@ -4398,7 +4398,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Phase 12: Table Properties
+    // Table Properties
     // ========================================================================
 
     #[test]

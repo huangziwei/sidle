@@ -603,9 +603,8 @@ impl<'a> Decoder<'a> {
                 // libjxr `ReadImagePlaneHeader` (strdec.c:2862-2866) reads TWO
                 // 4-bit reserved fields here (8 bits total) for YUV_444 —
                 // `reserved_e_bit` then `reserved_f`. Reading only 4 desyncs the
-                // entire codestream. Latent until now: every Amazon plate is
-                // 8bppGray/YONLY, so this YUV444 path had never run on real data;
-                // verified against libjxr-minted color JXRs (jxr-encoder.md 6.0).
+                // entire codestream. Amazon plates are 8bppGray/YONLY and never
+                // reach this path; a libjxr-minted color JXR does.
                 self.ds.unpack_bits(8)?; // reserved_e_bit (4) + reserved_f (4)
             }
             INT_YUV420 | INT_YUV422 => {

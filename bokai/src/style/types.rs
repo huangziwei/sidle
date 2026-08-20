@@ -97,24 +97,24 @@ pub struct ComputedStyle {
     // White-space handling
     pub white_space: WhiteSpace,
 
-    // Phase 2: Text decoration extensions
+    // Text decoration extensions
     pub underline_style: DecorationStyle,
     pub overline: bool,
     pub underline_color: Option<Color>,
 
-    // Phase 3: Layout properties
+    // Layout properties
     pub width: Length,
     pub height: Length,
     pub max_width: Length,
     pub min_height: Length,
     pub float: Float,
 
-    // Phase 4: Page break properties
+    // Page break properties
     pub break_before: BreakValue,
     pub break_after: BreakValue,
     pub break_inside: BreakValue,
 
-    // Phase 5: Border properties (4 sides)
+    // Border properties (4 sides)
     pub border_style_top: BorderStyle,
     pub border_style_right: BorderStyle,
     pub border_style_bottom: BorderStyle,
@@ -133,28 +133,28 @@ pub struct ComputedStyle {
     pub border_radius_bottom_left: Length,
     pub border_radius_bottom_right: Length,
 
-    // Phase 6: List properties
+    // List properties
     pub list_style_position: ListStylePosition,
 
-    // Phase 7: Amazon properties
+    // Amazon properties
     pub language: Option<String>,
     pub visibility: Visibility,
     pub box_sizing: BoxSizing,
 
-    // Phase 8: Additional layout properties
+    // Additional layout properties
     pub max_height: Length,
     pub min_width: Length,
     pub clear: Clear,
 
-    // Phase 9: Pagination control
+    // Pagination control
     pub orphans: u32,
     pub widows: u32,
 
-    // Phase 10: Text wrapping
+    // Text wrapping
     pub word_break: WordBreak,
     pub overflow_wrap: OverflowWrap,
 
-    // Phase 11: Table properties
+    // Table properties
     pub border_collapse: BorderCollapse,
     pub border_spacing: Length,
 }

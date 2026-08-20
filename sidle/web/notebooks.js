@@ -480,8 +480,8 @@
 
   // Inline rename: swap the shown title for an input (no native prompt dialog).
   // The label lives in whichever view is active — the gallery card's ".meta .t",
-  // or the list row's title cell (`td[data-col="title"]`). This used to look only
-  // in the grid, so rename silently no-opped in list view.
+  // or the list row's title cell (`td[data-col="title"]`). Looking only in the
+  // grid makes rename silently no-op in list view.
   function startRename(n) {
     const target =
       q(`#notes-grid .notebook-card[data-notebook-id="${n.id}"] .meta .t`) ||
@@ -610,8 +610,8 @@
   }
 
   // ── Open in the reader ───────────────────────────────────────────────────────
-  // The paged SVG viewer used to live here; it now renders inside the shared
-  // reader shell (#reader-view) as a third content mode, exactly like a PDF —
+  // The paged SVG viewer renders inside the shared reader shell (#reader-view)
+  // as a third content mode, exactly like a PDF —
   // see reader.js `openNotebook`. We just hand it a small descriptor (resolving
   // the title here, since the title fallback is ours), mirroring how library.js
   // opens a book via `sidleReader.open(id)`.
