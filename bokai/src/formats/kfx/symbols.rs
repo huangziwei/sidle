@@ -857,15 +857,12 @@ pub const KFX_SYMBOL_TABLE_SIZE: usize = 852;
 pub const KFX_MAX_SYMBOL_ID: usize = 851;
 
 /// Get the symbol name for a given symbol ID.
-/// This is the preferred way to look up symbol names.
 #[inline]
 pub fn symbol_name(id: u64) -> Option<&'static str> {
     KFX_SYMBOL_TABLE.get(id as usize).copied()
 }
 
 /// KFX symbol enum with values matching KFX_SYMBOL_TABLE indices.
-/// Generated from the table using `scripts/gen_kfx_enum.py`.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 #[allow(non_camel_case_types)]
