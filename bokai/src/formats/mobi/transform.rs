@@ -1488,7 +1488,14 @@ fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec
         // Check if this is an attribute to strip
         let should_strip = attr_name == b"aid"
             || attr_name.starts_with(b"data-Amzn")
-            || attr_name.starts_with(b"data-amzn");
+            || attr_name.starts_with(b"data-amzn")
+            // A KF8 book names every resource it holds with a `kindle:` URL,
+            // so a `srcset` — which its renderer ignores and its producer
+            // therefore left pointing at the pre-Kindle source tree — cites
+            // files no container holds. Carried through, it wins over `src`
+            // in every reader that implements it and the picture goes
+            // missing (epubcheck RSC-007 for the same reason).
+            || attr_name.eq_ignore_ascii_case(b"srcset");
 
         if should_strip {
             // Skip the attribute value, capturing it — a link-target aid is
@@ -1713,6 +1720,22 @@ mod tests {
         assert!(s.contains("id=\"ch1\""), "existing id must survive: {s}");
         assert!(!s.contains("aid-B4"), "no second id may be injected: {s}");
         assert!(!s.contains("aid=\""), "aid attribute must be stripped: {s}");
+    }
+
+    #[test]
+    fn srcset_naming_the_pre_kindle_source_tree_is_stripped() {
+        // A Standard Ebooks build leaves the retina `srcset` alone while
+        // calibre rewrites `src` to a `kindle:embed:` ref, so the 2x file is
+        // not in the book at all. Every reader that implements `srcset`
+        // prefers it over `src`, and the picture goes missing.
+        let input = b"<img src=\"kindle:embed:0003?mime=image/png\" \
+srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
+        let out = strip_kindle_attributes_fast(input, &Default::default());
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("srcset"), "srcset must be stripped: {s}");
+        assert!(!s.contains("logo-2x"), "its targets go with it: {s}");
+        assert!(s.contains("kindle:embed:0003"), "src survives: {s}");
+        assert!(s.contains("alt=\"Logo\""), "alt survives: {s}");
     }
 
     #[test]

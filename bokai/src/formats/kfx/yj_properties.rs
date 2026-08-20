@@ -445,6 +445,17 @@ fn format_length_struct(fields: &[(u64, IonValue)], symbols: &SymbolTable) -> Op
         }
     }
     match (value, unit) {
+        // A point is an absolute CSS length written at the Kindle's 160 dpi
+        // baseline (`style_schema::KFX_PT_PER_CSS_PX`), so it reads back as
+        // the pixel count it was made from: Amazon's own `0.45pt` borders are
+        // the `1px` its own stylesheet for the same book declares.
+        (Some(v), Some("pt")) => Some(match v.parse::<f64>() {
+            Ok(pt) => format!(
+                "{}px",
+                ((pt / crate::formats::kfx::style_schema::KFX_PT_PER_CSS_PX) * 1e5).round() / 1e5
+            ),
+            Err(_) => format!("{}pt", v),
+        }),
         (Some(v), Some(u)) => Some(format!("{}{}", v, u)),
         (Some(v), None) => Some(v),
         _ => None,
@@ -1683,6 +1694,31 @@ mod tests {
             css(&[("baseline_style", "text_bottom")]),
             vec![("vertical-align".to_string(), "text-bottom".to_string())]
         );
+    }
+
+    /// Amazon states an absolute length in points read at 160 dpi: the
+    /// `border-width: 1px` in its own AZW3 stylesheet is `0.45pt` in its own
+    /// KFX of the same book. Relative units carry their own meaning across.
+    #[test]
+    fn a_point_length_reads_back_as_the_pixels_it_states() {
+        let symbols = SymbolTable::from_fragment(None);
+        let length = |value: &str, unit: &str| {
+            let fields = vec![
+                (
+                    symbol_id_for_name("value").expect("value symbol"),
+                    IonValue::Decimal(value.to_string()),
+                ),
+                (
+                    symbol_id_for_name("unit").expect("unit symbol"),
+                    IonValue::Symbol(symbol_id_for_name(unit).expect("unit value")),
+                ),
+            ];
+            format_length_struct(&fields, &symbols)
+        };
+        assert_eq!(length("0.45", "pt"), Some("1px".to_string()));
+        assert_eq!(length("1.8", "pt"), Some("4px".to_string()));
+        assert_eq!(length("1.5", "em"), Some("1.5em".to_string()));
+        assert_eq!(length("75", "percent"), Some("75%".to_string()));
     }
 
     /// `vertical-align` does not inherit, so the initial value carries no
