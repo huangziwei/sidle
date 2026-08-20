@@ -177,7 +177,7 @@ pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
+pub(crate) fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
     // Composite alpha onto white before encoding. JPEG has no alpha
     // channel, and Kindle's renderer is documented as not compositing
     // transparency correctly — flattening here matches what a publisher

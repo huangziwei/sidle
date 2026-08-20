@@ -168,7 +168,10 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
     let mut nav_labels = Vec::new();
     flatten_labels(&ev.nav_tree, &mut nav_labels);
     let nav_count = nav_labels.len();
-    let nav_chapters = nav_labels.iter().filter(|l| !is_front_matter(l)).count();
+    let nav_chapters = nav_labels
+        .iter()
+        .filter(|l| !crate::model::toc_shape::is_front_matter(l))
+        .count();
     let fm_only = nav_count > 0 && nav_chapters == 0;
 
     // Ground-truth chapter count = the strongest of the three in-book signals.
@@ -363,57 +366,6 @@ impl TocAudit {
     }
 }
 
-/// Front-matter / boilerplate TOC labels (JP + EN). A declared TOC made only of
-/// these has no chapters. Kept intentionally broad — the cost of a false "front
-/// matter" is only that an entry doesn't count toward `nav_chapters`, and the
-/// flag still requires strong positive in-book evidence. Shared with the EPUB
-/// TOC repairer, which counts an existing TOC's real chapters before reusing it.
-pub(crate) fn is_front_matter(label: &str) -> bool {
-    let l = label.trim();
-    const JP: &[&str] = &[
-        "表紙",
-        "奥付",
-        "目次",
-        "もくじ",
-        "カバー",
-        "扉",
-        "中扉",
-        "口絵",
-        "表題",
-        "本扉",
-        "標題",
-        "凡例",
-        "序文",
-        "序",
-    ];
-    for p in JP {
-        if l.starts_with(p) {
-            return true;
-        }
-    }
-    let low = l.to_ascii_lowercase();
-    const EN: &[&str] = &[
-        "cover",
-        "contents",
-        "table of contents",
-        "title",
-        "copyright",
-        "colophon",
-        "dedication",
-        "about the author",
-        "about the publisher",
-        "praise",
-        "also by",
-        "other books",
-        "acknowledg",
-        "index",
-        "front matter",
-        "back matter",
-        "half title",
-    ];
-    EN.iter().any(|p| low.starts_with(p))
-}
-
 /// Whether a short line reads as a standalone chapter marker: a bare number
 /// (`1`, `12`), a Japanese `第N章/部/話/節`, or an English `Chapter N`. Kept tight
 /// so prose first-lines and dropcaps (a single letter) don't match. Shared by the
@@ -453,30 +405,6 @@ fn is_chapter_marker(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn front_matter_matches_expected() {
-        for s in [
-            "表紙",
-            "目次",
-            "奥付",
-            "Cover",
-            "Contents",
-            "Copyright",
-            "About the Author",
-        ] {
-            assert!(is_front_matter(s), "{s} should be front matter");
-        }
-        for s in [
-            "第一章",
-            "Chapter 1",
-            "一　目撃者",
-            "プロローグ",
-            "The High Window",
-        ] {
-            assert!(!is_front_matter(s), "{s} should not be front matter");
-        }
-    }
 
     #[test]
     fn chapter_marker_matches_bare_numbers_and_headings() {

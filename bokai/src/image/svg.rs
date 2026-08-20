@@ -12,26 +12,32 @@
 //! Also home to the process-wide system-font database used by every
 //! resvg consumer (this module and the Aozora cover generator).
 
+#[cfg(feature = "svg")]
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "svg")]
 use resvg::tiny_skia;
+#[cfg(feature = "svg")]
 use resvg::usvg;
 
 /// Upper bound for either raster dimension. Amazon's pipeline keeps non-HDV
 /// image resources — which JXR always is — within 1920px; kfxlib flags
 /// larger JXR resources as out-of-spec ("HDV dimensions" warning).
+#[cfg(feature = "svg")]
 const MAX_DIM: f32 = 1920.0;
 
 /// Supersample factor over the SVG's intrinsic CSS-px size. E-ink Kindles
 /// are ~300 ppi vs CSS's 96 (~3.1× physical); round up for zoom headroom.
 /// Display size still comes from the content's own CSS — supersampling
 /// only sharpens, it never changes layout for images with explicit sizes.
+#[cfg(feature = "svg")]
 const SCALE: f32 = 4.0;
 
 /// Cache the system-font scan. `load_system_fonts()` walks every
 /// `/Library/Fonts`, `~/Library/Fonts`, `/System/Library/Fonts` entry on
 /// macOS — ~150-300 ms per call. We scan once per process and clone the
 /// `Arc<Database>` into each render's `Options`.
+#[cfg(feature = "svg")]
 pub fn cached_fontdb() -> Arc<usvg::fontdb::Database> {
     static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     FONTDB
@@ -62,6 +68,7 @@ pub(crate) fn looks_like_svg(data: &[u8]) -> bool {
 ///
 /// `None` when the bytes don't sniff as SVG or fail to parse — callers
 /// fall through to their non-SVG handling.
+#[cfg(feature = "svg")]
 pub(crate) fn rasterize(data: &[u8]) -> Option<image::DynamicImage> {
     if !looks_like_svg(data) {
         return None;
@@ -109,6 +116,7 @@ mod tests {
         assert!(!looks_like_svg(b""));
     }
 
+    #[cfg(feature = "svg")]
     #[test]
     fn rasterize_supersamples_and_flattens_white() {
         let img = rasterize(HALF_BLACK.as_bytes()).expect("svg rasterizes");
@@ -121,6 +129,7 @@ mod tests {
         assert_eq!(rgb.get_pixel(10, 20).0, [0, 0, 0]);
     }
 
+    #[cfg(feature = "svg")]
     #[test]
     fn rasterize_caps_huge_intrinsic_size() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000"><rect width="4000" height="2000" fill="red"/></svg>"#;
@@ -129,6 +138,7 @@ mod tests {
         assert_eq!(img.height(), 960);
     }
 
+    #[cfg(feature = "svg")]
     #[test]
     fn rasterize_rejects_non_svg() {
         assert!(rasterize(b"GIF89a not svg").is_none());

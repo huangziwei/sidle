@@ -234,10 +234,11 @@ mod tests {
 
     /// A PDF-backed KFX declares a JPEG cover *and* a `format: pdf` resource: the
     /// extractor returns the cover image and skips the non-image PDF page.
+    #[cfg(feature = "pdf")]
     #[test]
     fn pdf_backed_extracts_cover_skips_pdf_resource() {
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
+        use crate::formats::pdf::structure::{PdfDoc, PdfPage};
 
         let doc = PdfDoc {
             bytes: b"%PDF-1.4\n% fixture\n%%EOF\n".to_vec(),

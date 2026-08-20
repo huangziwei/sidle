@@ -548,10 +548,11 @@ fn build_kfx_container(
                 fragments.push(build_font_resource_fragment(&href, &data, &mut ctx));
                 continue;
             }
+            reject_unrasterizable_svg(&href, &data)?;
             let is_cover =
                 cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
             let bundled = if is_cover {
-                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
+                cover_jpeg_for_kfx(&data).unwrap_or(data)
             } else {
                 encode_asset_for_kfx(&data, color_mode)
             };
@@ -2593,6 +2594,36 @@ const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
     hp: 32,
 };
 
+/// Prepare the cover image's bytes for KFX bundling as JPEG. An SVG cover is
+/// rasterized first — KFX has no vector resource format — then takes the same
+/// JFIF path as any other. `None` means the bytes stand as they are.
+fn cover_jpeg_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "svg")]
+    if let Some(img) = crate::image::svg::rasterize(data) {
+        return crate::image::jpeg::encode_as_jpeg(&img);
+    }
+    crate::image::jpeg::sanitize_for_kfx(data)
+}
+
+/// Reject vector art a build without the `svg` feature cannot rasterize. KFX
+/// carries no vector resource format: the verbatim bytes reach the device as a
+/// resource that draws nothing.
+#[cfg(not(feature = "svg"))]
+fn reject_unrasterizable_svg(href: &str, data: &[u8]) -> io::Result<()> {
+    if crate::image::svg::looks_like_svg(data) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{href}: SVG art needs the `svg` feature — KFX has no vector resource format"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "svg")]
+fn reject_unrasterizable_svg(_href: &str, _data: &[u8]) -> io::Result<()> {
+    Ok(())
+}
+
 /// Prepare a media asset's bytes for KFX bundling. Raster images are re-encoded
 /// as **grayscale JPEG-XR** — the device is B&W e-ink and the source EPUB keeps
 /// the color master, so this matches Amazon's own KFX image codec and shrinks
@@ -2605,6 +2636,7 @@ fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
     if let Some(jxr) = encode_jxr_asset(data, mode) {
         return jxr;
     }
+    #[cfg(feature = "svg")]
     if let Some(img) = crate::image::svg::rasterize(data)
         && let Some(jxr) = encode_dynimg_jxr(&img, mode)
     {
@@ -3615,6 +3647,7 @@ fn image_fxl_to_kfx(
             )
         })?;
         let raw = book.load_asset(&path)?;
+        reject_unrasterizable_svg(href, &raw)?;
         let (w, h) = crate::util::extract_image_dimensions(&raw).unwrap_or((0, 0));
         let img = encode_asset_for_kfx(&raw, color_mode);
         let (thumb, tw, th) = make_manga_thumbnail(&raw, color_mode).unwrap_or((Vec::new(), 0, 0));
@@ -3722,7 +3755,7 @@ fn image_fxl_to_kfx(
     ctx.has_publisher_fonts = has_publisher_fonts(book);
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
     // 3. metadata ($258) — reading order + page-progression-direction
-    fragments.push(build_pdf_metadata_fragment(&ctx, ppd_sym));
+    fragments.push(build_fxl_metadata_fragment(&ctx, ppd_sym));
     // 4. document_data ($538) — inserted here later, once max_id is known.
     let document_data_index = fragments.len();
 
@@ -3912,7 +3945,7 @@ fn build_manga_document_data_fragment(
     ctx: &ExportContext,
     ppd_sym: Option<KfxSymbol>,
 ) -> KfxFragment {
-    let reading_order = pdf_reading_order(ctx, ppd_sym);
+    let reading_order = default_reading_order(ctx, ppd_sym);
     let fields = vec![
         (
             KfxSymbol::WritingMode as u64,
@@ -4099,8 +4132,8 @@ fn build_manga_storyline(
 /// book language (mirrors the reference manga's shared inner-container style).
 fn build_manga_style_sj(sj_sym: u64, language: &str) -> KfxFragment {
     let mut fields = vec![
-        (KfxSymbol::Width as u64, pdf_percent_100()),
-        (KfxSymbol::Height as u64, pdf_percent_100()),
+        (KfxSymbol::Width as u64, percent_100()),
+        (KfxSymbol::Height as u64, percent_100()),
     ];
     if !language.is_empty() {
         fields.push((
@@ -4537,6 +4570,7 @@ fn build_manga_container_entity_map_fragment(
 // ============================================================================
 
 /// Metadata stamped into a PDF→KFX (PDOC) conversion.
+#[cfg(feature = "pdf")]
 pub struct PdfKfxMeta {
     pub title: String,
     pub author: Option<String>,
@@ -4555,12 +4589,13 @@ pub struct PdfKfxMeta {
     /// book must set this explicitly (e.g. from edited library metadata) and be
     /// force-reconverted. Applied to every reading order's
     /// `page_progression_direction` ($425) and to `document_data.direction`
-    /// ($192) — see `build_pdf_metadata_fragment` /
+    /// ($192) — see `build_fxl_metadata_fragment` /
     /// `build_pdf_document_data_fragment`.
     pub page_progression_direction: Option<String>,
 }
 
 /// Per-page bookkeeping gathered in the survey pass.
+#[cfg(feature = "pdf")]
 struct PdfPageRec {
     section_name: String,
     section_sym: u64,
@@ -4597,15 +4632,18 @@ struct PdfPageRec {
 /// Per-text-run bookkeeping: the text item's EID and the run's UTF-16 length
 /// (its span in the section position map — each character is one reading
 /// position).
+#[cfg(feature = "pdf")]
 struct PdfRunRec {
     id: u64,
     len: usize,
 }
 
 /// Symbolic name of the single shared PDF raw-media resource.
+#[cfg(feature = "pdf")]
 const PDF_RSRC_NAME: &str = "rsrc0";
 
 /// Symbolic name of the optional page-1 cover JPEG resource.
+#[cfg(feature = "pdf")]
 const COVER_RSRC_NAME: &str = "ecover";
 
 /// Convert a probed PDF into a fixed-layout, PDF-backed KFX (PDOC).
@@ -4624,6 +4662,7 @@ const COVER_RSRC_NAME: &str = "ecover";
 /// fixed-layout text live on device (select / search / dictionary / highlight) —
 /// matching Amazon's Send-to-Kindle structure. When `None`/empty for a page, that
 /// page stays visual-only (e.g. a scanned/image page, or a non-macOS build).
+#[cfg(feature = "pdf")]
 pub fn pdf_to_kfx(
     pdf: &crate::import::pdf::PdfDoc,
     meta: &PdfKfxMeta,
@@ -4744,7 +4783,7 @@ pub fn pdf_to_kfx(
         has_text,
     ));
     // 3. metadata ($258) — reading order
-    fragments.push(build_pdf_metadata_fragment(&ctx, ppd_sym));
+    fragments.push(build_fxl_metadata_fragment(&ctx, ppd_sym));
     // 4. document_data ($538) — inserted here later, once max_id is known.
     let document_data_index = fragments.len();
 
@@ -4868,7 +4907,7 @@ pub fn pdf_to_kfx(
 }
 
 /// A percent dimension struct: `{ value: 100, unit: percent }`.
-fn pdf_percent_100() -> IonValue {
+fn percent_100() -> IonValue {
     IonValue::Struct(vec![
         (KfxSymbol::Value as u64, IonValue::Int(100)),
         (
@@ -4883,6 +4922,7 @@ fn pdf_percent_100() -> IonValue {
 /// layer (`rec.runs`), the container also carries an `auxiliary_data.default`
 /// (`links_extracted`) marker and a second, invisible `{story_name, ignore}`
 /// child that pulls in the page's text storyline as a positioned overlay.
+#[cfg(feature = "pdf")]
 fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> KfxFragment {
     // Amazon sizes the page container in points×100.
     let fixed_w = (width_pt * 100.0).round() as i64;
@@ -4890,8 +4930,8 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
 
     let image = IonValue::Struct(vec![
         (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
-        (KfxSymbol::Width as u64, pdf_percent_100()),
-        (KfxSymbol::Height as u64, pdf_percent_100()),
+        (KfxSymbol::Width as u64, percent_100()),
+        (KfxSymbol::Height as u64, percent_100()),
         (
             KfxSymbol::Type as u64,
             IonValue::Symbol(KfxSymbol::Image as u64),
@@ -4969,6 +5009,7 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
 /// in its `style_events`, word-segmented for the custom word iterator, and
 /// linked to its `text_baseline` aux entry. The page-image storyline pulls this
 /// in by `story_name` (see [`build_pdf_page_storyline`]).
+#[cfg(feature = "pdf")]
 fn build_pdf_text_storyline(
     rec: &PdfPageRec,
     runs: &[crate::formats::pdf::render::TextRun],
@@ -5075,6 +5116,7 @@ fn build_pdf_text_storyline(
 
 /// Build an `auxiliary_data` ($597) fragment: `{kfx_id: <sym>, metadata: [{key,
 /// value}, …]}`. `fid` must be the string the `kfx_id` symbol was interned from.
+#[cfg(feature = "pdf")]
 fn build_aux_fragment(fid: &str, kfx_id_sym: u64, entries: Vec<(&str, IonValue)>) -> KfxFragment {
     let metadata: Vec<IonValue> = entries
         .into_iter()
@@ -5094,6 +5136,7 @@ fn build_aux_fragment(fid: &str, kfx_id_sym: u64, entries: Vec<(&str, IonValue)>
 
 /// Build a one-entry `auxiliary_data` fragment (the text layer's
 /// `links_extracted` / `text_baseline` entries).
+#[cfg(feature = "pdf")]
 fn build_kv_aux_fragment(fid: &str, kfx_id_sym: u64, key: &str, value: IonValue) -> KfxFragment {
     build_aux_fragment(fid, kfx_id_sym, vec![(key, value)])
 }
@@ -5104,6 +5147,7 @@ fn build_kv_aux_fragment(fid: &str, kfx_id_sym: u64, key: &str, value: IonValue)
 /// - portrait:  `{ id, story_name, condition:(isPortrait),  layout:vertical }`
 /// - landscape: `{ id, width:100%, story_name, fixed_width:100%,
 ///                 condition:(isLandscape), layout:overflow }`
+#[cfg(feature = "pdf")]
 fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
     let portrait = IonValue::Struct(vec![
         (KfxSymbol::Id as u64, IonValue::Int(rec.pt_id as i64)),
@@ -5126,9 +5170,9 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
             KfxSymbol::Id as u64,
             IonValue::Int(rec.pt_landscape_id as i64),
         ),
-        (KfxSymbol::Width as u64, pdf_percent_100()),
+        (KfxSymbol::Width as u64, percent_100()),
         (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
-        (KfxSymbol::FixedWidth as u64, pdf_percent_100()),
+        (KfxSymbol::FixedWidth as u64, percent_100()),
         (
             KfxSymbol::Condition as u64,
             IonValue::Sexp(vec![IonValue::Symbol(KfxSymbol::Islandscape as u64)]),
@@ -5161,6 +5205,7 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
 /// Decimal rather than float because these are exact base-10 quantities —
 /// `hundredths` counts pt×100, the unit the text layer is already measured in —
 /// and a binary float would print them back as 30.219999999999999.
+#[cfg(feature = "pdf")]
 fn pt_value(hundredths: i64) -> IonValue {
     if hundredths % 100 == 0 {
         return IonValue::Int(hundredths / 100);
@@ -5176,6 +5221,7 @@ fn pt_value(hundredths: i64) -> IonValue {
 /// is `351.496 × 598.11` — quantizing it to pt×100 would round the width to
 /// `351.5` and lose a digit Amazon keeps. Four decimals is past what an f32
 /// carries here, so the trim is what sets the final width.
+#[cfg(feature = "pdf")]
 fn pt_page_dim(pt: f32) -> IonValue {
     if pt.fract() == 0.0 && pt.abs() < i64::MAX as f32 {
         return IonValue::Int(pt as i64);
@@ -5200,6 +5246,7 @@ fn pt_page_dim(pt: f32) -> IonValue {
 /// glyph reaches it — its box tracks text *frames*, not the text in them. Erring
 /// narrow is the safe direction: the reader crops to what it is given, so a box
 /// that hugs the glyphs trims more whitespace and can never trim into content.
+#[cfg(feature = "pdf")]
 fn pdf_page_margins(
     runs: &[crate::formats::pdf::render::TextRun],
     page: (i64, i64),
@@ -5227,6 +5274,7 @@ fn pdf_page_margins(
 /// page: it states where the ink stops, so trimming whitespace does not trim
 /// content. Without it every margin setting renders identically. See
 /// [`pdf_page_margins`] for how far it is from Amazon's own.
+#[cfg(feature = "pdf")]
 fn build_pdf_external_resource(
     rec: &PdfPageRec,
     page_index: usize,
@@ -5281,6 +5329,7 @@ fn build_pdf_external_resource(
 /// resource (a real JPEG, no `page_index`) referenced by
 /// `book_metadata.cover_image`. Unlike the page resources it is not part of any
 /// section — it exists only to give the library tile / sleep screen its art.
+#[cfg(feature = "pdf")]
 fn build_pdf_cover_external_resource(
     res_sym: u64,
     width_px: u32,
@@ -5324,6 +5373,7 @@ fn build_pdf_cover_external_resource(
 /// The device's own PDF converter stamps `yj_pdf_links` alongside these from a
 /// pass over each page's link annotations; nothing here extracts those, so the
 /// key stays off until the links themselves exist.
+#[cfg(feature = "pdf")]
 fn build_pdf_content_features_fragment(has_text: bool, has_rotated_pages: bool) -> KfxFragment {
     fn feature(namespace: &str, key: &str, major: i64) -> IonValue {
         IonValue::Struct(vec![
@@ -5365,6 +5415,7 @@ fn build_pdf_content_features_fragment(has_text: bool, has_rotated_pages: bool) 
 }
 
 /// book_metadata ($490) for a PDOC, mirroring "Send to Kindle" categories.
+#[cfg(feature = "pdf")]
 fn build_pdf_book_metadata_fragment(
     meta: &PdfKfxMeta,
     container_id: &str,
@@ -5486,6 +5537,7 @@ fn build_pdf_book_metadata_fragment(
 /// One fabricator now.) Seeded by the PDF's stable identity (title + author + byte
 /// size + page count) since a PDF carries no publication identifier, so
 /// re-converting the same PDF yields the same id.
+#[cfg(feature = "pdf")]
 fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) -> String {
     let seed = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}",
@@ -5500,6 +5552,7 @@ fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) ->
 /// Resolve a page-progression-direction string to its KFX symbol: `"rtl"` →
 /// `$rtl` (375), `"ltr"` → `$ltr` (376); anything else (incl. `None`) → `None`,
 /// meaning "omit the field" — the device then defaults to ltr.
+#[cfg(feature = "pdf")]
 fn ppd_symbol(ppd: Option<&str>) -> Option<KfxSymbol> {
     match ppd {
         Some("rtl") => Some(KfxSymbol::Rtl),
@@ -5510,7 +5563,7 @@ fn ppd_symbol(ppd: Option<&str>) -> Option<KfxSymbol> {
 
 /// Build a default reading order over all sections, appending the
 /// `page_progression_direction` ($425) symbol when `ppd_sym` is set.
-fn pdf_reading_order(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> IonValue {
+fn default_reading_order(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> IonValue {
     let sections: Vec<IonValue> = ctx
         .section_ids
         .iter()
@@ -5533,10 +5586,10 @@ fn pdf_reading_order(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> IonValu
 }
 
 /// metadata ($258): the default reading order over all sections.
-fn build_pdf_metadata_fragment(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> KfxFragment {
+fn build_fxl_metadata_fragment(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> KfxFragment {
     let ion = IonValue::Struct(vec![(
         KfxSymbol::ReadingOrders as u64,
-        IonValue::List(vec![pdf_reading_order(ctx, ppd_sym)]),
+        IonValue::List(vec![default_reading_order(ctx, ppd_sym)]),
     )]);
     KfxFragment::singleton(KfxSymbol::Metadata, ion)
 }
@@ -5544,11 +5597,12 @@ fn build_pdf_metadata_fragment(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) 
 /// document_data ($538): minimal fixed-layout document — max_id, pan_zoom and
 /// the reading order, which is all Amazon's PDF document_data carries. (Reflow
 /// fields like font_size/line_height are irrelevant to a PDF-backed book.)
+#[cfg(feature = "pdf")]
 fn build_pdf_document_data_fragment(
     ctx: &ExportContext,
     ppd_sym: Option<KfxSymbol>,
 ) -> KfxFragment {
-    let reading_order = pdf_reading_order(ctx, ppd_sym);
+    let reading_order = default_reading_order(ctx, ppd_sym);
     let mut fields = vec![
         (KfxSymbol::MaxId as u64, IonValue::Int(ctx.max_eid() as i64)),
         (
@@ -5580,6 +5634,7 @@ fn build_pdf_document_data_fragment(
 /// both `position_id_map`'s section `length` and the `section_position_id_map`
 /// terminator, which must agree. Keep in sync with
 /// [`build_pdf_section_position_id_map_fragments`].
+#[cfg(feature = "pdf")]
 fn pdf_section_span(rec: &PdfPageRec) -> i64 {
     let mut span = 5i64; // pt_id + container + image + pt_landscape + text_ref
     if rec.runs.is_empty() {
@@ -5593,6 +5648,7 @@ fn pdf_section_span(rec: &PdfPageRec) -> i64 {
 /// position_map ($264): one entry per page enumerating the section's EIDs — both
 /// page templates, container, image, and (for a text page) the text-ref child +
 /// every text item. Tells the device which EIDs belong to each section.
+#[cfg(feature = "pdf")]
 fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
     let entries: Vec<IonValue> = recs
         .iter()
@@ -5627,6 +5683,7 @@ fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
 /// the overlay text unselectable). `pid` is the section's cumulative start
 /// position; `length` is its span. Paired with `section_position_id_map`, this is
 /// what makes the text live.
+#[cfg(feature = "pdf")]
 fn build_pdf_position_id_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
     let mut entries: Vec<IonValue> = Vec::with_capacity(recs.len());
     let mut pid = 0i64;
@@ -5655,6 +5712,7 @@ fn build_pdf_position_id_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
 /// page templates / container / image / text-ref and the run's UTF-16 length for
 /// a text item; an `[advance, 0]` terminator lands at `pid == length` (agreeing
 /// with `position_id_map`).
+#[cfg(feature = "pdf")]
 fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFragment> {
     recs.iter()
         .map(|rec| {
@@ -5726,6 +5784,7 @@ fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFr
 /// nav_container (as the reflowable EPUB path emits, which that reader tolerates)
 /// makes the device reject the whole book ("An error occurred…"). Returns an
 /// empty vec when there's no usable outline.
+#[cfg(feature = "pdf")]
 fn build_pdf_nav_fragments(
     pdf: &crate::import::pdf::PdfDoc,
     recs: &[PdfPageRec],
@@ -5791,6 +5850,7 @@ fn build_pdf_nav_fragments(
 /// label is the PDF's page label (`pdf.page_labels`); the target is the page's
 /// image EID, which `position_id_map` registers (an unregistered target would
 /// make the device reject the book — see `build_pdf_toc_entries`).
+#[cfg(feature = "pdf")]
 fn build_pdf_page_list_entries(labels: &[String], recs: &[PdfPageRec]) -> Vec<IonValue> {
     recs.iter()
         .enumerate()
@@ -5824,6 +5884,7 @@ fn build_pdf_page_list_entries(labels: &[String], recs: &[PdfPageRec]) -> Vec<Io
 /// targeting an unregistered EID (e.g. the page container) makes it reject the
 /// whole book. An item whose page is out of range is skipped along with its
 /// subtree.
+#[cfg(feature = "pdf")]
 fn build_pdf_toc_entries(
     items: &[crate::import::pdf::PdfOutlineItem],
     recs: &[PdfPageRec],
@@ -5863,6 +5924,7 @@ fn build_pdf_toc_entries(
 /// section → external_resource → shared bcRawMedia. The PDF variant differs
 /// from the EPUB one in that every page's external_resource depends on the
 /// *single* shared raw-media location, not a per-resource `resource/<name>`.
+#[cfg(feature = "pdf")]
 fn build_pdf_container_entity_map_fragment(
     container_id: &str,
     fragments: &[KfxFragment],
@@ -7239,6 +7301,7 @@ mod resource_export_tests {
         );
     }
 
+    #[cfg(feature = "svg")]
     #[test]
     fn svg_asset_rasterizes_to_jxr_plate() {
         // 20×10 CSS px SVG, left half black on a transparent background.
@@ -7263,6 +7326,29 @@ mod resource_export_tests {
             "transparent background flattens to white, got {}",
             px(60, 20)
         );
+    }
+
+    #[cfg(not(feature = "svg"))]
+    #[test]
+    fn svg_asset_is_refused_without_a_rasterizer() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"></svg>"#;
+        let err = reject_unrasterizable_svg("art.svg", svg).expect_err("svg must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        reject_unrasterizable_svg("photo.jpg", &[0xFF, 0xD8, 0xFF]).expect("a JPEG still passes");
+    }
+
+    #[cfg(feature = "svg")]
+    #[test]
+    fn svg_cover_rasterizes_to_jpeg() {
+        // 20×10 CSS px SVG, left half black on a transparent background.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10"><rect x="0" y="0" width="10" height="10" fill="black"/></svg>"#;
+        let out = cover_jpeg_for_kfx(svg).expect("svg cover encodes");
+        assert_eq!(
+            &out[0..3],
+            &[0xFF, 0xD8, 0xFF],
+            "cover must become a JPEG, not raw XML the device cannot render"
+        );
+        assert_eq!(crate::util::extract_image_dimensions(&out), Some((80, 40)));
     }
 
     #[test]

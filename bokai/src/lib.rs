@@ -72,6 +72,7 @@ pub mod text;
 // Re-exported because `model::Book`'s public API exposes `jxr::ColorMode`.
 pub use jxr;
 
+#[cfg(feature = "validate")]
 pub mod validate;
 
 pub(crate) mod trace;

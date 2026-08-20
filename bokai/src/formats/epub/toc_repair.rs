@@ -379,7 +379,7 @@ fn count_chapters(entries: &[TocEntry]) -> usize {
     entries
         .iter()
         .map(|e| {
-            let this = usize::from(!crate::validate::source::toc::is_front_matter(&e.title));
+            let this = usize::from(!crate::model::toc_shape::is_front_matter(&e.title));
             this + count_chapters(&e.children)
         })
         .sum()
@@ -1127,6 +1127,7 @@ mod tests {
     /// The headline case: a no-TOC EPUB is repaired. `propose_toc` finds the 6
     /// chapters, `set_toc` synthesizes a nav doc + NCX (registered in the OPF),
     /// and the result opens with a real 6-entry TOC that validates OK.
+    #[cfg(feature = "validate")]
     #[test]
     fn repairs_a_no_toc_epub() {
         let epub = no_toc_epub();

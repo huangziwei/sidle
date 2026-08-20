@@ -51,7 +51,9 @@ pub use epub::{
     ChapterContent, GlobalStylePool, NormalizedContent, SourceElements, normalize_book,
     normalize_book_with,
 };
-pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
+pub use kfx::{KfxConfig, KfxExporter};
+#[cfg(feature = "pdf")]
+pub use kfx::{PdfKfxMeta, pdf_to_kfx};
 pub use markdown::{MarkdownConfig, MarkdownExporter};
 
 pub use epub::{nav, opf};

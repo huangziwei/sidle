@@ -975,6 +975,7 @@ mod tests {
     /// prove the rewritten container re-loads, the reader's toc extractor sees
     /// the new entries, the TOC validator now passes, and it still converts to
     /// EPUB.
+    #[cfg(feature = "validate")]
     #[test]
     fn set_toc_rewrites_and_validates_ok() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -1092,6 +1093,7 @@ mod tests {
     /// TOC, and `repair_toc` rebuilds it from the in-book Contents page. The
     /// result re-loads, is no longer SUSPECT, and still converts to EPUB. A
     /// no-op if this fixture ships no Contents page to rebuild from.
+    #[cfg(feature = "validate")]
     #[test]
     fn repair_rebuilds_a_stripped_toc_from_the_contents_page() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");

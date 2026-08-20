@@ -8,12 +8,14 @@ mod azw3;
 mod epub;
 mod kfx;
 mod mobi;
+#[cfg(feature = "pdf")]
 pub mod pdf;
 
 pub use azw3::Azw3Importer;
 pub use epub::EpubImporter;
 pub use kfx::KfxImporter;
 pub use mobi::MobiImporter;
+#[cfg(feature = "pdf")]
 pub use pdf::{PdfDoc, PdfOutlineItem, PdfPage, probe_pdf};
 
 use std::collections::HashMap;

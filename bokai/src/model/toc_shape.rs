@@ -1,6 +1,6 @@
-//! Format-agnostic rules for the *shape* of a table of contents: how a flat run
-//! of entries is re-parented into the tree its labels imply, and how two lists of
-//! entries for the same book are merged without losing either.
+//! Format-agnostic rules for reading a table of contents: how a flat run of
+//! entries is re-parented into the tree its labels imply, how two lists of
+//! entries for the same book are merged, and which labels are boilerplate.
 //!
 //! Both rules read only what every format's TOC entry has — a label, a target and
 //! children — so a KFX `nav_container` and an EPUB nav doc get identical
@@ -34,8 +34,8 @@ pub trait TocNode: Sized {
     fn target_key(&self) -> String;
 }
 
-/// True if any entry in `entries` already declares children — the signal that a
-/// TOC carries its own structure and the derivation rules must leave it alone.
+/// True if any entry in `entries` declares children — the signal that a TOC
+/// carries its own structure and the derivation rules must leave it alone.
 fn already_nested<T: TocNode>(entries: &[T]) -> bool {
     entries.iter().any(|e| !e.children().is_empty())
 }
@@ -57,15 +57,14 @@ pub(crate) const MIN_INDENT_EVIDENCE: usize = 3;
 
 /// Re-parent a flat run by the levels its labels keep as leading indentation.
 ///
-/// A publisher whose TOC lost its nesting often still ships it visibly, one
+/// A publisher whose TOC lost its nesting often ships it visibly, one
 /// IDEOGRAPHIC SPACE per level: a part label flush left, its chapters indented
 /// once, their sections twice. Each entry attaches under the nearest preceding
-/// entry with a strictly shallower indent, so the depth is whatever the labels
-/// encode; the indentation is then trimmed, because the nesting now says what it
-/// said.
+/// entry with a strictly shallower indent; the depth is whatever the labels
+/// encode, and the tree carries it once the indentation is trimmed.
 ///
 /// A run with no deeper-indented entries (or fewer than `MIN_INDENT_EVIDENCE`)
-/// comes back untouched, as does one that already declares nesting.
+/// comes back untouched, as does one that declares nesting of its own.
 pub fn nest_by_label_indent<T: TocNode>(entries: Vec<T>) -> Vec<T> {
     if already_nested(&entries) {
         return entries;
@@ -94,21 +93,17 @@ pub fn nest_by_label_indent<T: TocNode>(entries: Vec<T>) -> Vec<T> {
 /// Merge the TOC a book **declares** with one **derived** from its content, into
 /// a single list in document order.
 ///
-/// The invariant is that nothing is lost: every declared entry survives, keeping
-/// its own label, and a derived entry joins it only when it targets somewhere the
-/// declared TOC does not already reach. A proposal built this way can add
-/// chapters and add structure but can never take away an entry the reader has
-/// today — which is what makes it safe to offer as the starting point for an
-/// edit.
+/// Nothing is lost: every `declared` entry survives with its own label, and a
+/// `derived` entry joins it only when its target is one `declared` misses. The
+/// result adds chapters and adds structure; it removes no entry.
 ///
 /// `position` places an entry in the book (a spine index, an element's ordinal,
-/// a page); entries it can't place inherit their predecessor's position, so they
-/// stay with the neighbours they arrived next to. Both inputs are assumed to be
-/// in document order already, and equal positions keep declared before derived.
+/// a page); entries it can't place inherit their predecessor's, keeping the
+/// neighbours they arrived next to. Both inputs come in document order, and
+/// equal positions keep `declared` ahead of `derived`.
 ///
-/// A declared TOC that already carries nesting is returned untouched: it is the
-/// publisher's own structure, and there is no non-guessing way to say where a
-/// flat derived list's additions belong inside it.
+/// A `declared` TOC carrying nesting of its own is returned untouched: it is the
+/// publisher's structure, and a flat `derived` list names no place inside it.
 pub fn merge_by_document_order<T: TocNode>(
     declared: Vec<T>,
     derived: Vec<T>,
@@ -192,6 +187,54 @@ impl<T: TocNode> TocTree<T> {
     }
 }
 
+/// Front-matter / boilerplate TOC labels (JP + EN). A TOC made only of these
+/// declares no chapters. The list is deliberately broad: a false "front matter"
+/// only costs an entry its place in a chapter count, never its place in the TOC.
+pub fn is_front_matter(label: &str) -> bool {
+    let l = label.trim();
+    const JP: &[&str] = &[
+        "表紙",
+        "奥付",
+        "目次",
+        "もくじ",
+        "カバー",
+        "扉",
+        "中扉",
+        "口絵",
+        "表題",
+        "本扉",
+        "標題",
+        "凡例",
+        "序文",
+        "序",
+    ];
+    for p in JP {
+        if l.starts_with(p) {
+            return true;
+        }
+    }
+    let low = l.to_ascii_lowercase();
+    const EN: &[&str] = &[
+        "cover",
+        "contents",
+        "table of contents",
+        "title",
+        "copyright",
+        "colophon",
+        "dedication",
+        "about the author",
+        "about the publisher",
+        "praise",
+        "also by",
+        "other books",
+        "acknowledg",
+        "index",
+        "front matter",
+        "back matter",
+        "half title",
+    ];
+    EN.iter().any(|p| low.starts_with(p))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,8 +376,8 @@ mod tests {
 
     #[test]
     fn a_declared_toc_that_repeats_a_target_keeps_both_copies() {
-        // Two entries pointing at one place is the publisher's own business; only
-        // the derived side is held to what the declaration already reached.
+        // Two `declared` entries on one target are the publisher's own business;
+        // only `derived` is filtered against the targets `declared` covers.
         let declared = vec![Node::new("Prologue", "p1"), Node::new("Chapter One", "p1")];
         let derived = vec![Node::new("1", "p1")];
         let pos = |n: &Node| n.target[1..].parse::<usize>().ok();
@@ -380,5 +423,29 @@ mod tests {
     fn merging_into_an_empty_declared_toc_yields_the_derivation() {
         let merged = merge_by_document_order(Vec::new(), vec![Node::new("One", "p1")], |_| None);
         assert_eq!(shape(&merged), ["One"]);
+    }
+
+    #[test]
+    fn front_matter_matches_expected() {
+        for s in [
+            "表紙",
+            "目次",
+            "奥付",
+            "Cover",
+            "Contents",
+            "Copyright",
+            "About the Author",
+        ] {
+            assert!(is_front_matter(s), "{s} should be front matter");
+        }
+        for s in [
+            "第一章",
+            "Chapter 1",
+            "一　目撃者",
+            "プロローグ",
+            "The High Window",
+        ] {
+            assert!(!is_front_matter(s), "{s} should not be front matter");
+        }
     }
 }

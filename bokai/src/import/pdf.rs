@@ -21,7 +21,7 @@ use crate::formats::pdf::doc::{decode_pdf_string, deref, load_pdf, page_geometry
 
 // The probed-document vocabulary lives in the format layer so both directions
 // and the format-internal repairs can name it without reaching up into `import`.
-pub use crate::formats::pdf::doc::{PdfDoc, PdfOutlineItem, PdfPage};
+pub use crate::formats::pdf::structure::{PdfDoc, PdfOutlineItem, PdfPage};
 
 /// Probe a PDF's structure without altering its bytes.
 pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {

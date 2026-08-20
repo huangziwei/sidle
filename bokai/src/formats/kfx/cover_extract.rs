@@ -186,6 +186,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pdf")]
     #[test]
     fn extracts_cover_from_pdf_backed_kfx() {
         // The bug this module fixes: a PDF-backed (PDF→KFX) container used to
@@ -193,7 +194,7 @@ mod tests {
         // reflowable path does (book_metadata.cover_image → external_resource →
         // bcRawMedia), so the extractor must return that embedded JPEG verbatim.
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
+        use crate::formats::pdf::structure::{PdfDoc, PdfPage};
 
         let pdf_bytes = b"%PDF-1.4\n% fixture\n%%EOF\n".to_vec();
         let doc = PdfDoc {
@@ -235,12 +236,13 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pdf")]
     #[test]
     fn pdf_backed_without_cover_is_none() {
         // A PDF-backed KFX built with no cover declares no cover_image; the
         // extractor returns Ok(None), not an error.
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
+        use crate::formats::pdf::structure::{PdfDoc, PdfPage};
 
         let doc = PdfDoc {
             bytes: b"%PDF-1.4\n%%EOF\n".to_vec(),

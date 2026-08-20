@@ -28,7 +28,7 @@ use super::navigation::for_each_nav_container;
 use super::structure::{collect_element_ids, lookup_fragment, reading_orders};
 use super::symbols::KfxSymbol;
 use crate::formats::kfx::container::get_field;
-use crate::formats::pdf::PdfOutlineItem;
+use crate::formats::pdf::structure::PdfOutlineItem;
 
 /// One page's text layer plus the eids anchored on it.
 #[derive(Debug, Clone, Default)]
@@ -342,13 +342,13 @@ fn walk(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pdf"))]
 mod tests {
     use super::*;
     use crate::export::{PdfKfxMeta, pdf_to_kfx};
     use crate::formats::kfx::container::SymbolTable;
     use crate::formats::kfx::loader::BookMetadata;
-    use crate::formats::pdf::{PdfDoc, PdfPage};
+    use crate::formats::pdf::structure::{PdfDoc, PdfPage};
 
     fn field(sym: KfxSymbol, v: IonValue) -> (u64, IonValue) {
         (sym as u64, v)

@@ -42,7 +42,7 @@ use lopdf::{Dictionary, Object, ObjectId};
 
 use super::doc::encode_pdf_string;
 use super::edit::PdfPackage;
-use crate::formats::pdf::doc::PdfOutlineItem;
+use crate::formats::pdf::structure::PdfOutlineItem;
 
 /// Deepest outline nesting accepted. Mirrors the reader's own guard
 /// ([`crate::import::pdf`] stops at 32) — anything deeper is a malformed tree,
