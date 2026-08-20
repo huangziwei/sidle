@@ -1,0 +1,171 @@
+# Publish a release on GitHub, get the Kindle install tree for bokai attached to
+# it.
+#
+#   Releases -> Draft a new release -> tag -> Publish
+#
+# **Publishing is what starts this, not the tag.** The release is written by
+# hand and this only ever adds files to one that already exists, so a tag pushed
+# on its own builds nothing and a draft waits until it is published. Assets are
+# replaced rather than added to, which is what makes a failed run safe to re-run
+# from the Actions tab without touching the release.
+#
+# **The tag decides which product is being released**, and there are two, on
+# separate version lines:
+#
+#   v0.1.9        a sidle release. Gated on [workspace.package] in Cargo.toml.
+#                 bokai rides along at whatever version it is currently on —
+#                 that is the normal case, and it needs no bokai bump.
+#
+#   bokai-v0.1.2  a bokai release, on its own. Gated on bokai/Cargo.toml.
+#                 sidle's version is never read and never has to move, so the
+#                 engine can take the spotlight on its own release page.
+#
+# Both build the identical artifact from the identical script, and both name it
+# after **bokai's** version rather than the tag, so one binary carries one name
+# wherever it is attached. What tells two same-named builds apart is inside:
+# BOKAI_BUILD stamps the release tag into `bokai --version`.
+#
+# GitHub generates "Source code (zip/tar.gz)" for whatever tag exists and that
+# cannot be turned off, so a bokai-only release still shows sidle's tree behind
+# it. The title, the notes and every asset here are bokai's; only that pair of
+# generated links is shared.
+#
+# Nothing about the build is CI-specific — build-bokai.sh assembles the same
+# device/extensions/bokai a workstation does. The zip is not part of that tree
+# and is made here alone: locally the tree is what gets dragged to the Kindle,
+# and an archive of it would be a build product nobody opens.
+#
+# One consequence of `release`: the workflow that runs is the one on the
+# **tagged commit**. Tag a commit made before this file existed and nothing
+# happens.
+
+name: Release
+
+on:
+    release:
+        types: [published]
+    # For a dry run on a branch: builds, and attaches nothing to anything.
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    bokai-native:
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            # One step reads both version lines, decides from the tag which of
+            # them the release claims, and stops if the claim is false. The
+            # version is compiled into the binary, and a release whose name
+            # disagrees with what `--version` reports is unreadable from a
+            # device.
+            - name: Read the versions, check the tag against the one it names
+              id: v
+              env:
+                  TAG: ${{ github.event.release.tag_name }}
+              run: |
+                  set -eu
+                  # bokai's [package] version — the first `version =` in its manifest.
+                  bokai=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' bokai/Cargo.toml | head -1)
+                  # sidle's [workspace.package] version. Section-aware, because the
+                  # root manifest holds other tables that could grow a `version`.
+                  sidle=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0}
+                               f && /^version *=/{gsub(/[" ]/,""); sub(/^version=/,""); print; exit}' Cargo.toml)
+                  [ -n "$bokai" ] || { echo "error: no version in bokai/Cargo.toml [package]" >&2; exit 1; }
+                  [ -n "$sidle" ] || { echo "error: no version in Cargo.toml [workspace.package]" >&2; exit 1; }
+
+                  case "${TAG:-}" in
+                      "")            product="dry run"; want=""; claim="" ;;
+                      bokai-v*)      product="bokai";   want="$bokai"; claim="${TAG#bokai-v}" ;;
+                      v*)            product="sidle";   want="$sidle"; claim="${TAG#v}" ;;
+                      *)
+                          echo "error: tag '$TAG' names no product." >&2
+                          echo "       expected 'vX.Y.Z' (sidle) or 'bokai-vX.Y.Z' (bokai)." >&2
+                          exit 1 ;;
+                  esac
+                  if [ -n "$want" ] && [ "$claim" != "$want" ]; then
+                      echo "error: release $TAG does not match the $product version $want" >&2
+                      exit 1
+                  fi
+
+                  echo "$product release — sidle $sidle, bokai $bokai"
+                  echo "name=bokai-v$bokai-kindle" >> "$GITHUB_OUTPUT"
+
+            - name: Install the cross target
+              run: rustup target add armv7-unknown-linux-musleabihf
+
+            # .cargo/config.toml names `rust-lld` as the linker for that target
+            # and rustup keeps it inside the toolchain rather than on PATH. The
+            # host triple differs between runners, so resolve it rather than
+            # hardcode it — the same symlink the config file documents.
+            - name: Put rust-lld on PATH
+              run: |
+                  ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
+                      ~/.cargo/bin/rust-lld
+
+            - uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry
+                      ~/.cargo/git
+                      target
+                  key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+            # Gated on what actually ships. `--features native` is the Kindle
+            # build's exact feature set, so this is the code in the artifact and
+            # not a superset of it; the desktop half of the workspace is a macOS
+            # + Tauri build this runner cannot make, and is checked where it is
+            # built. `cargo fmt` costs nothing and covers the whole tree.
+            - name: Format, lint, test
+              run: |
+                  cargo fmt --all --check
+                  cargo clippy -p bokai --no-default-features --features native --all-targets -- -D warnings
+                  cargo test -p bokai --no-default-features --features native
+
+            - name: Build the install tree
+              env:
+                  # Stamped into the binary, so `bokai --version` names the
+                  # release someone installed rather than a crate version that
+                  # several releases share. The branch name stands in on a dry
+                  # run, where there is no tag.
+                  BOKAI_BUILD: ${{ github.event.release.tag_name || github.ref_name }}
+              run: ./build-bokai.sh
+
+            - name: Package
+              env:
+                  NAME: ${{ steps.v.outputs.name }}
+              run: |
+                  set -eu
+                  mkdir -p dist
+                  # Zipped from inside device/ and naming only bokai's extension,
+                  # so the archive opens onto extensions/bokai — what gets dragged
+                  # to /mnt/us — and carries none of sidle's tree with it.
+                  (cd device && zip -qr "../dist/$NAME.zip" extensions/bokai)
+                  (cd dist && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+                  ls -lh "dist/$NAME.zip"
+                  unzip -l "dist/$NAME.zip"
+
+            # `--clobber` replaces an asset of the same name instead of refusing
+            # it, so re-running after a failure lands the same two files rather
+            # than needing the release taken apart first.
+            - name: Attach to the release
+              if: github.event_name == 'release'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.event.release.tag_name }}
+                  NAME: ${{ steps.v.outputs.name }}
+              run: |
+                  gh release upload "$TAG" \
+                    "dist/$NAME.zip" \
+                    "dist/$NAME.zip.sha256" \
+                    --clobber
+
+            - name: Keep the tree from a manual run
+              if: github.event_name != 'release'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ steps.v.outputs.name }}
+                  path: device/extensions/bokai

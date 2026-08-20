@@ -5,7 +5,6 @@ ref/
 books/
 bench
 scripts/
-boko-kai/target/
 /target
 sidle/desktop/gen/
 
@@ -26,3 +25,6 @@ sidle/desktop/resources/
 # bblanchon libpdfium cache; the PDF engine is now macOS PDFKit (no bundled
 # dylib), so this is only kept ignored for any stale cache from older builds.
 vendor/
+# CI packaging output (the release zip + its checksum). Made by the release
+# workflow from device/extensions/bokai; never committed.
+dist/

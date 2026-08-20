@@ -11,7 +11,9 @@ use bokai::{
 
 #[derive(Parser)]
 #[command(name = "bokai")]
-#[command(version, about = "Fast ebook converter", long_about = None)]
+// `BOKAI_VERSION` is the crate version, plus the release tag when build.rs was
+// handed one. See bokai/build.rs.
+#[command(version = env!("BOKAI_VERSION"), about = "Fast ebook converter", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
