@@ -2,16 +2,11 @@
 
 use std::borrow::Cow;
 
-/// Get current time as seconds since Unix epoch.
-///
-/// Uses `SystemTime::now()`.
+/// Seconds since the Unix epoch.
 pub fn time_now_secs() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    // Reproducible-builds convention: SOURCE_DATE_EPOCH, when set, pins every
-    // timestamp this converter stamps (EPUB `dcterms:modified`, KFX
-    // `modified_date`), making repeat conversions byte-comparable. Unset =
-    // wall clock (a modified-date describes the produced file, so it defaults
-    // to the moment of writing).
+    // `SOURCE_DATE_EPOCH`, when set, is the value returned in place of the
+    // wall clock.
     if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH")
         && let Ok(secs) = epoch.trim().parse::<u64>()
     {
@@ -24,24 +19,15 @@ pub fn time_now_secs() -> u32 {
 }
 
 /// Seed for the AZW3 writer's PalmDB unique id and FONT XOR key. Derived from
-/// [`time_now_secs`] so `SOURCE_DATE_EPOCH`, when set, pins it too: repeat
-/// AZW3 conversions of one book are byte-reproducible (the A/B harness and
-/// round-trip tests rely on that). Unpinned, it still varies second-to-second.
-/// The multiply spreads the seconds value across the u64 so the writer's LCG
-/// key derivation stays well-distributed.
+/// [`time_now_secs`], and pinned by `SOURCE_DATE_EPOCH` with it. The multiply
+/// spreads the seconds value across the u64.
 pub fn time_seed_nanos() -> u64 {
     (time_now_secs() as u64).wrapping_mul(1_000_000_007)
 }
 
 /// RFC 4122 v5 UUID derived from `name` via SHA-1 over the URL namespace.
-/// Deterministic: same input always yields the same UUID. Used for the OPF
-/// `<dc:identifier opf:scheme="uuid">` slot so two converts of the same
-/// source produce the same package id (vs. calibre's random v4, which makes
-/// every export look like a new book to library tools).
-///
-/// Gated to the one feature that reaches it: without `aozora` nothing calls it,
-/// and an ungated definition makes a bare `--no-default-features` build warn.
-#[cfg(feature = "aozora")]
+/// Deterministic: one `name` always yields one UUID. Fills the OPF
+/// `<dc:identifier opf:scheme="uuid">` slot.
 pub fn uuid_v5(name: &str) -> String {
     const URL_NAMESPACE: [u8; 16] = [
         0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
@@ -78,10 +64,7 @@ pub fn uuid_v5(name: &str) -> String {
 
 /// Current UTC time formatted as ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
 ///
-/// Used for `dcterms:modified` / KFX `modified_date` stamps. We synthesize on
-/// every export rather than pass the source value through — modified-date
-/// describes *this file*, not the work, so the value must reflect when this
-/// converter wrote it.
+/// Fills `dcterms:modified` and KFX `modified_date`.
 pub fn time_now_iso8601_utc() -> String {
     let secs = time_now_secs() as i64;
     let days = secs.div_euclid(86_400);
@@ -93,11 +76,9 @@ pub fn time_now_iso8601_utc() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
 }
 
-/// Map `f` over `items` in parallel across all available CPU cores,
-/// preserving input order. Each worker owns one contiguous chunk (static
-/// striping — appropriate when per-item cost is roughly uniform, e.g. the
-/// KFX JPEG-XR→JPEG transcode where images cost ~20 ms ± 30%). Falls back
-/// to a plain serial map for empty/single-item input or one core.
+/// Map `f` over `items` across `available_parallelism` workers, preserving
+/// input order. Each worker takes one contiguous chunk. Empty, single-item and
+/// single-core input maps serially.
 pub fn parallel_map<T, R, F>(items: &[T], f: F) -> Vec<R>
 where
     T: Sync,
@@ -146,42 +127,17 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     (y, m, d)
 }
 
-/// Decode bytes to a string, handling various encodings.
-///
-/// This function:
-/// 1. First tries UTF-8 (handles BOM automatically via encoding_rs)
-/// 2. If malformed, tries the hint encoding (from `<?xml encoding="..."?>`)
-/// 3. Falls back to Windows-1252 (common in old ebooks)
-///
-/// # Arguments
-///
-/// * `bytes` - The raw bytes to decode
-/// * `hint_encoding` - Optional encoding name from XML declaration or document metadata
-///
-/// # Returns
-///
-/// The decoded string. Uses `Cow<str>` to avoid allocation when the input is valid UTF-8.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Valid UTF-8
-/// let utf8_bytes = "Hello, World!".as_bytes();
-/// assert_eq!(decode_text(utf8_bytes, None), "Hello, World!");
-///
-/// // With encoding hint (e.g., from XML declaration)
-/// let bytes = b"Hello";
-/// assert_eq!(decode_text(bytes, Some("utf-8")), "Hello");
-/// ```
+/// Decode `bytes` as UTF-8, then as `hint_encoding`, then as Windows-1252.
+/// `hint_encoding` is the label from an XML declaration or document metadata.
+/// `Cow::Borrowed` for input that is valid UTF-8.
 pub fn decode_text<'a>(bytes: &'a [u8], hint_encoding: Option<&str>) -> Cow<'a, str> {
-    // Try UTF-8 first (handles BOM automatically)
+    // `decode` strips a BOM.
     let (result, _encoding, malformed) = encoding_rs::UTF_8.decode(bytes);
 
     if !malformed {
         return result;
     }
 
-    // If UTF-8 failed, try the hint encoding
     if let Some(name) = hint_encoding
         && let Some(encoding) = encoding_rs::Encoding::for_label(name.as_bytes())
     {
@@ -189,7 +145,7 @@ pub fn decode_text<'a>(bytes: &'a [u8], hint_encoding: Option<&str>) -> Cow<'a, 
         return result;
     }
 
-    // Fallback: Windows-1252 (common in old ebooks, superset of ISO-8859-1)
+    // Windows-1252 is a superset of ISO-8859-1.
     let (result, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
     result
 }
@@ -198,19 +154,8 @@ pub fn decode_text<'a>(bytes: &'a [u8], hint_encoding: Option<&str>) -> Cow<'a, 
 // Image Dimension Extraction
 // ============================================================================
 
-/// Extract image dimensions from raw image data.
-///
-/// Supports PNG, JPEG, and GIF formats by parsing header bytes.
-/// Returns `(width, height)` or `None` if format is unrecognized.
-///
-/// # Examples
-///
-/// ```ignore
-/// let png_data = include_bytes!("../tests/fixtures/image.png");
-/// if let Some((w, h)) = extract_image_dimensions(png_data) {
-///     println!("Image is {}x{}", w, h);
-/// }
-/// ```
+/// `(width, height)` read from the header bytes of PNG, JPEG, GIF and JPEG-XR
+/// data. `None` for any other format.
 pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     if data.len() < 24 {
         return None;
@@ -224,7 +169,7 @@ pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         return Some((width, height));
     }
 
-    // JPEG: Need to parse SOF markers
+    // JPEG: dimensions live in the SOF markers.
     if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
         return extract_jpeg_dimensions(data);
     }
@@ -236,9 +181,7 @@ pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         return Some((width, height));
     }
 
-    // JPEG XR / HD Photo (II-BC): read IMAGE_WIDTH/IMAGE_HEIGHT from the TIFF IFD.
-    // Without this, JXR plates can't size their fixed-layout pages and the device
-    // letterboxes them (margins). Reuses the decoder's container parser.
+    // JPEG XR / HD Photo (II-BC): IMAGE_WIDTH/IMAGE_HEIGHT in the TIFF IFD.
     if data[0] == 0x49 && data[1] == 0x49 && data[2] == 0xBC {
         return jxr::decode::container::parse(data)
             .ok()
@@ -248,7 +191,7 @@ pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// Extract dimensions from JPEG data by parsing SOF markers.
+/// `(width, height)` from a JPEG's SOF marker.
 fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let mut i = 2;
     while i + 4 < data.len() {
@@ -259,7 +202,7 @@ fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 
         let marker = data[i + 1];
 
-        // SOF markers (Start of Frame) - various encoding types
+        // SOF (Start of Frame) markers, one per encoding type.
         if matches!(
             marker,
             0xC0 | 0xC1
@@ -312,8 +255,7 @@ pub enum MediaFormat {
     Svg,
     /// WebP image
     WebP,
-    /// JPEG XR image (Microsoft HD Photo) — what EPUB→KFX encodes grayscale
-    /// raster plates to, matching Amazon's own KFX image codec.
+    /// JPEG XR image (Microsoft HD Photo)
     Jxr,
     /// TrueType font
     Ttf,
@@ -358,24 +300,10 @@ impl MediaFormat {
     }
 }
 
-/// Detect resource format from file path and/or raw bytes.
-///
-/// This is a pure function that encapsulates all format detection logic.
-/// It tries extension-based detection first, then falls back to magic bytes.
-///
-/// # Arguments
-///
-/// * `path` - The resource path/href (used for extension detection)
-/// * `data` - The raw resource bytes (used for magic byte detection)
-///
-/// # Returns
-///
-/// The detected `MediaFormat`, or `Binary` if unknown.
+/// The `MediaFormat` of `data`, read from its magic bytes, falling back to the
+/// extension of `path`. `Binary` when neither names a format. A transcoded
+/// resource keeps its source extension, and the magic bytes carry.
 pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
-    // Magic-bytes detection first. When the EPUB→KFX export transcodes a
-    // GIF to JPEG before bundling, the path still ends `.gif` but `data`
-    // is JPEG; an extension-only check would mislabel it and the KFX
-    // renderer would refuse the resource.
     if data.len() >= 4 {
         // JPEG: FF D8 FF
         if data[0] == 0xFF && data[1] == 0xD8 {
@@ -408,9 +336,7 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
         }
     }
 
-    // Fall back to extension when magic bytes are absent or unrecognised
-    // (covers SVG/TTF/OTF, plus the no-data case in callers that only
-    // have a path string).
+    // SVG, TTF and OTF are named by extension alone, as is an empty `data`.
     let path_lower = path.to_lowercase();
 
     if path_lower.ends_with(".jpg") || path_lower.ends_with(".jpeg") {
@@ -456,13 +382,8 @@ pub fn strip_ebook_chars(s: &str) -> String {
     out
 }
 
-/// The text of a markup fragment, with every tag removed and nothing else
-/// changed.
-///
-/// For reading a label out of a snippet that is known to be small and
-/// well-formed — a nav `<a>`'s content, a heading's inner markup. Anything that
-/// has to survive malformed input, entities or scripts goes through the HTML
-/// parser instead.
+/// The text of a markup fragment, with every `<…>` span removed and nothing
+/// else changed. Entities and script bodies pass through verbatim.
 pub fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -477,35 +398,15 @@ pub fn strip_tags(s: &str) -> String {
     out
 }
 
-/// Trim the whitespace markup layout introduces, keeping the whitespace that
-/// is typographic content.
-///
-/// A label read out of XML arrives padded by however the file was indented:
-///
-/// ```xml
-/// <li><a href="c1.xhtml">
-///     プロローグ
-/// </a></li>
-/// ```
-///
-/// so it has to be trimmed. But `str::trim` uses [`char::is_whitespace`], which
-/// includes U+3000 IDEOGRAPHIC SPACE and U+00A0 NO-BREAK SPACE — and neither of
-/// those is ever produced by pretty-printing. A serializer emits ASCII spaces,
-/// tabs and newlines; an author who typed U+3000 meant it. In Japanese
-/// typography a leading ideographic space is deliberate indentation, so
-/// `str::trim` silently rewrites `　プロローグ　潜入` to `プロローグ　潜入` —
-/// changing the label a reader sees while leaving the interior one alone.
-///
-/// Trimming the ASCII set only keeps the markup artifact removal and leaves the
-/// content untouched.
+/// Trim the ASCII whitespace markup indentation leaves on `s`. U+3000
+/// IDEOGRAPHIC SPACE and U+00A0 NO-BREAK SPACE are typographic content, and
+/// [`char::is_whitespace`] covers both.
 pub fn trim_markup_space(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_ascii_whitespace())
 }
 
-/// Detect MIME type from file extension or magic bytes.
-///
-/// Returns a static string like "image/jpeg", "image/png", etc.
-/// Returns `None` if the format is unknown.
+/// The MIME type of `filename` + `data`, `None` where
+/// [`detect_media_format`] reads `Binary`.
 pub fn detect_mime_type(filename: &str, data: &[u8]) -> Option<&'static str> {
     let format = detect_media_format(filename, data);
     match format {
@@ -518,21 +419,9 @@ pub fn detect_mime_type(filename: &str, data: &[u8]) -> Option<&'static str> {
 // Date Utilities
 // ============================================================================
 
-/// Truncate an ISO date/timestamp to just the date portion (YYYY-MM-DD).
-///
-/// Many ebook formats expect dates in YYYY-MM-DD format, but source metadata
-/// often includes full ISO timestamps like "2022-05-26T16:26:51Z". Both
-/// separators real sources use are handled: the `T` of strict ISO 8601, and the
-/// space of the SQL-ish form calibre writes into MOBI EXTH 106
-/// (`2014-12-14 23:00:00+00:00`).
-///
-/// # Examples
-///
-/// ```ignore
-/// assert_eq!(truncate_to_date("2022-05-26T16:26:51Z"), "2022-05-26");
-/// assert_eq!(truncate_to_date("2014-12-14 23:00:00+00:00"), "2014-12-14");
-/// assert_eq!(truncate_to_date("2022-05-26"), "2022-05-26");
-/// ```
+/// The `YYYY-MM-DD` head of a timestamp, cut at the `T` of ISO 8601 or at the
+/// space of the SQL-ish form (`2014-12-14 23:00:00+00:00`). A bare date is
+/// returned whole.
 pub fn truncate_to_date(s: &str) -> String {
     let s = s.trim();
     match s.find(['T', ' ']) {
@@ -545,27 +434,15 @@ pub fn truncate_to_date(s: &str) -> String {
 // Encoding Detection
 // ============================================================================
 
-/// Extract encoding from XML declaration.
-///
-/// Parses `<?xml ... encoding="..." ?>` to extract the encoding name.
-///
-/// # Arguments
-///
-/// * `bytes` - The raw bytes (only the first ~100 bytes are checked)
-///
-/// # Returns
-///
-/// The encoding name if found, or `None`.
+/// The encoding name in `<?xml … encoding="…" ?>`, read from the first 100
+/// bytes. `None` where those bytes carry no declaration.
 pub fn extract_xml_encoding(bytes: &[u8]) -> Option<&str> {
-    // Only check the first 100 bytes for the XML declaration
     let check_len = bytes.len().min(100);
     let prefix = &bytes[..check_len];
 
-    // Look for <?xml
     let xml_start = prefix.windows(5).position(|w| w == b"<?xml")?;
     let after_xml = &prefix[xml_start..];
 
-    // Look for encoding="..." or encoding='...'
     let enc_pos = after_xml
         .windows(9)
         .position(|w| w.eq_ignore_ascii_case(b"encoding="))?;
@@ -590,22 +467,10 @@ pub fn extract_xml_encoding(bytes: &[u8]) -> Option<&str> {
 // URI path helpers
 // ============================================================================
 
-/// Percent-decode a URI reference into its raw byte form.
-///
-/// Hrefs and `src` attributes inside an EPUB — the OPF manifest, the NCX/nav
-/// TOC, `@import` URLs, `<a>`/`<img>` targets — are URI references, so any byte
-/// outside the unreserved set may appear percent-escaped (`%21` for `!`, `%20`
-/// for a space, `%E8%A1%A8` for a multi-byte UTF-8 character). The container's
-/// ZIP entries, however, are stored under their literal decoded names. Decoding
-/// at every URI→archive-path boundary is what lets a calibre-produced EPUB
-/// whose files are named `CR!….html` but referenced as `CR%21….html` resolve.
-///
-/// `%XX` triples decode to a single byte; the assembled bytes are interpreted
-/// as UTF-8, falling back to the original string if the result is not valid
-/// UTF-8 (so a stray, non-escaped `%` is preserved verbatim). Everything else
-/// passes through unchanged.
+/// Percent-decode a URI reference into the literal name a ZIP entry is stored
+/// under. Each `%XX` triple becomes one byte and the assembled bytes are read
+/// as UTF-8; `s` is returned whole where they are not valid UTF-8.
 pub fn percent_decode(s: &str) -> String {
-    // Fast path: nothing to decode.
     if !s.contains('%') {
         return s.to_string();
     }
@@ -628,12 +493,9 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Make an href a valid URL, or return `None` if it can't be (the caller drops
-/// the link, keeping the text). Characters illegal in a URL path/query/fragment
-/// (e.g. a citation link ending in `]`) are percent-encoded — that fixes
-/// epubcheck RSC-020. But a character illegal in the HOST (e.g. a space, from a
-/// typo'd source domain like `bylon. com`) can't be encoded away — hosts forbid
-/// it even as `%20` — so such an unreachable URL is dropped rather than emitted.
+/// `href` as a valid URL: characters illegal in a path, query or fragment are
+/// percent-encoded. `None` where the authority holds a character no encoding
+/// makes legal — a space, a control byte, a non-numeric port.
 pub fn sanitize_href(href: &str) -> Option<String> {
     fn is_illegal(c: char) -> bool {
         matches!(
@@ -641,8 +503,8 @@ pub fn sanitize_href(href: &str) -> Option<String> {
             ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|' | '[' | ']'
         ) || (c as u32) < 0x20
     }
-    // Absolute URL: the authority (host[:port]) can't contain a space or control
-    // char, encoded or not. If it does, the URL is unusable → drop it.
+    // A space or control char in the authority (`host[:port]`) is illegal in
+    // every form, `%20` included.
     if let Some((_, after)) = href.split_once("://") {
         let auth = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
         if auth.chars().any(|c| c == ' ' || (c as u32) < 0x20)
@@ -650,12 +512,9 @@ pub fn sanitize_href(href: &str) -> Option<String> {
         {
             return None;
         }
-        // The port (everything after the host's `:`) must be all digits, or the
-        // authority is malformed and a strict reader rejects the whole URL. Real
-        // case baked into a source KFX: a double-scheme typo `http://http:://…`
-        // parses as host `http`, port `:…` → epubcheck RSC-020 "Illegal
-        // character in port". Strip any `userinfo@` first, and skip IPv6 literals
-        // (`[::1]:80`) whose host legitimately contains colons.
+        // The port carries digits alone, and the host is non-empty. Any
+        // `userinfo@` is stripped first; an IPv6 literal (`[::1]:80`) is
+        // skipped for the colons in its host.
         if !auth.starts_with('[') {
             let host_port = auth.rsplit_once('@').map_or(auth, |(_, hp)| hp);
             if let Some((host, port)) = host_port.split_once(':')
@@ -754,13 +613,11 @@ mod tests {
     fn test_truncate_to_date() {
         // Full ISO timestamp -> date only
         assert_eq!(truncate_to_date("2022-05-26T16:26:51Z"), "2022-05-26");
-        // Already just a date
+        // A bare date.
         assert_eq!(truncate_to_date("2022-05-26"), "2022-05-26");
         // With timezone offset
         assert_eq!(truncate_to_date("2022-05-26T16:26:51+00:00"), "2022-05-26");
-        // Space-separated, the form calibre writes into MOBI EXTH 106 — the
-        // `T`-only rule let this through whole and KFX `issue_date` carried a
-        // full timestamp where the device expects a date.
+        // Space-separated, the form MOBI EXTH 106 carries.
         assert_eq!(truncate_to_date("2014-12-14 23:00:00+00:00"), "2014-12-14");
         assert_eq!(truncate_to_date("  2014-12-14  "), "2014-12-14");
     }
@@ -769,7 +626,7 @@ mod tests {
     fn test_percent_decode() {
         // No escapes: returned verbatim.
         assert_eq!(percent_decode("OEBPS/Text/ch1.html"), "OEBPS/Text/ch1.html");
-        // The calibre case that crashed conversion: `!` escaped as %21.
+        // `!` escaped as %21.
         assert_eq!(
             percent_decode("Text/CR%21Z717_split_000.html"),
             "Text/CR!Z717_split_000.html"
@@ -788,22 +645,21 @@ mod tests {
 
     #[test]
     fn trim_markup_space_keeps_typographic_spaces() {
-        // What a pretty-printed nav.xhtml wraps a label in.
+        // Markup indentation around a label.
         assert_eq!(
             trim_markup_space("\n      Chapter One\n    "),
             "Chapter One"
         );
         assert_eq!(trim_markup_space("\tA\r\n"), "A");
 
-        // What a Japanese publisher typed. `str::trim` drops both of these.
+        // U+3000 and U+00A0 as content. `str::trim` drops both.
         assert_eq!(
             trim_markup_space("\u{3000}プロローグ\u{3000}潜入"),
             "\u{3000}プロローグ\u{3000}潜入"
         );
         assert_eq!(trim_markup_space("\u{00A0}A"), "\u{00A0}A");
 
-        // Markup padding around content that starts with a typographic space:
-        // the padding goes, the content stays.
+        // Markup padding outside a leading U+3000.
         assert_eq!(
             trim_markup_space("  \u{3000}１\u{3000}序論 \n"),
             "\u{3000}１\u{3000}序論"
