@@ -39,31 +39,6 @@ To install the Kindle native app for the first time, plug in the Kindle via USB,
 
 Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 5.16.2.1.1), Kindle Colorsoft (1st Gen; 5.18.0.2), and Kindle Scribe (1st Gen; 5.19.4.0.1).
 
-## Releases
-
-Two products ship from this repo, on separate version lines, and the release tag
-is what picks between them:
-
-| tag | product | version read from |
-|:--|:--|:--|
-| `v0.1.9` | Sidle | `[workspace.package]` in `Cargo.toml` |
-| `bokai-v0.1.2` | bokai | `bokai/Cargo.toml` |
-
-Publishing the release — not pushing the tag — runs
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which
-cross-compiles the Kindle build of `bokai` and attaches
-`bokai-v<version>-kindle.zip` and its `.sha256`. Both tag shapes attach that one
-artifact, named after **bokai's own** version: a Sidle release carries whatever
-`bokai` is current at the time without `bokai` having to move, and a `bokai-v*`
-release gives the engine a page of its own without touching Sidle's version. The
-tag is stamped into the binary either way, so `bokai --version` names the release
-it was installed from.
-
-The zip opens onto `extensions/bokai/`, which goes to `/mnt/us/extensions/bokai/`
-on the Kindle's USB volume. It is a command line, so it is run over SSH.
-
-To assemble the same tree locally, `./build-bokai.sh`.
-
 ## But Why?
 
 To sideload books to Kindle, one might just use Send-to-Kindle. But I don't want to use more Amazon services. 
