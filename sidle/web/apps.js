@@ -10,7 +10,8 @@
 
   const state = {
     overview: null, // AppsOverview from apps_overview
-    busy: null, // app id currently installing, or "*" for Update all
+    busy: null, // app id installing, or "*" for Update all
+    seq: 0, // issue number of the newest apps_overview call
   };
 
   function toast(msg, isError = false) {
@@ -30,18 +31,29 @@
 
   // ---- data ---------------------------------------------------------------
 
+  // Reads the whole fleet and the connected Kindle's view of it, which takes
+  // long enough that two calls overlap. `state.seq` keeps the newest one: a
+  // reply from an older call describes a device that has since been written to,
+  // and rendering it puts the tab one push behind.
   async function refresh() {
+    const mine = ++state.seq;
+    let overview = null;
+    let error = null;
     try {
-      state.overview = await api.invoke("apps_overview");
+      overview = await api.invoke("apps_overview");
     } catch (err) {
-      state.overview = null;
-      toast(`Could not read the apps: ${err}`, true);
+      error = err;
     }
+    if (mine !== state.seq) return;
+    state.overview = overview;
+    if (error) toast(`Could not read the apps: ${error}`, true);
     render();
   }
 
   // A device connect or disconnect changes every row's right half.
+  // `runInstall` refreshes at the end of a push, which holds the transport.
   function invalidate() {
+    if (state.busy != null) return;
     if (!q("#apps").hidden) refresh();
   }
 

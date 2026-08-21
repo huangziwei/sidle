@@ -529,9 +529,15 @@ pub async fn compose_plan(
         .map_err(|e| e.to_string())
 }
 
-/// Per-file and per-app state against the connected Kindle. Reached through
-/// `apps_overview`, which is what the Apps tab reads.
-pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatus, String> {
+/// Per-file and per-app state against the connected Kindle, for the `plan` the
+/// caller already composed. Reached through `apps_overview`, which is what the
+/// Apps tab reads: one plan feeds the row list and these states, so the two
+/// describe one moment.
+pub async fn device_app_status(
+    state: &AppState,
+    plan: &sidle_core::library::apps::DevicePlan,
+    source: &deploy::DeploySource,
+) -> Result<DeployStatus, String> {
     let device = state.device.lock().await.clone();
     // No Kindle connected at all → the UI hides the section on DeviceDisconnected.
     // A connected device — mass-storage OR MTP — gets a real status; the deploy
@@ -551,15 +557,15 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
     // is the same value `device_app_install` passes, so the status the user
     // reads is exactly what the button would push.
     let serial = device.serial.clone();
-    let conf = render_conf(&state, serial).await;
+    let conf = render_conf(state, serial).await;
 
-    let source = state.device_app_source.clone();
+    let plan = plan.clone();
+    let source = source.clone();
     // Cheap and idempotent, and it has to exist before the status can say
     // anything true about `etc/ca.pem`. Creating the CA needs no server and no
     // network — just two files — so there is nothing to wait for.
     let _ = sidle_core::library::tls::ensure_ca(&state.paths);
     let ca_cert = state.paths.ca_cert();
-    let plan = compose_plan(&state, &source).await?;
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
