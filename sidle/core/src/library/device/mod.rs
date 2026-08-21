@@ -1,16 +1,15 @@
 //! Kindle device sync — discovery, transport-agnostic IO, push/delete/pull.
 //!
-//! - Push KFX to the device's `documents/Sidle/` directory; the filename
-//!   carries an `sha8` infix (`<basename>.<sha8>.kfx`) so the directory
-//!   alone is enough to identify what's ours — no on-device sidecar file
-//!   to keep in sync with the library DB.
+//! - Push KFX to the device's `documents/Sidle/` directory. The filename
+//!   carries an `sha8` infix (`<basename>.<sha8>.kfx`), which identifies what
+//!   sidle put there from the directory alone.
 //! - Delete on-device by sha: scan `documents/Sidle/` for the matching
 //!   `*.<sha8>.kfx`, remove it plus the Kindle-created `.sdr/` next to it.
-//! - Pull `.kfx`/`.kfx-zip` from `/dedrm` and import (mass-storage only —
-//!   non-jailbroken devices have no `/dedrm` folder).
-//! - Send/remove over MTP for Kindle Scribe and other 2024+ models that
-//!   dropped USB mass storage. Detection + IO live behind the [`Transport`]
-//!   trait so push/delete/list stay transport-agnostic.
+//! - Pull `.kfx`/`.kfx-zip` from `/dedrm` and import (mass-storage only — a
+//!   device without a jailbreak has no `/dedrm` folder).
+//! - Send/remove over MTP for the Kindle Scribe and other 2024+ models.
+//!   Detection and IO sit behind the [`Transport`] trait, which keeps
+//!   push/delete/list transport-agnostic.
 
 use std::path::PathBuf;
 
@@ -21,6 +20,7 @@ pub mod annotations;
 pub mod dedrm;
 pub mod deploy;
 pub mod detect;
+pub mod dist;
 pub mod ink;
 pub mod inventory;
 pub mod mass_storage;
@@ -45,8 +45,7 @@ pub struct DeviceInfo {
     pub model: Option<String>,
     /// Firmware/OS version, e.g. `5.16.2.1.1`. Mass-storage parses it out of
     /// `system/version.txt` at detect time; MTP reads it from `GetDeviceInfo`
-    /// (`device_version`) at session open, so it's `None` until the on-connect
-    /// refresh lands — same lifecycle as `free_bytes` on MTP.
+    /// at session open, and holds `None` until the on-connect refresh lands.
     pub firmware: Option<String>,
     pub free_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
@@ -55,9 +54,8 @@ pub struct DeviceInfo {
 }
 
 /// Tagged on the wire as `{"transport":"mass_storage", ...}` or
-/// `{"transport":"mtp", ...}` so the frontend can branch on a single
-/// discriminator. Variant-specific fields ride along in the same object
-/// thanks to `#[serde(flatten)]` on `DeviceInfo.transport`.
+/// `{"transport":"mtp", ...}`, one discriminator to branch on. `#[serde(flatten)]`
+/// on `DeviceInfo.transport` carries the variant's fields in the same object.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 pub enum TransportKind {
@@ -77,10 +75,8 @@ pub enum TransportKind {
 }
 
 impl DeviceInfo {
-    /// Open a fresh transport handle for this device. Cheap for mass-storage
-    /// (just wraps the mount path); for MTP this opens a USB session, so
-    /// callers should reuse the handle within a single operation rather than
-    /// re-opening per IO call.
+    /// Open a fresh transport handle for this device. Mass-storage wraps the
+    /// mount path; MTP opens a USB session, one per operation.
     pub fn open_transport(&self) -> Result<Box<dyn Transport>> {
         match &self.transport {
             TransportKind::MassStorage { mount } => Ok(Box::new(
@@ -104,14 +100,13 @@ impl DeviceInfo {
 }
 
 /// On-device path to the firmware marker, relative to the volume/storage root.
-/// Mass-storage reads it off the mount; MTP downloads it from the object tree
-/// (the Kindle exposes its real filesystem over MTP, so it's the same file).
+/// Mass-storage reads it off the mount; MTP downloads the same file from the
+/// object tree.
 pub const VERSION_TXT_REL: &str = "system/version.txt";
 
-/// Pull the firmware version out of `system/version.txt`'s first line. The line
-/// is `Kindle <firmware> [(build)]` — e.g. `Kindle 5.19.4.0.1 (476724 003)` —
-/// so the firmware is the first whitespace token that's a dotted version number
-/// (leading digit, at least one `.`). `None` if the line carries none.
+/// Pull the firmware version out of `system/version.txt`'s first line, which
+/// reads `Kindle <firmware> [(build)]` — e.g. `Kindle 5.19.4.0.1 (476724 003)`.
+/// The firmware is its first dotted-version token. `None` when it carries none.
 pub(crate) fn parse_firmware(raw: &str) -> Option<String> {
     let first = raw.lines().next()?;
     first

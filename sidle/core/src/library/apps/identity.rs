@@ -7,10 +7,9 @@
 //! defines at `extensions/<id>/config.xml`, and the tile is whichever
 //! `documents/*.sh` launches the extension.
 //!
-//! Every field but the id is optional. A tree that states none of them is a
-//! whole app — `extensions/steb/bin/steb` installs the same whether or not
-//! anything names a version — so a missing field shows as a missing field and
-//! never as a reason to refuse the tree.
+//! Every field but the id is optional. A tree stating none of them is a whole
+//! app: its files install the same with no version anywhere, and a missing
+//! field shows as a missing field, never as a reason to refuse the tree.
 
 use std::path::Path;
 
@@ -178,7 +177,7 @@ fn tile_header(bytes: &[u8], key: &str) -> Option<String> {
 /// one in the fleet execs or calls something under
 /// `/mnt/us/extensions/<id>/`. That reference is the link, so no repo has to
 /// declare it and a tile renamed inside its own repo is still found. The
-/// trailing separator is what keeps `kfxdedrm` from claiming `kfxdedrm-fe`'s.
+/// trailing separator keeps one id from claiming a tile whose id extends it.
 fn find_tile(mount: &Path, id: &str) -> Option<String> {
     let needle = format!("extensions/{id}/");
     let mut hits: Vec<String> = Vec::new();

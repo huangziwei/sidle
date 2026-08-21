@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use sidle_core::library::db::{self, BookRow};
+use sidle_core::library::device::dist;
 use sidle_core::library::device::push::{DeleteResult, PushResult};
 use sidle_core::library::device::{
     DeviceInfo, Transport, annotations, dedrm, deploy, detect, inventory, notebooks, push,
@@ -468,11 +469,16 @@ pub struct AppArgs {
 }
 
 fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
-    // `stage_dist` copies the picker build into the directory the LAN server
-    // serves `/device/...` from.
+    // `dist::refresh` describes the fleet for the LAN server, which reads each
+    // app's bytes where its own build left them.
     if args.stage {
         let source = deploy::DeploySource::from_workspace_root(&workspace_root()?);
-        let outcome = deploy::stage_dist(&source, &ctx.paths.device_dist())?;
+        source.stage_binary()?;
+        let plan = {
+            let conn = ctx.conn();
+            sidle_core::library::apps::plan(&conn, &source.mount_dir)?
+        };
+        let outcome = dist::refresh(&plan, &source, &ctx.paths.device_dist())?;
         return ctx.report(&format!("{outcome:?}"), || println!("{outcome:?}"));
     }
 

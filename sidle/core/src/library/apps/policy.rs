@@ -32,7 +32,7 @@ pub enum Apply {
     Staged,
 }
 
-/// [`Apply::Staged`] for a path in [`STAGED`], [`Apply::Direct`] otherwise.
+/// [`Apply::Staged`] for a path in [`STAGED`], [`Apply::Direct`] for the rest.
 pub fn apply_for(mount_rel: &str) -> Apply {
     if STAGED.contains(&mount_rel) {
         Apply::Staged

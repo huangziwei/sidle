@@ -1375,23 +1375,23 @@ fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     }
 }
 
-/// Minimal `Deserialize` view of `device-dist/manifest.json`: the server only
-/// needs each entry's `name` to whitelist the served files. Mirrors the
-/// desktop's `DistManifest` (which also carries `sha256`/`size`) rather than
-/// sharing the type across the crate boundary — the same mirror-struct
-/// convention the sync DTOs use; serde drops the extra fields.
+/// Minimal `Deserialize` view of `device-dist/sources.json`: served path → the
+/// file on this machine holding its bytes. Mirrors the desktop's `SourceIndex`
+/// (which also carries each file's `mtime`/`size`/`sha256`) rather than sharing
+/// the type across the crate boundary — the same mirror-struct convention the
+/// sync DTOs use; serde drops the extra fields.
 #[derive(serde::Deserialize)]
-struct DistManifest {
-    files: Vec<DistManifestEntry>,
+struct SourceIndex {
+    files: HashMap<String, SourceEntry>,
 }
 
 #[derive(serde::Deserialize)]
-struct DistManifestEntry {
-    name: String,
+struct SourceEntry {
+    source: PathBuf,
 }
 
-fn read_dist_manifest(dist_dir: &StdPath) -> Option<DistManifest> {
-    let bytes = std::fs::read(dist_dir.join("manifest.json")).ok()?;
+fn read_dist_sources(dist_dir: &StdPath) -> Option<SourceIndex> {
+    let bytes = std::fs::read(dist_dir.join("sources.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -1407,13 +1407,13 @@ async fn get_dist_manifest(
     serve_file(path, "application/json", None).await
 }
 
-/// `GET /device/file/{*name}` → bytes from `device-dist/<name>` (token-gated).
+/// `GET /device/file/{*name}` → the bytes `device-dist/sources.json` maps
+/// `name` to (token-gated).
 ///
-/// `name` is whitelisted against the manifest's entries: only a file the
-/// manifest declares is servable. That's both the access bound (just the staged
-/// set) and the path-traversal guard — a `name` like `../library.db` isn't a
-/// manifest entry, so it 404s before any path join. The catch-all `{*name}` is
-/// needed because entries carry a `/` (e.g. `bin/sidle`).
+/// `name` is a key in that index and never a path fragment: the file served is
+/// the one the desktop wrote there, so `../library.db` finds no entry and 404s
+/// before anything is opened. The catch-all `{*name}` is needed because a key
+/// carries `/` (e.g. `extensions/karyll/bin/karyll`).
 async fn get_dist_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -1421,12 +1421,9 @@ async fn get_dist_file(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_token(&headers, &query, &state.token)?;
-    let dist = state.paths.device_dist();
-    let manifest = read_dist_manifest(&dist).ok_or(StatusCode::NOT_FOUND)?;
-    if !manifest.files.iter().any(|f| f.name == name) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    serve_file(dist.join(&name), "application/octet-stream", None).await
+    let sources = read_dist_sources(&state.paths.device_dist()).ok_or(StatusCode::NOT_FOUND)?;
+    let entry = sources.files.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    serve_file(entry.source.clone(), "application/octet-stream", None).await
 }
 
 async fn serve_file(
@@ -2162,23 +2159,59 @@ mod tests {
         b.body(Body::empty()).unwrap()
     }
 
-    /// Stage a `device-dist/` bundle (one binary + manifest) under `paths`,
-    /// mirroring what the desktop app's `stage_dist` writes. Returns the bytes.
+    /// Write a `device-dist/` pair under `paths`, mirroring what the desktop
+    /// app's `dist::refresh` writes: a manifest, and an index pointing each
+    /// served path at a file outside `device-dist/`. Returns the picker's bytes.
     fn stage_fake_dist(paths: &LibraryPaths) -> Vec<u8> {
         let dist = paths.device_dist();
-        std::fs::create_dir_all(dist.join("bin")).unwrap();
         let bytes = b"\x7fELF-fake-armv7-picker".to_vec();
-        std::fs::write(dist.join("bin/sidle"), &bytes).unwrap();
+        // Where each app's own build left its files. Nothing copies them.
+        let checkouts = paths.root.join("checkouts");
+        let write = |abs: &std::path::Path, body: &[u8]| {
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, body).unwrap();
+        };
+        let picker = checkouts.join("picker/bin/sidle");
+        let tile = checkouts.join("karyll/out/Karyll.sh");
+        write(&picker, &bytes);
+        write(&tile, TILE);
+
         let manifest = serde_json::json!({
-            "files": [ { "name": "bin/sidle", "sha256": "deadbeef", "size": bytes.len() } ]
+            "version": 2,
+            "files": [ { "name": "bin/sidle", "sha256": "deadbeef", "size": bytes.len() } ],
+            "apps": [
+                { "id": "sidle", "name": "Sidle", "built_at": 0, "files": [
+                    { "path": "extensions/sidle/bin/sidle", "sha256": "deadbeef",
+                      "size": bytes.len(), "apply": "staged" } ] },
+                { "id": "karyll", "name": "Karyll", "built_at": 0, "files": [
+                    { "path": "documents/Karyll.sh", "sha256": "cafe",
+                      "size": TILE.len(), "apply": "direct" } ] }
+            ]
         });
+        let entry = |p: &std::path::Path| serde_json::json!({ "source": p, "mtime_ms": 0, "size": 0, "sha256": "" });
+        let sources = serde_json::json!({
+            "files": {
+                "bin/sidle": entry(&picker),
+                "extensions/sidle/bin/sidle": entry(&picker),
+                "documents/Karyll.sh": entry(&tile),
+            }
+        });
+        std::fs::create_dir_all(&dist).unwrap();
         std::fs::write(
             dist.join("manifest.json"),
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        std::fs::write(
+            dist.join("sources.json"),
+            serde_json::to_vec(&sources).unwrap(),
+        )
+        .unwrap();
         bytes
     }
+
+    /// A tile, small enough to assert on whole.
+    const TILE: &[u8] = b"# Name: Karyll\n";
 
     fn staged_state(root: &Path) -> (AppState, String, Vec<u8>) {
         let paths = LibraryPaths {
@@ -2206,31 +2239,52 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(manifest["version"], 2);
         assert_eq!(manifest["files"][0]["name"], "bin/sidle");
 
-        // The catch-all `{*name}` captures the `bin/sidle` path and the bytes
-        // come back byte-identical to what was staged.
+        // The catch-all `{*name}` captures the `bin/sidle` key, and the bytes
+        // come back byte-identical to the file the index points at.
         let resp = build_router(state)
             .oneshot(get_request("/device/file/bin/sidle", Some(&token)))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(
-            body.as_ref(),
-            bin_bytes.as_slice(),
-            "served == staged binary"
-        );
+        assert_eq!(body.as_ref(), bin_bytes.as_slice(), "served == the source");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dist_file_404s_names_absent_from_manifest() {
+    async fn dist_file_serves_an_app_from_its_own_checkout() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token, _) = staged_state(tmp.path());
-        // Real bundle files that the v1 manifest deliberately does NOT list —
-        // the whitelist is what keeps the token + other device files unreachable
-        // (and, by the same check, blocks any traversal name).
-        for uri in ["/device/file/etc/server.conf", "/device/file/bin/sidle.sh"] {
+
+        let resp = build_router(state)
+            .oneshot(get_request(
+                "/device/file/documents/Karyll.sh",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a mount path outside the picker's own bundle"
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), TILE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dist_file_404s_names_absent_from_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token, _) = staged_state(tmp.path());
+        // Names `sources.json` holds no entry for. The lookup is what keeps the
+        // token and every other file unreachable, traversal names included.
+        for uri in [
+            "/device/file/extensions/sidle/etc/server.conf",
+            "/device/file/sources.json",
+            "/device/file/extensions/sidle/bin/sidle.sh",
+        ] {
             let resp = build_router(state.clone())
                 .oneshot(get_request(uri, Some(&token)))
                 .await

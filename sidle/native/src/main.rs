@@ -25,6 +25,7 @@ mod font;
 mod handwriting;
 mod orientation;
 mod readinglog;
+mod receipt;
 mod search;
 mod selfupdate;
 mod series;
@@ -59,10 +60,6 @@ const LOG_PATH: &str = "/mnt/us/logs/sidle-native.log";
 /// **Update** button (inline in `run`) and the `--update` recovery launch.
 const UPDATE_LOG_PATH: &str = "/mnt/us/logs/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
-/// On-device extension bundle root. `--update` stages its pulled binary under here as
-/// `bin/sidle.new` (manifest names are relative to this dir), and the launcher
-/// swaps it in. Parent of [`CONFIG_PATH`]'s `etc/`.
-const BUNDLE_DIR: &str = "/mnt/us/extensions/sidle";
 const FONT_PX: f32 = 28.0;
 /// Top margin above the grid. Holds the Amazon-style **search bar** (top level
 /// only) plus the sort/results header line below it. Sized to seat both; the
@@ -304,20 +301,21 @@ fn draw_panel(
 
 /// Map a [`selfupdate::run_pull`] result to the one-line banner shown to the
 /// user, so the in-app **Update** button (inline in [`run`]) and the `--update`
-/// recovery launch ([`run_update`]) speak identically. `Staged` tells the user
-/// to reopen Sidle — the launcher (`bin/sidle.sh`) swaps the staged `bin/sidle.new`
-/// in on the next start (nothing maps the running binary at that moment). A hard
-/// error is logged to the update log before it's flattened to the terse banner.
-fn update_result_message(result: api::Result<selfupdate::UpdateOutcome>) -> String {
+/// recovery launch ([`run_update`]) speak identically. A staged path tells the
+/// user to reopen Sidle — the launcher (`bin/sidle.sh`) swaps `bin/sidle.new`
+/// in on the next start, and the tile swaps `bin/sidle.sh.new`. A hard error is
+/// logged to the update log before it's flattened to the terse banner.
+fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> String {
     match result {
-        Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
-        Ok(selfupdate::UpdateOutcome::Staged(_)) => {
-            "Update staged — reopen Sidle to apply".to_string()
+        Ok(r) if r.quiet() => "Already up to date".to_string(),
+        Ok(r) if !r.staged.is_empty() => "Update staged — reopen Sidle to apply".to_string(),
+        Ok(r) if !r.written.is_empty() => {
+            format!("Updated {} file(s)", r.written.len())
         }
-        // The server's binary is older/equal — kept the newer one on the device.
-        Ok(selfupdate::UpdateOutcome::RefusedOlder(_)) => {
-            "Server build not newer — kept current".to_string()
-        }
+        // Nothing landed: the served build is older or equal, or the device
+        // holds edits of its own.
+        Ok(r) if !r.refused.is_empty() => "Server build not newer — kept current".to_string(),
+        Ok(r) => format!("Kept {} changed on Kindle", r.kept.len()),
         // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
         Err(api::SidleError::TokenMismatch) => {
             "Plug Kindle into sidle, click Update on Kindle".to_string()
@@ -366,7 +364,7 @@ fn run_update() -> anyhow::Result<()> {
     let message = update_result_message(selfupdate::run_pull(
         &agent,
         &cfg,
-        Path::new(BUNDLE_DIR),
+        Path::new(MNT_US),
         selfupdate::self_build_ts(),
         |m| update_log(m),
     ));
@@ -795,7 +793,7 @@ fn run() -> anyhow::Result<()> {
                             let banner_msg = update_result_message(selfupdate::run_pull(
                                 &agent,
                                 &cfg,
-                                Path::new(BUNDLE_DIR),
+                                Path::new(MNT_US),
                                 selfupdate::self_build_ts(),
                                 |m| update_log(m),
                             ));

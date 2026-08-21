@@ -1,24 +1,15 @@
 //! What sidle last installed on a device.
 //!
-//! The receipt is the only thing that can tell an app's own update apart from
-//! an edit someone made on the device. Bytes alone cannot: a file that differs
-//! from the source is either a version behind or a value the user changed on
-//! device, and overwriting the second one destroys it. So an install records
-//! what it wrote, and the next one reads that back — a file whose device copy
-//! still matches the receipt is sidle's to replace, and one that no longer
-//! matches is not.
+//! The receipt tells an app's own update apart from an edit made on the device.
+//! Bytes alone cannot: a file differing from the source is either a version
+//! behind or a value someone changed there. An install records what it wrote.
 //!
-//! Recording hashes is also what keeps a status check off the wire. A path
-//! whose source still hashes to what the receipt says was written needs no
-//! device read at all; only the paths that actually changed are worth the
-//! round trip. Against karyll's 121 files that is the difference between a
-//! status check and a 49 MB transfer. The receipt is trusted for that, and
-//! [`crate::library::device::deploy::verify`] is what re-reads every byte when
-//! trust is not enough.
+//! Recorded hashes also keep a status check off the wire. A path whose source
+//! hashes to what the receipt names needs no device read, which is what keeps
+//! a vendored subtree from being pulled back to check it.
 //!
-//! It lives inside the picker's own directory rather than one copy per app:
-//! sidle's bookkeeping belongs under sidle, not scattered through directories
-//! that belong to other people's programs.
+//! [`RECEIPT_PATH`] sits inside the picker's own directory, one file for every
+//! app.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,8 +31,8 @@ pub const RECEIPT_SCHEMA: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileReceipt {
     pub sha256: String,
-    /// Compared before the hash is: a device copy of a different length is
-    /// already known to differ, and MTP charges for every byte read.
+    /// Compared before the hash: a device copy of a different length differs,
+    /// and MTP charges for every byte read.
     pub size: u64,
 }
 
@@ -82,11 +73,9 @@ impl Default for InstallState {
 impl InstallState {
     /// Read the device's receipt, or an empty one.
     ///
-    /// Absent, unreadable and unparseable all give the same answer, because
-    /// they mean the same thing to every caller: nothing is known about what is
-    /// on this device, so read the device. A first push onto a bare Kindle
-    /// takes this path, and so does one onto a device somebody hand-dragged
-    /// files onto.
+    /// Absent, unreadable and unparseable give one answer: nothing is known
+    /// about this device, and every path reports against the device itself. A
+    /// first push onto a bare Kindle takes it.
     pub fn read(transport: &dyn Transport) -> Self {
         let path = TPath::parse(RECEIPT_PATH);
         let Ok(true) = transport.exists(&path) else {
@@ -117,9 +106,8 @@ impl InstallState {
         self.apps.get(app_id)
     }
 
-    /// Replace one app's record. A push rewrites the whole record rather than
-    /// merging into it, so a path the app no longer ships stops being one the
-    /// receipt claims sidle put there.
+    /// Replace one app's record wholesale. A path the app has stopped shipping
+    /// leaves the receipt with it.
     pub fn set_app(&mut self, app_id: &str, receipt: AppReceipt) {
         self.apps.insert(app_id.to_string(), receipt);
     }
@@ -211,8 +199,8 @@ mod tests {
         assert!(InstallState::read(&t).apps.is_empty());
     }
 
-    /// A push rewrites an app's whole record: a path it no longer ships must
-    /// stop being one the receipt claims sidle put there.
+    /// A push rewrites an app's whole record: a path it has stopped shipping
+    /// leaves the receipt with it.
     #[test]
     fn setting_an_app_replaces_rather_than_merges() {
         let mut state = InstallState::default();

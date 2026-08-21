@@ -12,6 +12,7 @@ use sidle_core::library::device::dedrm::{self, PullResult};
 use sidle_core::library::device::deploy::{
     self, DeployInstallReport, DeployOverall, DeployStatus, ServerConfRender,
 };
+use sidle_core::library::device::dist;
 use sidle_core::library::device::inventory;
 use sidle_core::library::device::push::{self, DeleteResult, PushResult};
 
@@ -543,16 +544,16 @@ pub async fn device_app_install(
     let conf = render_conf(&state, serial).await;
 
     let source = state.device_app_source.clone();
-    let plan = compose_plan(&state, &source).await?;
+    let fleet = compose_plan(&state, &source).await?;
     let plan = match &only {
         Some(id) => {
-            let narrowed = plan.only(id);
+            let narrowed = fleet.only(id);
             if narrowed.apps.is_empty() {
                 return Err(format!("no app named {id} in the fleet"));
             }
             narrowed
         }
-        None => plan,
+        None => fleet.clone(),
     };
     let app_handle = app.clone();
     let dist_dir = state.paths.device_dist();
@@ -576,8 +577,9 @@ pub async fn device_app_install(
             },
         )
         .map_err(|e| format!("{e:#}"))?;
-        // `stage_dist` puts the pushed binary in reach of a LAN pull. Non-fatal.
-        if let Err(e) = deploy::stage_dist(&source, &dist_dir) {
+        // `dist::refresh` puts the pushed bytes in reach of a LAN pull. Takes
+        // `fleet`, the plan before `only` narrowed it. Non-fatal.
+        if let Err(e) = dist::refresh(&fleet, &source, &dist_dir) {
             eprintln!("[sidle/device_app_install] device-dist staging failed: {e:#}");
         }
         Ok(report)
@@ -622,13 +624,14 @@ pub async fn device_app_uninstall(
     }
 }
 
-/// Re-stage the LAN self-update bundle in `<data-dir>/device-dist/` when the
-/// cross-built picker binary is newer than the staged copy. Needs no Kindle.
+/// Re-describe the fleet in `<data-dir>/device-dist/`, hashing what has moved.
+/// Needs no Kindle.
 #[tauri::command]
 pub async fn device_app_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
     let source = state.device_app_source.clone();
+    let plan = compose_plan(&state, &source).await?;
     let dist_dir = state.paths.device_dist();
-    tokio::task::spawn_blocking(move || deploy::stage_dist(&source, &dist_dir))
+    tokio::task::spawn_blocking(move || dist::refresh(&plan, &source, &dist_dir))
         .await
         .map_err(|e| e.to_string())?
         .map(|_| ())

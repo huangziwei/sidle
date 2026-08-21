@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use sidle_core::library::apps::{self, AppTree};
 use sidle_core::library::db;
+use sidle_core::library::device::dist;
 use tauri::State;
 
 use crate::state::AppState;
@@ -29,6 +30,17 @@ pub struct AppRow {
     pub error: Option<String>,
     /// This app's state on the connected Kindle. `None` when none is connected.
     pub device: Option<sidle_core::library::device::deploy::AppDeployStatus>,
+    /// What the Wi-Fi route offers. `None` for an app the manifest does not
+    /// name.
+    pub dist: Option<AppDist>,
+}
+
+/// One app as the LAN manifest offers it.
+#[derive(Serialize)]
+pub struct AppDist {
+    /// Whether the manifest's entry is as new as this machine's tree.
+    pub current: bool,
+    pub files: usize,
 }
 
 fn row(tree: &AppTree, source: Option<String>) -> AppRow {
@@ -43,6 +55,7 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
         total_bytes: tree.total_size(),
         error: None,
         device: None,
+        dist: None,
     }
 }
 
@@ -68,6 +81,20 @@ pub async fn apps_overview(state: State<'_, AppState>) -> Result<AppsOverview, S
     };
     let mut apps = apps_list(&plan, &rows);
 
+    // The Wi-Fi half: what `device-dist/` offers a Kindle that pulls. An app
+    // indexed from an older tree than this machine holds is behind.
+    if let Some(manifest) = dist::read_manifest(&state.paths.device_dist()) {
+        for app in &mut apps {
+            let Some(staged) = manifest.apps.iter().find(|a| a.id == app.id) else {
+                continue;
+            };
+            let built_at = plan.app(&app.id).map(|t| t.built_at()).unwrap_or(0);
+            app.dist = Some(AppDist {
+                current: staged.built_at >= built_at,
+                files: staged.files.len(),
+            });
+        }
+    }
     let device_connected = state.device.lock().await.is_some();
     let mut device_error = None;
     if device_connected {
@@ -122,6 +149,7 @@ fn apps_list(
             total_bytes: 0,
             error: Some(e.error.clone()),
             device: None,
+            dist: None,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

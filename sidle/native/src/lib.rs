@@ -15,6 +15,7 @@ pub mod device_state;
 pub mod font;
 pub mod handwriting;
 pub mod readinglog;
+pub mod receipt;
 pub mod selfupdate;
 pub mod series;
 pub mod updates;

@@ -111,9 +111,8 @@
       </div>
     </div>
 
-    <!-- The Reading Log's own sort, over reading figures rather than library
-         metadata. Same markup as the gallery's so the two look and behave
-         alike; it lives out here for the same reason that one does. -->
+    <!-- The Reading Log's own sort, over reading figures. Same markup as the
+         gallery's, at the same level. -->
     <div class="sort-popover" id="rl-sort-popover" hidden>
       <ul class="sort-key-list" id="rl-sort-keys"></ul>
       <div class="sort-dir-toggle" role="group" aria-label="Sort direction">
@@ -211,6 +210,7 @@
           <div class="apps-summary" id="apps-summary"></div>
           <div class="apps-head-actions">
             <button id="apps-update-all" class="btn" disabled>Update all</button>
+            <button id="apps-stage" class="btn" hidden>Refresh Wi-Fi</button>
             <button id="apps-add" class="btn">Add&hellip;</button>
           </div>
         </header>
@@ -780,8 +780,8 @@
           </section>
         </div>
 
-        <!-- Pinned below the scrollable body so a pending confirmation /
-             status is always visible rather than falling below the fold. -->
+        <!-- Pinned below the scrollable body, holding a pending confirmation
+             or status in view. -->
         <div class="settings-pinned">
           <!-- One confirm box, shared by relocate (move / use) and restore.
                Restore is the only one with two ways to say yes, so it borrows

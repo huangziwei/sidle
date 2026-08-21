@@ -1,27 +1,23 @@
 //! The one list both routes install from.
 //!
-//! A cable push and a Wi-Fi pull have to deliver the same tree under the same
-//! per-path rules, so neither reads the fleet for itself: both read a
-//! [`DevicePlan`], which is every registered app's tree flattened into
-//! mount-relative paths.
+//! A cable push and a Wi-Fi pull deliver the same tree under the same per-path
+//! rules: both read a [`DevicePlan`], every registered app's tree flattened
+//! into mount-relative paths.
 //!
 //! # Where the trees come from
 //!
 //! Two sources, resolved identically once found. The **built-in** tree ships
 //! with the desktop app — the `device/` mirror in a dev checkout, the staged
 //! resources in a packaged one — and holds the picker and bokai. **Registered**
-//! trees are rows in the `apps` table: a repo checkout the user pointed at, or
-//! an unpacked release bundle. The built-in tree is not a row, because where it
-//! is depends on how this binary was built, not on which library is open.
+//! trees are rows in the `apps` table: a repo checkout, or an unpacked release
+//! bundle. Where the built-in tree sits follows this binary's build, and it is
+//! not a row.
 //!
 //! # Nothing is materialised
 //!
-//! A plan is paths and their sources, not a copy of the bytes. karyll alone is
-//! 51 MB, and a cable push reads each file once on its way to the device —
-//! staging it into a second directory first would double the IO to no end. The
-//! LAN route does materialise, because a server serves files out of a
-//! directory; it materialises *from this plan*, so the two routes still carry
-//! one list.
+//! A plan is paths and their sources, not a copy of the bytes: a cable push
+//! reads each file once on its way to the device. `device::dist` materialises
+//! *from this plan* for the server, which serves files out of a directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,9 +42,8 @@ pub struct PlannedFile {
     pub app_id: String,
 }
 
-/// Two apps claiming one mount path. Reported rather than resolved: the loser's
-/// file would silently never install, and which one lost would depend on the
-/// order rows came back in.
+/// Two apps claiming one mount path, reported and not resolved. The dropped
+/// app's file never installs, and row order picks which one it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PathConflict {
     pub path: String,
@@ -83,9 +78,8 @@ impl DevicePlan {
 
     /// The same plan narrowed to one app, for a per-row install.
     ///
-    /// Conflicts and errors do not carry: they are facts about composing the
-    /// whole fleet, and repeating them against one row would report a clash
-    /// with an app this install is not touching.
+    /// Conflicts and errors do not carry across: both are facts about the whole
+    /// fleet, and name apps this install leaves alone.
     pub fn only(&self, id: &str) -> DevicePlan {
         DevicePlan {
             apps: self
@@ -117,8 +111,8 @@ impl DevicePlan {
         self.files.iter().map(|f| f.size).sum()
     }
 
-    /// Paths written as `<path>.new` for something one level up to swap in,
-    /// because the device is executing them at the moment of the update.
+    /// Paths written as `<path>.new` for the process one level up to swap in.
+    /// The device is executing them at the moment of the update.
     pub fn staged_paths(&self) -> impl Iterator<Item = &str> {
         self.files
             .iter()
@@ -129,17 +123,16 @@ impl DevicePlan {
 
 /// Compose the built-in tree with every registered app.
 ///
-/// `builtin` is the mount root that ships with the desktop app. Errors reading
-/// one registered source are collected into [`DevicePlan::errors`] rather than
-/// returned, so a repo that moved costs its own app and nothing else. A failure
-/// to read the built-in tree *is* returned: without it there is no picker, and
-/// a push that quietly omitted it would leave a device with no way in.
+/// `builtin` is the mount root that ships with the desktop app. An error
+/// reading one registered source lands in [`DevicePlan::errors`], costing that
+/// app alone. An error reading the built-in tree is returned: it holds the
+/// picker.
 pub fn plan(conn: &rusqlite::Connection, builtin: &Path) -> Result<DevicePlan> {
     let rows = db::list_app_sources(conn).context("read the registered apps")?;
     Ok(plan_from(builtin, &rows))
 }
 
-/// [`plan`] against an explicit row list, for callers that already hold one.
+/// [`plan`] against an explicit row list, for a caller holding one.
 pub fn plan_from(builtin: &Path, rows: &[AppSourceRow]) -> DevicePlan {
     let mut trees = Vec::new();
     let mut errors = Vec::new();
@@ -153,9 +146,8 @@ pub fn plan_from(builtin: &Path, rows: &[AppSourceRow]) -> DevicePlan {
         }),
     }
 
-    // Ids the built-in tree already provides win over a row claiming the same
-    // one: the picker that ships with this binary is the picker this binary
-    // knows how to render a `server.conf` for.
+    // An id the built-in tree provides wins over a row claiming it: the picker
+    // shipping with this binary is the one it renders a `server.conf` for.
     for row in rows {
         if trees.iter().any(|t: &AppTree| t.app.id == row.id) {
             continue;
@@ -319,8 +311,7 @@ mod tests {
         );
     }
 
-    /// A repo the user moved costs that app, not the push. The picker still
-    /// installs, which is the file a stranded device most needs.
+    /// A moved repo costs that app, not the push: the picker installs.
     #[test]
     fn one_unreadable_source_does_not_take_the_others_down() {
         let tmp = tempfile::tempdir().unwrap();
@@ -339,8 +330,8 @@ mod tests {
         assert!(plan.app("steb").is_none());
     }
 
-    /// The picker that ships with this binary is the one it knows how to render
-    /// a `server.conf` for, so a row claiming `sidle` does not displace it.
+    /// A row claiming `sidle` does not displace the picker shipping with this
+    /// binary, the one it renders a `server.conf` for.
     #[test]
     fn the_builtin_tree_wins_an_id_a_row_also_claims() {
         let tmp = tempfile::tempdir().unwrap();
@@ -361,9 +352,8 @@ mod tests {
         assert_eq!(picker.root, dev);
     }
 
-    /// Two apps claiming one path is reported, not silently resolved — the
-    /// loser's file would never install and which one lost would depend on row
-    /// order.
+    /// Two apps claiming one path is reported, not resolved: the dropped app's
+    /// file never installs, and row order picks it.
     #[test]
     fn a_contested_path_is_reported() {
         let tmp = tempfile::tempdir().unwrap();

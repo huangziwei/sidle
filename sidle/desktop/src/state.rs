@@ -12,17 +12,18 @@ use crate::device_monitor::DeviceState;
 use crate::library::{LibraryPaths, db, extent};
 use crate::queue::{self, QueueHandle};
 use crate::server::ServerHandle;
+use sidle_core::library::apps;
 use sidle_core::library::device::Transport;
-use sidle_core::library::device::deploy::{self, DeploySource};
+use sidle_core::library::device::deploy::DeploySource;
+use sidle_core::library::device::dist;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
 /// The app's one connection, lent out a moment at a time.
 ///
 /// Device sync spends minutes in USB IO between short bursts of database work
-/// and must not hold the connection across them, or the window freezes; it takes
-/// a [`db::Access`] and borrows through it. Blocking, so it belongs on a
-/// blocking task — the same place the sync itself belongs.
+/// and must not hold the connection across them; it takes a [`db::Access`] and
+/// borrows through it. `blocking_lock` puts every borrow on a blocking task.
 pub struct Borrowed<'a>(pub &'a DbHandle);
 
 impl db::Access for Borrowed<'_> {
@@ -31,49 +32,39 @@ impl db::Access for Borrowed<'_> {
     }
 }
 
-/// Long-lived, shared on-device IO handle. Opened once per device-connect by the
-/// monitor and cleared on disconnect; every Tauri command and the on-connect
-/// sync borrow this same `Arc<dyn Transport>` instead of calling
-/// `DeviceInfo::open_transport()` themselves.
+/// Long-lived, shared on-device IO handle. Opened once per device-connect by
+/// the monitor and cleared on disconnect; every Tauri command and the
+/// on-connect sync borrow this same `Arc<dyn Transport>`.
 ///
-/// Two reasons it has to be shared, not per-call: MTP-class Kindles expose a
-/// single USB session — a second `open_transport` while the first is live races
-/// the first one's bulk transfers and the device returns `exclusive_access` to
-/// whichever loses. Mass-storage doesn't care (the transport is a `PathBuf`
-/// wrapper), but using the same lifecycle for both keeps the call sites uniform.
-/// Concurrency inside the shared session is already serialized by
-/// `MtpTransport`'s storage mutex, so multiple borrowers don't need to
-/// coordinate here.
+/// An MTP-class Kindle exposes a single USB session: a second `open_transport`
+/// races the first one's bulk transfers for an `exclusive_access` error.
+/// `MtpTransport`'s storage mutex serializes the borrowers inside that session.
 pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
-/// Single-entry cache for the reader's search index. Keyed by `book_id`,
-/// holds at most one — switching books rebuilds. First search per book pays
-/// the parse cost (same as `reader_open`); subsequent are HashMap walks. Lives
-/// for the app session; the keyed-by-`book_id` replacement is the eviction.
+/// Single-entry cache for the reader's search index, keyed by `book_id`. The
+/// first search of a book pays the parse; the rest are HashMap walks. Opening
+/// another book replaces the entry, which is the whole eviction rule.
 pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<sidle_core::library::anchor::BookIndex>)>>>;
 
-/// Everything the open book's deferred fetches are served from: the parsed
-/// book that produces image bytes on request, the full built section HTML
-/// (source for windowed section streaming on large text books), and the
-/// eid→section index (jumps into sections the webview hasn't streamed yet).
+/// What the open book's deferred fetches are served from: the parsed book that
+/// produces image bytes on request, the built section HTML, and the eid→section
+/// index that reaches an unstreamed section.
 pub struct ReaderStoreEntry {
     pub images: sidle_core::reader::ImageStore,
-    /// Every section's `(href, html)` in spine order — already built by the
-    /// open; `reader_fetch_sections` hands them out without recompute.
+    /// Every section's `(href, html)` in spine order, built by the open;
+    /// `reader_fetch_sections` hands them out without recompute.
     pub sections: Vec<(String, String)>,
     pub eid_to_section: std::collections::HashMap<i64, usize>,
 }
 
 /// Single-entry store backing the open book's on-demand fetches
-/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_eid_section`).
-/// Populated by `reader_open`, dropped by `reader_release` — the frontend
-/// releases it on reader close and once everything deferred has been delivered
-/// (the webview keeps the data; the store is then dead weight). Keyed by
-/// `book_id`; opening another book replaces it.
+/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_eid_section`),
+/// filled by `reader_open` and dropped by `reader_release`. Keyed by `book_id`;
+/// opening another book replaces it.
 pub type ReaderStoreCache = Arc<Mutex<Option<(i64, Arc<ReaderStoreEntry>)>>>;
 
-/// Default to all available cores. Conversion is CPU-bound; the OS scheduler
-/// handles contention with other apps better than we can from a guessed cap.
+/// Default to all available cores. Conversion is CPU-bound, and the OS
+/// scheduler holds contention with other processes.
 fn default_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -97,18 +88,14 @@ pub struct AppState {
     /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
     pub reader_store: ReaderStoreCache,
     /// Raised to ask an in-flight reading-log import to stop at its next safe
-    /// point. Only one such import can run at a time (the DB lock enforces it),
-    /// so one flag suffices; the import clears it before starting so a stale
-    /// cancel can't abort the next run.
+    /// point. One import runs at a time, under the DB lock, and clears the flag
+    /// before it starts.
     pub reading_log_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/desktop`) until
-/// we hit a `Cargo.toml` declaring `[workspace]` — that's the repo
-/// root. Robust to layout changes that don't move the workspace
-/// manifest. If the desktop app is ever shipped packaged (outside the
-/// dev workspace), this returns Err and DeploySource paths will report
-/// `SourceMissing` to the UI.
+/// Walk up from `CARGO_MANIFEST_DIR` to the first `Cargo.toml` declaring
+/// `[workspace]`, the repo root. Outside the dev workspace this returns `Err`,
+/// and `DeploySource` paths report `SourceMissing` to the UI.
 pub(crate) fn find_workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut p: &Path = start.as_path();
@@ -138,9 +125,8 @@ impl AppState {
         let paths = LibraryPaths::resolve()?;
         paths.ensure()?;
 
-        // Capture the bundle resource dir while `app` is still ours — it's moved
-        // into the device monitor below, but the deploy source resolution further
-        // down (packaged builds) needs it. `None` in dev / if Tauri can't resolve.
+        // `app` moves into the device monitor below, and `device_app_source`
+        // reads this. `None` in dev, and when Tauri cannot resolve it.
         let resource_dir = app.path().resource_dir().ok();
 
         let conn = db::open(&paths.db())?;
@@ -150,10 +136,8 @@ impl AppState {
              WHERE status = 'converting'",
             rusqlite::params![db::now_iso()],
         );
-        // Backfill `kfx_sha256` for any pre-`kfx_sha256`-column rows. Push
-        // requires the hash to derive the on-device filename infix; rows
-        // imported before the column existed would otherwise be marked
-        // "kfx hash missing — reconvert" until manual intervention.
+        // Backfill `kfx_sha256`: a push derives the on-device filename infix
+        // from it, and a row without one reads as "kfx hash missing".
         for (book_id, kfx_path) in db::books_missing_kfx_sha(&conn).unwrap_or_default() {
             match sidle_core::library::import::sha256_of_file(std::path::Path::new(&kfx_path)) {
                 Ok(sha) => {
@@ -167,21 +151,13 @@ impl AppState {
                 }
             }
         }
-        // Backfill `asin` for any row that has a KFX but the value never made
-        // it to the row (rows converted before the worker started capturing
-        // bokai's stamped ASIN). One-time `Book::open` on each KFX is heavier
-        // than the sha256 backfill above, but the work happens at most once
-        // per row and only for the rare pre-fix subset. Without it,
-        // device-delete can't clean the on-device `<title>_<ASIN>.sdr/`
-        // catalog sidecar Kindle invents.
+        // Backfill `asin` for a row holding a KFX and no value. A device-delete
+        // reaches the `<title>_<ASIN>.sdr/` catalog sidecar through it.
         for (book_id, kfx_path) in db::books_missing_asin(&conn).unwrap_or_default() {
             match bokai::Book::open(std::path::Path::new(&kfx_path)) {
                 Ok(book) => {
-                    // The content_id bokai BAKED into this KFX — the device's
-                    // `.sdr` / `.notebooks` key. Read it back rather than
-                    // recomputing via `resolve_export_asin` (which used a
-                    // different input and produced a value that never matched the
-                    // baked one for PDF→KFX books).
+                    // The content_id bokai baked into this KFX — the device's
+                    // `.sdr` / `.notebooks` key, read back from the file.
                     if let Some(asin) = book.metadata().asin.clone() {
                         let _ = db::set_asin(&conn, book_id, &asin);
                     }
@@ -195,6 +171,9 @@ impl AppState {
             }
         }
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
+        // The registered app sources `dist::refresh` below composes, read while
+        // `conn` is in hand.
+        let app_rows = db::list_app_sources(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));
         let queue = queue::spawn(app.clone(), db.clone(), paths.clone(), default_workers());
@@ -208,17 +187,13 @@ impl AppState {
             });
         }
 
-        // Index the position axis of any book still missing one, so the Reading
-        // Log can attribute the sessions a Kindle reports against it. The
-        // conversion worker fills this as books arrive; this is the catch-up for
-        // rows that predate that, and the safety net for one that slipped.
+        // The position axis of every book missing one, which the Reading Log
+        // attributes a Kindle's sessions against. The conversion worker fills
+        // it as books arrive; this is the catch-up.
         //
-        // Deliberately not part of `bootstrap`'s body: a library that has never
-        // been indexed is minutes of container parsing, which must not stand
-        // between the user and their gallery. Backgrounded, and one book at a
-        // time — the parse happens off the lock and the connection is taken only
-        // to store the answer, so a long catch-up never holds the database
-        // against the app around it.
+        // Off `bootstrap`'s body: an unindexed library is minutes of container
+        // parsing. One book at a time, parsed off the lock, with the connection
+        // taken to store each answer.
         {
             let db = db.clone();
             tauri::async_runtime::spawn(async move {
@@ -240,10 +215,8 @@ impl AppState {
                         eprintln!("[sidle/bootstrap] extent: book {book_id} not stored: {e}");
                     }
                 }
-                // Newly indexed books are new answers to sessions already
-                // stored against a position nothing could be matched to. Without
-                // this the reading they account for stays invisible until the
-                // next Kindle sync happens to run the same pass.
+                // A freshly indexed book is a new answer to sessions stored
+                // against a position nothing matched.
                 let conn = db.lock().await;
                 match db::resolve_reading_sessions(&conn) {
                     Ok(n) if n > 0 => {
@@ -271,10 +244,8 @@ impl AppState {
             queue.clone(),
         );
 
-        // Dev reads the deploy source straight from the checkout (a live `cargo
-        // build`/armv7 cross-build shows up, and the staleness hint works);
-        // a packaged build carries the assets as bundle resources. `resource_dir`
-        // is captured above because `app` is moved into the monitor before this.
+        // A dev build reads the deploy source from the checkout, where a fresh
+        // armv7 cross-build shows up; a packaged build reads `resource_dir`.
         let device_app_source = if cfg!(debug_assertions) {
             match find_workspace_root() {
                 Ok(root) => DeploySource::from_workspace_root(&root),
@@ -301,14 +272,19 @@ impl AppState {
             }
         };
 
-        // Stage the LAN self-update bundle so a detached `sidle-server` can serve
-        // the current picker binary over `/device/...` without a cable. mtime-gated
-        // (a no-op once warm); `SourceMissing` (binary not cross-built yet) and IO
-        // errors are non-fatal — they must never block app launch.
-        match deploy::stage_dist(&device_app_source, &paths.device_dist()) {
-            Ok(outcome) => eprintln!("[sidle/bootstrap] device-dist: {outcome:?}"),
-            Err(e) => eprintln!("[sidle/bootstrap] device-dist staging failed: {e:#}"),
-        }
+        // The fleet a detached `sidle-server` serves over `/device/...`,
+        // mtime-gated per file. Off the launch path: a first run copies the
+        // whole fleet, and nothing here waits on the result.
+        let staging_source = device_app_source.clone();
+        let dist_dir = paths.device_dist();
+        std::thread::spawn(move || {
+            let _ = staging_source.stage_binary();
+            let plan = apps::plan_from(&staging_source.mount_dir, &app_rows);
+            match dist::refresh(&plan, &staging_source, &dist_dir) {
+                Ok(outcome) => eprintln!("[sidle/bootstrap] device-dist: {outcome:?}"),
+                Err(e) => eprintln!("[sidle/bootstrap] device-dist staging failed: {e:#}"),
+            }
+        });
 
         Ok(Self {
             db,

@@ -160,6 +160,13 @@
     const pending = apps.some((a) => a.device && a.device.write_count > 0);
     updateAll.disabled = !ov?.device_connected || !pending || state.busy != null;
     updateAll.textContent = ov?.device_connected ? "Update all" : "No Kindle";
+
+    // Offered while any app's staged copy lags its tree on this machine.
+    const stage = q("#apps-stage");
+    if (stage) {
+      stage.hidden = apps.length === 0 || apps.every((a) => a.dist?.current);
+      stage.disabled = state.busy != null;
+    }
   }
 
   function renderSummary(ov) {
@@ -172,9 +179,31 @@
     }
     const files = apps.reduce((n, a) => n + a.file_count, 0);
     const bytes = apps.reduce((n, a) => n + a.total_bytes, 0);
-    el.textContent =
-      `${apps.length} app${apps.length === 1 ? "" : "s"} · ` +
-      `${files} files · ${fmtSize(bytes)}`;
+    const parts = [
+      `${apps.length} app${apps.length === 1 ? "" : "s"}`,
+      `${files} files`,
+      fmtSize(bytes),
+      wifiSummary(ov),
+    ];
+    el.textContent = parts.filter(Boolean).join(" · ");
+  }
+
+  // The Wi-Fi route: how much of the fleet a Kindle's own Update button
+  // reaches. The Kindle page carries whether the server is up to serve it.
+  function wifiSummary(ov) {
+    const apps = ov?.apps || [];
+    const current = apps.filter((a) => a.dist && a.dist.current).length;
+    if (!current) return "Wi-Fi: nothing offered";
+    return `Wi-Fi: ${current} of ${apps.length} offered`;
+  }
+
+  // An offered fleet missing this app, or naming an older build of it. Silent
+  // until something is offered, when a lagging app is the anomaly.
+  function wifiLag(app, ov) {
+    const offered = (ov?.apps || []).some((a) => a.dist);
+    if (!offered || app.error) return null;
+    if (app.dist && app.dist.current) return null;
+    return app.dist ? "Wi-Fi: older build" : "Wi-Fi: not offered";
   }
 
   function renderRow(app, ov) {
@@ -222,6 +251,15 @@
       pre.className = "apps-preflight";
       pre.textContent = cost;
       meta.appendChild(pre);
+    }
+
+    const lag = wifiLag(app, ov);
+    if (lag) {
+      const wifi = document.createElement("span");
+      wifi.className = "apps-preflight";
+      wifi.textContent = lag;
+      wifi.title = "Refresh Wi-Fi to put this build in reach of a pull.";
+      meta.appendChild(wifi);
     }
 
     const size = document.createElement("span");
@@ -438,6 +476,22 @@
     }
   }
 
+  // Re-describes the fleet for the LAN server, putting this build in reach of
+  // a Kindle's own Update button. Copies nothing.
+  async function refreshWifi() {
+    state.busy = "*";
+    render();
+    try {
+      await api.invoke("device_app_stage_dist");
+      toast("Wi-Fi list refreshed");
+    } catch (err) {
+      toast(`Could not refresh: ${err}`, true);
+    } finally {
+      state.busy = null;
+      await refresh();
+    }
+  }
+
   async function add() {
     let folder;
     try {
@@ -459,6 +513,7 @@
   function wire() {
     q("#apps-add")?.addEventListener("click", add);
     q("#apps-update-all")?.addEventListener("click", updateAll);
+    q("#apps-stage")?.addEventListener("click", refreshWifi);
     // Per-file progress during a push, between renders.
     api.listen("device-app:install-progress", (e) => {
       if (state.busy == null) return;
