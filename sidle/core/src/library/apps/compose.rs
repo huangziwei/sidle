@@ -81,6 +81,38 @@ impl DevicePlan {
         self.apps.iter().find(|a| a.spec.id == id)
     }
 
+    /// The same plan narrowed to one app, for a per-row install.
+    ///
+    /// Conflicts and errors do not carry: they are facts about composing the
+    /// whole fleet, and repeating them against one row would report a clash
+    /// with an app this install is not touching.
+    pub fn only(&self, id: &str) -> DevicePlan {
+        DevicePlan {
+            apps: self
+                .apps
+                .iter()
+                .filter(|a| a.spec.id == id)
+                .cloned()
+                .collect(),
+            files: self
+                .files
+                .iter()
+                .filter(|f| f.app_id == id)
+                .cloned()
+                .collect(),
+            conflicts: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Which app owns a mount-relative path, if any.
+    pub fn owner_of(&self, path: &str) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.app_id.as_str())
+    }
+
     pub fn total_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }

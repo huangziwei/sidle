@@ -347,7 +347,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeStatus();
   subscribeImportProgress();
   subscribeDeviceStatus();
-  setupDeviceAppSection();
   refreshServerStatus();
   subscribeSendProgress();
   subscribeSendActive();
@@ -365,6 +364,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (state.section === "misc") window.Misc?.show();
   // And the Reading Log, which loads its overview on first show.
   if (state.section === "reading") window.ReadingLog?.show();
+  // And Apps, which reads the composed fleet on first show.
+  if (state.section === "apps") window.Apps?.show();
 });
 
 function loadPreferences() {
@@ -410,7 +411,12 @@ function loadPreferences() {
   // doesn't just fail to open, it costs the user the tab they actually left off
   // in, which the same key was holding.
   const section = localStorage.getItem("section");
-  if (section === "notes" || section === "misc" || section === "reading") {
+  if (
+    section === "notes" ||
+    section === "misc" ||
+    section === "reading" ||
+    section === "apps"
+  ) {
     state.section = section;
   }
   applySection();
@@ -444,6 +450,7 @@ function wireToolbar() {
   $("#section-books").addEventListener("click", () => setSection("books"));
   $("#section-notes").addEventListener("click", () => setSection("notes"));
   $("#section-misc").addEventListener("click", () => setSection("misc"));
+  $("#section-apps").addEventListener("click", () => setSection("apps"));
   $("#section-reading").addEventListener("click", () => setSection("reading"));
   $("#btn-notes-import").addEventListener("click", () => {
     if (window.Notebooks) window.Notebooks.importDevice();
@@ -595,6 +602,10 @@ function setSection(s) {
     if (s === "reading") window.ReadingLog.show();
     else window.ReadingLog.hide();
   }
+  if (window.Apps) {
+    if (s === "apps") window.Apps.show();
+    else window.Apps.hide();
+  }
   if (s === "device") {
     // Entering the Kindle page: re-pull device / deploy / LAN state. Lives here
     // (not the pill handler) so the `\` shortcut refreshes too.
@@ -618,18 +629,21 @@ function applySection() {
   const reading = state.section === "reading";
   const device = state.section === "device";
   const books = state.section === "books";
+  const apps = state.section === "apps";
   // Neither the Gallery/List toggle nor a library filter belongs on the Kindle
   // page or the Files tab (both are read-only surfaces, not a book library), so
   // they collapse the toolbar to just the section tabs.
-  const bare = device || misc || reading;
+  const bare = device || misc || reading || apps;
   // Section tabs light up for their own section. None of Books/Notes/Files is
   // active on the Kindle page — the upper-right pill carries that state instead.
   $("#section-books").classList.toggle("active", books);
   $("#section-notes").classList.toggle("active", notes);
   $("#section-misc").classList.toggle("active", misc);
+  $("#section-apps").classList.toggle("active", apps);
   $("#section-books").setAttribute("aria-selected", String(books));
   $("#section-notes").setAttribute("aria-selected", String(notes));
   $("#section-misc").setAttribute("aria-selected", String(misc));
+  $("#section-apps").setAttribute("aria-selected", String(apps));
   // Reading Log is a plain toggle button, not a tab in that list, so it carries
   // `aria-pressed`; `aria-selected` is only meaningful on a `role="tab"`.
   $("#section-reading").classList.toggle("active", reading);
@@ -662,6 +676,8 @@ function applySection() {
   $("#reading-log").hidden = !reading;
   $("#device-page").classList.toggle("active", device);
   $("#device-page").hidden = !device;
+  $("#apps").classList.toggle("active", apps);
+  $("#apps").hidden = !apps;
   applyView();
 }
 
@@ -1998,7 +2014,6 @@ function coverUrlFor(b, { thumb = false } = {}) {
 // re-probes rather than trusting cached state.
 function refreshDevicePage() {
   refreshDeviceList();
-  refreshDeviceAppStatus();
   // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
   // serves the latest cross-built picker: the dev loop is "rebuild armv7 → open
   // the Kindle page → device pulls", no cable, no app restart. Fire-and-forget +
@@ -2178,300 +2193,13 @@ function subscribeDeviceStatus() {
   window.api.invoke("device_status").then(updateDeviceUI).catch(() => {});
 }
 
-// ----- On-device app deploy section -------------------------------------------
+// ----- Kindle page: apps live in the Apps tab ---------------------------------
 
-function setupDeviceAppSection() {
-  // Per-file progress event from the install command. Surfaces a live
-  // count next to the button so a multi-file push doesn't look frozen.
-  window.api.listen("device-app:install-progress", (e) => {
-    const r = e.payload;
-    const prog = $("#device-app-install-progress");
-    if (!prog) return;
-    const path = r.device_path || "";
-    let line;
-    if (r.kind === "wrote") line = `wrote ${path}`;
-    else if (r.kind === "skipped") line = `skipped ${path}`;
-    else if (r.kind === "failed") line = `failed ${path}: ${r.error}`;
-    else if (r.kind === "source_missing") line = `no source for ${path}`;
-    else line = JSON.stringify(r);
-    prog.textContent = line;
-    prog.hidden = false;
-  });
-
-  $("#btn-device-app-add").addEventListener("click", async () => {
-    const folder = await window.api.invoke("library_pick_folder");
-    if (!folder) return;
-    const prog = $("#device-app-install-progress");
-    try {
-      const added = await window.api.invoke("apps_add", { path: folder });
-      prog.textContent = `added ${added.map((a) => a.id).join(", ")}`;
-      prog.hidden = false;
-    } catch (err) {
-      prog.textContent = `${err}`;
-      prog.hidden = false;
-    }
-    await refreshDeviceAppStatus();
-  });
-
-  $("#btn-device-app-install").addEventListener("click", async () => {
-    const btn = $("#btn-device-app-install");
-    const prog = $("#device-app-install-progress");
-    btn.disabled = true;
-    prog.hidden = false;
-    prog.textContent = "pushing…";
-    try {
-      const report = await window.api.invoke("device_app_install");
-      const wrote = report.results.filter((r) => r.kind === "wrote").length;
-      const skipped = report.results.filter((r) => r.kind === "skipped").length;
-      const failed = report.results.filter((r) => r.kind === "failed");
-      // Only server.conf reaches source_missing, and only with no LAN address
-      // or no server token. Everything else was still delivered, so this is a
-      // note on an otherwise successful push, not a failure.
-      const unwritten = report.results.filter(
-        (r) => r.kind === "source_missing",
-      ).length;
-      const note = unwritten ? " · server.conf not written" : "";
-      if (failed.length) {
-        prog.textContent = `${failed.length} failed — see file list`;
-      } else if (wrote === 0) {
-        prog.textContent = `already in sync (${skipped} skipped)${note}`;
-      } else {
-        prog.textContent = `pushed ${wrote}, skipped ${skipped}${note}`;
-      }
-    } catch (err) {
-      prog.textContent = `error: ${err}`;
-    } finally {
-      // Re-pull status; that'll re-enable/disable the button based on
-      // the new state.
-      await refreshDeviceAppStatus();
-    }
-  });
-}
-
-async function refreshDeviceAppStatus() {
-  // The app list does not need a Kindle: it says what a push would carry, which
-  // is worth seeing (and adding to) before one is plugged in.
-  try {
-    renderDeviceAppList(await window.api.invoke("apps_list"));
-  } catch (err) {
-    console.error("apps_list failed:", err);
-  }
-  try {
-    const status = await window.api.invoke("device_app_status");
-    renderDeviceAppStatus(status);
-  } catch (err) {
-    console.error("device_app_status failed:", err);
-  }
-}
-
-function renderDeviceAppList(apps) {
-  const list = $("#device-app-list");
-  if (!list) return;
-  list.innerHTML = "";
-  for (const app of apps || []) {
-    const li = document.createElement("li");
-
-    const name = document.createElement("span");
-    name.className = "device-app-name";
-    name.textContent = app.name;
-    li.appendChild(name);
-
-    const version = document.createElement("span");
-    version.className = "device-app-version";
-    version.textContent = app.version;
-    li.appendChild(version);
-
-    if (app.error) {
-      const err = document.createElement("span");
-      err.className = "device-app-row-error";
-      err.textContent = "unreadable — moved or rebuilt?";
-      err.title = app.error;
-      li.appendChild(err);
-    } else {
-      const size = document.createElement("span");
-      size.className = "device-app-size";
-      // The parenthesised figure is the `sync` bytes — what a status check
-      // reads. It is far below the total for an app with a large `seed`
-      // subtree, and equal to it for one with none, which is why it only
-      // appears when the two differ.
-      size.textContent =
-        app.hashed_bytes < app.total_bytes
-          ? `${app.file_count} files · ${formatBytes(app.total_bytes)} (${formatBytes(app.hashed_bytes)} checked)`
-          : `${app.file_count} files · ${formatBytes(app.total_bytes)}`;
-      li.appendChild(size);
-    }
-
-    // No Remove for the picker and bokai: they ship inside Sidle and have no
-    // registration to undo.
-    if (app.source) {
-      if (app.error) {
-        const spacer = document.createElement("span");
-        spacer.className = "device-app-size";
-        li.appendChild(spacer);
-      }
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "btn-link device-app-remove";
-      remove.textContent = "Remove";
-      remove.title = `Unregister ${app.id} — ${app.source}\nNothing on disk or on the Kindle is touched.`;
-      remove.addEventListener("click", async () => {
-        remove.disabled = true;
-        try {
-          await window.api.invoke("apps_remove", { id: app.id });
-        } catch (err) {
-          console.error("apps_remove failed:", err);
-        }
-        await refreshDeviceAppStatus();
-      });
-      li.appendChild(remove);
-    }
-    list.appendChild(li);
-  }
-}
-
-function renderDeviceAppStatus(status) {
-  const section = $("#device-app-section");
-  const label = $("#device-app-status-label");
-  const btn = $("#btn-device-app-install");
-  const tip = $("#device-app-tip");
-  const list = $("#device-app-file-list");
-
-  section.hidden = false;
-  if (!status || status.overall.kind === "device_disconnected") {
-    // No Kindle: the rows still say what a push would carry, and Add still
-    // works — registering an app is worth doing before the cable is in.
-    label.className = "device-app-status-label unknown";
-    label.textContent = "No Kindle";
-    btn.disabled = true;
-    btn.textContent = "Install on Kindle";
-    tip.hidden = true;
-    list.innerHTML = "";
-    list.hidden = true;
-    return;
-  }
-
-  const overall = status.overall.kind;
-  label.className = "device-app-status-label " + overallClass(overall);
-  label.textContent = overallLabel(status.overall);
-
-  // server.conf is the one slot whose bytes need a LAN address and a running
-  // server token; without them it reports source-missing and is left alone.
-  // The cable push still delivers every other file, so this is worth naming
-  // rather than hiding — the picker keeps whatever conf it already had.
-  const confMissing = (status.files || []).some(
-    (f) =>
-      f.device_path.endsWith("etc/server.conf") &&
-      f.state.kind === "source_missing",
-  );
-
-  if (overall === "binary_not_built") {
-    btn.disabled = true;
-    btn.textContent = "Install on Kindle";
-    tip.textContent =
-      "Run `cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native`, then click again.";
-    tip.hidden = false;
-  } else {
-    btn.disabled = false;
-    btn.textContent =
-      overall === "in_sync"
-        ? "Re-push to Kindle"
-        : overall === "not_installed"
-          ? "Install on Kindle"
-          : "Update on Kindle";
-    // The push covers every app in the fleet, not just the picker, so the
-    // count is worth naming when there is more than one.
-    const appCount = new Set(
-      (status.files || [])
-        .map((f) => f.device_path.split("/"))
-        .filter((p) => p[0] === "extensions" && p.length > 1)
-        .map((p) => p[1]),
-    ).size;
-    if (appCount > 1) btn.textContent += ` (${appCount} apps)`;
-    if (confMissing) {
-      tip.textContent =
-        "server.conf won't be written — no LAN address, or the server has no token. Everything else installs over the cable.";
-      tip.hidden = false;
-    } else if (
-      // Show "binary older than source" hint only when nothing else is wrong.
-      overall === "in_sync" &&
-      status.binary_mtime_ms != null &&
-      status.native_source_mtime_ms != null &&
-      status.native_source_mtime_ms > status.binary_mtime_ms
-    ) {
-      tip.textContent =
-        "Binary is older than native source — you have unbuilt code changes.";
-      tip.hidden = false;
-    } else {
-      tip.hidden = true;
-      tip.textContent = "";
-    }
-  }
-
-  // Per-file rows.
-  list.innerHTML = "";
-  if (status.files && status.files.length) {
-    for (const f of status.files) {
-      const li = document.createElement("li");
-      const name = document.createElement("span");
-      name.textContent = f.device_path;
-      const state = document.createElement("span");
-      state.className = "device-app-file-state " + fileStateClass(f.state.kind);
-      state.textContent = fileStateLabel(f.state.kind);
-      li.appendChild(name);
-      li.appendChild(state);
-      list.appendChild(li);
-    }
-    list.hidden = false;
-  } else {
-    list.hidden = true;
-  }
-}
-
-function overallClass(kind) {
-  switch (kind) {
-    case "in_sync": return "in-sync";
-    case "stale": return "stale";
-    case "not_installed": return "not-installed";
-    case "binary_not_built": return "binary-not-built";
-    default: return "unknown";
-  }
-}
-
-function overallLabel(overall) {
-  switch (overall.kind) {
-    case "in_sync": return "In sync";
-    case "stale": {
-      const n = (overall.stale_count || 0) + (overall.missing_count || 0);
-      return `${n} file${n === 1 ? "" : "s"} out of date`;
-    }
-    case "not_installed": return "Not installed";
-    case "binary_not_built": return "Binary not built";
-    default: return "—";
-  }
-}
-
-function fileStateClass(kind) {
-  switch (kind) {
-    case "synced": return "synced";
-    case "seeded": return "synced";
-    case "stale": return "stale";
-    case "missing": return "missing";
-    case "source_missing": return "source-missing";
-    default: return "";
-  }
-}
-
-function fileStateLabel(kind) {
-  switch (kind) {
-    case "synced": return "synced";
-    // A seed path is planted once and left alone: present is all that was
-    // asked, and neither side was read to decide it.
-    case "seeded": return "seeded";
-    case "stale": return "stale";
-    case "missing": return "missing";
-    case "source_missing": return "source missing";
-    default: return kind;
-  }
+// The Apps tab is the only place an app is installed, updated, removed or
+// added. What stays on the Kindle page is the device itself. A connect or
+// disconnect changes every app row's device state, so it reaches the tab here.
+function invalidateApps() {
+  window.Apps?.invalidate();
 }
 
 function updateDeviceUI(info) {
@@ -2527,7 +2255,7 @@ function updateDeviceUI(info) {
     // Always load sent state when device connects so the list-view "On Kindle"
     // column reflects reality without the user having to open the Kindle page.
     refreshDeviceList();
-    refreshDeviceAppStatus();
+    invalidateApps();
   } else {
     dot.className = "device-dot disconnected";
     label.textContent = "No Kindle";
@@ -2547,7 +2275,7 @@ function updateDeviceUI(info) {
     $("#device-empty").hidden = false;
     // The apps card stays up with no Kindle — it lists what a push would carry
     // and lets one be registered before the cable is in.
-    refreshDeviceAppStatus();
+    invalidateApps();
     // Hide eject button on disconnect — nothing to eject.
     const ejectBtn = $("#btn-device-eject");
     if (ejectBtn) ejectBtn.hidden = true;

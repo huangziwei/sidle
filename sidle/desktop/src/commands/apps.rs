@@ -36,6 +36,8 @@ pub struct AppRow {
     /// Why this app could not be read, when it could not. A moved checkout says
     /// so rather than quietly dropping out of the fleet.
     pub error: Option<String>,
+    /// This app's state on the connected Kindle. `None` when none is connected.
+    pub device: Option<sidle_core::library::device::deploy::AppDeployStatus>,
 }
 
 fn row(tree: &AppTree, source: Option<String>) -> AppRow {
@@ -54,14 +56,61 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
             .filter(|f| f.policy.class == FileClass::Seed)
             .count(),
         error: None,
+        device: None,
     }
+}
+
+/// What the Apps tab renders: every app, plus its state on the connected
+/// Kindle when there is one.
+///
+/// One call, so the tab cannot show a row list from one moment and a device
+/// state from another. `device` is absent per row when no Kindle is connected
+/// or the status read failed — the rows still stand, because what an app *is*
+/// does not depend on a cable.
+#[derive(Serialize)]
+pub struct AppsOverview {
+    pub apps: Vec<AppRow>,
+    pub device_connected: bool,
+    /// Set when a Kindle is connected but its status could not be read.
+    pub device_error: Option<String>,
+    /// Two apps claiming one mount path. Surfaced rather than resolved: the
+    /// loser's file would silently never install.
+    pub conflicts: Vec<sidle_core::library::apps::compose::PathConflict>,
+}
+
+#[tauri::command]
+pub async fn apps_overview(state: State<'_, AppState>) -> Result<AppsOverview, String> {
+    let mut apps = apps_list(state.clone()).await?;
+    let plan = {
+        let source = state.device_app_source.clone();
+        crate::commands::device::compose_plan(&state, &source).await?
+    };
+
+    let device_connected = state.device.lock().await.is_some();
+    let mut device_error = None;
+    if device_connected {
+        match crate::commands::device::device_app_status(state.clone()).await {
+            Ok(status) => {
+                for app in &mut apps {
+                    app.device = status.apps.iter().find(|a| a.id == app.id).cloned();
+                }
+            }
+            Err(e) => device_error = Some(e),
+        }
+    }
+
+    Ok(AppsOverview {
+        apps,
+        device_connected,
+        device_error,
+        conflicts: plan.conflicts,
+    })
 }
 
 /// Every app a push would carry, in the order it would carry them.
 ///
-/// Built from the same composed plan the install uses, so the card cannot show
-/// one set and the button push another.
-#[tauri::command]
+/// Built from the same composed plan the install uses, so the tab cannot show
+/// one set and the push another.
 pub async fn apps_list(state: State<'_, AppState>) -> Result<Vec<AppRow>, String> {
     let source = state.device_app_source.clone();
     let plan = crate::commands::device::compose_plan(&state, &source).await?;
@@ -99,6 +148,7 @@ pub async fn apps_list(state: State<'_, AppState>) -> Result<Vec<AppRow>, String
             hashed_bytes: 0,
             seed_count: 0,
             error: Some(e.error.clone()),
+            device: None,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

@@ -548,12 +548,11 @@ button {
 
 /* ---------------------------------------------------------------------------
    Kindle page (#device-page)
-   Promoted from the old upper-right device popover, which had outgrown a 380px
-   panel. The pill in the header is the entry point; this is a full-width `.view`
-   inside #main (same show/hide system as #gallery / #notes). The inner blocks
-   below — .device-fields, .device-actions, .device-sent-list, .device-app-section,
-   .server-section — are reused verbatim from the popover; a few popover-era
-   dividers are neutralised once each block is boxed inside a card.
+   The pill in the header is the entry point; this is a full-width `.view` inside
+   #main, on the same show/hide system as #gallery / #notes. The inner blocks —
+   .device-fields, .device-actions, .device-sent-list, .server-section — each sit
+   in a card, which is what neutralises the dividers a few of them carry. Apps
+   are not here: they are managed in the Apps tab.
    --------------------------------------------------------------------------- */
 
 .device-page {
@@ -627,7 +626,6 @@ button {
   border-bottom: 0;
 }
 
-.device-card.device-app-section,
 .device-card.server-section {
   border-top: 0;
 }
@@ -878,146 +876,120 @@ button {
   color: var(--accent);
 }
 
-/* On-device app deploy — mirrors .server-section chrome. */
+/* ---------------------------------------------------------------------------
+   Apps (#apps)
+   One row per program that installs to the Kindle. The row is three columns:
+   what the app is, what the device has, and what can be done to it.
+   --------------------------------------------------------------------------- */
 
-.device-app-section {
-  border-top: 1px solid var(--border);
+.apps {
+  max-width: 920px;
+  margin: 0 auto;
 }
 
-.device-app-section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 14px 4px;
-}
-
-.device-app-status-label {
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.device-app-status-label.in-sync {
-  color: #6fb361;
-}
-
-.device-app-status-label.stale,
-.device-app-status-label.not-installed {
-  color: #d8a05a;
-}
-
-.device-app-status-label.binary-not-built {
-  color: #d86a5a;
-}
-
-.device-app-actions {
-  padding: 4px 14px 6px;
-  font-size: 12px;
+.apps-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-}
-
-.device-app-install-progress {
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.device-app-tip {
-  margin: 0;
-  padding: 0 14px 6px;
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 1.4;
-}
-
-.device-app-tip[hidden] {
-  display: none;
-}
-
-.device-app-file-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 14px 12px;
-  font-size: 11px;
-  display: grid;
-  row-gap: 4px;
-}
-
-.device-app-file-list li {
-  display: flex;
   justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  gap: 16px;
+  padding: 0 0 12px;
 }
 
-.device-app-file-list li .device-app-file-state.synced {
-  color: #6fb361;
-}
-
-.device-app-file-list li .device-app-file-state.stale,
-.device-app-file-list li .device-app-file-state.missing {
-  color: #d8a05a;
-}
-
-.device-app-file-list li .device-app-file-state.source-missing {
-  color: #d86a5a;
-}
-
-/* One row per app a push would carry. */
-
-.device-app-list {
-  list-style: none;
-  margin: 0;
-  padding: 2px 14px 6px;
+.apps-summary {
   font-size: 12px;
-  display: grid;
-  row-gap: 5px;
+  color: var(--muted);
+  min-height: 1em;
 }
 
-.device-app-list li {
+.apps-head-actions {
   display: flex;
-  align-items: baseline;
   gap: 8px;
 }
 
-.device-app-name {
+.apps-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #d8a05a;
+  line-height: 1.4;
+}
+
+.apps-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  row-gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.apps-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--panel, var(--bg));
+}
+
+.apps-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.apps-name {
   font-weight: 600;
 }
 
-.device-app-version,
-.device-app-size {
+.apps-version {
   font-size: 11px;
   color: var(--muted);
 }
 
-/* Pushes Remove to the right edge without a second grid column. */
-.device-app-size {
-  margin-left: auto;
+/* The path can be long; it yields before the name and the version do. */
+.apps-source {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
-.device-app-remove {
+.apps-row-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
   font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.device-app-row-error {
-  font-size: 11px;
+.apps-state.ok {
+  color: #6fb361;
+}
+
+.apps-state.warn {
+  color: #d8a05a;
+}
+
+.apps-state.bad {
   color: #d86a5a;
 }
 
-.device-app-files {
-  font-size: 11px;
-  color: var(--muted);
-  padding: 0 14px 10px;
+.apps-preflight {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.device-app-files summary {
-  cursor: pointer;
-  padding: 2px 0;
-}
-
-.device-app-files .device-app-file-list {
-  padding: 6px 0 0;
+.apps-row-actions {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* Views */

@@ -484,7 +484,7 @@ pub async fn device_import_orphan(
 }
 
 // ----------------------------------------------------------------------------
-// On-device app deploy (the Install / Update on Kindle button)
+// Pushing the fleet to the device (the Apps tab's Install / Update / Update all)
 // ----------------------------------------------------------------------------
 
 /// Resolve the live `ServerConfRender` from app state. Same shape used
@@ -529,7 +529,8 @@ pub async fn compose_plan(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+/// Per-file and per-app state against the connected Kindle. Reached through
+/// `apps_overview`, which is what the Apps tab reads.
 pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatus, String> {
     let device = state.device.lock().await.clone();
     // No Kindle connected at all → the UI hides the section on DeviceDisconnected.
@@ -538,6 +539,7 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
     let Some(device) = device else {
         return Ok(DeployStatus {
             overall: DeployOverall::DeviceDisconnected,
+            apps: Vec::new(),
             files: Vec::new(),
             binary_mtime_ms: None,
             native_source_mtime_ms: None,
@@ -578,10 +580,17 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
     }
 }
 
+/// Push the fleet, or one app of it.
+///
+/// `only` narrows the composed plan to a single app id — the per-row Install in
+/// the Apps tab. Omitted, every app goes, which is Update all. Both take the
+/// same path through `install_all`, so a row and the whole fleet cannot behave
+/// differently.
 #[tauri::command]
 pub async fn device_app_install(
     app: AppHandle,
     state: State<'_, AppState>,
+    only: Option<String>,
 ) -> Result<DeployInstallReport, String> {
     let device = state.device.lock().await.clone();
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
@@ -598,6 +607,16 @@ pub async fn device_app_install(
 
     let source = state.device_app_source.clone();
     let plan = compose_plan(&state, &source).await?;
+    let plan = match &only {
+        Some(id) => {
+            let narrowed = plan.only(id);
+            if narrowed.apps.is_empty() {
+                return Err(format!("no app named {id} in the fleet"));
+            }
+            narrowed
+        }
+        None => plan,
+    };
     let app_handle = app.clone();
     let dist_dir = state.paths.device_dist();
     // Hard-fail rather than push a bundle without the trust root: the picker

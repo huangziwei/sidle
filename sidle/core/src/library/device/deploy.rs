@@ -46,6 +46,7 @@
 //! MTP (Colorsoft). Callers still refuse devices without a jailbreak's
 //! `/extensions/` layout (e.g. stock Scribes).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -56,12 +57,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{TPath, Transport};
-use crate::library::apps::{Apply, DevicePlan, FileClass, PathPolicy};
+use crate::library::apps::{APP_SPEC_FILE, AppSpec, Apply, DevicePlan, FileClass, PathPolicy};
 
 /// Cross-compile target the native binary is built for. Hard-coded
 /// because the picker only runs on armv7l Kindles; if a different target ever
 /// matters, that's a per-device problem, not a per-build one.
 const NATIVE_TARGET_TRIPLE: &str = "armv7-unknown-linux-musleabihf";
+
+/// The picker's own app id. It is the one app with per-install bytes — the
+/// rendered `server.conf` and the CA it pins — so a plan that does not include
+/// it gets neither.
+const PICKER_ID: &str = "sidle";
 
 /// Where the picker's binary lives inside the mount tree. Named here because
 /// three things agree on it: the mirror it is staged into, the plan entry whose
@@ -287,9 +293,36 @@ pub enum DeployOverall {
     InSync,
 }
 
+/// One app's state on the connected device, rolled up from its files.
+///
+/// The Apps tab reads this: a row says `Installed 0.3.0` because
+/// `installed_version` came off the device, and `Update` because `overall`
+/// says at least one of its files differs.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppDeployStatus {
+    pub id: String,
+    pub name: String,
+    /// What the source tree declares.
+    pub version: String,
+    /// What the device's own `extensions/<id>/app.json` declares. It is part of
+    /// the install, so the device carries it without anything extra being
+    /// written. `None` when the app is not there, or when its app.json cannot
+    /// be read — neither of which the file states below leave unsaid.
+    pub installed_version: Option<String>,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    /// Files this push would write, and what they weigh. Zero on an app that
+    /// is current — which is what lets a row say "nothing to do" honestly.
+    pub write_count: u32,
+    pub write_bytes: u64,
+    pub overall: DeployOverall,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DeployStatus {
     pub overall: DeployOverall,
+    /// One entry per app in the plan, in plan order.
+    pub apps: Vec<AppDeployStatus>,
     pub files: Vec<DeployFileStatus>,
     /// mtime of the source binary, if it exists. Serialized as a Unix
     /// epoch milliseconds value so the frontend can render a relative
@@ -385,23 +418,29 @@ fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> 
         })
         .collect();
 
-    // Not in any tree: the CA lives in the library root. This is the root the
-    // picker pins — its *only* trust anchor, since the device client is built
-    // with no public root set compiled in — so a device without it cannot
-    // complete a handshake at all. Pushed as a file rather than rendered bytes
-    // because that is what it is; the caller guarantees it exists.
-    out.push(plain(
-        "extensions/sidle/etc/ca.pem",
-        Source::File(ca_cert.to_path_buf()),
-    ));
-    // Not in any tree: per-install secret, rendered live. The mirror holds only
-    // `etc/server.conf.example`, which its `app.json` classes `ignore`. `None`
-    // when there is no LAN address or no server token to render — the slot then
-    // reports `SourceMissing` and everything else installs anyway.
-    out.push(plain(
-        "extensions/sidle/etc/server.conf",
-        Source::Rendered(conf.map(ServerConfRender::render)),
-    ));
+    // Both belong to the picker, so a plan narrowed to another app must not
+    // carry them — installing steb has no business writing sidle's trust root.
+    if plan.app(PICKER_ID).is_some() {
+        // Not in any tree: the CA lives in the library root. This is the root
+        // the picker pins — its *only* trust anchor, since the device client is
+        // built with no public root set compiled in — so a device without it
+        // cannot complete a handshake at all. Pushed as a file rather than
+        // rendered bytes because that is what it is; the caller guarantees it
+        // exists.
+        out.push(plain(
+            "extensions/sidle/etc/ca.pem",
+            Source::File(ca_cert.to_path_buf()),
+        ));
+        // Not in any tree: per-install secret, rendered live. The mirror holds
+        // only `etc/server.conf.example`, which its `app.json` classes
+        // `ignore`. `None` when there is no LAN address or no server token to
+        // render — the slot then reports `SourceMissing` and everything else
+        // installs anyway.
+        out.push(plain(
+            "extensions/sidle/etc/server.conf",
+            Source::Rendered(conf.map(ServerConfRender::render)),
+        ));
+    }
 
     out.sort_by(|a, b| a.device_rel.cmp(&b.device_rel));
     out
@@ -512,13 +551,84 @@ pub fn compute_status(
 
     let binary_mtime_ms = mtime_ms(&source.binary_path);
     let native_source_mtime_ms = newest_native_source_mtime_ms(source);
+    let apps = roll_up_per_app(plan, &files, transport)?;
 
     Ok(DeployStatus {
         overall,
+        apps,
         files,
         binary_mtime_ms,
         native_source_mtime_ms,
     })
+}
+
+/// Group the per-file states by the app that owns each path.
+///
+/// The two per-install slots (`etc/ca.pem`, `etc/server.conf`) are not in any
+/// tree, so [`DevicePlan::owner_of`] does not know them; they sit under the
+/// picker, which is the app whose install renders them.
+fn roll_up_per_app(
+    plan: &DevicePlan,
+    files: &[DeployFileStatus],
+    transport: &dyn Transport,
+) -> Result<Vec<AppDeployStatus>> {
+    let size_of: HashMap<&str, u64> = plan
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.size))
+        .collect();
+
+    let mut out = Vec::with_capacity(plan.apps.len());
+    for tree in &plan.apps {
+        let id = tree.spec.id.as_str();
+        let mine: Vec<&DeployFileStatus> = files
+            .iter()
+            .filter(|f| match plan.owner_of(&f.device_path) {
+                Some(owner) => owner == id,
+                None => id == PICKER_ID,
+            })
+            .collect();
+
+        let mut write_count = 0u32;
+        let mut write_bytes = 0u64;
+        for f in &mine {
+            if matches!(
+                f.state,
+                DeployFileState::Stale { .. } | DeployFileState::Missing { .. }
+            ) {
+                write_count += 1;
+                write_bytes += size_of.get(f.device_path.as_str()).copied().unwrap_or(0);
+            }
+        }
+
+        let statuses: Vec<DeployFileStatus> = mine.into_iter().cloned().collect();
+        out.push(AppDeployStatus {
+            id: id.to_string(),
+            name: tree.spec.name.clone(),
+            version: tree.spec.version.clone(),
+            installed_version: installed_version(transport, id),
+            file_count: tree.files.len(),
+            total_bytes: tree.total_size(),
+            write_count,
+            write_bytes,
+            overall: summarize(&statuses),
+        });
+    }
+    Ok(out)
+}
+
+/// The version the device's own `extensions/<id>/app.json` declares.
+///
+/// Best-effort by design: absent means not installed, and unparseable means an
+/// app.json this build does not read — neither is worth failing a status over,
+/// because the file states already say what would be written.
+fn installed_version(transport: &dyn Transport, id: &str) -> Option<String> {
+    let path = TPath::parse(&format!("extensions/{id}/{APP_SPEC_FILE}"));
+    if !transport.exists(&path).ok()? {
+        return None;
+    }
+    let bytes = transport.read(&path).ok()?;
+    AppSpec::parse(&bytes).ok().map(|spec| spec.version)
 }
 
 fn classify(source_hash: String, device_hash: Option<String>) -> DeployFileState {
@@ -1371,9 +1481,9 @@ mod tests {
         assert_eq!(events, 8);
     }
 
-    /// Register a karyll-shaped app beside the built-in tree: a tile, a binary,
+    /// Lay down a karyll-shaped app beside the built-in tree: a tile, a binary,
     /// and a vendored subtree classed `seed`.
-    fn karyll_row(repo: &Path) -> crate::library::db::AppSourceRow {
+    fn karyll_fixture(repo: &Path) -> crate::library::db::AppSourceRow {
         let out = repo.join("deploy").join("out");
         write_file(
             &out.join("extensions/karyll/app.json"),
@@ -1384,11 +1494,17 @@ mod tests {
         write_file(&out.join("extensions/karyll/bin/karyll"), b"armhf");
         write_file(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
         write_file(&out.join("documents/Karyll.sh"), b"# Name: Karyll\n");
+        karyll_row(repo)
+    }
+
+    /// The row alone. A test that edits a file in the tree recomposes through
+    /// this, because re-laying the fixture would undo the edit.
+    fn karyll_row(repo: &Path) -> crate::library::db::AppSourceRow {
         crate::library::db::AppSourceRow {
             id: "karyll".into(),
             source_kind: crate::library::db::APP_SOURCE_LOCAL.into(),
             source: repo.display().to_string(),
-            root: out.display().to_string(),
+            root: repo.join("deploy").join("out").display().to_string(),
             added_at: 0,
         }
     }
@@ -1396,6 +1512,12 @@ mod tests {
     fn plan_with_karyll(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
         let source = make_source(repo, true);
         source.stage_binary().unwrap();
+        crate::library::apps::plan_from(&source.mount_dir, &[karyll_fixture(karyll)])
+    }
+
+    /// Recompose against trees already on disk.
+    fn replan(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
+        let source = make_source(repo, true);
         crate::library::apps::plan_from(&source.mount_dir, &[karyll_row(karyll)])
     }
 
@@ -1556,6 +1678,97 @@ mod tests {
             !bin_dir.join("sidle.sh.new").exists(),
             "every staged path is cleared, not just the binary"
         );
+    }
+
+    /// The tab's row model: one entry per app, its own files only, its version
+    /// read off the device rather than inferred.
+    #[test]
+    fn per_app_rollup_scopes_each_app_to_its_own_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let source = make_source(tmp.path(), true);
+        let conf = make_conf();
+        let ca = ca_path(tmp.path());
+
+        // Nothing installed yet.
+        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let ids: Vec<&str> = status.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["karyll", "sidle"]);
+        for app in &status.apps {
+            assert_eq!(app.overall, DeployOverall::NotInstalled);
+            assert!(app.installed_version.is_none());
+            assert!(app.write_count > 0);
+        }
+
+        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+
+        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        for app in &status.apps {
+            assert_eq!(app.overall, DeployOverall::InSync, "{}", app.id);
+            assert_eq!(app.write_count, 0);
+            assert_eq!(app.write_bytes, 0);
+        }
+        let karyll_row = status.apps.iter().find(|a| a.id == "karyll").unwrap();
+        assert_eq!(karyll_row.installed_version.as_deref(), Some("0.2.4"));
+        assert_eq!(karyll_row.name, "Karyll");
+
+        // One app going stale leaves the other alone — the rows are per-app,
+        // not a share of one number.
+        std::fs::write(
+            karyll
+                .path()
+                .join("deploy/out/extensions/karyll/bin/karyll"),
+            b"rebuilt",
+        )
+        .unwrap();
+        let plan = replan(tmp.path(), karyll.path());
+        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let karyll_row = status.apps.iter().find(|a| a.id == "karyll").unwrap();
+        assert_eq!(karyll_row.write_count, 1);
+        assert_eq!(karyll_row.write_bytes, b"rebuilt".len() as u64);
+        assert_eq!(
+            status
+                .apps
+                .iter()
+                .find(|a| a.id == "sidle")
+                .unwrap()
+                .overall,
+            DeployOverall::InSync
+        );
+    }
+
+    /// A plan narrowed to one app installs that app and nothing else — and the
+    /// picker's per-install slots do not ride along, because installing karyll
+    /// has no business writing sidle's trust root or its bearer token.
+    #[test]
+    fn a_single_app_install_carries_neither_the_ca_nor_the_conf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path()).only("karyll");
+
+        install_all(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(device.path().join("extensions/karyll/bin/karyll").exists());
+        assert!(device.path().join("documents/Karyll.sh").exists());
+        assert!(!device.path().join("extensions/sidle/etc/ca.pem").exists());
+        assert!(
+            !device
+                .path()
+                .join("extensions/sidle/etc/server.conf")
+                .exists(),
+            "a per-app install must not write another app's per-install bytes"
+        );
+        assert!(!device.path().join("extensions/sidle/bin/sidle").exists());
     }
 
     #[test]

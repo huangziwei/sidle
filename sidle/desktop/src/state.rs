@@ -88,7 +88,7 @@ pub struct AppState {
     /// The shared device IO handle. See [`SharedTransport`].
     pub transport: SharedTransport,
     pub server: ServerHandle,
-    /// Source-of-truth paths for the on-device app deploy button (binary +
+    /// Source-of-truth paths for the on-device app push (binary +
     /// `device/` mirror). Resolved once at startup by walking up from
     /// `CARGO_MANIFEST_DIR` to the workspace Cargo.toml.
     pub device_app_source: DeploySource,

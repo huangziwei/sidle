@@ -20,6 +20,8 @@
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
           <button id="section-misc" class="seg-btn" role="tab" aria-selected="false"
                   title="Files backed up from your Kindle on Sync">Files</button>
+          <button id="section-apps" class="seg-btn" role="tab" aria-selected="false"
+                  title="Programs that install to your Kindle and run on it">Apps</button>
         </div>
         <div class="toolbar-sep" id="section-view-sep" aria-hidden="true"></div>
         <div class="seg" id="view-seg" role="tablist" aria-label="View">
@@ -198,6 +200,29 @@
           </p>
         </div>
         <div id="misc-content" hidden></div>
+      </section>
+
+      <!-- Apps: the programs that install to a Kindle's /mnt/us and run there
+           on their own — the picker, bokai, and whatever folders are
+           registered. apps.js (window.Apps) owns everything inside. This is the
+           only place an app is installed, updated, removed or added. -->
+      <section id="apps" class="view apps" aria-label="Apps" hidden>
+        <header class="apps-head">
+          <div class="apps-summary" id="apps-summary"></div>
+          <div class="apps-head-actions">
+            <button id="apps-update-all" class="btn" disabled>Update all</button>
+            <button id="apps-add" class="btn">Add&hellip;</button>
+          </div>
+        </header>
+        <p id="apps-note" class="apps-note" hidden></p>
+        <ul id="apps-list" class="apps-list"></ul>
+        <div id="apps-empty" class="empty" hidden>
+          <p>No apps yet.</p>
+          <p class="empty-hint">
+            <strong>Add&hellip;</strong> a folder holding a built app tree — a repo
+            checkout whose <code>build.sh</code> has run, or an unpacked release.
+          </p>
+        </div>
       </section>
 
       <!-- Reading Log: time read per day, recovered from the Kindle's own
@@ -447,28 +472,9 @@
             </div>
           </section>
 
-          <section class="device-card device-app-section" id="device-app-section" aria-label="Apps on device" hidden>
-            <header class="device-app-section-header">
-              <strong>Apps on device</strong>
-              <span id="device-app-status-label" class="device-app-status-label unknown">—</span>
-            </header>
-            <!-- One row per app a push would carry. The picker and bokai ship
-                 with Sidle and have no Remove; the rest are registered folders. -->
-            <ul id="device-app-list" class="device-app-list" aria-label="Apps"></ul>
-            <div class="device-app-actions">
-              <button type="button" id="btn-device-app-install" class="btn-link" disabled>
-                Install on Kindle
-              </button>
-              <button type="button" id="btn-device-app-add" class="btn-link">Add an app&hellip;</button>
-              <span id="device-app-install-progress" class="device-app-install-progress" hidden></span>
-            </div>
-            <p id="device-app-tip" class="device-app-tip" hidden></p>
-            <details class="device-app-files">
-              <summary>Files</summary>
-              <ul id="device-app-file-list" class="device-app-file-list" aria-label="Files a push would write" hidden></ul>
-            </details>
-          </section>
-
+          <!-- Apps are managed in the Apps tab, which is the only place they
+               are installed, updated, removed or added. This page keeps the
+               device itself: identity, storage, sync, and the LAN server. -->
           <section class="device-card server-section" aria-label="LAN server">
             <header class="server-section-header">
               <strong>LAN server</strong>
@@ -1124,6 +1130,7 @@
     <script src="library.js"></script>
     <script src="notebooks.js"></script>
     <script src="misc.js"></script>
+    <script src="apps.js"></script>
     <script src="readinglog.js"></script>
     <script type="module" src="reader.js"></script>
     <script type="module" src="editor.js"></script>
