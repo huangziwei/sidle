@@ -56,9 +56,8 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
     }
 }
 
-/// What the Apps tab renders off this machine alone: every app in one
-/// `DevicePlan`, what the Wi-Fi route offers of it, and whether a Kindle is
-/// connected. The device half of a row comes from [`apps_device_status`].
+/// Every app in one `DevicePlan`, what the Wi-Fi route offers of it, and
+/// whether a Kindle is connected. Per-app device state: [`AppsDeviceStatus`].
 #[derive(Serialize)]
 pub struct AppsOverview {
     pub apps: Vec<AppRow>,
@@ -67,11 +66,8 @@ pub struct AppsOverview {
     pub conflicts: Vec<sidle_core::library::apps::compose::PathConflict>,
 }
 
-/// Every app's state on the connected Kindle.
-///
-/// One device read, sharing the Kindle's single USB session with an annotation
-/// sync and queueing behind it. Separate from [`AppsOverview`], which answers
-/// off this machine alone.
+/// Every app's state on the connected Kindle. One device read, over the single
+/// USB session an annotation sync also holds.
 #[derive(Serialize)]
 pub struct AppsDeviceStatus {
     pub apps: Vec<sidle_core::library::device::deploy::AppDeployStatus>,
@@ -127,7 +123,7 @@ pub async fn apps_device_status(state: State<'_, AppState>) -> Result<AppsDevice
             apps: status.apps,
             error: None,
         }),
-        // A device that cannot be read is `error`, not a failed call.
+        // A device that cannot be read lands in `error`.
         Err(e) => Ok(AppsDeviceStatus {
             apps: Vec::new(),
             error: Some(e),
