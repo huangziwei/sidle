@@ -25,8 +25,9 @@ pub const KUAL_DESCRIPTOR: &str = "config.xml";
 /// runs to tens of kilobytes. Past this, it is not a tile.
 const MAX_TILE_BYTES: u64 = 1 << 20;
 
-/// How far into a scriptlet the `# Name:` header can be.
-const TILE_HEADER_BYTES: usize = 4096;
+/// The `# Icon:` value's prefix. Anything else in that header is not art, and
+/// never reaches an `<img>`.
+const ICON_PREFIX: &str = "data:image/";
 
 /// Who an app is, as its own tree states it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -37,7 +38,7 @@ pub struct AppIdentity {
     /// For display. The descriptor's `<name>`, else the tile's `# Name:`, else
     /// the id — which is what bokai, whose name *is* its directory, shows.
     pub name: String,
-    /// Whatever the repo calls this build, when it says so. Compared as an
+    /// Whatever the repo calls this build, when it states one. Compared as an
     /// opaque string and never as an ordering; the downgrade guard uses
     /// `built_at`.
     pub version: Option<String>,
@@ -45,6 +46,9 @@ pub struct AppIdentity {
     /// runs the extension, so it names it, and that is how it is found. An
     /// extension with no front door — bokai is run over SSH — has none.
     pub tile: Option<String>,
+    /// The tile's `# Icon:` art, a `data:image/…;base64,…` URI the library
+    /// draws on the home screen. Absent for an app with no tile.
+    pub icon: Option<String>,
 }
 
 impl AppIdentity {
@@ -57,18 +61,19 @@ impl AppIdentity {
             Err(_) => (None, None),
         };
         let tile = find_tile(mount, id);
+        let scriptlet = tile
+            .as_ref()
+            .and_then(|t| std::fs::read(mount.join(t)).ok());
         let name = xml_name
-            .or_else(|| {
-                tile.as_ref()
-                    .and_then(|t| std::fs::read(mount.join(t)).ok())
-                    .and_then(|bytes| tile_name(&bytes))
-            })
+            .or_else(|| scriptlet.as_deref().and_then(tile_name))
             .unwrap_or_else(|| id.to_string());
+        let icon = scriptlet.as_deref().and_then(tile_icon);
         Ok(Self {
             id: id.to_string(),
             name,
             version,
             tile,
+            icon,
         })
     }
 
@@ -79,9 +84,7 @@ impl AppIdentity {
 }
 
 /// `<name>` and `<version>` from the `<information>` block of a KUAL
-/// descriptor. Anything that does not parse yields neither rather than an
-/// error: the descriptor is a courtesy, and an app whose display name falls
-/// back to its id still installs byte for byte.
+/// descriptor. Anything that does not parse yields neither.
 fn kual_information(bytes: &[u8]) -> (Option<String>, Option<String>) {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return (None, None);
@@ -141,19 +144,28 @@ fn kual_information(bytes: &[u8]) -> (Option<String>, Option<String>) {
 /// The `# Name:` a hotfix scriptlet gives itself, which is the name the library
 /// shows on its tile.
 pub fn tile_name(bytes: &[u8]) -> Option<String> {
-    let head = &bytes[..bytes.len().min(TILE_HEADER_BYTES)];
-    for line in std::str::from_utf8(head).ok()?.lines() {
+    tile_header(bytes, "Name:")
+}
+
+/// The `# Icon:` art the library draws on that tile, as a data URI.
+pub fn tile_icon(bytes: &[u8]) -> Option<String> {
+    let value = tile_header(bytes, "Icon:")?;
+    (value.starts_with(ICON_PREFIX) && value.contains(";base64,")).then_some(value)
+}
+
+/// The value of one `# <key> <value>` header. The header ends at the first
+/// statement; past it is the script, not a declaration about it.
+fn tile_header(bytes: &[u8], key: &str) -> Option<String> {
+    for line in std::str::from_utf8(bytes).ok()?.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        // The header ends at the first statement; past it is the script, not a
-        // declaration about it.
         let comment = trimmed.strip_prefix('#')?;
-        if let Some(name) = comment.trim_start().strip_prefix("Name:") {
-            let name = name.trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
+        if let Some(value) = comment.trim_start().strip_prefix(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
@@ -242,9 +254,8 @@ mod tests {
         assert_eq!(version.as_deref(), Some("0.3.0"));
     }
 
-    /// An on-device web app's descriptor uses the same element names outside an
-    /// `<information>` block. Reading one as an app's identity would take a
-    /// vendored widget's name for the app's.
+    /// A web app's descriptor carries the same element names outside an
+    /// `<information>` block.
     #[test]
     fn a_widget_descriptor_yields_nothing() {
         let widget = br#"<widget id="com.lzampier.btmanager" version="1.0">
@@ -333,8 +344,52 @@ mod tests {
 
     #[test]
     fn a_header_comment_after_the_name_does_not_hide_it() {
-        let tile = b"#!/bin/sh\n# Name: Karyll\n# Author: Ziwei Huang\n# DontUseFBInk\n";
+        let tile = b"#!/bin/sh\n# Name: Karyll\n# Author: _hzw\n# DontUseFBInk\n";
         assert_eq!(tile_name(tile).as_deref(), Some("Karyll"));
+    }
+
+    /// The art runs to tens of kilobytes on its one line.
+    #[test]
+    fn the_icon_is_the_whole_data_uri() {
+        let art = format!("data:image/png;base64,{}", "iVBOR".repeat(6000));
+        let tile = format!("#!/bin/sh\n# Name: Steb\n# Icon: {art}\n# DontUseFBInk\n\nexec x\n");
+        assert_eq!(tile_icon(tile.as_bytes()).as_deref(), Some(art.as_str()));
+        assert_eq!(tile_name(tile.as_bytes()).as_deref(), Some("Steb"));
+    }
+
+    /// The value reaches an `<img src>`.
+    #[test]
+    fn a_header_that_is_not_a_data_uri_is_not_an_icon() {
+        for header in [
+            "# Icon: javascript:alert(1)\n",
+            "# Icon: ../../etc/passwd\n",
+            "# Icon: data:image/png,notbase64\n",
+        ] {
+            let tile = format!("#!/bin/sh\n{header}exec x\n");
+            assert_eq!(tile_icon(tile.as_bytes()), None, "accepted {header}");
+        }
+    }
+
+    #[test]
+    fn a_tile_carries_its_art_into_the_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("device");
+        write(&dev.join("extensions/steb/bin/steb"), b"elf");
+        write(
+            &dev.join("documents/Steb.sh"),
+            b"#!/bin/sh\n# Name: Steb\n# Icon: data:image/png;base64,iVBORw0K\n\
+              exec /mnt/us/extensions/steb/bin/steb\n",
+        );
+        let app = AppIdentity::read(&dev, "steb").unwrap();
+        assert_eq!(app.icon.as_deref(), Some("data:image/png;base64,iVBORw0K"));
+    }
+
+    #[test]
+    fn an_app_with_no_tile_has_no_art() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("device");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
+        assert_eq!(AppIdentity::read(&dev, "bokai").unwrap().icon, None);
     }
 
     #[test]

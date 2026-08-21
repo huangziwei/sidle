@@ -1,8 +1,8 @@
 // Apps section: the programs that install to a Kindle's /mnt/us.
 //
 // Classic script loaded after library.js, exposing `window.Apps`
-// ({ refresh, show, hide, invalidate }). One row per app: name, version and
-// source on the left, the connected Kindle's state on the right.
+// ({ refresh, show, hide, invalidate, setView }). List view is one row per app;
+// gallery view is one tile per app, carrying the art from its launcher.
 // Backend: commands/apps.rs, commands/device.rs.
 (function () {
   const api = window.api;
@@ -12,6 +12,7 @@
     overview: null, // AppsOverview from apps_overview
     busy: null, // app id installing, or "*" for Update all
     seq: 0, // issue number of the newest apps_overview call
+    view: "list", // "gallery" | "list", set by library.js's toggle
   };
 
   function toast(msg, isError = false) {
@@ -31,10 +32,7 @@
 
   // ---- data ---------------------------------------------------------------
 
-  // Reads the whole fleet and the connected Kindle's view of it, which takes
-  // long enough that two calls overlap. `state.seq` keeps the newest one: a
-  // reply from an older call describes a device that has since been written to,
-  // and rendering it puts the tab one push behind.
+  // `state.seq` numbers each call; a reply that is not the newest is dropped.
   async function refresh() {
     const mine = ++state.seq;
     let overview = null;
@@ -57,12 +55,19 @@
     if (!q("#apps").hidden) refresh();
   }
 
-  // Always re-read: a `build.sh` rewrites a local tree at any moment.
   function show() {
     refresh();
   }
 
   function hide() {}
+
+  // The toolbar's Gallery/List toggle, handed over by library.js's applyView.
+  function setView(view) {
+    if (view !== "gallery" && view !== "list") return;
+    if (view === state.view) return;
+    state.view = view;
+    if (!q("#apps").hidden) render();
+  }
 
   // ---- what a row says ----------------------------------------------------
 
@@ -122,17 +127,23 @@
 
   function render() {
     const list = q("#apps-list");
+    const grid = q("#apps-grid");
     const empty = q("#apps-empty");
     const note = q("#apps-note");
-    if (!list) return;
+    if (!list || !grid) return;
 
     const ov = state.overview;
     const apps = ov?.apps || [];
+    const gallery = state.view === "gallery";
     list.innerHTML = "";
+    grid.innerHTML = "";
     empty.hidden = apps.length > 0;
-    list.hidden = apps.length === 0;
+    list.hidden = gallery || apps.length === 0;
+    grid.hidden = !gallery || apps.length === 0;
 
-    for (const app of apps) list.appendChild(renderRow(app, ov));
+    const into = gallery ? grid : list;
+    const build = gallery ? renderCard : renderRow;
+    for (const app of apps) into.appendChild(build(app, ov));
 
     renderSummary(ov);
 
@@ -223,6 +234,49 @@
     return li;
   }
 
+  // One tile per app: the art its `documents/*.sh` carries, or the app's name
+  // over a plain ground when it carries none.
+  function renderCard(app, ov) {
+    const card = document.createElement("div");
+    card.className = "apps-card";
+
+    const cover = document.createElement("div");
+    cover.className = "apps-cover";
+    if (app.icon) {
+      cover.classList.add("has-image");
+      const img = document.createElement("img");
+      img.src = app.icon;
+      img.alt = "";
+      cover.appendChild(img);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "apps-cover-placeholder";
+      placeholder.textContent = app.name;
+      cover.appendChild(placeholder);
+    }
+    card.appendChild(cover);
+
+    const meta = document.createElement("div");
+    meta.className = "apps-card-meta";
+
+    const name = document.createElement("div");
+    name.className = "apps-name";
+    name.textContent = app.name;
+    name.title = app.source || "bundled with Sidle";
+    meta.appendChild(name);
+
+    const st = deviceState(app, ov?.device_connected);
+    const sub = document.createElement("div");
+    sub.className = `apps-card-state ${st ? st.cls : ""}`;
+    sub.textContent = st ? st.label : app.version || "";
+    if (app.error) sub.title = app.error;
+    meta.appendChild(sub);
+
+    meta.appendChild(renderActions(app, ov));
+    card.appendChild(meta);
+    return card;
+  }
+
   function renderActions(app, ov) {
     const actions = document.createElement("div");
     actions.className = "apps-row-actions";
@@ -245,32 +299,52 @@
 
       // `d.diverged_count` files the Kindle changed, which a plain push keeps.
       if (d && d.diverged_count) {
-        const overwrite = document.createElement("button");
-        overwrite.type = "button";
-        overwrite.className = "btn-link";
-        overwrite.textContent = "Overwrite";
-        overwrite.title =
-          `Replace the ${d.diverged_count} file(s) changed on the Kindle with ` +
-          `this build's.\nWhatever they hold now is lost.`;
-        overwrite.disabled = state.busy != null;
-        overwrite.addEventListener("click", () => overwriteOne(app.id));
-        actions.appendChild(overwrite);
+        actions.appendChild(
+          button("Overwrite", () => overwriteOne(app.id), {
+            title:
+              `Replace the ${d.diverged_count} file(s) changed on the Kindle ` +
+              `with this build's.\nWhatever they hold now is lost.`,
+          }),
+        );
+      }
+
+      // Something on the Kindle to take off it.
+      if (d && d.overall.kind !== "not_installed") {
+        actions.appendChild(
+          button("Remove from Kindle", () => uninstallOne(app), {
+            danger: true,
+            title:
+              `Delete extensions/${app.id}/ and its tile from the Kindle.\n` +
+              `${app.name} stays in the Apps tab, ready to install again.`,
+          }),
+        );
       }
     }
 
-    // `app.source` is absent for an app bundled with Sidle.
+    // `app.source` is absent for an app bundled with Sidle, which has no row to
+    // drop.
     if (app.source) {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "btn-link apps-remove";
-      remove.textContent = "Remove";
-      remove.title =
-        `Unregister ${app.id}.\nNothing on disk or on the Kindle is touched.`;
-      remove.disabled = state.busy != null;
-      remove.addEventListener("click", () => removeOne(app.id));
-      actions.appendChild(remove);
+      actions.appendChild(
+        button("Remove from library", () => removeOne(app), {
+          danger: true,
+          title:
+            `Stop tracking ${app.name}.\nIts folder on this machine and its ` +
+            `files on the Kindle are left alone.`,
+        }),
+      );
     }
     return actions;
+  }
+
+  function button(label, onClick, opts = {}) {
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = opts.danger ? "btn-link apps-danger" : "btn-link";
+    el.textContent = label;
+    if (opts.title) el.title = opts.title;
+    el.disabled = state.busy != null;
+    el.addEventListener("click", onClick);
+    return el;
   }
 
   // ---- actions ------------------------------------------------------------
@@ -319,13 +393,49 @@
     }
   }
 
-  async function removeOne(id) {
+  // Drops the `apps` row. The folder on this machine and the files on the
+  // Kindle are left where they are.
+  async function removeOne(app) {
+    const ok = window.confirm(
+      `Remove ${app.name} from the library?\n\n` +
+        `Sidle stops tracking ${app.source}. Nothing there is deleted, and ` +
+        `anything already on a Kindle stays.`,
+    );
+    if (!ok) return;
     try {
-      await api.invoke("apps_remove", { id });
+      await api.invoke("apps_remove", { id: app.id });
+      toast(`${app.name}: removed from the library`);
     } catch (err) {
-      toast(`Could not unregister ${id}: ${err}`, true);
+      toast(`Could not remove ${app.name}: ${err}`, true);
     }
     await refresh();
+  }
+
+  // Deletes the app off the Kindle. The row stays, ready to install again.
+  async function uninstallOne(app) {
+    const ok = window.confirm(
+      `Remove ${app.name} from the Kindle?\n\n` +
+        `Deletes extensions/${app.id}/ and its tile from the device, along ` +
+        `with anything it saved in there. ${app.name} stays in the Apps tab.`,
+    );
+    if (!ok) return;
+    state.busy = app.id;
+    render();
+    try {
+      const report = await api.invoke("device_app_uninstall", { id: app.id });
+      if (report.errors.length) {
+        toast(`${app.name}: ${report.errors[0]}`, true);
+      } else if (!report.removed.length) {
+        toast(`${app.name}: nothing on the Kindle`);
+      } else {
+        toast(`${app.name}: removed from the Kindle`);
+      }
+    } catch (err) {
+      toast(`${app.name}: ${err}`, true);
+    } finally {
+      state.busy = null;
+      await refresh();
+    }
   }
 
   async function add() {
@@ -366,5 +476,5 @@
     wire();
   }
 
-  window.Apps = { refresh, show, hide, invalidate };
+  window.Apps = { refresh, show, hide, invalidate, setView };
 })();

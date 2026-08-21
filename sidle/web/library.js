@@ -523,6 +523,7 @@ function applyView() {
   // The Gallery/List toggle drives the Notes section too; hand the choice off
   // so notebooks.js can swap its grid/table. No-op while Notes isn't visible.
   if (window.Notebooks) window.Notebooks.setView(state.view);
+  if (window.Apps) window.Apps.setView(state.view);
   // Re-apply the keyboard focus ring to its tile: applyView runs on every render
   // AND on a bare view switch (which rebuilds no DOM), so this keeps the cursor
   // visible across both — and across the gallery/list DOM, which both persist.
@@ -630,10 +631,11 @@ function applySection() {
   const device = state.section === "device";
   const books = state.section === "books";
   const apps = state.section === "apps";
-  // Neither the Gallery/List toggle nor a library filter belongs on the Kindle
-  // page or the Files tab (both are read-only surfaces, not a book library), so
-  // they collapse the toolbar to just the section tabs.
-  const bare = device || misc || reading || apps;
+  // The Kindle page, Files and the Reading Log collapse the toolbar to just the
+  // section tabs. Apps keeps the Gallery/List toggle and drops the filter with
+  // the rest.
+  const bare = device || misc || reading;
+  const unfiltered = notes || apps || bare;
   // Section tabs light up for their own section. None of Books/Notes/Files is
   // active on the Kindle page — the upper-right pill carries that state instead.
   $("#section-books").classList.toggle("active", books);
@@ -656,9 +658,9 @@ function applySection() {
   // Notes keeps the Gallery/List toggle + separators; the Kindle page and Files
   // hide the view toggle and both toolbar separators (the section↔view one and
   // #view-sep) so the toolbar-group collapses to just the section tabs.
-  $("#filter-bar").hidden = notes || bare;
+  $("#filter-bar").hidden = unfiltered;
   const search = document.querySelector(".filter-search");
-  if (search) search.hidden = notes || bare;
+  if (search) search.hidden = unfiltered;
   $("#view-seg").hidden = bare;
   $("#view-sep").hidden = bare;
   // Addressed by id: the Reading Log pill introduced a second .toolbar-sep

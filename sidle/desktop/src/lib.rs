@@ -118,6 +118,7 @@ pub fn run() {
             commands::device::annotations_import_from_device,
             commands::device::device_restore,
             commands::device::device_app_install,
+            commands::device::device_app_uninstall,
             commands::device::device_app_stage_dist,
             commands::server::server_status,
             commands::server::server_start,

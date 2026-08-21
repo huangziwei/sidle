@@ -23,6 +23,8 @@ pub struct AppRow {
     /// Absent for an app with no `apps` row, bundled with this one.
     pub source: Option<String>,
     pub tile: Option<String>,
+    /// The tile's own art, a `data:image/…;base64,…` URI.
+    pub icon: Option<String>,
     pub file_count: usize,
     pub total_bytes: u64,
     /// Why this app could not be read, when it could not.
@@ -38,6 +40,7 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
         version: tree.app.version.clone(),
         source,
         tile: tree.app.tile.clone(),
+        icon: tree.app.icon.clone(),
         file_count: tree.files.len(),
         total_bytes: tree.total_size(),
         error: None,
@@ -118,6 +121,7 @@ fn apps_list(
             version: None,
             source: Some(e.source.clone()),
             tile: None,
+            icon: None,
             file_count: 0,
             total_bytes: 0,
             error: Some(e.error.clone()),

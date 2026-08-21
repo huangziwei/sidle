@@ -271,10 +271,7 @@ pub async fn device_delete(
     })
     .await;
 
-    // Any per-file `Failed` (or a panic) means the cached MTP transport is
-    // likely wedged — drop it so the next on-wire call ( the refreshDeviceList
-    // that the frontend fires right after delete) opens a fresh session
-    // instead of compounding errors against a stalled endpoint.
+    // A per-file `Failed` or a panic leaves the cached MTP transport wedged.
     let needs_evict = match &result {
         Err(_) => true,
         Ok(Err(_)) => true,
@@ -381,9 +378,7 @@ pub async fn device_send(
         evict_transport(&cell).await;
         eprintln!("[sidle/device_send] transport evicted after error");
     } else {
-        // Books landed on the device — re-read free space so the popover drops
-        // by what we just pushed instead of waiting for a reconnect. Skipped on
-        // the evict path (the session is wedged; a reconnect refreshes anyway).
+        // Free space after the books landed. Skipped on the evict path.
         refresh_free_space(&app_refresh, &state.device, &state.transport).await;
     }
 
@@ -487,12 +482,8 @@ pub async fn device_import_orphan(
 // Pushing the fleet to the device (the Apps tab's Install / Update / Update all)
 // ----------------------------------------------------------------------------
 
-/// Resolve the live `ServerConfRender` from app state. Same shape used
-/// by both `device_app_status` and `device_app_install` — keeping it in one place
-/// guarantees the staleness check and the actual install agree on
-/// what `server.conf` *should* contain. `serial` is the connected device's
-/// USB iSerial, threaded in from the same `DeviceInfo` snapshot the mount came
-/// from (the picker pushes it back as `device_serial`).
+/// The `ServerConfRender` `device_app_status` and `device_app_install` share.
+/// `serial` is the connected device's USB iSerial.
 async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRender> {
     let server_status = state.server.status(&state.paths).await;
     let host = deploy::detect_lan_ipv4()?.to_string();
@@ -529,10 +520,7 @@ pub async fn compose_plan(
         .map_err(|e| e.to_string())
 }
 
-/// Per-file and per-app state against the connected Kindle, for the `plan` the
-/// caller already composed. Reached through `apps_overview`, which is what the
-/// Apps tab reads: one plan feeds the row list and these states, so the two
-/// describe one moment.
+/// Per-file and per-app state of `plan` against the connected Kindle.
 pub async fn device_app_status(
     state: &AppState,
     plan: &sidle_core::library::apps::DevicePlan,
@@ -552,18 +540,14 @@ pub async fn device_app_status(
         });
     };
 
-    // No server token or no LAN IP → `None`, and the `etc/server.conf` slot
-    // reports `SourceMissing` while every other slot is checked normally. This
-    // is the same value `device_app_install` passes, so the status the user
-    // reads is exactly what the button would push.
+    // `None` with no server token or no LAN IP: the `etc/server.conf` slot then
+    // reports `SourceMissing`, and `device_app_install` passes the same value.
     let serial = device.serial.clone();
     let conf = render_conf(state, serial).await;
 
     let plan = plan.clone();
     let source = source.clone();
-    // Cheap and idempotent, and it has to exist before the status can say
-    // anything true about `etc/ca.pem`. Creating the CA needs no server and no
-    // network — just two files — so there is nothing to wait for.
+    // The CA the `etc/ca.pem` slot is compared against.
     let _ = sidle_core::library::tls::ensure_ca(&state.paths);
     let ca_cert = state.paths.ca_cert();
     let transport = ensure_transport(&state.transport, &device)
@@ -578,8 +562,7 @@ pub async fn device_app_status(
     match result {
         Ok(status) => Ok(status),
         Err(e) => {
-            // On-wire failure (mainly MTP): drop the cached session so the next
-            // call reopens fresh rather than reusing a wedged endpoint.
+            // An on-wire failure leaves the cached session wedged.
             evict_transport(&cell).await;
             Err(format!("{e:#}"))
         }
@@ -588,14 +571,8 @@ pub async fn device_app_status(
 
 /// Push the fleet, or one app of it.
 ///
-/// `only` narrows the composed plan to a single app id — the per-row Install in
-/// the Apps tab. Omitted, every app goes, which is Update all. Both take the
-/// same path through `install_all`, so a row and the whole fleet cannot behave
-/// differently.
-///
-/// `force` overwrites files the device changed out from under sidle. A plain
-/// push keeps those, because their bytes exist nowhere else; this is the row
-/// action that says to replace them anyway.
+/// `only` narrows the plan to one app id; omitted, every app goes. `force`
+/// overwrites files the device changed, which a plain push keeps.
 #[tauri::command]
 pub async fn device_app_install(
     app: AppHandle,
@@ -606,13 +583,8 @@ pub async fn device_app_install(
     let device = state.device.lock().await.clone();
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
 
-    // `None` when there is no running server token or no routable LAN address.
-    // That does not stop the push: `etc/server.conf` is the only slot that
-    // needs one, it reports `SourceMissing`, and the binary, launcher, CA, KUAL
-    // metadata and tile all land. A device on a network that cannot carry a
-    // LAN address is exactly the device that needs the cable. A half-rendered
-    // conf is still never written — the slot is skipped, not filled in with
-    // blanks that would silently 403 the picker.
+    // `None` with no server token or no routable LAN address: the
+    // `etc/server.conf` slot reports `SourceMissing` and every other slot lands.
     let serial = device.serial.clone();
     let conf = render_conf(&state, serial).await;
 
@@ -630,10 +602,7 @@ pub async fn device_app_install(
     };
     let app_handle = app.clone();
     let dist_dir = state.paths.device_dist();
-    // Hard-fail rather than push a bundle without the trust root: the picker
-    // pins this CA and nothing else, so a device that receives every other file
-    // but not `etc/ca.pem` cannot complete a single handshake — and would look
-    // like a successful install.
+    // The only root the picker pins. A push without it completes no handshake.
     sidle_core::library::tls::ensure_ca(&state.paths)
         .map_err(|e| format!("issue the CA the device must pin: {e:#}"))?;
     let ca_cert = state.paths.ca_cert();
@@ -668,6 +637,39 @@ pub async fn device_app_install(
         evict_transport(&cell).await;
     }
     result
+}
+
+/// Take one app off the connected Kindle: its extension directory and its tile.
+///
+/// Its `apps` row stands — that row is where the app comes from on this
+/// machine, and `apps_remove` is what drops it.
+#[tauri::command]
+pub async fn device_app_uninstall(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<deploy::UninstallReport, String> {
+    let device = state.device.lock().await.clone();
+    let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
+    let source = state.device_app_source.clone();
+    let plan = compose_plan(&state, &source).await?;
+    let tree = plan
+        .app(&id)
+        .ok_or_else(|| format!("no app named {id} in the fleet"))?
+        .clone();
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| format!("open device transport: {e:#}"))?;
+    let cell = state.transport.clone();
+    let result = tokio::task::spawn_blocking(move || deploy::uninstall(&tree, transport.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?;
+    match result {
+        Ok(report) => Ok(report),
+        Err(e) => {
+            evict_transport(&cell).await;
+            Err(format!("{e:#}"))
+        }
+    }
 }
 
 /// Re-stage the LAN self-update bundle (`<data-dir>/device-dist/`) when the

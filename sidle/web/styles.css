@@ -992,6 +992,102 @@ button {
   white-space: nowrap;
 }
 
+/* The two removals, coloured like the library's own. */
+.apps-row-actions .apps-danger {
+  color: var(--accent);
+}
+
+/* Gallery view. The tile art a Kindle draws on its home screen is 1440×2200,
+   the same portrait frame a book cover gets. */
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px;
+}
+
+.apps-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.apps-cover {
+  aspect-ratio: 2 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.apps-cover.has-image {
+  background: var(--bg);
+}
+
+.apps-cover img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.apps-cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #6d7a8c, #4b5563);
+}
+
+.apps-card-meta {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.apps-card-meta .apps-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.apps-card-state {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1em;
+}
+
+.apps-card-state.ok {
+  color: #6fb361;
+}
+
+.apps-card-state.warn {
+  color: #d8a05a;
+}
+
+.apps-card-state.bad {
+  color: #d86a5a;
+}
+
+.apps-card .apps-row-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* Views */
 
 #main {

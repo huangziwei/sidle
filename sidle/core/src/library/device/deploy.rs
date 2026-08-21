@@ -2,49 +2,33 @@
 //! Kindle over a cable: the picker (its armv7 binary, launcher wrapper, KUAL
 //! metadata, the `documents/Sidle.sh` tile, a freshly rendered
 //! `etc/server.conf` and the CA at `etc/ca.pem`), and whatever else is
-//! registered — bokai, steb, karyll, kfxdedrm-fe.
+//! registered.
 //!
-//! The file list is not written here. It comes from
-//! [`crate::library::apps::DevicePlan`], which walks every app's mount-rooted
-//! tree. Adding a file to the deploy means dropping it in the tree at the path
-//! it should land on; there is no slot to add and no source-vs-device path
-//! mapping to keep in sync.
+//! The file list comes from [`crate::library::apps::DevicePlan`], which walks
+//! every app's mount-rooted tree. A file joins the deploy by sitting in a tree
+//! at the path it lands on.
 //!
-//! Two slots are **not** in any tree, because their bytes are per-install
-//! rather than per-repo: `etc/server.conf` is rendered live, and `etc/ca.pem`
-//! is copied from the library root. The CA is the root the picker pins — its
-//! only trust anchor, since the device client compiles in no public root set —
-//! so a bundle that arrives without it leaves a device that cannot complete a
-//! single handshake while looking perfectly installed.
+//! Two slots are in no tree: `etc/server.conf` is rendered per install, and
+//! `etc/ca.pem` is copied from the library root. That CA is the picker's only
+//! trust anchor — the device client compiles in no public root set.
 //!
-//! What gets written is decided against the install receipt
-//! ([`super::receipt`]), not against the device's bytes alone. A path whose
-//! source still hashes to what sidle last wrote there is done, and is not read
-//! off the device at all — which is what keeps a status check off 49 MB of
-//! vendored files no update would touch. A path whose device copy no longer
-//! matches the receipt was changed on the device, and a push leaves it alone
-//! and says so, because overwriting it would destroy the only copy of whatever
-//! it now holds. `force` is the one way past that, and it re-reads every byte
-//! rather than trusting the receipt at all.
+//! [`decide`] settles each path against the install receipt ([`super::receipt`])
+//! before the device's bytes. A path whose source still hashes to the receipt's
+//! entry is done, and the device is not read. A path whose device copy matches
+//! neither the source nor the receipt is [`DeployFileState::Diverged`] and is
+//! kept; `force` compares bytes and overwrites.
 //!
-//! The picker is not a KUAL app: `documents/Sidle.sh` is a jailbreak-hotfix
-//! scriptlet the library indexes as a tile, and tapping it runs
-//! `extensions/sidle/bin/sidle.sh` directly. That tile is the only front door;
-//! KUAL does not run on this firmware, so `config.xml` and `menu.json` are
-//! inert and dropping them would cost nothing.
+//! `documents/Sidle.sh` is a jailbreak-hotfix scriptlet the library indexes as a
+//! tile, and tapping it runs `extensions/sidle/bin/sidle.sh`. KUAL does not run
+//! on this firmware, and `config.xml` and `menu.json` are inert there.
 //!
-//! The button this module backs (`device_app_install` in `commands/device.rs`)
-//! re-syncs every file in one click and is idempotent — content-hash equal
-//! means skip. `etc/server.conf` is rendered on every push rather than
-//! remembered, so a rotated `.server-token` cannot leave the picker holding a
-//! stale bearer and getting `403` from `/list.json` with nothing in the UI to
-//! say why.
+//! [`install_all`] is idempotent — content-hash equal means skip.
+//! `etc/server.conf` is rendered on every push, so a rotated `.server-token`
+//! leaves the picker no stale bearer to hold.
 //!
-//! A cable push is authoritative and every path is a direct write: nothing on
-//! the device is executing anything while it is mounted, so the `.new` staging
-//! a Wi-Fi update needs does not apply. Any `.new` a previous LAN pull left is
-//! deleted, or the launcher would swap a stale binary over the fresh one on the
-//! next launch.
+//! A cable push writes every path directly: nothing on the device is executing
+//! while it is mounted. Any `.new` a LAN pull staged is deleted, ahead of the
+//! launcher swapping a stale binary over the fresh one at the next launch.
 //!
 //! Transport-agnostic: everything below drives the [`Transport`] trait,
 //! so a deploy behaves identically over a mass-storage mount (KOA2) and
@@ -63,7 +47,7 @@ use sha2::{Digest, Sha256};
 
 use super::receipt::{self, AppReceipt, FileReceipt, InstallState, now_secs};
 use super::{TPath, Transport};
-use crate::library::apps::DevicePlan;
+use crate::library::apps::{AppTree, DevicePlan};
 
 /// Cross-compile target the native binary is built for. Hard-coded
 /// because the picker only runs on armv7l Kindles; if a different target ever
@@ -983,6 +967,56 @@ fn install_one(
     }
 }
 
+/// What an uninstall took off the device.
+#[derive(Debug, Clone, Serialize)]
+pub struct UninstallReport {
+    pub id: String,
+    /// Mount-relative paths that were there and are gone.
+    pub removed: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Take one app off the device: its extension directory, its tile, and its
+/// record in the receipt.
+///
+/// The app is `extensions/<id>/**` plus the one `documents/*.sh` that launches
+/// it. Nothing else in `documents/` is touched.
+pub fn uninstall(tree: &AppTree, transport: &dyn Transport) -> Result<UninstallReport> {
+    let id = tree.app.id.clone();
+    let mut removed = Vec::new();
+    let mut errors = Vec::new();
+
+    let ext = tree.app.extension_dir();
+    match transport.delete_dir(&TPath::parse(&ext)) {
+        Ok(true) => removed.push(ext),
+        Ok(false) => {}
+        Err(e) => errors.push(format!("{ext}: {e:#}")),
+    }
+
+    if let Some(tile) = &tree.app.tile {
+        match transport.delete(&TPath::parse(tile)) {
+            Ok(true) => removed.push(tile.clone()),
+            Ok(false) => {}
+            Err(e) => errors.push(format!("{tile}: {e:#}")),
+        }
+    }
+
+    // An entry naming paths that are gone reads as an edit on the device.
+    let mut state = InstallState::read(transport);
+    if state.app(&id).is_some() {
+        state.forget_app(&id);
+        if let Err(e) = state.write(transport) {
+            errors.push(format!("{}: {e:#}", receipt::RECEIPT_PATH));
+        }
+    }
+
+    Ok(UninstallReport {
+        id,
+        removed,
+        errors,
+    })
+}
+
 fn atomic_write(dest: &Path, bytes: &[u8]) -> Result<()> {
     let partial = with_suffix(dest, ".partial");
     {
@@ -1814,6 +1848,67 @@ mod tests {
             std::fs::read(device.path().join(HID_CONF)).unwrap(),
             b"[device]\n"
         );
+    }
+
+    #[test]
+    fn uninstall_takes_the_extension_dir_and_the_tile_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        push(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            device.path(),
+        );
+        write_file(
+            &device.path().join("documents/My Novel.txt"),
+            b"chapter one",
+        );
+
+        let report = uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            report.removed,
+            vec!["extensions/karyll", "documents/Karyll.sh"]
+        );
+        assert!(!device.path().join("extensions/karyll").exists());
+        assert!(!device.path().join("documents/Karyll.sh").exists());
+        assert!(device.path().join("documents/My Novel.txt").exists());
+        assert!(device.path().join("extensions/sidle/bin/sidle").exists());
+        assert!(device.path().join("documents/Sidle.sh").exists());
+    }
+
+    #[test]
+    fn uninstall_drops_the_apps_receipt_so_a_repush_reinstalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+        let conf = make_conf();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        push(&plan, Some(&conf), &ca, device.path());
+
+        uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        let state = InstallState::read(&ms(device.path()));
+        assert!(state.app("karyll").is_none());
+        assert!(state.app("sidle").is_some(), "the picker's record stands");
+
+        push(&plan, Some(&conf), &ca, device.path());
+        assert!(device.path().join(HID_CONF).exists());
+        assert!(device.path().join("documents/Karyll.sh").exists());
+    }
+
+    #[test]
+    fn uninstalling_what_is_not_there_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let report = uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        assert!(report.removed.is_empty());
+        assert!(report.errors.is_empty());
     }
 
     /// A per-row install rewrites that app's record and leaves every other
