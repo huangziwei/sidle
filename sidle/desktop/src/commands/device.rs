@@ -12,6 +12,7 @@ use sidle_core::library::device::dedrm::{self, PullResult};
 use sidle_core::library::device::deploy::{
     self, DeployInstallReport, DeployOverall, DeployStatus, ServerConfRender,
 };
+use sidle_core::library::device::digest::DigestCache;
 use sidle_core::library::device::dist;
 use sidle_core::library::device::inventory;
 use sidle_core::library::device::push::{self, DeleteResult, PushResult};
@@ -511,8 +512,19 @@ pub async fn device_app_status(
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
+    let digest_path = state.paths.source_digests();
     let result = tokio::task::spawn_blocking(move || {
-        deploy::compute_status(&plan, &source, conf.as_ref(), &ca_cert, transport.as_ref())
+        let mut digests = DigestCache::open(&digest_path);
+        let status = deploy::compute_status(
+            &plan,
+            &source,
+            conf.as_ref(),
+            &ca_cert,
+            transport.as_ref(),
+            &mut digests,
+        );
+        let _ = digests.save();
+        status
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -565,13 +577,16 @@ pub async fn device_app_install(
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
+    let digest_path = state.paths.source_digests();
     let result = tokio::task::spawn_blocking(move || -> Result<DeployInstallReport, String> {
+        let mut digests = DigestCache::open(&digest_path);
         let report = deploy::install_all(
             &plan,
             conf.as_ref(),
             &ca_cert,
             transport.as_ref(),
             force.unwrap_or(false),
+            &mut digests,
             |progress| {
                 let _ = app_handle.emit("device-app:install-progress", progress);
             },
@@ -579,9 +594,10 @@ pub async fn device_app_install(
         .map_err(|e| format!("{e:#}"))?;
         // `dist::refresh` puts the pushed bytes in reach of a LAN pull. Takes
         // `fleet`, the plan before `only` narrowed it. Non-fatal.
-        if let Err(e) = dist::refresh(&fleet, &source, &dist_dir) {
-            eprintln!("[sidle/device_app_install] device-dist staging failed: {e:#}");
+        if let Err(e) = dist::refresh(&fleet, &source, &dist_dir, &mut digests) {
+            eprintln!("[sidle/device_app_install] device-dist refresh failed: {e:#}");
         }
+        let _ = digests.save();
         Ok(report)
     })
     .await
@@ -631,9 +647,15 @@ pub async fn device_app_stage_dist(state: State<'_, AppState>) -> Result<(), Str
     let source = state.device_app_source.clone();
     let plan = compose_plan(&state, &source).await?;
     let dist_dir = state.paths.device_dist();
-    tokio::task::spawn_blocking(move || dist::refresh(&plan, &source, &dist_dir))
-        .await
-        .map_err(|e| e.to_string())?
-        .map(|_| ())
-        .map_err(|e| format!("{e:#}"))
+    let digest_path = state.paths.source_digests();
+    tokio::task::spawn_blocking(move || {
+        let mut digests = DigestCache::open(&digest_path);
+        let outcome = dist::refresh(&plan, &source, &dist_dir, &mut digests);
+        let _ = digests.save();
+        outcome
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|_| ())
+    .map_err(|e| format!("{e:#}"))
 }

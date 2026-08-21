@@ -277,6 +277,7 @@ pub fn run_pull(
     ));
     let mut state = InstallState::read(mount);
     let mut report = UpdateReport::default();
+    let mut dirty = false;
 
     for app in &manifest.apps {
         // The guard protects the binary this process is running from a stale
@@ -326,7 +327,13 @@ pub fn run_pull(
                 app.built_at,
                 guard,
             ) {
-                Decision::UpToDate => continue,
+                Decision::UpToDate => {
+                    // `dest` holds these bytes. `state.record` settles this
+                    // path by receipt on the next pull, unread.
+                    state.record(&app.id, &file.path, receipt_for(file));
+                    dirty = true;
+                    continue;
+                }
                 Decision::RefuseOlder => {
                     log(&format!(
                         "{}: build {} not newer than installed {} — refusing downgrade",
@@ -369,14 +376,8 @@ pub fn run_pull(
                 file.path,
                 landed.display()
             ));
-            state.record(
-                &app.id,
-                &file.path,
-                FileReceipt {
-                    sha256: file.sha256.clone(),
-                    size: file.size,
-                },
-            );
+            state.record(&app.id, &file.path, receipt_for(file));
+            dirty = true;
             wrote_any = true;
             match file.apply {
                 Apply::Direct => report.written.push(file.path.clone()),
@@ -389,11 +390,18 @@ pub fn run_pull(
         }
     }
 
-    let landed = !report.written.is_empty() || !report.staged.is_empty();
-    if landed && let Err(e) = state.write(mount) {
+    if dirty && let Err(e) = state.write(mount) {
         log(&format!("receipt: write failed — {e}"));
     }
     Ok(report)
+}
+
+/// What the receipt records for `file`: its `sha256` and `size`.
+fn receipt_for(file: &DistFile) -> FileReceipt {
+    FileReceipt {
+        sha256: file.sha256.clone(),
+        size: file.size,
+    }
 }
 
 /// Whether `<dest>.new` holds the offered bytes.

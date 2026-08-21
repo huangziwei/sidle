@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::deploy::{DeploySource, atomic_write, sha256_bytes};
+use super::deploy::{DeploySource, atomic_write};
+use super::digest::DigestCache;
 use crate::library::apps::{Apply, DevicePlan};
 
 /// Schema of `manifest.json`.
@@ -83,14 +84,10 @@ impl DistManifest {
     }
 }
 
-/// Where one served path's bytes are read from, and what they hashed to at the
-/// `mtime`/`size` recorded here.
+/// Where one served path's bytes are read from.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceEntry {
     pub source: PathBuf,
-    pub mtime_ms: u64,
-    pub size: u64,
-    pub sha256: String,
 }
 
 /// `device-dist/sources.json`: served path → the file on this machine.
@@ -142,33 +139,40 @@ pub fn read_sources(dist_dir: &Path) -> Option<SourceIndex> {
 /// Describe `plan` in `dist_dir`: the manifest a device reads, and the index
 /// naming the file behind each path.
 ///
-/// No app's bytes are copied. A file whose `mtime` and size match what the
-/// index recorded keeps its sha, so a warm call costs one stat per file and
-/// reads nothing. Anything else under `dist_dir` is deleted.
+/// No app's bytes are copied, and `digests` hashes a file once per version of
+/// it — a warm call costs one stat per file and reads nothing. Anything else
+/// under `dist_dir` is deleted.
 pub fn refresh(
     plan: &DevicePlan,
     source: &DeploySource,
     dist_dir: &Path,
+    digests: &mut DigestCache,
 ) -> Result<RefreshOutcome> {
-    let Some((bin_mtime, bin_size)) = stat(&source.binary_path) else {
+    let before = digests.hashed();
+    let Some(binary) = digests.of(&source.binary_path)? else {
         return Ok(RefreshOutcome::SourceMissing);
     };
-    let previous = read_sources(dist_dir).unwrap_or_default();
     let mut sources = SourceIndex::default();
-    let mut hashed = 0usize;
     let mut apps = Vec::with_capacity(plan.apps.len());
 
     for tree in &plan.apps {
         let mut files = Vec::new();
         for planned in plan.files.iter().filter(|f| f.app_id == tree.app.id) {
-            let entry = entry_for(&previous, &planned.path, &planned.source, &mut hashed)?;
+            let digest = digests
+                .of(&planned.source)?
+                .with_context(|| format!("{} left the tree", planned.source.display()))?;
             files.push(DistFile {
                 path: planned.path.clone(),
-                sha256: entry.sha256.clone(),
-                size: entry.size,
+                sha256: digest.sha256,
+                size: digest.size,
                 apply: planned.apply,
             });
-            sources.files.insert(planned.path.clone(), entry);
+            sources.files.insert(
+                planned.path.clone(),
+                SourceEntry {
+                    source: planned.source.clone(),
+                },
+            );
         }
         apps.push(DistApp {
             id: tree.app.id.clone(),
@@ -179,19 +183,13 @@ pub fn refresh(
         });
     }
 
-    // The picker's binary reads from the same file under a second key.
-    let legacy = entry_for(
-        &previous,
-        LEGACY_BINARY_NAME,
-        &source.binary_path,
-        &mut hashed,
-    )?;
+    // The picker's binary is served from the same file under a second key.
     let manifest = DistManifest {
         version: MANIFEST_VERSION,
         files: vec![LegacyFile {
             name: LEGACY_BINARY_NAME.to_string(),
-            sha256: legacy.sha256.clone(),
-            size: bin_size,
+            sha256: binary.sha256,
+            size: binary.size,
             built_at: source.build_ts(),
         }],
         apps,
@@ -199,12 +197,12 @@ pub fn refresh(
     sources.files.insert(
         LEGACY_BINARY_NAME.to_string(),
         SourceEntry {
-            mtime_ms: bin_mtime,
-            ..legacy
+            source: source.binary_path.clone(),
         },
     );
 
     prune(dist_dir)?;
+    let hashed = digests.hashed() - before;
     if hashed == 0
         && read_manifest(dist_dir).as_ref() == Some(&manifest)
         && read_sources(dist_dir).as_ref() == Some(&sources)
@@ -216,50 +214,12 @@ pub fn refresh(
     Ok(RefreshOutcome::Indexed(hashed))
 }
 
-/// The index entry for `path`, hashing `file` when `previous` holds nothing at
-/// its current `mtime` and size.
-fn entry_for(
-    previous: &SourceIndex,
-    path: &str,
-    file: &Path,
-    hashed: &mut usize,
-) -> Result<SourceEntry> {
-    let (mtime_ms, size) = stat(file).with_context(|| format!("stat {}", file.display()))?;
-    if let Some(prev) = previous.files.get(path)
-        && prev.source == file
-        && prev.mtime_ms == mtime_ms
-        && prev.size == size
-    {
-        return Ok(prev.clone());
-    }
-    let bytes = std::fs::read(file).with_context(|| format!("read {}", file.display()))?;
-    *hashed += 1;
-    Ok(SourceEntry {
-        source: file.to_path_buf(),
-        mtime_ms,
-        size,
-        sha256: sha256_bytes(&bytes),
-    })
-}
-
 fn write_json<T: Serialize>(dest: &Path, value: &T) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let json = serde_json::to_vec_pretty(value).context("serialize a dist file")?;
     atomic_write(dest, &json)
-}
-
-/// Modification time in milliseconds and length, from one stat.
-fn stat(path: &Path) -> Option<(u64, u64)> {
-    let md = std::fs::metadata(path).ok()?;
-    let ms = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis() as u64;
-    Some((ms, md.len()))
 }
 
 /// Delete everything under `dist_dir` outside the two index files, then every
@@ -297,6 +257,7 @@ fn prune(dist_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::deploy::sha256_bytes;
     use super::*;
     use crate::library::apps::plan_from;
     use std::time::{Duration, SystemTime};
@@ -342,7 +303,7 @@ mod tests {
         let (plan, source) = fixture(tmp.path());
 
         assert_eq!(
-            refresh(&plan, &source, dist.path()).unwrap(),
+            refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap(),
             RefreshOutcome::Indexed(5)
         );
 
@@ -388,7 +349,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
-        refresh(&plan, &source, dist.path()).unwrap();
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
         let sources = read_sources(dist.path()).unwrap();
         assert_eq!(
@@ -411,10 +372,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
+        let mut digests = DigestCache::ephemeral();
 
-        refresh(&plan, &source, dist.path()).unwrap();
+        refresh(&plan, &source, dist.path(), &mut digests).unwrap();
         assert_eq!(
-            refresh(&plan, &source, dist.path()).unwrap(),
+            refresh(&plan, &source, dist.path(), &mut digests).unwrap(),
             RefreshOutcome::UpToDate
         );
     }
@@ -424,7 +386,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
-        refresh(&plan, &source, dist.path()).unwrap();
+        let mut digests = DigestCache::ephemeral();
+        refresh(&plan, &source, dist.path(), &mut digests).unwrap();
 
         let steb = tmp.path().join("device/extensions/steb/bin/steb");
         std::fs::write(&steb, b"steb-v2-longer").unwrap();
@@ -432,8 +395,9 @@ mod tests {
         let plan = plan_from(&source.mount_dir, &[]);
 
         assert_eq!(
-            refresh(&plan, &source, dist.path()).unwrap(),
-            RefreshOutcome::Indexed(1)
+            refresh(&plan, &source, dist.path(), &mut digests).unwrap(),
+            RefreshOutcome::Indexed(1),
+            "only the changed file is read again"
         );
         let entry = read_manifest(dist.path())
             .unwrap()
@@ -451,11 +415,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
-        refresh(&plan, &source, dist.path()).unwrap();
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
         std::fs::remove_dir_all(tmp.path().join("device/extensions/steb")).unwrap();
         let plan = plan_from(&source.mount_dir, &[]);
-        refresh(&plan, &source, dist.path()).unwrap();
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
         let manifest = read_manifest(dist.path()).unwrap();
         assert!(manifest.apps.iter().all(|a| a.id != "steb"));
@@ -475,7 +439,7 @@ mod tests {
         write(&dist.path().join("extensions/karyll/hid/big.so"), b"49MB");
         write(&dist.path().join(LEGACY_BINARY_NAME), b"picker-v1");
 
-        refresh(&plan, &source, dist.path()).unwrap();
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
         assert!(!dist.path().join("extensions").exists());
         assert!(!dist.path().join("bin").exists());
@@ -491,7 +455,7 @@ mod tests {
         source.binary_path = tmp.path().join("cross/never-built");
 
         assert_eq!(
-            refresh(&plan, &source, dist.path()).unwrap(),
+            refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap(),
             RefreshOutcome::SourceMissing
         );
         assert!(!manifest_path(dist.path()).exists());

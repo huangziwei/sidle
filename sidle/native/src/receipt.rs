@@ -91,18 +91,19 @@ impl InstallState {
         self.apps.get(app_id)?.files.get(path)
     }
 
-    /// Record one written file, stamping the app's install time.
+    /// Record what one path holds: the bytes a pull wrote there, or the bytes
+    /// it found there. Either settles the next pull without a read.
     pub fn record(&mut self, app_id: &str, path: &str, file: FileReceipt) {
         let app = self.apps.entry(app_id.to_string()).or_default();
         app.files.insert(path.to_string(), file);
-        app.installed_at = now_secs();
     }
 
-    /// Carry an app's version and build stamp across from the manifest.
+    /// Stamp an app as installed at the manifest's version and build.
     pub fn describe(&mut self, app_id: &str, version: Option<String>, built_at: u64) {
         let app = self.apps.entry(app_id.to_string()).or_default();
         app.version = version;
         app.built_at = built_at;
+        app.installed_at = now_secs();
     }
 }
 
@@ -162,6 +163,26 @@ mod tests {
             "a schema this build does not read is treated as absent"
         );
         let _ = std::fs::remove_dir_all(&mount);
+    }
+
+    /// `record` takes a confirmed path as well as a written one; `describe` is
+    /// what stamps the time.
+    #[test]
+    fn recording_a_path_leaves_the_install_time_alone() {
+        let mut state = InstallState::default();
+        state.record(
+            "steb",
+            "extensions/steb/bin/steb",
+            FileReceipt {
+                sha256: "s".into(),
+                size: 1,
+            },
+        );
+        assert_eq!(state.apps["steb"].installed_at, 0);
+
+        state.describe("steb", None, 42);
+        assert!(state.apps["steb"].installed_at > 0);
+        assert_eq!(state.apps["steb"].built_at, 42);
     }
 
     #[test]

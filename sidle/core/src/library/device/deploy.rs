@@ -44,6 +44,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::digest::{DigestCache, FileDigest};
 use super::receipt::{self, AppReceipt, FileReceipt, InstallState, now_secs};
 use super::{TPath, Transport};
 use crate::library::apps::{AppTree, DevicePlan};
@@ -519,26 +520,20 @@ fn decide(
 
 /// The source bytes' hash and length, or `None` for a slot whose bytes cannot
 /// be produced at all.
-fn source_digest(slot: &Slot) -> Result<Option<(String, u64)>> {
+fn source_digest(slot: &Slot, digests: &mut DigestCache) -> Result<Option<FileDigest>> {
     match &slot.source {
-        Source::Rendered(Some(text)) => {
-            Ok(Some((sha256_bytes(text.as_bytes()), text.len() as u64)))
-        }
+        Source::Rendered(Some(text)) => Ok(Some(FileDigest {
+            sha256: sha256_bytes(text.as_bytes()),
+            size: text.len() as u64,
+        })),
         Source::Rendered(None) => Ok(None),
-        Source::File(path) => {
-            // Two kinds of file land here: one from an app's tree, where a miss
-            // means the tree changed under the walk, and the CA in the library
-            // root, where it means nobody issued one. Name the path and let it
-            // say which.
-            let bytes = std::fs::read(path).with_context(|| {
-                format!(
-                    "deploy source missing at {} — the tree changed under \
-                     the walk, or TLS material was never issued",
-                    path.display()
-                )
-            })?;
-            Ok(Some((sha256_bytes(&bytes), bytes.len() as u64)))
-        }
+        Source::File(path) => digests.of(path).with_context(|| {
+            format!(
+                "deploy source unreadable at {} — the tree changed under the \
+                 walk, or TLS material was never issued",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -559,6 +554,7 @@ pub fn compute_status(
     conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
+    digests: &mut DigestCache,
 ) -> Result<DeployStatus> {
     let slots = slots(plan, conf, ca_cert);
     let state = InstallState::read(transport);
@@ -566,15 +562,15 @@ pub fn compute_status(
     let mut files = Vec::with_capacity(slots.len());
 
     for slot in &slots {
-        let file_state = match source_digest(slot)? {
+        let file_state = match source_digest(slot, digests)? {
             None => DeployFileState::SourceMissing,
-            Some((hash, size)) => decide(
+            Some(source) => decide(
                 transport,
                 &mut index,
                 slot,
                 state.file(&slot.app_id, &slot.device_rel),
-                &hash,
-                size,
+                &source.sha256,
+                source.size,
                 false,
             )?,
         };
@@ -764,6 +760,7 @@ pub fn install_all(
     ca_cert: &Path,
     transport: &dyn Transport,
     force: bool,
+    digests: &mut DigestCache,
     mut on_progress: impl FnMut(&DeployFileInstallResult),
 ) -> Result<DeployInstallReport> {
     // `Transport::write_atomic` creates the bin/ and etc/ parents on both
@@ -776,7 +773,7 @@ pub fn install_all(
 
     for slot in &slots {
         let prior = state.file(&slot.app_id, &slot.device_rel).cloned();
-        let (result, receipt) = install_one(transport, &mut index, slot, prior, force);
+        let (result, receipt) = install_one(transport, &mut index, slot, prior, force, digests);
         on_progress(&result);
         results.push(result);
         if let Some(receipt) = receipt {
@@ -812,9 +809,8 @@ pub fn install_all(
     }
     if let Err(e) = state.write(transport) {
         // The files are on the device either way. A lost receipt costs the next
-        // push its shortcuts and its ability to spot an on-device edit, so it is
-        // reported rather than swallowed — and not raised to an error, which
-        // would call a completed install a failure.
+        // push its shortcuts and its reading of an on-device edit: reported as
+        // one failed path, against a completed install.
         let result = DeployFileInstallResult::Failed {
             device_path: receipt::RECEIPT_PATH.to_string(),
             error: format!("{e:#}"),
@@ -836,10 +832,15 @@ fn install_one(
     slot: &Slot,
     prior: Option<FileReceipt>,
     force: bool,
+    digests: &mut DigestCache,
 ) -> (DeployFileInstallResult, Option<FileReceipt>) {
-    let bytes_result: Result<Vec<u8>> = match &slot.source {
-        Source::Rendered(Some(text)) => Ok(text.as_bytes().to_vec()),
-        Source::Rendered(None) => {
+    let failed = |e: anyhow::Error| DeployFileInstallResult::Failed {
+        device_path: slot.device_rel.clone(),
+        error: format!("{e:#}"),
+    };
+    let source = match source_digest(slot, digests) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
             return (
                 DeployFileInstallResult::SourceMissing {
                     device_path: slot.device_rel.clone(),
@@ -847,28 +848,13 @@ fn install_one(
                 prior,
             );
         }
-        Source::File(path) => {
-            std::fs::read(path).with_context(|| format!("read source {}", path.display()))
-        }
+        Err(e) => return (failed(e), prior),
     };
-    let bytes = match bytes_result {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                DeployFileInstallResult::Failed {
-                    device_path: slot.device_rel.clone(),
-                    error: format!("{e:#}"),
-                },
-                prior,
-            );
-        }
+    let receipt = FileReceipt {
+        sha256: source.sha256.clone(),
+        size: source.size,
     };
-
-    let source = FileReceipt {
-        sha256: sha256_bytes(&bytes),
-        size: bytes.len() as u64,
-    };
-    let state = decide(
+    let state = match decide(
         transport,
         index,
         slot,
@@ -876,42 +862,43 @@ fn install_one(
         &source.sha256,
         source.size,
         force,
-    );
+    ) {
+        Ok(state) => state,
+        Err(e) => return (failed(e), prior),
+    };
     match state {
-        Err(e) => (
-            DeployFileInstallResult::Failed {
-                device_path: slot.device_rel.clone(),
-                error: format!("{e:#}"),
-            },
-            prior,
-        ),
-        Ok(DeployFileState::Synced) => (
+        DeployFileState::Synced => (
             DeployFileInstallResult::Skipped {
                 device_path: slot.device_rel.clone(),
             },
-            Some(source),
+            Some(receipt),
         ),
-        Ok(DeployFileState::Diverged) => (
+        DeployFileState::Diverged => (
             DeployFileInstallResult::KeptDeviceCopy {
                 device_path: slot.device_rel.clone(),
             },
             prior,
         ),
-        Ok(_) => match transport.write_atomic(&slot.tpath(), &bytes) {
+        // The one branch that needs the bytes.
+        _ => match read_source(slot).and_then(|b| transport.write_atomic(&slot.tpath(), &b)) {
             Ok(()) => (
                 DeployFileInstallResult::Wrote {
                     device_path: slot.device_rel.clone(),
                 },
-                Some(source),
+                Some(receipt),
             ),
-            Err(e) => (
-                DeployFileInstallResult::Failed {
-                    device_path: slot.device_rel.clone(),
-                    error: format!("{e:#}"),
-                },
-                prior,
-            ),
+            Err(e) => (failed(e), prior),
         },
+    }
+}
+
+/// The bytes a slot installs.
+fn read_source(slot: &Slot) -> Result<Vec<u8>> {
+    match &slot.source {
+        Source::Rendered(text) => Ok(text.clone().unwrap_or_default().into_bytes()),
+        Source::File(path) => {
+            std::fs::read(path).with_context(|| format!("read source {}", path.display()))
+        }
     }
 }
 
@@ -998,10 +985,8 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// on-device server.conf, or asks.
 pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Use a TEST-NET-3 address (RFC 5737) rather than 8.8.8.8 — we
-    // don't want to leak that "is this machine using sidle?" to any
-    // network observer, and TEST-NET addresses are guaranteed
-    // unreachable so even a misbehaving kernel won't actually send.
+    // A TEST-NET-3 address (RFC 5737): guaranteed unreachable, and it tells a
+    // network observer nothing about this machine.
     sock.set_read_timeout(Some(Duration::from_millis(50))).ok();
     sock.connect("203.0.113.1:80").ok()?;
     match sock.local_addr().ok()? {
@@ -1037,20 +1022,17 @@ mod tests {
         }
     }
 
-    /// Wrap a temp dir as a mass-storage [`Transport`], so the deploy tests
-    /// drive the same trait the command layer uses — byte-for-byte the prior
-    /// `std::fs`-against-a-mount behavior, now also shared with the MTP path.
+    /// Wrap a temp dir as a mass-storage [`Transport`]: the deploy tests drive
+    /// the same trait the command layer and the MTP path do.
     fn ms(dir: &Path) -> crate::library::device::mass_storage::transport::MassStorageTransport {
         crate::library::device::mass_storage::transport::MassStorageTransport::new(
             dir.to_path_buf(),
         )
     }
 
-    /// A stand-in CA on disk. Deliberately NOT under the `device/` mirror: the
-    /// real one lives in the library root, and a test that put it in the mirror
-    /// would stop exercising the fact that this slot's source comes from
-    /// somewhere else entirely. Content is irrelevant here — every slot is
-    /// compared by hash, so any stable bytes prove the same plumbing.
+    /// A stand-in CA on disk, outside the `device/` mirror — the one place this
+    /// slot's source never comes from. Every slot is compared by hash, and any
+    /// stable bytes exercise the same plumbing.
     fn ca_path(repo: &Path) -> PathBuf {
         let p = repo.join("library-root").join("tls").join("ca.pem");
         if !p.exists() {
@@ -1075,8 +1057,8 @@ mod tests {
 
     #[test]
     fn render_is_byte_stable() {
-        // Same inputs must produce identical bytes — staleness check is
-        // byte-equality, any drift would re-trigger "stale" forever.
+        // Same inputs, identical bytes: the staleness check is byte-equality,
+        // and any drift re-triggers "stale" on every push.
         let a = make_conf().render();
         let b = make_conf().render();
         assert_eq!(a, b);
@@ -1131,7 +1113,7 @@ mod tests {
     }
 
     /// The composed tree alone, for a test that only installs. `compute_status`
-    /// is the only caller that still needs the source, for its mtime hints.
+    /// is the caller that needs the source too, for its mtime hints.
     fn make_install_plan(repo: &Path) -> crate::library::apps::DevicePlan {
         make_both(repo, true).1
     }
@@ -1153,7 +1135,16 @@ mod tests {
         ca: &Path,
         device: &Path,
     ) -> DeployInstallReport {
-        install_all(plan, conf, ca, &ms(device), false, |_| {}).unwrap()
+        install_all(
+            plan,
+            conf,
+            ca,
+            &ms(device),
+            false,
+            &mut DigestCache::ephemeral(),
+            |_| {},
+        )
+        .unwrap()
     }
 
     fn status_of(
@@ -1163,7 +1154,15 @@ mod tests {
         ca: &Path,
         device: &Path,
     ) -> DeployStatus {
-        compute_status(plan, source, conf, ca, &ms(device)).unwrap()
+        compute_status(
+            plan,
+            source,
+            conf,
+            ca,
+            &ms(device),
+            &mut DigestCache::ephemeral(),
+        )
+        .unwrap()
     }
 
     fn state_of(status: &DeployStatus, path: &str) -> DeployFileState {
@@ -1267,11 +1266,9 @@ mod tests {
         );
     }
 
-    /// A machine with no routable LAN address (or no server token) must still
-    /// be able to push over a cable. `etc/server.conf` is the only slot whose
-    /// bytes depend on an address; the binary, the launcher, the CA, the KUAL
-    /// metadata and the tile do not, and a device on a client-isolated network
-    /// is exactly the device that needs them delivered by hand.
+    /// A machine with no routable LAN address, or no server token, pushes over
+    /// a cable. `etc/server.conf` is the one slot whose bytes depend on an
+    /// address; the binary, the launcher, the CA and the tile do not.
     #[test]
     fn conf_without_inputs_reports_source_missing_and_the_rest_installs() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1313,10 +1310,9 @@ mod tests {
         }
     }
 
-    /// The status the UI shows and the push it would run have to agree: an
-    /// unrenderable conf is `SourceMissing` in both, and `summarize` already
-    /// excludes that state, so every other slot being current reads "In sync"
-    /// rather than a permanent one-file-stale that no push can clear.
+    /// The status the UI shows and the push behind it agree: an unrenderable
+    /// conf is `SourceMissing` in both, `summarize` excludes that state, and
+    /// every other slot being current reads "In sync".
     #[test]
     fn status_without_conf_inputs_matches_what_install_would_do() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1413,12 +1409,9 @@ mod tests {
 
     /// The CA has to arrive, byte-identical, from outside the `device/` mirror.
     ///
-    /// Worth its own test rather than leaning on the file count: the picker pins
-    /// this root and carries no public root set at all, so a deploy that pushed
-    /// every other file but silently skipped or corrupted this one would look
-    /// completely successful and leave a device that cannot complete a single
-    /// handshake. The failure would surface as "sync is broken", nowhere near
-    /// this code.
+    /// The picker pins this root and carries no public root set. A push that
+    /// skipped or corrupted it leaves a device that completes no handshake,
+    /// under a report of success.
     #[test]
     fn install_pushes_the_ca_the_picker_pins() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1436,9 +1429,8 @@ mod tests {
             "the CA must arrive byte-identical — a re-encoded or truncated PEM \
              fails verification just as completely as a missing one"
         );
-        // It comes from the library root, so it must NOT be expected in the
-        // repo mirror — a future `mirrored()` call for this path would compile
-        // and then push the wrong bytes.
+        // The library root is where it comes from. A `mirrored()` call for this
+        // path compiles, and pushes the wrong bytes.
         assert!(
             !source
                 .mount_dir
@@ -1461,6 +1453,7 @@ mod tests {
             &ca_path(tmp.path()),
             &ms(device.path()),
             false,
+            &mut DigestCache::ephemeral(),
             |_| events += 1,
         )
         .unwrap();
@@ -1488,7 +1481,7 @@ mod tests {
     }
 
     /// The row alone. A test that edits a file in the tree recomposes through
-    /// this, because re-laying the fixture would undo the edit.
+    /// this; re-laying the fixture overwrites the edit.
     fn karyll_row(repo: &Path) -> crate::library::db::AppSourceRow {
         crate::library::db::AppSourceRow {
             id: "karyll".into(),
@@ -1505,7 +1498,7 @@ mod tests {
         crate::library::apps::plan_from(&source.mount_dir, &[karyll_fixture(karyll)])
     }
 
-    /// Recompose against trees already on disk.
+    /// Recompose against the trees on disk.
     fn replan(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
         let source = make_source(repo, true);
         crate::library::apps::plan_from(&source.mount_dir, &[karyll_row(karyll)])
@@ -1591,8 +1584,8 @@ mod tests {
         )));
     }
 
-    /// The way past it, and the only one: force compares bytes rather than
-    /// trusting the receipt, and writes what differs.
+    /// The way past it: `force` compares bytes against the source and writes
+    /// what differs.
     #[test]
     fn force_overwrites_a_file_changed_on_the_device() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1604,14 +1597,23 @@ mod tests {
         push(&plan, Some(&conf), &ca, device.path());
 
         std::fs::write(device.path().join(HID_CONF), b"edited on device\n").unwrap();
-        install_all(&plan, Some(&conf), &ca, &ms(device.path()), true, |_| {}).unwrap();
+        install_all(
+            &plan,
+            Some(&conf),
+            &ca,
+            &ms(device.path()),
+            true,
+            &mut DigestCache::ephemeral(),
+            |_| {},
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(device.path().join(HID_CONF)).unwrap(),
             b"[device]\n"
         );
-        // And the receipt is back in step: an unforced push now has nothing to
-        // say about the file.
+        // The receipt is back in step, and an unforced push has nothing to say
+        // about the file.
         let source = make_source(tmp.path(), true);
         let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         assert_eq!(state_of(&status, HID_CONF), DeployFileState::Synced);
@@ -1656,8 +1658,8 @@ mod tests {
         let source = make_source(tmp.path(), true);
 
         push(&plan, Some(&conf), &ca, device.path());
-        // Same length, different bytes: only a read could tell, and none is
-        // made, because nothing this push would write has changed.
+        // Same length, different bytes. A read is what tells them apart, and
+        // the receipt settles the path without one.
         std::fs::write(device.path().join(HID_CONF), b"[device]!\n").unwrap();
 
         let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
@@ -1665,9 +1667,9 @@ mod tests {
         assert_eq!(status.overall, DeployOverall::InSync);
     }
 
-    /// A device sidle has never installed to carries no receipt, so there is
-    /// nothing to have diverged from: the push normalises it to the tree and
-    /// starts the record.
+    /// A device sidle has never installed to carries no receipt, and nothing to
+    /// have diverged from: the push normalises it to the tree and starts the
+    /// record.
     #[test]
     fn a_hand_dragged_file_is_overwritten_when_no_receipt_covers_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1750,7 +1752,7 @@ mod tests {
     }
 
     /// A per-row install rewrites that app's record and leaves every other
-    /// app's alone, or the next full push would forget what it knew.
+    /// app's alone. The next full push reads all of them.
     #[test]
     fn a_per_app_push_leaves_the_other_apps_receipts_intact() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1770,8 +1772,8 @@ mod tests {
     }
 
     /// A cable push writes every path directly — nothing on a mounted device is
-    /// executing — and clears any `.new` a Wi-Fi pull staged, so the applier one
-    /// level up cannot swap a stale file over the fresh one.
+    /// executing — and clears any `.new` a Wi-Fi pull staged, which the applier
+    /// one level up swaps in at the next launch.
     #[test]
     fn a_push_writes_staged_paths_directly_and_clears_their_pending_new() {
         let tmp = tempfile::tempdir().unwrap();

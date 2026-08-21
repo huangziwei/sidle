@@ -15,6 +15,7 @@ use crate::server::ServerHandle;
 use sidle_core::library::apps;
 use sidle_core::library::device::Transport;
 use sidle_core::library::device::deploy::DeploySource;
+use sidle_core::library::device::digest::DigestCache;
 use sidle_core::library::device::dist;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
@@ -272,18 +273,21 @@ impl AppState {
             }
         };
 
-        // The fleet a detached `sidle-server` serves over `/device/...`,
-        // mtime-gated per file. Off the launch path: a first run copies the
-        // whole fleet, and nothing here waits on the result.
+        // What a detached `sidle-server` serves over `/device/...`. Off the
+        // launch path: a first run hashes the whole fleet, and nothing here
+        // waits on the result.
         let staging_source = device_app_source.clone();
         let dist_dir = paths.device_dist();
+        let digest_path = paths.source_digests();
         std::thread::spawn(move || {
             let _ = staging_source.stage_binary();
             let plan = apps::plan_from(&staging_source.mount_dir, &app_rows);
-            match dist::refresh(&plan, &staging_source, &dist_dir) {
+            let mut digests = DigestCache::open(&digest_path);
+            match dist::refresh(&plan, &staging_source, &dist_dir, &mut digests) {
                 Ok(outcome) => eprintln!("[sidle/bootstrap] device-dist: {outcome:?}"),
-                Err(e) => eprintln!("[sidle/bootstrap] device-dist staging failed: {e:#}"),
+                Err(e) => eprintln!("[sidle/bootstrap] device-dist refresh failed: {e:#}"),
             }
+            let _ = digests.save();
         });
 
         Ok(Self {

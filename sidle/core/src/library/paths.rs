@@ -196,6 +196,12 @@ impl LibraryPaths {
         self.root.join("device-dist")
     }
 
+    /// Content hashes of the fleet's source files, keyed by what a stat says.
+    /// Derived from files this machine holds, and rebuilt by deleting it.
+    pub fn source_digests(&self) -> PathBuf {
+        self.root.join("device-digests.json")
+    }
+
     /// TLS material for the LAN server: the private CA and the server leaf it
     /// signs. Keyed off the active library root, as
     /// [`device_dist`](Self::device_dist) is.

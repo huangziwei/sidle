@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use sidle_core::library::db::{self, BookRow};
+use sidle_core::library::device::digest::DigestCache;
 use sidle_core::library::device::dist;
 use sidle_core::library::device::push::{DeleteResult, PushResult};
 use sidle_core::library::device::{
@@ -478,7 +479,9 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
             let conn = ctx.conn();
             sidle_core::library::apps::plan(&conn, &source.mount_dir)?
         };
-        let outcome = dist::refresh(&plan, &source, &ctx.paths.device_dist())?;
+        let mut digests = DigestCache::open(&ctx.paths.source_digests());
+        let outcome = dist::refresh(&plan, &source, &ctx.paths.device_dist(), &mut digests)?;
+        digests.save()?;
         return ctx.report(&format!("{outcome:?}"), || println!("{outcome:?}"));
     }
 
@@ -517,9 +520,17 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     };
     let ca_cert = ctx.paths.ca_cert();
 
+    let mut digests = DigestCache::open(&ctx.paths.source_digests());
     if !args.install {
-        let status =
-            deploy::compute_status(&plan, &source, conf.as_ref(), &ca_cert, transport.as_ref())?;
+        let status = deploy::compute_status(
+            &plan,
+            &source,
+            conf.as_ref(),
+            &ca_cert,
+            transport.as_ref(),
+            &mut digests,
+        )?;
+        digests.save()?;
         return ctx.report(&status, || {
             println!("{:?}", status.overall);
             for f in &status.files {
@@ -534,8 +545,10 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
         &ca_cert,
         transport.as_ref(),
         args.force,
+        &mut digests,
         |r| eprintln!("  {r:?}"),
     )?;
+    digests.save()?;
     ctx.report(&report, || {
         println!("installed {} file(s)", report.results.len());
     })

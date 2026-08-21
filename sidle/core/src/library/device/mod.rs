@@ -20,6 +20,7 @@ pub mod annotations;
 pub mod dedrm;
 pub mod deploy;
 pub mod detect;
+pub mod digest;
 pub mod dist;
 pub mod ink;
 pub mod inventory;
