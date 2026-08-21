@@ -178,9 +178,9 @@ const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// device batches its upload to bound its own RAM, and a cap it can't reach is
 /// no cap at all.
 const NOTEBOOK_BODY_LIMIT: usize = 64 * 1024 * 1024;
-/// Body cap on `POST /sync/book` — a decrypted book (`.kfx-zip`), buffered whole
-/// before it's handed to the importer. Generous for an image-heavy purchase;
-/// single-user LAN, so the transient RAM is fine.
+/// Body cap on `POST /sync/book` — one decrypted book, buffered whole before
+/// it's handed to the importer. Generous for an image-heavy purchase;
+/// single-user LAN, and the transient RAM is fine.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
 /// Body cap on `POST /sync/misc` — one batch of the Kindle's configured folders,
 /// base64 in one JSON bundle. The picker batches to a fraction of this (its own
@@ -922,15 +922,41 @@ struct BookSyncResult {
     id: i64,
 }
 
-/// Ingest one decrypted book pushed over the LAN — the WiFi twin of the desktop's
-/// USB `/dedrm` auto-pull. Token-gated, then the raw `.kfx-zip` body is written to
-/// a temp file and handed to the **exact** import the USB pull uses
-/// ([`import::import_file`]), so a WiFi import is byte-for-byte the same DB
-/// operation (and hash-dedupes against a book already pulled via USB).
+/// The filename extension [`sync_book`] stages an upload under, from what the
+/// pusher put in `?ext=`.
 ///
-/// `Bytes` is last (a body-consuming extractor). The book converts to its EPUB
-/// side on the next app launch (`state.rs` re-enqueues pending jobs); P4b wires a
-/// pulse so it converts live.
+/// Kept to lowercase ASCII letters, digits and `-`, and to the length of the
+/// longest extension the library reads: a query value reaches no path outside
+/// the temp dir and hides no second extension. Anything else, `None` included,
+/// takes `kfx-zip`, the extension of every KFX push. An extension that survives
+/// but names a format the library cannot read passes through, and `import_file`
+/// answers with its own message.
+fn staged_ext(requested: Option<&str>) -> String {
+    requested
+        .filter(|e| {
+            !e.is_empty()
+                && e.len() <= "kfx-zip".len()
+                && e.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        .unwrap_or("kfx-zip")
+        .to_string()
+}
+
+/// Ingest one decrypted book pushed over the LAN — the WiFi twin of the desktop's
+/// USB `/dedrm` auto-pull. Token-gated, then the raw body is written to a temp
+/// file and handed to the **exact** import the USB pull uses
+/// ([`import::import_file`]): a WiFi import is byte-for-byte the same DB
+/// operation, hash-deduped against a book the USB pull took.
+///
+/// `?ext=` names the extension to stage the bytes under, which `import_file`
+/// dispatches on. The Kindle sends the decrypted file's own —
+/// `kfx-zip` for a KFX, `azw3`/`azw4`/`mobi` for the MOBI family. See
+/// [`staged_ext`] for what an absent or unusable value falls back to.
+///
+/// `Bytes` is last, a body-consuming extractor. [`write_book_pulse`] signals the
+/// app; absent a listening app, `state.rs` re-enqueues the pending job on the
+/// next launch.
 async fn sync_book(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -940,11 +966,12 @@ async fn sync_book(
     check_token(&headers, &query, &state.token)?;
 
     let paths = state.paths.clone();
+    let ext = staged_ext(query.get("ext").map(String::as_str));
     let result = tokio::task::spawn_blocking(move || -> Result<BookSyncResult, StatusCode> {
-        // import_file dispatches on the extension, so stage the bytes under a
-        // `.kfx-zip` name; the sha keeps concurrent uploads from colliding.
+        // import_file dispatches on the extension, so stage the bytes under the
+        // one the pusher named; the sha keeps concurrent uploads from colliding.
         let sha = import::sha256_of_bytes(&body);
-        let tmp = std::env::temp_dir().join(format!("sidle-upload-{sha}.kfx-zip"));
+        let tmp = std::env::temp_dir().join(format!("sidle-upload-{sha}.{ext}"));
         std::fs::write(&tmp, &body).map_err(|err| {
             tracing::error!(?err, "sync/book: write temp failed");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1457,7 +1484,7 @@ fn filename_from_path(p: &str) -> String {
 mod tests {
     use super::{
         AppState, Config, build_router, import_changed_anything, load_or_generate_token,
-        serve_with_shutdown,
+        serve_with_shutdown, staged_ext,
     };
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -1706,7 +1733,8 @@ mod tests {
             .unwrap()
     }
 
-    /// A `POST /sync/book` request with raw `.kfx-zip` bytes and an optional token.
+    /// A `POST /sync/book` request with raw body bytes and an optional token,
+    /// naming no `?ext=`: the server stages under `staged_ext`'s default.
     fn book_request(token: Option<&str>, body: Vec<u8>) -> Request<Body> {
         let mut b = Request::builder()
             .method("POST")
@@ -2070,6 +2098,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn a_pushed_extension_decides_the_staged_name() {
+        // What the picker sends for each family the engine decrypts.
+        assert_eq!(staged_ext(Some("kfx-zip")), "kfx-zip");
+        for ext in ["azw3", "azw4", "mobi"] {
+            assert_eq!(staged_ext(Some(ext)), ext, "{ext}");
+        }
+        // A picker that names no extension is pushing a KFX.
+        assert_eq!(staged_ext(None), "kfx-zip");
+        assert_eq!(staged_ext(Some("")), "kfx-zip");
+        // Nothing that could leave the temp dir or hide a second extension
+        // survives.
+        for bad in [
+            "../../etc/passwd",
+            "kfx-zip/../x",
+            "tar.gz",
+            "KFX-ZIP",
+            "a b",
+            "toolongext",
+        ] {
+            assert_eq!(staged_ext(Some(bad)), "kfx-zip", "{bad}");
+        }
+        // An extension the library cannot read passes through, and `import_file`
+        // names it in the error.
+        assert_eq!(staged_ext(Some("djvu")), "djvu");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

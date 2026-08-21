@@ -1,11 +1,13 @@
 //! Pull from `<kindle>/dedrm/`.
 //!
 //! The `dedrm` directory is populated by a Kindle-side jailbreak tool — files
-//! there are stripped of DRM but still in Amazon's native container (`.kfx`
-//! single-container, or `.kfx-zip` multi-container bundle). We hash each,
-//! skip what's already in the local library by sha256, and run the rest
-//! through the standard import pipeline — which synthesizes an EPUB via bokai
-//! and enqueues the canonical EPUB→KFX conversion just like a drag-drop.
+//! there are stripped of DRM and left in the container Amazon delivered them
+//! in: a `.kfx` single container, a `.kfx-zip` multi-container bundle, or a
+//! MOBI-family book under its own name. [`hash_dedrm_candidates`] hashes each,
+//! [`filter_new_candidates`] drops every sha256 the local library holds, and
+//! [`pull_one`] runs the rest through the standard import pipeline — which
+//! synthesizes an EPUB via bokai and enqueues the canonical EPUB→KFX conversion
+//! just like a drag-drop.
 //!
 //! Mass-storage only. Non-jailbroken devices (every MTP-class Kindle) have no
 //! `/dedrm` folder, and the jailbreak that creates the folder isn't available
@@ -41,11 +43,11 @@ pub enum PullResult {
     },
 }
 
-/// Phase 1 of the autopull scan: list every `.kfx` / `.kfx-zip` in `/dedrm`
-/// and hash it. Does no DB work, so it's safe to run outside the DB lock —
-/// crucial because hashing several MB-per-file off a USB-attached Kindle
-/// takes a second or two, and holding the DB lock for that long would block
-/// the frontend's first `library_list` request after a cold start.
+/// Phase 1 of the autopull scan: list every decrypted book in `/dedrm` and hash
+/// it. Does no DB work and runs outside the DB lock. Hashing several MB per
+/// file off a USB-attached Kindle takes a second or two, and the DB lock held
+/// that long blocks the frontend's first `library_list` request after a cold
+/// start.
 pub fn hash_dedrm_candidates(device: &DeviceInfo) -> Vec<(PathBuf, String)> {
     let Some(mount) = device.mass_storage_mount() else {
         return Vec::new();
@@ -57,7 +59,7 @@ pub fn hash_dedrm_candidates(device: &DeviceInfo) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !is_kfx_input(&path) {
+        if !is_dedrm_output(&path) {
             continue;
         }
         match sha256_of_file(&path) {
@@ -70,10 +72,9 @@ pub fn hash_dedrm_candidates(device: &DeviceInfo) -> Vec<(PathBuf, String)> {
     out
 }
 
-/// Phase 2: filter the hashed candidates against the library so only files
-/// we haven't seen before get pulled. Holds the DB lock for one `SELECT`
-/// per candidate — tens of microseconds total, fine to keep inside the
-/// autopull's lock-acquiring `spawn_blocking`.
+/// Phase 2: the hashed candidates whose sha256 the `books` table lacks. Holds
+/// the DB lock for one `SELECT` per candidate — tens of microseconds total,
+/// fine to keep inside the autopull's lock-acquiring `spawn_blocking`.
 pub fn filter_new_candidates(
     conn: &rusqlite::Connection,
     candidates: Vec<(PathBuf, String)>,
@@ -95,11 +96,10 @@ pub fn filter_new_candidates(
         .collect()
 }
 
-/// Import a single dedrm file into the library. Returns the import outcome
-/// plus, when the row needs a background conversion (now true for every
-/// fresh KFX/KFX-zip pull — the EPUB is produced by the worker, not
-/// import_file), the `book_id` to enqueue. Caller does the enqueue from
-/// async context.
+/// Import a single dedrm file into the library. Returns the import outcome plus
+/// the `book_id` to enqueue when the row needs a background conversion, which a
+/// fresh KFX pull always does: the worker produces its EPUB, not `import_file`.
+/// Caller does the enqueue from async context.
 pub fn pull_one(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
@@ -137,14 +137,18 @@ pub fn pull_one(
     }
 }
 
-fn is_kfx_input(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref(),
-        Some("kfx") | Some("kfx-zip")
-    ) && path.is_file()
+/// What the Kindle-side tool writes into `/dedrm`: Amazon's KFX in either
+/// container shape, and the MOBI family under the names it decrypts them to.
+/// `.azw4` is among them — the tool strips its DRM, and `import_file` names the
+/// extension in its own error.
+const DEDRM_EXTENSIONS: [&str; 5] = ["kfx", "kfx-zip", "azw3", "azw4", "mobi"];
+
+fn is_dedrm_output(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .is_some_and(|ext| DEDRM_EXTENSIONS.contains(&ext.as_str()))
+        && path.is_file()
 }
 
 #[cfg(test)]
@@ -185,19 +189,28 @@ mod tests {
     fn hash_filters_by_extension_and_returns_64char_shas() {
         let tmp = tempfile::tempdir().unwrap();
         let dedrm = tmp.path().join("dedrm");
-        touch(&dedrm.join("a.kfx"), b"hello-kfx");
-        touch(&dedrm.join("b.kfx-zip"), b"hello-bundle");
+        for (i, ext) in DEDRM_EXTENSIONS.iter().enumerate() {
+            touch(
+                &dedrm.join(format!("book{i}.{ext}")),
+                format!("b{i}").as_bytes(),
+            );
+        }
+        // A FAT round-trip through a desktop can upper-case an extension.
+        touch(&dedrm.join("shouty.AZW3"), b"loud");
         touch(&dedrm.join("ignore.txt"), b"x");
         touch(&dedrm.join("notes.md"), b"y");
+        touch(&dedrm.join("sideload.epub"), b"z");
 
         let candidates = hash_dedrm_candidates(&fake_device(tmp.path()));
-        assert_eq!(candidates.len(), 2);
         let names: Vec<_> = candidates
             .iter()
             .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"a.kfx".to_string()));
-        assert!(names.contains(&"b.kfx-zip".to_string()));
+        assert_eq!(candidates.len(), DEDRM_EXTENSIONS.len() + 1, "{names:?}");
+        for (i, ext) in DEDRM_EXTENSIONS.iter().enumerate() {
+            assert!(names.contains(&format!("book{i}.{ext}")), "{names:?}");
+        }
+        assert!(names.contains(&"shouty.AZW3".to_string()), "{names:?}");
         for (_, sha) in &candidates {
             assert_eq!(sha.len(), 64);
         }

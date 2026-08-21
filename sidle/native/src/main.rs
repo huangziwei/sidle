@@ -837,11 +837,10 @@ fn run() -> anyhow::Result<()> {
                             // DRM view's right disc (the library view's Update slot,
                             // useless while browsing DRM): decrypt every on-device
                             // purchase and push each to the desktop, behind an
-                            // `n/total` progress bar. Then re-scan — a synced book has
-                            // had its `.kfx` removed (cleanup) while a decrypted-but-
-                            // unsynced one still shows its `.kfx-zip`, so `dedrm::scan`
-                            // drops it either way and the DRM view collapses to just
-                            // the ones left (or empties).
+                            // `n/total` progress bar. Then re-scan: a synced book has
+                            // had its input removed and a decrypted-but-unsynced
+                            // one has its output, and `dedrm::scan` drops both.
+                            // The DRM view collapses to the ones left.
                             log("decrypt-all button tap");
                             if drm_books.is_empty() {
                                 let dirty =
@@ -909,8 +908,8 @@ fn run() -> anyhow::Result<()> {
                             log("sync-button tap");
                             let banner_msg = match source {
                                 Source::Drm => {
-                                    let zips = dedrm::decrypted_books();
-                                    if zips.is_empty() {
+                                    let decrypted = dedrm::decrypted_books();
+                                    if decrypted.is_empty() {
                                         "No decrypted books to sync".to_string()
                                     } else {
                                         let dirty = toast::draw(
@@ -919,7 +918,7 @@ fn run() -> anyhow::Result<()> {
                                             "Syncing decrypted books…",
                                         );
                                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-                                        sync_decrypted(&agent, &cfg, &zips)
+                                        sync_decrypted(&agent, &cfg, &decrypted)
                                     }
                                 }
                                 Source::Library => {
@@ -2037,33 +2036,33 @@ fn library_asins(books: &[api::Book]) -> std::collections::HashSet<String> {
     books.iter().filter_map(|b| b.asin.clone()).collect()
 }
 
-/// Push every decrypted `.kfx-zip` to the desktop over the LAN, returning a
-/// one-line toast summary. The manual DRM-mode Sync; server dedupe makes re-runs
-/// safe (a re-push of an already-imported book is a `duplicate` no-op). Each
-/// confirmed push (`imported` **or** `duplicate`) then clears that book's
-/// on-device leftovers via [`dedrm::cleanup_synced`] — the same stem-scoped
+/// Push every decrypted book to the desktop over the LAN, returning a one-line
+/// toast summary. The manual DRM-mode Sync; server dedupe makes re-runs safe (a
+/// re-push of an already-imported book is a `duplicate` no-op). Each confirmed
+/// push (`imported` **or** `duplicate`) then clears that book's on-device
+/// leftovers via [`dedrm::cleanup_synced`] — the same name-scoped
 /// removal the auto-push flows do, so a book recovered here doesn't linger. A
 /// token mismatch aborts early with the re-provision breadcrumb — every push
 /// would hit the same wall.
 fn sync_decrypted(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
-    zips: &[std::path::PathBuf],
+    decrypted: &[std::path::PathBuf],
 ) -> String {
     let (mut imported, mut dup, mut failed) = (0u32, 0u32, 0u32);
-    for zip in zips {
-        match api::push_book(agent, cfg, zip) {
+    for out in decrypted {
+        match api::push_book(agent, cfg, out) {
             Ok(outcome) => {
                 match outcome {
                     api::BookPush::Imported => imported += 1,
                     api::BookPush::Duplicate => dup += 1,
                 }
                 // Confirmed on the desktop → remove this book's on-device
-                // leftovers. This path only has the `.kfx-zip`, so recover the
-                // Items01 `.kfx` from its stem; cleanup then drops the `.kfx`, its
-                // `.sdr`, and this same `.kfx-zip`. Best effort — failures logged.
-                if let Some(kfx) = dedrm::source_kfx(zip) {
-                    for (path, err) in dedrm::cleanup_synced(&kfx) {
+                // leftovers. This path holds only the output; `source_book`
+                // recovers the Items01 input from its name, and cleanup drops
+                // that input, its `.sdr`, and this same output.
+                if let Some(book) = dedrm::source_book(out) {
+                    for (path, err) in dedrm::cleanup_synced(&book) {
                         log(format!("sync cleanup {}: {err}", path.display()));
                     }
                 }
@@ -2073,7 +2072,7 @@ fn sync_decrypted(
                     .to_string();
             }
             Err(api::SidleError::Other(err)) => {
-                log(format!("sync {}: {err:#}", zip.display()));
+                log(format!("sync {}: {err:#}", out.display()));
                 failed += 1;
             }
         }
@@ -2112,15 +2111,15 @@ fn drain_decrypt_input(input: &mut Input, fb: &mut Framebuffer) -> anyhow::Resul
 
 /// Decrypt one on-device DRM purchase in place via the kfxdedrm engine — the DRM
 /// twin of [`download_flow`]. Probe the working ABI binary, spawn `<exe> dedrm
-/// <kfx>`, stream its stdout to the toast, and report exit status. Returns the
+/// <book>`, stream its stdout to the toast, and report exit status. Returns the
 /// toast message **and** whether it succeeded (`true` hides the tile, mirroring a
 /// completed download).
 ///
 /// No cancel — a single small book decrypts in seconds — and stderr is inherited
-/// (it lands in `sidle.sh`'s log). The engine writes `<stem>.kfx-zip` under
-/// [`dedrm::OUT_DIR`]; whether the file materialized is logged as a breadcrumb
-/// (to confirm the assumed output name on-device) but success is the exit code,
-/// so a divergent output name still reads as success rather than a false failure.
+/// (it lands in `sidle.sh`'s log). The engine writes the book's `out_path` under
+/// [`dedrm::OUT_DIR`]; whether that file materialized is logged as a breadcrumb.
+/// Success is the exit code: a divergent output name reads as success, never as
+/// a failure.
 ///
 /// Input is drained between engine prints and after the push, so the two-corner
 /// screenshot lands on the live toast. The drain rides the stdout stream —
@@ -2144,7 +2143,7 @@ fn decrypt_flow(
 
     let mut child = match Command::new(&exe)
         .arg("dedrm")
-        .arg(&book.kfx_path)
+        .arg(&book.path)
         .stdout(std::process::Stdio::piped())
         .spawn()
     {
@@ -2182,7 +2181,7 @@ fn decrypt_flow(
     }
 
     let status = child.wait();
-    let out_path = dedrm::out_path(&book.kfx_path);
+    let out_path = &book.out_path;
     log(format!(
         "kfxdedrm exit={status:?}; {} exists={}",
         out_path.display(),
@@ -2192,23 +2191,23 @@ fn decrypt_flow(
         return Ok(("Decrypt failed — see log".to_string(), false));
     }
 
-    // Decrypt done → auto-push the fresh .kfx-zip to the desktop over the LAN
+    // Decrypt done → auto-push the fresh output to the desktop over the LAN
     // (best effort). The decrypt already succeeded, so the tile hides either way;
     // a failed push is caught by the DRM-mode Sync button, which re-pushes every
-    // dedrm/*.kfx-zip. If the assumed output name isn't on disk (a divergent
+    // book in dedrm/. If the assumed output name isn't on disk (a divergent
     // kfxdedrm name), don't guess which file is the fresh one — leave it for Sync.
     if !out_path.exists() {
         return Ok(("Decrypted (tap Sync to send)".to_string(), true));
     }
     let dirty = toast::draw(fb, renderer, &format!("Syncing {short}…"));
     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-    let msg = match api::push_book(agent, cfg, &out_path) {
+    let msg = match api::push_book(agent, cfg, out_path) {
         Ok(outcome) => {
             // Confirmed on the desktop → remove both on-device leftovers (this
-            // `.kfx-zip` plus the encrypted `.kfx`/`.sdr` under Items01), scoped
-            // to just this book's stem. Best effort: a failed removal is a logged
-            // breadcrumb, not an error — the desktop already has the book.
-            for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
+            // output plus the encrypted book and its `.sdr` under Items01), scoped
+            // to just this book's name. Best effort: a failed removal is a logged
+            // breadcrumb, not an error — the desktop holds the book.
+            for (path, err) in dedrm::cleanup_synced(&book.path) {
                 log(format!("cleanup {}: {err}", path.display()));
             }
             match outcome {
@@ -2232,12 +2231,12 @@ fn decrypt_flow(
 /// action button (the slot the library view gives to self-update). Steps through
 /// the list behind a [`toast::draw_progress_stop`] `n / total` bar that advances
 /// one book at a time. The ABI binary is probed once up front. Each book's decrypt
-/// is `<exe> dedrm <kfx>` with stdio inherited (it lands in `sidle.sh`'s log —
+/// is `<exe> dedrm <book>` with stdio inherited (it lands in `sidle.sh`'s log —
 /// no pipe to drain, unlike the single-book streaming flow), spawned and waited
 /// on in a poll loop that keeps input serviced: the touchscreen is grabbed, so
 /// anything the user does during the batch — above all the two-corner
 /// screenshot — queues on the fd until someone polls, and a blocking wait would
-/// sit on that queue for the whole book. Then the resulting `.kfx-zip` is
+/// sit on that queue for the whole book. Then the resulting output is
 /// pushed over the LAN. Push is best-effort: an
 /// `Other` error is logged and the book still counts as decrypted; a token
 /// mismatch stops further pushes (every one would hit the same wall) but
@@ -2283,7 +2282,7 @@ fn decrypt_all_flow(
         // the toast), so the wait blocks in `next_deadline`: a gesture wakes
         // it instantly, and an idle `Tick` bounds the exit check at
         // [`DEDRM_WAIT_POLL`].
-        let status = match Command::new(&exe).arg("dedrm").arg(&book.kfx_path).spawn() {
+        let status = match Command::new(&exe).arg("dedrm").arg(&book.path).spawn() {
             Ok(mut child) => loop {
                 match child.try_wait() {
                     Ok(Some(s)) => break Ok(s),
@@ -2315,7 +2314,7 @@ fn decrypt_all_flow(
             },
             Err(e) => Err(e),
         };
-        let out_path = dedrm::out_path(&book.kfx_path);
+        let out_path = &book.out_path;
         log(format!(
             "decrypt-all {}/{}: {} exit={status:?} out_exists={}",
             i + 1,
@@ -2331,13 +2330,13 @@ fn decrypt_all_flow(
 
             // Push the fresh output (best effort; skipped once the token is known bad).
             if out_path.exists() && !token_bad {
-                match api::push_book(agent, cfg, &out_path) {
+                match api::push_book(agent, cfg, out_path) {
                     Ok(api::BookPush::Imported | api::BookPush::Duplicate) => {
                         synced += 1;
                         // Confirmed on the desktop → drop this book's leftovers (its
-                        // `.kfx-zip` output plus the `.kfx`/`.sdr` under Items01),
-                        // scoped to this stem. Best effort — failures are just logged.
-                        for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
+                        // output plus the encrypted book and its `.sdr` under Items01),
+                        // scoped to this name. Best effort — failures are just logged.
+                        for (path, err) in dedrm::cleanup_synced(&book.path) {
                             log(format!("decrypt-all cleanup {}: {err}", path.display()));
                         }
                     }

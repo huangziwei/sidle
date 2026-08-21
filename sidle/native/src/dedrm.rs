@@ -1,23 +1,25 @@
 //! DRM-books source — the on-device scan + decrypt-engine probe.
 //!
-//! The picker's second library source: purchased Amazon KFX books that the
-//! stock reader downloaded to `Downloads/Items01/`, listed as a cover grid so a
-//! tap decrypts one in place via the prebuilt **kfxdedrm** engine (a separate
-//! KUAL extension; we only spawn its binary). This module is the **pure** half —
-//! filesystem scan, filename parsing, the executable probe — so it builds and
-//! unit-tests on the host, alongside [`crate::device_state`]. The device half
-//! (spawn + toast streaming) is `main.rs`'s `decrypt_flow`, the sibling of
-//! `download_flow`.
+//! [`scan`] lists the purchased Amazon books the stock reader downloaded to
+//! [`ITEMS_DIR`], the picker's second library source; a tap decrypts one in
+//! place through the **kfxdedrm** engine, a separate KUAL extension whose
+//! binary [`probe_exe`] locates and `main.rs` spawns. This module is the
+//! **pure** half — filesystem scan, filename parsing, the DRM gates, the
+//! executable probe — and builds and unit-tests on the host, alongside
+//! [`crate::device_state`]. The device half (spawn + toast streaming) is
+//! `main.rs`'s `decrypt_flow`, the sibling of `download_flow`.
 //!
-//! Layout facts are from on-device recon (KOA2) + the kfxdedrm reference:
-//! - Books live in `Downloads/Items01/` as `<Title>_<ASIN>.kfx` + a sibling
-//!   `<Title>_<ASIN>.sdr/` whose `assets/voucher` is the decrypt key. Both the
-//!   title and the ASIN come straight from the filename — no KFX parsing.
-//! - Covers are `system/thumbnails/thumbnail_<ASIN>_EBOK_portrait.jpg` (the
-//!   device fetches them asynchronously, so a just-downloaded book may not have
-//!   one yet → placeholder).
-//! - The engine's single-book mode is `<exe> dedrm <path.kfx>` → output at
-//!   `/mnt/us/dedrm/<stem>.kfx-zip`; it needs the voucher beside the input.
+//! The engine decrypts two families and [`scan`] lists both (see [`Format`]):
+//! - **KFX** — `<Title>_<ASIN>.kfx` plus a sibling `<Title>_<ASIN>.sdr/` whose
+//!   `assets/voucher` is the decrypt key. Output is `<stem>.kfx-zip`.
+//! - **MOBI family** — [`MOBI_EXTENSIONS`], gated on the PalmDOC
+//!   `encryption_type` in the book's own header. Output keeps the input's
+//!   filename; the engine copies the file and patches it in place.
+//!
+//! `title_from_stem` and `parse_asin` read the filename; `cover_for` reads the
+//! ASIN-keyed thumbnail cache under [`THUMBS_DIR`], which the device fills
+//! asynchronously — a just-downloaded book may have no cover yet. No book is
+//! opened or parsed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,16 +27,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::Book;
 
-/// Where the stock reader stores purchased KFX downloads. Kept as one constant
-/// so a different on-device path is a one-line change. (Deliberately reads
-/// `Items01`, which the Sidle reader/sync never touches — a dedrm tool reading
-/// DRM books is its whole purpose.)
+/// Where the stock reader stores purchased downloads. One constant: a different
+/// on-device path is a one-line change. Reads `Items01`, which the Sidle
+/// reader/sync never touches.
 pub const ITEMS_DIR: &str = "/mnt/us/documents/Downloads/Items01";
 /// Device cover-thumbnail cache, keyed by ASIN.
 pub const THUMBS_DIR: &str = "/mnt/us/system/thumbnails";
-/// The kfxdedrm KUAL extension's binary dir (the decrypt engine we spawn).
+/// The kfxdedrm KUAL extension's binary dir, holding `ABI_VARIANTS`.
 pub const BIN_DIR: &str = "/mnt/us/extensions/kfxdedrm/bin";
-/// Where the engine writes each decrypted book (`<stem>.kfx-zip`).
+/// Where the engine writes each decrypted book.
 pub const OUT_DIR: &str = "/mnt/us/dedrm";
 
 /// kfxdedrm's four ABI builds, in the probe order its own `run_cmd.sh` uses:
@@ -47,26 +48,56 @@ const ABI_VARIANTS: [&str; 4] = [
     "kfxdedrm_c11",
 ];
 
+/// The extensions the engine's MOBI path names as candidates. `.azw` and
+/// `.prc` are not among them.
+pub const MOBI_EXTENSIONS: [&str; 3] = ["azw3", "azw4", "mobi"];
+
+/// The engine's two code paths, which differ in how a book proves it carries
+/// DRM and in how its output is named ([`out_path`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Kfx,
+    Mobi,
+}
+
+impl Format {
+    /// The family of the book at `path`, by extension. Case-insensitive: a FAT
+    /// partition round-trips through desktops that upper-case one.
+    pub fn of_path(path: &Path) -> Option<Format> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        if ext == "kfx" {
+            Some(Format::Kfx)
+        } else if MOBI_EXTENSIONS.contains(&ext.as_str()) {
+            Some(Format::Mobi)
+        } else {
+            None
+        }
+    }
+}
+
 /// A purchased DRM book found on the device — the app-layer view-model that
-/// carries the local path/cover alongside the pipeline [`Book`], so `api::Book`
+/// carries the local paths/cover alongside the pipeline [`Book`], so `api::Book`
 /// (the server DTO) stays clean. The synthesized `book.id` is this entry's index
-/// in [`scan`]'s returned `Vec`, so the cover + tap seams recover the local data
-/// by `book.id` (see `main.rs`).
+/// in [`scan`]'s returned `Vec`; the cover + tap seams recover the local data by
+/// `book.id` (see `main.rs`).
 #[derive(Debug, Clone)]
 pub struct DrmBook {
     pub book: Book,
-    /// The encrypted `.kfx` under [`ITEMS_DIR`] — the decrypt input. (Its ASIN,
-    /// if needed, is the filename's trailing `_B…` token.)
-    pub kfx_path: PathBuf,
-    /// The device thumbnail, if present and complete (a `.tmp.partial` — the
-    /// device still fetching it — counts as absent → tile shows a placeholder).
+    /// The encrypted file under [`ITEMS_DIR`] — the decrypt input.
+    pub path: PathBuf,
+    /// Where the engine writes this book, under [`OUT_DIR`]. [`scan`] resolves
+    /// it and lists no book it cannot name an output for. Its extension is the
+    /// one place the book's [`Format`] shows.
+    pub out_path: PathBuf,
+    /// The device thumbnail, if present and complete. A half-written
+    /// `.tmp.partial` counts as absent and the tile shows a placeholder.
     pub cover_path: Option<PathBuf>,
 }
 
-/// Is the kfxdedrm engine installed? A cheap dir check that gates entry to the
-/// DRM source, so a user without it gets a clear toast instead of a gallery they
-/// can't act on. The per-ABI `<exe> test` probe ([`probe_exe`]) runs later, at
-/// decrypt time, to also catch a present-but-non-working install.
+/// Is the kfxdedrm engine installed? A cheap dir check gating entry to the DRM
+/// source; `main.rs` toasts on false. The per-ABI `<exe> test` probe
+/// ([`probe_exe`]) runs at decrypt time and catches a present-but-non-working
+/// install.
 pub fn available() -> bool {
     Path::new(BIN_DIR).is_dir()
 }
@@ -95,36 +126,50 @@ pub fn probe_exe() -> Option<PathBuf> {
     None
 }
 
-/// The engine's output path for an input `.kfx`: `OUT_DIR/<stem>.kfx-zip`. Used
-/// both to skip already-decrypted books in [`scan`] and to confirm success
-/// after a decrypt.
-pub fn out_path(kfx_path: &Path) -> PathBuf {
-    let stem = kfx_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    Path::new(OUT_DIR).join(format!("{stem}.kfx-zip"))
+/// The engine's output for the book at `path`, under [`OUT_DIR`]. `None` for a
+/// path of neither family.
+pub fn out_path(path: &Path) -> Option<PathBuf> {
+    out_in(Path::new(OUT_DIR), path, Format::of_path(path)?)
 }
 
-/// The inverse of [`out_path`]: the encrypted `<stem>.kfx` under [`ITEMS_DIR`]
-/// that produced a given `<stem>.kfx-zip`. The DRM Sync path works from the
-/// `dedrm/` outputs (see [`decrypted_books`]) and needs the original back to
-/// clean it up after a confirmed push. `None` if `zip_path` isn't a `.kfx-zip`.
-pub fn source_kfx(zip_path: &Path) -> Option<PathBuf> {
-    let stem = zip_path.file_name()?.to_str()?.strip_suffix(".kfx-zip")?;
-    Some(Path::new(ITEMS_DIR).join(format!("{stem}.kfx")))
+/// [`out_path`] with the output dir and the family injected; [`scan_in`] judges
+/// a temp tree with it. [`Format::Kfx`] takes the `.kfx-zip` extension;
+/// [`Format::Mobi`] keeps its own filename, the engine copying the file into
+/// the output dir and patching it there.
+fn out_in(dir: &Path, path: &Path, format: Format) -> Option<PathBuf> {
+    match format {
+        Format::Kfx => Some(dir.join(format!("{}.kfx-zip", path.file_stem()?.to_str()?))),
+        Format::Mobi => Some(dir.join(path.file_name()?)),
+    }
 }
 
-/// A purchased book's sidecar dir: the `<stem>.sdr/` sitting beside its `.kfx`
-/// (it holds `assets/voucher`, the decrypt key). Derived from the input path's
-/// own parent + stem, so it resolves both on-device (under [`ITEMS_DIR`]) and
-/// against a test's temp tree.
-fn sdr_dir(kfx_path: &Path) -> PathBuf {
-    let parent = kfx_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = kfx_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+/// The inverse of [`out_path`]: the encrypted book under [`ITEMS_DIR`] that
+/// produced a given output. The DRM Sync path works from the [`OUT_DIR`] files
+/// (see [`decrypted_books`]) and needs the original back to clean it up after a
+/// confirmed push. `None` if `out` is not an engine output.
+pub fn source_book(out: &Path) -> Option<PathBuf> {
+    let items = Path::new(ITEMS_DIR);
+    let name = out.file_name()?.to_str()?;
+    match name.strip_suffix(".kfx-zip") {
+        Some(stem) => Some(items.join(format!("{stem}.kfx"))),
+        None => (Format::of_path(out) == Some(Format::Mobi)).then(|| items.join(name)),
+    }
+}
+
+/// A purchased book's sidecar dir: the `<stem>.sdr/` sitting beside it (for a
+/// KFX it holds `assets/voucher`, the decrypt key). Derived from the book path's
+/// own parent + stem, resolving both on-device (under [`ITEMS_DIR`]) and against
+/// a test's temp tree.
+fn sdr_dir(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     parent.join(format!("{stem}.sdr"))
 }
 
-/// Every decrypted book currently in [`OUT_DIR`] (`*.kfx-zip`) — the DRM-mode
-/// Sync button re-pushes all of these to the server (which dedupes, so
-/// already-synced ones are no-ops). Empty (never errors) when the dir is absent.
+/// Every decrypted book currently in [`OUT_DIR`] — the DRM-mode Sync button
+/// re-pushes all of these to the server, which dedupes a repeat push to a no-op.
+/// `is_output` recognises them by extension, leaving the engine's own
+/// `keyfile.txt` out. Empty (never errors) when the dir is absent.
 pub fn decrypted_books() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(OUT_DIR) else {
         return Vec::new();
@@ -134,41 +179,54 @@ pub fn decrypted_books() -> Vec<PathBuf> {
         .filter_map(|e| {
             let path = e.path();
             let name = path.file_name()?.to_str()?;
-            (!name.starts_with("._") && name.ends_with(".kfx-zip") && path.is_file())
-                .then_some(path)
+            if name.starts_with("._") || !path.is_file() {
+                return None;
+            }
+            is_output(&path).then_some(path)
         })
         .collect()
 }
 
+/// Whether `path` names an engine output: a merged `.kfx-zip`, or a MOBI-family
+/// book under its own name.
+fn is_output(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".kfx-zip"))
+        || Format::of_path(path) == Some(Format::Mobi)
+}
+
 /// Remove one purchased book's entire on-device footprint once it's confirmed on
-/// the desktop: the encrypted `<stem>.kfx` input, its `<stem>.sdr/` sidecar, and
-/// the decrypted `<stem>.kfx-zip` output. Every target is derived from
-/// `kfx_path`'s stem — the two siblings beside it, the output under [`OUT_DIR`] —
-/// so this only ever touches the three paths belonging to this one book; it never
-/// scans or globs a directory. An already-absent target is a success (cleanup is
-/// idempotent). Returns each `(path, error)` it failed to remove so the caller can
-/// log it; a leftover is harmless (the desktop has the book), so nothing aborts.
+/// the desktop: the encrypted input, its `<stem>.sdr/` sidecar, and the
+/// decrypted output. Every target is derived from `path`'s own name — the
+/// sidecar beside it, the output under [`OUT_DIR`] — and it touches only the
+/// paths belonging to this one book, never scanning or globbing a directory. An
+/// absent target is a success: cleanup is idempotent. Returns each
+/// `(path, error)` it failed to remove, for the caller to log. Nothing aborts on
+/// a leftover; the desktop has the book.
 ///
 /// Call this **only** after [`crate::api::push_book`] returns
 /// `Imported`/`Duplicate` for this book — never on a failed push, whose sole
-/// decrypted copy is the `.kfx-zip` the DRM Sync button will retry.
-pub fn cleanup_synced(kfx_path: &Path) -> Vec<(PathBuf, std::io::Error)> {
-    cleanup_paths(kfx_path, &sdr_dir(kfx_path), &out_path(kfx_path))
+/// decrypted copy is the output the DRM Sync button will retry.
+pub fn cleanup_synced(path: &Path) -> Vec<(PathBuf, std::io::Error)> {
+    cleanup_paths(path, &sdr_dir(path), out_path(path).as_deref())
 }
 
-/// [`cleanup_synced`] with the three targets injected, so the removal is
-/// host-testable against a temp tree (the public entry wires the stem-derived
-/// paths). Order is input → sidecar → output; each is removed leniently.
-fn cleanup_paths(kfx: &Path, sdr: &Path, zip: &Path) -> Vec<(PathBuf, std::io::Error)> {
+/// [`cleanup_synced`] with the three targets injected; the removal is
+/// host-testable against a temp tree, the public entry wiring the name-derived
+/// paths. Order is input → sidecar → output, each removed leniently.
+fn cleanup_paths(book: &Path, sdr: &Path, out: Option<&Path>) -> Vec<(PathBuf, std::io::Error)> {
     let mut failures = Vec::new();
-    remove_lenient(kfx, false, &mut failures);
+    remove_lenient(book, false, &mut failures);
     remove_lenient(sdr, true, &mut failures);
-    remove_lenient(zip, false, &mut failures);
+    if let Some(out) = out {
+        remove_lenient(out, false, &mut failures);
+    }
     failures
 }
 
 /// Remove one path — a file (`is_dir` false) or a whole dir tree (`is_dir` true)
-/// — treating an already-absent path as success and pushing any real error onto
+/// — treating an absent path as success and pushing any real error onto
 /// `failures` for the caller to log.
 fn remove_lenient(path: &Path, is_dir: bool, failures: &mut Vec<(PathBuf, std::io::Error)>) {
     let res = if is_dir {
@@ -185,17 +243,16 @@ fn remove_lenient(path: &Path, is_dir: bool, failures: &mut Vec<(PathBuf, std::i
 
 /// Scan [`ITEMS_DIR`] for decryptable purchased books, newest download first.
 ///
-/// A candidate is a top-level `<stem>.kfx` file (non-recursive, so the `updates/`
-/// staging dir and the `.sdr` subtrees are skipped) that:
+/// A candidate is a top-level file — non-recursive, skipping the `updates/`
+/// staging dir and the `.sdr` subtrees — that:
 /// - isn't a macOS `._*` AppleDouble shadow (they persist on the FAT partition);
-/// - has a sibling `<stem>.sdr/assets/voucher` (the decrypt key — also the
-///   "download complete enough to decrypt" gate, so mid-download books drop out);
-/// - has a filename ending `_<ASIN>` with a well-formed ASIN;
-/// - hasn't already been decrypted (its `.kfx-zip` output is absent).
+/// - carries an extension of one of the two [`Format`] families;
+/// - passes that family's DRM gate — which for a KFX is also the
+///   "download complete enough to decrypt" test, dropping mid-download books;
+/// - has no output yet.
 ///
-/// Title and ASIN come from the filename; the cover from the ASIN-keyed
-/// thumbnail cache — no KFX parsing. Returns `[]` (never errors) when the dir is
-/// absent/unreadable, so the caller just shows an empty DRM view.
+/// Returns `[]` (never errors) when the dir is absent/unreadable; the caller
+/// shows an empty DRM view.
 pub fn scan() -> Vec<DrmBook> {
     scan_in(
         Path::new(ITEMS_DIR),
@@ -204,68 +261,119 @@ pub fn scan() -> Vec<DrmBook> {
     )
 }
 
-/// [`scan`] with the three dirs injected, so the rule engine is host-testable
-/// against a temp tree (the public [`scan`] wires the on-device consts).
+/// [`scan`] with the three dirs injected; the rule engine is host-testable
+/// against a temp tree, the public [`scan`] wiring the on-device consts.
 fn scan_in(items: &Path, thumbs: &Path, out_dir: &Path) -> Vec<DrmBook> {
     let Ok(entries) = std::fs::read_dir(items) else {
         return Vec::new();
     };
 
-    // Collect (path, name, mtime) for every non-shadow *.kfx file, newest first
-    // so the synthesized ids are stable and the default Date-added sort has a
+    // Collect (path, format, size, mtime) for every DRM'd book, newest first so
+    // the synthesized ids are stable and the default Date-added sort has a
     // sensible tiebreak.
-    let mut kfx: Vec<(PathBuf, String, SystemTime)> = entries
+    let mut found: Vec<(PathBuf, Format, u64, SystemTime)> = entries
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            let name = path.file_name()?.to_str()?.to_string();
-            if name.starts_with("._") || !name.ends_with(".kfx") {
+            if path.file_name()?.to_str()?.starts_with("._") {
                 return None;
             }
+            let format = Format::of_path(&path)?;
             let meta = e.metadata().ok()?;
-            if !meta.is_file() {
+            if !meta.is_file() || !is_encrypted(&path, format) {
                 return None;
             }
-            let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
-            Some((path, name, mtime))
+            Some((
+                path,
+                format,
+                meta.len(),
+                meta.modified().unwrap_or(UNIX_EPOCH),
+            ))
         })
         .collect();
-    kfx.sort_by_key(|k| std::cmp::Reverse(k.2));
+    found.sort_by_key(|k| std::cmp::Reverse(k.3));
 
     let mut out = Vec::new();
-    for (path, name, mtime) in kfx {
-        let stem = &name[..name.len() - ".kfx".len()];
-        // Voucher gate: complete download + the key the engine needs beside it.
-        let voucher = items.join(format!("{stem}.sdr")).join("assets/voucher");
-        if !voucher.is_file() {
-            continue;
-        }
-        let Some(asin) = parse_asin(stem) else {
+    for (path, format, size, mtime) in found {
+        let Some(produced) = out_in(out_dir, &path, format) else {
             continue;
         };
-        // Persistent hide: already decrypted (output present) → done, don't relist.
-        if out_dir.join(format!("{stem}.kfx-zip")).exists() {
+        // Persistent hide: an output on disk drops the book from the list.
+        if produced.exists() {
             continue;
         }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
 
-        let title = title_from_stem(stem, &asin);
-        let file_size = std::fs::metadata(&path)
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
-        let cover = cover_for(thumbs, &asin);
+        let asin = parse_asin(stem);
         let id = out.len() as i64;
         out.push(DrmBook {
-            book: synth_book(id, title, file_size, format_mtime(mtime)),
-            kfx_path: path,
-            cover_path: cover,
+            book: synth_book(
+                id,
+                title_from_stem(stem, asin.as_deref()),
+                format,
+                size as i64,
+                format_mtime(mtime),
+            ),
+            cover_path: asin.as_deref().and_then(|a| cover_for(thumbs, a)),
+            out_path: produced,
+            path,
         });
     }
     out
 }
 
+/// Whether the book at `path` carries DRM the engine can strip.
+///
+/// [`Format::Kfx`] takes the voucher sidecar beside it. [`Format::Mobi`] takes
+/// its own PalmDOC header: types 1 and 2 are the pair the engine decodes, and
+/// it refuses everything else with "Cannot decode unknown Mobipocket encryption
+/// type".
+fn is_encrypted(path: &Path, format: Format) -> bool {
+    match format {
+        Format::Kfx => sdr_dir(path).join("assets").join("voucher").is_file(),
+        Format::Mobi => matches!(palmdoc_encryption(path), Some(1 | 2)),
+    }
+}
+
+/// The PalmDB `type`+`creator` pair a Mobipocket database carries, and its
+/// offset in the header.
+const BOOKMOBI: &[u8; 8] = b"BOOKMOBI";
+const TYPE_CREATOR_OFF: usize = 60;
+/// Start of the record-info list: 8 bytes per record, the first four holding
+/// that record's file offset.
+const RECORD_LIST_OFF: usize = 78;
+/// Where `encryption_type` sits in the PalmDOC header that opens record 0.
+const ENCRYPTION_OFF: usize = 12;
+
+/// The `encryption_type` field of a MOBI-family book, as two short reads — the
+/// book is never opened as a book. `None` on an I/O error, a file cut short of
+/// the field, or a database that is not Mobipocket (a Topaz `.azw`, a
+/// half-copied download), none of which may read as DRM-free.
+fn palmdoc_encryption(path: &Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; RECORD_LIST_OFF + 4];
+    f.read_exact(&mut header).ok()?;
+    if &header[TYPE_CREATOR_OFF..TYPE_CREATOR_OFF + 8] != BOOKMOBI {
+        return None;
+    }
+    let record0 = u32::from_be_bytes(header[RECORD_LIST_OFF..].try_into().ok()?);
+
+    f.seek(SeekFrom::Start(record0 as u64)).ok()?;
+    let mut rec0 = [0u8; ENCRYPTION_OFF + 2];
+    f.read_exact(&mut rec0).ok()?;
+    Some(u16::from_be_bytes([
+        rec0[ENCRYPTION_OFF],
+        rec0[ENCRYPTION_OFF + 1],
+    ]))
+}
+
 /// The ASIN suffix of a filename stem: the final `_`-delimited token when it's a
-/// well-formed ASIN (`B` + 9 uppercase-alphanumerics, 10 chars). `None`
-/// otherwise, so a stray non-purchase filename is skipped rather than mis-listed.
+/// well-formed ASIN (`B` + 9 uppercase-alphanumerics, 10 chars). `None` for a
+/// filename carrying none, which costs the book its cover, not its tile.
 fn parse_asin(stem: &str) -> Option<String> {
     let tok = stem.rsplit('_').next()?;
     let well_formed = tok.len() == 10
@@ -279,13 +387,15 @@ fn parse_asin(stem: &str) -> Option<String> {
 /// The human title: the stem with its trailing `_<ASIN>` removed, and the
 /// filename-safe `_ ` (a sanitized `: `) restored — Amazon writes
 /// `All of Us_ The Collected Poems` for "All of Us: The Collected Poems".
-fn title_from_stem(stem: &str, asin: &str) -> String {
-    let title = stem.strip_suffix(&format!("_{asin}")).unwrap_or(stem);
+fn title_from_stem(stem: &str, asin: Option<&str>) -> String {
+    let title = asin
+        .and_then(|a| stem.strip_suffix(&format!("_{a}")))
+        .unwrap_or(stem);
     title.replace("_ ", ": ")
 }
 
 /// The device cover thumbnail for an ASIN, if the complete `.jpg` is present. A
-/// `.tmp.partial` (the device still fetching it) is treated as absent.
+/// half-written `.tmp.partial` is treated as absent.
 fn cover_for(thumbs: &Path, asin: &str) -> Option<PathBuf> {
     let p = thumbs.join(format!("thumbnail_{asin}_EBOK_portrait.jpg"));
     p.is_file().then_some(p)
@@ -304,10 +414,9 @@ fn format_mtime(t: SystemTime) -> String {
 
 /// A [`Book`] carrying only what a DRM book knows: id (its scan index), the
 /// filename title, byte size, and a sortable download time. Everything else is
-/// blank — DRM books have no series/author/tags, so they render as standalone
-/// tiles and an empty `search_key` makes `search` fall back to the title (Latin,
-/// which every purchased title here is).
-fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Book {
+/// blank — DRM books have no series/author/tags, and render as standalone tiles.
+/// An empty `search_key` makes `search` fall back to the title.
+fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_at: String) -> Book {
     Book {
         id,
         title,
@@ -318,13 +427,19 @@ fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Bo
         publisher: None,
         series_name: None,
         series_index: None,
-        // A purchase pulled off the device is KFX by construction — it has no
-        // conversion job, so state it here rather than letting the `None`
-        // default report it as EPUB in the Format facet.
-        kind: Some("kfx_to_epub".to_string()),
-        // A purchase's own Amazon ASIN, not a content_id Sidle baked — the ink
-        // sync matches against the library's asins, and this book isn't in the
-        // library, so leaving it unset keeps it out of that match.
+        // The conversion kind this book's library row carries once imported: a
+        // KFX converts to EPUB, a MOBI-family book imports through its EPUB
+        // side. The Format facet buckets the tile the way the desktop buckets
+        // the book.
+        kind: Some(
+            match format {
+                Format::Kfx => "kfx_to_epub",
+                Format::Mobi => "epub_to_kfx",
+            }
+            .to_string(),
+        ),
+        // The ink sync matches against the library's asins. This book is not in
+        // the library, and an unset `asin` keeps it out of that match.
         asin: None,
         file_size,
         imported_at,
@@ -338,6 +453,31 @@ fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal PalmDB: the 78-byte header, one record-info entry, then a
+    /// record 0 whose `encryption_type` is `enc`.
+    fn palmdb(type_creator: &[u8; 8], enc: u16) -> Vec<u8> {
+        let record0 = (RECORD_LIST_OFF + 8) as u32;
+        let mut v = vec![0u8; RECORD_LIST_OFF + 8];
+        v[TYPE_CREATOR_OFF..TYPE_CREATOR_OFF + 8].copy_from_slice(type_creator);
+        v[76..78].copy_from_slice(&1u16.to_be_bytes());
+        v[RECORD_LIST_OFF..RECORD_LIST_OFF + 4].copy_from_slice(&record0.to_be_bytes());
+        // Record 0: compression, unused, text length, record count, record
+        // size, then `encryption_type`.
+        v.extend_from_slice(&[0u8; ENCRYPTION_OFF]);
+        v.extend_from_slice(&enc.to_be_bytes());
+        v
+    }
+
+    fn mobi_book(enc: u16) -> Vec<u8> {
+        palmdb(BOOKMOBI, enc)
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("sidle-dedrm-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        base
+    }
 
     #[test]
     fn parse_asin_accepts_real_asins_and_rejects_junk() {
@@ -370,31 +510,92 @@ mod tests {
         assert_eq!(
             title_from_stem(
                 "All of Us_ The Collected Poems (Vintage Contemporaries)_B00XST7S8C",
-                "B00XST7S8C"
+                Some("B00XST7S8C")
             ),
             "All of Us: The Collected Poems (Vintage Contemporaries)"
-        );
-        assert_eq!(
-            title_from_stem("Little Children_ A Novel_B000FC1BQK", "B000FC1BQK"),
-            "Little Children: A Novel"
         );
         // No sanitized colon → unchanged but for the ASIN strip.
         assert_eq!(
             title_from_stem(
                 "Neuromancer (Sprawl Trilogy Book 1)_B000O76ON6",
-                "B000O76ON6"
+                Some("B000O76ON6")
             ),
             "Neuromancer (Sprawl Trilogy Book 1)"
+        );
+        // A sideload with no ASIN keeps its whole stem.
+        assert_eq!(
+            title_from_stem("Some Book_ A Novel", None),
+            "Some Book: A Novel"
         );
     }
 
     #[test]
+    fn every_extension_the_engine_names_classifies() {
+        assert_eq!(Format::of_path(Path::new("a.kfx")), Some(Format::Kfx));
+        for ext in MOBI_EXTENSIONS {
+            assert_eq!(
+                Format::of_path(&PathBuf::from(format!("a.{ext}"))),
+                Some(Format::Mobi),
+                "{ext}"
+            );
+        }
+        // FAT round-trips through desktops that upper-case extensions.
+        assert_eq!(Format::of_path(Path::new("a.AZW3")), Some(Format::Mobi));
+        assert_eq!(Format::of_path(Path::new("a.KFX")), Some(Format::Kfx));
+        // The engine's scanner names neither of these.
+        assert_eq!(Format::of_path(Path::new("a.azw")), None);
+        assert_eq!(Format::of_path(Path::new("a.prc")), None);
+        // Everything else, the engine's own KFX output included.
+        assert_eq!(Format::of_path(Path::new("a.kfx-zip")), None);
+        assert_eq!(Format::of_path(Path::new("a.epub")), None);
+        assert_eq!(Format::of_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn kfx_output_takes_a_new_extension_and_mobi_keeps_its_own() {
+        let items = Path::new(ITEMS_DIR);
+        assert_eq!(
+            out_path(&items.join("Book_B000O76ON6.kfx")),
+            Some(Path::new(OUT_DIR).join("Book_B000O76ON6.kfx-zip"))
+        );
+        // The MOBI path copies the file under its own name — same name, same
+        // extension, different directory.
+        assert_eq!(
+            out_path(&items.join("Some Book_B000O76ON6.azw3")),
+            Some(Path::new(OUT_DIR).join("Some Book_B000O76ON6.azw3"))
+        );
+        // `file_stem` splits at the last dot; a volume number survives.
+        assert_eq!(
+            out_path(&items.join("All of Us_ Vol. 1_B00XST7S8C.kfx")),
+            Some(Path::new(OUT_DIR).join("All of Us_ Vol. 1_B00XST7S8C.kfx-zip"))
+        );
+        assert_eq!(out_path(Path::new("/x/noext")), None);
+    }
+
+    #[test]
+    fn source_book_inverts_out_path_for_both_families() {
+        for name in ["Book_B000O76ON6.kfx", "Book_B000O76ON6.azw3", "Book.mobi"] {
+            let book = Path::new(ITEMS_DIR).join(name);
+            let out = out_path(&book).unwrap();
+            assert_eq!(source_book(&out).as_deref(), Some(book.as_path()), "{name}");
+            assert!(is_output(&out), "{name}");
+        }
+        // Not an engine output — `decrypted_books` never yields these.
+        assert_eq!(source_book(Path::new("/x/keyfile.txt")), None);
+        assert!(!is_output(Path::new("/x/keyfile.txt")));
+        // A bare `.kfx` carries an input's extension, not an output's: the
+        // engine writes `.kfx-zip`.
+        assert_eq!(source_book(Path::new("/x/Book.kfx")), None);
+        assert!(!is_output(Path::new("/x/Book.kfx")));
+    }
+
+    #[test]
     fn scan_in_applies_the_recon_rules() {
-        // A fake Items01 exercising every scan rule: a good+covered book, an
-        // incomplete one (no voucher), a macOS shadow, a no-ASIN file, an
-        // already-decrypted one, and the `updates/` staging dir.
-        let base = std::env::temp_dir().join(format!("sidle-dedrm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        // A fake Items01 exercising every scan rule across both families: a
+        // good+covered KFX, an incomplete one (no voucher), a macOS shadow, a
+        // no-ASIN sideload, a decrypted one, a DRM'd azw3, a DRM-free mobi, a
+        // Topaz `.azw`, and the `updates/` staging dir.
+        let base = scratch("scan");
         let items = base.join("Items01");
         let thumbs = base.join("thumbnails");
         let out = base.join("dedrm");
@@ -402,7 +603,7 @@ mod tests {
         std::fs::create_dir_all(&thumbs).unwrap();
         std::fs::create_dir_all(&out).unwrap();
 
-        let mk = |stem: &str, voucher: bool| {
+        let kfx = |stem: &str, voucher: bool| {
             std::fs::write(items.join(format!("{stem}.kfx")), b"kfx").unwrap();
             if voucher {
                 let assets = items.join(format!("{stem}.sdr")).join("assets");
@@ -410,14 +611,21 @@ mod tests {
                 std::fs::write(assets.join("voucher"), b"v").unwrap();
             }
         };
-        mk("Good Book_ Subtitle_B000O76ON6", true); // kept (has a cover, below)
-        mk("Coverless_B01MXXZOEW", true); // kept, but no thumbnail → placeholder
-        mk("Half Book_B000FC1BQK", false); // no voucher → skipped
-        mk("Done Book_B078H4RWP7", true); // already decrypted → skipped
+        kfx("Good Book_ Subtitle_B000O76ON6", true); // kept (has a cover, below)
+        kfx("Coverless_B01MXXZOEW", true); // kept, but no thumbnail → placeholder
+        kfx("Half Book_B000FC1BQK", false); // no voucher → skipped
+        kfx("Done Book_B078H4RWP7", true); // already decrypted → skipped
         std::fs::write(out.join("Done Book_B078H4RWP7.kfx-zip"), b"z").unwrap();
         std::fs::write(items.join("._Good Book_ Subtitle_B000O76ON6.kfx"), b"x").unwrap();
-        std::fs::write(items.join("random.kfx"), b"x").unwrap(); // no ASIN → skipped
         std::fs::create_dir_all(items.join("updates")).unwrap();
+
+        std::fs::write(items.join("Sideload_ A Novel.azw3"), mobi_book(2)).unwrap();
+        std::fs::write(items.join("Old Book_B01LRIQ74G.mobi"), mobi_book(1)).unwrap();
+        std::fs::write(items.join("Free Book_B0BXTBYRVC.mobi"), mobi_book(0)).unwrap();
+        std::fs::write(items.join("Weird_B00ZJZGVYK.azw3"), mobi_book(9)).unwrap();
+        std::fs::write(items.join("Topaz_B00XST7S8C.azw3"), palmdb(b"TPZ3TPZ3", 2)).unwrap();
+        std::fs::write(items.join("Not A Book_B000FC1BQK.azw"), mobi_book(2)).unwrap();
+
         // A complete thumbnail for the good book; a partial one is ignored.
         std::fs::write(
             thumbs.join("thumbnail_B000O76ON6_EBOK_portrait.jpg"),
@@ -431,21 +639,35 @@ mod tests {
         .unwrap();
 
         let found = scan_in(&items, &thumbs, &out);
-        // Exactly the two complete, undecrypted, ASIN-named books survive (order
-        // is by mtime, which the two temp files share — so assert by title, not
-        // position).
-        assert_eq!(found.len(), 2);
+        let titles: Vec<&str> = found.iter().map(|d| d.book.title.as_str()).collect();
+        // Order is by mtime, which the temp files share — assert by title.
+        assert_eq!(found.len(), 4, "{titles:?}");
         let by_title = |t: &str| found.iter().find(|d| d.book.title == t).unwrap();
         let good = by_title("Good Book: Subtitle");
         let coverless = by_title("Coverless");
+        let sideload = by_title("Sideload: A Novel");
+        let old = by_title("Old Book");
+
         // The `.kfx` under Items01 is the decrypt input; its complete cover
         // matched by ASIN (a `.tmp.partial` thumbnail is treated as absent).
-        assert!(
-            good.kfx_path
-                .ends_with("Good Book_ Subtitle_B000O76ON6.kfx")
-        );
+        assert!(good.path.ends_with("Good Book_ Subtitle_B000O76ON6.kfx"));
         assert!(good.cover_path.is_some());
         assert_eq!(coverless.cover_path, None);
+        // Each family's own output naming, rooted at the injected dir.
+        assert_eq!(
+            good.out_path,
+            out.join("Good Book_ Subtitle_B000O76ON6.kfx-zip")
+        );
+        assert_eq!(sideload.out_path, out.join("Sideload_ A Novel.azw3"));
+        assert_eq!(old.out_path, out.join("Old Book_B01LRIQ74G.mobi"));
+        // A sideload with no ASIN is listed, without a cover.
+        assert_eq!(sideload.cover_path, None);
+        // The Format facet reads the conversion kind: KFX its own, the MOBI
+        // family the EPUB side the desktop imports them through.
+        assert_eq!(good.book.kind.as_deref(), Some("kfx_to_epub"));
+        assert_eq!(sideload.book.kind.as_deref(), Some("epub_to_kfx"));
+        // Byte size comes off the scanned file.
+        assert_eq!(sideload.book.file_size, mobi_book(2).len() as i64);
         // No series/author → standalone tiles; empty search_key feeds the title
         // search fallback.
         assert!(good.book.series_name.is_none());
@@ -453,24 +675,14 @@ mod tests {
         // ids are the contiguous scan indices (the cover/tap seams key off this).
         let mut ids: Vec<i64> = found.iter().map(|d| d.book.id).collect();
         ids.sort();
-        assert_eq!(ids, vec![0, 1]);
+        assert_eq!(ids, vec![0, 1, 2, 3]);
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn source_kfx_inverts_out_path() {
-        // A dotted title exercises the suffix-strip vs. a naive extension split.
-        let kfx = Path::new(ITEMS_DIR).join("All of Us_ Vol. 1_B00XST7S8C.kfx");
-        assert_eq!(source_kfx(&out_path(&kfx)).as_deref(), Some(kfx.as_path()));
-        // Not a `.kfx-zip` name → None (decrypted_books only ever yields those).
-        assert_eq!(source_kfx(Path::new("/x/foo.kfx")), None);
     }
 
     #[test]
     fn cleanup_removes_only_this_books_footprint() {
-        let base = std::env::temp_dir().join(format!("sidle-cleanup-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = scratch("cleanup");
         let items = base.join("Items01");
         let out = base.join("dedrm");
         std::fs::create_dir_all(&items).unwrap();
@@ -494,10 +706,10 @@ mod tests {
         std::fs::create_dir_all(&other_sdr).unwrap();
         std::fs::write(&other_zip, b"z").unwrap();
 
-        // sdr_dir must resolve the sidecar from the `.kfx`'s own parent.
+        // sdr_dir must resolve the sidecar from the book's own parent.
         assert_eq!(sdr_dir(&kfx), sdr);
 
-        let failures = cleanup_paths(&kfx, &sdr_dir(&kfx), &zip);
+        let failures = cleanup_paths(&kfx, &sdr_dir(&kfx), Some(&zip));
         assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
         // The synced book's three parts are gone…
@@ -509,8 +721,61 @@ mod tests {
         assert!(other_sdr.exists());
         assert!(other_zip.exists());
 
-        // Idempotent: a second pass over the now-absent footprint is a no-op.
-        assert!(cleanup_paths(&kfx, &sdr_dir(&kfx), &zip).is_empty());
+        // Idempotent: a second pass over the absent footprint is a no-op.
+        assert!(cleanup_paths(&kfx, &sdr_dir(&kfx), Some(&zip)).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_mobi_cleanup_keeps_the_input_and_output_apart() {
+        // The MOBI output carries the input's own filename; the two differ only
+        // by directory, and a cleanup removes both, not one twice.
+        let base = scratch("mobi-cleanup");
+        let items = base.join("Items01");
+        let out = base.join("dedrm");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+
+        let book = items.join("Sideload.azw3");
+        let decrypted = out.join("Sideload.azw3");
+        std::fs::write(&book, mobi_book(2)).unwrap();
+        std::fs::write(&decrypted, b"clear").unwrap();
+
+        assert!(cleanup_paths(&book, &sdr_dir(&book), Some(&decrypted)).is_empty());
+        assert!(!book.exists());
+        assert!(!decrypted.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_palmdoc_gate_reads_the_books_own_header() {
+        let base = scratch("palmdoc");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let cases: [(&str, Vec<u8>, bool); 6] = [
+            ("legacy.mobi", mobi_book(1), true),
+            ("mobipocket.azw3", mobi_book(2), true),
+            ("free.azw3", mobi_book(0), false),
+            // The engine refuses any type outside 0/1/2.
+            ("unknown.azw4", mobi_book(9), false),
+            ("topaz.azw3", palmdb(b"TPZ3TPZ3", 2), false),
+            ("junk.mobi", b"not a palm database".to_vec(), false),
+        ];
+        for (name, bytes, drm) in &cases {
+            let path = base.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(is_encrypted(&path, Format::Mobi), *drm, "{name}");
+        }
+        // A file cut short of the field must not read as DRM-free.
+        let short = base.join("short.mobi");
+        let mut bytes = mobi_book(2);
+        bytes.truncate(RECORD_LIST_OFF + 8 + 4);
+        std::fs::write(&short, &bytes).unwrap();
+        assert_eq!(palmdoc_encryption(&short), None);
+        assert!(!is_encrypted(&short, Format::Mobi));
+        assert!(!is_encrypted(&base.join("absent.mobi"), Format::Mobi));
 
         let _ = std::fs::remove_dir_all(&base);
     }

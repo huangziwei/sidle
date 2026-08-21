@@ -1203,13 +1203,22 @@ struct BookPushReply {
     outcome: String,
 }
 
-/// Push one decrypted `.kfx-zip` to sidle-server's `POST /sync/book`, which
-/// imports it exactly as the desktop's USB `/dedrm` auto-pull would (hash-
-/// deduped, so USB and WiFi coexist). Streams the file straight from disk rather
-/// than buffering the whole book in the Kindle's RAM.
+/// Push one decrypted book to sidle-server's `POST /sync/book`, which imports it
+/// exactly as the desktop's USB `/dedrm` auto-pull does — hash-deduped, letting
+/// USB and WiFi coexist. Streams the file straight from disk; the whole book
+/// never sits in the Kindle's RAM.
+///
+/// `?ext=` carries the file's own extension, which the server stages the bytes
+/// under. The engine writes a KFX as `.kfx-zip` and a MOBI-family book under its
+/// own name; the bytes alone name neither.
 pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result<BookPush> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let url = format!("https://{}:{}/sync/book", cfg.host, cfg.port);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let url = format!("https://{}:{}/sync/book?ext={ext}", cfg.host, cfg.port);
     let mut res = match agent
         .post(&url)
         .header("X-Sidle-Token", &cfg.token)
