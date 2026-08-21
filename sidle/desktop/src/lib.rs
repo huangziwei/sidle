@@ -80,6 +80,7 @@ pub fn run() {
             commands::library::library_location,
             commands::library::library_pick_folder,
             commands::apps::apps_overview,
+            commands::apps::apps_device_status,
             commands::apps::apps_add,
             commands::apps::apps_remove,
             commands::library::library_relocate_move,

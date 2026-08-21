@@ -10,8 +10,11 @@
 
   const state = {
     overview: null, // AppsOverview from apps_overview
+    device: null, // AppsDeviceStatus, once one has landed
+    deviceBusy: false, // a device read is in flight
+    deviceStale: false, // a refresh landed during that read
     busy: null, // app id installing, or "*" for Update all
-    seq: 0, // issue number of the newest apps_overview call
+    seq: 0, // issue number of the newest refresh
     view: "list", // "gallery" | "list", set by library.js's toggle
   };
 
@@ -32,7 +35,10 @@
 
   // ---- data ---------------------------------------------------------------
 
-  // `state.seq` numbers each call; a reply that is not the newest is dropped.
+  // Two calls, rendered as each lands: the apps on this machine, then their
+  // state on the Kindle. The second waits on the device's single USB session,
+  // which an annotation sync can hold for minutes. `state.seq` numbers each
+  // refresh; a reply that is not the newest is dropped.
   async function refresh() {
     const mine = ++state.seq;
     let overview = null;
@@ -44,8 +50,48 @@
     }
     if (mine !== state.seq) return;
     state.overview = overview;
+    const connected = !!overview?.device_connected;
+    if (!connected) state.device = null;
     if (error) toast(`Could not read the apps: ${error}`, true);
+    // `readDevice` marks itself busy before its first await, which the render
+    // below paints as "Checking…".
+    if (connected) readDevice();
     render();
+  }
+
+  // One read of the Kindle at a time — a refresh during one asks for another
+  // after it rather than queueing a second walk of the device. The last status
+  // to land stays on screen throughout, so a row that already knows its Kindle
+  // state does not blank on every refresh.
+  async function readDevice() {
+    if (state.deviceBusy) {
+      state.deviceStale = true;
+      return;
+    }
+    state.deviceBusy = true;
+    const mine = state.seq;
+    let status = null;
+    let error = null;
+    try {
+      status = await api.invoke("apps_device_status");
+    } catch (err) {
+      error = err;
+    }
+    state.deviceBusy = false;
+    if (mine === state.seq) {
+      state.device = status || { apps: [], error: `${error}` };
+      // A push owns the summary line while it runs, and refreshes after.
+      if (state.busy == null) render();
+    }
+    if (state.deviceStale) {
+      state.deviceStale = false;
+      if (state.overview?.device_connected) readDevice();
+    }
+  }
+
+  // This app's state on the Kindle, or null while it is unread.
+  function statusOf(app) {
+    return state.device?.apps.find((a) => a.id === app.id) || null;
   }
 
   // A device connect or disconnect changes every row's right half.
@@ -76,8 +122,8 @@
   function deviceState(app, connected) {
     if (app.error) return { label: "source unreadable", cls: "bad" };
     if (!connected) return null;
-    const d = app.device;
-    if (!d) return { label: "—", cls: "" };
+    const d = statusOf(app);
+    if (!d) return { label: state.deviceBusy ? "Checking…" : "—", cls: "" };
     switch (d.overall.kind) {
       case "in_sync":
         return {
@@ -107,7 +153,7 @@
 
   // What a push writes, and what it keeps. Empty when there is neither.
   function preflight(app) {
-    const d = app.device;
+    const d = statusOf(app);
     if (!d) return "";
     const parts = [];
     if (d.write_count) {
@@ -152,12 +198,12 @@
     for (const c of ov?.conflicts || []) {
       lines.push(`${c.dropped} also claims ${c.path} — ${c.kept}'s is used.`);
     }
-    if (ov?.device_error) lines.push(`Kindle: ${ov.device_error}`);
+    if (state.device?.error) lines.push(`Kindle: ${state.device.error}`);
     note.textContent = lines.join(" ");
     note.hidden = lines.length === 0;
 
     const updateAll = q("#apps-update-all");
-    const pending = apps.some((a) => a.device && a.device.write_count > 0);
+    const pending = apps.some((a) => statusOf(a)?.write_count > 0);
     updateAll.disabled = !ov?.device_connected || !pending || state.busy != null;
     updateAll.textContent = ov?.device_connected ? "Update all" : "No Kindle";
 
@@ -319,8 +365,10 @@
     const actions = document.createElement("div");
     actions.className = "apps-row-actions";
 
-    const d = app.device;
-    if (ov?.device_connected && !app.error) {
+    const d = statusOf(app);
+    // Which action a row offers is read off the Kindle, so they wait for it.
+    const known = !state.deviceBusy || d != null;
+    if (ov?.device_connected && !app.error && known) {
       const install = document.createElement("button");
       install.type = "button";
       install.className = "btn-link";

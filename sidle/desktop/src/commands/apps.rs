@@ -28,8 +28,6 @@ pub struct AppRow {
     pub total_bytes: u64,
     /// Why this app's tree could not be read.
     pub error: Option<String>,
-    /// This app's state on the connected Kindle. `None` when none is connected.
-    pub device: Option<sidle_core::library::device::deploy::AppDeployStatus>,
     /// What the Wi-Fi route offers. `None` for an app the manifest does not
     /// name.
     pub dist: Option<AppDist>,
@@ -54,21 +52,31 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
         file_count: tree.files.len(),
         total_bytes: tree.total_size(),
         error: None,
-        device: None,
         dist: None,
     }
 }
 
-/// What the Apps tab renders: every app in one `DevicePlan`, and its state on
-/// the connected Kindle.
+/// What the Apps tab renders off this machine alone: every app in one
+/// `DevicePlan`, what the Wi-Fi route offers of it, and whether a Kindle is
+/// connected. The device half of a row comes from [`apps_device_status`].
 #[derive(Serialize)]
 pub struct AppsOverview {
     pub apps: Vec<AppRow>,
     pub device_connected: bool,
-    /// Set when a Kindle is connected but its status could not be read.
-    pub device_error: Option<String>,
     /// Two apps claiming one mount path, reported and not resolved.
     pub conflicts: Vec<sidle_core::library::apps::compose::PathConflict>,
+}
+
+/// Every app's state on the connected Kindle.
+///
+/// One device read, sharing the Kindle's single USB session with an annotation
+/// sync and queueing behind it. Separate from [`AppsOverview`], which answers
+/// off this machine alone.
+#[derive(Serialize)]
+pub struct AppsDeviceStatus {
+    pub apps: Vec<sidle_core::library::device::deploy::AppDeployStatus>,
+    /// Set when a Kindle is connected but its status could not be read.
+    pub error: Option<String>,
 }
 
 #[tauri::command]
@@ -95,25 +103,36 @@ pub async fn apps_overview(state: State<'_, AppState>) -> Result<AppsOverview, S
             });
         }
     }
-    let device_connected = state.device.lock().await.is_some();
-    let mut device_error = None;
-    if device_connected {
-        match crate::commands::device::device_app_status(&state, &plan, &source).await {
-            Ok(status) => {
-                for app in &mut apps {
-                    app.device = status.apps.iter().find(|a| a.id == app.id).cloned();
-                }
-            }
-            Err(e) => device_error = Some(e),
-        }
-    }
 
     Ok(AppsOverview {
         apps,
-        device_connected,
-        device_error,
+        device_connected: state.device.lock().await.is_some(),
         conflicts: plan.conflicts,
     })
+}
+
+/// The device half of every row. Empty with no Kindle connected.
+#[tauri::command]
+pub async fn apps_device_status(state: State<'_, AppState>) -> Result<AppsDeviceStatus, String> {
+    if state.device.lock().await.is_none() {
+        return Ok(AppsDeviceStatus {
+            apps: Vec::new(),
+            error: None,
+        });
+    }
+    let source = state.device_app_source.clone();
+    let plan = crate::commands::device::compose_plan(&state, &source).await?;
+    match crate::commands::device::device_app_status(&state, &plan, &source).await {
+        Ok(status) => Ok(AppsDeviceStatus {
+            apps: status.apps,
+            error: None,
+        }),
+        // A device that cannot be read is `error`, not a failed call.
+        Err(e) => Ok(AppsDeviceStatus {
+            apps: Vec::new(),
+            error: Some(e),
+        }),
+    }
 }
 
 /// One row per app in `plan`, plus one per named source in `plan.errors`.
@@ -148,7 +167,6 @@ fn apps_list(
             file_count: 0,
             total_bytes: 0,
             error: Some(e.error.clone()),
-            device: None,
             dist: None,
         });
     }
