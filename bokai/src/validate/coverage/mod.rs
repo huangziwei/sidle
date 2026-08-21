@@ -7,8 +7,8 @@
 //! - [`style`] — which CSS property names bokai's parser accepts vs silently
 //!   drops.
 //!
-//! Kept here for proximity to the validators they inform, but they belong to
-//! the bokai roadmap, not the pass/fail gate.
+//! Kept here for proximity to the validators they inform; nothing in this
+//! module belongs in a pass/fail gate.
 
 pub mod style;
 pub mod tags;

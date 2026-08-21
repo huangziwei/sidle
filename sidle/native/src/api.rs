@@ -280,8 +280,7 @@ pub struct Book {
     /// Cover revision (ms mtime) from the server, folded into the on-device
     /// cover-cache filename (`cover_cache`) so a desktop recrawl that changes
     /// the cover bumps the rev and self-invalidates the stale thumbnail.
-    /// `#[serde(default)]` → 0 against an older server, i.e. cache by id alone
-    /// (the prior behavior).
+    /// `#[serde(default)]` → 0 against an older server, i.e. cache by id alone.
     #[serde(default)]
     pub cover_rev: i64,
     /// Content revision of the KFX on the server: the file's ms mtime. Because
@@ -290,7 +289,7 @@ pub struct Book {
     /// this is the only signal that the device copy is stale. The picker records
     /// it at download time (`crate::updates`) and re-pulls in place when the
     /// server's value moves. `#[serde(default)]` → 0 against an older server, i.e.
-    /// "no update tracking" (the prior behavior).
+    /// "no update tracking".
     #[serde(default)]
     pub kfx_rev: i64,
     /// Canonical (space/punctuation-free, ASCII-folded, lowercase) search key the

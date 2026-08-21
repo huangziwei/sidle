@@ -56,8 +56,8 @@ pub struct Misordering {
     pub machine_sorted: bool,
     /// The first entry the spine reads *late* — the TOC lists it before the
     /// entry after it, and the spine puts it after. Naming this side of the
-    /// inversion is what makes the report legible: on the book this was found
-    /// on it is 【九】, which reads after the appendices.
+    /// inversion is what makes the report legible — "【九】 reads after the
+    /// appendices" rather than "the spine disagrees with the TOC".
     pub first_out_of_order: Option<String>,
 }
 

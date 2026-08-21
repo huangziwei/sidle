@@ -3647,7 +3647,7 @@ async function openNotebook(desc) {
   document.addEventListener("keydown", keyHandler, true);
 }
 
-// Synchronous in this phase; becomes async when Phase 4 saves the last-read page.
+// Synchronous: nothing here is persisted, so callers need not await a close.
 function closeNotebook() {
   if (keyHandler) {
     document.removeEventListener("keydown", keyHandler, true);

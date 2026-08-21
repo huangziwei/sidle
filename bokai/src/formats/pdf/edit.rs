@@ -196,7 +196,7 @@ mod tests {
     }
 
     /// A PDF using a cross-reference **stream** + an `/Info`, the layout every
-    /// modern PDF (both real books this was validated against) actually uses.
+    /// modern PDF actually uses.
     /// The harness must chain `/Prev` to it and append a matching xref *stream*,
     /// which is a different writer path from `minimal.pdf`'s xref table — so it
     /// gets its own coverage rather than relying on an out-of-repo book.

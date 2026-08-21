@@ -5,12 +5,11 @@
 //! [`emit_nav`] / [`emit_ncx`], so the two navigation artifacts have one
 //! shape by construction.
 //!
-//! Escaping is deliberately two-tiered to stay byte-stable with the emitter
-//! this code was extracted from: the TOC/page-list `<ol>` bodies and the NCX
-//! navMap never escaped apostrophes (raw `'` is valid XML in text and in
+//! Escaping is deliberately two-tiered: the TOC/page-list `<ol>` bodies and
+//! the NCX navMap leave apostrophes raw (valid XML in text and in
 //! double-quoted attributes), while the document shell and the landmarks nav
-//! escape the full five. Collapsing the two would churn every shipped book
-//! for zero validity gain.
+//! escape the full five. Collapsing the two would churn the bytes of every
+//! book already published for zero validity gain.
 
 use std::collections::HashMap;
 

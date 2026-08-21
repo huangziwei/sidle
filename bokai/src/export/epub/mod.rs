@@ -311,7 +311,7 @@ impl EpubExporter {
         // Add chapters to manifest. Chapter bytes load once here — the
         // OPF-014 property scan (a content doc embedding inline SVG / MathML
         // / scripting must declare it on its manifest item) needs the text,
-        // and step 7 writes the same bytes.
+        // and the zip write below emits the same bytes.
         let mut chapter_bytes: Vec<Vec<u8>> = Vec::with_capacity(spine.len());
         for (i, entry) in spine.iter().enumerate() {
             on_progress("content", i + 1, spine.len(), "Reading chapters");

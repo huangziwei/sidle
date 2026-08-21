@@ -539,8 +539,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         "identifier" => {
                             // Route by scheme: ASIN / MOBI-ASIN go into the
                             // dedicated field; everything else fills the
-                            // generic identifier (first one wins to match
-                            // prior behavior).
+                            // generic identifier (first one wins).
                             // Legacy EPUB-2 form carries the scheme as an
                             // `opf:scheme="ASIN"` attribute; EPUB-3-valid output
                             // (KFX→EPUB) instead tags the identifier with

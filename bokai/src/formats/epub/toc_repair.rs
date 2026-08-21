@@ -1132,7 +1132,7 @@ mod tests {
     fn repairs_a_no_toc_epub() {
         let epub = no_toc_epub();
 
-        // Originally deficient: a chapterless declared TOC with in-book chapters.
+        // The fixture declares no TOC at all while carrying in-book chapters.
         let before = crate::validate::source::toc::validate(&epub).expect("validate");
         assert_eq!(before.nav_count, 0, "starts with no declared TOC");
 

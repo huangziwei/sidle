@@ -90,9 +90,10 @@ resvg = { version = "0.47", default-features = false, features = ["text", "syste
 # Base64 encoding for KFX raw media
 base64 = "0.22"
 
-# Pure-Rust JPEG encoder. Used by the kfx_to_epub mechanical port to
-# re-encode JPEG-XR images decoded from KFX into something EPUB readers
-# can render. Small, focused, no C deps.
+# Pure-Rust JPEG encoder. The single encoder in the crate: it re-encodes
+# JPEG-XR decoded from KFX into something EPUB readers can render
+# (`formats::kfx::jxr`, `image::jpeg`), rasterizes the Aozora cover, and
+# writes PDF page plates. Small, focused, no C deps.
 jpeg-encoder = { version = "0.6", default-features = false }
 
 # Pure-Rust JPEG-XR codec (top-level workspace crate; zero deps). Decodes KFX

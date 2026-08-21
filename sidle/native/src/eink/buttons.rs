@@ -7,8 +7,8 @@
 //!
 //! We open it and `EVIOCGRAB` it for the same reason `touch.rs` grabs the
 //! touchscreen: once grabbed, the stock framework no longer sees the press, so
-//! it stops repainting the native library over our gallery (the corruption
-//! this fixes). Without the grab the picker UI tears on every button press.
+//! it stops repainting the native library over our gallery. Without the grab
+//! the picker UI tears on every button press.
 //!
 //! **Safety:** the device is matched by exact `Name="gpio-keys"`, never "any
 //! key device". The power button(s) are *separate* devices — `snvs-powerkey`

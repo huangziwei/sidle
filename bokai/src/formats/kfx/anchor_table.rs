@@ -37,15 +37,15 @@ pub struct AnchorTable {
     pub position_anchors: HashMap<i64, HashMap<i64, Vec<String>>>,
 
     /// Reverse index `anchor_name → (location_id, offset)`, built alongside
-    /// `position_anchors`. `resolve_uri` used to scan the whole
-    /// `position_anchors` map for every `<a href="anchor:…">` — an
-    /// O(hrefs × anchors) quadratic that cost ~300 ms on a link-dense book.
-    /// This makes resolution O(1). The OFFSET is retained (not just the eid)
-    /// so `resolve_uri` can resolve a link to ANY anchor at a position to the
-    /// SAME element id the *first* anchor there stamped (calibre's
-    /// `get_anchor_uri` semantics — `id_at` returns the first anchor's id, so a
-    /// link naming a non-first co-located anchor must still point at that id or
-    /// it dangles). First registration wins, matching the prior "first match".
+    /// `position_anchors`, so `resolve_uri` answers each
+    /// `<a href="anchor:…">` in O(1) instead of scanning the whole map —
+    /// quadratic in hrefs × anchors, hundreds of milliseconds on a link-dense
+    /// book. The OFFSET is retained (not just the eid) so `resolve_uri` can
+    /// resolve a link to ANY anchor at a position to the SAME element id the
+    /// *first* anchor there stamped (calibre's `get_anchor_uri` semantics —
+    /// `id_at` returns the first anchor's id, so a link naming a non-first
+    /// co-located anchor must still point at that id or it dangles). First
+    /// registration wins.
     pub name_to_position: HashMap<String, (i64, i64)>,
 
     /// Heading level (1..=6) registered at a `(location_id, offset)` by the

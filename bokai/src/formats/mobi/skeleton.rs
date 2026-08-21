@@ -689,10 +689,9 @@ mod chunker_tests {
 
     #[test]
     fn chunk_selectors_are_per_file_unique() {
-        // Regression test for issue #10: every spine file's chunks must
-        // reference *that file's* body aid in their selector, not a single
-        // shared aid. With shared selectors Kindle conflates positions
-        // across files during layout and locks up.
+        // Every spine file's chunks must reference *that file's* body aid in
+        // their selector, not a single shared aid. With shared selectors
+        // Kindle conflates positions across files during layout and locks up.
         let html = |n| {
             format!(
                 "<html><head><title>F{n}</title></head><body>\

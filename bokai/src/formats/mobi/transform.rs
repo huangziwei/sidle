@@ -486,8 +486,8 @@ pub fn inline_svg_flows(
         } else {
             // Flow missing, not SVG, or out of range — leave the tag alone.
             // `transform_kindle_refs` will rewrite the URL to a CSS path,
-            // which produces a broken `<img src="...css">` but matches
-            // prior behavior rather than silently dropping content.
+            // which produces a broken `<img src="...css">` — preferred to
+            // silently dropping the content.
             output.extend_from_slice(&html[pos..tag_end]);
             pos = tag_end;
         }

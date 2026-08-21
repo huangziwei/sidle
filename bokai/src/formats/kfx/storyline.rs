@@ -2001,9 +2001,9 @@ pub fn ir_to_tokens(chapter: &Chapter, ctx: &mut ExportContext) -> TokenStream {
 
 /// Walk a node and emit tokens for export.
 ///
-/// Uses schema-driven attribute export (FIX for Issue #2: Attribute Hardcoding).
-/// Inline roles (Link, Inline) are emitted as StartSpan/EndSpan instead of
-/// StartElement/EndElement, enabling proper style_events generation.
+/// Attributes are exported through the schema, never hardcoded. Inline roles
+/// (Link, Inline) are emitted as StartSpan/EndSpan instead of
+/// StartElement/EndElement, which is what lets style_events be generated.
 fn walk_node_for_export(
     chapter: &Chapter,
     node_id: NodeId,
@@ -4254,15 +4254,14 @@ mod tests {
     #[test]
     fn test_captioned_figure_migrates_image_into_content_list() {
         // `<div class="pic"><img/>caption</div>` — image FIRST, caption text
-        // AFTER, no text before. A regression guard for the captioned-figure
-        // bug: the pre-interleave exporter externalized the caption to a
-        // `content` entity WHILE leaving the image stranded in `content_list`,
-        // producing a node with BOTH fields. Renderers (Kindle + the KFX→IR
-        // importer) honor `content` and drop `content_list`, so every captioned
-        // figure lost its image. The image must instead migrate into the
-        // interleave: content_list = [image(render: inline), "caption"], and no
-        // `content` field. Real-world hit: Kobo-processed CJK books whose
-        // figures carry an inline caption in the same `<div class="pic">`.
+        // AFTER, no text before. Externalizing the caption to a `content`
+        // entity while the image stays in `content_list` gives the node BOTH
+        // fields, and renderers (Kindle + the KFX→IR importer) honor `content`
+        // and drop `content_list` — which loses the image. It must migrate
+        // into the interleave instead: content_list = [image(render: inline),
+        // "caption"], and no `content` field. Kobo-processed CJK books hit
+        // this, their figures carrying an inline caption in the same
+        // `<div class="pic">`.
         let mut chapter = Chapter::new();
 
         let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
@@ -4771,12 +4770,12 @@ mod tests {
 
     #[test]
     fn test_horizontal_rule_keeps_its_element_type() {
-        // An `<hr>` is drawn from a border, so the bordered-box path used to
-        // claim it: the rule came out as `type: container` holding an empty
-        // `type: text`, and re-importing gave back a `Container` + empty
-        // `Paragraph` instead of a `Rule`. Amazon emits the bare element
-        // (`{style: linear, type: horizontal_rule}`), which is also the shape
-        // this crate's own importer reads back as `Role::Rule`.
+        // An `<hr>` is drawn from a border, so the bordered-box path can
+        // claim it and emit `type: container` around an empty `type: text`,
+        // which re-imports as a `Container` + empty `Paragraph`. Amazon emits
+        // the bare element (`{style: linear, type: horizontal_rule}`), which
+        // is also the shape this crate's own importer reads back as
+        // `Role::Rule`.
         use crate::style::{BorderStyle, ComputedStyle, Length};
 
         let mut chapter = Chapter::new();

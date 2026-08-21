@@ -1303,8 +1303,8 @@ mod tests {
 
     #[test]
     fn indent_depth_is_carried_not_flattened() {
-        // Every depth used to collapse to the stylesheet's one character, and a
-        // one-line `［＃N字下げ］` indented nothing at all.
+        // Each depth carries its own margin, and a one-line `［＃N字下げ］`
+        // indents that one line.
         let src = "T\nA\n\n-------\n［＃ここから４字下げ］\n深い\n［＃ここで字下げ終わり］\n［＃５字下げ］一行だけ\n［＃天から２字下げ］天から\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;

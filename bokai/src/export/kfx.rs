@@ -1408,13 +1408,14 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// whose text is mostly unstyled from surrendering its one decorative `標楷體`,
 /// without a constant deciding how small "decorative" is.
 ///
-/// This was fitted first — a share cut tuned against Amazon's own decisions —
-/// and the comparison is why it is gone: the two agree on **all 917 stacks in
-/// 435 Amazon books and all 1,625 books in the reference library**, so the
-/// constant only restated what the book's own proportions already say. It also
-/// tunes itself where a fixed cut had to be chosen: one Amazon book hands over
-/// a stack holding just 44.5% of its text, having split the rest across two
-/// other faces, and the plurality sees that without being told.
+/// A fixed share cut ("hand over the stack past N% of the text") answers the
+/// same question, and across **917 stacks in 435 Amazon books and 1,625 books
+/// in the reference library** it never disagrees — it only restates what the
+/// book's own proportions already say, while needing a threshold chosen by
+/// hand. The plurality tunes itself instead: one Amazon book hands over a
+/// stack holding just 44.5% of its text, having split the rest across two
+/// other faces, and the plurality sees that without being told. Do not
+/// reintroduce a constant here.
 ///
 /// **Exactly one stack hands over, even when a book reads in several faces.**
 /// An anthology whose quoted stories use a second face keeps that face pinned,

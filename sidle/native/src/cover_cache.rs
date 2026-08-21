@@ -11,7 +11,7 @@
 //! bumps the rev, so the next launch misses the old file and refetches — self-
 //! invalidating. `store` prunes prior revisions, so the cache holds one file
 //! per book, not one per cover version. (An older server omits `cover_rev`, so
-//! every book gets rev 0 — i.e. caches by id alone, the prior behavior.)
+//! every book gets rev 0 — i.e. caches by id alone.)
 //!
 //! FAT-safe atomic write: bytes are written to a `.partial` sibling then
 //! renamed over the target, so a crash mid-write can't leave a truncated JPEG

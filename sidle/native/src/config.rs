@@ -10,9 +10,8 @@ use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Mac's LAN IP or hostname. Named `HOST` in the file (the old Phase 5
-    /// bundle called it `MAC`; we renamed because it's an IP, not a MAC
-    /// address — the legacy name was a bug magnet).
+    /// Mac's LAN IP or hostname. Named `HOST` in the config file — it holds an
+    /// address, never a MAC.
     pub host: String,
     pub port: u16,
     pub token: String,

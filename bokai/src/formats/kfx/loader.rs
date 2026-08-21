@@ -489,7 +489,7 @@ fn resolve_cover_value(value: Option<&IonValue>, symbols: &SymbolTable) -> Optio
 mod tests {
     use super::*;
 
-    /// Minimum-viable load check on the committed 黒死館殺人事件 KFX fixture.
+    /// Load check on the committed 黒死館殺人事件 KFX fixture.
     #[test]
     fn load_ningen_shikkaku_kfx_smoke() {
         let path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";

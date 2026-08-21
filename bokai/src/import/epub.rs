@@ -822,7 +822,8 @@ mod tests {
                 br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
             )
             .unwrap();
-            // The explicit directory entry that used to leak into `assets`.
+            // An explicit directory entry: a zip member with no bytes, which
+            // must not be collected as an asset.
             zip.add_directory("OEBPS", opt).unwrap();
             zip.start_file("OEBPS/content.opf", opt).unwrap();
             zip.write_all(

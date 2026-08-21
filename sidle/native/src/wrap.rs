@@ -77,9 +77,9 @@ where
 /// overflows the box (in the degenerate case the line collapses to just
 /// `…`).
 ///
-/// Same `measure` contract as [`wrap_to_width`]. Extracted from the cover
-/// placeholder renderer so the diagnostics panel can clamp long error
-/// strings the same way — one tested path for both.
+/// Same `measure` contract as [`wrap_to_width`]. Shared by the cover
+/// placeholder renderer and the diagnostics panel's error strings — one
+/// tested path for both.
 pub fn wrap_and_clamp<F>(
     text: &str,
     max_width: u32,
