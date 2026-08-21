@@ -4628,7 +4628,7 @@ pub const APP_SOURCE_RELEASE: &str = "release";
 /// be stale from the moment it was written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppSourceRow {
-    /// The app's id, as its `app.json` declares it.
+    /// The app's id — its directory name under `extensions/`.
     pub id: String,
     /// [`APP_SOURCE_LOCAL`] or [`APP_SOURCE_RELEASE`].
     pub source_kind: String,

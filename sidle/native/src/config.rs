@@ -1,8 +1,6 @@
 //! Parse `etc/server.conf` — shell-style `KEY=VALUE` lines, `#`-prefix
 //! comments. Single source of truth for "where is the Mac, and what's the
-//! token". File lives at `/mnt/us/extensions/sidle/etc/server.conf` on the
-//! device; the in-repo template at `device/extensions/sidle/etc/server.conf.example` is the deploy
-//! template.
+//! token". The file lives at `/mnt/us/extensions/sidle/etc/server.conf`.
 
 use std::path::Path;
 
@@ -15,12 +13,9 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub token: String,
-    /// This Kindle's USB iSerial, written by the desktop app at deploy
-    /// time (it read it off the mounted device). Echoed back as `device_serial`
-    /// in the `/sync/annotations` push so the server keys annotations per
-    /// device. Empty when loaded from a pre-sync `server.conf` (older install) —
-    /// the push path errors clearly and asks for a re-install rather than
-    /// blocking boot/list/download, which don't need it.
+    /// This Kindle's USB iSerial, echoed back as `device_serial` in the
+    /// `/sync/annotations` push. Empty when `server.conf` carries no `SERIAL=`;
+    /// only the push path reads it.
     pub serial: String,
 }
 

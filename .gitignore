@@ -10,8 +10,8 @@ sidle/desktop/gen/
 
 artifacts/
 
-# Per-install secret + binary. The .example file is the template; real
-# values fill in `etc/server.conf` at install time and stay out of git.
+# Per-install secret + binary. `device/server.conf.example` is the template;
+# real values fill in `etc/server.conf` at install time and stay out of git.
 device/extensions/sidle/etc/server.conf
 device/extensions/sidle/bin/sidle
 device/extensions/sidle/bin/sidle.build-ts

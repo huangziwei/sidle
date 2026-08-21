@@ -458,6 +458,10 @@ pub struct AppArgs {
     /// Write the stale files to the device.
     #[arg(long)]
     install: bool,
+    /// Overwrite files the device changed out from under sidle, and compare
+    /// bytes rather than trusting the install receipt.
+    #[arg(long, requires = "install")]
+    force: bool,
     /// Stage the self-update bundle instead, so a Kindle already carrying the
     /// picker can update itself over the LAN with no cable.
     #[arg(long, conflicts_with = "install")]
@@ -529,9 +533,14 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
         });
     }
 
-    let report = deploy::install_all(&plan, conf.as_ref(), &ca_cert, transport.as_ref(), |r| {
-        eprintln!("  {r:?}");
-    })?;
+    let report = deploy::install_all(
+        &plan,
+        conf.as_ref(),
+        &ca_cert,
+        transport.as_ref(),
+        args.force,
+        |r| eprintln!("  {r:?}"),
+    )?;
     ctx.report(&report, || {
         println!("installed {} file(s)", report.results.len());
     })

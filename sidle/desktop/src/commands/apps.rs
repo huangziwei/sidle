@@ -2,37 +2,35 @@
 //! whatever the user has registered (steb, karyll, kfxdedrm-fe).
 //!
 //! Registering an app records where its mount-rooted tree is on this machine;
-//! everything shown about it — version, file count, size — is read off disk on
-//! every call, because a local source is a working copy whose `build.sh`
-//! rewrites it without telling anyone. The push itself lives in
+//! everything shown about it — name, version, file count, size — is read off
+//! disk on every call, because a local source is a working copy whose
+//! `build.sh` rewrites it without telling anyone. The push itself lives in
 //! `commands::device`, which composes these rows with the tree that ships in
 //! this app bundle.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
-use sidle_core::library::apps::{self, AppTree, FileClass};
+use sidle_core::library::apps::{self, AppTree};
 use sidle_core::library::db;
 use tauri::State;
 
 use crate::state::AppState;
 
-/// One row of the "Apps on device" card.
+/// One row of the Apps tab.
 #[derive(Serialize)]
 pub struct AppRow {
     pub id: String,
     pub name: String,
-    pub version: String,
+    /// Absent for a tree that states no version — steb and karyll ship none,
+    /// and the row shows what the device holds instead.
+    pub version: Option<String>,
     /// Absent for the picker and bokai, which ship with this app and have no
     /// row in the table — there is nothing to remove them from.
     pub source: Option<String>,
     pub tile: Option<String>,
     pub file_count: usize,
     pub total_bytes: u64,
-    /// Bytes a status check has to read: the `sync` files. The rest is `seed`,
-    /// decided by existence alone.
-    pub hashed_bytes: u64,
-    pub seed_count: usize,
     /// Why this app could not be read, when it could not. A moved checkout says
     /// so rather than quietly dropping out of the fleet.
     pub error: Option<String>,
@@ -42,19 +40,13 @@ pub struct AppRow {
 
 fn row(tree: &AppTree, source: Option<String>) -> AppRow {
     AppRow {
-        id: tree.spec.id.clone(),
-        name: tree.spec.name.clone(),
-        version: tree.spec.version.clone(),
+        id: tree.app.id.clone(),
+        name: tree.app.name.clone(),
+        version: tree.app.version.clone(),
         source,
-        tile: tree.spec.tile.clone(),
+        tile: tree.app.tile.clone(),
         file_count: tree.files.len(),
         total_bytes: tree.total_size(),
-        hashed_bytes: tree.sync_files().map(|f| f.size).sum(),
-        seed_count: tree
-            .files
-            .iter()
-            .filter(|f| f.policy.class == FileClass::Seed)
-            .count(),
         error: None,
         device: None,
     }
@@ -125,7 +117,7 @@ pub async fn apps_list(state: State<'_, AppState>) -> Result<Vec<AppRow>, String
         .map(|tree| {
             let source = rows
                 .iter()
-                .find(|r| r.id == tree.spec.id)
+                .find(|r| r.id == tree.app.id)
                 .map(|r| r.source.clone());
             row(tree, source)
         })
@@ -140,13 +132,11 @@ pub async fn apps_list(state: State<'_, AppState>) -> Result<Vec<AppRow>, String
         out.push(AppRow {
             id: e.id.clone(),
             name: e.id.clone(),
-            version: "—".into(),
+            version: None,
             source: Some(e.source.clone()),
             tile: None,
             file_count: 0,
             total_bytes: 0,
-            hashed_bytes: 0,
-            seed_count: 0,
             error: Some(e.error.clone()),
             device: None,
         });
@@ -163,24 +153,17 @@ pub async fn apps_add(state: State<'_, AppState>, path: String) -> Result<Vec<Ap
     let path = PathBuf::from(path);
     let path = std::path::absolute(&path).map_err(|e| e.to_string())?;
     let scan = path.clone();
-    let trees = tokio::task::spawn_blocking(move || apps::discover(&scan))
+    let trees = tokio::task::spawn_blocking(move || apps::discover_registrable(&scan))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("{e:#}"))?;
-    if trees.is_empty() {
-        return Err(format!(
-            "No extensions/<id>/app.json under {}. An app declares itself with \
-             one, so a folder without it is not a tree sidle can install.",
-            path.display()
-        ));
-    }
 
     let conn = state.db.lock().await;
     let mut added = Vec::with_capacity(trees.len());
     for tree in &trees {
         db::upsert_app_source(
             &conn,
-            &tree.spec.id,
+            &tree.app.id,
             db::APP_SOURCE_LOCAL,
             &path.display().to_string(),
             &tree.root.display().to_string(),

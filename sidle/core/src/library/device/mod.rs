@@ -28,6 +28,7 @@ pub mod misc;
 pub mod mtp;
 pub mod notebooks;
 pub mod push;
+pub mod receipt;
 pub mod transport;
 
 pub use transport::{TEntry, TPath, Transport};

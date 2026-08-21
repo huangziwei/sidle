@@ -1,98 +1,51 @@
-//! Finding an app's mount-rooted tree on this machine, and walking it into the
-//! file list an install works from.
+//! Finding an app's mount-rooted tree on this machine and walking it into a
+//! file list.
 //!
-//! # An app owns its extension directory and its tile
+//! An app is `extensions/<id>/**` plus the one `documents/*.sh` that launches
+//! it. `documents/` itself is never swept.
 //!
-//! That is the whole ownership rule. `extensions/<id>/**` is the app's, plus
-//! the one `documents/*.sh` its [`AppSpec::tile`] names — the launcher tile the
-//! library indexes, which has to sit at the mount root because that is the only
-//! place the jailbreak hotfix looks. Nothing else in the tree belongs to the
-//! app, so `documents/` is never walked: it is the writer's directory, and an
-//! app that swept it would claim the user's own files. It also makes removal
-//! answerable without a receipt — delete the extension directory and the tile.
-//!
-//! # Discovery is by `app.json`, not by convention
-//!
-//! Each repo puts its tree somewhere different — `device/` for steb, bokai,
-//! kfxdedrm-fe and the picker, `deploy/out/` for karyll, whatever a zip
-//! unpacked into for a release. Rather than a `root` field that every repo
-//! would have to keep true, the tree announces itself: the directory holding
-//! `extensions/<id>/app.json` *is* `extensions/`, so its parent is the mount
-//! root. One repo can hold several — this one holds the picker and bokai — and
-//! discovery returns all of them.
+//! A directory holding `extensions/` is a mount root. Each directory under it
+//! that holds a payload file is one app, and `discover` returns all of them.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
-use super::spec::{APP_SPEC_FILE, AppSpec, FileClass, PathPolicy};
+use super::identity::AppIdentity;
+use super::policy::{self, Apply, BUILD_STAMP_SUFFIX};
 
-/// How far above `extensions/` a discovery walk looks. karyll's is the deepest
-/// in the fleet at `deploy/out/extensions/`; three leaves room without turning
-/// "add a repo" into a scan of a home directory.
+/// Directories above `extensions/` that `find_apps` descends through.
 const MAX_ROOT_DEPTH: usize = 3;
 
-/// Directories a source walk never descends into. Build outputs and vendored
-/// checkouts can hold an `extensions/` that is not an app of this repo's — and
-/// `target/` in particular is large enough that walking it is the difference
-/// between instant and not.
+/// Directory names `find_apps` never descends into.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "ref", "artifacts"];
-
-/// What an install records inside `extensions/<id>/` about itself: the version
-/// that landed and each `seed` path's generation. Written on the device, never
-/// taken from a source tree — a copy found in one is a stray from a hand-drag
-/// and is skipped like the other files below.
-pub const RECEIPT_FILE: &str = ".sidle-install.json";
-
-fn is_never_installed(name: &str) -> bool {
-    name == ".DS_Store" || name == RECEIPT_FILE || name.starts_with("._")
-}
 
 /// One installable file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppFile {
-    /// Mount-relative, and the one string that keys the manifest entry, the
-    /// served route and the on-device destination.
+    /// Mount-relative: the manifest key, the served route, and the on-device
+    /// destination.
     pub path: String,
     /// Where the bytes are on this machine.
     pub source: PathBuf,
     pub size: u64,
-    pub policy: PathPolicy,
+    pub apply: Apply,
 }
 
-/// An app's tree as found on disk: its spec, its mount root, and every file it
-/// would install. Hashes are not computed here — a status check reads only the
-/// `sync` files, and composing reads all of them once.
+/// One app's tree on disk: its identity, its mount root, and its files.
 #[derive(Debug, Clone)]
 pub struct AppTree {
     /// The directory `extensions/` sits in. Every [`AppFile::path`] resolves
     /// against it.
     pub root: PathBuf,
-    pub spec: AppSpec,
-    /// Sorted by path, so two walks of one tree produce identical lists and a
-    /// manifest diff means a real change.
+    pub app: AppIdentity,
+    /// Sorted by path.
     pub files: Vec<AppFile>,
 }
 
 impl AppTree {
-    /// When this build was made, in unix seconds. The device compares it
-    /// against its own and refuses anything not strictly newer, so a stale
-    /// bundle cannot downgrade a device over Wi-Fi.
-    ///
-    /// A `<file>.build-ts` sidecar anywhere in the tree is the answer; mtimes
-    /// are the fallback for a tree that carries none.
-    ///
-    /// The sidecar exists for the picker, whose `build.sh` bakes the same
-    /// second into the binary. That value is what the running picker compares
-    /// against, so it has to be the value the manifest carries — and a
-    /// newest-mtime that merely happens to be larger is not the same number. It
-    /// would make a re-push of one build read as an upgrade, and put a time in
-    /// the receipt that no binary was ever built at. A deliberate statement
-    /// beats an incidental one.
-    ///
-    /// Every other app makes no statement and has nothing compiled in, and its
-    /// working copy's timestamps are exactly the truth the dev loop turns on:
-    /// rebuild steb, and the tree is newer than what the device carries.
+    /// The tree's build time in unix seconds: the largest [`BUILD_STAMP_SUFFIX`]
+    /// sidecar value, else the largest file mtime.
     pub fn built_at(&self) -> u64 {
         let stamped = self.files.iter().filter_map(sidecar_ts).max();
         stamped
@@ -100,88 +53,71 @@ impl AppTree {
             .unwrap_or(0)
     }
 
-    /// Total bytes the app would occupy on the device.
+    /// Total bytes of [`AppTree::files`].
     pub fn total_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
-
-    /// The files an update decides by hash. Everything else is `seed` and is
-    /// decided by existence alone, which is what keeps a status check off
-    /// karyll's 49 MB of vendored Bluetooth stack.
-    pub fn sync_files(&self) -> impl Iterator<Item = &AppFile> {
-        self.files
-            .iter()
-            .filter(|f| f.policy.class == FileClass::Sync)
-    }
 }
 
-/// Every app tree at or under `root`. A repo path, an unpacked bundle, or the
-/// composed device tree all work — the shape is the same, only the depth
-/// differs.
-///
-/// Returns them sorted by id. An empty result is not an error: "this folder
-/// holds no app" is a thing the caller wants to say to the user, not a failure.
+/// Every app tree at or under `root`, sorted by id. An empty result is not an
+/// error.
 pub fn discover(root: &Path) -> Result<Vec<AppTree>> {
-    let mut specs = Vec::new();
-    find_specs(root, 0, &mut specs)?;
-    let mut trees = Vec::with_capacity(specs.len());
-    for spec_path in specs {
-        // `<mount>/extensions/<id>/app.json` — three parents up is the mount.
-        let mount = spec_path
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .context("app.json is not three levels under a mount root")?
-            .to_path_buf();
-        trees.push(walk(&mount, &AppSpec::load(&spec_path)?)?);
+    let mut found = Vec::new();
+    find_apps(root, 0, &mut found)?;
+    let mut trees = Vec::with_capacity(found.len());
+    for (mount, id) in found {
+        trees.push(walk(&mount, &id)?);
     }
-    trees.sort_by(|a, b| a.spec.id.cmp(&b.spec.id));
+    trees.sort_by(|a, b| a.app.id.cmp(&b.app.id));
     Ok(trees)
 }
 
-/// Read one app's tree, given its mount root and its already-loaded spec.
-pub fn walk(mount: &Path, spec: &AppSpec) -> Result<AppTree> {
-    let ext_dir = mount.join("extensions").join(&spec.id);
-    let mut files = Vec::new();
-    collect(&ext_dir, mount, spec, &mut files)?;
+/// [`discover`], erroring when `root` holds no app tree.
+pub fn discover_registrable(root: &Path) -> Result<Vec<AppTree>> {
+    let trees = discover(root)?;
+    if trees.is_empty() {
+        bail!(
+            "no extensions/<id>/ under {} — an app is a directory of files that \
+             install to /mnt/us/extensions/, and this folder holds no such tree",
+            root.display()
+        );
+    }
+    Ok(trees)
+}
 
-    // The tile is the app's one file outside its extension directory. Absent on
-    // disk is an error rather than a skip: a tile that a spec names and a build
-    // did not produce is an app with no way to launch it, and the install would
-    // otherwise look complete.
-    if let Some(tile) = &spec.tile {
+/// One app's tree: `mount` plus the directory `id` under `extensions/`.
+pub fn walk(mount: &Path, id: &str) -> Result<AppTree> {
+    let app = AppIdentity::read(mount, id)?;
+    let ext_dir = mount.join("extensions").join(id);
+    let mut files = Vec::new();
+    collect(&ext_dir, mount, &mut files)?;
+
+    // `app.tile` is the one file outside `extensions/<id>`.
+    if let Some(tile) = &app.tile {
         let source = mount.join(tile);
-        let meta = std::fs::metadata(&source).with_context(|| {
-            format!(
-                "{} names tile {tile}, which is not at {} — the tile is the only way \
-                 to launch the app, so an install without it is not one",
-                spec.id,
-                source.display()
-            )
-        })?;
-        let policy = spec.policy_for(tile);
-        if policy.class != FileClass::Ignore {
-            files.push(AppFile {
-                path: tile.clone(),
-                source,
-                size: meta.len(),
-                policy,
-            });
-        }
+        let size = std::fs::metadata(&source)
+            .with_context(|| format!("read tile {}", source.display()))?
+            .len();
+        files.push(AppFile {
+            path: tile.clone(),
+            source,
+            size,
+            apply: policy::apply_for(tile),
+        });
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(AppTree {
         root: mount.to_path_buf(),
-        spec: spec.clone(),
+        app,
         files,
     })
 }
 
-/// The unix seconds in `<file>.build-ts`, when a build wrote one beside it.
+/// The unix seconds in `<f.source>.build-ts`.
 fn sidecar_ts(f: &AppFile) -> Option<u64> {
     let mut sidecar = f.source.clone().into_os_string();
-    sidecar.push(".build-ts");
+    sidecar.push(BUILD_STAMP_SUFFIX);
     std::fs::read_to_string(PathBuf::from(sidecar))
         .ok()?
         .trim()
@@ -200,23 +136,21 @@ fn mtime_secs(f: &AppFile) -> Option<u64> {
 }
 
 /// Depth-first walk of the app's extension directory.
-fn collect(dir: &Path, mount: &Path, spec: &AppSpec, out: &mut Vec<AppFile>) -> Result<()> {
+fn collect(dir: &Path, mount: &Path, out: &mut Vec<AppFile>) -> Result<()> {
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("read app tree {}", dir.display()))?;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if is_never_installed(&name) {
+        if !policy::is_payload(&name) {
             continue;
         }
         let path = entry.path();
-        // `file_type` does not follow links, which is the point: a mount has no
-        // symlinks to write one to, and following one would pull bytes from
-        // outside the tree under a path inside it.
+        // `file_type` does not follow links.
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            collect(&path, mount, spec, out)?;
+            collect(&path, mount, out)?;
             continue;
         }
         if !ft.is_file() {
@@ -231,35 +165,58 @@ fn collect(dir: &Path, mount: &Path, spec: &AppSpec, out: &mut Vec<AppFile>) -> 
                 path.display()
             );
         };
-        // Windows separators cannot occur here (this reads a host filesystem),
-        // but the string is about to become a mount-relative key, so it is
-        // validated as one rather than assumed to be one.
-        super::spec::validate_mount_rel(rel)?;
-        let policy = spec.policy_for(rel);
-        if policy.class == FileClass::Ignore {
+        validate_mount_rel(rel)?;
+        if policy::is_per_install(rel) {
             continue;
         }
         out.push(AppFile {
             path: rel.to_string(),
             source: path.clone(),
             size: entry.metadata()?.len(),
-            policy,
+            apply: policy::apply_for(rel),
         });
     }
     Ok(())
 }
 
-/// Collect every `extensions/*/app.json` at or under `dir`, no deeper than
+/// Refuse a `path` that is not mount-relative: empty, absolute, backslashed,
+/// with an empty component, or holding a `.` or `..` component.
+pub fn validate_mount_rel(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("empty path");
+    }
+    if path.starts_with('/') {
+        bail!("{path:?} is absolute — paths are relative to the mount root");
+    }
+    if path.contains('\\') {
+        bail!("{path:?} contains a backslash — separators are `/` on the device");
+    }
+    if path.contains("//") {
+        bail!("{path:?} has an empty path component");
+    }
+    for comp in path.split('/') {
+        if comp == "." || comp == ".." {
+            return Err(anyhow!("{path:?} contains a `{comp}` component"));
+        }
+    }
+    Ok(())
+}
+
+/// Collect every `(mount root, id)` at or under `dir`, no deeper than
 /// [`MAX_ROOT_DEPTH`] directories above the `extensions/` that holds it.
-fn find_specs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
+fn find_apps(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, String)>) -> Result<()> {
     let ext = dir.join("extensions");
     if ext.is_dir()
         && let Ok(entries) = std::fs::read_dir(&ext)
     {
         for entry in entries.flatten() {
-            let spec = entry.path().join(APP_SPEC_FILE);
-            if spec.is_file() {
-                out.push(spec);
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with('.') || !entry.path().is_dir() {
+                continue;
+            }
+            if holds_payload(&entry.path()) {
+                out.push((dir.to_path_buf(), name.to_string()));
             }
         }
     }
@@ -272,16 +229,35 @@ fn find_specs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // `extensions/` was already handled above; descending into it again
-        // would look for `extensions/extensions/`.
+        // `extensions/` is handled above.
         if name == "extensions" || name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
             continue;
         }
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            find_specs(&entry.path(), depth + 1, out)?;
+            find_apps(&entry.path(), depth + 1, out)?;
         }
     }
     Ok(())
+}
+
+/// Whether `dir` holds at least one [`policy::is_payload`] file.
+fn holds_payload(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !policy::is_payload(&name) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(t) if t.is_file() => return true,
+            Ok(t) if t.is_dir() && holds_payload(&entry.path()) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -293,16 +269,9 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
-    /// A karyll-shaped repo: the tree two levels down, a seeded vendored
-    /// subtree, a tile in documents/, and repo files that are not the app.
+    /// A repo whose tree is two levels down, with files outside it.
     fn karyll_repo(root: &Path) -> PathBuf {
         let out = root.join("deploy").join("out");
-        write(
-            &out.join("extensions/karyll/app.json"),
-            br#"{"schema":1,"id":"karyll","name":"Karyll","version":"0.2.4",
-                 "tile":"documents/Karyll.sh","pidof":"karyll",
-                 "paths":[{"match":"extensions/karyll/hid/","class":"seed","seed_gen":1}]}"#,
-        );
         write(&out.join("extensions/karyll/bin/karyll"), b"armhf");
         write(
             &out.join("extensions/karyll/bin/karyll-softfloat"),
@@ -311,8 +280,10 @@ mod tests {
         write(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
         write(&out.join("extensions/karyll/hid/dist/libc.so.6"), b"elf");
         write(&out.join("extensions/karyll/.DS_Store"), b"junk");
-        write(&out.join("documents/Karyll.sh"), b"# Name: Karyll\n");
-        // Repo files that are not part of any app.
+        write(
+            &out.join("documents/Karyll.sh"),
+            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+        );
         write(&root.join("build.sh"), b"#!/bin/sh\n");
         write(&root.join("device/assets/cover.png"), b"png");
         write(&root.join("target/debug/karyll"), b"host binary");
@@ -325,7 +296,8 @@ mod tests {
         let out = karyll_repo(tmp.path());
         let trees = discover(tmp.path()).unwrap();
         assert_eq!(trees.len(), 1);
-        assert_eq!(trees[0].spec.id, "karyll");
+        assert_eq!(trees[0].app.id, "karyll");
+        assert_eq!(trees[0].app.name, "Karyll");
         assert_eq!(trees[0].root, out, "the mount root is extensions/'s parent");
     }
 
@@ -339,7 +311,6 @@ mod tests {
             paths,
             vec![
                 "documents/Karyll.sh",
-                "extensions/karyll/app.json",
                 "extensions/karyll/bin/karyll",
                 "extensions/karyll/bin/karyll-softfloat",
                 "extensions/karyll/hid/config.ini",
@@ -349,38 +320,15 @@ mod tests {
         );
     }
 
-    /// `seed` exists so a status check does not read what no update writes.
-    #[test]
-    fn seeded_subtrees_are_out_of_the_hash_set() {
-        let tmp = tempfile::tempdir().unwrap();
-        karyll_repo(tmp.path());
-        let tree = discover(tmp.path()).unwrap().pop().unwrap();
-        let hashed: Vec<&str> = tree.sync_files().map(|f| f.path.as_str()).collect();
-        assert_eq!(
-            hashed,
-            vec![
-                "documents/Karyll.sh",
-                "extensions/karyll/app.json",
-                "extensions/karyll/bin/karyll",
-                "extensions/karyll/bin/karyll-softfloat",
-            ]
-        );
-        for f in &tree.files {
-            if f.path.starts_with("extensions/karyll/hid/") {
-                assert_eq!(f.policy.class, FileClass::Seed);
-                assert_eq!(f.policy.seed_gen, 1);
-            }
-        }
-    }
-
-    /// documents/ is the writer's directory. An app takes the one file it
-    /// declares out of it and leaves everything else alone.
     #[test]
     fn documents_is_not_swept() {
         let tmp = tempfile::tempdir().unwrap();
         let out = karyll_repo(tmp.path());
         write(&out.join("documents/My Novel.txt"), b"chapter one");
-        write(&out.join("documents/SomeOtherApp.sh"), b"# Name: Other\n");
+        write(
+            &out.join("documents/SomeOtherApp.sh"),
+            b"# Name: Other\nexec /mnt/us/extensions/other/bin/other\n",
+        );
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         assert!(
             tree.files
@@ -393,35 +341,24 @@ mod tests {
     fn one_repo_can_hold_several_apps() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
+        write(&dev.join("extensions/sidle/bin/sidle"), b"picker");
         write(
-            &dev.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
-                 "tile":"documents/Sidle.sh"}"#,
-        );
-        write(&dev.join("documents/Sidle.sh"), b"# Name: Sidle\n");
-        write(
-            &dev.join("extensions/bokai/app.json"),
-            br#"{"schema":1,"id":"bokai","name":"bokai","version":"0.1.4"}"#,
+            &dev.join("documents/Sidle.sh"),
+            b"#!/bin/sh\n# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
         write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         let ids: Vec<String> = discover(tmp.path())
             .unwrap()
             .into_iter()
-            .map(|t| t.spec.id)
+            .map(|t| t.app.id)
             .collect();
         assert_eq!(ids, vec!["bokai", "sidle"]);
     }
 
-    /// bokai ships no tile at all — it is run over SSH. An extension without a
-    /// front door is a normal app, not a broken one.
     #[test]
     fn an_app_with_no_tile_walks_fine() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(
-            &dev.join("extensions/bokai/app.json"),
-            br#"{"schema":1,"id":"bokai","name":"bokai","version":"0.1.4"}"#,
-        );
         write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         assert!(tree.files.iter().all(|f| f.path.starts_with("extensions/")));
@@ -431,35 +368,10 @@ mod tests {
         );
     }
 
-    /// A tile a spec names and a build did not produce is an app that cannot be
-    /// launched. Reporting the install as complete would hide it.
-    #[test]
-    fn a_declared_tile_that_is_not_there_fails_the_walk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dev = tmp.path().join("device");
-        write(
-            &dev.join("extensions/steb/app.json"),
-            br#"{"schema":1,"id":"steb","name":"Steb","version":"0.1.0",
-                 "tile":"documents/Steb.sh"}"#,
-        );
-        write(&dev.join("extensions/steb/bin/steb"), b"elf");
-        let err = discover(tmp.path()).unwrap_err();
-        assert!(format!("{err:#}").contains("documents/Steb.sh"));
-    }
-
-    /// The picker's build time is compiled into its binary and the device
-    /// refuses anything not strictly newer. An mtime cannot stand in for that
-    /// — copying the file restamps it — so the sidecar beside it wins.
     #[test]
     fn a_build_ts_sidecar_beats_the_mtime() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(
-            &dev.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
-                 "paths":[{"match":"extensions/sidle/bin/sidle.build-ts",
-                           "class":"ignore"}]}"#,
-        );
         write(&dev.join("extensions/sidle/bin/sidle"), b"elf");
         write(
             &dev.join("extensions/sidle/bin/sidle.build-ts"),
@@ -469,7 +381,7 @@ mod tests {
         assert_eq!(
             tree.built_at(),
             1755712345,
-            "app.json's mtime is `now` and larger; the stamp still wins"
+            "the tree's own mtimes are `now` and larger; the stamp still wins"
         );
         assert!(
             tree.files
@@ -483,47 +395,53 @@ mod tests {
     fn a_tree_with_no_stamp_falls_back_to_its_own_timestamps() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(
-            &dev.join("extensions/steb/app.json"),
-            br#"{"schema":1,"id":"steb","name":"Steb","version":"0.1.0"}"#,
-        );
         write(&dev.join("extensions/steb/bin/steb"), b"elf");
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         assert!(tree.built_at() > 0);
     }
 
     #[test]
-    fn ignored_paths_never_reach_the_file_list() {
+    fn the_pickers_own_two_files_are_staged() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(
-            &dev.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
-                 "paths":[{"match":"extensions/sidle/etc/server.conf.example",
-                           "class":"ignore"}]}"#,
-        );
-        write(
-            &dev.join("extensions/sidle/etc/server.conf.example"),
-            b"TOKEN=x\n",
-        );
-        write(&dev.join("extensions/sidle/config.xml"), b"<config/>");
+        write(&dev.join("extensions/sidle/bin/sidle"), b"picker");
+        write(&dev.join("extensions/sidle/bin/sidle.sh"), b"#!/bin/sh\n");
+        write(&dev.join("extensions/sidle/config.xml"), b"<extension/>");
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
-        let paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
+        let staged: Vec<&str> = tree
+            .files
+            .iter()
+            .filter(|f| f.apply == Apply::Staged)
+            .map(|f| f.path.as_str())
+            .collect();
         assert_eq!(
-            paths,
-            vec!["extensions/sidle/app.json", "extensions/sidle/config.xml"]
+            staged,
+            vec![
+                "extensions/sidle/bin/sidle",
+                "extensions/sidle/bin/sidle.sh"
+            ]
         );
     }
 
-    /// A tree nested deeper than any repo puts one is not found, so "add this
-    /// folder" cannot turn into a scan of everything below it.
+    #[test]
+    fn a_per_install_path_left_in_a_tree_is_not_a_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("device");
+        write(&dev.join("extensions/sidle/bin/sidle"), b"picker");
+        write(
+            &dev.join("extensions/sidle/etc/server.conf"),
+            b"TOKEN=old\n",
+        );
+        write(&dev.join("extensions/sidle/etc/ca.pem"), b"stale root\n");
+        let tree = discover(tmp.path()).unwrap().pop().unwrap();
+        let paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["extensions/sidle/bin/sidle"]);
+    }
+
     #[test]
     fn discovery_stops_before_it_becomes_a_filesystem_scan() {
         let tmp = tempfile::tempdir().unwrap();
-        write(
-            &tmp.path().join("a/b/c/d/extensions/deep/app.json"),
-            br#"{"schema":1,"id":"deep","name":"Deep","version":"1"}"#,
-        );
+        write(&tmp.path().join("a/b/c/d/extensions/deep/bin/deep"), b"elf");
         assert!(discover(tmp.path()).unwrap().is_empty());
     }
 
@@ -531,8 +449,19 @@ mod tests {
     fn a_build_output_directory_is_not_searched() {
         let tmp = tempfile::tempdir().unwrap();
         write(
-            &tmp.path().join("target/extensions/ghost/app.json"),
-            br#"{"schema":1,"id":"ghost","name":"Ghost","version":"1"}"#,
+            &tmp.path().join("target/extensions/ghost/bin/ghost"),
+            b"elf",
+        );
+        assert!(discover(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_directory_with_nothing_to_install_is_not_an_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("device/extensions/steb/bin")).unwrap();
+        write(
+            &tmp.path().join("device/extensions/steb/.DS_Store"),
+            b"junk",
         );
         assert!(discover(tmp.path()).unwrap().is_empty());
     }

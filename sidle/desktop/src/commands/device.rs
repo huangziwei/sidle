@@ -586,11 +586,16 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
 /// the Apps tab. Omitted, every app goes, which is Update all. Both take the
 /// same path through `install_all`, so a row and the whole fleet cannot behave
 /// differently.
+///
+/// `force` overwrites files the device changed out from under sidle. A plain
+/// push keeps those, because their bytes exist nowhere else; this is the row
+/// action that says to replace them anyway.
 #[tauri::command]
 pub async fn device_app_install(
     app: AppHandle,
     state: State<'_, AppState>,
     only: Option<String>,
+    force: Option<bool>,
 ) -> Result<DeployInstallReport, String> {
     let device = state.device.lock().await.clone();
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
@@ -636,6 +641,7 @@ pub async fn device_app_install(
             conf.as_ref(),
             &ca_cert,
             transport.as_ref(),
+            force.unwrap_or(false),
             |progress| {
                 let _ = app_handle.emit("device-app:install-progress", progress);
             },

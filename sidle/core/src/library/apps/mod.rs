@@ -3,19 +3,23 @@
 //!
 //! Five programs ship to the mount: the picker, bokai, steb, karyll and
 //! kfxdedrm-fe. They are standalone — they install to `extensions/`, they do
-//! not talk to sidle, and each is built by its own repo. What they share is the
-//! shape of what they publish: a **mount-rooted tree** whose entries are paths
-//! under `/mnt/us`, carrying its own [`spec::AppSpec`] at
-//! `extensions/<id>/app.json`.
+//! not talk to sidle, and each is built by its own repo. What they share is
+//! only the shape of what they publish: a **mount-rooted tree** whose entries
+//! are paths under `/mnt/us`.
 //!
-//! This module is the reader of that shape. It knows how to find a tree, walk
-//! it, and say what each path's install rule is; it knows nothing about any
-//! particular app, and no app repo depends on this crate.
+//! That shape is the whole interface, and it is one every one of those repos
+//! already has. Nothing here asks an app to declare itself to sidle: the
+//! [`identity`] a row shows is read from the tree's own directory names, from
+//! the KUAL descriptor the Kindle defines, and from the launcher tile. How a
+//! file is installed is [`policy`] — sidle's rules, kept on sidle's side, so no
+//! repo has to carry a file it would never use itself.
 
 pub mod compose;
-pub mod spec;
+pub mod identity;
+pub mod policy;
 pub mod tree;
 
 pub use compose::{DevicePlan, PlannedFile, plan, plan_from};
-pub use spec::{APP_SPEC_FILE, APP_SPEC_SCHEMA, AppSpec, Apply, FileClass, PathPolicy, PathRule};
-pub use tree::{AppFile, AppTree, RECEIPT_FILE, discover, walk};
+pub use identity::AppIdentity;
+pub use policy::{Apply, apply_for, is_payload};
+pub use tree::{AppFile, AppTree, discover, discover_registrable, validate_mount_rel, walk};

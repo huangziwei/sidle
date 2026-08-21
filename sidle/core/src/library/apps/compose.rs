@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use super::spec::{Apply, FileClass, PathPolicy};
+use super::policy::Apply;
 use super::tree::{AppFile, AppTree, discover, walk};
 use crate::library::db::{self, AppSourceRow};
 
@@ -41,7 +41,7 @@ pub struct PlannedFile {
     pub path: String,
     pub source: PathBuf,
     pub size: u64,
-    pub policy: PathPolicy,
+    pub apply: Apply,
     /// The app whose tree this came from.
     pub app_id: String,
 }
@@ -78,7 +78,7 @@ pub struct DevicePlan {
 
 impl DevicePlan {
     pub fn app(&self, id: &str) -> Option<&AppTree> {
-        self.apps.iter().find(|a| a.spec.id == id)
+        self.apps.iter().find(|a| a.app.id == id)
     }
 
     /// The same plan narrowed to one app, for a per-row install.
@@ -91,7 +91,7 @@ impl DevicePlan {
             apps: self
                 .apps
                 .iter()
-                .filter(|a| a.spec.id == id)
+                .filter(|a| a.app.id == id)
                 .cloned()
                 .collect(),
             files: self
@@ -117,20 +117,12 @@ impl DevicePlan {
         self.files.iter().map(|f| f.size).sum()
     }
 
-    /// The files an update decides by hash, which is what a status check has to
-    /// read. `seed` files are decided by existence alone.
-    pub fn sync_files(&self) -> impl Iterator<Item = &PlannedFile> {
-        self.files
-            .iter()
-            .filter(|f| f.policy.class == FileClass::Sync)
-    }
-
     /// Paths written as `<path>.new` for something one level up to swap in,
     /// because the device is executing them at the moment of the update.
     pub fn staged_paths(&self) -> impl Iterator<Item = &str> {
         self.files
             .iter()
-            .filter(|f| f.policy.apply == Apply::Staged)
+            .filter(|f| f.apply == Apply::Staged)
             .map(|f| f.path.as_str())
     }
 }
@@ -165,10 +157,10 @@ pub fn plan_from(builtin: &Path, rows: &[AppSourceRow]) -> DevicePlan {
     // one: the picker that ships with this binary is the picker this binary
     // knows how to render a `server.conf` for.
     for row in rows {
-        if trees.iter().any(|t: &AppTree| t.spec.id == row.id) {
+        if trees.iter().any(|t: &AppTree| t.app.id == row.id) {
             continue;
         }
-        match read_row(row) {
+        match walk(Path::new(&row.root), &row.id) {
             Ok(tree) => trees.push(tree),
             Err(e) => errors.push(AppSourceError {
                 id: row.id.clone(),
@@ -177,7 +169,7 @@ pub fn plan_from(builtin: &Path, rows: &[AppSourceRow]) -> DevicePlan {
             }),
         }
     }
-    trees.sort_by(|a, b| a.spec.id.cmp(&b.spec.id));
+    trees.sort_by(|a, b| a.app.id.cmp(&b.app.id));
 
     let (files, conflicts) = flatten(&trees);
     DevicePlan {
@@ -188,29 +180,18 @@ pub fn plan_from(builtin: &Path, rows: &[AppSourceRow]) -> DevicePlan {
     }
 }
 
-/// Read one registered app's tree from the root its row records.
-fn read_row(row: &AppSourceRow) -> Result<AppTree> {
-    let root = PathBuf::from(&row.root);
-    let spec_path = root
-        .join("extensions")
-        .join(&row.id)
-        .join(super::spec::APP_SPEC_FILE);
-    let spec = super::spec::AppSpec::load(&spec_path)?;
-    walk(&root, &spec)
-}
-
 /// Merge every tree's files into one path-keyed list.
 fn flatten(trees: &[AppTree]) -> (Vec<PlannedFile>, Vec<PathConflict>) {
     let mut by_path: HashMap<&str, PlannedFile> = HashMap::new();
     let mut conflicts = Vec::new();
     for tree in trees {
         for f in &tree.files {
-            let planned = to_planned(f, &tree.spec.id);
+            let planned = to_planned(f, &tree.app.id);
             match by_path.get(f.path.as_str()) {
                 Some(kept) => conflicts.push(PathConflict {
                     path: f.path.clone(),
                     kept: kept.app_id.clone(),
-                    dropped: tree.spec.id.clone(),
+                    dropped: tree.app.id.clone(),
                 }),
                 None => {
                     by_path.insert(f.path.as_str(), planned);
@@ -229,7 +210,7 @@ fn to_planned(f: &AppFile, app_id: &str) -> PlannedFile {
         path: f.path.clone(),
         source: f.source.clone(),
         size: f.size,
-        policy: f.policy,
+        apply: f.apply,
         app_id: app_id.to_string(),
     }
 }
@@ -247,18 +228,15 @@ mod tests {
     fn builtin(root: &Path) -> PathBuf {
         let dev = root.join("device");
         write(
-            &dev.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
-                 "tile":"documents/Sidle.sh","pidof":"sidle",
-                 "paths":[{"match":"extensions/sidle/bin/sidle","apply":"staged"},
-                          {"match":"extensions/sidle/bin/sidle.sh","apply":"staged"}]}"#,
+            &dev.join("extensions/sidle/config.xml"),
+            br#"<extension><information><name>Sidle</name>
+                <version>0.1.9</version></information></extension>"#,
         );
         write(&dev.join("extensions/sidle/bin/sidle"), b"picker");
         write(&dev.join("extensions/sidle/bin/sidle.sh"), b"#!/bin/sh\n");
-        write(&dev.join("documents/Sidle.sh"), b"# Name: Sidle\n");
         write(
-            &dev.join("extensions/bokai/app.json"),
-            br#"{"schema":1,"id":"bokai","name":"bokai","version":"0.1.4"}"#,
+            &dev.join("documents/Sidle.sh"),
+            b"#!/bin/sh\n# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
         write(&dev.join("extensions/bokai/bin/bokai"), b"engine");
         dev
@@ -266,15 +244,12 @@ mod tests {
 
     fn karyll_repo(root: &Path) -> AppSourceRow {
         let out = root.join("deploy").join("out");
-        write(
-            &out.join("extensions/karyll/app.json"),
-            br#"{"schema":1,"id":"karyll","name":"Karyll","version":"0.2.4",
-                 "tile":"documents/Karyll.sh",
-                 "paths":[{"match":"extensions/karyll/hid/","class":"seed","seed_gen":1}]}"#,
-        );
         write(&out.join("extensions/karyll/bin/karyll"), b"armhf");
         write(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
-        write(&out.join("documents/Karyll.sh"), b"# Name: Karyll\n");
+        write(
+            &out.join("documents/Karyll.sh"),
+            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+        );
         AppSourceRow {
             id: "karyll".into(),
             source_kind: db::APP_SOURCE_LOCAL.into(),
@@ -289,7 +264,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dev = builtin(tmp.path());
         let plan = plan_from(&dev, &[]);
-        let ids: Vec<&str> = plan.apps.iter().map(|a| a.spec.id.as_str()).collect();
+        let ids: Vec<&str> = plan.apps.iter().map(|a| a.app.id.as_str()).collect();
         assert_eq!(ids, vec!["bokai", "sidle"]);
         assert!(plan.errors.is_empty());
         assert!(plan.conflicts.is_empty());
@@ -307,14 +282,12 @@ mod tests {
             vec![
                 "documents/Karyll.sh",
                 "documents/Sidle.sh",
-                "extensions/bokai/app.json",
                 "extensions/bokai/bin/bokai",
-                "extensions/karyll/app.json",
                 "extensions/karyll/bin/karyll",
                 "extensions/karyll/hid/config.ini",
-                "extensions/sidle/app.json",
                 "extensions/sidle/bin/sidle",
                 "extensions/sidle/bin/sidle.sh",
+                "extensions/sidle/config.xml",
             ],
             "one list, sorted by mount path, regardless of which tree each came from"
         );
@@ -322,23 +295,15 @@ mod tests {
             plan.total_size(),
             plan.files.iter().map(|f| f.size).sum::<u64>()
         );
+        assert_eq!(plan.app("karyll").unwrap().app.name, "Karyll");
     }
 
     #[test]
-    fn per_path_classes_survive_the_flatten() {
+    fn the_staged_pair_survives_the_flatten() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = builtin(tmp.path());
         let repo = tempfile::tempdir().unwrap();
         let plan = plan_from(&dev, &[karyll_repo(repo.path())]);
-
-        let hid = plan
-            .files
-            .iter()
-            .find(|f| f.path == "extensions/karyll/hid/config.ini")
-            .unwrap();
-        assert_eq!(hid.policy.class, FileClass::Seed);
-        assert_eq!(hid.app_id, "karyll");
-
         let staged: Vec<&str> = plan.staged_paths().collect();
         assert_eq!(
             staged,
@@ -346,11 +311,11 @@ mod tests {
                 "extensions/sidle/bin/sidle",
                 "extensions/sidle/bin/sidle.sh"
             ],
-            "only the two files the device is executing are staged"
+            "only the two files the picker executes are staged"
         );
-        assert!(
-            plan.sync_files()
-                .all(|f| f.path != "extensions/karyll/hid/config.ini")
+        assert_eq!(
+            plan.owner_of("extensions/karyll/hid/config.ini"),
+            Some("karyll")
         );
     }
 
@@ -382,10 +347,6 @@ mod tests {
         let dev = builtin(tmp.path());
         let other = tempfile::tempdir().unwrap();
         let out = other.path().join("device");
-        write(
-            &out.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Impostor","version":"9.9.9"}"#,
-        );
         write(&out.join("extensions/sidle/bin/sidle"), b"not the picker");
         let row = AppSourceRow {
             id: "sidle".into(),
@@ -395,11 +356,9 @@ mod tests {
             added_at: 0,
         };
         let plan = plan_from(&dev, &[row]);
-        assert_eq!(plan.app("sidle").unwrap().spec.name, "Sidle");
-        assert_eq!(
-            std::fs::read(&plan.app("sidle").unwrap().files[0].source).unwrap(),
-            b"# Name: Sidle\n"
-        );
+        let picker = plan.app("sidle").unwrap();
+        assert_eq!(picker.app.name, "Sidle");
+        assert_eq!(picker.root, dev);
     }
 
     /// Two apps claiming one path is reported, not silently resolved — the
@@ -411,12 +370,14 @@ mod tests {
         let dev = builtin(tmp.path());
         let other = tempfile::tempdir().unwrap();
         let out = other.path().join("device");
+        write(&out.join("extensions/rogue/bin/rogue"), b"elf");
+        // A tile that launches both apps belongs to whichever the plan reaches
+        // first, and the other one loses a file it thought it shipped.
         write(
-            &out.join("extensions/rogue/app.json"),
-            br#"{"schema":1,"id":"rogue","name":"Rogue","version":"1",
-                 "tile":"documents/Sidle.sh"}"#,
+            &out.join("documents/Sidle.sh"),
+            b"#!/bin/sh\n# Name: Rogue\nexec /mnt/us/extensions/rogue/bin/rogue\n",
         );
-        write(&out.join("documents/Sidle.sh"), b"# Name: Rogue\n");
+        write(&out.join("extensions/sidle/bin/sidle"), b"decoy");
         let row = AppSourceRow {
             id: "rogue".into(),
             source_kind: db::APP_SOURCE_LOCAL.into(),

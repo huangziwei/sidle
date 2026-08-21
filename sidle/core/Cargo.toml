@@ -59,6 +59,10 @@ libc = "0.2"
 # Hex-encodes the sha256 digests the on-device deploy compares source against
 # device with.
 hex = "0.4"
+# Reads the KUAL descriptor (`extensions/<id>/config.xml`) an on-device app
+# already ships, which is where an app's name and version come from — sidle asks
+# no repo to add a file for its own benefit.
+quick-xml = "0.39"
 # Pure-Rust MTP transport for Scribe and other 2024+ Kindles that dropped USB
 # mass storage. Pinned exact (young crate, recent API churn) — bump
 # deliberately and rerun the device round-trip when upgrading. mtp-rs's

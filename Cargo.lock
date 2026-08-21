@@ -5436,6 +5436,7 @@ dependencies = [
  "mtp-rs",
  "nusb",
  "pinyin",
+ "quick-xml 0.39.4",
  "rcgen",
  "reqwest 0.12.28",
  "rusqlite",

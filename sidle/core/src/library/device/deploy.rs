@@ -6,9 +6,9 @@
 //!
 //! The file list is not written here. It comes from
 //! [`crate::library::apps::DevicePlan`], which walks every app's mount-rooted
-//! tree and carries each path's class. Adding a file to the deploy means
-//! dropping it in the tree at the path it should land on; there is no slot to
-//! add and no source-vs-device path mapping to keep in sync.
+//! tree. Adding a file to the deploy means dropping it in the tree at the path
+//! it should land on; there is no slot to add and no source-vs-device path
+//! mapping to keep in sync.
 //!
 //! Two slots are **not** in any tree, because their bytes are per-install
 //! rather than per-repo: `etc/server.conf` is rendered live, and `etc/ca.pem`
@@ -17,10 +17,15 @@
 //! so a bundle that arrives without it leaves a device that cannot complete a
 //! single handshake while looking perfectly installed.
 //!
-//! Every path carries a class. `sync` is written when its hash differs from the
-//! source's; `seed` is written only when the path is absent on device, and is
-//! never read to decide, which is what keeps a status check off 49 MB of
-//! vendored files no update will ever write.
+//! What gets written is decided against the install receipt
+//! ([`super::receipt`]), not against the device's bytes alone. A path whose
+//! source still hashes to what sidle last wrote there is done, and is not read
+//! off the device at all — which is what keeps a status check off 49 MB of
+//! vendored files no update would touch. A path whose device copy no longer
+//! matches the receipt was changed on the device, and a push leaves it alone
+//! and says so, because overwriting it would destroy the only copy of whatever
+//! it now holds. `force` is the one way past that, and it re-reads every byte
+//! rather than trusting the receipt at all.
 //!
 //! The picker is not a KUAL app: `documents/Sidle.sh` is a jailbreak-hotfix
 //! scriptlet the library indexes as a tile, and tapping it runs
@@ -46,18 +51,19 @@
 //! MTP (Colorsoft). Callers still refuse devices without a jailbreak's
 //! `/extensions/` layout (e.g. stock Scribes).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::receipt::{self, AppReceipt, FileReceipt, InstallState, now_secs};
 use super::{TPath, Transport};
-use crate::library::apps::{APP_SPEC_FILE, AppSpec, Apply, DevicePlan, FileClass, PathPolicy};
+use crate::library::apps::DevicePlan;
 
 /// Cross-compile target the native binary is built for. Hard-coded
 /// because the picker only runs on armv7l Kindles; if a different target ever
@@ -71,7 +77,7 @@ const PICKER_ID: &str = "sidle";
 
 /// Where the picker's binary lives inside the mount tree. Named here because
 /// three things agree on it: the mirror it is staged into, the plan entry whose
-/// absence means "not built yet", and the `app.json` rule that stages it.
+/// absence means "not built yet", and the rule that stages it.
 const PICKER_BINARY_REL: &str = "extensions/sidle/bin/sidle";
 
 /// The tree that ships with the desktop app: the `device/` mirror in a dev
@@ -234,23 +240,20 @@ impl ServerConfRender {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeployFileState {
-    /// Source bytes hash-match the on-device bytes — nothing to do.
+    /// The device already holds what this push would write — either its bytes
+    /// were compared, or the receipt says sidle wrote exactly these bytes there
+    /// and the path is still present.
     Synced,
-    /// They differ. Hex sha256 of both surfaces so the UI can show a
-    /// diff hint without re-reading the files.
-    Stale {
-        source_hash: String,
-        device_hash: String,
-    },
-    /// File is missing on the device (clean install case). `source_hash` is
-    /// absent for a `seed` path, whose whole point is that neither side is read
-    /// to decide — hashing 49 MB of vendored files to fill a UI hint would undo
-    /// the saving.
-    Missing { source_hash: Option<String> },
-    /// A `seed` path already on the device. Present, not compared: the
-    /// on-device copy is the live one and the source's is a fresh install's
-    /// starting point, so equal bytes were never the test.
-    Seeded,
+    /// The source moved on and the device copy is still the one sidle put
+    /// there, so it is sidle's to replace.
+    Stale,
+    /// Not on the device: a clean install, or a file someone deleted.
+    Missing,
+    /// The device copy is neither the source's nor the one the receipt records,
+    /// so something other than this push wrote it — a hand-drag, or an edit
+    /// made on the device. Left alone, because a push cannot tell what was
+    /// meant by it and its bytes exist nowhere else. `force` overwrites it.
+    Diverged,
     /// File is missing on the *source* side. Only meaningful for the
     /// binary slot — UI surfaces "run `cargo build ...` first".
     SourceMissing,
@@ -288,6 +291,10 @@ pub enum DeployOverall {
         stale_count: u32,
         missing_count: u32,
     },
+    /// Nothing to write, but at least one file on the device is not the one
+    /// sidle put there. A push would change nothing until it is forced, so this
+    /// is not "in sync" and not work either.
+    DivergedOnly { diverged_count: u32 },
     /// Every file is present and content-equal — button re-pushes
     /// anyway, but the pill reads "In sync".
     InSync,
@@ -302,12 +309,11 @@ pub enum DeployOverall {
 pub struct AppDeployStatus {
     pub id: String,
     pub name: String,
-    /// What the source tree declares.
-    pub version: String,
-    /// What the device's own `extensions/<id>/app.json` declares. It is part of
-    /// the install, so the device carries it without anything extra being
-    /// written. `None` when the app is not there, or when its app.json cannot
-    /// be read — neither of which the file states below leave unsaid.
+    /// What the source tree states, when it states anything.
+    pub version: Option<String>,
+    /// What the receipt says the last push put there. `None` when sidle has
+    /// never installed this app on this device — which the file states below
+    /// do not leave unsaid either.
     pub installed_version: Option<String>,
     pub file_count: usize,
     pub total_bytes: u64,
@@ -315,6 +321,8 @@ pub struct AppDeployStatus {
     /// is current — which is what lets a row say "nothing to do" honestly.
     pub write_count: u32,
     pub write_bytes: u64,
+    /// Files the device changed out from under sidle, which a push keeps.
+    pub diverged_count: u32,
     pub overall: DeployOverall,
 }
 
@@ -344,8 +352,11 @@ pub struct DeployStatus {
 pub enum DeployFileInstallResult {
     /// Wrote new bytes (either because Missing or Stale).
     Wrote { device_path: String },
-    /// Skipped — already content-equal to the source.
+    /// Skipped — the device already holds what this push would write.
     Skipped { device_path: String },
+    /// Skipped — the device copy is not the one sidle wrote, so replacing it
+    /// would destroy whatever is now in it. `force` writes it anyway.
+    KeptDeviceCopy { device_path: String },
     /// Nothing to write: the bytes for this slot could not be produced. Only
     /// `etc/server.conf` reaches this, and only with no LAN address or no
     /// server token. Distinct from `Skipped` because the device copy is *not*
@@ -379,7 +390,8 @@ enum Source {
 struct Slot {
     device_rel: String,
     source: Source,
-    policy: PathPolicy,
+    /// The app whose receipt records this path.
+    app_id: String,
 }
 
 impl Slot {
@@ -388,16 +400,13 @@ impl Slot {
     }
 }
 
-/// A `sync`/`direct` slot — what everything outside an app tree is.
+/// A directly-applied slot outside any app tree. Both belong to the picker,
+/// which is the app whose install produces them.
 fn plain(device_rel: &str, source: Source) -> Slot {
     Slot {
         device_rel: device_rel.to_string(),
         source,
-        policy: PathPolicy {
-            class: FileClass::Sync,
-            seed_gen: 0,
-            apply: Apply::Direct,
-        },
+        app_id: PICKER_ID.to_string(),
     }
 }
 
@@ -414,7 +423,7 @@ fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> 
         .map(|f| Slot {
             device_rel: f.path.clone(),
             source: Source::File(f.source.clone()),
-            policy: f.policy,
+            app_id: f.app_id.clone(),
         })
         .collect();
 
@@ -431,11 +440,9 @@ fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> 
             "extensions/sidle/etc/ca.pem",
             Source::File(ca_cert.to_path_buf()),
         ));
-        // Not in any tree: per-install secret, rendered live. The mirror holds
-        // only `etc/server.conf.example`, which its `app.json` classes
-        // `ignore`. `None` when there is no LAN address or no server token to
-        // render — the slot then reports `SourceMissing` and everything else
-        // installs anyway.
+        // Not in any tree: per-install secret, rendered live. `None` when there
+        // is no LAN address or no server token to render — the slot then
+        // reports `SourceMissing` and everything else installs anyway.
         out.push(plain(
             "extensions/sidle/etc/server.conf",
             Source::Rendered(conf.map(ServerConfRender::render)),
@@ -463,15 +470,134 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Hex sha256 of the on-device bytes at `path`, or `None` when the object is
-/// absent — the transport analog of [`sha256_file_opt`]. Drives the same
+/// Hex sha256 of the on-device bytes at `path`. Drives the same
 /// staleness/idempotency logic over either transport (mass-storage `std::fs` or
 /// MTP USB), so the deploy behaves identically on both.
-fn device_sha_opt(transport: &dyn Transport, path: &TPath) -> Result<Option<String>> {
-    if transport.exists(path)? {
-        Ok(Some(sha256_bytes(&transport.read(path)?)))
-    } else {
-        Ok(None)
+fn device_sha(transport: &dyn Transport, path: &TPath) -> Result<String> {
+    Ok(sha256_bytes(&transport.read(path)?))
+}
+
+/// What is on the device, one directory listing at a time.
+///
+/// Every decision starts with "is it there, and how big" — a listing answers
+/// that for a whole directory at once, where an `exists` per path is a round
+/// trip per path. Over MTP that is the difference between one request and a
+/// hundred, and the size it also yields is often enough to settle a file
+/// without reading a byte of it.
+#[derive(Default)]
+struct DeviceIndex {
+    /// Parent directory to its files' sizes. A directory that could not be
+    /// listed caches as empty: it does not exist, so nothing in it does.
+    dirs: HashMap<String, HashMap<String, u64>>,
+}
+
+impl DeviceIndex {
+    /// The size of the device's copy of `mount_rel`, or `None` if it has none.
+    fn size_of(&mut self, transport: &dyn Transport, mount_rel: &str) -> Option<u64> {
+        let (dir, name) = match mount_rel.rsplit_once('/') {
+            Some((dir, name)) => (dir, name),
+            None => ("", mount_rel),
+        };
+        if !self.dirs.contains_key(dir) {
+            let listed = transport
+                .list(&TPath::parse(dir))
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(|e| !e.is_dir)
+                        .map(|e| (e.name, e.size.unwrap_or(0)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.dirs.insert(dir.to_string(), listed);
+        }
+        self.dirs.get(dir)?.get(name).copied()
+    }
+}
+
+/// Where the device stands on one path.
+///
+/// Reads as little as the answer needs. The receipt says what sidle last wrote
+/// there, so a source that still hashes to it is settled by the listing alone;
+/// only a path that genuinely moved is worth pulling off the device, and only
+/// then to tell an update apart from an edit somebody made on the device.
+///
+/// `force` throws the receipt away and compares bytes, which is both how a
+/// diverged file gets overwritten and how a receipt that has drifted out of
+/// step with the device is corrected.
+fn decide(
+    transport: &dyn Transport,
+    index: &mut DeviceIndex,
+    slot: &Slot,
+    receipt: Option<&FileReceipt>,
+    source_hash: &str,
+    source_size: u64,
+    force: bool,
+) -> Result<DeployFileState> {
+    let Some(device_size) = index.size_of(transport, &slot.device_rel) else {
+        return Ok(DeployFileState::Missing);
+    };
+    let tpath = slot.tpath();
+
+    if force {
+        return Ok(if device_sha(transport, &tpath)? == source_hash {
+            DeployFileState::Synced
+        } else {
+            DeployFileState::Stale
+        });
+    }
+
+    match receipt {
+        // The source has not moved since sidle wrote it, and the file is still
+        // there. Nothing this push could do to it, so nothing is read.
+        Some(r) if r.sha256 == source_hash => Ok(DeployFileState::Synced),
+        // A device copy of a different length is not the one that was written,
+        // and knowing that costs no read at all.
+        Some(r) if device_size != r.size => Ok(DeployFileState::Diverged),
+        Some(r) => {
+            let device_hash = device_sha(transport, &tpath)?;
+            Ok(if device_hash == r.sha256 {
+                DeployFileState::Stale
+            } else if device_hash == source_hash {
+                DeployFileState::Synced
+            } else {
+                DeployFileState::Diverged
+            })
+        }
+        // No receipt: sidle has never written here, so there is nothing to have
+        // diverged from and the device copy is whatever a hand-drag or an older
+        // install left. This push is the one that starts the record.
+        None if device_size != source_size => Ok(DeployFileState::Stale),
+        None => Ok(if device_sha(transport, &tpath)? == source_hash {
+            DeployFileState::Synced
+        } else {
+            DeployFileState::Stale
+        }),
+    }
+}
+
+/// The source bytes' hash and length, or `None` for a slot whose bytes cannot
+/// be produced at all.
+fn source_digest(slot: &Slot) -> Result<Option<(String, u64)>> {
+    match &slot.source {
+        Source::Rendered(Some(text)) => {
+            Ok(Some((sha256_bytes(text.as_bytes()), text.len() as u64)))
+        }
+        Source::Rendered(None) => Ok(None),
+        Source::File(path) => {
+            // Two kinds of file land here: one from an app's tree, where a miss
+            // means the tree changed under the walk, and the CA in the library
+            // root, where it means nobody issued one. Name the path and let it
+            // say which.
+            let bytes = std::fs::read(path).with_context(|| {
+                format!(
+                    "deploy source missing at {} — the tree changed under \
+                     the walk, or TLS material was never issued",
+                    path.display()
+                )
+            })?;
+            Ok(Some((sha256_bytes(&bytes), bytes.len() as u64)))
+        }
     }
 }
 
@@ -494,49 +620,26 @@ pub fn compute_status(
     transport: &dyn Transport,
 ) -> Result<DeployStatus> {
     let slots = slots(plan, conf, ca_cert);
+    let state = InstallState::read(transport);
+    let mut index = DeviceIndex::default();
     let mut files = Vec::with_capacity(slots.len());
 
-    for slot in slots {
-        // A `seed` path is decided by existence alone — neither side is read.
-        // This is the whole reason the class exists: karyll's 100 vendored
-        // files are 49 MB that no update writes, and hashing them over MTP
-        // would make a status check a transfer.
-        if slot.policy.class == FileClass::Seed {
-            let state = if transport.exists(&slot.tpath())? {
-                DeployFileState::Seeded
-            } else {
-                DeployFileState::Missing { source_hash: None }
-            };
-            files.push(DeployFileStatus {
-                device_path: slot.device_rel,
-                state,
-            });
-            continue;
-        }
-
-        let device_hash = device_sha_opt(transport, &slot.tpath())?;
-        let state = match slot.source {
-            Source::Rendered(Some(text)) => classify(sha256_bytes(text.as_bytes()), device_hash),
-            Source::Rendered(None) => DeployFileState::SourceMissing,
-            Source::File(path) => {
-                // Two kinds of file land here: one from an app's tree, where a
-                // miss means the tree changed under the walk, and the CA in the
-                // library root, where it means nobody issued one. Name the path
-                // and let it say which.
-                let source_hash = sha256_file_opt(&path)?.ok_or_else(|| {
-                    anyhow!(
-                        "deploy source missing at {} — the tree changed under \
-                         the walk, or TLS material was never issued",
-                        path.display()
-                    )
-                })?;
-                classify(source_hash, device_hash)
-            }
+    for slot in &slots {
+        let file_state = match source_digest(slot)? {
+            None => DeployFileState::SourceMissing,
+            Some((hash, size)) => decide(
+                transport,
+                &mut index,
+                slot,
+                state.file(&slot.app_id, &slot.device_rel),
+                &hash,
+                size,
+                false,
+            )?,
         };
-
         files.push(DeployFileStatus {
-            device_path: slot.device_rel,
-            state,
+            device_path: slot.device_rel.clone(),
+            state: file_state,
         });
     }
 
@@ -551,7 +654,7 @@ pub fn compute_status(
 
     let binary_mtime_ms = mtime_ms(&source.binary_path);
     let native_source_mtime_ms = newest_native_source_mtime_ms(source);
-    let apps = roll_up_per_app(plan, &files, transport)?;
+    let apps = roll_up_per_app(plan, &files, &state);
 
     Ok(DeployStatus {
         overall,
@@ -570,8 +673,8 @@ pub fn compute_status(
 fn roll_up_per_app(
     plan: &DevicePlan,
     files: &[DeployFileStatus],
-    transport: &dyn Transport,
-) -> Result<Vec<AppDeployStatus>> {
+    state: &InstallState,
+) -> Vec<AppDeployStatus> {
     let size_of: HashMap<&str, u64> = plan
         .files
         .iter()
@@ -580,7 +683,7 @@ fn roll_up_per_app(
 
     let mut out = Vec::with_capacity(plan.apps.len());
     for tree in &plan.apps {
-        let id = tree.spec.id.as_str();
+        let id = tree.app.id.as_str();
         let mine: Vec<&DeployFileStatus> = files
             .iter()
             .filter(|f| match plan.owner_of(&f.device_path) {
@@ -591,82 +694,66 @@ fn roll_up_per_app(
 
         let mut write_count = 0u32;
         let mut write_bytes = 0u64;
+        let mut diverged_count = 0u32;
         for f in &mine {
-            if matches!(
-                f.state,
-                DeployFileState::Stale { .. } | DeployFileState::Missing { .. }
-            ) {
-                write_count += 1;
-                write_bytes += size_of.get(f.device_path.as_str()).copied().unwrap_or(0);
+            match f.state {
+                DeployFileState::Stale | DeployFileState::Missing => {
+                    write_count += 1;
+                    write_bytes += size_of.get(f.device_path.as_str()).copied().unwrap_or(0);
+                }
+                DeployFileState::Diverged => diverged_count += 1,
+                DeployFileState::Synced | DeployFileState::SourceMissing => {}
             }
         }
 
         let statuses: Vec<DeployFileStatus> = mine.into_iter().cloned().collect();
         out.push(AppDeployStatus {
             id: id.to_string(),
-            name: tree.spec.name.clone(),
-            version: tree.spec.version.clone(),
-            installed_version: installed_version(transport, id),
+            name: tree.app.name.clone(),
+            version: tree.app.version.clone(),
+            installed_version: state.app(id).and_then(|r| r.version.clone()),
             file_count: tree.files.len(),
             total_bytes: tree.total_size(),
             write_count,
             write_bytes,
+            diverged_count,
             overall: summarize(&statuses),
         });
     }
-    Ok(out)
-}
-
-/// The version the device's own `extensions/<id>/app.json` declares.
-///
-/// Best-effort by design: absent means not installed, and unparseable means an
-/// app.json this build does not read — neither is worth failing a status over,
-/// because the file states already say what would be written.
-fn installed_version(transport: &dyn Transport, id: &str) -> Option<String> {
-    let path = TPath::parse(&format!("extensions/{id}/{APP_SPEC_FILE}"));
-    if !transport.exists(&path).ok()? {
-        return None;
-    }
-    let bytes = transport.read(&path).ok()?;
-    AppSpec::parse(&bytes).ok().map(|spec| spec.version)
-}
-
-fn classify(source_hash: String, device_hash: Option<String>) -> DeployFileState {
-    match device_hash {
-        None => DeployFileState::Missing {
-            source_hash: Some(source_hash),
-        },
-        Some(dh) if dh == source_hash => DeployFileState::Synced,
-        Some(dh) => DeployFileState::Stale {
-            source_hash,
-            device_hash: dh,
-        },
-    }
+    out
 }
 
 fn summarize(files: &[DeployFileStatus]) -> DeployOverall {
     let mut stale = 0u32;
     let mut missing = 0u32;
     let mut synced = 0u32;
+    let mut diverged = 0u32;
     for f in files {
         match f.state {
-            // A seeded path is present and deliberately not compared, so it is
-            // as done as a synced one.
-            DeployFileState::Synced | DeployFileState::Seeded => synced += 1,
-            DeployFileState::Stale { .. } => stale += 1,
-            DeployFileState::Missing { .. } => missing += 1,
+            DeployFileState::Synced => synced += 1,
+            DeployFileState::Stale => stale += 1,
+            DeployFileState::Missing => missing += 1,
+            // Present, and not what sidle put there. Not work a push would do,
+            // and not a file anyone should read as in sync.
+            DeployFileState::Diverged => diverged += 1,
             DeployFileState::SourceMissing => {}
         }
     }
-    if stale == 0 && missing == 0 {
-        DeployOverall::InSync
-    } else if synced == 0 && stale == 0 {
-        DeployOverall::NotInstalled
-    } else {
-        DeployOverall::Stale {
-            stale_count: stale,
-            missing_count: missing,
+    if stale > 0 || missing > 0 {
+        if synced == 0 && diverged == 0 && stale == 0 {
+            DeployOverall::NotInstalled
+        } else {
+            DeployOverall::Stale {
+                stale_count: stale,
+                missing_count: missing,
+            }
         }
+    } else if diverged > 0 {
+        DeployOverall::DivergedOnly {
+            diverged_count: diverged,
+        }
+    } else {
+        DeployOverall::InSync
     }
 }
 
@@ -715,9 +802,16 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
     newest
 }
 
-/// Install every slot. For each: skip if Synced, write-via-temp +
-/// rename otherwise. On failure, record per-file and continue — a
-/// partial install is recoverable on the next click.
+/// Install every slot, and record what landed.
+///
+/// Each file is written unless the device already holds those bytes, or holds
+/// bytes nobody here put there — see [`decide`]. On failure, record per-file
+/// and continue: a partial install is recoverable on the next click.
+///
+/// `force` overwrites a device copy sidle did not write, and compares bytes
+/// rather than trusting the receipt. It is the way past a file changed on the
+/// device, and the way to repair a receipt that has drifted out of step with
+/// what is actually there.
 ///
 /// `on_progress` fires once per file with its outcome. The Tauri
 /// command wires this to `device-app:install-progress` events for live UI
@@ -733,17 +827,29 @@ pub fn install_all(
     conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
+    force: bool,
     mut on_progress: impl FnMut(&DeployFileInstallResult),
 ) -> Result<DeployInstallReport> {
     // No explicit mkdir: `Transport::write_atomic` creates the bin/ and etc/
     // parents on both transports (mass-storage `create_dir_all`, MTP
     // `ensure_folder`), so a fresh install needs no pre-step.
     let slots = slots(plan, conf, ca_cert);
+    let mut state = InstallState::read(transport);
+    let mut index = DeviceIndex::default();
     let mut results = Vec::with_capacity(slots.len());
+    let mut recorded: HashMap<String, BTreeMap<String, FileReceipt>> = HashMap::new();
+
     for slot in &slots {
-        let result = install_one(transport, slot);
+        let prior = state.file(&slot.app_id, &slot.device_rel).cloned();
+        let (result, receipt) = install_one(transport, &mut index, slot, prior, force);
         on_progress(&result);
         results.push(result);
+        if let Some(receipt) = receipt {
+            recorded
+                .entry(slot.app_id.clone())
+                .or_default()
+                .insert(slot.device_rel.clone(), receipt);
+        }
     }
 
     // A cable push is authoritative: what it just wrote supersedes any pending
@@ -754,60 +860,126 @@ pub fn install_all(
         let _ = transport.delete(&TPath::parse(&format!("{path}.new")));
     }
 
+    // One record per app this push covered, replacing rather than merging: a
+    // path the app has stopped shipping should stop being one the receipt
+    // claims sidle put there. Apps outside the plan keep theirs, which is what
+    // makes a per-row install leave the rest of the fleet's record alone.
+    let installed_at = now_secs();
+    for tree in &plan.apps {
+        let id = tree.app.id.as_str();
+        state.set_app(
+            id,
+            AppReceipt {
+                version: tree.app.version.clone(),
+                built_at: tree.built_at(),
+                installed_at,
+                files: recorded.remove(id).unwrap_or_default(),
+            },
+        );
+    }
+    if let Err(e) = state.write(transport) {
+        // The files are on the device either way. A lost receipt costs the next
+        // push its shortcuts and its ability to spot an on-device edit, so it is
+        // reported rather than swallowed — and not raised to an error, which
+        // would call a completed install a failure.
+        let result = DeployFileInstallResult::Failed {
+            device_path: receipt::RECEIPT_PATH.to_string(),
+            error: format!("{e:#}"),
+        };
+        on_progress(&result);
+        results.push(result);
+    }
+
     Ok(DeployInstallReport { results })
 }
 
-fn install_one(transport: &dyn Transport, slot: &Slot) -> DeployFileInstallResult {
-    let tpath = slot.tpath();
-
-    // A `seed` path is planted once and left alone. The on-device copy is the
-    // live one — a user may have edited it, and replacing a vendored stack
-    // costs a re-download — so presence, not equal bytes, is the test.
-    if slot.policy.class == FileClass::Seed && matches!(transport.exists(&tpath), Ok(true)) {
-        return DeployFileInstallResult::Skipped {
-            device_path: slot.device_rel.clone(),
-        };
-    }
-
+/// Install one slot, and say what the receipt should record for it.
+///
+/// A `None` receipt means "leave whatever the receipt already said": the file
+/// on the device is not the one this push would have written, so the record of
+/// what sidle last wrote there is still the truth.
+fn install_one(
+    transport: &dyn Transport,
+    index: &mut DeviceIndex,
+    slot: &Slot,
+    prior: Option<FileReceipt>,
+    force: bool,
+) -> (DeployFileInstallResult, Option<FileReceipt>) {
     let bytes_result: Result<Vec<u8>> = match &slot.source {
         Source::Rendered(Some(text)) => Ok(text.as_bytes().to_vec()),
         Source::Rendered(None) => {
-            return DeployFileInstallResult::SourceMissing {
-                device_path: slot.device_rel.clone(),
-            };
+            return (
+                DeployFileInstallResult::SourceMissing {
+                    device_path: slot.device_rel.clone(),
+                },
+                prior,
+            );
         }
         Source::File(path) => {
             std::fs::read(path).with_context(|| format!("read source {}", path.display()))
         }
     };
-
     let bytes = match bytes_result {
         Ok(b) => b,
         Err(e) => {
-            return DeployFileInstallResult::Failed {
-                device_path: slot.device_rel.clone(),
-                error: format!("{e:#}"),
-            };
+            return (
+                DeployFileInstallResult::Failed {
+                    device_path: slot.device_rel.clone(),
+                    error: format!("{e:#}"),
+                },
+                prior,
+            );
         }
     };
 
-    let source_hash = sha256_bytes(&bytes);
-    if let Ok(Some(device_hash)) = device_sha_opt(transport, &tpath)
-        && device_hash == source_hash
-    {
-        return DeployFileInstallResult::Skipped {
-            device_path: slot.device_rel.clone(),
-        };
-    }
-
-    if let Err(e) = transport.write_atomic(&tpath, &bytes) {
-        return DeployFileInstallResult::Failed {
-            device_path: slot.device_rel.clone(),
-            error: format!("{e:#}"),
-        };
-    }
-    DeployFileInstallResult::Wrote {
-        device_path: slot.device_rel.clone(),
+    let source = FileReceipt {
+        sha256: sha256_bytes(&bytes),
+        size: bytes.len() as u64,
+    };
+    let state = decide(
+        transport,
+        index,
+        slot,
+        prior.as_ref(),
+        &source.sha256,
+        source.size,
+        force,
+    );
+    match state {
+        Err(e) => (
+            DeployFileInstallResult::Failed {
+                device_path: slot.device_rel.clone(),
+                error: format!("{e:#}"),
+            },
+            prior,
+        ),
+        Ok(DeployFileState::Synced) => (
+            DeployFileInstallResult::Skipped {
+                device_path: slot.device_rel.clone(),
+            },
+            Some(source),
+        ),
+        Ok(DeployFileState::Diverged) => (
+            DeployFileInstallResult::KeptDeviceCopy {
+                device_path: slot.device_rel.clone(),
+            },
+            prior,
+        ),
+        Ok(_) => match transport.write_atomic(&slot.tpath(), &bytes) {
+            Ok(()) => (
+                DeployFileInstallResult::Wrote {
+                    device_path: slot.device_rel.clone(),
+                },
+                Some(source),
+            ),
+            Err(e) => (
+                DeployFileInstallResult::Failed {
+                    device_path: slot.device_rel.clone(),
+                    error: format!("{e:#}"),
+                },
+                prior,
+            ),
+        },
     }
 }
 
@@ -1051,16 +1223,10 @@ mod tests {
     fn make_source(repo: &Path, include_binary: bool) -> DeploySource {
         let mirror = repo.join("device");
         write_file(
-            &mirror.join("extensions/sidle/app.json"),
-            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
-                 "tile":"documents/Sidle.sh","pidof":"sidle",
-                 "paths":[{"match":"extensions/sidle/bin/sidle","apply":"staged"},
-                          {"match":"extensions/sidle/bin/sidle.sh","apply":"staged"},
-                          {"match":"extensions/sidle/bin/sidle.build-ts","class":"ignore"},
-                          {"match":"extensions/sidle/etc/server.conf.example",
-                           "class":"ignore"}]}"#,
+            &mirror.join("extensions/sidle/config.xml"),
+            br#"<extension><information><name>Sidle</name>
+                <version>0.1.9</version></information></extension>"#,
         );
-        write_file(&mirror.join("extensions/sidle/config.xml"), b"<config/>");
         write_file(
             &mirror.join("extensions/sidle/menu.json"),
             b"{\"items\":[]}",
@@ -1071,7 +1237,7 @@ mod tests {
         );
         write_file(
             &mirror.join("documents/Sidle.sh"),
-            b"#!/bin/sh\n# Name: Sidle\nexec sidle\n",
+            b"#!/bin/sh\n# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
         if include_binary {
             write_file(
@@ -1108,26 +1274,55 @@ mod tests {
         (source, plan)
     }
 
+    /// A push with nothing forced, which is every push the button makes.
+    fn push(
+        plan: &crate::library::apps::DevicePlan,
+        conf: Option<&ServerConfRender>,
+        ca: &Path,
+        device: &Path,
+    ) -> DeployInstallReport {
+        install_all(plan, conf, ca, &ms(device), false, |_| {}).unwrap()
+    }
+
+    fn status_of(
+        plan: &crate::library::apps::DevicePlan,
+        source: &DeploySource,
+        conf: Option<&ServerConfRender>,
+        ca: &Path,
+        device: &Path,
+    ) -> DeployStatus {
+        compute_status(plan, source, conf, ca, &ms(device)).unwrap()
+    }
+
+    fn state_of(status: &DeployStatus, path: &str) -> DeployFileState {
+        status
+            .files
+            .iter()
+            .find(|f| f.device_path == path)
+            .unwrap_or_else(|| panic!("{path} is not in the plan"))
+            .state
+            .clone()
+    }
+
     #[test]
     fn status_not_installed_when_device_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(
+        let status = status_of(
             &plan,
             &source,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-        )
-        .unwrap();
+            device.path(),
+        );
         assert_eq!(status.overall, DeployOverall::NotInstalled);
         assert!(
             status
                 .files
                 .iter()
-                .all(|f| matches!(f.state, DeployFileState::Missing { .. }))
+                .all(|f| f.state == DeployFileState::Missing)
         );
     }
 
@@ -1137,23 +1332,10 @@ mod tests {
         let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
+        let ca = ca_path(tmp.path());
 
-        install_all(
-            &plan,
-            Some(&conf),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
-        let status = compute_status(
-            &plan,
-            &source,
-            Some(&conf),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-        )
-        .unwrap();
+        push(&plan, Some(&conf), &ca, device.path());
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         assert_eq!(status.overall, DeployOverall::InSync);
     }
 
@@ -1162,29 +1344,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
 
         // First install with one token.
         let conf1 = make_conf();
-        install_all(
-            &plan,
-            Some(&conf1),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        push(&plan, Some(&conf1), &ca, device.path());
 
         // Token rotates; everything else identical.
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let status = compute_status(
-            &plan,
-            &source,
-            Some(&conf2),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-        )
-        .unwrap();
+        let status = status_of(&plan, &source, Some(&conf2), &ca, device.path());
 
         match status.overall {
             DeployOverall::Stale {
@@ -1196,13 +1365,10 @@ mod tests {
             }
             other => panic!("expected Stale, got {other:?}"),
         }
-
-        let conf_status = status
-            .files
-            .iter()
-            .find(|f| f.device_path == "extensions/sidle/etc/server.conf")
-            .unwrap();
-        assert!(matches!(conf_status.state, DeployFileState::Stale { .. }));
+        assert_eq!(
+            state_of(&status, "extensions/sidle/etc/server.conf"),
+            DeployFileState::Stale
+        );
     }
 
     #[test]
@@ -1211,14 +1377,13 @@ mod tests {
         let (source, plan) = make_both(tmp.path(), false); // no binary
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(
+        let status = status_of(
             &plan,
             &source,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-        )
-        .unwrap();
+            device.path(),
+        );
         assert_eq!(status.overall, DeployOverall::BinaryNotBuilt);
         assert!(
             !status
@@ -1241,14 +1406,7 @@ mod tests {
         let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
-        let report = install_all(
-            &plan,
-            None,
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        let report = push(&plan, None, &ca_path(tmp.path()), device.path());
 
         let unwritten: Vec<&str> = report
             .results
@@ -1292,31 +1450,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
 
-        install_all(
-            &plan,
-            None,
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
-        let status = compute_status(
-            &plan,
-            &source,
-            None,
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-        )
-        .unwrap();
+        push(&plan, None, &ca, device.path());
+        let status = status_of(&plan, &source, None, &ca, device.path());
 
         assert_eq!(status.overall, DeployOverall::InSync);
-        let conf_status = status
-            .files
-            .iter()
-            .find(|f| f.device_path == "extensions/sidle/etc/server.conf")
-            .unwrap();
-        assert_eq!(conf_status.state, DeployFileState::SourceMissing);
+        assert_eq!(
+            state_of(&status, "extensions/sidle/etc/server.conf"),
+            DeployFileState::SourceMissing
+        );
     }
 
     #[test]
@@ -1325,23 +1468,10 @@ mod tests {
         let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
+        let ca = ca_path(tmp.path());
 
-        install_all(
-            &plan,
-            Some(&conf),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
-        let report = install_all(
-            &plan,
-            Some(&conf),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        push(&plan, Some(&conf), &ca, device.path());
+        let report = push(&plan, Some(&conf), &ca, device.path());
 
         assert!(
             report
@@ -1357,27 +1487,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
 
         let conf1 = make_conf();
-        install_all(
-            &plan,
-            Some(&conf1),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        push(&plan, Some(&conf1), &ca, device.path());
 
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let report = install_all(
-            &plan,
-            Some(&conf2),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        let report = push(&plan, Some(&conf2), &ca, device.path());
 
         let written: Vec<&str> = report
             .results
@@ -1396,14 +1513,12 @@ mod tests {
         let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
-        install_all(
+        push(
             &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+            device.path(),
+        );
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
         assert!(
@@ -1439,7 +1554,7 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
 
-        install_all(&plan, Some(&make_conf()), &ca, &ms(device.path()), |_| {}).unwrap();
+        push(&plan, Some(&make_conf()), &ca, device.path());
 
         let landed = device.path().join("extensions/sidle/etc/ca.pem");
         assert!(landed.exists(), "the device never received a trust root");
@@ -1473,27 +1588,30 @@ mod tests {
             Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
+            false,
             |_| events += 1,
         )
         .unwrap();
-        // extensions/sidle/{app.json, bin/sidle, bin/sidle.sh, config.xml,
-        // menu.json, etc/server.conf, etc/ca.pem} + documents/Sidle.sh
-        assert_eq!(events, 8);
+        // extensions/sidle/{bin/sidle, bin/sidle.sh, config.xml, menu.json,
+        // etc/server.conf, etc/ca.pem} + documents/Sidle.sh
+        assert_eq!(events, 7);
     }
 
-    /// Lay down a karyll-shaped app beside the built-in tree: a tile, a binary,
-    /// and a vendored subtree classed `seed`.
+    /// Lay down a karyll-shaped app beside the built-in tree: a descriptor, a
+    /// tile, a binary, and a vendored subtree.
     fn karyll_fixture(repo: &Path) -> crate::library::db::AppSourceRow {
         let out = repo.join("deploy").join("out");
         write_file(
-            &out.join("extensions/karyll/app.json"),
-            br#"{"schema":1,"id":"karyll","name":"Karyll","version":"0.2.4",
-                 "tile":"documents/Karyll.sh",
-                 "paths":[{"match":"extensions/karyll/hid/","class":"seed","seed_gen":1}]}"#,
+            &out.join("extensions/karyll/config.xml"),
+            br#"<extension><information><name>Karyll</name>
+                <version>0.2.4</version></information></extension>"#,
         );
         write_file(&out.join("extensions/karyll/bin/karyll"), b"armhf");
         write_file(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
-        write_file(&out.join("documents/Karyll.sh"), b"# Name: Karyll\n");
+        write_file(
+            &out.join("documents/Karyll.sh"),
+            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+        );
         karyll_row(repo)
     }
 
@@ -1521,6 +1639,8 @@ mod tests {
         crate::library::apps::plan_from(&source.mount_dir, &[karyll_row(karyll)])
     }
 
+    const HID_CONF: &str = "extensions/karyll/hid/config.ini";
+
     /// One cable push installs every app, not just the picker.
     #[test]
     fn a_registered_app_installs_over_the_same_cable() {
@@ -1529,20 +1649,18 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let plan = plan_with_karyll(tmp.path(), karyll.path());
 
-        install_all(
+        push(
             &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+            device.path(),
+        );
 
         for landed in [
             "extensions/sidle/bin/sidle",
             "extensions/sidle/etc/ca.pem",
             "extensions/karyll/bin/karyll",
-            "extensions/karyll/hid/config.ini",
+            HID_CONF,
             "documents/Karyll.sh",
             "documents/Sidle.sh",
         ] {
@@ -1553,99 +1671,169 @@ mod tests {
         }
     }
 
-    /// A `seed` path is planted once. The on-device copy is the live one — a
-    /// user may have set `[device] name` in it — so a later push must leave it
-    /// exactly as it found it, even though the source's bytes differ.
+    /// The rule the receipt exists for. A user sets `[device] name` on the
+    /// Kindle; the app then ships a new default for the same file. The push
+    /// wants to write and must not: the device's bytes exist nowhere else, and
+    /// no repo had to remember to mark the file for that to hold.
     #[test]
-    fn a_seed_file_is_never_overwritten_once_it_exists() {
+    fn a_file_changed_on_the_device_is_kept_when_the_source_moves_on() {
         let tmp = tempfile::tempdir().unwrap();
         let karyll = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
-        let conf = make_conf();
         let ca = ca_path(tmp.path());
+        let conf = make_conf();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        push(&plan, Some(&conf), &ca, device.path());
 
-        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
-
-        let on_device = device.path().join("extensions/karyll/hid/config.ini");
+        let on_device = device.path().join(HID_CONF);
         std::fs::write(&on_device, b"[device]\nname = My-Keyboard\n").unwrap();
+        std::fs::write(
+            karyll.path().join("deploy/out").join(HID_CONF),
+            b"[device]\nrate = 9600\n",
+        )
+        .unwrap();
 
-        let report = install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+        let plan = replan(tmp.path(), karyll.path());
+        let source = make_source(tmp.path(), true);
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
+        assert_eq!(state_of(&status, HID_CONF), DeployFileState::Diverged);
+        assert_eq!(
+            status
+                .apps
+                .iter()
+                .find(|a| a.id == "karyll")
+                .unwrap()
+                .overall,
+            DeployOverall::DivergedOnly { diverged_count: 1 }
+        );
+
+        let report = push(&plan, Some(&conf), &ca, device.path());
         assert_eq!(
             std::fs::read(&on_device).unwrap(),
             b"[device]\nname = My-Keyboard\n",
-            "an edited seed file must survive a re-push"
+            "a file edited on the device must survive a re-push"
         );
-        assert!(matches!(
-            report
-                .results
-                .iter()
-                .find(|r| matches!(r,
-                    DeployFileInstallResult::Skipped { device_path }
-                        | DeployFileInstallResult::Wrote { device_path }
-                        if device_path == "extensions/karyll/hid/config.ini"))
-                .unwrap(),
-            DeployFileInstallResult::Skipped { .. }
-        ));
+        assert!(report.results.iter().any(|r| matches!(
+            r,
+            DeployFileInstallResult::KeptDeviceCopy { device_path } if device_path == HID_CONF
+        )));
     }
 
-    /// A seed path the device does not have yet is a first install, and gets
-    /// written like anything else.
+    /// The way past it, and the only one: force compares bytes rather than
+    /// trusting the receipt, and writes what differs.
     #[test]
-    fn a_seed_file_is_written_when_the_device_lacks_it() {
+    fn force_overwrites_a_file_changed_on_the_device() {
         let tmp = tempfile::tempdir().unwrap();
         let karyll = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+        let conf = make_conf();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        push(&plan, Some(&conf), &ca, device.path());
+
+        std::fs::write(device.path().join(HID_CONF), b"edited on device\n").unwrap();
+        install_all(&plan, Some(&conf), &ca, &ms(device.path()), true, |_| {}).unwrap();
+
+        assert_eq!(
+            std::fs::read(device.path().join(HID_CONF)).unwrap(),
+            b"[device]\n"
+        );
+        // And the receipt is back in step: an unforced push now has nothing to
+        // say about the file.
+        let source = make_source(tmp.path(), true);
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
+        assert_eq!(state_of(&status, HID_CONF), DeployFileState::Synced);
+    }
+
+    /// A file the device does not have is a first install and gets written like
+    /// anything else, whatever the receipt does or does not say.
+    #[test]
+    fn a_missing_file_is_written_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+        let conf = make_conf();
         let plan = plan_with_karyll(tmp.path(), karyll.path());
 
-        install_all(
-            &plan,
-            Some(&make_conf()),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+        push(&plan, Some(&conf), &ca, device.path());
+        std::fs::remove_file(device.path().join(HID_CONF)).unwrap();
+
+        let source = make_source(tmp.path(), true);
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
+        assert_eq!(state_of(&status, HID_CONF), DeployFileState::Missing);
+
+        push(&plan, Some(&conf), &ca, device.path());
         assert_eq!(
-            std::fs::read(device.path().join("extensions/karyll/hid/config.ini")).unwrap(),
+            std::fs::read(device.path().join(HID_CONF)).unwrap(),
             b"[device]\n"
         );
     }
 
-    /// The saving the class exists for: a seeded path is reported from its
-    /// existence alone, and its bytes are never read off the device. Against
-    /// karyll's real tree that is 100 files and 49 MB a status check skips.
+    /// The saving the receipt exists for: a path whose source still hashes to
+    /// what was written is settled without reading the device. Against karyll's
+    /// real tree that is 100 files and 49 MB a status check never pulls.
     #[test]
-    fn a_seeded_path_is_reported_without_reading_either_side() {
+    fn an_unchanged_path_is_settled_without_reading_the_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+        let conf = make_conf();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let source = make_source(tmp.path(), true);
+
+        push(&plan, Some(&conf), &ca, device.path());
+        // Same length, different bytes: only a read could tell, and none is
+        // made, because nothing this push would write has changed.
+        std::fs::write(device.path().join(HID_CONF), b"[device]!\n").unwrap();
+
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
+        assert_eq!(state_of(&status, HID_CONF), DeployFileState::Synced);
+        assert_eq!(status.overall, DeployOverall::InSync);
+    }
+
+    /// A device sidle has never installed to carries no receipt, so there is
+    /// nothing to have diverged from: the push normalises it to the tree and
+    /// starts the record.
+    #[test]
+    fn a_hand_dragged_file_is_overwritten_when_no_receipt_covers_it() {
         let tmp = tempfile::tempdir().unwrap();
         let karyll = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let plan = plan_with_karyll(tmp.path(), karyll.path());
-        let source = make_source(tmp.path(), true);
-        let conf = make_conf();
-        let ca = ca_path(tmp.path());
+        write_file(&device.path().join(HID_CONF), b"dragged in by hand\n");
 
-        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
-        // Diverge the on-device copy. A `sync` path would read Stale; this one
-        // is not compared at all.
-        std::fs::write(
-            device.path().join("extensions/karyll/hid/config.ini"),
-            b"edited on device\n",
-        )
-        .unwrap();
-
-        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
-        let hid = status
-            .files
-            .iter()
-            .find(|f| f.device_path == "extensions/karyll/hid/config.ini")
-            .unwrap();
-        assert_eq!(hid.state, DeployFileState::Seeded);
-        assert_eq!(
-            status.overall,
-            DeployOverall::InSync,
-            "a seeded path that differs is not something to push"
+        push(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            device.path(),
         );
+        assert_eq!(
+            std::fs::read(device.path().join(HID_CONF)).unwrap(),
+            b"[device]\n"
+        );
+    }
+
+    /// A per-row install rewrites that app's record and leaves every other
+    /// app's alone, or the next full push would forget what it knew.
+    #[test]
+    fn a_per_app_push_leaves_the_other_apps_receipts_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let ca = ca_path(tmp.path());
+        let conf = make_conf();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+
+        push(&plan, Some(&conf), &ca, device.path());
+        push(&plan.only("karyll"), Some(&conf), &ca, device.path());
+
+        let state = InstallState::read(&ms(device.path()));
+        assert!(state.app("sidle").is_some(), "the picker's record survived");
+        assert!(state.file("sidle", "extensions/sidle/bin/sidle").is_some());
+        assert!(state.file("karyll", HID_CONF).is_some());
     }
 
     /// A cable push writes every path directly — nothing on a mounted device is
@@ -1662,14 +1850,12 @@ mod tests {
         std::fs::write(bin_dir.join("sidle.new"), b"stale-lan-stage").unwrap();
         std::fs::write(bin_dir.join("sidle.sh.new"), b"stale-lan-stage").unwrap();
 
-        install_all(
+        push(
             &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+            device.path(),
+        );
 
         assert!(bin_dir.join("sidle").exists());
         assert!(bin_dir.join("sidle.sh").exists());
@@ -1680,8 +1866,8 @@ mod tests {
         );
     }
 
-    /// The tab's row model: one entry per app, its own files only, its version
-    /// read off the device rather than inferred.
+    /// The tab's row model: one entry per app, its own files only, its installed
+    /// version read from what the last push recorded.
     #[test]
     fn per_app_rollup_scopes_each_app_to_its_own_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1693,7 +1879,7 @@ mod tests {
         let ca = ca_path(tmp.path());
 
         // Nothing installed yet.
-        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         let ids: Vec<&str> = status.apps.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["karyll", "sidle"]);
         for app in &status.apps {
@@ -1702,9 +1888,9 @@ mod tests {
             assert!(app.write_count > 0);
         }
 
-        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+        push(&plan, Some(&conf), &ca, device.path());
 
-        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         for app in &status.apps {
             assert_eq!(app.overall, DeployOverall::InSync, "{}", app.id);
             assert_eq!(app.write_count, 0);
@@ -1724,7 +1910,7 @@ mod tests {
         )
         .unwrap();
         let plan = replan(tmp.path(), karyll.path());
-        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         let karyll_row = status.apps.iter().find(|a| a.id == "karyll").unwrap();
         assert_eq!(karyll_row.write_count, 1);
         assert_eq!(karyll_row.write_bytes, b"rebuilt".len() as u64);
@@ -1749,14 +1935,12 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let plan = plan_with_karyll(tmp.path(), karyll.path()).only("karyll");
 
-        install_all(
+        push(
             &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
+            device.path(),
+        );
 
         assert!(device.path().join("extensions/karyll/bin/karyll").exists());
         assert!(device.path().join("documents/Karyll.sh").exists());
