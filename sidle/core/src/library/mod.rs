@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod apps;
 pub mod authors;
 pub mod backup;
 pub mod convert;

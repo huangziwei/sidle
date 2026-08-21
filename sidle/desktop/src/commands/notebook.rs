@@ -2,8 +2,8 @@
 //!
 //! Mirrors `commands::library` but for the `notebooks` entity: list, per-page
 //! SVG (read from the import-time cache — no SQLite re-parse), cover thumbnail,
-//! rename, remove, and a manual `.notebooks/` folder import (the Phase 1 way to
-//! populate the tab and the Phase 2 fallback when MTP can't expose notebooks).
+//! rename, remove, and a manual `.notebooks/` folder import — the fallback for
+//! a device whose MTP session will not expose notebooks.
 
 use std::path::{Path, PathBuf};
 

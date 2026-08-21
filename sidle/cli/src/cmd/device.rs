@@ -485,21 +485,28 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     // The CA has to exist before anything can be said about `etc/ca.pem`, and
     // making one needs no server and no network.
     let _ = sidle_core::library::tls::ensure_ca(&ctx.paths);
-    let conf = deploy::ServerConfRender {
-        host: match args.host {
-            Some(h) => h,
-            None => deploy::detect_lan_ipv4()
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-        },
-        port: args.port,
-        serial: device.serial.clone(),
-        token: sidle_server::load_or_generate_token(&ctx.paths.root)?,
+    // `None` when no address was given and none can be detected: the
+    // `etc/server.conf` slot then reports `SourceMissing` and the other six
+    // install, which is what a push from a machine with no routable interface
+    // is for. Rendering `HOST=` instead would write a conf the picker cannot
+    // use and call it installed.
+    let host = match args.host {
+        Some(h) => Some(h),
+        None => deploy::detect_lan_ipv4().map(|ip| ip.to_string()),
+    };
+    let conf = match host {
+        Some(host) => Some(deploy::ServerConfRender {
+            host,
+            port: args.port,
+            serial: device.serial.clone(),
+            token: sidle_server::load_or_generate_token(&ctx.paths.root)?,
+        }),
+        None => None,
     };
     let ca_cert = ctx.paths.ca_cert();
 
     if !args.install {
-        let status = deploy::compute_status(&source, &conf, &ca_cert, transport.as_ref())?;
+        let status = deploy::compute_status(&source, conf.as_ref(), &ca_cert, transport.as_ref())?;
         return ctx.report(&status, || {
             println!("{:?}", status.overall);
             for f in &status.files {
@@ -508,7 +515,7 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
         });
     }
 
-    let report = deploy::install_all(&source, &conf, &ca_cert, transport.as_ref(), |r| {
+    let report = deploy::install_all(&source, conf.as_ref(), &ca_cert, transport.as_ref(), |r| {
         eprintln!("  {r:?}");
     })?;
     ctx.report(&report, || {

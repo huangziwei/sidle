@@ -10000,9 +10000,9 @@ mod tests {
             // linear="no" item is an NCX `<content src>`: epubcheck's NCXHandler
             // registers those as HYPERLINK references, so the item is reachable.
             // (Paired with `detects_non_linear_cover_without_hyperlink`, where
-            // nothing — NCX included — points at the non-linear cover.) This is
-            // the fix for a systematic false positive: real books whose only path
-            // to a non-linear cover is the NCX toc.
+            // nothing — NCX included — points at the non-linear cover.) Real
+            // books whose only path to a non-linear cover is the NCX toc are
+            // common, so firing here would be a systematic false positive.
             let bytes = sample_aozora_epub();
             // Cover becomes non-linear...
             let m1 = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {

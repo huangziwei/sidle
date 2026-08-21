@@ -521,19 +521,12 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
         });
     };
 
-    // If we can't render a conf (no server token, no LAN IP), fall back
-    // to a placeholder so the binary/bundle slots still get checked.
-    // The status will read "server.conf stale" but at least the user
-    // sees which other files need pushing.
+    // No server token or no LAN IP → `None`, and the `etc/server.conf` slot
+    // reports `SourceMissing` while every other slot is checked normally. This
+    // is the same value `device_app_install` passes, so the status the user
+    // reads is exactly what the button would push.
     let serial = device.serial.clone();
-    let conf = render_conf(&state, serial)
-        .await
-        .unwrap_or(ServerConfRender {
-            host: String::new(),
-            port: 0,
-            serial: String::new(),
-            token: String::new(),
-        });
+    let conf = render_conf(&state, serial).await;
 
     let source = state.device_app_source.clone();
     // Cheap and idempotent, and it has to exist before the status can say
@@ -546,7 +539,7 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || {
-        deploy::compute_status(&source, &conf, &ca_cert, transport.as_ref())
+        deploy::compute_status(&source, conf.as_ref(), &ca_cert, transport.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -569,13 +562,15 @@ pub async fn device_app_install(
     let device = state.device.lock().await.clone();
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
 
-    // Hard-fail if any input the conf needs is missing — better than
-    // writing a broken server.conf that'd silently 403 the picker.
+    // `None` when there is no running server token or no routable LAN address.
+    // That does not stop the push: `etc/server.conf` is the only slot that
+    // needs one, it reports `SourceMissing`, and the binary, launcher, CA, KUAL
+    // metadata and tile all land. A device on a network that cannot carry a
+    // LAN address is exactly the device that needs the cable. A half-rendered
+    // conf is still never written — the slot is skipped, not filled in with
+    // blanks that would silently 403 the picker.
     let serial = device.serial.clone();
-    let conf = render_conf(&state, serial).await.ok_or_else(|| {
-        "couldn't resolve server.conf inputs (need a running server with token + a LAN IP)"
-            .to_string()
-    })?;
+    let conf = render_conf(&state, serial).await;
 
     let source = state.device_app_source.clone();
     let app_handle = app.clone();
@@ -592,11 +587,16 @@ pub async fn device_app_install(
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<DeployInstallReport, String> {
-        let report =
-            deploy::install_all(&source, &conf, &ca_cert, transport.as_ref(), |progress| {
+        let report = deploy::install_all(
+            &source,
+            conf.as_ref(),
+            &ca_cert,
+            transport.as_ref(),
+            |progress| {
                 let _ = app_handle.emit("device-app:install-progress", progress);
-            })
-            .map_err(|e| format!("{e:#}"))?;
+            },
+        )
+        .map_err(|e| format!("{e:#}"))?;
         // Refresh the LAN dist so an untethered in-app Update pull gets the
         // exact binary this push just wrote. Non-fatal — a staging miss
         // doesn't undo a successful device install.

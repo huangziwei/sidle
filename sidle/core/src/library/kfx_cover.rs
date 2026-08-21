@@ -4,9 +4,9 @@
 //! true cover by ASIN; for the EPUB we swap it via `epub_cover`, and here we
 //! swap it into the imported KFX too — so the copy we push to the Kindle shows
 //! the real cover. A store KFX can ship the *wrong* cover: the publisher may
-//! drop a house-logo placeholder into `cover_image` (verified on こちらあみ子,
-//! whose KFX cover was a 1200×1600 "筑摩eBOOKS" logo, not the book art). The
-//! home tile / sleep-screen renders whatever that embedded resource holds.
+//! drop a house-logo placeholder into `cover_image` — こちらあみ子 carries a
+//! 1200×1600 "筑摩eBOOKS" logo there rather than the book art. The home tile /
+//! sleep-screen renders whatever that embedded resource holds.
 //!
 //! The container surgery lives in bokai (`kfx::cover_replace`); this layer is
 //! just file I/O. Rewriting the KFX changes its bytes, so the caller must

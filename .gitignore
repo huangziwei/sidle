@@ -14,6 +14,7 @@ artifacts/
 # values fill in `etc/server.conf` at install time and stay out of git.
 device/extensions/sidle/etc/server.conf
 device/extensions/sidle/bin/sidle
+device/extensions/sidle/bin/sidle.build-ts
 device/extensions/bokai/bin/bokai
 
 # build.sh staging: the sidle-server sidecar and on-device resources copied here

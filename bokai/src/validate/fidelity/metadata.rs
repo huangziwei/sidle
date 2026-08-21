@@ -311,10 +311,11 @@ pub fn validate(
             kfx: "(missing)".into(),
         });
     }
-    // PPD check moved to `validate::fidelity::page_progression`, which mirrors calibre's
-    // writing-mode → ppd override (a KFX with `direction: ltr` + `writing_mode:
-    // vertical_rl` still has PPD = rtl, which a literal field-by-field compare
-    // here would miss). PPD values are still printed below as informational.
+    // The PPD check lives in `validate::fidelity::page_progression`, which
+    // mirrors calibre's writing-mode → ppd override: a KFX with `direction: ltr`
+    // + `writing_mode: vertical_rl` still has PPD = rtl, which the literal
+    // field-by-field compare here would miss. PPD values are printed below as
+    // informational only.
 
     // The remaining checks depend on which side is bokai's output. When the
     // EPUB is generated from a KFX ("port"), it must carry the KFX's

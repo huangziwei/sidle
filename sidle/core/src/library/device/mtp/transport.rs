@@ -14,11 +14,11 @@
 //!
 //! Atomicity: weaker than mass-storage. `SendObjectInfo` allocates the object
 //! handle before `SendObject` streams the bytes, so a failed mid-upload can
-//! leave a zero-or-partial-byte object visible to the device's indexer.
-//! Phase 3 accepts this — the failure modes are (a) USB unplug, which the
-//! user sees, and (b) `Error::Cancelled`, which we propagate. A Phase 4
-//! polish item is upload-as-`.partial` + `MoveObject`/rename when the device
-//! advertises `SetObjectPropValue` support (`MtpDevice::supports_rename()`).
+//! leave a zero-or-partial-byte object visible to the device's indexer. Both
+//! ways that happens are visible to the caller — a USB unplug, and
+//! `Error::Cancelled`, which propagates — so nothing here hides a torn write.
+//! Upload-as-`.partial` + `MoveObject` would close the window on devices that
+//! advertise `SetObjectPropValue` (`MtpDevice::supports_rename()`).
 
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -154,10 +154,10 @@ async fn upload_streamed(
     let parent = ensure_folder(storage, &parent_path).await?;
 
     // MTP has no atomic overwrite: delete-then-upload, accepting a tiny window
-    // where neither the old nor new object is present (Phase 3 tradeoff — see
-    // the module header). Push routes here for the real (color-cover, send)
-    // writes; the window is between an existing same-name object's delete and
-    // the new upload, which only happens on a re-push of an edited book.
+    // where neither the old nor new object is present — see the module header.
+    // Push routes here for the real (color-cover, send) writes; the window is
+    // between an existing same-name object's delete and the new upload, which
+    // only happens on a re-push of an edited book.
     let entries = storage.list_objects(parent).await.map_err(map_mtp_err)?;
     if let Some(existing) = entries.into_iter().find(|o| o.filename == name) {
         storage

@@ -52,6 +52,11 @@ VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' bokai/Cargo.toml | head -1
 # this file has to run on both.
 sed -i.bak -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" "$EXT/config.xml"
 rm -f "$EXT/config.xml.bak"
+# The other install file outside Cargo's reach: what a desktop installer reads
+# to name the version it is about to push. bokai has no tile and no menu, so
+# this is the only place the device says which build it carries.
+sed -i.bak -E "s#\"version\": \"[^\"]*\"#\"version\": \"${VERSION}\"#" "$EXT/app.json"
+rm -f "$EXT/app.json.bak"
 
 # The stamp that tells two builds of one version apart. bokai's version stands
 # still across most sidle releases — that is the point of releasing it attached

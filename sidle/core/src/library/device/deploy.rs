@@ -24,13 +24,12 @@
 //! KUAL does not run on this firmware, so `config.xml` and `menu.json` are
 //! inert and dropping them would cost nothing.
 //!
-//! Why this exists: the manual workflow (`cargo build ... && cp ...`) was
-//! easy to forget after every native change, and `etc/server.conf` would
-//! silently fall out of sync whenever sidle-server rotated its
-//! `.server-token`, leaving the picker getting `403` from `/list.json`
-//! with no UI breadcrumb. The button this module backs
-//! (`device_app_install` in `commands/device.rs`) re-syncs every file in one
-//! click and is idempotent — content-hash equal means skip.
+//! The button this module backs (`device_app_install` in `commands/device.rs`)
+//! re-syncs every file in one click and is idempotent — content-hash equal
+//! means skip. `etc/server.conf` is rendered on every push rather than
+//! remembered, so a rotated `.server-token` cannot leave the picker holding a
+//! stale bearer and getting `403` from `/list.json` with nothing in the UI to
+//! say why.
 //!
 //! Transport-agnostic: everything below drives the [`Transport`] trait,
 //! so a deploy behaves identically over a mass-storage mount (KOA2) and
@@ -240,6 +239,12 @@ pub enum DeployFileInstallResult {
     Wrote { device_path: String },
     /// Skipped — already content-equal to the source.
     Skipped { device_path: String },
+    /// Nothing to write: the bytes for this slot could not be produced. Only
+    /// `etc/server.conf` reaches this, and only with no LAN address or no
+    /// server token. Distinct from `Skipped` because the device copy is *not*
+    /// known to match — it was never compared — and distinct from `Failed`
+    /// because nothing went wrong and the rest of the push is authoritative.
+    SourceMissing { device_path: String },
     /// Write failed; the rest of the install continues so a partial
     /// failure leaves a recoverable state.
     Failed { device_path: String, error: String },
@@ -256,7 +261,14 @@ pub struct DeployInstallReport {
 /// read from a file.
 enum Source<'a> {
     File(PathBuf),
-    Rendered(String),
+    /// Bytes computed live rather than read from a file. `None` says the
+    /// inputs to compute them are unavailable, and the slot reports
+    /// [`DeployFileState::SourceMissing`] rather than failing the deploy — the
+    /// same graceful degradation the binary slot already has. Only
+    /// `etc/server.conf` needs it, and it is exactly what a machine with no
+    /// routable LAN address needs from a cable push: every other slot is
+    /// independent of the address, and pushing them is the whole point.
+    Rendered(Option<String>),
     /// For the binary: same as File, but a missing source path
     /// surfaces as `SourceMissing` instead of an error.
     BinaryFile(&'a Path),
@@ -285,7 +297,11 @@ fn mirrored(source: &DeploySource, device_rel: &'static str) -> Slot<'static> {
     }
 }
 
-fn slots<'a>(source: &'a DeploySource, conf: &ServerConfRender, ca_cert: &Path) -> Vec<Slot<'a>> {
+fn slots<'a>(
+    source: &'a DeploySource,
+    conf: Option<&ServerConfRender>,
+    ca_cert: &Path,
+) -> Vec<Slot<'a>> {
     vec![
         // Not mirrored: the picker is cross-compiled into `target/`, and ships
         // on-device under its short name.
@@ -309,10 +325,12 @@ fn slots<'a>(source: &'a DeploySource, conf: &ServerConfRender, ca_cert: &Path) 
         mirrored(source, "extensions/sidle/config.xml"),
         mirrored(source, "extensions/sidle/menu.json"),
         // Not mirrored: per-install secret, rendered live. The mirror holds
-        // only `etc/server.conf.example`, which is never pushed.
+        // only `etc/server.conf.example`, which is never pushed. `None` when
+        // there is no LAN address or no server token to render — the slot then
+        // reports `SourceMissing` and the other six install anyway.
         Slot {
             device_rel: "extensions/sidle/etc/server.conf",
-            source: Source::Rendered(conf.render()),
+            source: Source::Rendered(conf.map(ServerConfRender::render)),
         },
         // The one-tap launcher tile, and the app's primary front door. The
         // hotfix only indexes tiles from `documents/`, so this one sits at the
@@ -363,11 +381,16 @@ fn device_sha_opt(transport: &dyn Transport, path: &TPath) -> Result<Option<Stri
 /// server.conf, and the connected device's [`Transport`] (mass-storage volume
 /// or MTP — the deploy is identical over either).
 ///
+/// `conf` is `None` when its inputs are unavailable (no routable LAN address,
+/// or no server token): the `etc/server.conf` slot reports
+/// [`DeployFileState::SourceMissing`] and every other slot is checked
+/// normally, so the status matches what [`install_all`] would then push.
+///
 /// Does no writes, no network. Reads the source side off the host filesystem
 /// and the device side through `transport`.
 pub fn compute_status(
     source: &DeploySource,
-    conf: &ServerConfRender,
+    conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
 ) -> Result<DeployStatus> {
@@ -378,10 +401,11 @@ pub fn compute_status(
         let device_hash = device_sha_opt(transport, &slot.tpath())?;
 
         let state = match slot.source {
-            Source::Rendered(text) => {
+            Source::Rendered(Some(text)) => {
                 let source_hash = sha256_bytes(text.as_bytes());
                 classify(source_hash, device_hash)
             }
+            Source::Rendered(None) => DeployFileState::SourceMissing,
             Source::File(path) => {
                 // Two kinds of file land here: the `device/` mirror, where a
                 // miss means repo layout drift, and the CA in the library root,
@@ -515,9 +539,15 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 /// `on_progress` fires once per file with its outcome. The Tauri
 /// command wires this to `device-app:install-progress` events for live UI
 /// updates; tests can pass `|_| {}`.
+///
+/// `conf` is `None` when `etc/server.conf` has no bytes to render — that slot
+/// reports [`DeployFileInstallResult::SourceMissing`] and the other six are
+/// written. A push must not be gated on the one slot that needs a LAN address,
+/// because a device on a network that cannot carry one is precisely the device
+/// that needs the cable.
 pub fn install_all(
     source: &DeploySource,
-    conf: &ServerConfRender,
+    conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
     mut on_progress: impl FnMut(&DeployFileInstallResult),
@@ -544,7 +574,12 @@ pub fn install_all(
 
 fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> DeployFileInstallResult {
     let bytes_result: Result<Vec<u8>> = match &slot.source {
-        Source::Rendered(text) => Ok(text.as_bytes().to_vec()),
+        Source::Rendered(Some(text)) => Ok(text.as_bytes().to_vec()),
+        Source::Rendered(None) => {
+            return DeployFileInstallResult::SourceMissing {
+                device_path: slot.device_rel.to_string(),
+            };
+        }
         Source::File(path) => {
             std::fs::read(path).with_context(|| format!("read source {}", path.display()))
         }
@@ -856,7 +891,7 @@ mod tests {
 
         let status = compute_status(
             &source,
-            &make_conf(),
+            Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
         )
@@ -879,14 +914,19 @@ mod tests {
 
         install_all(
             &source,
-            &conf,
+            Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
         )
         .unwrap();
-        let status =
-            compute_status(&source, &conf, &ca_path(tmp.path()), &ms(device.path())).unwrap();
+        let status = compute_status(
+            &source,
+            Some(&conf),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+        )
+        .unwrap();
         assert_eq!(status.overall, DeployOverall::InSync);
     }
 
@@ -900,7 +940,7 @@ mod tests {
         let conf1 = make_conf();
         install_all(
             &source,
-            &conf1,
+            Some(&conf1),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -910,8 +950,13 @@ mod tests {
         // Token rotates; everything else identical.
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let status =
-            compute_status(&source, &conf2, &ca_path(tmp.path()), &ms(device.path())).unwrap();
+        let status = compute_status(
+            &source,
+            Some(&conf2),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+        )
+        .unwrap();
 
         match status.overall {
             DeployOverall::Stale {
@@ -940,7 +985,7 @@ mod tests {
 
         let status = compute_status(
             &source,
-            &make_conf(),
+            Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
         )
@@ -954,6 +999,89 @@ mod tests {
         assert_eq!(bin.state, DeployFileState::SourceMissing);
     }
 
+    /// A machine with no routable LAN address (or no server token) must still
+    /// be able to push over a cable. `etc/server.conf` is the only slot whose
+    /// bytes depend on an address; the binary, the launcher, the CA, the KUAL
+    /// metadata and the tile do not, and a device on a client-isolated network
+    /// is exactly the device that needs them delivered by hand.
+    #[test]
+    fn conf_without_inputs_reports_source_missing_and_the_rest_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        let report = install_all(
+            &source,
+            None,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+
+        let unwritten: Vec<&str> = report
+            .results
+            .iter()
+            .filter_map(|r| match r {
+                DeployFileInstallResult::SourceMissing { device_path } => {
+                    Some(device_path.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unwritten, vec!["extensions/sidle/etc/server.conf"]);
+
+        assert!(
+            !device
+                .path()
+                .join("extensions/sidle/etc/server.conf")
+                .exists()
+        );
+        for landed in [
+            "extensions/sidle/bin/sidle",
+            "extensions/sidle/bin/sidle.sh",
+            "extensions/sidle/etc/ca.pem",
+            "extensions/sidle/config.xml",
+            "extensions/sidle/menu.json",
+            "documents/Sidle.sh",
+        ] {
+            assert!(
+                device.path().join(landed).exists(),
+                "{landed} does not depend on a LAN address and must be pushed"
+            );
+        }
+    }
+
+    /// The status the UI shows and the push it would run have to agree: an
+    /// unrenderable conf is `SourceMissing` in both, and `summarize` already
+    /// excludes that state, so the other six being current reads "In sync"
+    /// rather than a permanent one-file-stale that no push can clear.
+    #[test]
+    fn status_without_conf_inputs_matches_what_install_would_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        install_all(
+            &source,
+            None,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+        let status =
+            compute_status(&source, None, &ca_path(tmp.path()), &ms(device.path())).unwrap();
+
+        assert_eq!(status.overall, DeployOverall::InSync);
+        let conf_status = status
+            .files
+            .iter()
+            .find(|f| f.device_path == "extensions/sidle/etc/server.conf")
+            .unwrap();
+        assert_eq!(conf_status.state, DeployFileState::SourceMissing);
+    }
+
     #[test]
     fn install_skips_synced_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -963,7 +1091,7 @@ mod tests {
 
         install_all(
             &source,
-            &conf,
+            Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -971,7 +1099,7 @@ mod tests {
         .unwrap();
         let report = install_all(
             &source,
-            &conf,
+            Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -996,7 +1124,7 @@ mod tests {
         let conf1 = make_conf();
         install_all(
             &source,
-            &conf1,
+            Some(&conf1),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -1007,7 +1135,7 @@ mod tests {
         conf2.token = "rotated".into();
         let report = install_all(
             &source,
-            &conf2,
+            Some(&conf2),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -1033,7 +1161,7 @@ mod tests {
 
         install_all(
             &source,
-            &make_conf(),
+            Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
@@ -1074,7 +1202,7 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
 
-        install_all(&source, &make_conf(), &ca, &ms(device.path()), |_| {}).unwrap();
+        install_all(&source, Some(&make_conf()), &ca, &ms(device.path()), |_| {}).unwrap();
 
         let landed = device.path().join("extensions/sidle/etc/ca.pem");
         assert!(landed.exists(), "the device never received a trust root");
@@ -1105,7 +1233,7 @@ mod tests {
         let mut events = 0;
         install_all(
             &source,
-            &make_conf(),
+            Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| events += 1,
@@ -1146,7 +1274,7 @@ mod tests {
 
         install_all(
             &source,
-            &make_conf(),
+            Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},

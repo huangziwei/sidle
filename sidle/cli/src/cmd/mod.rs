@@ -1,6 +1,7 @@
 //! One module per group of commands, mirroring the desktop's own panels.
 
 pub mod annotations;
+pub mod apps;
 pub mod convert;
 pub mod device;
 pub mod library;

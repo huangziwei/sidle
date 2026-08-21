@@ -37,10 +37,11 @@ pub fn detect() -> Option<DeviceInfo> {
         .clone()
         .unwrap_or_else(|| format!("anon-mtp-{:x}", dev.location_id));
 
-    // Prefer the USB product descriptor for human-readable model. The MTP
+    // Prefer the USB product descriptor for a human-readable model. The MTP
     // session's DeviceInfo.model often has the same string, sometimes more
-    // detailed — but reading it requires opening a session, which is Phase 3.
-    // What we have now is enough for "Kindle Scribe connected" on the tile.
+    // detailed, but reading it means opening a session — and detection runs
+    // before one exists. The descriptor is enough for "Kindle Scribe
+    // connected" on the tile.
     let model = match (&dev.manufacturer, &dev.product) {
         (Some(m), Some(p)) => Some(format!("{m} {p}")),
         (None, Some(p)) => Some(p.clone()),

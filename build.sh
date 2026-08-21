@@ -42,6 +42,10 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\
 [ -n "$VERSION" ] || { echo "error: no version found in root Cargo.toml [workspace.package]" >&2; exit 1; }
 echo "==> Stamping config.xml version ($VERSION)"
 sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" device/extensions/sidle/config.xml
+# The picker is an app like the other four: app.json is what the installer
+# reads to name a version, and which of its files may be written directly
+# versus staged as `.new` for the level above to swap in.
+sed -i '' -E "s#\"version\": \"[^\"]*\"#\"version\": \"${VERSION}\"#" device/extensions/sidle/app.json
 
 # One build timestamp (unix seconds) per run, baked into the picker binary
 # (build.rs reads SIDLE_BUILD_TS) and written to the sidle.build-ts sidecar the
@@ -53,6 +57,19 @@ SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$DEVICE_TARGET" -p si
 # The build time next to the binary DeploySource points at on the dev path.
 # build.rs bakes the same value into the binary.
 printf '%s' "$BUILD_TS" > "target/$DEVICE_TARGET/release/sidle-native.build-ts"
+
+# Complete the `device/` mount mirror. Every other app in the fleet ships a
+# tree in which every installable file sits at the path it lands on, and the
+# picker's binary was the one exception — cross-built into target/ under a
+# different name (`sidle-native`; the desktop app owns `sidle` in target/) and
+# reached through a source path rather than through the mirror. Copying it here
+# makes the mirror what it claims to be, so one walk of the tree finds
+# everything the picker installs. Both files are gitignored: they are build
+# products, like device/extensions/bokai/bin/bokai beside them.
+mkdir -p device/extensions/sidle/bin
+cp "target/$DEVICE_TARGET/release/sidle-native" device/extensions/sidle/bin/sidle
+cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
+    device/extensions/sidle/bin/sidle.build-ts
 
 echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
 cargo build --release -p sidle-server

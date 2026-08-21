@@ -3,11 +3,10 @@
 //! decoded names.
 //!
 //! calibre names split chapter files like `CR!….html` but writes the manifest
-//! href as `CR%21….html`. Before the fix the importer fed the still-encoded
-//! path straight to the ZIP lookup, so converting such a book died with
-//! `File not found in ZIP: OEBPS/Text/CR%21…_split_000.html`. Every URI→archive
-//! boundary now percent-decodes: spine paths, the NCX/nav TOC, landmarks, the
-//! cover, in-HTML `<img src>` / `<a href>`, and CSS `@import` URLs.
+//! href as `CR%21….html`, so an encoded path handed straight to the ZIP lookup
+//! finds nothing. Every URI→archive boundary percent-decodes: spine paths, the
+//! NCX/nav TOC, landmarks, the cover, in-HTML `<img src>` / `<a href>`, and CSS
+//! `@import` URLs.
 
 use std::io::Write;
 use std::path::Path;

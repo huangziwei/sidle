@@ -2192,6 +2192,7 @@ function setupDeviceAppSection() {
     if (r.kind === "wrote") line = `wrote ${path}`;
     else if (r.kind === "skipped") line = `skipped ${path}`;
     else if (r.kind === "failed") line = `failed ${path}: ${r.error}`;
+    else if (r.kind === "source_missing") line = `no source for ${path}`;
     else line = JSON.stringify(r);
     prog.textContent = line;
     prog.hidden = false;
@@ -2208,12 +2209,19 @@ function setupDeviceAppSection() {
       const wrote = report.results.filter((r) => r.kind === "wrote").length;
       const skipped = report.results.filter((r) => r.kind === "skipped").length;
       const failed = report.results.filter((r) => r.kind === "failed");
+      // Only server.conf reaches source_missing, and only with no LAN address
+      // or no server token. Everything else was still delivered, so this is a
+      // note on an otherwise successful push, not a failure.
+      const unwritten = report.results.filter(
+        (r) => r.kind === "source_missing",
+      ).length;
+      const note = unwritten ? " · server.conf not written" : "";
       if (failed.length) {
         prog.textContent = `${failed.length} failed — see file list`;
       } else if (wrote === 0) {
-        prog.textContent = `already in sync (${skipped} skipped)`;
+        prog.textContent = `already in sync (${skipped} skipped)${note}`;
       } else {
-        prog.textContent = `pushed ${wrote}, skipped ${skipped}`;
+        prog.textContent = `pushed ${wrote}, skipped ${skipped}${note}`;
       }
     } catch (err) {
       prog.textContent = `error: ${err}`;
@@ -2253,6 +2261,16 @@ function renderDeviceAppStatus(status) {
   label.className = "device-app-status-label " + overallClass(overall);
   label.textContent = overallLabel(status.overall);
 
+  // server.conf is the one slot whose bytes need a LAN address and a running
+  // server token; without them it reports source-missing and is left alone.
+  // The cable push still delivers the other six, so this is worth naming
+  // rather than hiding — the picker keeps whatever conf it already had.
+  const confMissing = (status.files || []).some(
+    (f) =>
+      f.device_path.endsWith("etc/server.conf") &&
+      f.state.kind === "source_missing",
+  );
+
   if (overall === "binary_not_built") {
     btn.disabled = true;
     btn.textContent = "Install on Kindle";
@@ -2267,8 +2285,12 @@ function renderDeviceAppStatus(status) {
         : overall === "not_installed"
           ? "Install on Kindle"
           : "Update on Kindle";
-    // Show "binary older than source" hint only when nothing else is wrong.
-    if (
+    if (confMissing) {
+      tip.textContent =
+        "server.conf won't be written — no LAN address, or the server has no token. Everything else installs over the cable.";
+      tip.hidden = false;
+    } else if (
+      // Show "binary older than source" hint only when nothing else is wrong.
       overall === "in_sync" &&
       status.binary_mtime_ms != null &&
       status.native_source_mtime_ms != null &&

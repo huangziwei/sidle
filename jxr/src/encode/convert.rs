@@ -7,8 +7,7 @@
 //! entropy core are depth-agnostic (`i32` coefficients end to end), so depth
 //! only touches this conversion plus a handful of header fields ([`Depth`]).
 //!
-//! `shift_bits` policy is **cloned from libjxr** (verified by header-dumping
-//! jxrencapp-minted files, and against `strenc.c`): 0 for BD16/BD16S, **10
+//! `shift_bits` policy is **cloned from libjxr**: 0 for BD16/BD16S, **10
 //! for BD32S** (`strenc.c:785` default) — 32-bit input must shed 10 low bits
 //! for `i32` transform headroom, so BD32S is never bit-lossless, even at q1
 //! (the reference behaves identically). For the same headroom reason libjxr

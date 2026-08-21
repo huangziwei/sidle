@@ -26,7 +26,6 @@ pub struct TPath {
 impl TPath {
     /// Empty path. Used as the root for `list`/`exists` checks against a
     /// transport's storage root.
-    #[allow(dead_code)] // Phase 3 wiring.
     pub fn new() -> Self {
         Self::default()
     }
@@ -47,12 +46,10 @@ impl TPath {
         &self.segments
     }
 
-    #[allow(dead_code)] // Phase 3 wiring (used by mtp::transport to resolve object names).
     pub fn name(&self) -> Option<&str> {
         self.segments.last().map(|s| s.as_str())
     }
 
-    #[allow(dead_code)] // Phase 3 wiring (mtp::transport walks parent → child).
     pub fn parent(&self) -> Option<TPath> {
         if self.segments.is_empty() {
             None
@@ -69,7 +66,6 @@ impl TPath {
         TPath { segments }
     }
 
-    #[allow(dead_code)] // Phase 3 wiring.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
@@ -82,7 +78,6 @@ impl std::fmt::Display for TPath {
 }
 
 /// One immediate child of a directory listing.
-#[allow(dead_code)] // Phase 4 wiring (free-space / list UI).
 #[derive(Debug, Clone)]
 pub struct TEntry {
     pub name: String,
@@ -206,11 +201,9 @@ pub trait Transport: Send + Sync {
     #[allow(dead_code)]
     fn exists(&self, path: &TPath) -> Result<bool>;
     /// Immediate children of `dir`. Empty when `dir` is absent.
-    #[allow(dead_code)] // Phase 4 wiring (push UI device-state introspection).
     fn list(&self, dir: &TPath) -> Result<Vec<TEntry>>;
     /// `(free, total)` bytes when known. None when the transport has no
     /// usable storage-info call (or it failed at this moment).
-    #[allow(dead_code)] // Phase 4 wiring (free-space refresh from transport).
     fn free_space(&self) -> Option<(u64, u64)>;
 
     /// Firmware/OS version string when the transport learns it at session open

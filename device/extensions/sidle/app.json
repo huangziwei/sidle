@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "sidle",
+  "name": "Sidle",
+  "version": "0.1.9",
+  "tile": "documents/Sidle.sh",
+  "pidof": "sidle",
+  "paths": [
+    {
+      "match": "extensions/sidle/bin/sidle",
+      "apply": "staged"
+    },
+    {
+      "match": "extensions/sidle/bin/sidle.sh",
+      "apply": "staged"
+    },
+    {
+      "match": "extensions/sidle/etc/server.conf.example",
+      "class": "ignore"
+    },
+    {
+      "match": "extensions/sidle/bin/sidle.build-ts",
+      "class": "ignore"
+    }
+  ]
+}

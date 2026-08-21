@@ -137,7 +137,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
 
         // bcRawFont ($418): also raw bytes; treat the same as bcRawMedia
         // since calibre's process_fonts pulls from book_data["$418"] as bytes.
-        // Kept for the (still-deferred) font handling.
+        // Collected here so a font pass has the payloads to work from.
         if ent.type_id == KfxSymbol::Bcrawfont as u32 {
             let key = symbols.resolve(ent.id as u64).to_string();
             if !key.is_empty() && key != "?" {

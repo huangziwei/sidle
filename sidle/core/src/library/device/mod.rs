@@ -30,7 +30,6 @@ pub mod notebooks;
 pub mod push;
 pub mod transport;
 
-#[allow(unused_imports)] // TEntry used by `Transport::list` (Phase 4 wiring).
 pub use transport::{TEntry, TPath, Transport};
 
 /// What sidle knows about a connected Kindle.

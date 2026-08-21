@@ -368,9 +368,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     // `import_ink` itself decodes a real KDF `nbk` (a SQLite file) + a real KFX,
-    // so its end-to-end correctness is verified by an offline device-data
-    // harness, not here.
-    // These cover the pure DB-side logic: orphan-then-relink by asin.
+    // neither of which these fixtures carry. What is covered here is the
+    // DB-side logic alone: orphan-then-relink by asin.
     use super::*;
     use crate::library::db::{self, NewBook, NewBookInk};
     use std::path::Path;
