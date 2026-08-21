@@ -73,7 +73,7 @@ pub async fn serve(config: Config) -> Result<()> {
 /// [`serve`] with a shutdown trigger threaded in, so axum drains in-flight
 /// requests when the future resolves instead of dropping the listener abruptly.
 /// The standalone `sidle-server` passes a SIGTERM/SIGINT future (so a graceful
-/// `kill`, sakabar's port-kill, an app-initiated stop, and Ctrl-C all drain
+/// `kill`, an external port-kill, an app-initiated stop, and Ctrl-C all drain
 /// cleanly); a test can pass a oneshot to drive shutdown deterministically.
 pub async fn serve_with_shutdown(
     config: Config,
@@ -142,7 +142,7 @@ pub async fn serve_with_shutdown(
     // axum-server drains via a `Handle` rather than a shutdown future, so bridge
     // the two: the caller's future still decides *when*, and in-flight requests
     // still get to finish. The timeout bounds a wedged request so a stop can't
-    // hang forever — SIGTERM callers (the app's stop, sakabar, plain `kill`)
+    // hang forever — SIGTERM callers (the app's stop, a supervisor, plain `kill`)
     // expect the process to actually go away.
     let handle = axum_server::Handle::new();
     let drain = handle.clone();
@@ -2163,7 +2163,7 @@ mod tests {
             std::fs::write(abs, body).unwrap();
         };
         let picker = checkouts.join("picker/bin/sidle");
-        let tile = checkouts.join("karyll/out/Karyll.sh");
+        let tile = checkouts.join("sprocket/out/Sprocket.sh");
         write(&picker, &bytes);
         write(&tile, TILE);
 
@@ -2176,8 +2176,8 @@ mod tests {
                 { "id": "sidle", "name": "Sidle", "built_at": 0, "files": [
                     { "path": "extensions/sidle/bin/sidle", "sha256": "deadbeef",
                       "size": bytes.len(), "apply": "staged" } ] },
-                { "id": "karyll", "name": "Karyll", "built_at": 0, "files": [
-                    { "path": "documents/Karyll.sh", "sha256": "cafe",
+                { "id": "sprocket", "name": "Sprocket", "built_at": 0, "files": [
+                    { "path": "documents/Sprocket.sh", "sha256": "cafe",
                       "size": TILE.len(), "apply": "direct" } ] }
             ]
         });
@@ -2186,7 +2186,7 @@ mod tests {
             "files": {
                 "bin/sidle": entry(&picker),
                 "extensions/sidle/bin/sidle": entry(&picker),
-                "documents/Karyll.sh": entry(&tile),
+                "documents/Sprocket.sh": entry(&tile),
             }
         });
         std::fs::create_dir_all(&dist).unwrap();
@@ -2204,7 +2204,7 @@ mod tests {
     }
 
     /// A tile, small enough to assert on whole.
-    const TILE: &[u8] = b"# Name: Karyll\n";
+    const TILE: &[u8] = b"# Name: Sprocket\n";
 
     fn staged_state(root: &Path) -> (AppState, String, Vec<u8>) {
         let paths = LibraryPaths {
@@ -2268,8 +2268,9 @@ mod tests {
     async fn a_source_rebuilt_after_staging_is_offered_as_it_stands() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token, _) = staged_state(tmp.path());
-        let tile = state.paths.root.join("checkouts/karyll/out/Karyll.sh");
-        std::fs::write(&tile, b"# Name: Karyll\n# Icon: new\n").unwrap();
+        let tile = state.paths.root.join("checkouts/sprocket/out/Sprocket.sh");
+        const REBUILT: &[u8] = b"# Name: Sprocket\n# Icon: new\n";
+        std::fs::write(&tile, REBUILT).unwrap();
 
         let resp = build_router(state)
             .oneshot(get_request("/device/manifest.json", Some(&token)))
@@ -2281,9 +2282,9 @@ mod tests {
         let entry = &manifest["apps"][1]["files"][0];
         assert_eq!(
             entry["sha256"].as_str().unwrap(),
-            sidle_core::library::device::deploy::sha256_bytes(b"# Name: Karyll\n# Icon: new\n")
+            sidle_core::library::device::deploy::sha256_bytes(REBUILT)
         );
-        assert_eq!(entry["size"], 27);
+        assert_eq!(entry["size"], REBUILT.len());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2293,7 +2294,7 @@ mod tests {
 
         let resp = build_router(state)
             .oneshot(get_request(
-                "/device/file/documents/Karyll.sh",
+                "/device/file/documents/Sprocket.sh",
                 Some(&token),
             ))
             .await

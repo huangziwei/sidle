@@ -99,6 +99,20 @@ impl DevicePlan {
         }
     }
 
+    /// [`DevicePlan::only`], refusing an id the fleet holds no tree for. An id
+    /// standing in [`DevicePlan::errors`] is refused with the error its source
+    /// produced.
+    pub fn narrow(&self, id: &str) -> Result<DevicePlan> {
+        let narrowed = self.only(id);
+        if !narrowed.apps.is_empty() {
+            return Ok(narrowed);
+        }
+        match self.errors.iter().find(|e| e.id == id) {
+            Some(e) => anyhow::bail!("{id}: {}", e.error),
+            None => anyhow::bail!("no app named {id} in the fleet"),
+        }
+    }
+
     /// Which app owns a mount-relative path, if any.
     pub fn owner_of(&self, path: &str) -> Option<&str> {
         self.files
@@ -234,16 +248,19 @@ mod tests {
         dev
     }
 
-    fn karyll_repo(root: &Path) -> AppSourceRow {
+    fn sprocket_repo(root: &Path) -> AppSourceRow {
         let out = root.join("deploy").join("out");
-        write(&out.join("extensions/karyll/bin/karyll"), b"armhf");
-        write(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
+        write(&out.join("extensions/sprocket/bin/sprocket"), b"armhf");
         write(
-            &out.join("documents/Karyll.sh"),
-            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+            &out.join("extensions/sprocket/hid/config.ini"),
+            b"[device]\n",
+        );
+        write(
+            &out.join("documents/Sprocket.sh"),
+            b"#!/bin/sh\n# Name: Sprocket\nexec /mnt/us/extensions/sprocket/bin/sprocket.sh\n",
         );
         AppSourceRow {
-            id: "karyll".into(),
+            id: "sprocket".into(),
             source_kind: db::APP_SOURCE_LOCAL.into(),
             source: root.display().to_string(),
             root: out.display().to_string(),
@@ -267,19 +284,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dev = builtin(tmp.path());
         let repo = tempfile::tempdir().unwrap();
-        let plan = plan_from(&dev, &[karyll_repo(repo.path())]);
+        let plan = plan_from(&dev, &[sprocket_repo(repo.path())]);
         let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
             vec![
-                "documents/Karyll.sh",
                 "documents/Sidle.sh",
+                "documents/Sprocket.sh",
                 "extensions/bokai/bin/bokai",
-                "extensions/karyll/bin/karyll",
-                "extensions/karyll/hid/config.ini",
                 "extensions/sidle/bin/sidle",
                 "extensions/sidle/bin/sidle.sh",
                 "extensions/sidle/config.xml",
+                "extensions/sprocket/bin/sprocket",
+                "extensions/sprocket/hid/config.ini",
             ],
             "one list, sorted by mount path, regardless of which tree each came from"
         );
@@ -287,7 +304,7 @@ mod tests {
             plan.total_size(),
             plan.files.iter().map(|f| f.size).sum::<u64>()
         );
-        assert_eq!(plan.app("karyll").unwrap().app.name, "Karyll");
+        assert_eq!(plan.app("sprocket").unwrap().app.name, "Sprocket");
     }
 
     #[test]
@@ -295,7 +312,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dev = builtin(tmp.path());
         let repo = tempfile::tempdir().unwrap();
-        let plan = plan_from(&dev, &[karyll_repo(repo.path())]);
+        let plan = plan_from(&dev, &[sprocket_repo(repo.path())]);
         let staged: Vec<&str> = plan.staged_paths().collect();
         assert_eq!(
             staged,
@@ -306,8 +323,8 @@ mod tests {
             "only the two files the picker executes are staged"
         );
         assert_eq!(
-            plan.owner_of("extensions/karyll/hid/config.ini"),
-            Some("karyll")
+            plan.owner_of("extensions/sprocket/hid/config.ini"),
+            Some("sprocket")
         );
     }
 
@@ -317,17 +334,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dev = builtin(tmp.path());
         let gone = AppSourceRow {
-            id: "steb".into(),
+            id: "gadget".into(),
             source_kind: db::APP_SOURCE_LOCAL.into(),
-            source: "/nowhere/steb".into(),
-            root: "/nowhere/steb/device".into(),
+            source: "/nowhere/gadget".into(),
+            root: "/nowhere/gadget/device".into(),
             added_at: 0,
         };
         let plan = plan_from(&dev, &[gone]);
         assert_eq!(plan.errors.len(), 1);
-        assert_eq!(plan.errors[0].id, "steb");
+        assert_eq!(plan.errors[0].id, "gadget");
         assert!(plan.app("sidle").is_some());
-        assert!(plan.app("steb").is_none());
+        assert!(plan.app("gadget").is_none());
     }
 
     /// A row claiming `sidle` does not displace the picker shipping with this
@@ -384,6 +401,50 @@ mod tests {
                 .filter(|f| f.path == "documents/Sidle.sh")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn narrowing_keeps_one_app_and_its_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = builtin(tmp.path());
+        let repo = tempfile::tempdir().unwrap();
+        let plan = plan_from(&dev, &[sprocket_repo(repo.path())])
+            .narrow("sprocket")
+            .unwrap();
+        let ids: Vec<&str> = plan.apps.iter().map(|a| a.app.id.as_str()).collect();
+        assert_eq!(ids, vec!["sprocket"]);
+        let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "documents/Sprocket.sh",
+                "extensions/sprocket/bin/sprocket",
+                "extensions/sprocket/hid/config.ini",
+            ]
+        );
+    }
+
+    /// An id the fleet holds no tree for is refused, and one whose source
+    /// failed to read is refused with the error that source produced.
+    #[test]
+    fn narrowing_names_why_an_id_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = builtin(tmp.path());
+        let gone = AppSourceRow {
+            id: "gadget".into(),
+            source_kind: db::APP_SOURCE_LOCAL.into(),
+            source: "/nowhere/gadget".into(),
+            root: "/nowhere/gadget/device".into(),
+            added_at: 0,
+        };
+        let plan = plan_from(&dev, &[gone]);
+        let refused = plan.narrow("gadget").unwrap_err().to_string();
+        assert!(refused.starts_with("gadget: "), "{refused}");
+        assert!(!refused.contains("no app named"), "{refused}");
+        assert_eq!(
+            plan.narrow("sprocket").unwrap_err().to_string(),
+            "no app named sprocket in the fleet"
         );
     }
 }

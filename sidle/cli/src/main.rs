@@ -155,7 +155,7 @@ fn run(cli: Cli) -> Result<()> {
     }
     // Reading an app repo is a question about a directory on this machine, not
     // about a library. Answering it should not need one to exist — a checkout
-    // of steb on a machine that has never run sidle is exactly where "what
+    // of an app repo on a machine that has never run sidle is exactly where "what
     // would this install?" gets asked.
     if let Command::Apps(cmd::apps::AppsCmd::Inspect { path, files }) = &cli.command {
         return cmd::apps::inspect(cli.json, path, *files);

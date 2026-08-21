@@ -103,7 +103,9 @@
     refresh();
   }
 
-  function hide() {}
+  function hide() {
+    showRepoForm(false);
+  }
 
   // The toolbar's Gallery/List toggle, handed over by library.js's applyView.
   function setView(view) {
@@ -522,8 +524,45 @@
     await refresh();
   }
 
+  // Show or hide the `owner/repo` row.
+  function showRepoForm(open) {
+    const form = q("#apps-repo-form");
+    if (!form) return;
+    form.hidden = !open;
+    if (open) q("#apps-repo")?.focus();
+    else form.reset();
+  }
+
+  async function addRepo(e) {
+    e.preventDefault();
+    const source = q("#apps-repo")?.value.trim();
+    if (!source) return;
+    const tag = q("#apps-repo-tag")?.value.trim() || null;
+    const button = q("#apps-repo-form button[type=submit]");
+    if (button) button.disabled = true;
+    toast(`Fetching ${source}…`);
+    try {
+      const added = await api.invoke("apps_add_release", { source, tag });
+      toast(`Added ${added.map((a) => a.name).join(", ")}`);
+      showRepoForm(false);
+    } catch (err) {
+      toast(`${err}`, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+    await refresh();
+  }
+
   function wire() {
     q("#apps-add")?.addEventListener("click", add);
+    q("#apps-add-repo")?.addEventListener("click", () => {
+      showRepoForm(q("#apps-repo-form")?.hidden !== false);
+    });
+    q("#apps-repo-form")?.addEventListener("submit", addRepo);
+    q("#apps-repo-cancel")?.addEventListener("click", () => showRepoForm(false));
+    q("#apps-repo-form")?.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") showRepoForm(false);
+    });
     q("#apps-update-all")?.addEventListener("click", updateAll);
     // Per-file progress during a push, between renders.
     api.listen("device-app:install-progress", (e) => {

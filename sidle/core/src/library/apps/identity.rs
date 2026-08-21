@@ -236,10 +236,10 @@ mod tests {
     const DESCRIPTOR: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <extension>
     <information>
-        <name>KFX DeDRM</name>
+        <name>Gizmo UI</name>
         <version>0.3.0</version>
-        <author>hzwei.dev</author>
-        <id>kfxdedrm-fe</id>
+        <author>example.dev</author>
+        <id>gizmo-ui</id>
     </information>
     <menus>
         <menu type="json">menu.json</menu>
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn the_kual_descriptor_names_the_app() {
         let (name, version) = kual_information(DESCRIPTOR);
-        assert_eq!(name.as_deref(), Some("KFX DeDRM"));
+        assert_eq!(name.as_deref(), Some("Gizmo UI"));
         assert_eq!(version.as_deref(), Some("0.3.0"));
     }
 
@@ -257,7 +257,7 @@ mod tests {
     /// `<information>` block.
     #[test]
     fn a_widget_descriptor_yields_nothing() {
-        let widget = br#"<widget id="com.lzampier.btmanager" version="1.0">
+        let widget = br#"<widget id="com.example.btmanager" version="1.0">
             <name xml:lang="en">BT Manager</name>
         </widget>"#;
         assert_eq!(kual_information(widget), (None, None));
@@ -267,15 +267,18 @@ mod tests {
     fn a_tree_with_no_descriptor_still_has_an_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/steb/bin/steb"), b"elf");
+        write(&dev.join("extensions/gadget/bin/gadget"), b"elf");
         write(
-            &dev.join("documents/Steb.sh"),
-            b"#!/bin/sh\n# Name: Steb\n\n/mnt/us/extensions/steb/bin/steb\n",
+            &dev.join("documents/Gadget.sh"),
+            b"#!/bin/sh\n# Name: Gadget\n\n/mnt/us/extensions/gadget/bin/gadget\n",
         );
-        let app = AppIdentity::read(&dev, "steb").unwrap();
-        assert_eq!(app.name, "Steb", "the tile names it when nothing else does");
+        let app = AppIdentity::read(&dev, "gadget").unwrap();
+        assert_eq!(
+            app.name, "Gadget",
+            "the tile names it when nothing else does"
+        );
         assert_eq!(app.version, None);
-        assert_eq!(app.tile.as_deref(), Some("documents/Steb.sh"));
+        assert_eq!(app.tile.as_deref(), Some("documents/Gadget.sh"));
     }
 
     #[test]
@@ -294,22 +297,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
         write(
-            &dev.join("extensions/kfxdedrm-fe/bin/launch.sh"),
+            &dev.join("extensions/gizmo-ui/bin/launch.sh"),
             b"#!/bin/sh\n",
         );
-        write(&dev.join("extensions/kfxdedrm/bin/engine"), b"elf");
+        write(&dev.join("extensions/gizmo/bin/engine"), b"elf");
         write(
-            &dev.join("documents/KFXDeDRM.sh"),
-            b"#!/bin/sh\n# Name: KFX DeDRM\nexec /mnt/us/extensions/kfxdedrm-fe/bin/launch.sh\n",
+            &dev.join("documents/GizmoUI.sh"),
+            b"#!/bin/sh\n# Name: Gizmo UI\nexec /mnt/us/extensions/gizmo-ui/bin/launch.sh\n",
         );
         assert_eq!(
-            AppIdentity::read(&dev, "kfxdedrm-fe")
-                .unwrap()
-                .tile
-                .as_deref(),
-            Some("documents/KFXDeDRM.sh")
+            AppIdentity::read(&dev, "gizmo-ui").unwrap().tile.as_deref(),
+            Some("documents/GizmoUI.sh")
         );
-        assert_eq!(AppIdentity::read(&dev, "kfxdedrm").unwrap().tile, None);
+        assert_eq!(AppIdentity::read(&dev, "gizmo").unwrap().tile, None);
     }
 
     /// documents/ is the writer's directory. Only the scriptlet that launches
@@ -318,42 +318,42 @@ mod tests {
     fn nothing_else_in_documents_is_claimed() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/steb/bin/steb"), b"elf");
+        write(&dev.join("extensions/gadget/bin/gadget"), b"elf");
         write(&dev.join("documents/My Novel.txt"), b"chapter one");
         write(
             &dev.join("documents/Other.sh"),
             b"# Name: Other\nexec /mnt/us/extensions/other/x\n",
         );
-        assert_eq!(AppIdentity::read(&dev, "steb").unwrap().tile, None);
+        assert_eq!(AppIdentity::read(&dev, "gadget").unwrap().tile, None);
     }
 
     #[test]
     fn the_descriptor_outranks_the_tile_for_the_display_name() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/kfxdedrm-fe/config.xml"), DESCRIPTOR);
+        write(&dev.join("extensions/gizmo-ui/config.xml"), DESCRIPTOR);
         write(
-            &dev.join("documents/KFXDeDRM.sh"),
-            b"#!/bin/sh\n# Name: DeDRM\nexec /mnt/us/extensions/kfxdedrm-fe/bin/launch.sh\n",
+            &dev.join("documents/GizmoUI.sh"),
+            b"#!/bin/sh\n# Name: Gizmo\nexec /mnt/us/extensions/gizmo-ui/bin/launch.sh\n",
         );
-        let app = AppIdentity::read(&dev, "kfxdedrm-fe").unwrap();
-        assert_eq!(app.name, "KFX DeDRM");
+        let app = AppIdentity::read(&dev, "gizmo-ui").unwrap();
+        assert_eq!(app.name, "Gizmo UI");
         assert_eq!(app.version.as_deref(), Some("0.3.0"));
     }
 
     #[test]
     fn a_header_comment_after_the_name_does_not_hide_it() {
-        let tile = b"#!/bin/sh\n# Name: Karyll\n# Author: _hzw\n# DontUseFBInk\n";
-        assert_eq!(tile_name(tile).as_deref(), Some("Karyll"));
+        let tile = b"#!/bin/sh\n# Name: Sprocket\n# Author: nobody\n# DontUseFBInk\n";
+        assert_eq!(tile_name(tile).as_deref(), Some("Sprocket"));
     }
 
     /// The art runs to tens of kilobytes on its one line.
     #[test]
     fn the_icon_is_the_whole_data_uri() {
         let art = format!("data:image/png;base64,{}", "iVBOR".repeat(6000));
-        let tile = format!("#!/bin/sh\n# Name: Steb\n# Icon: {art}\n# DontUseFBInk\n\nexec x\n");
+        let tile = format!("#!/bin/sh\n# Name: Gadget\n# Icon: {art}\n# DontUseFBInk\n\nexec x\n");
         assert_eq!(tile_icon(tile.as_bytes()).as_deref(), Some(art.as_str()));
-        assert_eq!(tile_name(tile.as_bytes()).as_deref(), Some("Steb"));
+        assert_eq!(tile_name(tile.as_bytes()).as_deref(), Some("Gadget"));
     }
 
     /// The value reaches an `<img src>`.
@@ -373,13 +373,13 @@ mod tests {
     fn a_tile_carries_its_art_into_the_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/steb/bin/steb"), b"elf");
+        write(&dev.join("extensions/gadget/bin/gadget"), b"elf");
         write(
-            &dev.join("documents/Steb.sh"),
-            b"#!/bin/sh\n# Name: Steb\n# Icon: data:image/png;base64,iVBORw0K\n\
-              exec /mnt/us/extensions/steb/bin/steb\n",
+            &dev.join("documents/Gadget.sh"),
+            b"#!/bin/sh\n# Name: Gadget\n# Icon: data:image/png;base64,iVBORw0K\n\
+              exec /mnt/us/extensions/gadget/bin/gadget\n",
         );
-        let app = AppIdentity::read(&dev, "steb").unwrap();
+        let app = AppIdentity::read(&dev, "gadget").unwrap();
         assert_eq!(app.icon.as_deref(), Some("data:image/png;base64,iVBORw0K"));
     }
 

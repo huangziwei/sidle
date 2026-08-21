@@ -26,6 +26,7 @@ mod handwriting;
 mod orientation;
 mod readinglog;
 mod receipt;
+mod running;
 mod search;
 mod selfupdate;
 mod series;
@@ -329,6 +330,9 @@ fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> Strin
     }
     if !r.refused.is_empty() {
         parts.push("Server build not newer".to_string());
+    }
+    if !r.busy.is_empty() {
+        parts.push(format!("{} in use — close the app", r.busy.len()));
     }
     if !r.failed.is_empty() {
         parts.push(format!("{} failed — see log", r.failed.len()));

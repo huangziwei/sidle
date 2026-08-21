@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
 
     let bind = format!("0.0.0.0:{}", cli.port);
 
-    // PID file so the desktop app / sakabar / CLI can stop this daemon precisely
+    // PID file so the desktop app, a supervisor or the CLI can stop this daemon
     // and show who's serving. Written here in the standalone binary — never in the
     // shared `serve()` — so the app's (former) in-process use couldn't write the
     // app's own PID here. Removed on graceful exit; a SIGKILL leaves it stale,
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
 
 /// Resolves on SIGINT (Ctrl-C) or SIGTERM so `serve_with_shutdown` drains
 /// in-flight requests before exit. SIGTERM is what the desktop app's stop,
-/// sakabar's port-kill, and a plain `kill` send; SIGINT is an interactive Ctrl-C.
+/// an external port-kill, and a plain `kill` send; SIGINT is an interactive Ctrl-C.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

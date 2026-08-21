@@ -129,25 +129,25 @@ mod tests {
         let mount = scratch("roundtrip");
         let mut state = InstallState::default();
         state.record(
-            "karyll",
-            "extensions/karyll/bin/karyll",
+            "sprocket",
+            "extensions/sprocket/bin/sprocket",
             FileReceipt {
                 sha256: "abc".into(),
                 size: 12,
             },
         );
-        state.describe("karyll", Some("0.4.0".into()), 1_755_712_345);
+        state.describe("sprocket", Some("0.4.0".into()), 1_755_712_345);
         state.write(&mount).unwrap();
 
         let back = InstallState::read(&mount);
         assert_eq!(
-            back.file("karyll", "extensions/karyll/bin/karyll")
+            back.file("sprocket", "extensions/sprocket/bin/sprocket")
                 .map(|f| f.size),
             Some(12)
         );
-        assert_eq!(back.apps["karyll"].version.as_deref(), Some("0.4.0"));
-        assert_eq!(back.apps["karyll"].built_at, 1_755_712_345);
-        assert!(back.apps["karyll"].installed_at > 0);
+        assert_eq!(back.apps["sprocket"].version.as_deref(), Some("0.4.0"));
+        assert_eq!(back.apps["sprocket"].built_at, 1_755_712_345);
+        assert!(back.apps["sprocket"].installed_at > 0);
         let _ = std::fs::remove_dir_all(&mount);
     }
 
@@ -171,18 +171,18 @@ mod tests {
     fn recording_a_path_leaves_the_install_time_alone() {
         let mut state = InstallState::default();
         state.record(
-            "steb",
-            "extensions/steb/bin/steb",
+            "gadget",
+            "extensions/gadget/bin/gadget",
             FileReceipt {
                 sha256: "s".into(),
                 size: 1,
             },
         );
-        assert_eq!(state.apps["steb"].installed_at, 0);
+        assert_eq!(state.apps["gadget"].installed_at, 0);
 
-        state.describe("steb", None, 42);
-        assert!(state.apps["steb"].installed_at > 0);
-        assert_eq!(state.apps["steb"].built_at, 42);
+        state.describe("gadget", None, 42);
+        assert!(state.apps["gadget"].installed_at > 0);
+        assert_eq!(state.apps["gadget"].built_at, 42);
     }
 
     #[test]
@@ -190,8 +190,8 @@ mod tests {
         let mount = scratch("merge");
         let mut state = InstallState::default();
         state.record(
-            "steb",
-            "extensions/steb/bin/steb",
+            "gadget",
+            "extensions/gadget/bin/gadget",
             FileReceipt {
                 sha256: "s".into(),
                 size: 1,
@@ -211,7 +211,10 @@ mod tests {
         state.write(&mount).unwrap();
 
         let back = InstallState::read(&mount);
-        assert!(back.file("steb", "extensions/steb/bin/steb").is_some());
+        assert!(
+            back.file("gadget", "extensions/gadget/bin/gadget")
+                .is_some()
+        );
         assert!(back.file("sidle", "extensions/sidle/bin/sidle").is_some());
         let _ = std::fs::remove_dir_all(&mount);
     }

@@ -63,14 +63,14 @@ mod tests {
         assert_eq!(apply_for("extensions/sidle/bin/sidle"), Apply::Staged);
         assert_eq!(apply_for("extensions/sidle/bin/sidle.sh"), Apply::Staged);
         assert_eq!(apply_for("extensions/sidle/config.xml"), Apply::Direct);
-        assert_eq!(apply_for("extensions/karyll/bin/karyll"), Apply::Direct);
+        assert_eq!(apply_for("extensions/sprocket/bin/sprocket"), Apply::Direct);
         assert_eq!(apply_for("documents/Sidle.sh"), Apply::Direct);
     }
 
     #[test]
     fn build_stamps_and_desktop_droppings_are_not_payload() {
         assert!(!is_payload(".DS_Store"));
-        assert!(!is_payload("._karyll"));
+        assert!(!is_payload("._widget"));
         assert!(!is_payload("sidle.build-ts"));
         assert!(is_payload("sidle"));
         assert!(is_payload("config.xml"));
@@ -81,6 +81,6 @@ mod tests {
         assert!(is_per_install("extensions/sidle/etc/server.conf"));
         assert!(is_per_install("extensions/sidle/etc/ca.pem"));
         assert!(!is_per_install("extensions/sidle/menu.json"));
-        assert!(!is_per_install("extensions/karyll/hid/config.ini"));
+        assert!(!is_per_install("extensions/sprocket/hid/config.ini"));
     }
 }

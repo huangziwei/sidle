@@ -23,11 +23,16 @@ pub enum AppsCmd {
         #[arg(long)]
         files: bool,
     },
-    /// Register every app under `path`; a device push carries what is
-    /// registered. One path can hold several. Re-adding an id repoints it.
+    /// Register every app in `target`; a device push carries what is
+    /// registered. One target can hold several. Re-adding an id repoints it.
     Add {
-        /// Repo checkout or unpacked bundle.
-        path: PathBuf,
+        /// A repo checkout or unpacked bundle on this machine, or the
+        /// `owner/repo` of a GitHub repo publishing release bundles. A path
+        /// that exists is read as a path.
+        target: String,
+        /// Take this release instead of the repo's latest.
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
     },
     /// What is registered, and what each source holds.
     List,
@@ -41,7 +46,7 @@ pub enum AppsCmd {
 pub fn run(ctx: &Ctx, cmd: AppsCmd) -> Result<()> {
     match cmd {
         AppsCmd::Inspect { .. } => unreachable!("dispatched before the library opens"),
-        AppsCmd::Add { path } => add(ctx, &path),
+        AppsCmd::Add { target, tag } => add(ctx, &target, tag.as_deref()),
         AppsCmd::List => list(ctx),
         AppsCmd::Remove { id } => remove(ctx, &id),
     }
@@ -57,20 +62,58 @@ fn no_apps_here(path: &std::path::Path) -> String {
     )
 }
 
-fn add(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
+/// Register a folder on this machine, or the latest release of a GitHub repo.
+/// A `target` that names an existing path is a path, whatever else it looks
+/// like.
+fn add(ctx: &Ctx, target: &str, tag: Option<&str>) -> Result<()> {
+    let path = PathBuf::from(target);
+    if tag.is_none() && path.exists() {
+        return add_local(ctx, &path);
+    }
+    if path.exists() {
+        anyhow::bail!("--tag names a release; {target} is a folder on this machine");
+    }
+    add_release(ctx, target, tag)
+}
+
+fn add_local(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     let path = crate::ctx::absolute(path.to_path_buf())?;
     let trees = apps::discover(&path)?;
     if trees.is_empty() {
         anyhow::bail!("{}", no_apps_here(&path));
     }
+    register(
+        ctx,
+        &trees,
+        db::APP_SOURCE_LOCAL,
+        &path.display().to_string(),
+    )
+}
+
+fn add_release(ctx: &Ctx, source: &str, tag: Option<&str>) -> Result<()> {
+    let fetched = apps::release::fetch(&ctx.paths, source, tag)?;
+    ctx.say(match fetched.downloaded {
+        true => format!("fetched {} {}", fetched.repo, fetched.tag),
+        false => format!("{} {} was already unpacked", fetched.repo, fetched.tag),
+    });
+    register(
+        ctx,
+        &fetched.apps,
+        db::APP_SOURCE_RELEASE,
+        &fetched.repo.to_string(),
+    )
+}
+
+/// One row per tree, all pointing at the same source.
+fn register(ctx: &Ctx, trees: &[AppTree], kind: &str, source: &str) -> Result<()> {
     let conn = ctx.conn();
     let mut added = Vec::new();
-    for tree in &trees {
+    for tree in trees {
         db::upsert_app_source(
             &conn,
             &tree.app.id,
-            db::APP_SOURCE_LOCAL,
-            &path.display().to_string(),
+            kind,
+            source,
             &tree.root.display().to_string(),
         )?;
         added.push(summarize(tree, false));
@@ -137,7 +180,7 @@ fn list(ctx: &Ctx) -> Result<()> {
 
     ctx.report(&listed, || {
         if listed.is_empty() {
-            println!("no apps registered — `sidle-cli apps add <path>`");
+            println!("no apps registered — `sidle-cli apps add <path|owner/repo>`");
             println!("(the picker and bokai ship with the app and need no row)");
         }
         for app in &listed {

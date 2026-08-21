@@ -2012,7 +2012,7 @@ function coverUrlFor(b, { thumb = false } = {}) {
 
 // Re-pull everything the Kindle page shows. Fired on entering the device section
 // (pill click or `\`). Deploy staleness + LAN-server state change out-of-band
-// (server token rotates, native rebuilt, sakabar/CLI start-stop), so this always
+// (server token rotates, native rebuilt, a start-stop from elsewhere), so this
 // re-probes rather than trusting cached state.
 function refreshDevicePage() {
   refreshDeviceList();

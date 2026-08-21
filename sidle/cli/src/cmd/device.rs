@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use sidle_core::library::apps::DevicePlan;
 use sidle_core::library::db::{self, BookRow};
 use sidle_core::library::device::digest::DigestCache;
 use sidle_core::library::device::dist;
@@ -452,12 +453,20 @@ fn pull(ctx: &Ctx) -> Result<()> {
 
 #[derive(Args)]
 pub struct AppArgs {
+    /// Act on one app instead of the whole fleet. `sidle-cli apps list` names
+    /// the ids.
+    #[arg(long, value_name = "ID")]
+    only: Option<String>,
     /// Write the stale files to the device.
     #[arg(long)]
     install: bool,
     /// Overwrite files the device changed, comparing bytes against the source.
     #[arg(long, requires = "install")]
     force: bool,
+    /// Delete the app's `extensions/<id>/` and its tile from the device. Its
+    /// row and its files on this machine stand.
+    #[arg(long, requires = "only", conflicts_with_all = ["install", "stage"])]
+    uninstall: bool,
     /// Stage the self-update bundle for the LAN route, with no Kindle attached.
     #[arg(long, conflicts_with = "install")]
     stage: bool,
@@ -491,16 +500,29 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     // `stage_binary` copies the cross-built picker into the mount tree at the
     // path it installs to.
     source.stage_binary()?;
-    let plan = {
+    let fleet = {
         let conn = ctx.conn();
         sidle_core::library::apps::plan(&conn, &source.mount_dir)?
     };
-    for e in &plan.errors {
-        eprintln!("  skipping {}: {}", e.id, e.error);
+    // A narrowed plan carries neither list: both name apps this call leaves
+    // alone.
+    let plan = match &args.only {
+        Some(id) => fleet.narrow(id)?,
+        None => {
+            for e in &fleet.errors {
+                eprintln!("  skipping {}: {}", e.id, e.error);
+            }
+            for c in &fleet.conflicts {
+                eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
+            }
+            fleet
+        }
+    };
+
+    if args.uninstall {
+        return uninstall(ctx, &plan, transport.as_ref());
     }
-    for c in &plan.conflicts {
-        eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
-    }
+
     // `ensure_ca` makes the root the `etc/ca.pem` slot is compared against.
     let _ = sidle_core::library::tls::ensure_ca(&ctx.paths);
     // `None` with no `--host` and no detectable address: the `etc/server.conf`
@@ -551,6 +573,30 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     digests.save()?;
     ctx.report(&report, || {
         println!("installed {} file(s)", report.results.len());
+    })
+}
+
+/// Take every app in `plan` off the device. `--only` narrows it to one, and
+/// `--uninstall` requires that flag.
+fn uninstall(ctx: &Ctx, plan: &DevicePlan, transport: &dyn Transport) -> Result<()> {
+    let mut reports = Vec::new();
+    for tree in &plan.apps {
+        reports.push(deploy::uninstall(tree, transport)?);
+    }
+    ctx.report(&reports, || {
+        for r in &reports {
+            if r.removed.is_empty() {
+                println!("{}: nothing on the device", r.id);
+            }
+            for path in &r.removed {
+                println!("removed {path}");
+            }
+            for e in &r.errors {
+                println!("  {e}");
+            }
+        }
+        println!("\nThe folder on this machine and the `apps` row stand.");
+        println!("`sidle-cli apps remove <id>` drops the row.");
     })
 }
 

@@ -82,6 +82,7 @@ pub fn run() {
             commands::apps::apps_overview,
             commands::apps::apps_device_status,
             commands::apps::apps_add,
+            commands::apps::apps_add_release,
             commands::apps::apps_remove,
             commands::library::library_relocate_move,
             commands::library::library_relocate_use,

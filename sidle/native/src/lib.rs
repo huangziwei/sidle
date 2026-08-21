@@ -16,6 +16,7 @@ pub mod font;
 pub mod handwriting;
 pub mod readinglog;
 pub mod receipt;
+pub mod running;
 pub mod selfupdate;
 pub mod series;
 pub mod updates;

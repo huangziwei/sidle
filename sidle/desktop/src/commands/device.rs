@@ -572,13 +572,7 @@ pub async fn device_app_install(
     let source = state.device_app_source.clone();
     let fleet = compose_plan(&state, &source).await?;
     let plan = match &only {
-        Some(id) => {
-            let narrowed = fleet.only(id);
-            if narrowed.apps.is_empty() {
-                return Err(format!("no app named {id} in the fleet"));
-            }
-            narrowed
-        }
+        Some(id) => fleet.narrow(id).map_err(|e| format!("{e:#}"))?,
         None => fleet,
     };
     let app_handle = app.clone();
@@ -628,10 +622,8 @@ pub async fn device_app_uninstall(
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
     let source = state.device_app_source.clone();
     let plan = compose_plan(&state, &source).await?;
-    let tree = plan
-        .app(&id)
-        .ok_or_else(|| format!("no app named {id} in the fleet"))?
-        .clone();
+    let mut narrowed = plan.narrow(&id).map_err(|e| format!("{e:#}"))?;
+    let tree = narrowed.apps.swap_remove(0);
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;

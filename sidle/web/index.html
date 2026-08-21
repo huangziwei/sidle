@@ -210,17 +210,42 @@
           <div class="apps-summary" id="apps-summary"></div>
           <div class="apps-head-actions">
             <button id="apps-update-all" class="btn" disabled>Update all</button>
-            <button id="apps-add" class="btn">Add&hellip;</button>
+            <button id="apps-add" class="btn">Add folder&hellip;</button>
+            <button id="apps-add-repo" class="btn">Add from GitHub&hellip;</button>
           </div>
         </header>
+        <!-- The second source: a repo's own release, taken as published. The
+             row appears on the button beside it and folds away again. -->
+        <form id="apps-repo-form" class="apps-repo-form" hidden>
+          <input
+            id="apps-repo"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="owner/repo"
+            aria-label="GitHub owner and repository"
+          />
+          <input
+            id="apps-repo-tag"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="tag (latest)"
+            aria-label="Release tag"
+          />
+          <button type="submit" class="btn">Fetch</button>
+          <button type="button" id="apps-repo-cancel" class="btn">Cancel</button>
+        </form>
         <p id="apps-note" class="apps-note" hidden></p>
         <ul id="apps-list" class="apps-list"></ul>
         <div id="apps-grid" class="apps-grid" hidden></div>
         <div id="apps-empty" class="empty" hidden>
           <p>No apps yet.</p>
           <p class="empty-hint">
-            <strong>Add&hellip;</strong> a folder holding a built app tree — a repo
-            checkout whose <code>build.sh</code> has run, or an unpacked release.
+            <strong>Add folder&hellip;</strong> takes a built app tree on this
+            machine — a repo checkout whose <code>build.sh</code> has run, or an
+            unpacked bundle. <strong>Add from GitHub&hellip;</strong> takes a
+            repo's published release instead.
           </p>
         </div>
       </section>

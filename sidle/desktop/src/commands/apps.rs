@@ -182,6 +182,40 @@ pub async fn apps_add(state: State<'_, AppState>, path: String) -> Result<Vec<Ap
     Ok(added)
 }
 
+/// Register every app in the latest release of `source`, an `owner/repo`.
+///
+/// The bundle is checked against the sha256 its release declares and unpacked
+/// under the library root, where it is read exactly as a checkout is.
+#[tauri::command]
+pub async fn apps_add_release(
+    state: State<'_, AppState>,
+    source: String,
+    tag: Option<String>,
+) -> Result<Vec<AppRow>, String> {
+    let paths = state.paths.clone();
+    let fetched =
+        tokio::task::spawn_blocking(move || apps::release::fetch(&paths, &source, tag.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+
+    let source = fetched.repo.to_string();
+    let conn = state.db.lock().await;
+    let mut added = Vec::with_capacity(fetched.apps.len());
+    for tree in &fetched.apps {
+        db::upsert_app_source(
+            &conn,
+            &tree.app.id,
+            db::APP_SOURCE_RELEASE,
+            &source,
+            &tree.root.display().to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        added.push(row(tree, Some(source.clone())));
+    }
+    Ok(added)
+}
+
 /// Drop an app's `apps` row. Nothing on disk or on a device is touched.
 #[tauri::command]
 pub async fn apps_remove(state: State<'_, AppState>, id: String) -> Result<bool, String> {

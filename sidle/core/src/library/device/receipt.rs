@@ -154,9 +154,12 @@ mod tests {
         let t = transport(tmp.path());
         let mut state = InstallState::default();
         let mut files = BTreeMap::new();
-        files.insert("extensions/karyll/bin/karyll".to_string(), receipt("ab", 4));
+        files.insert(
+            "extensions/sprocket/bin/sprocket".to_string(),
+            receipt("ab", 4),
+        );
         state.set_app(
-            "karyll",
+            "sprocket",
             AppReceipt {
                 version: Some("0.4.0".into()),
                 built_at: 1755712345,
@@ -168,19 +171,19 @@ mod tests {
 
         let read_back = InstallState::read(&t);
         assert_eq!(
-            read_back.app("karyll").unwrap().version.as_deref(),
+            read_back.app("sprocket").unwrap().version.as_deref(),
             Some("0.4.0")
         );
         assert_eq!(
             read_back
-                .file("karyll", "extensions/karyll/bin/karyll")
+                .file("sprocket", "extensions/sprocket/bin/sprocket")
                 .unwrap()
                 .sha256,
             "ab"
         );
         assert!(
             read_back
-                .file("steb", "extensions/karyll/bin/karyll")
+                .file("gadget", "extensions/sprocket/bin/sprocket")
                 .is_none()
         );
     }
@@ -193,7 +196,7 @@ mod tests {
         let t = transport(tmp.path());
         t.write_atomic(
             &TPath::parse(RECEIPT_PATH),
-            br#"{"schema":99,"apps":{"karyll":{"files":{}}}}"#,
+            br#"{"schema":99,"apps":{"sprocket":{"files":{}}}}"#,
         )
         .unwrap();
         assert!(InstallState::read(&t).apps.is_empty());
@@ -205,24 +208,28 @@ mod tests {
     fn setting_an_app_replaces_rather_than_merges() {
         let mut state = InstallState::default();
         let mut first = BTreeMap::new();
-        first.insert("extensions/steb/bin/old".to_string(), receipt("aa", 1));
+        first.insert("extensions/gadget/bin/old".to_string(), receipt("aa", 1));
         state.set_app(
-            "steb",
+            "gadget",
             AppReceipt {
                 files: first,
                 ..Default::default()
             },
         );
         let mut second = BTreeMap::new();
-        second.insert("extensions/steb/bin/steb".to_string(), receipt("bb", 2));
+        second.insert("extensions/gadget/bin/gadget".to_string(), receipt("bb", 2));
         state.set_app(
-            "steb",
+            "gadget",
             AppReceipt {
                 files: second,
                 ..Default::default()
             },
         );
-        assert!(state.file("steb", "extensions/steb/bin/old").is_none());
-        assert!(state.file("steb", "extensions/steb/bin/steb").is_some());
+        assert!(state.file("gadget", "extensions/gadget/bin/old").is_none());
+        assert!(
+            state
+                .file("gadget", "extensions/gadget/bin/gadget")
+                .is_some()
+        );
     }
 }

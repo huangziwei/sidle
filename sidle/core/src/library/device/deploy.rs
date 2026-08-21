@@ -1464,27 +1464,30 @@ mod tests {
 
     /// Lay down a registered app beside the built-in tree: a descriptor, a
     /// tile, a binary, and a vendored subtree.
-    fn karyll_fixture(repo: &Path) -> crate::library::db::AppSourceRow {
+    fn sprocket_fixture(repo: &Path) -> crate::library::db::AppSourceRow {
         let out = repo.join("deploy").join("out");
         write_file(
-            &out.join("extensions/karyll/config.xml"),
-            br#"<extension><information><name>Karyll</name>
+            &out.join("extensions/sprocket/config.xml"),
+            br#"<extension><information><name>Sprocket</name>
                 <version>0.2.4</version></information></extension>"#,
         );
-        write_file(&out.join("extensions/karyll/bin/karyll"), b"armhf");
-        write_file(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
+        write_file(&out.join("extensions/sprocket/bin/sprocket"), b"armhf");
         write_file(
-            &out.join("documents/Karyll.sh"),
-            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+            &out.join("extensions/sprocket/hid/config.ini"),
+            b"[device]\n",
         );
-        karyll_row(repo)
+        write_file(
+            &out.join("documents/Sprocket.sh"),
+            b"#!/bin/sh\n# Name: Sprocket\nexec /mnt/us/extensions/sprocket/bin/sprocket.sh\n",
+        );
+        sprocket_row(repo)
     }
 
     /// The row alone. A test that edits a file in the tree recomposes through
     /// this; re-laying the fixture overwrites the edit.
-    fn karyll_row(repo: &Path) -> crate::library::db::AppSourceRow {
+    fn sprocket_row(repo: &Path) -> crate::library::db::AppSourceRow {
         crate::library::db::AppSourceRow {
-            id: "karyll".into(),
+            id: "sprocket".into(),
             source_kind: crate::library::db::APP_SOURCE_LOCAL.into(),
             source: repo.display().to_string(),
             root: repo.join("deploy").join("out").display().to_string(),
@@ -1492,27 +1495,27 @@ mod tests {
         }
     }
 
-    fn plan_with_karyll(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
+    fn plan_with_widget(repo: &Path, sprocket: &Path) -> crate::library::apps::DevicePlan {
         let source = make_source(repo, true);
         source.stage_binary().unwrap();
-        crate::library::apps::plan_from(&source.mount_dir, &[karyll_fixture(karyll)])
+        crate::library::apps::plan_from(&source.mount_dir, &[sprocket_fixture(sprocket)])
     }
 
     /// Recompose against the trees on disk.
-    fn replan(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
+    fn replan(repo: &Path, sprocket: &Path) -> crate::library::apps::DevicePlan {
         let source = make_source(repo, true);
-        crate::library::apps::plan_from(&source.mount_dir, &[karyll_row(karyll)])
+        crate::library::apps::plan_from(&source.mount_dir, &[sprocket_row(sprocket)])
     }
 
-    const HID_CONF: &str = "extensions/karyll/hid/config.ini";
+    const HID_CONF: &str = "extensions/sprocket/hid/config.ini";
 
     /// One cable push installs every app, not just the picker.
     #[test]
     fn a_registered_app_installs_over_the_same_cable() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
 
         push(
             &plan,
@@ -1524,9 +1527,9 @@ mod tests {
         for landed in [
             "extensions/sidle/bin/sidle",
             "extensions/sidle/etc/ca.pem",
-            "extensions/karyll/bin/karyll",
+            "extensions/sprocket/bin/sprocket",
             HID_CONF,
-            "documents/Karyll.sh",
+            "documents/Sprocket.sh",
             "documents/Sidle.sh",
         ] {
             assert!(
@@ -1543,22 +1546,22 @@ mod tests {
     #[test]
     fn a_file_changed_on_the_device_is_kept_when_the_source_moves_on() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         push(&plan, Some(&conf), &ca, device.path());
 
         let on_device = device.path().join(HID_CONF);
         std::fs::write(&on_device, b"[device]\nname = My-Keyboard\n").unwrap();
         std::fs::write(
-            karyll.path().join("deploy/out").join(HID_CONF),
+            sprocket.path().join("deploy/out").join(HID_CONF),
             b"[device]\nrate = 9600\n",
         )
         .unwrap();
 
-        let plan = replan(tmp.path(), karyll.path());
+        let plan = replan(tmp.path(), sprocket.path());
         let source = make_source(tmp.path(), true);
         let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         assert_eq!(state_of(&status, HID_CONF), DeployFileState::Diverged);
@@ -1566,7 +1569,7 @@ mod tests {
             status
                 .apps
                 .iter()
-                .find(|a| a.id == "karyll")
+                .find(|a| a.id == "sprocket")
                 .unwrap()
                 .overall,
             DeployOverall::DivergedOnly { diverged_count: 1 }
@@ -1589,11 +1592,11 @@ mod tests {
     #[test]
     fn force_overwrites_a_file_changed_on_the_device() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         push(&plan, Some(&conf), &ca, device.path());
 
         std::fs::write(device.path().join(HID_CONF), b"edited on device\n").unwrap();
@@ -1624,11 +1627,11 @@ mod tests {
     #[test]
     fn a_missing_file_is_written_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
 
         push(&plan, Some(&conf), &ca, device.path());
         std::fs::remove_file(device.path().join(HID_CONF)).unwrap();
@@ -1650,11 +1653,11 @@ mod tests {
     #[test]
     fn an_unchanged_path_is_settled_without_reading_the_device() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         let source = make_source(tmp.path(), true);
 
         push(&plan, Some(&conf), &ca, device.path());
@@ -1673,9 +1676,9 @@ mod tests {
     #[test]
     fn a_hand_dragged_file_is_overwritten_when_no_receipt_covers_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         write_file(&device.path().join(HID_CONF), b"dragged in by hand\n");
 
         push(
@@ -1693,9 +1696,9 @@ mod tests {
     #[test]
     fn uninstall_takes_the_extension_dir_and_the_tile_and_nothing_else() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         push(
             &plan,
             Some(&make_conf()),
@@ -1707,14 +1710,14 @@ mod tests {
             b"chapter one",
         );
 
-        let report = uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        let report = uninstall(plan.app("sprocket").unwrap(), &ms(device.path())).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(
             report.removed,
-            vec!["extensions/karyll", "documents/Karyll.sh"]
+            vec!["extensions/sprocket", "documents/Sprocket.sh"]
         );
-        assert!(!device.path().join("extensions/karyll").exists());
-        assert!(!device.path().join("documents/Karyll.sh").exists());
+        assert!(!device.path().join("extensions/sprocket").exists());
+        assert!(!device.path().join("documents/Sprocket.sh").exists());
         assert!(device.path().join("documents/My Novel.txt").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("documents/Sidle.sh").exists());
@@ -1723,30 +1726,30 @@ mod tests {
     #[test]
     fn uninstall_drops_the_apps_receipt_so_a_repush_reinstalls() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         push(&plan, Some(&conf), &ca, device.path());
 
-        uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        uninstall(plan.app("sprocket").unwrap(), &ms(device.path())).unwrap();
         let state = InstallState::read(&ms(device.path()));
-        assert!(state.app("karyll").is_none());
+        assert!(state.app("sprocket").is_none());
         assert!(state.app("sidle").is_some(), "the picker's record stands");
 
         push(&plan, Some(&conf), &ca, device.path());
         assert!(device.path().join(HID_CONF).exists());
-        assert!(device.path().join("documents/Karyll.sh").exists());
+        assert!(device.path().join("documents/Sprocket.sh").exists());
     }
 
     #[test]
     fn uninstalling_what_is_not_there_removes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
-        let report = uninstall(plan.app("karyll").unwrap(), &ms(device.path())).unwrap();
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
+        let report = uninstall(plan.app("sprocket").unwrap(), &ms(device.path())).unwrap();
         assert!(report.removed.is_empty());
         assert!(report.errors.is_empty());
     }
@@ -1756,19 +1759,19 @@ mod tests {
     #[test]
     fn a_per_app_push_leaves_the_other_apps_receipts_intact() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
         let conf = make_conf();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
 
         push(&plan, Some(&conf), &ca, device.path());
-        push(&plan.only("karyll"), Some(&conf), &ca, device.path());
+        push(&plan.only("sprocket"), Some(&conf), &ca, device.path());
 
         let state = InstallState::read(&ms(device.path()));
         assert!(state.app("sidle").is_some(), "the picker's record survived");
         assert!(state.file("sidle", "extensions/sidle/bin/sidle").is_some());
-        assert!(state.file("karyll", HID_CONF).is_some());
+        assert!(state.file("sprocket", HID_CONF).is_some());
     }
 
     /// A cable push writes every path directly — nothing on a mounted device is
@@ -1806,9 +1809,9 @@ mod tests {
     #[test]
     fn per_app_rollup_scopes_each_app_to_its_own_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let plan = plan_with_widget(tmp.path(), sprocket.path());
         let source = make_source(tmp.path(), true);
         let conf = make_conf();
         let ca = ca_path(tmp.path());
@@ -1816,7 +1819,7 @@ mod tests {
         // Nothing installed yet.
         let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
         let ids: Vec<&str> = status.apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, vec!["karyll", "sidle"]);
+        assert_eq!(ids, vec!["sidle", "sprocket"]);
         for app in &status.apps {
             assert_eq!(app.overall, DeployOverall::NotInstalled);
             assert!(app.installed_version.is_none());
@@ -1831,24 +1834,24 @@ mod tests {
             assert_eq!(app.write_count, 0);
             assert_eq!(app.write_bytes, 0);
         }
-        let karyll_row = status.apps.iter().find(|a| a.id == "karyll").unwrap();
-        assert_eq!(karyll_row.installed_version.as_deref(), Some("0.2.4"));
-        assert_eq!(karyll_row.name, "Karyll");
+        let sprocket_row = status.apps.iter().find(|a| a.id == "sprocket").unwrap();
+        assert_eq!(sprocket_row.installed_version.as_deref(), Some("0.2.4"));
+        assert_eq!(sprocket_row.name, "Sprocket");
 
         // One app going stale leaves the other alone — the rows are per-app,
         // not a share of one number.
         std::fs::write(
-            karyll
+            sprocket
                 .path()
-                .join("deploy/out/extensions/karyll/bin/karyll"),
+                .join("deploy/out/extensions/sprocket/bin/sprocket"),
             b"rebuilt",
         )
         .unwrap();
-        let plan = replan(tmp.path(), karyll.path());
+        let plan = replan(tmp.path(), sprocket.path());
         let status = status_of(&plan, &source, Some(&conf), &ca, device.path());
-        let karyll_row = status.apps.iter().find(|a| a.id == "karyll").unwrap();
-        assert_eq!(karyll_row.write_count, 1);
-        assert_eq!(karyll_row.write_bytes, b"rebuilt".len() as u64);
+        let sprocket_row = status.apps.iter().find(|a| a.id == "sprocket").unwrap();
+        assert_eq!(sprocket_row.write_count, 1);
+        assert_eq!(sprocket_row.write_bytes, b"rebuilt".len() as u64);
         assert_eq!(
             status
                 .apps
@@ -1866,9 +1869,9 @@ mod tests {
     #[test]
     fn a_single_app_install_carries_neither_the_ca_nor_the_conf() {
         let tmp = tempfile::tempdir().unwrap();
-        let karyll = tempfile::tempdir().unwrap();
+        let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_karyll(tmp.path(), karyll.path()).only("karyll");
+        let plan = plan_with_widget(tmp.path(), sprocket.path()).only("sprocket");
 
         push(
             &plan,
@@ -1877,8 +1880,13 @@ mod tests {
             device.path(),
         );
 
-        assert!(device.path().join("extensions/karyll/bin/karyll").exists());
-        assert!(device.path().join("documents/Karyll.sh").exists());
+        assert!(
+            device
+                .path()
+                .join("extensions/sprocket/bin/sprocket")
+                .exists()
+        );
+        assert!(device.path().join("documents/Sprocket.sh").exists());
         assert!(!device.path().join("extensions/sidle/etc/ca.pem").exists());
         assert!(
             !device

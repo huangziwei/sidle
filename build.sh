@@ -61,7 +61,7 @@ cp "target/$DEVICE_TARGET/release/sidle-native" device/extensions/sidle/bin/sidl
 cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
     device/extensions/sidle/bin/sidle.build-ts
 
-echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
+echo "==> Building sidle-server (LAN daemon: app spawns it; the Kindle reaches it)"
 cargo build --release -p sidle-server
 
 # Everything the bundle carries for a standalone .app. Tauri names sidecars

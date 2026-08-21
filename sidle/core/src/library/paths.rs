@@ -202,6 +202,16 @@ impl LibraryPaths {
         self.root.join("device-digests.json")
     }
 
+    /// Where a release bundle unpacks: one mount-rooted tree per tag of one
+    /// repo, holding however many apps that repo publishes together. A local
+    /// source stays where its build left it and has no directory here.
+    ///
+    /// The caller is [`crate::library::apps::release`], which is where the
+    /// three components are made path-safe.
+    pub fn app_release_dir(&self, owner: &str, repo: &str, tag: &str) -> PathBuf {
+        self.root.join("apps").join(owner).join(repo).join(tag)
+    }
+
     /// TLS material for the LAN server: the private CA and the server leaf it
     /// signs. Keyed off the active library root, as
     /// [`device_dist`](Self::device_dist) is.

@@ -347,7 +347,7 @@ mod tests {
             &mount.join("documents/Sidle.sh"),
             b"# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
-        write(&mount.join("extensions/steb/bin/steb"), b"steb-v1");
+        write(&mount.join("extensions/gadget/bin/gadget"), b"gadget-v1");
         let binary = root.join("cross/sidle-native");
         write(&binary, b"picker-v1");
 
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(manifest.version, MANIFEST_VERSION);
         assert_eq!(manifest.files[0].name, LEGACY_BINARY_NAME);
         let ids: Vec<&str> = manifest.apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["sidle", "steb"]);
+        assert_eq!(ids, ["gadget", "sidle"]);
 
         let picker = manifest.apps.iter().find(|a| a.id == "sidle").unwrap();
         let launcher = picker
@@ -415,8 +415,12 @@ mod tests {
 
         let sources = read_sources(dist.path()).unwrap();
         assert_eq!(
-            sources.source_of("extensions/steb/bin/steb"),
-            Some(tmp.path().join("device/extensions/steb/bin/steb").as_path())
+            sources.source_of("extensions/gadget/bin/gadget"),
+            Some(
+                tmp.path()
+                    .join("device/extensions/gadget/bin/gadget")
+                    .as_path()
+            )
         );
         assert_eq!(
             sources.source_of(LEGACY_BINARY_NAME),
@@ -451,9 +455,9 @@ mod tests {
         let mut digests = DigestCache::ephemeral();
         refresh(&plan, &source, dist.path(), &mut digests).unwrap();
 
-        let steb = tmp.path().join("device/extensions/steb/bin/steb");
-        std::fs::write(&steb, b"steb-v2-longer").unwrap();
-        touch_ahead(&steb);
+        let gadget = tmp.path().join("device/extensions/gadget/bin/gadget");
+        std::fs::write(&gadget, b"gadget-v2-longer").unwrap();
+        touch_ahead(&gadget);
         let plan = plan_from(&source.mount_dir, &[]);
 
         assert_eq!(
@@ -465,11 +469,11 @@ mod tests {
             .unwrap()
             .apps
             .into_iter()
-            .find(|a| a.id == "steb")
+            .find(|a| a.id == "gadget")
             .and_then(|a| a.files.into_iter().next())
             .unwrap();
-        assert_eq!(entry.sha256, sha256_bytes(b"steb-v2-longer"));
-        assert_eq!(entry.size, 14);
+        assert_eq!(entry.sha256, sha256_bytes(b"gadget-v2-longer"));
+        assert_eq!(entry.size, b"gadget-v2-longer".len() as u64);
     }
 
     #[test]
@@ -479,16 +483,16 @@ mod tests {
         let (plan, source) = fixture(tmp.path());
         refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
-        std::fs::remove_dir_all(tmp.path().join("device/extensions/steb")).unwrap();
+        std::fs::remove_dir_all(tmp.path().join("device/extensions/gadget")).unwrap();
         let plan = plan_from(&source.mount_dir, &[]);
         refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
         let manifest = read_manifest(dist.path()).unwrap();
-        assert!(manifest.apps.iter().all(|a| a.id != "steb"));
+        assert!(manifest.apps.iter().all(|a| a.id != "gadget"));
         assert!(
             read_sources(dist.path())
                 .unwrap()
-                .source_of("extensions/steb/bin/steb")
+                .source_of("extensions/gadget/bin/gadget")
                 .is_none()
         );
     }
@@ -498,7 +502,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
-        write(&dist.path().join("extensions/karyll/hid/big.so"), b"49MB");
+        write(&dist.path().join("extensions/sprocket/hid/big.so"), b"49MB");
         write(&dist.path().join(LEGACY_BINARY_NAME), b"picker-v1");
 
         refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
@@ -516,10 +520,10 @@ mod tests {
         let (plan, source) = fixture(tmp.path());
         refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
 
-        // `steb` changes in the tree `sources.json` points at.
-        let steb = tmp.path().join("device/extensions/steb/bin/steb");
-        std::fs::write(&steb, b"steb-v2").unwrap();
-        touch_ahead(&steb);
+        // `gadget` changes in the tree `sources.json` points at.
+        let gadget = tmp.path().join("device/extensions/gadget/bin/gadget");
+        std::fs::write(&gadget, b"gadget-v2").unwrap();
+        touch_ahead(&gadget);
 
         let stale = read_manifest(dist.path()).unwrap();
         let entry_of = |m: &DistManifest, id: &str| {
@@ -532,19 +536,32 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        assert_eq!(entry_of(&stale, "steb").sha256, sha256_bytes(b"steb-v1"));
+        assert_eq!(
+            entry_of(&stale, "gadget").sha256,
+            sha256_bytes(b"gadget-v1")
+        );
 
         let fresh = restamp(
             &stale,
             &read_sources(dist.path()).unwrap(),
             &mut DigestCache::ephemeral(),
         );
-        let steb_entry = entry_of(&fresh, "steb");
-        assert_eq!(steb_entry.sha256, sha256_bytes(b"steb-v2"));
-        assert_eq!(steb_entry.size, 7);
+        let gadget_entry = entry_of(&fresh, "gadget");
+        assert_eq!(gadget_entry.sha256, sha256_bytes(b"gadget-v2"));
+        assert_eq!(gadget_entry.size, b"gadget-v2".len() as u64);
         assert!(
-            fresh.apps.iter().find(|a| a.id == "steb").unwrap().built_at
-                > stale.apps.iter().find(|a| a.id == "steb").unwrap().built_at,
+            fresh
+                .apps
+                .iter()
+                .find(|a| a.id == "gadget")
+                .unwrap()
+                .built_at
+                > stale
+                    .apps
+                    .iter()
+                    .find(|a| a.id == "gadget")
+                    .unwrap()
+                    .built_at,
             "the rebuild moves the app's build time"
         );
         assert_eq!(
@@ -561,7 +578,7 @@ mod tests {
         let dist = tempfile::tempdir().unwrap();
         let (plan, source) = fixture(tmp.path());
         refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
-        std::fs::remove_dir_all(tmp.path().join("device/extensions/steb")).unwrap();
+        std::fs::remove_dir_all(tmp.path().join("device/extensions/gadget")).unwrap();
 
         let fresh = restamp(
             &read_manifest(dist.path()).unwrap(),
@@ -569,7 +586,7 @@ mod tests {
             &mut DigestCache::ephemeral(),
         );
         assert!(
-            fresh.apps.iter().all(|a| a.id != "steb"),
+            fresh.apps.iter().all(|a| a.id != "gadget"),
             "an app with nothing left to serve is not offered"
         );
         assert!(fresh.apps.iter().any(|a| a.id == "sidle"));

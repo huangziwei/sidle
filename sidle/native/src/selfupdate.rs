@@ -25,6 +25,7 @@ use crate::api::Result;
 use crate::api::{JSON_MAX_BYTES, read_text};
 use crate::config::ServerConfig;
 use crate::receipt::{FileReceipt, InstallState};
+use crate::running::{self, InUse};
 
 /// The app id whose files this binary is itself executing.
 pub const PICKER_ID: &str = "sidle";
@@ -95,6 +96,9 @@ pub struct UpdateReport {
     /// Paths that could not be downloaded, or whose bytes miss the digest the
     /// manifest declares. Nothing is written at any of them.
     pub failed: Vec<String>,
+    /// Paths a process on this device is running. Nothing is written at any of
+    /// them.
+    pub busy: Vec<String>,
 }
 
 impl UpdateReport {
@@ -105,6 +109,7 @@ impl UpdateReport {
             && self.kept.is_empty()
             && self.refused.is_empty()
             && self.failed.is_empty()
+            && self.busy.is_empty()
     }
 }
 
@@ -264,7 +269,7 @@ pub fn write_file(mount: &Path, file: &DistFile, bytes: &[u8]) -> anyhow::Result
 /// Fetch the manifest and bring `mount` up to it.
 ///
 /// Per file: settle against the receipt → read the device copy → [`decide`] →
-/// download → verify → write. A file that fails any of those joins
+/// [`InUse`] → download → verify → write. A file that fails any of those joins
 /// [`UpdateReport::failed`], and the pull continues at the next.
 pub fn run_pull(
     agent: &ureq::Agent,
@@ -282,6 +287,8 @@ pub fn run_pull(
     let mut state = InstallState::read(mount);
     let mut report = UpdateReport::default();
     let mut dirty = false;
+    // Read once, at the first direct write a pull actually reaches.
+    let mut in_use: Option<InUse> = None;
 
     for app in &manifest.apps {
         // The guard protects the binary this process is running from a stale
@@ -355,6 +362,27 @@ pub fn run_pull(
                     continue;
                 }
                 Decision::Write => {}
+            }
+            // A direct write replaces a directory entry, and FAT frees the
+            // clusters the process reading it is at.
+            if file.apply == Apply::Direct {
+                let running = in_use.get_or_insert_with(|| {
+                    let found = InUse::scan(Path::new(running::PROC));
+                    log(&format!(
+                        "{}: {} file(s) in use",
+                        running::PROC,
+                        found.count()
+                    ));
+                    found
+                });
+                if running.holds(&dest) {
+                    log(&format!(
+                        "{} ({}): running on this device — not writing",
+                        file.path, app.id
+                    ));
+                    report.busy.push(file.path.clone());
+                    continue;
+                }
             }
             log(&format!("{}: downloading…", file.path));
             let bytes = match download_file(agent, cfg, &file.path) {
@@ -490,22 +518,22 @@ mod tests {
 
     #[test]
     fn a_file_the_device_changed_is_kept() {
-        let offered = b"karyll-v2";
+        let offered = b"sprocket-v2";
         let file = DistFile {
-            path: "extensions/karyll/hid/config.ini".into(),
+            path: "extensions/sprocket/hid/config.ini".into(),
             sha256: sha256_hex(offered),
             size: offered.len() as u64,
             apply: Apply::Direct,
         };
         // The receipt names what sidle wrote; the device holds something else.
-        let written = receipt_for(b"karyll-v1");
+        let written = receipt_for(b"sprocket-v1");
         assert_eq!(
             decide(Some(b"edited-on-device"), &file, Some(&written), 0, 0),
             Decision::KeepDeviceCopy,
         );
         // The bytes sidle wrote → sidle's to replace.
         assert_eq!(
-            decide(Some(b"karyll-v1"), &file, Some(&written), 0, 0),
+            decide(Some(b"sprocket-v1"), &file, Some(&written), 0, 0),
             Decision::Write,
         );
     }
@@ -593,17 +621,17 @@ mod tests {
     fn a_direct_write_lands_on_the_path_itself() {
         let mount = scratch("direct");
         let file = DistFile {
-            path: "documents/Karyll.sh".into(),
-            sha256: sha256_hex(b"# Name: Karyll\n"),
+            path: "documents/Sprocket.sh".into(),
+            sha256: sha256_hex(b"# Name: Sprocket\n"),
             size: 15,
             apply: Apply::Direct,
         };
 
-        let landed = write_file(&mount, &file, b"# Name: Karyll\n").unwrap();
+        let landed = write_file(&mount, &file, b"# Name: Sprocket\n").unwrap();
 
-        assert_eq!(landed, mount.join("documents/Karyll.sh"));
-        assert_eq!(std::fs::read(&landed).unwrap(), b"# Name: Karyll\n");
-        assert!(!mount.join("documents/Karyll.sh.new").exists());
+        assert_eq!(landed, mount.join("documents/Sprocket.sh"));
+        assert_eq!(std::fs::read(&landed).unwrap(), b"# Name: Sprocket\n");
+        assert!(!mount.join("documents/Sprocket.sh.new").exists());
         let _ = std::fs::remove_dir_all(&mount);
     }
 
@@ -616,8 +644,8 @@ mod tests {
             { "id": "sidle", "name": "Sidle", "version": "0.1.9", "built_at": 7, "files": [
               { "path": "extensions/sidle/bin/sidle", "sha256": "aa", "size": 3, "apply": "staged" },
               { "path": "documents/Sidle.sh", "sha256": "bb", "size": 4, "apply": "direct" } ] },
-            { "id": "karyll", "name": "Karyll", "built_at": 9, "files": [
-              { "path": "extensions/karyll/bin/karyll", "sha256": "cc", "size": 5 } ] }
+            { "id": "sprocket", "name": "Sprocket", "built_at": 9, "files": [
+              { "path": "extensions/sprocket/bin/sprocket", "sha256": "cc", "size": 5 } ] }
           ] }"#;
         let manifest: DistManifest = serde_json::from_str(json).unwrap();
 

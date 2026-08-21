@@ -278,51 +278,54 @@ mod tests {
     }
 
     /// A repo whose tree is two levels down, with files outside it.
-    fn karyll_repo(root: &Path) -> PathBuf {
+    fn sprocket_repo(root: &Path) -> PathBuf {
         let out = root.join("deploy").join("out");
-        write(&out.join("extensions/karyll/bin/karyll"), b"armhf");
+        write(&out.join("extensions/sprocket/bin/sprocket"), b"armhf");
         write(
-            &out.join("extensions/karyll/bin/karyll-softfloat"),
+            &out.join("extensions/sprocket/bin/sprocket-softfloat"),
             b"armel",
         );
-        write(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
-        write(&out.join("extensions/karyll/hid/dist/libc.so.6"), b"elf");
-        write(&out.join("extensions/karyll/.DS_Store"), b"junk");
         write(
-            &out.join("documents/Karyll.sh"),
-            b"#!/bin/sh\n# Name: Karyll\nexec /mnt/us/extensions/karyll/bin/karyll.sh\n",
+            &out.join("extensions/sprocket/hid/config.ini"),
+            b"[device]\n",
+        );
+        write(&out.join("extensions/sprocket/hid/dist/libc.so.6"), b"elf");
+        write(&out.join("extensions/sprocket/.DS_Store"), b"junk");
+        write(
+            &out.join("documents/Sprocket.sh"),
+            b"#!/bin/sh\n# Name: Sprocket\nexec /mnt/us/extensions/sprocket/bin/sprocket.sh\n",
         );
         write(&root.join("build.sh"), b"#!/bin/sh\n");
         write(&root.join("device/assets/cover.png"), b"png");
-        write(&root.join("target/debug/karyll"), b"host binary");
+        write(&root.join("target/debug/sprocket"), b"host binary");
         out
     }
 
     #[test]
     fn discovery_finds_a_tree_the_repo_never_names() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = karyll_repo(tmp.path());
+        let out = sprocket_repo(tmp.path());
         let trees = discover(tmp.path()).unwrap();
         assert_eq!(trees.len(), 1);
-        assert_eq!(trees[0].app.id, "karyll");
-        assert_eq!(trees[0].app.name, "Karyll");
+        assert_eq!(trees[0].app.id, "sprocket");
+        assert_eq!(trees[0].app.name, "Sprocket");
         assert_eq!(trees[0].root, out, "the mount root is extensions/'s parent");
     }
 
     #[test]
     fn the_walk_takes_the_extension_dir_and_the_tile_and_nothing_else() {
         let tmp = tempfile::tempdir().unwrap();
-        karyll_repo(tmp.path());
+        sprocket_repo(tmp.path());
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         let paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
             vec![
-                "documents/Karyll.sh",
-                "extensions/karyll/bin/karyll",
-                "extensions/karyll/bin/karyll-softfloat",
-                "extensions/karyll/hid/config.ini",
-                "extensions/karyll/hid/dist/libc.so.6",
+                "documents/Sprocket.sh",
+                "extensions/sprocket/bin/sprocket",
+                "extensions/sprocket/bin/sprocket-softfloat",
+                "extensions/sprocket/hid/config.ini",
+                "extensions/sprocket/hid/dist/libc.so.6",
             ],
             "no .DS_Store, and nothing from the repo outside the tree"
         );
@@ -331,7 +334,7 @@ mod tests {
     #[test]
     fn documents_is_not_swept() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = karyll_repo(tmp.path());
+        let out = sprocket_repo(tmp.path());
         write(&out.join("documents/My Novel.txt"), b"chapter one");
         write(
             &out.join("documents/SomeOtherApp.sh"),
@@ -341,7 +344,7 @@ mod tests {
         assert!(
             tree.files
                 .iter()
-                .all(|f| f.path.starts_with("extensions/") || f.path == "documents/Karyll.sh")
+                .all(|f| f.path.starts_with("extensions/") || f.path == "documents/Sprocket.sh")
         );
     }
 
@@ -403,7 +406,7 @@ mod tests {
     fn a_tree_with_no_stamp_falls_back_to_its_own_timestamps() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/steb/bin/steb"), b"elf");
+        write(&dev.join("extensions/gadget/bin/gadget"), b"elf");
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         assert!(tree.built_at() > 0);
     }
@@ -466,9 +469,9 @@ mod tests {
     #[test]
     fn a_directory_with_nothing_to_install_is_not_an_app() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("device/extensions/steb/bin")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("device/extensions/gadget/bin")).unwrap();
         write(
-            &tmp.path().join("device/extensions/steb/.DS_Store"),
+            &tmp.path().join("device/extensions/gadget/.DS_Store"),
             b"junk",
         );
         assert!(discover(tmp.path()).unwrap().is_empty());
