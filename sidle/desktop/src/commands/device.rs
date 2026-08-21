@@ -20,15 +20,8 @@ pub async fn device_status(state: State<'_, AppState>) -> Result<Option<DeviceIn
     Ok(state.device.lock().await.clone())
 }
 
-/// Unmount + spin down a mass-storage Kindle so the user can unplug
-/// safely without macOS scolding them. Shells out to `diskutil eject`
-/// — the same command Finder's eject button runs.
-///
-/// MTP devices don't need (and don't support) eject in the
-/// mass-storage sense — they just need to have their USB session
-/// closed, which happens automatically on unplug. The frontend hides
-/// the button when transport is MTP, so a caller hitting this with an
-/// MTP device is treated as a programming error.
+/// Unmount and spin down a mass-storage Kindle, shelling out to `diskutil
+/// eject`. A device with no `mass_storage_mount` errors here.
 #[tauri::command]
 pub async fn device_eject(state: State<'_, AppState>) -> Result<(), String> {
     let device = state.device.lock().await.clone();
@@ -86,9 +79,8 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<inventor
     })
     .await;
 
-    // Drop the cached MTP transport on USB/MTP error so the next caller's
-    // `ensure_transport` opens a fresh session — a stalled endpoint or
-    // post-error mtp-rs state isn't recoverable by reusing the same `Arc`.
+    // An error leaves the cached MTP transport wedged; the next
+    // `ensure_transport` opens a fresh session.
     if matches!(result, Err(_) | Ok(Err(_))) {
         evict_transport(&cell).await;
         eprintln!("[sidle/device_list] {serial}: transport evicted after error");
@@ -99,15 +91,9 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<inventor
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Import highlights / notes / bookmarks from the connected Kindle — either
-/// transport. Mass-storage reads `documents/Sidle/` off the volume; MTP (Scribe)
-/// pulls the `.yjr` over USB. Matches each annotated `.sdr` to a library book by
-/// its `kfx_sha256` infix and extracts the highlighted text from the book's own
-/// (readable) KFX. The dedup hash makes it idempotent — safe to re-run on every
-/// connect.
-///
-/// MTP import only yields records if the device exposes its `.sdr/.yjr` sidecars
-/// over MTP; if it doesn't, the report is simply 0 books.
+/// Import highlights, notes and bookmarks from the connected Kindle over
+/// either transport. Each annotated `.sdr` matches a library book by its
+/// `kfx_sha256` infix, and a dedup hash keeps a re-run idempotent.
 #[tauri::command]
 pub async fn annotations_import_from_device(
     app: AppHandle,
@@ -156,10 +142,8 @@ pub async fn annotations_import_from_device(
         .map_err(|e| e.to_string())
 }
 
-/// "Restore from device" — re-import everything the connected Kindle holds and
-/// UNDO Sidle-side deletions: clear all deletion records so accidentally-deleted
-/// annotations / ink / notebooks the device still has come back, then force a full
-/// re-pull (clear this device's sync checkpoints). NEVER deletes a Sidle row.
+/// Re-import everything the connected Kindle holds: clears every deletion
+/// record and this device's sync checkpoints. Deletes no library row.
 #[tauri::command]
 pub async fn device_restore(
     app: AppHandle,
@@ -181,8 +165,7 @@ pub async fn device_restore(
 
     let result =
         tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-            // Undo every Sidle-side deletion + force a full re-pull, so anything still
-            // on the device is re-imported.
+            // `clear_all_deletions` and cleared checkpoints make the pull full.
             {
                 let conn = db_handle.blocking_lock();
                 db::clear_all_deletions(&conn)?;
@@ -206,8 +189,7 @@ pub async fn device_restore(
                 &paths,
                 &on_progress,
             )?;
-            // Notebooks ride a separate import path; re-pull them too (their records
-            // were just cleared, so any deleted ones come back).
+            // Notebooks ride a separate import path.
             let _ = sidle_core::library::device::notebooks::import_device_notebooks(
                 transport.as_ref(),
                 &paths,
@@ -249,10 +231,8 @@ pub async fn device_delete(
         let conn = db_handle.blocking_lock();
         let mut out = Vec::with_capacity(filenames.len());
         for name in filenames {
-            // Pull the book's ASIN from the local row so delete_one can
-            // also wipe Kindle's `<title>_<ASIN>.sdr/` (catalog-style
-            // sidecar). Best-effort: if the row is gone or the lookup
-            // errors out, we still delete the file + filename-style .sdr.
+            // `delete_one` takes the row's ASIN to reach a
+            // `<title>_<ASIN>.sdr/` sidecar.
             let asin = parse_sha_infix(&name)
                 .and_then(|sha| db::find_by_kfx_sha_prefix(&conn, &sha).ok().flatten())
                 .and_then(|b| b.asin);
@@ -281,8 +261,7 @@ pub async fn device_delete(
         evict_transport(&cell).await;
         eprintln!("[sidle/device_delete] transport evicted after error");
     } else {
-        // Files (and their `.sdr` sidecars) left the device — re-read free
-        // space so the popover climbs back up immediately.
+        // Free space after the files and their `.sdr` sidecars left the device.
         refresh_free_space(&app_refresh, &state.device, &state.transport).await;
     }
 
@@ -291,12 +270,8 @@ pub async fn device_delete(
         .map_err(|e| e.to_string())
 }
 
-/// Live byte-progress for the file currently being sent, emitted as
-/// `device:send-active` so the footer / queue can show "Sending «title» —
-/// 45 MB / 72 MB" while the transfer is in flight — distinct from the per-book
-/// terminal `device:send-progress` (a `PushResult`). `total` is 0 when the size
-/// is unknown. The frontend matches `book_id` to its seeded queue task and
-/// derives batch position from that queue, so no index/count is sent.
+/// Byte-progress for the file in flight, emitted as `device:send-active`.
+/// `total` is 0 when the size is unknown; `book_id` keys the queue task.
 #[derive(Clone, serde::Serialize)]
 struct SendActive {
     book_id: i64,
@@ -329,10 +304,7 @@ pub async fn device_send(
         for book_id in book_ids {
             let result = match db::get_book(&conn, book_id)? {
                 Some(book) => {
-                    // Stream byte-progress for THIS file into the queue. The
-                    // closure names the file (title); `push_one` ticks it as
-                    // bytes land on the device. Captured by ref, lives only for
-                    // this iteration.
+                    // `push_one` ticks this closure as bytes land on the device.
                     let title = book.title.clone();
                     let on_progress = |done: u64, total: u64| {
                         let _ = app.emit(
@@ -358,8 +330,7 @@ pub async fn device_send(
                     error: "book not found".into(),
                 },
             };
-            // Best-effort: notify UI of the per-book terminal result before
-            // moving on so a long batch shows live progress.
+            // `device:send-progress` carries the per-book terminal result.
             let _ = app.emit("device:send-progress", &result);
             out.push(result);
         }
@@ -367,8 +338,7 @@ pub async fn device_send(
     })
     .await;
 
-    // Same MTP-stall recovery dance as `device_delete` — drop the cached
-    // transport on any failure so the next call gets a fresh session.
+    // A failure leaves the cached MTP transport wedged.
     let needs_evict = match &result {
         Err(_) => true,
         Ok(Err(_)) => true,
@@ -387,9 +357,9 @@ pub async fn device_send(
         .map_err(|e| e.to_string())
 }
 
-/// Live progress for a single orphan import, emitted as `device:import-progress`
-/// while the object is pulled off the device. `done`/`total` are byte counts;
-/// `total` is 0 when the size wasn't known up front.
+/// Progress for one orphan import, emitted as `device:import-progress` while
+/// the object comes off the device. `done` and `total` are byte counts, and
+/// `total` is 0 when the size is unknown.
 #[derive(Clone, Serialize)]
 struct ImportProgress {
     filename: String,
@@ -397,13 +367,8 @@ struct ImportProgress {
     total: u64,
 }
 
-/// Pull an orphan `.kfx` off the device and into the local library.
-///
-/// The orphan flow exists for the "I removed it from the library but it's
-/// still on the Kindle" / "I sent it from another Mac" cases. We read the
-/// bytes via [`Transport`] (free for mass-storage, an MTP `GetObject`
-/// otherwise), stage to a temp file, and run the same import pipeline as
-/// a drag-drop — which also enqueues the KFX→EPUB background job.
+/// Pull an orphan `.kfx` off the device and into the local library: read via
+/// [`Transport`], stage to a temp file, run the drag-drop import pipeline.
 #[tauri::command]
 pub async fn device_import_orphan(
     app: AppHandle,
@@ -426,10 +391,7 @@ pub async fn device_import_orphan(
         tokio::task::spawn_blocking(move || -> anyhow::Result<(PullResult, Option<i64>)> {
             let on_device =
                 sidle_core::library::device::TPath::parse("documents/Sidle").join(&filename);
-            // Live byte-progress for the slow part: pulling the object off the
-            // device. Over MTP this spans several PTP sessions (the Scribe's
-            // per-session cap) and takes seconds for a multi-MiB book, which
-            // otherwise looks hung between the click and the final toast.
+            // Byte-progress while the object comes off the device.
             let on_progress = |done: u64, total: u64| {
                 let _ = app_progress.emit(
                     "device:import-progress",
@@ -442,9 +404,8 @@ pub async fn device_import_orphan(
             };
             let bytes = transport.read_with_progress(&on_device, &on_progress)?;
 
-            // Stage to a temp file with the original extension preserved so
-            // the import pipeline's extension-based dispatch routes
-            // correctly. Drop-on-scope cleans up after `pull_one`.
+            // The staged file keeps its extension; the import pipeline
+            // dispatches on it.
             let suffix = std::path::Path::new(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
@@ -497,12 +458,9 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
     })
 }
 
-/// The mount tree the fleet should have: the picker and bokai from the tree
-/// that ships with this app, plus every app registered in the library.
-///
-/// Stages the cross-built picker into that tree first, so a bare `cargo build
-/// --target armv7-…` is enough for the dev loop — the binary lands in `target/`
-/// under another name, and the walk looks for it at the path it installs to.
+/// The mount tree the fleet should have: the built-in tree plus every app
+/// registered in the library. `stage_binary` puts the cross-built picker into
+/// that tree at the path it installs to.
 pub async fn compose_plan(
     state: &AppState,
     source: &deploy::DeploySource,
@@ -527,9 +485,7 @@ pub async fn device_app_status(
     source: &deploy::DeploySource,
 ) -> Result<DeployStatus, String> {
     let device = state.device.lock().await.clone();
-    // No Kindle connected at all → the UI hides the section on DeviceDisconnected.
-    // A connected device — mass-storage OR MTP — gets a real status; the deploy
-    // runs over either transport.
+    // `DeviceDisconnected` with no device; either transport gets a real status.
     let Some(device) = device else {
         return Ok(DeployStatus {
             overall: DeployOverall::DeviceDisconnected,
@@ -569,10 +525,8 @@ pub async fn device_app_status(
     }
 }
 
-/// Push the fleet, or one app of it.
-///
-/// `only` narrows the plan to one app id; omitted, every app goes. `force`
-/// overwrites files the device changed, which a plain push keeps.
+/// Push the fleet, or one app of it. `only` narrows the plan to one app id;
+/// `force` overwrites files the device changed.
 #[tauri::command]
 pub async fn device_app_install(
     app: AppHandle,
@@ -622,9 +576,7 @@ pub async fn device_app_install(
             },
         )
         .map_err(|e| format!("{e:#}"))?;
-        // Refresh the LAN dist so an untethered in-app Update pull gets the
-        // exact binary this push just wrote. Non-fatal — a staging miss
-        // doesn't undo a successful device install.
+        // `stage_dist` puts the pushed binary in reach of a LAN pull. Non-fatal.
         if let Err(e) = deploy::stage_dist(&source, &dist_dir) {
             eprintln!("[sidle/device_app_install] device-dist staging failed: {e:#}");
         }
@@ -632,17 +584,15 @@ pub async fn device_app_install(
     })
     .await
     .map_err(|e| e.to_string())?;
-    // On-wire failure (mainly MTP): drop the cached session so a retry reopens.
+    // An on-wire failure leaves the cached session wedged.
     if result.is_err() {
         evict_transport(&cell).await;
     }
     result
 }
 
-/// Take one app off the connected Kindle: its extension directory and its tile.
-///
-/// Its `apps` row stands — that row is where the app comes from on this
-/// machine, and `apps_remove` is what drops it.
+/// Take one app off the connected Kindle: its extension directory and its
+/// tile. Its `apps` row stands; `apps_remove` drops that.
 #[tauri::command]
 pub async fn device_app_uninstall(
     state: State<'_, AppState>,
@@ -672,14 +622,8 @@ pub async fn device_app_uninstall(
     }
 }
 
-/// Re-stage the LAN self-update bundle (`<data-dir>/device-dist/`) when the
-/// freshly cross-built picker binary is newer than the staged copy. Called on
-/// the device-popover-open path alongside [`device_app_status`], so the dev loop is
-/// "rebuild armv7 → open the popover → device pulls" — no cable, no app restart.
-/// mtime-gated (a near-instant no-op once warm) and device-independent (it
-/// stages the repo binary into the data dir), so it works whether or not a
-/// Kindle is plugged in. Errors are surfaced but the frontend treats them as
-/// non-fatal.
+/// Re-stage the LAN self-update bundle in `<data-dir>/device-dist/` when the
+/// cross-built picker binary is newer than the staged copy. Needs no Kindle.
 #[tauri::command]
 pub async fn device_app_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
     let source = state.device_app_source.clone();

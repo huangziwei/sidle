@@ -1,9 +1,5 @@
-//! The apps that install to a Kindle's `/mnt/us` — the picker, bokai, steb,
-//! karyll, kfxdedrm-fe.
-//!
-//! Each is built by its own repo and publishes a mount-rooted tree, and that
-//! tree is all sidle reads. These verbs point at one and say what it holds:
-//! which app it is, what it would install, and where each file lands.
+//! `AppsCmd`: read an app tree off a path, register it, and list what is
+//! registered. An app tree is mount-rooted — its paths install under `/mnt/us`.
 
 use std::path::PathBuf;
 
@@ -17,10 +13,8 @@ use crate::ctx::Ctx;
 
 #[derive(Subcommand)]
 pub enum AppsCmd {
-    /// Read every app tree under a path and print what it would install.
-    ///
-    /// Works on a repo checkout, an unpacked release bundle, or the composed
-    /// device tree — the shape is the same, only the depth differs.
+    /// Read every app tree under `path` and print what it installs. Takes a
+    /// repo checkout, an unpacked release bundle, or the composed device tree.
     Inspect {
         /// Repo or bundle to read. Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -29,18 +23,16 @@ pub enum AppsCmd {
         #[arg(long)]
         files: bool,
     },
-    /// Register every app under a path, so a device push carries it.
-    ///
-    /// One path can hold several — sidle's own tree holds the picker and
-    /// bokai — and all of them are registered. Re-adding an id repoints it.
+    /// Register every app under `path`; a device push carries what is
+    /// registered. One path can hold several. Re-adding an id repoints it.
     Add {
         /// Repo checkout or unpacked bundle.
         path: PathBuf,
     },
-    /// What is registered, and what each source currently holds.
+    /// What is registered, and what each source holds.
     List,
-    /// Forget an app. Unregisters the source only: nothing on disk and
-    /// nothing already on a device is touched.
+    /// Forget an app. Drops its row; nothing on disk and nothing on a device
+    /// is touched.
     Remove { id: String },
 }
 
@@ -55,9 +47,7 @@ pub fn run(ctx: &Ctx, cmd: AppsCmd) -> Result<()> {
     }
 }
 
-/// What a path holds no app at all reads like. Says what was looked for rather
-/// than what was missing, because nothing is missing — the folder is simply not
-/// a tree that installs anywhere.
+/// The message `path` gets when it holds no app tree.
 fn no_apps_here(path: &std::path::Path) -> String {
     format!(
         "no extensions/<id>/ under {} — an app is a directory of files that \
@@ -98,9 +88,8 @@ fn add(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     })
 }
 
-/// What each registered row currently holds, read fresh off disk. A row that
-/// no longer resolves is reported rather than hidden: a moved checkout should
-/// say so, not quietly stop being part of the fleet.
+/// What each registered row holds, read off disk. A row whose source fails to
+/// resolve carries its error.
 #[derive(Serialize)]
 struct Registered {
     id: String,
@@ -135,9 +124,8 @@ fn list(ctx: &Ctx) -> Result<()> {
         })
         .collect();
 
-    // What a push would actually carry: the registered rows plus the tree that
-    // ships with this binary, flattened to one path-keyed list. Composing it
-    // here is also the only way to see a path two apps both claim.
+    // `plan_from` flattens the registered rows and the mount tree beside this
+    // binary into one path-keyed list, naming any path two apps claim.
     let composed = crate::cmd::device::workspace_root()
         .map(|repo| {
             let source =

@@ -1,9 +1,6 @@
-//! The Kindle on the other end of the cable.
-//!
-//! Every one of these opens its own transport and closes it when the command
-//! ends: there is no monitor thread here and no shared session to keep alive.
-//! An MTP Kindle allows one session at a time, so a command will fail while the
-//! desktop app holds the device — quit it, or unplug and replug.
+//! The Kindle on the other end of the cable. Every verb opens its own
+//! transport and closes it when the command ends; an MTP Kindle allows one
+//! session at a time.
 
 use std::path::PathBuf;
 
@@ -30,7 +27,7 @@ pub enum DeviceCmd {
     Send {
         #[command(flatten)]
         select: Select,
-        /// Print what would be sent and send nothing.
+        /// Print the plan and send nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -39,8 +36,8 @@ pub enum DeviceCmd {
     Delete {
         #[command(flatten)]
         select: Select,
-        /// Remove a file by its on-device name instead of by library selection.
-        /// Repeatable — this is how an orphan goes.
+        /// Remove a file by its on-device name. Repeatable, and the only
+        /// handle an orphan has.
         #[arg(long = "filename", value_name = "NAME")]
         filenames: Vec<String>,
         #[arg(long)]
@@ -50,9 +47,8 @@ pub enum DeviceCmd {
     /// reading positions, handwriting, screenshots — and write sidle's own
     /// annotations back into its sidecars.
     Sync {
-        /// Take everything again from scratch: undo every deletion made on this
-        /// side and forget what was already pulled, so anything still on the
-        /// device comes back.
+        /// Undo every deletion made on this side and clear this device's sync
+        /// checkpoints.
         #[arg(long)]
         restore: bool,
     },
@@ -65,9 +61,9 @@ pub enum DeviceCmd {
     },
     /// Import from the jailbreak's `/dedrm` folder (mass-storage Kindles).
     Pull,
-    /// The on-device picker app: what is installed, and what is stale.
+    /// The apps on the device: what is installed, and what is stale.
     App(AppArgs),
-    /// Unmount a mass-storage Kindle so it can be unplugged safely.
+    /// Unmount a mass-storage Kindle.
     Eject,
 }
 
@@ -234,8 +230,8 @@ fn send(ctx: &Ctx, select: &Select, dry_run: bool) -> Result<()> {
 
 fn delete(ctx: &Ctx, select: &Select, filenames: &[String], apply: bool) -> Result<()> {
     let device = require_device()?;
-    // Two ways to name a file: by the library row that produced it (the usual
-    // case), or by its on-device name — which is the only handle an orphan has.
+    // `targets` names a file by `filenames`, or by the library row that
+    // produced it.
     let mut targets: Vec<(String, Option<BookRow>)> =
         filenames.iter().map(|f| (f.clone(), None)).collect();
     if !select.is_unset() {
@@ -404,9 +400,8 @@ fn import_orphans(ctx: &Ctx, apply: bool) -> Result<()> {
         });
     }
 
-    // The importer dispatches on extension, so an MTP pull has to become a real
-    // file first; mass-storage could hand over a path, but staging both the same
-    // way keeps one import path.
+    // The importer dispatches on extension; both transports stage to a file
+    // under `staging`.
     let docs = sidle_core::library::device::TPath::parse("documents/Sidle");
     let staging = tempfile::tempdir().context("stage pulled files")?;
     let mut done = Vec::new();
@@ -458,12 +453,10 @@ pub struct AppArgs {
     /// Write the stale files to the device.
     #[arg(long)]
     install: bool,
-    /// Overwrite files the device changed out from under sidle, and compare
-    /// bytes rather than trusting the install receipt.
+    /// Overwrite files the device changed, comparing bytes against the source.
     #[arg(long, requires = "install")]
     force: bool,
-    /// Stage the self-update bundle instead, so a Kindle already carrying the
-    /// picker can update itself over the LAN with no cable.
+    /// Stage the self-update bundle for the LAN route, with no Kindle attached.
     #[arg(long, conflicts_with = "install")]
     stage: bool,
     /// LAN address the picker should reach the server at. Detected when absent.
@@ -475,8 +468,8 @@ pub struct AppArgs {
 }
 
 fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
-    // Staging is host-side only — it copies the current picker build into the
-    // directory the LAN server serves `/device/...` from, and needs no Kindle.
+    // `stage_dist` copies the picker build into the directory the LAN server
+    // serves `/device/...` from.
     if args.stage {
         let source = deploy::DeploySource::from_workspace_root(&workspace_root()?);
         let outcome = deploy::stage_dist(&source, &ctx.paths.device_dist())?;
@@ -486,8 +479,8 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     let device = require_device()?;
     let transport = open(&device)?;
     let source = deploy::DeploySource::from_workspace_root(&workspace_root()?);
-    // The picker is cross-built into `target/` under another name; put it in
-    // the mount tree so the walk finds it where it installs to.
+    // `stage_binary` copies the cross-built picker into the mount tree at the
+    // path it installs to.
     source.stage_binary()?;
     let plan = {
         let conn = ctx.conn();
@@ -499,14 +492,10 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     for c in &plan.conflicts {
         eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
     }
-    // The CA has to exist before anything can be said about `etc/ca.pem`, and
-    // making one needs no server and no network.
+    // `ensure_ca` makes the root the `etc/ca.pem` slot is compared against.
     let _ = sidle_core::library::tls::ensure_ca(&ctx.paths);
-    // `None` when no address was given and none can be detected: the
-    // `etc/server.conf` slot then reports `SourceMissing` and everything else
-    // installs, which is what a push from a machine with no routable interface
-    // is for. Rendering `HOST=` instead would write a conf the picker cannot
-    // use and call it installed.
+    // `None` with no `--host` and no detectable address: the `etc/server.conf`
+    // slot reports `SourceMissing`, and every other slot installs.
     let host = match args.host {
         Some(h) => Some(h),
         None => deploy::detect_lan_ipv4().map(|ip| ip.to_string()),

@@ -1,8 +1,6 @@
-//! The Apps tab: the apps that install to a Kindle's `/mnt/us`.
-//!
-//! An `apps` row records where an app's mount-rooted tree sits on this
-//! machine. Name, version, file count and size are read off that tree on every
-//! call. The push lives in `commands::device`.
+//! The Apps tab. An `apps` row records where an app's mount-rooted tree sits
+//! on this machine; name, version, file count and size are read off that tree
+//! on every call. `commands::device` holds the push.
 
 use std::path::PathBuf;
 
@@ -20,14 +18,14 @@ pub struct AppRow {
     pub name: String,
     /// Absent for a tree that states no version.
     pub version: Option<String>,
-    /// Absent for an app with no `apps` row, bundled with this one.
+    /// Absent for an app with no `apps` row, composed from the built-in tree.
     pub source: Option<String>,
     pub tile: Option<String>,
     /// The tile's own art, a `data:image/…;base64,…` URI.
     pub icon: Option<String>,
     pub file_count: usize,
     pub total_bytes: u64,
-    /// Why this app could not be read, when it could not.
+    /// Why this app's tree could not be read.
     pub error: Option<String>,
     /// This app's state on the connected Kindle. `None` when none is connected.
     pub device: Option<sidle_core::library::device::deploy::AppDeployStatus>,
@@ -48,10 +46,8 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
     }
 }
 
-/// What the Apps tab renders: every app, and its state on the connected Kindle.
-///
-/// One call over one `DevicePlan`. A row keeps its left half with `device`
-/// absent.
+/// What the Apps tab renders: every app in one `DevicePlan`, and its state on
+/// the connected Kindle.
 #[derive(Serialize)]
 pub struct AppsOverview {
     pub apps: Vec<AppRow>,

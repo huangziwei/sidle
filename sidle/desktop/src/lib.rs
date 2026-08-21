@@ -1,4 +1,4 @@
-//! sidle desktop app — library + KFX conversion + (later) Kindle sync.
+//! The sidle desktop app: library, KFX conversion, Kindle sync.
 
 mod commands;
 
@@ -9,28 +9,16 @@ mod server;
 mod state;
 mod sync_pulse;
 
-// The on-disk library — db, paths, import pipeline — lives in `sidle-core`
-// so the LAN server crate can share it without pulling Tauri. Re-bind as
-// `crate::library` so the existing `use crate::library::...` sites keep working.
+// `sidle_core::library` bound as `crate::library`.
 use sidle_core::library;
 
 use tauri::Manager;
 
 use crate::state::AppState;
 
-/// Opt the whole process out of macOS App Nap.
-///
-/// When the app window is in the background, App Nap throttles the process: the
-/// tokio reactor and timers get coalesced by tens of seconds. The LAN server now
-/// runs as a separate `sidle-server` daemon, so it's unaffected (part of why it
-/// was moved out-of-process); but the app's *own* background work — the USB
-/// device monitor and the conversion queue — would still stall while
-/// backgrounded, so we keep this assertion for them.
-///
-/// We hold an `NSProcessInfo` activity assertion for the life of the process.
-/// `UserInitiatedAllowingIdleSystemSleep` disables App Nap but still lets the
-/// Mac sleep normally when idle. The token is intentionally leaked: the
-/// assertion must last as long as the app runs, and we never want to end it.
+/// Opt the whole process out of macOS App Nap. The leaked `token` holds an
+/// `UserInitiatedAllowingIdleSystemSleep` activity assertion for the life of
+/// the process.
 #[cfg(target_os = "macos")]
 fn disable_app_nap() {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
@@ -55,10 +43,8 @@ pub fn run() {
             let state = AppState::bootstrap(app.handle().clone())
                 .map_err(|e| format!("failed to bootstrap app state: {e:#}"))?;
 
-            // Restart a daemon this app's predecessor left behind, so a rebuilt
-            // app never talks to a server built from older code. Backgrounded:
-            // the old daemon drains in-flight requests first, and the window has
-            // no reason to wait on that.
+            // `realign_on_launch` restarts a daemon left by an earlier process,
+            // off the setup path.
             let server = state.server.clone();
             let paths = state.paths.clone();
             tauri::async_runtime::spawn(async move {
@@ -183,10 +169,7 @@ pub fn run() {
             commands::reading_log::reading_log_attribute,
         ])
         .on_window_event(|window, event| {
-            // macOS convention: the red close button (and Cmd+W) closes the
-            // *window*, not the app. Tauri's default exits once the last window
-            // closes, so intercept the request and hide the window instead. The
-            // app stays alive in the Dock; Cmd+Q (default menu) still quits.
+            // `prevent_close` keeps the process alive with its window hidden.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -195,7 +178,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| {
-            // Clicking the Dock icon after the window was hidden re-shows it.
+            // `Reopen` shows and focuses every window.
             if let tauri::RunEvent::Reopen { .. } = event {
                 for (_, window) in app.webview_windows() {
                     let _ = window.show();
