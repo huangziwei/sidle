@@ -76,22 +76,24 @@ impl DevicePlan {
         self.apps.iter().find(|a| a.app.id == id)
     }
 
-    /// The same plan narrowed to one app, for a per-row install.
+    /// The same plan narrowed to the apps `ids` names, for a per-row install
+    /// and for a push scoped to what a device holds.
     ///
     /// Conflicts and errors do not carry across: both are facts about the whole
     /// fleet, and name apps this install leaves alone.
-    pub fn only(&self, id: &str) -> DevicePlan {
+    pub fn only<S: AsRef<str>>(&self, ids: &[S]) -> DevicePlan {
+        let wanted = |id: &str| ids.iter().any(|w| w.as_ref() == id);
         DevicePlan {
             apps: self
                 .apps
                 .iter()
-                .filter(|a| a.app.id == id)
+                .filter(|a| wanted(&a.app.id))
                 .cloned()
                 .collect(),
             files: self
                 .files
                 .iter()
-                .filter(|f| f.app_id == id)
+                .filter(|f| wanted(&f.app_id))
                 .cloned()
                 .collect(),
             conflicts: Vec::new(),
@@ -102,15 +104,18 @@ impl DevicePlan {
     /// [`DevicePlan::only`], refusing an id the fleet holds no tree for. An id
     /// standing in [`DevicePlan::errors`] is refused with the error its source
     /// produced.
-    pub fn narrow(&self, id: &str) -> Result<DevicePlan> {
-        let narrowed = self.only(id);
-        if !narrowed.apps.is_empty() {
-            return Ok(narrowed);
+    pub fn narrow<S: AsRef<str>>(&self, ids: &[S]) -> Result<DevicePlan> {
+        for id in ids {
+            let id = id.as_ref();
+            if self.app(id).is_some() {
+                continue;
+            }
+            match self.errors.iter().find(|e| e.id == id) {
+                Some(e) => anyhow::bail!("{id}: {}", e.error),
+                None => anyhow::bail!("no app named {id} in the fleet"),
+            }
         }
-        match self.errors.iter().find(|e| e.id == id) {
-            Some(e) => anyhow::bail!("{id}: {}", e.error),
-            None => anyhow::bail!("no app named {id} in the fleet"),
-        }
+        Ok(self.only(ids))
     }
 
     /// Which app owns a mount-relative path, if any.
@@ -410,7 +415,7 @@ mod tests {
         let dev = builtin(tmp.path());
         let repo = tempfile::tempdir().unwrap();
         let plan = plan_from(&dev, &[sprocket_repo(repo.path())])
-            .narrow("sprocket")
+            .narrow(&["sprocket"])
             .unwrap();
         let ids: Vec<&str> = plan.apps.iter().map(|a| a.app.id.as_str()).collect();
         assert_eq!(ids, vec!["sprocket"]);
@@ -423,6 +428,25 @@ mod tests {
                 "extensions/sprocket/hid/config.ini",
             ]
         );
+    }
+
+    /// A push scoped to what a device holds names several ids at once, and one
+    /// it leaves out contributes no file.
+    #[test]
+    fn narrowing_takes_a_set_of_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = builtin(tmp.path());
+        let repo = tempfile::tempdir().unwrap();
+        let fleet = plan_from(&dev, &[sprocket_repo(repo.path())]);
+
+        let both = fleet.narrow(&["bokai", "sprocket"]).unwrap();
+        let ids: Vec<&str> = both.apps.iter().map(|a| a.app.id.as_str()).collect();
+        assert_eq!(ids, vec!["bokai", "sprocket"]);
+        assert!(both.files.iter().all(|f| f.app_id != "sidle"));
+
+        let none = fleet.narrow::<String>(&[]).unwrap();
+        assert!(none.apps.is_empty());
+        assert!(none.files.is_empty());
     }
 
     /// An id the fleet holds no tree for is refused, and one whose source
@@ -439,11 +463,11 @@ mod tests {
             added_at: 0,
         };
         let plan = plan_from(&dev, &[gone]);
-        let refused = plan.narrow("gadget").unwrap_err().to_string();
+        let refused = plan.narrow(&["gadget"]).unwrap_err().to_string();
         assert!(refused.starts_with("gadget: "), "{refused}");
         assert!(!refused.contains("no app named"), "{refused}");
         assert_eq!(
-            plan.narrow("sprocket").unwrap_err().to_string(),
+            plan.narrow(&["sprocket"]).unwrap_err().to_string(),
             "no app named sprocket in the fleet"
         );
     }

@@ -202,10 +202,15 @@
     note.textContent = lines.join(" ");
     note.hidden = lines.length === 0;
 
+    // The button is enabled by what it would push, which is what `updateAll`
+    // sends: an app the Kindle does not hold leaves it disabled.
     const updateAll = q("#apps-update-all");
-    const pending = apps.some((a) => statusOf(a)?.write_count > 0);
+    const pending = updatable(ov).length;
     updateAll.disabled = !ov?.device_connected || !pending || state.busy != null;
     updateAll.textContent = ov?.device_connected ? "Update all" : "No Kindle";
+    updateAll.title = pending
+      ? `Push ${pending} app${pending === 1 ? "" : "s"} the Kindle holds an older build of.`
+      : "Every app the Kindle holds is current. An app it lacks has Install on its row.";
   }
 
   function renderSummary(ov) {
@@ -418,22 +423,35 @@
   // ---- actions ------------------------------------------------------------
 
   async function installOne(id) {
-    await runInstall(id, id, false);
+    await runInstall([id], id, false);
   }
 
   async function overwriteOne(id) {
-    await runInstall(id, id, true);
+    await runInstall([id], id, true);
+  }
+
+  // Every app the Kindle holds that this build has moved past. An app the
+  // Kindle does not hold is reached by its own row's Install.
+  function updatable(ov) {
+    return (ov?.apps || []).filter((a) => hasUpdate(a)).map((a) => a.id);
+  }
+
+  function hasUpdate(app) {
+    const d = statusOf(app);
+    return !!d && d.overall.kind !== "not_installed" && d.write_count > 0;
   }
 
   async function updateAll() {
-    await runInstall(null, "*", false);
+    const ids = updatable(state.overview);
+    if (!ids.length) return;
+    await runInstall(ids, "*", false);
   }
 
   // One path for a row and for the fleet; `only` is the single difference.
   async function runInstall(only, busyKey, force) {
     state.busy = busyKey;
     render();
-    const label = only || "every app";
+    const label = only.length === 1 ? only[0] : `${only.length} apps`;
     try {
       const report = await api.invoke("device_app_install", { only, force });
       const wrote = report.results.filter((r) => r.kind === "wrote").length;

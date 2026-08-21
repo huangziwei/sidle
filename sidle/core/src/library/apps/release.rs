@@ -113,26 +113,21 @@ pub struct Fetched {
     pub repo: Repo,
     /// The release's own tag, as GitHub states it.
     pub tag: String,
-    /// The asset the tree came out of. Empty for a tag already unpacked.
+    /// The asset the tree came out of. Empty for a tag read off disk.
     pub bundle: String,
     /// The mount root the bundle unpacked to.
     pub root: PathBuf,
     /// Every app the bundle holds. One repo can publish several.
     #[serde(skip)]
     pub apps: Vec<AppTree>,
-    /// Whether this call went to the network. A tag already unpacked is read
-    /// off disk.
+    /// Whether this call went to the network. A tag present under `paths` is
+    /// read there.
     pub downloaded: bool,
 }
 
-/// Take a release of `source` and unpack it under `paths`.
-///
-/// `tag` names a release; absent, it is the repo's latest. A tag already
-/// unpacked is returned as it stands.
-///
-/// Each candidate is checked against its sidecar and unpacked, and the one
-/// whose entries are a mount-rooted tree is kept. One candidate costs itself,
-/// and a refusal names what each did.
+/// Take a release of `source` and unpack it under `paths`. `tag` names one;
+/// absent, it is the repo's latest. Each candidate is checked against its
+/// sidecar, and the one holding a mount-rooted tree is kept.
 pub fn fetch(paths: &LibraryPaths, source: &str, tag: Option<&str>) -> Result<Fetched> {
     let repo = Repo::parse(source)?;
     let client = client()?;
@@ -234,7 +229,7 @@ struct ApiRelease {
 struct ApiAsset {
     name: String,
     /// The API's own handle on the bytes, which serves a private repo's assets
-    /// to a token the browser URL would turn away.
+    /// to a token.
     url: String,
 }
 

@@ -552,13 +552,13 @@ pub async fn device_app_status(
     }
 }
 
-/// Push the fleet, or one app of it. `only` narrows the plan to one app id;
-/// `force` overwrites files the device changed.
+/// Push the apps `only` names, or the whole fleet with `only` absent. `force`
+/// overwrites files the device changed. An empty `only` pushes nothing.
 #[tauri::command]
 pub async fn device_app_install(
     app: AppHandle,
     state: State<'_, AppState>,
-    only: Option<String>,
+    only: Option<Vec<String>>,
     force: Option<bool>,
 ) -> Result<DeployInstallReport, String> {
     let device = state.device.lock().await.clone();
@@ -572,7 +572,7 @@ pub async fn device_app_install(
     let source = state.device_app_source.clone();
     let fleet = compose_plan(&state, &source).await?;
     let plan = match &only {
-        Some(id) => fleet.narrow(id).map_err(|e| format!("{e:#}"))?,
+        Some(ids) => fleet.narrow(ids).map_err(|e| format!("{e:#}"))?,
         None => fleet,
     };
     let app_handle = app.clone();
@@ -622,7 +622,9 @@ pub async fn device_app_uninstall(
     let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
     let source = state.device_app_source.clone();
     let plan = compose_plan(&state, &source).await?;
-    let mut narrowed = plan.narrow(&id).map_err(|e| format!("{e:#}"))?;
+    let mut narrowed = plan
+        .narrow(std::slice::from_ref(&id))
+        .map_err(|e| format!("{e:#}"))?;
     let tree = narrowed.apps.swap_remove(0);
     let transport = ensure_transport(&state.transport, &device)
         .await

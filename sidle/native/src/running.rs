@@ -77,7 +77,7 @@ impl InUse {
     }
 }
 
-/// Take an absolute path whose directory entry still stands.
+/// Take an absolute path whose directory entry exists.
 fn keep(paths: &mut HashSet<PathBuf>, path: &Path) {
     let Some(s) = path.to_str() else { return };
     if !s.starts_with('/') || s.ends_with(DELETED) {

@@ -1,4 +1,4 @@
-//! What an app's tree already says it is.
+//! What an app's tree says it is.
 //!
 //! An app is a directory under `extensions/` on a Kindle's `/mnt/us`, built by
 //! a repo that has never heard of sidle. So none of this is read out of a file
@@ -175,9 +175,9 @@ fn tile_header(bytes: &[u8], key: &str) -> Option<String> {
 ///
 /// A tile exists to run the app, so it spells the app's directory out — every
 /// one in the fleet execs or calls something under
-/// `/mnt/us/extensions/<id>/`. That reference is the link, so no repo has to
-/// declare it and a tile renamed inside its own repo is still found. The
-/// trailing separator keeps one id from claiming a tile whose id extends it.
+/// `/mnt/us/extensions/<id>/`. That reference is the link, and it survives a
+/// rename of the tile itself. The trailing separator keeps one id from
+/// claiming a tile whose id extends it.
 fn find_tile(mount: &Path, id: &str) -> Option<String> {
     let needle = format!("extensions/{id}/");
     let mut hits: Vec<String> = Vec::new();

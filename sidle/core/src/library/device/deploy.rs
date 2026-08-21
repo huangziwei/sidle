@@ -1766,7 +1766,7 @@ mod tests {
         let plan = plan_with_widget(tmp.path(), sprocket.path());
 
         push(&plan, Some(&conf), &ca, device.path());
-        push(&plan.only("sprocket"), Some(&conf), &ca, device.path());
+        push(&plan.only(&["sprocket"]), Some(&conf), &ca, device.path());
 
         let state = InstallState::read(&ms(device.path()));
         assert!(state.app("sidle").is_some(), "the picker's record survived");
@@ -1871,7 +1871,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sprocket = tempfile::tempdir().unwrap();
         let device = tempfile::tempdir().unwrap();
-        let plan = plan_with_widget(tmp.path(), sprocket.path()).only("sprocket");
+        let plan = plan_with_widget(tmp.path(), sprocket.path()).only(&["sprocket"]);
 
         push(
             &plan,

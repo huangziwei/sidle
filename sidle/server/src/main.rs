@@ -2,8 +2,7 @@
 //! load (or generate) the bearer token, bind on `0.0.0.0:<port>`, serve.
 //!
 //! The Tauri app does the same dance in-process via `sidle_server::serve`,
-//! sharing the runtime; this binary is for the "GUI quit, Kindle should
-//! still reach the library" case.
+//! sharing the runtime; this binary serves a library whose GUI has quit.
 
 use std::path::PathBuf;
 

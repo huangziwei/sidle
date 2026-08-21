@@ -453,10 +453,10 @@ fn pull(ctx: &Ctx) -> Result<()> {
 
 #[derive(Args)]
 pub struct AppArgs {
-    /// Act on one app instead of the whole fleet. `sidle-cli apps list` names
-    /// the ids.
+    /// Act on the named apps, not the whole fleet. Repeatable.
+    /// `sidle-cli apps list` names the ids.
     #[arg(long, value_name = "ID")]
-    only: Option<String>,
+    only: Vec<String>,
     /// Write the stale files to the device.
     #[arg(long)]
     install: bool,
@@ -506,17 +506,16 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     };
     // A narrowed plan carries neither list: both name apps this call leaves
     // alone.
-    let plan = match &args.only {
-        Some(id) => fleet.narrow(id)?,
-        None => {
-            for e in &fleet.errors {
-                eprintln!("  skipping {}: {}", e.id, e.error);
-            }
-            for c in &fleet.conflicts {
-                eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
-            }
-            fleet
+    let plan = if args.only.is_empty() {
+        for e in &fleet.errors {
+            eprintln!("  skipping {}: {}", e.id, e.error);
         }
+        for c in &fleet.conflicts {
+            eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
+        }
+        fleet
+    } else {
+        fleet.narrow(&args.only)?
     };
 
     if args.uninstall {
