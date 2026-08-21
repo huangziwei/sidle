@@ -28,17 +28,9 @@ pub struct AppRow {
     pub total_bytes: u64,
     /// Why this app's tree could not be read.
     pub error: Option<String>,
-    /// What the Wi-Fi route offers. `None` for an app the manifest does not
-    /// name.
-    pub dist: Option<AppDist>,
-}
-
-/// One app as the LAN manifest offers it.
-#[derive(Serialize)]
-pub struct AppDist {
-    /// Whether the manifest's entry is as new as this machine's tree.
-    pub current: bool,
-    pub files: usize,
+    /// Whether `device-dist/manifest.json` names this app, putting it in reach
+    /// of a Kindle pulling over Wi-Fi.
+    pub offered: bool,
 }
 
 fn row(tree: &AppTree, source: Option<String>) -> AppRow {
@@ -52,7 +44,7 @@ fn row(tree: &AppTree, source: Option<String>) -> AppRow {
         file_count: tree.files.len(),
         total_bytes: tree.total_size(),
         error: None,
-        dist: None,
+        offered: false,
     }
 }
 
@@ -85,18 +77,11 @@ pub async fn apps_overview(state: State<'_, AppState>) -> Result<AppsOverview, S
     };
     let mut apps = apps_list(&plan, &rows);
 
-    // The Wi-Fi half: what `device-dist/` offers a Kindle that pulls. An app
-    // indexed from an older tree than this machine holds is behind.
+    // The Wi-Fi half: which apps `device-dist/` puts within reach of a pull.
+    // `compose_plan` re-described it above.
     if let Some(manifest) = dist::read_manifest(&state.paths.device_dist()) {
         for app in &mut apps {
-            let Some(staged) = manifest.apps.iter().find(|a| a.id == app.id) else {
-                continue;
-            };
-            let built_at = plan.app(&app.id).map(|t| t.built_at()).unwrap_or(0);
-            app.dist = Some(AppDist {
-                current: staged.built_at >= built_at,
-                files: staged.files.len(),
-            });
+            app.offered = manifest.apps.iter().any(|a| a.id == app.id);
         }
     }
 
@@ -163,7 +148,7 @@ fn apps_list(
             file_count: 0,
             total_bytes: 0,
             error: Some(e.error.clone()),
-            dist: None,
+            offered: false,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

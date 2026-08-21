@@ -299,32 +299,41 @@ fn draw_panel(
     Ok(())
 }
 
-/// Map a [`selfupdate::run_pull`] result to the one-line banner shown to the
-/// user, so the in-app **Update** button (inline in [`run`]) and the `--update`
-/// recovery launch ([`run_update`]) speak identically. A staged path tells the
-/// user to reopen Sidle — the launcher (`bin/sidle.sh`) swaps `bin/sidle.new`
-/// in on the next start, and the tile swaps `bin/sidle.sh.new`. A hard error is
-/// logged to the update log before it's flattened to the terse banner.
+/// The one-line banner for a [`selfupdate::run_pull`] result, shared by the
+/// in-app **Update** button (inline in [`run`]) and [`run_update`]. One phrase
+/// per outcome the pull produced. A hard error reaches the update log whole.
 fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> String {
-    match result {
-        Ok(r) if r.quiet() => "Already up to date".to_string(),
-        Ok(r) if !r.staged.is_empty() => "Update staged — reopen Sidle to apply".to_string(),
-        Ok(r) if !r.written.is_empty() => {
-            format!("Updated {} file(s)", r.written.len())
-        }
-        // Nothing landed: the served build is older or equal, or the device
-        // holds edits of its own.
-        Ok(r) if !r.refused.is_empty() => "Server build not newer — kept current".to_string(),
-        Ok(r) => format!("Kept {} changed on Kindle", r.kept.len()),
+    let r = match result {
+        Ok(r) => r,
         // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
         Err(api::SidleError::TokenMismatch) => {
-            "Plug Kindle into sidle, click Update on Kindle".to_string()
+            return "Plug Kindle into sidle, click Update on Kindle".to_string();
         }
         Err(e) => {
             update_log(format!("FAILED: {e}"));
-            "Update failed — see log".to_string()
+            return "Update failed — see log".to_string();
         }
+    };
+    if r.quiet() {
+        return "Already up to date".to_string();
     }
+    let mut parts = Vec::new();
+    if !r.staged.is_empty() {
+        parts.push("Staged — reopen Sidle".to_string());
+    }
+    if !r.written.is_empty() {
+        parts.push(format!("Updated {} file(s)", r.written.len()));
+    }
+    if !r.kept.is_empty() {
+        parts.push(format!("Kept {} changed on Kindle", r.kept.len()));
+    }
+    if !r.refused.is_empty() {
+        parts.push("Server build not newer".to_string());
+    }
+    if !r.failed.is_empty() {
+        parts.push(format!("{} failed — see log", r.failed.len()));
+    }
+    parts.join(" · ")
 }
 
 /// `--update` mode: the LAN self-update as a standalone launch (the break-glass

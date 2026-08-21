@@ -2016,13 +2016,6 @@ function coverUrlFor(b, { thumb = false } = {}) {
 // re-probes rather than trusting cached state.
 function refreshDevicePage() {
   refreshDeviceList();
-  // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
-  // serves the latest cross-built picker: the dev loop is "rebuild armv7 → open
-  // the Kindle page → device pulls", no cable, no app restart. Fire-and-forget +
-  // mtime-gated (a no-op once warm); non-fatal on error.
-  window.api
-    .invoke("device_app_stage_dist")
-    .catch((err) => console.warn("device_app_stage_dist failed:", err));
   refreshServerStatus();
 }
 

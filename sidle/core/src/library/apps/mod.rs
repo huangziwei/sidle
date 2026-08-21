@@ -18,4 +18,6 @@ pub mod tree;
 pub use compose::{DevicePlan, PlannedFile, plan, plan_from};
 pub use identity::AppIdentity;
 pub use policy::{Apply, apply_for, is_payload};
-pub use tree::{AppFile, AppTree, discover, discover_registrable, validate_mount_rel, walk};
+pub use tree::{
+    AppFile, AppTree, built_at_of, discover, discover_registrable, validate_mount_rel, walk,
+};

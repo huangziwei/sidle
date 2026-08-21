@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -92,6 +92,9 @@ pub struct UpdateReport {
     pub kept: Vec<String>,
     /// Paths whose offered build is not newer than this binary's.
     pub refused: Vec<String>,
+    /// Paths that could not be downloaded, or whose bytes miss the digest the
+    /// manifest declares. Nothing is written at any of them.
+    pub failed: Vec<String>,
 }
 
 impl UpdateReport {
@@ -101,6 +104,7 @@ impl UpdateReport {
             && self.staged.is_empty()
             && self.kept.is_empty()
             && self.refused.is_empty()
+            && self.failed.is_empty()
     }
 }
 
@@ -260,8 +264,8 @@ pub fn write_file(mount: &Path, file: &DistFile, bytes: &[u8]) -> anyhow::Result
 /// Fetch the manifest and bring `mount` up to it.
 ///
 /// Per file: settle against the receipt → read the device copy → [`decide`] →
-/// download → verify → write. `mount` is `/mnt/us`, a verify failure aborts the
-/// pull, and `log` takes step breadcrumbs for `sidle-update.log`.
+/// download → verify → write. A file that fails any of those joins
+/// [`UpdateReport::failed`], and the pull continues at the next.
 pub fn run_pull(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -353,24 +357,39 @@ pub fn run_pull(
                 Decision::Write => {}
             }
             log(&format!("{}: downloading…", file.path));
-            let bytes = download_file(agent, cfg, &file.path)?;
+            let bytes = match download_file(agent, cfg, &file.path) {
+                Ok(b) => b,
+                Err(e) => {
+                    log(&format!(
+                        "{} ({}): download failed — {e}",
+                        file.path, app.id
+                    ));
+                    report.failed.push(file.path.clone());
+                    continue;
+                }
+            };
             if !verify_download(&bytes, file) {
                 log(&format!(
-                    "{}: VERIFY FAILED — got {} bytes sha={} — not writing",
-                    file.path,
-                    bytes.len(),
-                    short(&sha256_hex(&bytes)),
-                ));
-                return Err(anyhow!(
-                    "downloaded {} failed its sha256/size check ({} bytes vs {} expected) \
+                    "{} ({}): VERIFY FAILED — got {} bytes sha={}, expected {} bytes sha={} \
                      — not writing",
                     file.path,
+                    app.id,
                     bytes.len(),
+                    short(&sha256_hex(&bytes)),
                     file.size,
-                )
-                .into());
+                    short(&file.sha256),
+                ));
+                report.failed.push(file.path.clone());
+                continue;
             }
-            let landed = write_file(mount, file, &bytes)?;
+            let landed = match write_file(mount, file, &bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    log(&format!("{} ({}): write failed — {e}", file.path, app.id));
+                    report.failed.push(file.path.clone());
+                    continue;
+                }
+            };
             log(&format!(
                 "{}: verified + wrote {}",
                 file.path,

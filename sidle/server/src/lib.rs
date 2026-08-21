@@ -28,6 +28,7 @@ use rusqlite::Connection;
 
 use sidle_core::library::{
     LibraryPaths, db,
+    device::{digest::DigestCache, dist},
     device_backup::{self, SyncCollections},
     import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
@@ -1375,45 +1376,35 @@ fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     }
 }
 
-/// Minimal `Deserialize` view of `device-dist/sources.json`: served path → the
-/// file on this machine holding its bytes. Mirrors the desktop's `SourceIndex`
-/// (which also carries each file's `mtime`/`size`/`sha256`) rather than sharing
-/// the type across the crate boundary — the same mirror-struct convention the
-/// sync DTOs use; serde drops the extra fields.
-#[derive(serde::Deserialize)]
-struct SourceIndex {
-    files: HashMap<String, SourceEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct SourceEntry {
-    source: PathBuf,
-}
-
-fn read_dist_sources(dist_dir: &StdPath) -> Option<SourceIndex> {
-    let bytes = std::fs::read(dist_dir.join("sources.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// `GET /device/manifest.json` → the staged manifest verbatim (token-gated).
-/// 404 when nothing's been staged yet; the picker reads that as "no update".
+/// `GET /device/manifest.json` → the offered fleet with every entry re-read
+/// through `device-dist/sources.json` (token-gated). 404 when nothing has been
+/// described; the picker reads that as "no update".
 async fn get_dist_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_token(&headers, &query, &state.token)?;
-    let path = state.paths.device_dist().join("manifest.json");
-    serve_file(path, "application/json", None).await
+    let dist_dir = state.paths.device_dist();
+    let digest_path = state.paths.source_digests();
+    let manifest = tokio::task::spawn_blocking(move || {
+        let manifest = dist::read_manifest(&dist_dir)?;
+        let sources = dist::read_sources(&dist_dir)?;
+        let mut digests = DigestCache::open(&digest_path);
+        let fresh = dist::restamp(&manifest, &sources, &mut digests);
+        let _ = digests.save();
+        Some(fresh)
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(manifest).into_response())
 }
 
 /// `GET /device/file/{*name}` → the bytes `device-dist/sources.json` maps
-/// `name` to (token-gated).
-///
-/// `name` is a key in that index and never a path fragment: the file served is
-/// the one the desktop wrote there, so `../library.db` finds no entry and 404s
-/// before anything is opened. The catch-all `{*name}` is needed because a key
-/// carries `/` (e.g. `extensions/karyll/bin/karyll`).
+/// `name` to (token-gated). `name` is a key in that index and never a path
+/// fragment: `../library.db` finds no entry and 404s before anything opens.
 async fn get_dist_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -1421,9 +1412,9 @@ async fn get_dist_file(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_token(&headers, &query, &state.token)?;
-    let sources = read_dist_sources(&state.paths.device_dist()).ok_or(StatusCode::NOT_FOUND)?;
-    let entry = sources.files.get(&name).ok_or(StatusCode::NOT_FOUND)?;
-    serve_file(entry.source.clone(), "application/octet-stream", None).await
+    let sources = dist::read_sources(&state.paths.device_dist()).ok_or(StatusCode::NOT_FOUND)?;
+    let source = sources.source_of(&name).ok_or(StatusCode::NOT_FOUND)?;
+    serve_file(source.to_path_buf(), "application/octet-stream", None).await
 }
 
 async fn serve_file(
@@ -2176,9 +2167,11 @@ mod tests {
         write(&picker, &bytes);
         write(&tile, TILE);
 
+        // Digests that miss the files: `dist::restamp` reads the sources.
         let manifest = serde_json::json!({
             "version": 2,
-            "files": [ { "name": "bin/sidle", "sha256": "deadbeef", "size": bytes.len() } ],
+            "files": [ { "name": "bin/sidle", "sha256": "deadbeef",
+                         "size": bytes.len(), "built_at": 0 } ],
             "apps": [
                 { "id": "sidle", "name": "Sidle", "built_at": 0, "files": [
                     { "path": "extensions/sidle/bin/sidle", "sha256": "deadbeef",
@@ -2188,7 +2181,7 @@ mod tests {
                       "size": TILE.len(), "apply": "direct" } ] }
             ]
         });
-        let entry = |p: &std::path::Path| serde_json::json!({ "source": p, "mtime_ms": 0, "size": 0, "sha256": "" });
+        let entry = |p: &std::path::Path| serde_json::json!({ "source": p });
         let sources = serde_json::json!({
             "files": {
                 "bin/sidle": entry(&picker),
@@ -2242,6 +2235,18 @@ mod tests {
         assert_eq!(manifest["version"], 2);
         assert_eq!(manifest["files"][0]["name"], "bin/sidle");
 
+        // The promised digest is the one the served bytes hash to.
+        let promised = manifest["files"][0]["sha256"].as_str().unwrap();
+        assert_eq!(
+            promised,
+            sidle_core::library::device::deploy::sha256_bytes(&bin_bytes)
+        );
+        assert_eq!(
+            manifest["apps"][1]["files"][0]["sha256"].as_str().unwrap(),
+            sidle_core::library::device::deploy::sha256_bytes(TILE),
+            "the tile's promise is read off the tile"
+        );
+
         // The catch-all `{*name}` captures the `bin/sidle` key, and the bytes
         // come back byte-identical to the file the index points at.
         let resp = build_router(state)
@@ -2251,6 +2256,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert_eq!(body.as_ref(), bin_bytes.as_slice(), "served == the source");
+        assert_eq!(
+            sidle_core::library::device::deploy::sha256_bytes(&body),
+            promised,
+            "what was promised is what was handed over"
+        );
+    }
+
+    /// A source rewritten after `stage_fake_dist`: the manifest follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_source_rebuilt_after_staging_is_offered_as_it_stands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token, _) = staged_state(tmp.path());
+        let tile = state.paths.root.join("checkouts/karyll/out/Karyll.sh");
+        std::fs::write(&tile, b"# Name: Karyll\n# Icon: new\n").unwrap();
+
+        let resp = build_router(state)
+            .oneshot(get_request("/device/manifest.json", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entry = &manifest["apps"][1]["files"][0];
+        assert_eq!(
+            entry["sha256"].as_str().unwrap(),
+            sidle_core::library::device::deploy::sha256_bytes(b"# Name: Karyll\n# Icon: new\n")
+        );
+        assert_eq!(entry["size"], 27);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

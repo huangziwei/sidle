@@ -463,6 +463,9 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
 /// The mount tree the fleet should have: the built-in tree plus every app
 /// registered in the library. `stage_binary` puts the cross-built picker into
 /// that tree at the path it installs to.
+///
+/// `dist::refresh` re-describes the composed plan in `device-dist/` on the way
+/// out. A warm call is one stat per file and writes nothing.
 pub async fn compose_plan(
     state: &AppState,
     source: &deploy::DeploySource,
@@ -475,9 +478,20 @@ pub async fn compose_plan(
         sidle_core::library::db::list_app_sources(&conn).map_err(|e| e.to_string())?
     };
     let builtin = source.mount_dir.clone();
-    tokio::task::spawn_blocking(move || sidle_core::library::apps::plan_from(&builtin, &rows))
-        .await
-        .map_err(|e| e.to_string())
+    let source = source.clone();
+    let dist_dir = state.paths.device_dist();
+    let digest_path = state.paths.source_digests();
+    tokio::task::spawn_blocking(move || {
+        let plan = sidle_core::library::apps::plan_from(&builtin, &rows);
+        let mut digests = DigestCache::open(&digest_path);
+        if let Err(e) = dist::refresh(&plan, &source, &dist_dir, &mut digests) {
+            eprintln!("[sidle/device] device-dist refresh failed: {e:#}");
+        }
+        let _ = digests.save();
+        plan
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Per-file and per-app state of `plan` against the connected Kindle.
@@ -565,10 +579,9 @@ pub async fn device_app_install(
             }
             narrowed
         }
-        None => fleet.clone(),
+        None => fleet,
     };
     let app_handle = app.clone();
-    let dist_dir = state.paths.device_dist();
     // The only root the picker pins. A push without it completes no handshake.
     sidle_core::library::tls::ensure_ca(&state.paths)
         .map_err(|e| format!("issue the CA the device must pin: {e:#}"))?;
@@ -592,11 +605,6 @@ pub async fn device_app_install(
             },
         )
         .map_err(|e| format!("{e:#}"))?;
-        // `dist::refresh` puts the pushed bytes in reach of a LAN pull. Takes
-        // `fleet`, the plan before `only` narrowed it. Non-fatal.
-        if let Err(e) = dist::refresh(&fleet, &source, &dist_dir, &mut digests) {
-            eprintln!("[sidle/device_app_install] device-dist refresh failed: {e:#}");
-        }
         let _ = digests.save();
         Ok(report)
     })
@@ -638,24 +646,4 @@ pub async fn device_app_uninstall(
             Err(format!("{e:#}"))
         }
     }
-}
-
-/// Re-describe the fleet in `<data-dir>/device-dist/`, hashing what has moved.
-/// Needs no Kindle.
-#[tauri::command]
-pub async fn device_app_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
-    let source = state.device_app_source.clone();
-    let plan = compose_plan(&state, &source).await?;
-    let dist_dir = state.paths.device_dist();
-    let digest_path = state.paths.source_digests();
-    tokio::task::spawn_blocking(move || {
-        let mut digests = DigestCache::open(&digest_path);
-        let outcome = dist::refresh(&plan, &source, &dist_dir, &mut digests);
-        let _ = digests.save();
-        outcome
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map(|_| ())
-    .map_err(|e| format!("{e:#}"))
 }

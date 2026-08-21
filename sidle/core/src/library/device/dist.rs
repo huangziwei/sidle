@@ -10,6 +10,10 @@
 //!
 //! A manifest `path` is mount-relative: one string keys the served route, the
 //! on-device destination, and the `sources.json` entry.
+//!
+//! [`restamp`] re-reads every manifest entry from the file `sources.json` names
+//! for it: the sha256 a device verifies against and the bytes it downloads come
+//! from one file at one moment.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::deploy::{DeploySource, atomic_write};
 use super::digest::DigestCache;
-use crate::library::apps::{Apply, DevicePlan};
+use crate::library::apps::{Apply, DevicePlan, built_at_of};
 
 /// Schema of `manifest.json`.
 pub const MANIFEST_VERSION: u32 = 2;
@@ -137,11 +141,8 @@ pub fn read_sources(dist_dir: &Path) -> Option<SourceIndex> {
 }
 
 /// Describe `plan` in `dist_dir`: the manifest a device reads, and the index
-/// naming the file behind each path.
-///
-/// No app's bytes are copied, and `digests` hashes a file once per version of
-/// it — a warm call costs one stat per file and reads nothing. Anything else
-/// under `dist_dir` is deleted.
+/// naming the file behind each path. No app's bytes are copied, a warm call
+/// costs one stat per file, and anything else under `dist_dir` is deleted.
 pub fn refresh(
     plan: &DevicePlan,
     source: &DeploySource,
@@ -212,6 +213,67 @@ pub fn refresh(
     write_json(&manifest_path(dist_dir), &manifest)?;
     write_json(&sources_path(dist_dir), &sources)?;
     Ok(RefreshOutcome::Indexed(hashed))
+}
+
+/// `manifest` with every entry re-read from the file `sources` names for it:
+/// each `sha256` and `size`, and each app's `built_at`. A path with no entry,
+/// or whose source has left the disk, is dropped, and an emptied app with it.
+pub fn restamp(
+    manifest: &DistManifest,
+    sources: &SourceIndex,
+    digests: &mut DigestCache,
+) -> DistManifest {
+    let mut apps = Vec::with_capacity(manifest.apps.len());
+    for app in &manifest.apps {
+        let mut files = Vec::with_capacity(app.files.len());
+        let mut paths = Vec::with_capacity(app.files.len());
+        for file in &app.files {
+            let Some(source) = sources.source_of(&file.path) else {
+                continue;
+            };
+            let Ok(Some(digest)) = digests.of(source) else {
+                continue;
+            };
+            files.push(DistFile {
+                path: file.path.clone(),
+                sha256: digest.sha256,
+                size: digest.size,
+                apply: file.apply,
+            });
+            paths.push(source.to_path_buf());
+        }
+        if files.is_empty() {
+            continue;
+        }
+        apps.push(DistApp {
+            id: app.id.clone(),
+            name: app.name.clone(),
+            version: app.version.clone(),
+            built_at: built_at_of(paths.iter().map(|p| p.as_path())),
+            files,
+        });
+    }
+
+    let files = manifest
+        .files
+        .iter()
+        .filter_map(|legacy| {
+            let source = sources.source_of(&legacy.name)?;
+            let digest = digests.of(source).ok()??;
+            Some(LegacyFile {
+                name: legacy.name.clone(),
+                sha256: digest.sha256,
+                size: digest.size,
+                built_at: built_at_of(std::iter::once(source)),
+            })
+        })
+        .collect();
+
+    DistManifest {
+        version: manifest.version,
+        files,
+        apps,
+    }
 }
 
 fn write_json<T: Serialize>(dest: &Path, value: &T) -> Result<()> {
@@ -445,6 +507,72 @@ mod tests {
         assert!(!dist.path().join("bin").exists());
         assert!(manifest_path(dist.path()).exists());
         assert!(sources_path(dist.path()).exists());
+    }
+
+    #[test]
+    fn a_rebuild_after_the_refresh_is_what_restamp_offers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dist = tempfile::tempdir().unwrap();
+        let (plan, source) = fixture(tmp.path());
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
+
+        // `steb` changes in the tree `sources.json` points at.
+        let steb = tmp.path().join("device/extensions/steb/bin/steb");
+        std::fs::write(&steb, b"steb-v2").unwrap();
+        touch_ahead(&steb);
+
+        let stale = read_manifest(dist.path()).unwrap();
+        let entry_of = |m: &DistManifest, id: &str| {
+            m.apps
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .files
+                .first()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(entry_of(&stale, "steb").sha256, sha256_bytes(b"steb-v1"));
+
+        let fresh = restamp(
+            &stale,
+            &read_sources(dist.path()).unwrap(),
+            &mut DigestCache::ephemeral(),
+        );
+        let steb_entry = entry_of(&fresh, "steb");
+        assert_eq!(steb_entry.sha256, sha256_bytes(b"steb-v2"));
+        assert_eq!(steb_entry.size, 7);
+        assert!(
+            fresh.apps.iter().find(|a| a.id == "steb").unwrap().built_at
+                > stale.apps.iter().find(|a| a.id == "steb").unwrap().built_at,
+            "the rebuild moves the app's build time"
+        );
+        assert_eq!(
+            entry_of(&fresh, "sidle"),
+            entry_of(&stale, "sidle"),
+            "an untouched app is offered unchanged"
+        );
+        assert_eq!(fresh.files[0].sha256, stale.files[0].sha256);
+    }
+
+    #[test]
+    fn restamp_drops_a_file_whose_source_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dist = tempfile::tempdir().unwrap();
+        let (plan, source) = fixture(tmp.path());
+        refresh(&plan, &source, dist.path(), &mut DigestCache::ephemeral()).unwrap();
+        std::fs::remove_dir_all(tmp.path().join("device/extensions/steb")).unwrap();
+
+        let fresh = restamp(
+            &read_manifest(dist.path()).unwrap(),
+            &read_sources(dist.path()).unwrap(),
+            &mut DigestCache::ephemeral(),
+        );
+        assert!(
+            fresh.apps.iter().all(|a| a.id != "steb"),
+            "an app with nothing left to serve is not offered"
+        );
+        assert!(fresh.apps.iter().any(|a| a.id == "sidle"));
     }
 
     #[test]

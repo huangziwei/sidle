@@ -44,13 +44,9 @@ pub struct AppTree {
 }
 
 impl AppTree {
-    /// The tree's build time in unix seconds: the largest [`BUILD_STAMP_SUFFIX`]
-    /// sidecar value, else the largest file mtime.
+    /// The tree's build time in unix seconds. See [`built_at_of`].
     pub fn built_at(&self) -> u64 {
-        let stamped = self.files.iter().filter_map(sidecar_ts).max();
-        stamped
-            .or_else(|| self.files.iter().filter_map(mtime_secs).max())
-            .unwrap_or(0)
+        built_at_of(self.files.iter().map(|f| f.source.as_path()))
     }
 
     /// Total bytes of [`AppTree::files`].
@@ -114,9 +110,21 @@ pub fn walk(mount: &Path, id: &str) -> Result<AppTree> {
     })
 }
 
-/// The unix seconds in `<f.source>.build-ts`.
-fn sidecar_ts(f: &AppFile) -> Option<u64> {
-    let mut sidecar = f.source.clone().into_os_string();
+/// The build time of a set of source files, in unix seconds: the largest
+/// [`BUILD_STAMP_SUFFIX`] sidecar value beside any of them, else the largest
+/// mtime. `0` when the set is empty or none can be read.
+pub fn built_at_of<'a>(sources: impl Iterator<Item = &'a Path> + Clone) -> u64 {
+    sources
+        .clone()
+        .filter_map(sidecar_ts)
+        .max()
+        .or_else(|| sources.filter_map(mtime_secs).max())
+        .unwrap_or(0)
+}
+
+/// The unix seconds in `<source>.build-ts`.
+fn sidecar_ts(source: &Path) -> Option<u64> {
+    let mut sidecar = source.to_path_buf().into_os_string();
     sidecar.push(BUILD_STAMP_SUFFIX);
     std::fs::read_to_string(PathBuf::from(sidecar))
         .ok()?
@@ -125,8 +133,8 @@ fn sidecar_ts(f: &AppFile) -> Option<u64> {
         .ok()
 }
 
-fn mtime_secs(f: &AppFile) -> Option<u64> {
-    std::fs::metadata(&f.source)
+fn mtime_secs(source: &Path) -> Option<u64> {
+    std::fs::metadata(source)
         .ok()?
         .modified()
         .ok()?
