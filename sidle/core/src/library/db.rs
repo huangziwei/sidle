@@ -198,7 +198,11 @@ pub struct BookRow {
 /// the device or inferred from its awake time. A book the Kindle can count no
 /// words in is never timed by it at all, so an estimate is the only figure
 /// available; it must stay distinguishable from a counted one.
-pub const SCHEMA_VERSION: i64 = 22;
+/// v23: added `apps` — where each on-device app's mount tree comes from on this
+/// machine. Rows hold a location and nothing else; name, version and file list
+/// are read off disk on every query, because the source is a working copy that
+/// a build changes without telling anyone.
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// A borrowable handle to the library database.
 ///
@@ -937,6 +941,27 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "offset"     INTEGER NOT NULL,
             linear_pos   INTEGER NOT NULL,
             PRIMARY KEY (end_position, eid, "offset", linear_pos)
+        )"#,
+        [],
+    )?;
+
+    // v23: where an on-device app's mount tree is on this machine. Deliberately
+    // just a location: a `local` source is a working copy whose version, files
+    // and sizes change when its build.sh runs, so a cached copy of any of them
+    // is wrong as soon as it is written. `root` is the mount root inside
+    // `source` — one repo can hold several apps (the picker and bokai both live
+    // in sidle's), so the source alone does not name which tree a row is.
+    //
+    // The picker's own tree is not in here. It ships with the desktop app and
+    // its location is a property of how that app was built, so it is composed in
+    // unconditionally rather than remembered per library.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS apps (
+            id          TEXT PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            root        TEXT NOT NULL,
+            added_at    INTEGER NOT NULL
         )"#,
         [],
     )?;
@@ -4580,6 +4605,97 @@ pub fn record_device_book_presence(
         params![device_serial, book_id, now],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// On-device apps — where each app's mount tree lives on this machine.
+// ---------------------------------------------------------------------------
+
+/// [`AppSourceRow::source_kind`] discriminators.
+///
+/// `local` is a directory on this machine — a repo checkout whose `build.sh`
+/// has run, or an unpacked bundle. `release` is a GitHub `owner/repo` whose
+/// release asset was fetched and unpacked; `root` then points at where it
+/// landed, so both kinds resolve the same way from here on.
+pub const APP_SOURCE_LOCAL: &str = "local";
+pub const APP_SOURCE_RELEASE: &str = "release";
+
+/// One registered app: where to find its tree, and nothing else.
+///
+/// Everything a caller wants to show — name, version, files, sizes — is read
+/// from `root` when it is asked for. A `local` source is a working copy that a
+/// build rewrites without telling anyone, so a cached copy of any of it would
+/// be stale from the moment it was written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppSourceRow {
+    /// The app's id, as its `app.json` declares it.
+    pub id: String,
+    /// [`APP_SOURCE_LOCAL`] or [`APP_SOURCE_RELEASE`].
+    pub source_kind: String,
+    /// The repo path or `owner/repo` the user named.
+    pub source: String,
+    /// The mount root inside `source` — the directory `extensions/` sits in.
+    /// Stored because one source can hold several apps, so `source` alone does
+    /// not say which tree this row is.
+    pub root: String,
+    pub added_at: i64,
+}
+
+fn row_to_app_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppSourceRow> {
+    Ok(AppSourceRow {
+        id: row.get("id")?,
+        source_kind: row.get("source_kind")?,
+        source: row.get("source")?,
+        root: row.get("root")?,
+        added_at: row.get("added_at")?,
+    })
+}
+
+/// Every registered app, by id.
+pub fn list_app_sources(conn: &Connection) -> rusqlite::Result<Vec<AppSourceRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source_kind, source, root, added_at FROM apps ORDER BY id COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], row_to_app_source)?;
+    rows.collect()
+}
+
+pub fn get_app_source(conn: &Connection, id: &str) -> rusqlite::Result<Option<AppSourceRow>> {
+    let mut stmt =
+        conn.prepare("SELECT id, source_kind, source, root, added_at FROM apps WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![id], row_to_app_source)?;
+    rows.next().transpose()
+}
+
+/// Register an app, or repoint one that is already registered.
+///
+/// Re-adding an id replaces its location rather than erroring: pointing sidle
+/// at a checkout that moved is the same gesture as adding it, and an id names
+/// one app in the fleet.
+pub fn upsert_app_source(
+    conn: &Connection,
+    id: &str,
+    source_kind: &str,
+    source: &str,
+    root: &str,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO apps (id, source_kind, source, root, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+             source_kind = excluded.source_kind,
+             source      = excluded.source,
+             root        = excluded.root",
+        params![id, source_kind, source, root, now],
+    )?;
+    Ok(())
+}
+
+/// Forget an app. `true` if a row went. This unregisters the source only — it
+/// touches neither the tree on disk nor anything already on a device.
+pub fn remove_app_source(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM apps WHERE id = ?1", params![id])? > 0)
 }
 
 #[cfg(test)]

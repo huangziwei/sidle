@@ -6,8 +6,9 @@
 //! code key and emit it with the leading `1` stripped, so the decoder's
 //! bit-by-bit `huff` walk lands on exactly that entry.
 //!
-//! The adaptive table *selection* (mirroring `adapt_lp`/`adapt_hp`) lands in a
-//! later step; this module is the static per-table primitive it will call.
+//! Scope: one table, applied as given. Choosing *which* table — the adaptation
+//! the decoder does in `adapt_lp`/`adapt_hp` — is the caller's, not this
+//! module's.
 
 use super::bitstream::BitWriter;
 use std::collections::HashMap;

@@ -359,10 +359,10 @@ mod tests {
   </navMap>
 </ncx>"##;
 
-    /// Every defect the EPUB validator used to detect with a hand-written check
-    /// on the `RSC-005` channel, now the schemas' job. Each case names a
-    /// substring the reported message must contain, so a rule that silently
-    /// stops matching — the way a schema port loses recall — fails here.
+    /// The defects the schemas are responsible for reporting on the `RSC-005`
+    /// channel. Each case names a substring the reported message must contain,
+    /// so a rule that silently stops matching — the way a schema loses recall —
+    /// fails here rather than quietly reporting nothing.
     ///
     /// The base documents are asserted clean first: a case that "passes" only
     /// because its base already errors would prove nothing.

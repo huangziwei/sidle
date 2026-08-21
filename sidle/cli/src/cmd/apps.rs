@@ -12,6 +12,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use serde::Serialize;
 use sidle_core::library::apps::{self, AppTree, FileClass};
+use sidle_core::library::db;
 
 use crate::ctx::Ctx;
 
@@ -29,14 +30,177 @@ pub enum AppsCmd {
         #[arg(long)]
         files: bool,
     },
+    /// Register every app under a path, so a device push carries it.
+    ///
+    /// One path can hold several — sidle's own tree holds the picker and
+    /// bokai — and all of them are registered. Re-adding an id repoints it.
+    Add {
+        /// Repo checkout or unpacked bundle.
+        path: PathBuf,
+    },
+    /// What is registered, and what each source currently holds.
+    List,
+    /// Forget an app. Unregisters the source only: nothing on disk and
+    /// nothing already on a device is touched.
+    Remove { id: String },
 }
 
 /// Every verb that needs an open library. `inspect` does not, and main
 /// dispatches it before the library is opened.
-pub fn run(_ctx: &Ctx, cmd: AppsCmd) -> Result<()> {
+pub fn run(ctx: &Ctx, cmd: AppsCmd) -> Result<()> {
     match cmd {
         AppsCmd::Inspect { .. } => unreachable!("dispatched before the library opens"),
+        AppsCmd::Add { path } => add(ctx, &path),
+        AppsCmd::List => list(ctx),
+        AppsCmd::Remove { id } => remove(ctx, &id),
     }
+}
+
+fn add(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
+    let path = crate::ctx::absolute(path.to_path_buf())?;
+    let trees = apps::discover(&path)?;
+    if trees.is_empty() {
+        anyhow::bail!(
+            "no extensions/<id>/app.json under {} — an app declares itself with \
+             one, so a tree without it is not one sidle can install",
+            path.display()
+        );
+    }
+    let conn = ctx.conn();
+    let mut added = Vec::new();
+    for tree in &trees {
+        db::upsert_app_source(
+            &conn,
+            &tree.spec.id,
+            db::APP_SOURCE_LOCAL,
+            &path.display().to_string(),
+            &tree.root.display().to_string(),
+        )?;
+        added.push(summarize(tree, false));
+    }
+    ctx.report(&added, || {
+        for app in &added {
+            println!(
+                "registered {} {} — {} file(s), {}",
+                app.id,
+                app.version,
+                app.file_count,
+                human(app.total_bytes)
+            );
+        }
+    })
+}
+
+/// What each registered row currently holds, read fresh off disk. A row that
+/// no longer resolves is reported rather than hidden: a moved checkout should
+/// say so, not quietly stop being part of the fleet.
+#[derive(Serialize)]
+struct Registered {
+    id: String,
+    source: String,
+    #[serde(flatten)]
+    state: RegisteredState,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum RegisteredState {
+    Present(Box<AppSummary>),
+    Unreadable { error: String },
+}
+
+fn list(ctx: &Ctx) -> Result<()> {
+    let rows = {
+        let conn = ctx.conn();
+        db::list_app_sources(&conn)?
+    };
+    let listed: Vec<Registered> = rows
+        .iter()
+        .map(|row| Registered {
+            id: row.id.clone(),
+            source: row.source.clone(),
+            state: match read_registered(row) {
+                Ok(tree) => RegisteredState::Present(Box::new(summarize(&tree, false))),
+                Err(e) => RegisteredState::Unreadable {
+                    error: format!("{e:#}"),
+                },
+            },
+        })
+        .collect();
+
+    // What a push would actually carry: the registered rows plus the tree that
+    // ships with this binary, flattened to one path-keyed list. Composing it
+    // here is also the only way to see a path two apps both claim.
+    let composed = crate::cmd::device::workspace_root()
+        .map(|repo| {
+            let source =
+                sidle_core::library::device::deploy::DeploySource::from_workspace_root(&repo);
+            let _ = source.stage_binary();
+            apps::plan_from(&source.mount_dir, &rows)
+        })
+        .ok();
+
+    ctx.report(&listed, || {
+        if listed.is_empty() {
+            println!("no apps registered — `sidle-cli apps add <path>`");
+            println!("(the picker and bokai ship with the app and need no row)");
+        }
+        for app in &listed {
+            match &app.state {
+                RegisteredState::Present(s) => println!(
+                    "{:<14} {:<10} {} file(s), {:<9} {}",
+                    app.id,
+                    s.version,
+                    s.file_count,
+                    human(s.total_bytes),
+                    app.source
+                ),
+                RegisteredState::Unreadable { error } => {
+                    println!("{:<14} {:<10} {}", app.id, "—", app.source);
+                    println!("               {error}");
+                }
+            }
+        }
+        let Some(plan) = &composed else { return };
+        let hashed: u64 = plan.sync_files().map(|f| f.size).sum();
+        println!();
+        println!(
+            "a push carries {} app(s), {} file(s), {} — of which {} is read to \
+             decide what changed",
+            plan.apps.len(),
+            plan.files.len(),
+            human(plan.total_size()),
+            human(hashed)
+        );
+        for c in &plan.conflicts {
+            println!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
+        }
+    })
+}
+
+fn read_registered(row: &db::AppSourceRow) -> Result<apps::AppTree> {
+    let root = PathBuf::from(&row.root);
+    let spec = apps::AppSpec::load(
+        &root
+            .join("extensions")
+            .join(&row.id)
+            .join(apps::APP_SPEC_FILE),
+    )?;
+    apps::walk(&root, &spec)
+}
+
+fn remove(ctx: &Ctx, id: &str) -> Result<()> {
+    let gone = {
+        let conn = ctx.conn();
+        db::remove_app_source(&conn, id)?
+    };
+    ctx.report(&gone, || {
+        if gone {
+            println!("unregistered {id} — its files on disk and on any device are untouched");
+        } else {
+            println!("{id} was not registered");
+        }
+    })
 }
 
 /// What one app tree holds, flattened for `--json`.

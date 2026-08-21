@@ -506,6 +506,29 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
     })
 }
 
+/// The mount tree the fleet should have: the picker and bokai from the tree
+/// that ships with this app, plus every app registered in the library.
+///
+/// Stages the cross-built picker into that tree first, so a bare `cargo build
+/// --target armv7-…` is enough for the dev loop — the binary lands in `target/`
+/// under another name, and the walk looks for it at the path it installs to.
+async fn compose_plan(
+    state: &AppState,
+    source: &deploy::DeploySource,
+) -> Result<sidle_core::library::apps::DevicePlan, String> {
+    if let Err(e) = source.stage_binary() {
+        eprintln!("[sidle/device] staging the picker into the mount tree: {e:#}");
+    }
+    let rows = {
+        let conn = state.db.lock().await;
+        sidle_core::library::db::list_app_sources(&conn).map_err(|e| e.to_string())?
+    };
+    let builtin = source.mount_dir.clone();
+    tokio::task::spawn_blocking(move || sidle_core::library::apps::plan_from(&builtin, &rows))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatus, String> {
     let device = state.device.lock().await.clone();
@@ -534,12 +557,13 @@ pub async fn device_app_status(state: State<'_, AppState>) -> Result<DeployStatu
     // network — just two files — so there is nothing to wait for.
     let _ = sidle_core::library::tls::ensure_ca(&state.paths);
     let ca_cert = state.paths.ca_cert();
+    let plan = compose_plan(&state, &source).await?;
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || {
-        deploy::compute_status(&source, conf.as_ref(), &ca_cert, transport.as_ref())
+        deploy::compute_status(&plan, &source, conf.as_ref(), &ca_cert, transport.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -573,6 +597,7 @@ pub async fn device_app_install(
     let conf = render_conf(&state, serial).await;
 
     let source = state.device_app_source.clone();
+    let plan = compose_plan(&state, &source).await?;
     let app_handle = app.clone();
     let dist_dir = state.paths.device_dist();
     // Hard-fail rather than push a bundle without the trust root: the picker
@@ -588,7 +613,7 @@ pub async fn device_app_install(
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<DeployInstallReport, String> {
         let report = deploy::install_all(
-            &source,
+            &plan,
             conf.as_ref(),
             &ca_cert,
             transport.as_ref(),

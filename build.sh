@@ -80,8 +80,9 @@ cargo build --release -p sidle-server
 #
 # The device resources reproduce the `device/` mount mirror
 # DeploySource::from_resource_root() reads under Contents/Resources/resources/
-# device: the files pushed to the device, and NOT the gitignored etc/server.conf
-# (rendered per-device at install time) or etc/server.conf.example (a template).
+# device. A packaged app walks that tree exactly the way a dev checkout walks
+# `device/`, so every app.json goes in with the files it classifies — and
+# etc/server.conf stays out, because it is rendered per-device at install time.
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "$HOST_TRIPLE" ] || { echo "error: could not read host target triple from rustc -vV" >&2; exit 1; }
 
@@ -96,14 +97,32 @@ APP_DIR="sidle/desktop"
 SIDECAR_DIR="$APP_DIR/binaries"
 RES_DEVICE="$APP_DIR/resources/device"
 rm -rf "$SIDECAR_DIR" "$RES_DEVICE"
-mkdir -p "$SIDECAR_DIR" "$RES_DEVICE/extensions/sidle/bin" "$RES_DEVICE/documents" "$RES_DEVICE/native"
+mkdir -p "$SIDECAR_DIR" "$RES_DEVICE/extensions/sidle/bin" "$RES_DEVICE/documents"
 cp target/release/sidle-server "$SIDECAR_DIR/sidle-server-$HOST_TRIPLE"
+cp device/extensions/sidle/app.json     "$RES_DEVICE/extensions/sidle/app.json"
 cp device/extensions/sidle/config.xml   "$RES_DEVICE/extensions/sidle/config.xml"
 cp device/extensions/sidle/menu.json    "$RES_DEVICE/extensions/sidle/menu.json"
 cp device/extensions/sidle/bin/sidle.sh "$RES_DEVICE/extensions/sidle/bin/sidle.sh"
 cp device/documents/Sidle.sh            "$RES_DEVICE/documents/Sidle.sh"
-cp "target/$DEVICE_TARGET/release/sidle-native" "$RES_DEVICE/native/sidle"
-cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" "$RES_DEVICE/native/sidle.build-ts"
+# The picker at the path it installs to, not off to one side: the packaged app
+# walks this tree, and a binary anywhere else is a binary the walk cannot find.
+cp "target/$DEVICE_TARGET/release/sidle-native" \
+    "$RES_DEVICE/extensions/sidle/bin/sidle"
+cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
+    "$RES_DEVICE/extensions/sidle/bin/sidle.build-ts"
+
+# bokai is a second app in the same tree, built by build-bokai.sh — which this
+# script deliberately never calls, so the engine and the product can ship on
+# their own lines. Staged when a cross-build has left one, skipped when it has
+# not; a packaged app then simply has no bokai to offer.
+if [ -f device/extensions/bokai/bin/bokai ]; then
+    mkdir -p "$RES_DEVICE/extensions/bokai/bin"
+    cp device/extensions/bokai/app.json    "$RES_DEVICE/extensions/bokai/app.json"
+    cp device/extensions/bokai/config.xml  "$RES_DEVICE/extensions/bokai/config.xml"
+    cp device/extensions/bokai/bin/bokai   "$RES_DEVICE/extensions/bokai/bin/bokai"
+else
+    echo "==> no cross-built bokai in device/extensions/bokai — not staging it"
+fi
 
 echo "==> Building sidle desktop app"
 # From inside the app dir. With `tauri.conf.json` in the cwd the CLI stops there

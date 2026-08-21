@@ -482,6 +482,19 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     let device = require_device()?;
     let transport = open(&device)?;
     let source = deploy::DeploySource::from_workspace_root(&workspace_root()?);
+    // The picker is cross-built into `target/` under another name; put it in
+    // the mount tree so the walk finds it where it installs to.
+    source.stage_binary()?;
+    let plan = {
+        let conn = ctx.conn();
+        sidle_core::library::apps::plan(&conn, &source.mount_dir)?
+    };
+    for e in &plan.errors {
+        eprintln!("  skipping {}: {}", e.id, e.error);
+    }
+    for c in &plan.conflicts {
+        eprintln!("  {} also claims {} — kept {}'s", c.dropped, c.path, c.kept);
+    }
     // The CA has to exist before anything can be said about `etc/ca.pem`, and
     // making one needs no server and no network.
     let _ = sidle_core::library::tls::ensure_ca(&ctx.paths);
@@ -506,7 +519,8 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     let ca_cert = ctx.paths.ca_cert();
 
     if !args.install {
-        let status = deploy::compute_status(&source, conf.as_ref(), &ca_cert, transport.as_ref())?;
+        let status =
+            deploy::compute_status(&plan, &source, conf.as_ref(), &ca_cert, transport.as_ref())?;
         return ctx.report(&status, || {
             println!("{:?}", status.overall);
             for f in &status.files {
@@ -515,7 +529,7 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
         });
     }
 
-    let report = deploy::install_all(&source, conf.as_ref(), &ca_cert, transport.as_ref(), |r| {
+    let report = deploy::install_all(&plan, conf.as_ref(), &ca_cert, transport.as_ref(), |r| {
         eprintln!("  {r:?}");
     })?;
     ctx.report(&report, || {
@@ -525,7 +539,7 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
 
 /// The checkout this binary was built from, which is where the picker's own
 /// binary and `device/` mirror live.
-fn workspace_root() -> Result<PathBuf> {
+pub fn workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut p = start.as_path();
     loop {

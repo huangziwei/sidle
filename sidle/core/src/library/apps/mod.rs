@@ -12,8 +12,10 @@
 //! it, and say what each path's install rule is; it knows nothing about any
 //! particular app, and no app repo depends on this crate.
 
+pub mod compose;
 pub mod spec;
 pub mod tree;
 
+pub use compose::{DevicePlan, PlannedFile, plan, plan_from};
 pub use spec::{APP_SPEC_FILE, APP_SPEC_SCHEMA, AppSpec, Apply, FileClass, PathPolicy, PathRule};
 pub use tree::{AppFile, AppTree, RECEIPT_FILE, discover, walk};

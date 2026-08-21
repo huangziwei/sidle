@@ -53,9 +53,11 @@
 //! would put a fake token where the real one goes. Naming it in `app.json`
 //! keeps that fact in the repo that owns the file.
 //!
-//! When a release genuinely has to replace a `seed` file, the rule bumps its
-//! `seed_gen`. The install receipt records the generation that landed, and a
-//! higher generation in the spec makes the path writable once.
+//! `seed_gen` numbers the contents of a `seed` path so a release that genuinely
+//! has to replace one can say so. An install writes a `seed` path only when the
+//! device lacks it, or when the spec's generation outranks the one the device
+//! records — so bumping it re-authorises exactly one overwrite. Generations
+//! start at 1; 0 means a path a device has never been told about.
 //!
 //! # `apply`
 //!
@@ -86,8 +88,8 @@ pub enum FileClass {
     /// Written whenever its hash differs from the bundle's.
     #[default]
     Sync,
-    /// Written only when absent on device (or when `seed_gen` outranks the
-    /// generation the receipt recorded).
+    /// Written only when absent on device, or when the rule's `seed_gen`
+    /// outranks the generation the device records.
     Seed,
     /// Never written, never hashed, never in the manifest. The path exists in
     /// the repo's mirror for a reader, not for a device.
@@ -143,8 +145,8 @@ impl PathRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PathPolicy {
     pub class: FileClass,
-    /// 1 for a `seed` path with no explicit generation; 0 for a `sync` path,
-    /// where the concept does not apply and the receipt records nothing.
+    /// 1 for a `seed` path with no explicit generation; 0 for a `sync` or
+    /// `ignore` path, where the concept does not apply.
     pub seed_gen: u32,
     pub apply: Apply,
 }

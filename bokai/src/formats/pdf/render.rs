@@ -493,12 +493,13 @@ mod macos {
             // their advance has to come from the surrounding glyphs).
             //
             // Amazon also emits a `left` kerning correction on a segment whose
-            // start disagrees with the widths that precede it — 277 of its
-            // 296094 segments on this book. Not reproduced: deriving it from
-            // the gap between the running pen and the glyph's ink fired on
-            // 50103 segments against Amazon's 277, so that is not the rule, and
-            // a wrong correction on one segment in six would drag every later
-            // word's hit box off its glyphs.
+            // start disagrees with the widths that precede it, on well under
+            // 0.1% of segments. Deliberately not reproduced: the obvious rule —
+            // derive it from the gap between the running pen and the glyph's
+            // ink — fires on roughly one segment in six, two orders of magnitude
+            // too often, so it is not the rule Amazon uses. A wrong correction
+            // drags every later word's hit box off its glyphs, which is worse
+            // than omitting a rare one.
             let mut words: Vec<StyleSeg> = Vec::with_capacity(segs.len());
             for (k, s) in segs.iter().enumerate() {
                 let width = if !s.space && s.r > s.l {

@@ -38,8 +38,10 @@ const MAX_ROOT_DEPTH: usize = 3;
 /// between instant and not.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "ref", "artifacts"];
 
-/// Files that are never part of an install regardless of what a spec says:
-/// macOS directory metadata, AppleDouble forks, and sidle's own receipt.
+/// What an install records inside `extensions/<id>/` about itself: the version
+/// that landed and each `seed` path's generation. Written on the device, never
+/// taken from a source tree — a copy found in one is a stray from a hand-drag
+/// and is skipped like the other files below.
 pub const RECEIPT_FILE: &str = ".sidle-install.json";
 
 fn is_never_installed(name: &str) -> bool {

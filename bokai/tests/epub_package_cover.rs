@@ -90,8 +90,8 @@ fn the_container_drops_the_cover_page_the_package_keeps() {
 /// The container's navigation remaps the suppressed cover section onto the
 /// synthesized `cover.xhtml`, which exists only inside the zip. A renderer
 /// consumes `EpubPackage.toc` alongside `documents` and holds no such file, so
-/// a remapped entry would be a TOC row that navigates nowhere — which is what
-/// the reader's 表紙/Cover row became when it moved onto the package.
+/// a remapped entry that reached the package would be a TOC row — 表紙/Cover
+/// among them — that navigates nowhere.
 #[test]
 fn every_toc_entry_names_a_document_the_package_holds() {
     let Ok(kfx) = std::fs::read(REFLOWABLE) else {

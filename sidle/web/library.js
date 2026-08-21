@@ -2285,6 +2285,15 @@ function renderDeviceAppStatus(status) {
         : overall === "not_installed"
           ? "Install on Kindle"
           : "Update on Kindle";
+    // The push covers every app in the fleet, not just the picker, so the
+    // count is worth naming when there is more than one.
+    const appCount = new Set(
+      (status.files || [])
+        .map((f) => f.device_path.split("/"))
+        .filter((p) => p[0] === "extensions" && p.length > 1)
+        .map((p) => p[1]),
+    ).size;
+    if (appCount > 1) btn.textContent += ` (${appCount} apps)`;
     if (confMissing) {
       tip.textContent =
         "server.conf won't be written — no LAN address, or the server has no token. Everything else installs over the cable.";
@@ -2351,6 +2360,7 @@ function overallLabel(overall) {
 function fileStateClass(kind) {
   switch (kind) {
     case "synced": return "synced";
+    case "seeded": return "synced";
     case "stale": return "stale";
     case "missing": return "missing";
     case "source_missing": return "source-missing";
@@ -2361,6 +2371,9 @@ function fileStateClass(kind) {
 function fileStateLabel(kind) {
   switch (kind) {
     case "synced": return "synced";
+    // A seed path is planted once and left alone: present is all that was
+    // asked, and neither side was read to decide it.
+    case "seeded": return "seeded";
     case "stale": return "stale";
     case "missing": return "missing";
     case "source_missing": return "source missing";

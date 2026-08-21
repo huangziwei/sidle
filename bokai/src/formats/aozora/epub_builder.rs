@@ -709,11 +709,9 @@ mod tests {
     use super::*;
 
     fn tiny_jpeg() -> Vec<u8> {
-        // Minimal valid JPEG: 1x1 white. The bytes were dumped from
-        // `printf '\xFF\xD8\xFF\xE0\x00\x10JFIF...\xFF\xD9'` — see EPUB
-        // tests for shape; we don't need to render this, just ship it.
-        // Synthesized via `jpeg-encoder` would also work but this is
-        // smaller and dependency-free.
+        // Minimal valid JPEG: 1x1 white. Nothing here renders it — it only has
+        // to be a well-formed JPEG the builder will carry, so it is written out
+        // literally rather than encoded, which keeps the tests dependency-free.
         vec![
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
             0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06,

@@ -1,22 +1,26 @@
-//! On-device app deploy — pushes everything the native picker needs onto a
-//! jailbroken Kindle: the armv7 binary, the launcher wrapper, a freshly
-//! rendered `etc/server.conf`, the CA at `etc/ca.pem`, the KUAL menu entry
-//! (`config.xml`, `menu.json`), and the one-tap launcher tile at
-//! `documents/Sidle.sh`.
+//! On-device app deploy — pushes every app in the fleet onto a jailbroken
+//! Kindle over a cable: the picker (its armv7 binary, launcher wrapper, KUAL
+//! metadata, the `documents/Sidle.sh` tile, a freshly rendered
+//! `etc/server.conf` and the CA at `etc/ca.pem`), and whatever else is
+//! registered — bokai, steb, karyll, kfxdedrm-fe.
 //!
-//! The in-repo `device/` directory is a literal mirror of the mount, so a
-//! slot's source path and its device path are the same relative string —
-//! `device/documents/Sidle.sh` → `<mount>/documents/Sidle.sh`. Adding a file
-//! to the deploy means dropping it in `device/` at the path it should land on
-//! and adding one [`Slot`]; there is no source-vs-device path mapping to keep
-//! in sync.
+//! The file list is not written here. It comes from
+//! [`crate::library::apps::DevicePlan`], which walks every app's mount-rooted
+//! tree and carries each path's class. Adding a file to the deploy means
+//! dropping it in the tree at the path it should land on; there is no slot to
+//! add and no source-vs-device path mapping to keep in sync.
 //!
-//! Two slots are **not** mirrored, because their bytes are per-install rather
-//! than per-repo: `etc/server.conf` is rendered live, and `etc/ca.pem` is
-//! copied from the library root. The CA is the root the picker pins — its only
-//! trust anchor, since the device client compiles in no public root set — so a
-//! bundle that arrives without it leaves a device that cannot complete a single
-//! handshake while looking perfectly installed.
+//! Two slots are **not** in any tree, because their bytes are per-install
+//! rather than per-repo: `etc/server.conf` is rendered live, and `etc/ca.pem`
+//! is copied from the library root. The CA is the root the picker pins — its
+//! only trust anchor, since the device client compiles in no public root set —
+//! so a bundle that arrives without it leaves a device that cannot complete a
+//! single handshake while looking perfectly installed.
+//!
+//! Every path carries a class. `sync` is written when its hash differs from the
+//! source's; `seed` is written only when the path is absent on device, and is
+//! never read to decide, which is what keeps a status check off 49 MB of
+//! vendored files no update will ever write.
 //!
 //! The picker is not a KUAL app: `documents/Sidle.sh` is a jailbreak-hotfix
 //! scriptlet the library indexes as a tile, and tapping it runs
@@ -30,6 +34,12 @@
 //! remembered, so a rotated `.server-token` cannot leave the picker holding a
 //! stale bearer and getting `403` from `/list.json` with nothing in the UI to
 //! say why.
+//!
+//! A cable push is authoritative and every path is a direct write: nothing on
+//! the device is executing anything while it is mounted, so the `.new` staging
+//! a Wi-Fi update needs does not apply. Any `.new` a previous LAN pull left is
+//! deleted, or the launcher would swap a stale binary over the fresh one on the
+//! next launch.
 //!
 //! Transport-agnostic: everything below drives the [`Transport`] trait,
 //! so a deploy behaves identically over a mass-storage mount (KOA2) and
@@ -46,23 +56,29 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{TPath, Transport};
-
-/// Where on the device the extension bundle lives, relative to the mount.
-/// Only [`bundle_tpath`] needs it — the slots carry mount-relative paths.
-const DEVICE_BUNDLE_REL: &str = "extensions/sidle";
+use crate::library::apps::{Apply, DevicePlan, FileClass, PathPolicy};
 
 /// Cross-compile target the native binary is built for. Hard-coded
 /// because the picker only runs on armv7l Kindles; if a different target ever
 /// matters, that's a per-device problem, not a per-build one.
 const NATIVE_TARGET_TRIPLE: &str = "armv7-unknown-linux-musleabihf";
 
-/// Where on the desktop side each piece of the deploy comes from. The
-/// `mount_dir` is the in-repo `device/` tree — a mirror of the Kindle's mount
-/// root, so every static slot reads from `mount_dir.join(<its device path>)`.
-/// The `binary_path` is the developer's freshly cross-compiled native binary,
-/// which lives in `target/` rather than the mirror. Both are resolved at app
-/// startup (see `state.rs`) and re-evaluated per status query so a fresh
-/// `cargo build` shows up without restarting the desktop app.
+/// Where the picker's binary lives inside the mount tree. Named here because
+/// three things agree on it: the mirror it is staged into, the plan entry whose
+/// absence means "not built yet", and the `app.json` rule that stages it.
+const PICKER_BINARY_REL: &str = "extensions/sidle/bin/sidle";
+
+/// The tree that ships with the desktop app: the `device/` mirror in a dev
+/// checkout, the staged resources in a packaged one. It holds the picker and
+/// bokai, and it is what [`crate::library::apps::plan`] composes with every
+/// registered app.
+///
+/// `binary_path` is where the cross-compiled picker lands — `target/` on the
+/// dev path, under a different name, because the desktop app already owns
+/// `sidle` there. [`Self::stage_binary`] is what puts it in the mirror, so the
+/// walk finds it at the path it installs to. Both are resolved at app startup
+/// (see `state.rs`) and re-evaluated per status query, so a fresh `cargo build`
+/// shows up without restarting the desktop app.
 #[derive(Debug, Clone)]
 pub struct DeploySource {
     pub mount_dir: PathBuf,
@@ -90,17 +106,63 @@ impl DeploySource {
     /// Packaged builds: the on-device source assets ride along as Tauri bundle
     /// resources instead of living in a dev checkout. build.sh stages them under
     /// `Contents/Resources/resources/device/`, reproducing the same mount mirror
-    /// `from_workspace_root` points at — plus the cross-compiled armv7 picker at
-    /// `native/sidle` — so `slots`, `compute_status`, and `stage_dist` behave
-    /// identically dev vs packaged. `res_dir` is `app.path().resource_dir()`.
-    /// The "binary older than source" mtime hint silently no-ops here (no
+    /// `from_workspace_root` points at, cross-compiled picker included — so the
+    /// walk, `compute_status` and `stage_dist` behave identically dev vs
+    /// packaged. `res_dir` is `app.path().resource_dir()`. `binary_path` is the
+    /// mirror's own copy here, which makes [`Self::stage_binary`] a no-op; the
+    /// "binary older than source" mtime hint silently no-ops too (no
     /// `sidle/native/src` tree alongside).
     pub fn from_resource_root(res_dir: &Path) -> Self {
         let staged = res_dir.join("resources").join("device");
         Self {
-            binary_path: staged.join("native").join("sidle"),
+            binary_path: staged.join(PICKER_BINARY_REL),
             mount_dir: staged,
         }
+    }
+
+    /// Where the picker's binary sits inside the mirror.
+    pub fn mirrored_binary(&self) -> PathBuf {
+        self.mount_dir.join(PICKER_BINARY_REL)
+    }
+
+    /// Copy the cross-built picker into the mirror when `target/`'s copy is
+    /// newer, so the tree walk finds current bytes at the path they install to.
+    ///
+    /// The picker is the one file in the fleet a build leaves outside the tree
+    /// that ships it: it is cross-compiled into `target/` under a different
+    /// name. Everything else — bokai's binary, steb's, karyll's two — is
+    /// already written to its mount path by its own `build.sh`. Doing this here
+    /// rather than only in `build.sh` keeps the dev loop at one command:
+    /// cross-build, push. Its `.build-ts` sidecar rides along, because the
+    /// device compares that value against the one compiled into the binary and
+    /// the two have to move together.
+    ///
+    /// Best-effort. A missing source binary is the "not built yet" case, which
+    /// [`compute_status`] reports from the plan; a failed copy leaves whatever
+    /// the mirror already had.
+    pub fn stage_binary(&self) -> Result<()> {
+        let dest = self.mirrored_binary();
+        if dest == self.binary_path {
+            return Ok(());
+        }
+        let Some(src_mtime) = mtime_ms(&self.binary_path) else {
+            return Ok(());
+        };
+        if mtime_ms(&dest).is_some_and(|d| d >= src_mtime) {
+            return Ok(());
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        atomic_write(&dest, &std::fs::read(&self.binary_path)?)?;
+
+        let mut src_sidecar = self.binary_path.clone().into_os_string();
+        src_sidecar.push(".build-ts");
+        if let Ok(ts) = std::fs::read(PathBuf::from(src_sidecar)) {
+            atomic_write(&with_suffix(&dest, ".build-ts"), &ts)?;
+        }
+        Ok(())
     }
 
     /// Build time (unix seconds) of `binary_path`, read from the
@@ -169,8 +231,15 @@ pub enum DeployFileState {
         source_hash: String,
         device_hash: String,
     },
-    /// File is missing on the device (clean install case).
-    Missing { source_hash: String },
+    /// File is missing on the device (clean install case). `source_hash` is
+    /// absent for a `seed` path, whose whole point is that neither side is read
+    /// to decide — hashing 49 MB of vendored files to fill a UI hint would undo
+    /// the saving.
+    Missing { source_hash: Option<String> },
+    /// A `seed` path already on the device. Present, not compared: the
+    /// on-device copy is the live one and the source's is a fresh install's
+    /// starting point, so equal bytes were never the test.
+    Seeded,
     /// File is missing on the *source* side. Only meaningful for the
     /// binary slot — UI surfaces "run `cargo build ...` first".
     SourceMissing,
@@ -255,89 +324,82 @@ pub struct DeployInstallReport {
     pub results: Vec<DeployFileInstallResult>,
 }
 
-/// File-slot specs: where each piece comes from on the source side,
-/// where it lands on the device. The `server.conf` slot has a special
-/// `Source::Rendered` variant because its bytes are computed live, not
-/// read from a file.
-enum Source<'a> {
+/// Where a slot's bytes come from on this machine.
+enum Source {
     File(PathBuf),
     /// Bytes computed live rather than read from a file. `None` says the
     /// inputs to compute them are unavailable, and the slot reports
-    /// [`DeployFileState::SourceMissing`] rather than failing the deploy — the
-    /// same graceful degradation the binary slot already has. Only
+    /// [`DeployFileState::SourceMissing`] rather than failing the deploy. Only
     /// `etc/server.conf` needs it, and it is exactly what a machine with no
     /// routable LAN address needs from a cable push: every other slot is
     /// independent of the address, and pushing them is the whole point.
     Rendered(Option<String>),
-    /// For the binary: same as File, but a missing source path
-    /// surfaces as `SourceMissing` instead of an error.
-    BinaryFile(&'a Path),
 }
 
-/// One file in the deploy. `device_rel` is **mount-relative** and doubles as
-/// the path under the in-repo `device/` mirror, which is why a static slot
-/// needs nothing but its own path — see [`mirrored`].
-struct Slot<'a> {
-    device_rel: &'static str,
-    source: Source<'a>,
+/// One file in the deploy. `device_rel` is **mount-relative** — the same string
+/// that keys the manifest entry and the served route.
+struct Slot {
+    device_rel: String,
+    source: Source,
+    policy: PathPolicy,
 }
 
-impl Slot<'_> {
+impl Slot {
     fn tpath(&self) -> TPath {
-        TPath::parse(self.device_rel)
+        TPath::parse(&self.device_rel)
     }
 }
 
-/// A slot whose bytes come from the `device/` mirror verbatim: source path and
-/// device path are the same relative string.
-fn mirrored(source: &DeploySource, device_rel: &'static str) -> Slot<'static> {
+/// A `sync`/`direct` slot — what everything outside an app tree is.
+fn plain(device_rel: &str, source: Source) -> Slot {
     Slot {
-        device_rel,
-        source: Source::File(source.mount_dir.join(device_rel)),
+        device_rel: device_rel.to_string(),
+        source,
+        policy: PathPolicy {
+            class: FileClass::Sync,
+            seed_gen: 0,
+            apply: Apply::Direct,
+        },
     }
 }
 
-fn slots<'a>(
-    source: &'a DeploySource,
-    conf: Option<&ServerConfRender>,
-    ca_cert: &Path,
-) -> Vec<Slot<'a>> {
-    vec![
-        // Not mirrored: the picker is cross-compiled into `target/`, and ships
-        // on-device under its short name.
-        Slot {
-            device_rel: "extensions/sidle/bin/sidle",
-            source: Source::BinaryFile(source.binary_path.as_path()),
-        },
-        // Not mirrored: the CA lives in the library root, not the repo, and is
-        // per-install material like `server.conf`. This is the root the picker
-        // pins — its *only* trust anchor, since the device client is built with
-        // no public root set compiled in — so a device without it cannot
-        // complete a handshake at all. Pushed as a file rather than rendered
-        // bytes because that is what it is; the caller guarantees it exists.
-        Slot {
-            device_rel: "extensions/sidle/etc/ca.pem",
-            source: Source::File(ca_cert.to_path_buf()),
-        },
-        mirrored(source, "extensions/sidle/bin/sidle.sh"),
-        // KUAL menu metadata, inert on this firmware. Pushed so a device that
-        // ever gains a menu finds a current entry rather than a stale one.
-        mirrored(source, "extensions/sidle/config.xml"),
-        mirrored(source, "extensions/sidle/menu.json"),
-        // Not mirrored: per-install secret, rendered live. The mirror holds
-        // only `etc/server.conf.example`, which is never pushed. `None` when
-        // there is no LAN address or no server token to render — the slot then
-        // reports `SourceMissing` and the other six install anyway.
-        Slot {
-            device_rel: "extensions/sidle/etc/server.conf",
-            source: Source::Rendered(conf.map(ServerConfRender::render)),
-        },
-        // The one-tap launcher tile, and the app's primary front door. The
-        // hotfix only indexes tiles from `documents/`, so this one sits at the
-        // mount root rather than in the bundle. Its `# Icon:` header is
-        // generated — see `device/make-tile.sh`.
-        mirrored(source, "documents/Sidle.sh"),
-    ]
+/// Every file this push would write: the composed tree, plus the two slots
+/// whose bytes are per-install rather than per-repo.
+///
+/// A slot's `apply` is carried but not acted on. Over a cable nothing on the
+/// device is executing, so a `staged` path is written directly — see
+/// [`install_all`], which also clears any `.new` a LAN pull left behind.
+fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> Vec<Slot> {
+    let mut out: Vec<Slot> = plan
+        .files
+        .iter()
+        .map(|f| Slot {
+            device_rel: f.path.clone(),
+            source: Source::File(f.source.clone()),
+            policy: f.policy,
+        })
+        .collect();
+
+    // Not in any tree: the CA lives in the library root. This is the root the
+    // picker pins — its *only* trust anchor, since the device client is built
+    // with no public root set compiled in — so a device without it cannot
+    // complete a handshake at all. Pushed as a file rather than rendered bytes
+    // because that is what it is; the caller guarantees it exists.
+    out.push(plain(
+        "extensions/sidle/etc/ca.pem",
+        Source::File(ca_cert.to_path_buf()),
+    ));
+    // Not in any tree: per-install secret, rendered live. The mirror holds only
+    // `etc/server.conf.example`, which its `app.json` classes `ignore`. `None`
+    // when there is no LAN address or no server token to render — the slot then
+    // reports `SourceMissing` and everything else installs anyway.
+    out.push(plain(
+        "extensions/sidle/etc/server.conf",
+        Source::Rendered(conf.map(ServerConfRender::render)),
+    ));
+
+    out.sort_by(|a, b| a.device_rel.cmp(&b.device_rel));
+    out
 }
 
 /// Hex sha256 of a file's bytes. Returns `None` if the path doesn't
@@ -355,14 +417,6 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
-}
-
-/// Mount-relative [`TPath`] for something inside the extension bundle
-/// (`bin/sidle.new` → `extensions/sidle/bin/sidle.new`). Slots don't need this
-/// — they already carry mount-relative paths — but the staged-update cleanup
-/// in [`install_all`] refers to a file that is not a slot.
-fn bundle_tpath(bundle_rel: &str) -> TPath {
-    TPath::parse(&format!("{DEVICE_BUNDLE_REL}/{bundle_rel}"))
 }
 
 /// Hex sha256 of the on-device bytes at `path`, or `None` when the object is
@@ -389,53 +443,63 @@ fn device_sha_opt(transport: &dyn Transport, path: &TPath) -> Result<Option<Stri
 /// Does no writes, no network. Reads the source side off the host filesystem
 /// and the device side through `transport`.
 pub fn compute_status(
+    plan: &DevicePlan,
     source: &DeploySource,
     conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
 ) -> Result<DeployStatus> {
-    let mut files = Vec::with_capacity(8);
-    let mut binary_missing = false;
+    let slots = slots(plan, conf, ca_cert);
+    let mut files = Vec::with_capacity(slots.len());
 
-    for slot in slots(source, conf, ca_cert) {
+    for slot in slots {
+        // A `seed` path is decided by existence alone — neither side is read.
+        // This is the whole reason the class exists: karyll's 100 vendored
+        // files are 49 MB that no update writes, and hashing them over MTP
+        // would make a status check a transfer.
+        if slot.policy.class == FileClass::Seed {
+            let state = if transport.exists(&slot.tpath())? {
+                DeployFileState::Seeded
+            } else {
+                DeployFileState::Missing { source_hash: None }
+            };
+            files.push(DeployFileStatus {
+                device_path: slot.device_rel,
+                state,
+            });
+            continue;
+        }
+
         let device_hash = device_sha_opt(transport, &slot.tpath())?;
-
         let state = match slot.source {
-            Source::Rendered(Some(text)) => {
-                let source_hash = sha256_bytes(text.as_bytes());
-                classify(source_hash, device_hash)
-            }
+            Source::Rendered(Some(text)) => classify(sha256_bytes(text.as_bytes()), device_hash),
             Source::Rendered(None) => DeployFileState::SourceMissing,
             Source::File(path) => {
-                // Two kinds of file land here: the `device/` mirror, where a
-                // miss means repo layout drift, and the CA in the library root,
-                // where it means nobody issued one. Name the path and let it say
-                // which rather than asserting the mirror.
+                // Two kinds of file land here: one from an app's tree, where a
+                // miss means the tree changed under the walk, and the CA in the
+                // library root, where it means nobody issued one. Name the path
+                // and let it say which.
                 let source_hash = sha256_file_opt(&path)?.ok_or_else(|| {
                     anyhow!(
-                        "deploy source missing at {} — repo layout drift, or TLS \
-                         material never issued",
+                        "deploy source missing at {} — the tree changed under \
+                         the walk, or TLS material was never issued",
                         path.display()
                     )
                 })?;
                 classify(source_hash, device_hash)
             }
-            Source::BinaryFile(path) => match sha256_file_opt(path)? {
-                Some(source_hash) => classify(source_hash, device_hash),
-                None => {
-                    binary_missing = true;
-                    DeployFileState::SourceMissing
-                }
-            },
         };
 
         files.push(DeployFileStatus {
-            device_path: slot.device_rel.to_string(),
+            device_path: slot.device_rel,
             state,
         });
     }
 
-    let overall = if binary_missing {
+    // Nothing to install without the picker's own binary. It reaches the plan
+    // through the built-in tree, so its absence means the armv7 cross-build has
+    // not run — the one prerequisite the user has to satisfy by hand.
+    let overall = if !plan.files.iter().any(|f| f.path == PICKER_BINARY_REL) {
         DeployOverall::BinaryNotBuilt
     } else {
         summarize(&files)
@@ -454,7 +518,9 @@ pub fn compute_status(
 
 fn classify(source_hash: String, device_hash: Option<String>) -> DeployFileState {
     match device_hash {
-        None => DeployFileState::Missing { source_hash },
+        None => DeployFileState::Missing {
+            source_hash: Some(source_hash),
+        },
         Some(dh) if dh == source_hash => DeployFileState::Synced,
         Some(dh) => DeployFileState::Stale {
             source_hash,
@@ -469,7 +535,9 @@ fn summarize(files: &[DeployFileStatus]) -> DeployOverall {
     let mut synced = 0u32;
     for f in files {
         match f.state {
-            DeployFileState::Synced => synced += 1,
+            // A seeded path is present and deliberately not compared, so it is
+            // as done as a synced one.
+            DeployFileState::Synced | DeployFileState::Seeded => synced += 1,
             DeployFileState::Stale { .. } => stale += 1,
             DeployFileState::Missing { .. } => missing += 1,
             DeployFileState::SourceMissing => {}
@@ -546,7 +614,7 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 /// because a device on a network that cannot carry one is precisely the device
 /// that needs the cable.
 pub fn install_all(
-    source: &DeploySource,
+    plan: &DevicePlan,
     conf: Option<&ServerConfRender>,
     ca_cert: &Path,
     transport: &dyn Transport,
@@ -555,36 +623,46 @@ pub fn install_all(
     // No explicit mkdir: `Transport::write_atomic` creates the bin/ and etc/
     // parents on both transports (mass-storage `create_dir_all`, MTP
     // `ensure_folder`), so a fresh install needs no pre-step.
-    let mut results = Vec::with_capacity(8);
-    for slot in slots(source, conf, ca_cert) {
-        let result = install_one(transport, &slot);
+    let slots = slots(plan, conf, ca_cert);
+    let mut results = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        let result = install_one(transport, slot);
         on_progress(&result);
         results.push(result);
     }
 
-    // A direct push is authoritative: the `bin/sidle` we just wrote supersedes any
-    // pending LAN self-update staged as `bin/sidle.new` by an earlier "Update
-    // over Wi-Fi". Leaving the stale `.new` would let the launcher's
-    // unconditional swap (`sidle.sh`) clobber this freshly-pushed binary on the
-    // next launch — a silent regression. Best-effort; absent is the norm.
-    let _ = transport.delete(&bundle_tpath("bin/sidle.new"));
+    // A cable push is authoritative: what it just wrote supersedes any pending
+    // LAN self-update staged as `<path>.new`. Leaving one would let the applier
+    // one level up swap a stale file over the fresh one on the next launch.
+    // Best-effort; absent is the norm.
+    for path in plan.staged_paths() {
+        let _ = transport.delete(&TPath::parse(&format!("{path}.new")));
+    }
 
     Ok(DeployInstallReport { results })
 }
 
-fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> DeployFileInstallResult {
+fn install_one(transport: &dyn Transport, slot: &Slot) -> DeployFileInstallResult {
+    let tpath = slot.tpath();
+
+    // A `seed` path is planted once and left alone. The on-device copy is the
+    // live one — a user may have edited it, and replacing a vendored stack
+    // costs a re-download — so presence, not equal bytes, is the test.
+    if slot.policy.class == FileClass::Seed && matches!(transport.exists(&tpath), Ok(true)) {
+        return DeployFileInstallResult::Skipped {
+            device_path: slot.device_rel.clone(),
+        };
+    }
+
     let bytes_result: Result<Vec<u8>> = match &slot.source {
         Source::Rendered(Some(text)) => Ok(text.as_bytes().to_vec()),
         Source::Rendered(None) => {
             return DeployFileInstallResult::SourceMissing {
-                device_path: slot.device_rel.to_string(),
+                device_path: slot.device_rel.clone(),
             };
         }
         Source::File(path) => {
             std::fs::read(path).with_context(|| format!("read source {}", path.display()))
-        }
-        Source::BinaryFile(path) => {
-            std::fs::read(path).with_context(|| format!("read binary {}", path.display()))
         }
     };
 
@@ -592,30 +670,29 @@ fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> DeployFileInstallR
         Ok(b) => b,
         Err(e) => {
             return DeployFileInstallResult::Failed {
-                device_path: slot.device_rel.to_string(),
+                device_path: slot.device_rel.clone(),
                 error: format!("{e:#}"),
             };
         }
     };
 
-    let tpath = slot.tpath();
     let source_hash = sha256_bytes(&bytes);
     if let Ok(Some(device_hash)) = device_sha_opt(transport, &tpath)
         && device_hash == source_hash
     {
         return DeployFileInstallResult::Skipped {
-            device_path: slot.device_rel.to_string(),
+            device_path: slot.device_rel.clone(),
         };
     }
 
     if let Err(e) = transport.write_atomic(&tpath, &bytes) {
         return DeployFileInstallResult::Failed {
-            device_path: slot.device_rel.to_string(),
+            device_path: slot.device_rel.clone(),
             error: format!("{e:#}"),
         };
     }
     DeployFileInstallResult::Wrote {
-        device_path: slot.device_rel.to_string(),
+        device_path: slot.device_rel.clone(),
     }
 }
 
@@ -853,11 +930,21 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
-    /// Build a minimal `device/` mirror under `repo_root` — every static slot
-    /// at the same relative path it lands on the device — and optionally
-    /// `<repo>/target/.../release/sidle-native`.
+    /// Build a minimal `device/` mirror under `repo_root` — every file at the
+    /// relative path it lands on the device — and optionally the cross-built
+    /// picker at `<repo>/target/.../release/sidle-native`.
     fn make_source(repo: &Path, include_binary: bool) -> DeploySource {
         let mirror = repo.join("device");
+        write_file(
+            &mirror.join("extensions/sidle/app.json"),
+            br#"{"schema":1,"id":"sidle","name":"Sidle","version":"0.1.9",
+                 "tile":"documents/Sidle.sh","pidof":"sidle",
+                 "paths":[{"match":"extensions/sidle/bin/sidle","apply":"staged"},
+                          {"match":"extensions/sidle/bin/sidle.sh","apply":"staged"},
+                          {"match":"extensions/sidle/bin/sidle.build-ts","class":"ignore"},
+                          {"match":"extensions/sidle/etc/server.conf.example",
+                           "class":"ignore"}]}"#,
+        );
         write_file(&mirror.join("extensions/sidle/config.xml"), b"<config/>");
         write_file(
             &mirror.join("extensions/sidle/menu.json"),
@@ -883,13 +970,37 @@ mod tests {
         DeploySource::from_workspace_root(repo)
     }
 
+    /// The composed tree a push works from: the built-in mirror alone, with the
+    /// cross-built picker staged into it first, and no registered apps.
+    fn make_plan(source: &DeploySource) -> crate::library::apps::DevicePlan {
+        source.stage_binary().unwrap();
+        crate::library::apps::plan_from(&source.mount_dir, &[])
+    }
+
+    /// The composed tree alone, for a test that only installs. `compute_status`
+    /// is the only caller that still needs the source, for its mtime hints.
+    fn make_install_plan(repo: &Path) -> crate::library::apps::DevicePlan {
+        make_both(repo, true).1
+    }
+
+    /// A source plus its plan.
+    fn make_both(
+        repo: &Path,
+        include_binary: bool,
+    ) -> (DeploySource, crate::library::apps::DevicePlan) {
+        let source = make_source(repo, include_binary);
+        let plan = make_plan(&source);
+        (source, plan)
+    }
+
     #[test]
     fn status_not_installed_when_device_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
         let status = compute_status(
+            &plan,
             &source,
             Some(&make_conf()),
             &ca_path(tmp.path()),
@@ -908,12 +1019,12 @@ mod tests {
     #[test]
     fn status_in_sync_after_install() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
         install_all(
-            &source,
+            &plan,
             Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -921,6 +1032,7 @@ mod tests {
         )
         .unwrap();
         let status = compute_status(
+            &plan,
             &source,
             Some(&conf),
             &ca_path(tmp.path()),
@@ -933,13 +1045,13 @@ mod tests {
     #[test]
     fn status_stale_when_token_rotated() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
         // First install with one token.
         let conf1 = make_conf();
         install_all(
-            &source,
+            &plan,
             Some(&conf1),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -951,6 +1063,7 @@ mod tests {
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
         let status = compute_status(
+            &plan,
             &source,
             Some(&conf2),
             &ca_path(tmp.path()),
@@ -980,10 +1093,11 @@ mod tests {
     #[test]
     fn status_binary_not_built_when_missing_target() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), false); // no binary
+        let (source, plan) = make_both(tmp.path(), false); // no binary
         let device = tempfile::tempdir().unwrap();
 
         let status = compute_status(
+            &plan,
             &source,
             Some(&make_conf()),
             &ca_path(tmp.path()),
@@ -991,12 +1105,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status.overall, DeployOverall::BinaryNotBuilt);
-        let bin = status
-            .files
-            .iter()
-            .find(|f| f.device_path == "extensions/sidle/bin/sidle")
-            .unwrap();
-        assert_eq!(bin.state, DeployFileState::SourceMissing);
+        assert!(
+            !status
+                .files
+                .iter()
+                .any(|f| f.device_path == "extensions/sidle/bin/sidle"),
+            "an unbuilt binary is not in the tree, so there is no slot for it — \
+             the overall is what says the push cannot go"
+        );
     }
 
     /// A machine with no routable LAN address (or no server token) must still
@@ -1007,11 +1123,11 @@ mod tests {
     #[test]
     fn conf_without_inputs_reports_source_missing_and_the_rest_installs() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
         let report = install_all(
-            &source,
+            &plan,
             None,
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1059,19 +1175,25 @@ mod tests {
     #[test]
     fn status_without_conf_inputs_matches_what_install_would_do() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
         install_all(
-            &source,
+            &plan,
             None,
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| {},
         )
         .unwrap();
-        let status =
-            compute_status(&source, None, &ca_path(tmp.path()), &ms(device.path())).unwrap();
+        let status = compute_status(
+            &plan,
+            &source,
+            None,
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+        )
+        .unwrap();
 
         assert_eq!(status.overall, DeployOverall::InSync);
         let conf_status = status
@@ -1085,12 +1207,12 @@ mod tests {
     #[test]
     fn install_skips_synced_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
         install_all(
-            &source,
+            &plan,
             Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1098,7 +1220,7 @@ mod tests {
         )
         .unwrap();
         let report = install_all(
-            &source,
+            &plan,
             Some(&conf),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1118,12 +1240,12 @@ mod tests {
     #[test]
     fn install_rewrites_only_stale_file_after_token_rotation() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
         let conf1 = make_conf();
         install_all(
-            &source,
+            &plan,
             Some(&conf1),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1134,7 +1256,7 @@ mod tests {
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
         let report = install_all(
-            &source,
+            &plan,
             Some(&conf2),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1156,11 +1278,11 @@ mod tests {
     #[test]
     fn install_creates_subdirs_on_clean_device() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
         install_all(
-            &source,
+            &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
@@ -1198,11 +1320,11 @@ mod tests {
     #[test]
     fn install_pushes_the_ca_the_picker_pins() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let (source, plan) = make_both(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
         let ca = ca_path(tmp.path());
 
-        install_all(&source, Some(&make_conf()), &ca, &ms(device.path()), |_| {}).unwrap();
+        install_all(&plan, Some(&make_conf()), &ca, &ms(device.path()), |_| {}).unwrap();
 
         let landed = device.path().join("extensions/sidle/etc/ca.pem");
         assert!(landed.exists(), "the device never received a trust root");
@@ -1227,21 +1349,208 @@ mod tests {
     #[test]
     fn install_progress_fires_per_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
+        let plan = make_install_plan(tmp.path());
         let device = tempfile::tempdir().unwrap();
 
         let mut events = 0;
         install_all(
-            &source,
+            &plan,
             Some(&make_conf()),
             &ca_path(tmp.path()),
             &ms(device.path()),
             |_| events += 1,
         )
         .unwrap();
-        // extensions/sidle/{bin/sidle, bin/sidle.sh, config.xml, menu.json,
-        // etc/server.conf, etc/ca.pem} + documents/Sidle.sh
-        assert_eq!(events, 7);
+        // extensions/sidle/{app.json, bin/sidle, bin/sidle.sh, config.xml,
+        // menu.json, etc/server.conf, etc/ca.pem} + documents/Sidle.sh
+        assert_eq!(events, 8);
+    }
+
+    /// Register a karyll-shaped app beside the built-in tree: a tile, a binary,
+    /// and a vendored subtree classed `seed`.
+    fn karyll_row(repo: &Path) -> crate::library::db::AppSourceRow {
+        let out = repo.join("deploy").join("out");
+        write_file(
+            &out.join("extensions/karyll/app.json"),
+            br#"{"schema":1,"id":"karyll","name":"Karyll","version":"0.2.4",
+                 "tile":"documents/Karyll.sh",
+                 "paths":[{"match":"extensions/karyll/hid/","class":"seed","seed_gen":1}]}"#,
+        );
+        write_file(&out.join("extensions/karyll/bin/karyll"), b"armhf");
+        write_file(&out.join("extensions/karyll/hid/config.ini"), b"[device]\n");
+        write_file(&out.join("documents/Karyll.sh"), b"# Name: Karyll\n");
+        crate::library::db::AppSourceRow {
+            id: "karyll".into(),
+            source_kind: crate::library::db::APP_SOURCE_LOCAL.into(),
+            source: repo.display().to_string(),
+            root: out.display().to_string(),
+            added_at: 0,
+        }
+    }
+
+    fn plan_with_karyll(repo: &Path, karyll: &Path) -> crate::library::apps::DevicePlan {
+        let source = make_source(repo, true);
+        source.stage_binary().unwrap();
+        crate::library::apps::plan_from(&source.mount_dir, &[karyll_row(karyll)])
+    }
+
+    /// One cable push installs every app, not just the picker.
+    #[test]
+    fn a_registered_app_installs_over_the_same_cable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+
+        install_all(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+
+        for landed in [
+            "extensions/sidle/bin/sidle",
+            "extensions/sidle/etc/ca.pem",
+            "extensions/karyll/bin/karyll",
+            "extensions/karyll/hid/config.ini",
+            "documents/Karyll.sh",
+            "documents/Sidle.sh",
+        ] {
+            assert!(
+                device.path().join(landed).exists(),
+                "{landed} never arrived"
+            );
+        }
+    }
+
+    /// A `seed` path is planted once. The on-device copy is the live one — a
+    /// user may have set `[device] name` in it — so a later push must leave it
+    /// exactly as it found it, even though the source's bytes differ.
+    #[test]
+    fn a_seed_file_is_never_overwritten_once_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let conf = make_conf();
+        let ca = ca_path(tmp.path());
+
+        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+
+        let on_device = device.path().join("extensions/karyll/hid/config.ini");
+        std::fs::write(&on_device, b"[device]\nname = My-Keyboard\n").unwrap();
+
+        let report = install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+        assert_eq!(
+            std::fs::read(&on_device).unwrap(),
+            b"[device]\nname = My-Keyboard\n",
+            "an edited seed file must survive a re-push"
+        );
+        assert!(matches!(
+            report
+                .results
+                .iter()
+                .find(|r| matches!(r,
+                    DeployFileInstallResult::Skipped { device_path }
+                        | DeployFileInstallResult::Wrote { device_path }
+                        if device_path == "extensions/karyll/hid/config.ini"))
+                .unwrap(),
+            DeployFileInstallResult::Skipped { .. }
+        ));
+    }
+
+    /// A seed path the device does not have yet is a first install, and gets
+    /// written like anything else.
+    #[test]
+    fn a_seed_file_is_written_when_the_device_lacks_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+
+        install_all(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(device.path().join("extensions/karyll/hid/config.ini")).unwrap(),
+            b"[device]\n"
+        );
+    }
+
+    /// The saving the class exists for: a seeded path is reported from its
+    /// existence alone, and its bytes are never read off the device. Against
+    /// karyll's real tree that is 100 files and 49 MB a status check skips.
+    #[test]
+    fn a_seeded_path_is_reported_without_reading_either_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let karyll = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = plan_with_karyll(tmp.path(), karyll.path());
+        let source = make_source(tmp.path(), true);
+        let conf = make_conf();
+        let ca = ca_path(tmp.path());
+
+        install_all(&plan, Some(&conf), &ca, &ms(device.path()), |_| {}).unwrap();
+        // Diverge the on-device copy. A `sync` path would read Stale; this one
+        // is not compared at all.
+        std::fs::write(
+            device.path().join("extensions/karyll/hid/config.ini"),
+            b"edited on device\n",
+        )
+        .unwrap();
+
+        let status = compute_status(&plan, &source, Some(&conf), &ca, &ms(device.path())).unwrap();
+        let hid = status
+            .files
+            .iter()
+            .find(|f| f.device_path == "extensions/karyll/hid/config.ini")
+            .unwrap();
+        assert_eq!(hid.state, DeployFileState::Seeded);
+        assert_eq!(
+            status.overall,
+            DeployOverall::InSync,
+            "a seeded path that differs is not something to push"
+        );
+    }
+
+    /// A cable push writes every path directly — nothing on a mounted device is
+    /// executing — and clears any `.new` a Wi-Fi pull staged, so the applier one
+    /// level up cannot swap a stale file over the fresh one.
+    #[test]
+    fn a_push_writes_staged_paths_directly_and_clears_their_pending_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device = tempfile::tempdir().unwrap();
+        let plan = make_install_plan(tmp.path());
+
+        let bin_dir = device.path().join("extensions/sidle/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("sidle.new"), b"stale-lan-stage").unwrap();
+        std::fs::write(bin_dir.join("sidle.sh.new"), b"stale-lan-stage").unwrap();
+
+        install_all(
+            &plan,
+            Some(&make_conf()),
+            &ca_path(tmp.path()),
+            &ms(device.path()),
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(bin_dir.join("sidle").exists());
+        assert!(bin_dir.join("sidle.sh").exists());
+        assert!(!bin_dir.join("sidle.new").exists());
+        assert!(
+            !bin_dir.join("sidle.sh.new").exists(),
+            "every staged path is cleared, not just the binary"
+        );
     }
 
     #[test]
@@ -1258,37 +1567,6 @@ mod tests {
         // Can't assert a specific IP in CI, just that the call is
         // side-effect-free and doesn't panic on either outcome.
         let _ = detect_lan_ipv4();
-    }
-
-    #[test]
-    fn install_all_clears_stale_sidle_new() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = make_source(tmp.path(), true);
-        let device = tempfile::tempdir().unwrap();
-
-        // A pending LAN self-update staged on the device before this USB push.
-        let bin_dir = device.path().join("extensions/sidle/bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let stale = bin_dir.join("sidle.new");
-        std::fs::write(&stale, b"stale-lan-stage").unwrap();
-
-        install_all(
-            &source,
-            Some(&make_conf()),
-            &ca_path(tmp.path()),
-            &ms(device.path()),
-            |_| {},
-        )
-        .unwrap();
-
-        assert!(
-            !stale.exists(),
-            "USB install must clear a pending bin/sidle.new"
-        );
-        assert!(
-            bin_dir.join("sidle").exists(),
-            "the authoritative bin/sidle is written"
-        );
     }
 
     #[test]
