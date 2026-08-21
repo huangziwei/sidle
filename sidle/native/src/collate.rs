@@ -1,8 +1,8 @@
 //! Natural-order string collation, shared by the sort, series, and facet
 //! orderings.
 //!
-//! Port of the desktop's `naturalCompare` (`web/library.js`:1008 —
-//! `Intl.Collator(undefined, { numeric: true })`, added in commit 774bd58): a
+//! Port of the desktop's `naturalCompare` (`web/library.js`, built on
+//! `Intl.Collator(undefined, { numeric: true })`): a
 //! run of ASCII digits compares by its numeric value, so "Vol 2" sorts *before*
 //! "Vol 10" instead of lexicographically after it. That lines a series' volumes
 //! up by their in-title number even before a numeric series index is set.

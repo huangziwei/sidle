@@ -998,7 +998,7 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     out.issue_date = first("issue_date");
 
     // Detect any vertical writing mode anywhere in the KFX. Calibre's hint
-    // logic (`epub_output.py:955`) emits `<meta name="primary-writing-mode">`
+    // logic (`epub_output.py`) emits `<meta name="primary-writing-mode">`
     // for any non-`horizontal-tb` book-level mode.
     let (is_vertical, vertical_mode) = detect_vertical_writing_mode(kfx_bytes, &resolve_sym)?;
     out.is_vertical = is_vertical;

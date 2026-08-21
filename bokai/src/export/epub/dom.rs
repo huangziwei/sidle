@@ -316,7 +316,7 @@ pub fn chapter_document(dom: &Dom) -> String {
 // ---------------------------------------------------------------------------
 
 /// HTML block-level elements (calibre's set in
-/// `yj_to_epub_properties.py:1965`). Used by [`consolidate_part`] to decide
+/// `yj_to_epub_properties.py`). Used by [`consolidate_part`] to decide
 /// whether a `<div>` qualifies as a leaf-text paragraph.
 const BLOCK_TAGS: &[&str] = &[
     "aside",
@@ -360,7 +360,7 @@ fn is_block_tag(tag: &str) -> bool {
     BLOCK_TAGS.contains(&tag)
 }
 
-/// Calibre's `is_inline_only` (`yj_to_epub_content.py:1900`): an element is
+/// Calibre's `is_inline_only` (`yj_to_epub_content.py`): an element is
 /// inline-only if it's an `<svg>`, or it's one of the inline tags
 /// (a/audio/img/rb/rt/ruby/span/video) with every descendant inline-only. Used
 /// by the `render:inline` demotion to decide whether a `<div>` can become a
@@ -381,7 +381,7 @@ pub fn is_inline_only(dom: &Dom, id: NodeId) -> bool {
 
 /// Strip every `<span>` whose attribute list is empty (or carries only an
 /// empty `class=""`), inlining its text and children into the parent.
-/// Mirrors calibre's `consolidate_html` span pass (epub_output.py:783).
+/// Mirrors calibre's `consolidate_html` span pass (epub_output.py).
 ///
 /// lxml semantics for `strip_tags`:
 /// - `span.text` appends to previous-sibling.tail (or parent.text when
@@ -536,7 +536,7 @@ fn unwrap_into_parent(dom: &mut Dom, e: NodeId, parent: NodeId) {
     dom.get_mut(e).children.clear();
 }
 
-/// Port of calibre's `consolidate_html` div-collapse (`epub_output.py:792-814`).
+/// Port of calibre's `consolidate_html` div-collapse (`epub_output.py`).
 /// Strips an attribute-less `<div>` that is the sole child of a block-level
 /// parent (with no leading parent text), splicing its contents up into the
 /// parent. KFX wraps content in redundant nested `<div>`s; without this, a
@@ -604,8 +604,8 @@ fn collapse_redundant_divs(
     }
 }
 
-/// Port of calibre's `consolidate_html` (epub_output.py:742) +
-/// div→p promotion (yj_to_epub_properties.py:1921), one part at a time.
+/// Port of calibre's `consolidate_html` (epub_output.py) +
+/// div→p promotion (yj_to_epub_properties.py), one part at a time.
 ///
 /// Four passes:
 /// 1. Strip attribute-less `<span>` (and class-less ones) — merges their
@@ -751,7 +751,7 @@ pub fn normalize_lists_dom(dom: &mut Dom) {
 
 /// Replace EOL characters (`\n` / `\r` / ` ` / ` `) inside
 /// element text or tail with explicit `<br/>` elements. Mirrors calibre's
-/// `replace_eol_with_br` (yj_to_epub_content.py:1720). KFX text content
+/// `replace_eol_with_br` (yj_to_epub_content.py). KFX text content
 /// carries forced line breaks as raw EOL characters; without this pass
 /// they get collapsed by HTML whitespace rules and the source `<br/>`s
 /// disappear from the rendered output.

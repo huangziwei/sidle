@@ -21,7 +21,7 @@ use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 
 /// Per-anchor data extracted from `$266 anchor` entities plus synthetic nav
-/// anchors. Mirrors calibre's `process_anchors` (yj_to_epub_navigation.py:40).
+/// anchors. Mirrors calibre's `process_anchors` (yj_to_epub_navigation.py).
 #[derive(Debug, Default, Clone)]
 pub struct AnchorTable {
     /// External-URI anchors: anchor_name → uri. Set when `$186 uri` is
@@ -230,7 +230,7 @@ impl AnchorTable {
     /// unit's `landmark_type` (`$h2`..`$h6`) sets the level for its nested
     /// entries, and every nested unit's `target_position` `(eid, offset)` is
     /// recorded at that level. Mirrors the subset of calibre's
-    /// `process_nav_unit` (`yj_to_epub_navigation.py:199-258`) that derives
+    /// `process_nav_unit` (`yj_to_epub_navigation.py`) that derives
     /// `anchor_heading_level`.
     pub fn register_heading_level_unit(&mut self, value: &IonValue, symbols: &SymbolTable) {
         let inner = value.unwrap_annotated();

@@ -1,16 +1,12 @@
 //! Shared helpers for the KFX substrate tests.
 //!
-//! These tests used to assert "the IR route agrees with the mechanical port",
-//! which was the right question while a second implementation existed to
-//! answer it. It is gone, and keeping one alive purely to be compared against
-//! would defeat the migration — so the question becomes the one a single
-//! implementation can still be held to: **did this change move the substrate?**
+//! With one implementation there is nothing to compare against, so these hold
+//! it to the question it can still answer: **did this change move the
+//! substrate?** A pinned digest says loudly when it does.
 //!
-//! A pinned digest answers that. It cannot say the substrate is *correct* (only
-//! the corpus-wide parity runs against the port could, and they passed 435/435
-//! before it was deleted); it says loudly when the substrate *changes*, which
-//! is what protects stored `(eid, offset)` annotations from silently
-//! re-resolving.
+//! The digest cannot say the substrate is *correct*, only that it is the same
+//! one — which is what protects stored `(eid, offset)` annotations from
+//! silently re-resolving. Update a pin only for a substrate change you intend.
 
 /// FNV-1a, 64-bit.
 ///

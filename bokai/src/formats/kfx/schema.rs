@@ -519,7 +519,7 @@ impl KfxSchema {
         );
 
         // Figure - container for images with captions
-        // Uses type: text with layout_hints: [figure] (added in storyline.rs)
+        // Emits type: text; `storyline.rs` attaches layout_hints: [figure].
         self.export_strategy_table.insert(
             Role::Figure,
             Strategy::Structure {
@@ -529,7 +529,7 @@ impl KfxSchema {
         );
 
         // Caption - figcaption/caption element
-        // Uses type: text with layout_hints: [caption] (added in storyline.rs)
+        // Emits type: text; `storyline.rs` attaches layout_hints: [caption].
         self.export_strategy_table.insert(
             Role::Caption,
             Strategy::Structure {

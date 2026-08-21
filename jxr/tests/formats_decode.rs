@@ -1,13 +1,12 @@
-//! Regression guards for the deep/exotic decode formats added in Phase 2 of
-//! the general-codec plan: 16-bit gray (BD16 + SHIFT_BITS path), half-float
-//! RGBA with a SEPARATE container alpha codestream (`decode_image` merge),
-//! and RGBE (the PostScalingF2 shared-exponent packing).
+//! Guards for the deep/exotic decode formats: 16-bit gray (BD16 + SHIFT_BITS
+//! path), half-float RGBA with a SEPARATE container alpha codestream
+//! (`decode_image` merge), and RGBE (the PostScalingF2 shared-exponent
+//! packing).
 //!
 //! Fixtures are libjxr-minted (JxrEncApp, lossless) from deterministic
-//! patterns; the `.raw` blobs (interleaved i32 LE samples — half/float
-//! formats as bit patterns) were captured from a decode verified sample-exact
-//! against JxrDecApp by the oracle harness (`check-formats`, 17/17,
-//! 2026-06-09). Lossless ⇒ exact equality is the correct assertion.
+//! patterns; the `.raw` blobs hold interleaved i32 LE samples, half/float
+//! formats as bit patterns. The encode is lossless, so exact equality — not a
+//! tolerance — is the correct assertion.
 
 use jxr::decode::{container, decode_image};
 

@@ -8,15 +8,14 @@
 //! external producer, not a self-loop. Lossless ⇒ the decode must be
 //! **bit-exact**.
 //!
-//! Minted by the oracle harness (`scripts/jxr-oracle`, case
-//! `gray8_16x16_q1_base`); the generator below must stay byte-identical to
-//! its `make_gray`. This test needs only the committed fixture.
+//! The test needs only the committed fixture, but `expected_gray` below must
+//! keep reproducing the exact image the fixture was encoded from — change one
+//! and the pair stops meaning anything.
 
 use jxr::decode::{container, decoder::Decoder};
 
-/// The exact gray image the fixture was encoded from (sync: `make_gray` in
-/// `scripts/jxr-oracle/src/io.rs`): two-axis gradient + corner swatches +
-/// one LCG noise row at mid-height.
+/// The exact gray image the fixture was encoded from: two-axis gradient +
+/// corner swatches + one LCG noise row at mid-height.
 fn expected_gray() -> Vec<u8> {
     let (w, h) = (16usize, 16usize);
     let mut v = vec![0u8; w * h];

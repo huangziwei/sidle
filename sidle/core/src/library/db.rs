@@ -1017,14 +1017,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
-    // v12: re-key annotation identity without the linear position. `dedup_hash`
-    // used to be salted with `loc_start`, which the two origins measure on
-    // different scales — so one passage highlighted both in Sidle and on a
-    // Kindle hashed twice, and a highlight pushed to the device came back as a
-    // duplicate row. See [`super::ingest::annotation_dedup_hash`]. Rehashing
-    // collapses the pairs that split; the `annotation_device` presence records
-    // and the deletion tombstones are re-keyed with them, or they would point at
-    // hashes that no longer exist.
+    // v12: re-key annotation identity without the linear position. A pre-v12
+    // `dedup_hash` is salted with `loc_start`, which the two origins measure on
+    // different scales, so one passage highlighted both in Sidle and on a
+    // Kindle carries two hashes. Rehashing on the salt-free rule
+    // ([`super::ingest::annotation_dedup_hash`]) collapses those pairs; the
+    // `annotation_device` presence records and the deletion tombstones re-key
+    // with them, or they point at hashes that no longer exist.
     //
     // Version-gated rather than idempotent-on-every-open. The hash is salted
     // with the book's title, so recomputing unconditionally would also re-key

@@ -10,8 +10,8 @@
 //! exact (see the per-family notes on [`encode_typed`]); `QP > 0` is lossy.
 
 // Encoder machinery: crate-visible only. The public encode surface is the
-// re-exports below plus the `encode*` functions — narrowed deliberately
-// (Phase 7a) so the API rustdoc shows the contract, not the internals.
+// re-exports below plus the `encode*` functions — narrowed deliberately so the
+// API rustdoc shows the contract, not the internals.
 pub(crate) mod bitstream;
 pub(crate) mod codestream;
 pub(crate) mod coeff;
@@ -162,10 +162,9 @@ impl BandsPresent {
     }
 }
 
-/// Encoder options beyond the plain [`encode`] surface. Started as the 4b
-/// close-out shape and extended as Phase 4 lands more of the envelope (this
-/// is the Phase-7 consolidation point, begun early). `Default` reproduces
-/// classic `encode(…, QpSet::LOSSLESS)` behavior.
+/// Encoder options beyond the plain [`encode`] surface — the one place a new
+/// knob belongs, so the `encode*` signatures stay fixed. `Default` reproduces
+/// `encode(…, QpSet::LOSSLESS)` behavior.
 #[derive(Debug, Clone)]
 pub struct EncodeOptions {
     /// Primary-plane per-band quantizers.
@@ -1076,7 +1075,7 @@ fn encode_multi_typed(
 /// Typed (any-depth) pixel input for [`encode_typed`]: the deep-format
 /// counterpart of [`ImageInput`]. Plane count carries the color shape exactly
 /// as in the 8-bit API (**1** = grayscale, **3** = RGB; **4** = RGB + alpha,
-/// 8-bit only so far); the [`SamplePlanes`] variant carries the depth.
+/// 8-bit only); the [`SamplePlanes`] variant carries the depth.
 pub struct TypedInput<'a> {
     /// Width in pixels.
     pub width: u32,
@@ -1394,8 +1393,7 @@ pub fn encode_typed(
 
 /// Map a 0–100 quality knob to per-band quantizers. 100 ⇒ lossless; lower ⇒
 /// coarser, with HP quantized hardest (the `1:2:4` dc:lp:hp ratio Amazon-style).
-/// Tuned so the mid-80s land near Amazon's per-plate size on LN content; the
-/// default is refined against real plates in the pipeline (Phase 5).
+/// Tuned so the mid-80s land near Amazon's per-plate size on LN content.
 pub fn quality_to_qp(quality: u8) -> QpSet {
     if quality >= 100 {
         return QpSet::LOSSLESS;

@@ -235,10 +235,10 @@ fn resolve_box_align(decl: &mut CssDecl) {
 /// Translate a single KFX property value to a CSS string. Handles the four
 /// cases calibre supports: enum (Prop.values), length (struct with unit/value),
 /// color, plain int/float, string/symbol.
-/// calibre's `DEFAULT_FONT_NAMES` (yj_to_epub_properties.py:715): font-family
+/// calibre's `DEFAULT_FONT_NAMES` (yj_to_epub_properties.py): font-family
 /// values meaning "the document default font". calibre replaces these with the
 /// real default family in its font pass (`font_name_replacements`,
-/// yj_to_epub_metadata.py:114); bokai defers that pass, so we emit no font-family
+/// yj_to_epub_metadata.py); bokai defers that pass, so we emit no font-family
 /// (inherit the default) rather than the literal sentinel, which is invalid CSS.
 fn is_default_font_name(s: &str) -> bool {
     s == "default" || s == "$amzn_fixup_default_font$"
@@ -328,7 +328,7 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
     // table → `normal`) on some styles and a `{value: 0.6, unit: lh}` length
     // struct on others. Calibre dispatches on the VALUE's type before ever
     // consulting the enum map (`property_value`,
-    // yj_to_epub_properties.py:1174 — the IonStruct branch precedes the
+    // yj_to_epub_properties.py — the IonStruct branch precedes the
     // value_map lookup). Matching the table first and bailing on a miss would
     // drop every numeric value of an enum-carrying property.
     if let Some(table) = prop.values {
@@ -597,7 +597,7 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // Direct port of calibre's `Prop("font-weight", {...})`
-    // (yj_to_epub_properties.py:238), keyed by symbol: $350 normal, $355 thin→100,
+    // (yj_to_epub_properties.py), keyed by symbol: $350 normal, $355 thin→100,
     // $356 ultra_light→200, $357 light→300, $359 medium→500, $360 semi_bold→600,
     // $361 bold, $362 ultra_bold→800, $363 heavy→900. ($358 "book" is unmapped, as
     // in calibre.) The keys have to be symbol names: a `font_weight_100…` key
@@ -1621,7 +1621,7 @@ pub fn layout_hints_from_element_fields(
 /// content box, not how it sizes a replaced element — and `float` / `clear` /
 /// `text-align` / the `break-*` family are dead or wrong on a replaced inline
 /// element. The bokai-emittable subset of calibre's
-/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py:49`), plus `clear`
+/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py`), plus `clear`
 /// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
 /// where CSS does too).
 pub fn img_wrapper_trigger(prop: &str) -> bool {

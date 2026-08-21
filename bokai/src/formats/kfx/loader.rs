@@ -365,7 +365,7 @@ fn extract_categorised_metadata(
                 // pathway (`yj_metadata.py:get_yj_metadata_from_book`) uses
                 // `authors.append(val)`, preserving source order in the OPF —
                 // that's the order in `horror.calibre.epub`. The other
-                // calibre code path in `yj_to_epub_metadata.py:192` uses
+                // calibre code path in `yj_to_epub_metadata.py` uses
                 // `insert(0)` for the intermediate EPUB stage, but that
                 // intermediate is discarded by calibre's library importer.
                 // We match the library output, which the user reads.

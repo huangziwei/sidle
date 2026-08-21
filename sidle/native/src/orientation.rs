@@ -7,9 +7,9 @@
 //! at startup and apply a 180° transform to both fb writes and touch
 //! reads so the user-visible UI is right-side-up regardless of grip.
 //!
-//! v1 scope: detect once at startup. Mid-session rotation (user flips the
-//! device after sidle is running) is unsupported — the framework redraws
-//! over us and we don't track the change. Documented in the bundle README.
+//! Detection happens once, at startup. Mid-session rotation (the device
+//! flipped while sidle runs) is unsupported: the framework redraws over us and
+//! nothing here tracks the change.
 
 use std::process::Command;
 

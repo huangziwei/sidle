@@ -41,14 +41,14 @@ pub struct TocEvidence {
     pub has_toc_landmark: bool,
     /// Volumes of a multi-work book (合本版) that the declared TOC lists at the
     /// same depth as their own chapters, and how many entries belong under one.
-    /// Both zero for a book that declares its structure or has none. EPUB only
-    /// so far — the KFX extractor leaves them zero.
+    /// Both zero for a book that declares its structure or has none. EPUB
+    /// only: the KFX extractor leaves them zero.
     pub flattened: Flattening,
     /// How far the book's reading order has drifted from the order its own TOC
-    /// lists. Zero when the two agree, which is the ordinary case. EPUB only so
-    /// far — reordering a KFX reading order moves every position with it, so
-    /// the KFX extractor leaves this zero rather than report what it can't yet
-    /// offer to fix.
+    /// lists. Zero when the two agree, which is the ordinary case. EPUB only:
+    /// reordering a KFX reading order moves every position with it, so the KFX
+    /// extractor leaves this zero rather than report a defect it has no repair
+    /// for.
     pub misordered: Misordering,
 }
 

@@ -1,18 +1,14 @@
-//! Regression guards for YUV 4:2:0 / 4:2:2 decode reconstruction (joint-coded
-//! chroma entropy, chroma transforms + overlap, upsampling) — the paths added
-//! in Phase 2 of the general-codec plan.
+//! Guards for YUV 4:2:0 / 4:2:2 decode reconstruction: joint-coded chroma
+//! entropy, chroma transforms + overlap, upsampling.
 //!
 //! Both fixtures are **libjxr-minted** (JxrEncApp, q16 lossy, frequency order,
 //! overlap 1 — encoder defaults): real external producers. The expected `.rgb`
-//! blobs (interleaved RGB, row-major) were captured from a decode that was
-//! verified **pixel-exact against JxrDecApp** across a 110-case oracle matrix
-//! (scripts/jxr-oracle, 2026-06-09) — i.e., they are libjxr's own output for
-//! these files. Decoding a lossy file is deterministic, so exact equality is
-//! the correct assertion.
+//! blobs (interleaved RGB, row-major) are libjxr's own output for these files,
+//! pixel-exact against JxrDecApp. Decoding a lossy file is deterministic, so
+//! exact equality — not a tolerance — is the correct assertion.
 //!
-//! The 4:2:2 fixture additionally locks in the `UpdateModelMB` chroma-weight
-//! fix (Table 116 `iWeight2`): before it, this exact file desynced the
-//! bitstream (`decode_run 13 not in 1..=11`).
+//! The 4:2:2 fixture is also what holds `UpdateModelMB` to Table 116's
+//! `iWeight2`: get that weight wrong and this file desyncs the bitstream.
 
 use jxr::decode::{container, decoder::Decoder};
 

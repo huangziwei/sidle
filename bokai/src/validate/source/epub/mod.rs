@@ -7069,56 +7069,12 @@ mod tests {
     fn epubcheck_error_coverage_is_tracked() {
         let (covered, total) = epubcheck_error_coverage();
         assert_eq!(total, 138, "error-level catalog total drifted");
-        // Distinct epubcheck error-level ids implemented so far; the port's
-        // progress ratchet. OPF batch added OPF-030/031/033/034/040/048/050/060/
-        // 074/091/096/099; OCF batch PKG-005/009/011/025 + RSC-030; XML batch
-        // HTM-001/003 + RSC-013; container/URL batch RSC-003 + RSC-033;
-        // cross-doc batch NCX-001 + RSC-008 + OPF-073 + OPF-032; encoding batch
-        // RSC-028 + HTM-058 (RSC-027 is a warning, not counted here); fallback/
-        // rootfile batch OPF-016/017/043/044/045; metadata batch OPF-054 (the
-        // date's EPUB-2 error id — OPF-053/085 are warnings, RSC-005 for missing
-        // title/language was already counted); language batch OPF-092; remote/data
-        // batch RSC-006 (remote spine item) + RSC-029 (manifest data: URL); OPF
-        // <link> batch OPF-089 (alternate+other) + OPF-095 (voicing not audio) +
-        // OPF-098 (link into package doc) + OPF-067 (link to non-spine item);
-        // hyperlink-target batch RSC-010 (target not a content doc) + RSC-011
-        // (target not a spine item); nav batch NAV-010 (nav links remote);
-        // obfuscation batch PKG-026 (obfuscated resource not a font); bitmap batch
-        // OPF-029 (image header vs declared media-type); recall-gap batch OPF-014
-        // (undeclared manifest property) + OPF-028 (undeclared vocab prefix) +
-        // HTM-046 (fixed-layout doc without a viewport meta) + PKG-021 (undecodable
-        // raster image) + RSC-020 (invalid reference URL); fixed-layout/stylesheet
-        // batch HTM-047/056/057/059 (viewport metadata) + HTM-048 (SVG viewBox) +
-        // CSS-015 (untitled alternate stylesheet) + CSS-002 (empty url()) +
-        // RSC-015 (svg use without a fragment) + OPF-041 (missing fallback-style);
-        // schema-engine batch HTM-054 + HTM-061 (the two defects preprocessing
-        // reports on its way past); CSS batch CSS-001 (a forbidden property) +
-        // CSS-004 (a non-UTF-8 stylesheet) + CSS-008 (a syntax error) —
-        // CSS-030 (overlay styling with no CSS); CSS-003 is the UTF-16 warning,
-        // not counted here.
-        // Media-overlay batch MED-005 + MED-008 + MED-009 + MED-010 + MED-011 +
-        // MED-012 + MED-013 + MED-014.
-        // Property-vocabulary batch OPF-012 + OPF-025 + OPF-026 + OPF-027.
-        // Refines-graph batch OPF-065.
-        // Declared-but-unused manifest property OPF-015.
-        // Singles batch OPF-005 + OPF-006 (prefix declaration syntax) + OPF-042
-        // (impermissible spine media type) + OPF-093 + OPF-094 (link media-type)
-        // + NAV-001 (nav document in EPUB 2) + PKG-013 (multiple renditions).
-        // + OPF-052 (a dc:creator role outside the MARC relator scheme).
-        // Collection batch OPF-071 + OPF-075 + OPF-076 + OPF-081 + OPF-082 +
-        // OPF-083 + OPF-084.
-        // + RSC-021 (a search key map entry outside the spine).
-        // + OPF-078 (a dictionary collection with no dictionary content).
-        // + HTM-009 (an obsolete package DOCTYPE) + MED-004 (an image with no
-        // header) + MED-007 (a picture source with no type).
-        // + HTM-052 + NAV-009 (region-based navigation).
-        // + NAV-003 + OPF-066 (EduPub pagination).
-        // SVG reference model: RSC-014 (a reference landing on an element that
-        // cannot be used that way).
+        // Distinct epubcheck error-level ids bokai implements. A ratchet:
+        // raise it when a rule adds an id, never lower it to make a run pass.
         //
-        // This counts *ids*, so it understates the schema engine badly: every
-        // grammar and every assertion reports through RSC-005, one id that was
-        // already counted when a handful of hand-written checks emitted it.
+        // It counts *ids*, so it understates the schema engine badly — every
+        // grammar and every assertion reports through RSC-005, one id already
+        // counted for the hand-written checks that emit it.
         assert_eq!(
             covered, 121,
             "epubcheck error coverage changed: {covered}/{total}"

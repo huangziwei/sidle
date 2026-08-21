@@ -963,7 +963,7 @@ where
 }
 
 /// The IR analog of calibre's `is_inline_only` (calibre
-/// `yj_to_epub_content.py:1900`): inline elements with every descendant
+/// `yj_to_epub_content.py`): inline elements with every descendant
 /// inline-only. A text run containing `\n` counts as NOT inline — calibre's
 /// DOM materializes the break as a `<br>` child, which is outside calibre's
 /// inline tag set and blocks the demotion there.
@@ -1240,7 +1240,7 @@ enum Located {
 
 /// Locate `offset` code points into `root`'s text and return the node to
 /// stamp — the IR analog of calibre's `locate_offset` (calibre
-/// `yj_to_epub_content.py:1540`, `split_after=false, zero_len=true`): a
+/// `yj_to_epub_content.py`, `split_after=false, zero_len=true`): a
 /// mid-text offset splits the text run around a fresh zero-length span, an
 /// offset at the very end appends one to the element, an offset past the text
 /// stamps nothing.

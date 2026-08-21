@@ -136,7 +136,104 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
     dom::normalize_lists_dom(&mut dom);
     dom::replace_eol_with_br_dom(&mut dom);
     dom::finalize_attrs(&mut dom, &classes, &styles);
+    anchor_page_plate_height(&mut dom, head_id, body_id);
     dom::chapter_document(&dom)
+}
+
+/// The chain of boxes from `<body>` down to the one element a document's
+/// whole content leads to, or `None` when the document branches.
+///
+/// A KFX section that holds nothing but a full-page plate arrives as exactly
+/// this shape: one unbranched line of wrapper boxes ending at the `<img>`.
+/// Any sibling box or stray text and the chain stops standing for the page,
+/// which is the whole reason [`anchor_page_plate_height`] may size it.
+fn sole_content_path(dom: &Dom, body: dom::NodeId) -> Option<Vec<dom::NodeId>> {
+    let mut path = Vec::new();
+    let mut id = body;
+    loop {
+        let elem = dom.get(id);
+        if elem.text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            return None;
+        }
+        let &[only] = &elem.children[..] else {
+            return (!path.is_empty()).then_some(path);
+        };
+        if dom
+            .get(only)
+            .tail
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+        {
+            return None;
+        }
+        path.push(only);
+        id = only;
+    }
+}
+
+/// Give a full-page plate's percentage height something to resolve against.
+///
+/// KFX sizes such a plate as `height: 100%` of its section's page template,
+/// and that template *is* the page — a height the format never has to state.
+/// CSS has no implicit page box: a percentage height whose containing block
+/// is auto-height is undefined, and readers split on it. Some fit the plate
+/// to the page; others fall back to the image's intrinsic size, which for
+/// artwork authored at page scale lands visibly small beside the sized
+/// artwork around it. Naming the chain — `html`, `body`, and every box down
+/// to the plate — is what makes the percentage mean what the KFX meant.
+///
+/// `max-width` comes with it: on a page narrower than the plate's aspect
+/// wants, CSS recomputes a replaced element's used height from the clamped
+/// width, so the plate scales down whole instead of overflowing the column.
+///
+/// Only a document whose entire content is that one plate qualifies — see
+/// [`sole_content_path`]. The height has to be inline on the plate, which is
+/// where the block-image partition puts an image's own properties.
+fn anchor_page_plate_height(dom: &mut Dom, head: dom::NodeId, body: dom::NodeId) {
+    let Some(path) = sole_content_path(dom, body) else {
+        return;
+    };
+    let Some(&plate) = path.last() else {
+        return;
+    };
+    if !matches!(dom.get(plate).tag.as_str(), "img" | "svg" | "video") {
+        return;
+    }
+    let mut plate_decl = inline_decl(dom, plate);
+    if !plate_decl
+        .get("height")
+        .is_some_and(|h| h.ends_with('%') && h != "0%")
+    {
+        return;
+    }
+    plate_decl.set("max-width", "100%");
+    let inline = plate_decl.to_inline();
+    dom.get_mut(plate).set("style", inline);
+
+    // Every box between `<body>` and the plate, exclusive: the plate keeps
+    // the height it states, and `<body>` takes its own from the rule below.
+    for &id in &path[..path.len() - 1] {
+        let mut decl = inline_decl(dom, id);
+        if decl.get("height").is_none() {
+            decl.set("height", "100%");
+            let inline = decl.to_inline();
+            dom.get_mut(id).set("style", inline);
+        }
+    }
+
+    let style = dom.sub_element(head, "style");
+    let el = dom.get_mut(style);
+    el.set("type", "text/css");
+    el.text = Some("html, body { height: 100% }".to_string());
+}
+
+/// An element's `style` attribute as a declaration list, empty when it has
+/// none.
+fn inline_decl(dom: &Dom, id: dom::NodeId) -> CssDecl {
+    dom.get(id)
+        .get("style")
+        .map(parse_inline_decl)
+        .unwrap_or_default()
 }
 
 /// Adopt a document's sole top-level container as its `<body>`.
@@ -593,7 +690,7 @@ fn is_default_decl(name: &str, value: &str) -> bool {
 /// auto-generated class rules.
 ///
 /// Mirrors a subset of calibre's `fixup_styles_and_classes`
-/// (yj_to_epub_properties.py:1388): when the same serialized declaration
+/// (yj_to_epub_properties.py): when the same serialized declaration
 /// shows up on ≥ 2 elements across the book, it gets a `g<N>` class rule and
 /// the caller replaces each matching inline style with the class reference.
 /// Single-occurrence styles stay inline — keeps the stylesheet readable.
@@ -780,6 +877,66 @@ mod tests {
                 ".sB:visited { color: purple }",
             ]
         );
+    }
+
+    /// Build `<body>` → the given chain of `(tag, style)` boxes.
+    fn plate_doc(chain: &[(&str, &str)]) -> (Dom, dom::NodeId, dom::NodeId) {
+        let (mut dom, _html, head, body) = dom::new_book_part("t");
+        let mut parent = body;
+        for (tag, style) in chain {
+            let el = dom.sub_element(parent, *tag);
+            if !style.is_empty() {
+                dom.get_mut(el).set("style", *style);
+            }
+            parent = el;
+        }
+        (dom, head, body)
+    }
+
+    /// A KFX full-page plate states `height: 100%` of a page template CSS has
+    /// no equivalent of. Without a stated chain the percentage resolves
+    /// against nothing and the plate falls back to its intrinsic size.
+    #[test]
+    fn a_page_plate_gets_a_chain_its_height_can_resolve_against() {
+        let (mut dom, head, body) = plate_doc(&[("div", ""), ("div", ""), ("img", "height: 100%")]);
+        anchor_page_plate_height(&mut dom, head, body);
+        let out = dom.serialize(dom.root);
+        assert!(out.contains("html, body { height: 100% }"), "{out}");
+        assert_eq!(
+            out.matches(r#"<div style="height: 100%">"#).count(),
+            2,
+            "{out}"
+        );
+        // Clamped width recomputes a replaced element's used height, so a
+        // page narrower than the plate scales it whole instead of clipping.
+        assert!(
+            out.contains(r#"style="height: 100%; max-width: 100%""#),
+            "{out}"
+        );
+    }
+
+    /// The chain may only stand for the page when the plate is all the
+    /// document holds; a sibling means those boxes are ordinary content and
+    /// sizing them to the page would clip it.
+    #[test]
+    fn a_plate_with_a_sibling_is_left_alone() {
+        let (mut dom, head, body) = plate_doc(&[("div", ""), ("img", "height: 100%")]);
+        dom.sub_element(body, "p");
+        anchor_page_plate_height(&mut dom, head, body);
+        let out = dom.serialize(dom.root);
+        assert!(!out.contains("html, body"), "{out}");
+        assert!(!out.contains("max-width"), "{out}");
+    }
+
+    /// An image sized in the axis CSS can always resolve needs nothing added,
+    /// and must not be handed a page-height chain that would resize it.
+    #[test]
+    fn a_width_sized_image_is_left_alone() {
+        let (mut dom, head, body) = plate_doc(&[("div", ""), ("img", "width: 58.594%")]);
+        anchor_page_plate_height(&mut dom, head, body);
+        let out = dom.serialize(dom.root);
+        assert!(!out.contains("html, body"), "{out}");
+        assert!(out.contains(r#"style="width: 58.594%""#), "{out}");
     }
 
     #[test]

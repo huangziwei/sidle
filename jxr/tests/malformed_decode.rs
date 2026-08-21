@@ -1,4 +1,4 @@
-//! Malformed-input hardening regression (Phase 3).
+//! Malformed-input hardening for the decoder.
 //!
 //! These fixtures are real fuzz-found byte sequences that exercise the
 //! decoder's *structural* guards: a lying header that would otherwise allocate
@@ -12,10 +12,9 @@
 //! Scope note: integer-overflow-on-garbage in the reconstruction stage is NOT
 //! covered here. Such inputs wrap (the decoder's shipping/release semantics —
 //! garbage pixels, never a panic), which only holds with overflow checks off.
-//! That property is verified by the decode fuzzer, which runs with
-//! `-Coverflow-checks=off` to match the shipped binary (see
-//! scripts/jxr-fuzz-overnight.sh); asserting it here would test the wrong
-//! configuration. The full artifact corpus replays clean under those semantics.
+//! That property belongs to the decode fuzzer, which runs with
+//! `-Coverflow-checks=off` to match the shipped binary; asserting it here
+//! would test the wrong configuration.
 
 use jxr::decode::decoder::DecodeError;
 use jxr::decode::{container, decode_image};

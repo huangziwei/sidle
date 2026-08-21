@@ -5,7 +5,7 @@
 //! image-based fixed layout; `yj_double_page_spread` ⇒ a spread comic.
 //!
 //! EPUB side (mirrors what the EPUB export must emit, calibre
-//! `epub_output.py:926` + `yj_to_epub_content.py:210`):
+//! `epub_output.py` + `yj_to_epub_content.py`):
 //!
 //! - `<meta property="rendition:layout">pre-paginated` in the OPF metadata.
 //! - A `<meta name="viewport">` in **every** spine document.

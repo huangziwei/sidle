@@ -1,4 +1,4 @@
-//! Sidle native — Milestone 9 paginated cover grid + download flow.
+//! Sidle native — the paginated cover grid and download flow.
 //!
 //! 3×3 grid per page, prev/next bottom-strip controls when the library
 //! overflows one page. Tap a cover → overlay "Downloading…" → stream
