@@ -964,6 +964,62 @@ button {
   color: #d86a5a;
 }
 
+/* One row per app a push would carry. */
+
+.device-app-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 14px 6px;
+  font-size: 12px;
+  display: grid;
+  row-gap: 5px;
+}
+
+.device-app-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.device-app-name {
+  font-weight: 600;
+}
+
+.device-app-version,
+.device-app-size {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Pushes Remove to the right edge without a second grid column. */
+.device-app-size {
+  margin-left: auto;
+}
+
+.device-app-remove {
+  font-size: 11px;
+}
+
+.device-app-row-error {
+  font-size: 11px;
+  color: #d86a5a;
+}
+
+.device-app-files {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 14px 10px;
+}
+
+.device-app-files summary {
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.device-app-files .device-app-file-list {
+  padding: 6px 0 0;
+}
+
 /* Views */
 
 #main {

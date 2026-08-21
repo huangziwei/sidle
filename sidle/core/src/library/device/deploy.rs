@@ -137,9 +137,14 @@ impl DeploySource {
     /// device compares that value against the one compiled into the binary and
     /// the two have to move together.
     ///
-    /// Best-effort. A missing source binary is the "not built yet" case, which
-    /// [`compute_status`] reports from the plan; a failed copy leaves whatever
-    /// the mirror already had.
+    /// **A no-op in a packaged build.** [`Self::from_resource_root`] points
+    /// `binary_path` at the mirror's own copy, which `build.sh` put there at
+    /// bundle time, so there is nothing to move and the app reads only its own
+    /// Resources. This exists for the dev path alone.
+    ///
+    /// Best-effort otherwise. A missing source binary is the "not built yet"
+    /// case, which [`compute_status`] reports from the plan; a failed copy
+    /// leaves whatever the mirror already had.
     pub fn stage_binary(&self) -> Result<()> {
         let dest = self.mirrored_binary();
         if dest == self.binary_path {
@@ -609,7 +614,7 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 /// updates; tests can pass `|_| {}`.
 ///
 /// `conf` is `None` when `etc/server.conf` has no bytes to render — that slot
-/// reports [`DeployFileInstallResult::SourceMissing`] and the other six are
+/// reports [`DeployFileInstallResult::SourceMissing`] and every other slot is
 /// written. A push must not be gated on the one slot that needs a LAN address,
 /// because a device on a network that cannot carry one is precisely the device
 /// that needs the cable.
@@ -1170,7 +1175,7 @@ mod tests {
 
     /// The status the UI shows and the push it would run have to agree: an
     /// unrenderable conf is `SourceMissing` in both, and `summarize` already
-    /// excludes that state, so the other six being current reads "In sync"
+    /// excludes that state, so every other slot being current reads "In sync"
     /// rather than a permanent one-file-stale that no push can clear.
     #[test]
     fn status_without_conf_inputs_matches_what_install_would_do() {

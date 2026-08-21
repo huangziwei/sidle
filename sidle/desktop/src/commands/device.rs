@@ -512,7 +512,7 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
 /// Stages the cross-built picker into that tree first, so a bare `cargo build
 /// --target armv7-…` is enough for the dev loop — the binary lands in `target/`
 /// under another name, and the walk looks for it at the path it installs to.
-async fn compose_plan(
+pub async fn compose_plan(
     state: &AppState,
     source: &deploy::DeploySource,
 ) -> Result<sidle_core::library::apps::DevicePlan, String> {

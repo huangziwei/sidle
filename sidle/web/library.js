@@ -2198,6 +2198,21 @@ function setupDeviceAppSection() {
     prog.hidden = false;
   });
 
+  $("#btn-device-app-add").addEventListener("click", async () => {
+    const folder = await window.api.invoke("library_pick_folder");
+    if (!folder) return;
+    const prog = $("#device-app-install-progress");
+    try {
+      const added = await window.api.invoke("apps_add", { path: folder });
+      prog.textContent = `added ${added.map((a) => a.id).join(", ")}`;
+      prog.hidden = false;
+    } catch (err) {
+      prog.textContent = `${err}`;
+      prog.hidden = false;
+    }
+    await refreshDeviceAppStatus();
+  });
+
   $("#btn-device-app-install").addEventListener("click", async () => {
     const btn = $("#btn-device-app-install");
     const prog = $("#device-app-install-progress");
@@ -2234,11 +2249,83 @@ function setupDeviceAppSection() {
 }
 
 async function refreshDeviceAppStatus() {
+  // The app list does not need a Kindle: it says what a push would carry, which
+  // is worth seeing (and adding to) before one is plugged in.
+  try {
+    renderDeviceAppList(await window.api.invoke("apps_list"));
+  } catch (err) {
+    console.error("apps_list failed:", err);
+  }
   try {
     const status = await window.api.invoke("device_app_status");
     renderDeviceAppStatus(status);
   } catch (err) {
     console.error("device_app_status failed:", err);
+  }
+}
+
+function renderDeviceAppList(apps) {
+  const list = $("#device-app-list");
+  if (!list) return;
+  list.innerHTML = "";
+  for (const app of apps || []) {
+    const li = document.createElement("li");
+
+    const name = document.createElement("span");
+    name.className = "device-app-name";
+    name.textContent = app.name;
+    li.appendChild(name);
+
+    const version = document.createElement("span");
+    version.className = "device-app-version";
+    version.textContent = app.version;
+    li.appendChild(version);
+
+    if (app.error) {
+      const err = document.createElement("span");
+      err.className = "device-app-row-error";
+      err.textContent = "unreadable — moved or rebuilt?";
+      err.title = app.error;
+      li.appendChild(err);
+    } else {
+      const size = document.createElement("span");
+      size.className = "device-app-size";
+      // The parenthesised figure is the `sync` bytes — what a status check
+      // reads. It is far below the total for an app with a large `seed`
+      // subtree, and equal to it for one with none, which is why it only
+      // appears when the two differ.
+      size.textContent =
+        app.hashed_bytes < app.total_bytes
+          ? `${app.file_count} files · ${formatBytes(app.total_bytes)} (${formatBytes(app.hashed_bytes)} checked)`
+          : `${app.file_count} files · ${formatBytes(app.total_bytes)}`;
+      li.appendChild(size);
+    }
+
+    // No Remove for the picker and bokai: they ship inside Sidle and have no
+    // registration to undo.
+    if (app.source) {
+      if (app.error) {
+        const spacer = document.createElement("span");
+        spacer.className = "device-app-size";
+        li.appendChild(spacer);
+      }
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "btn-link device-app-remove";
+      remove.textContent = "Remove";
+      remove.title = `Unregister ${app.id} — ${app.source}\nNothing on disk or on the Kindle is touched.`;
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        try {
+          await window.api.invoke("apps_remove", { id: app.id });
+        } catch (err) {
+          console.error("apps_remove failed:", err);
+        }
+        await refreshDeviceAppStatus();
+      });
+      li.appendChild(remove);
+    }
+    list.appendChild(li);
   }
 }
 
@@ -2249,13 +2336,19 @@ function renderDeviceAppStatus(status) {
   const tip = $("#device-app-tip");
   const list = $("#device-app-file-list");
 
+  section.hidden = false;
   if (!status || status.overall.kind === "device_disconnected") {
-    // Hide the whole section when no Kindle is connected (or MTP-only).
-    // The server section above stays visible regardless.
-    section.hidden = true;
+    // No Kindle: the rows still say what a push would carry, and Add still
+    // works — registering an app is worth doing before the cable is in.
+    label.className = "device-app-status-label unknown";
+    label.textContent = "No Kindle";
+    btn.disabled = true;
+    btn.textContent = "Install on Kindle";
+    tip.hidden = true;
+    list.innerHTML = "";
+    list.hidden = true;
     return;
   }
-  section.hidden = false;
 
   const overall = status.overall.kind;
   label.className = "device-app-status-label " + overallClass(overall);
@@ -2263,7 +2356,7 @@ function renderDeviceAppStatus(status) {
 
   // server.conf is the one slot whose bytes need a LAN address and a running
   // server token; without them it reports source-missing and is left alone.
-  // The cable push still delivers the other six, so this is worth naming
+  // The cable push still delivers every other file, so this is worth naming
   // rather than hiding — the picker keeps whatever conf it already had.
   const confMissing = (status.files || []).some(
     (f) =>
@@ -2452,9 +2545,9 @@ function updateDeviceUI(info) {
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
-    // Hide the deploy section when no device is connected.
-    const deviceAppSection = $("#device-app-section");
-    if (deviceAppSection) deviceAppSection.hidden = true;
+    // The apps card stays up with no Kindle — it lists what a push would carry
+    // and lets one be registered before the cable is in.
+    refreshDeviceAppStatus();
     // Hide eject button on disconnect — nothing to eject.
     const ejectBtn = $("#btn-device-eject");
     if (ejectBtn) ejectBtn.hidden = true;

@@ -162,8 +162,8 @@ fn facet_holds(param: &str, arg: &str, v: &str) -> bool {
         "length" => arg.parse::<usize>().is_ok_and(|n| len == n),
         "minLength" => arg.parse::<usize>().is_ok_and(|n| len >= n),
         "maxLength" => arg.parse::<usize>().is_ok_and(|n| len <= n),
-        // `pattern` is an XSD regular expression. Applying it needs a regex
-        // engine over that dialect; until then it holds, which under-reports.
+        // `pattern` is an XSD regular expression. Enforcing it would need a
+        // regex engine over that dialect, so it holds — which under-reports.
         _ => true,
     }
 }

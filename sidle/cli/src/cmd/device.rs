@@ -499,8 +499,8 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
     // making one needs no server and no network.
     let _ = sidle_core::library::tls::ensure_ca(&ctx.paths);
     // `None` when no address was given and none can be detected: the
-    // `etc/server.conf` slot then reports `SourceMissing` and the other six
-    // install, which is what a push from a machine with no routable interface
+    // `etc/server.conf` slot then reports `SourceMissing` and everything else
+    // installs, which is what a push from a machine with no routable interface
     // is for. Rendering `HOST=` instead would write a conf the picker cannot
     // use and call it installed.
     let host = match args.host {

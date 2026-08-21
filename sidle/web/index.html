@@ -447,19 +447,26 @@
             </div>
           </section>
 
-          <section class="device-card device-app-section" id="device-app-section" aria-label="Kindle app" hidden>
+          <section class="device-card device-app-section" id="device-app-section" aria-label="Apps on device" hidden>
             <header class="device-app-section-header">
-              <strong>Kindle app</strong>
+              <strong>Apps on device</strong>
               <span id="device-app-status-label" class="device-app-status-label unknown">—</span>
             </header>
+            <!-- One row per app a push would carry. The picker and bokai ship
+                 with Sidle and have no Remove; the rest are registered folders. -->
+            <ul id="device-app-list" class="device-app-list" aria-label="Apps"></ul>
             <div class="device-app-actions">
               <button type="button" id="btn-device-app-install" class="btn-link" disabled>
                 Install on Kindle
               </button>
+              <button type="button" id="btn-device-app-add" class="btn-link">Add an app&hellip;</button>
               <span id="device-app-install-progress" class="device-app-install-progress" hidden></span>
             </div>
             <p id="device-app-tip" class="device-app-tip" hidden></p>
-            <ul id="device-app-file-list" class="device-app-file-list" aria-label="Kindle app files" hidden></ul>
+            <details class="device-app-files">
+              <summary>Files</summary>
+              <ul id="device-app-file-list" class="device-app-file-list" aria-label="Files a push would write" hidden></ul>
+            </details>
           </section>
 
           <section class="device-card server-section" aria-label="LAN server">
