@@ -1,17 +1,15 @@
 //! KFX style → CSS property translation.
 //!
-//! Port of `yj_to_epub_properties.py`, plus the block-image wrapper
-//! partition from `yj_to_epub_content.py`. Covers the property table, value
-//! translation, and `writing-mode` emission; the long tail (advanced color
-//! transforms, layout-hint synthesis, etc.) is left to a follow-up pass.
-//! `KfxImporter` resolves named `$157` styles through it, so a KFX's own
-//! stylesheet and the IR's computed styles agree property-for-property.
+//! Covers the property table, value translation, `writing-mode` emission, and
+//! the block-image wrapper partition. `KfxImporter` resolves named `$157`
+//! styles through it, so a KFX's own stylesheet and the IR's computed styles
+//! agree property-for-property.
 //!
 //! Identifiers track calibre as much as Rust syntax allows.
 //!
-//! Transitional home: this is the import-direction (KFX→CSS) half of style
-//! translation, while `style_schema.rs` holds the export-direction table —
-//! the two are slated to merge into one bidirectional table.
+//! This is the import direction (KFX→CSS); `style_schema.rs` holds the
+//! export-direction table. A property added to one needs its counterpart in
+//! the other or it round-trips lossily.
 
 #![allow(non_snake_case)]
 
@@ -61,8 +59,7 @@ pub fn length_unit_for(symbol_name: &str) -> Option<&'static str> {
 }
 
 /// Translate a KFX style's properties (as `(symbol_id, IonValue)` pairs) to
-/// a CSS declaration. Mirrors calibre's `convert_yj_properties` at the
-/// minimum-viable level we need for step 6.
+/// a CSS declaration.
 pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) -> CssDecl {
     let mut out = CssDecl::new();
 
@@ -90,10 +87,56 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
         }
     }
 
+    resolve_line_height_units(&mut out);
     resolve_box_align(&mut out);
     merge_axis_pair(&mut out, "background-position", "0%");
     merge_axis_pair(&mut out, "background-size", "auto");
     out
+}
+
+/// Floor for a resolved `line-height`, matching calibre's
+/// `MINIMUM_LINE_HEIGHT`: a line box shorter than the text it holds overlaps
+/// its neighbours.
+const MINIMUM_LINE_HEIGHT: f64 = 1.0;
+
+/// Resolve the `lh` lengths in a declaration into units every reader has.
+///
+/// KFX states line-relative lengths as multiples of the line height. CSS has
+/// a `lh` unit of its own, but a late one, and a reader that predates it
+/// drops the whole declaration: the vertical rhythm a front-matter page is
+/// built out of — the drop before the author line, the gap above a publisher
+/// logo — collapses to nothing. So no `lh` may reach the stylesheet, the way
+/// calibre resolves it in `fix_styles`.
+///
+/// `line-height: 1lh` is KFX for "the default line height", which CSS spells
+/// `normal` — and which stays right as the element's font-size changes, where
+/// a resolved multiple of the *inherited* line height would leave a display
+/// heading's lines overlapping. Any other multiple becomes the unitless
+/// number CSS multiplies the font-size by; every other property takes the
+/// same multiple in `em`.
+fn resolve_line_height_units(decl: &mut CssDecl) {
+    let scale = crate::formats::kfx::style_schema::DOCUMENT_LINE_HEIGHT_EM as f64;
+    for (name, value) in decl.items.iter_mut() {
+        let Some(multiple) = value.strip_suffix("lh").and_then(|n| n.parse::<f64>().ok()) else {
+            continue;
+        };
+        *value = if name == "line-height" {
+            if (0.99..=1.01).contains(&multiple) {
+                "normal".to_string()
+            } else {
+                css_number((multiple * scale).max(MINIMUM_LINE_HEIGHT))
+            }
+        } else {
+            format!("{}em", css_number(multiple * scale))
+        };
+    }
+}
+
+/// Serialize a computed length at the five decimals the rest of the KFX
+/// length path keeps, so `4.16667lh` reads back as `5em` and not
+/// `5.000004em`.
+fn css_number(value: f64) -> String {
+    format!("{}", (value * 1e5).round() / 1e5)
 }
 
 /// Fold a KFX per-axis pair into the CSS shorthand that carries both.
@@ -155,15 +198,16 @@ const BOX_ALIGN: &str = "-kfx-box-align";
 /// `box_align` says where the box sits inside its container; the KFX
 /// container's own `text_alignment` says where text sits inside the box.
 /// They are separate properties and a style may carry either, both, or
-/// neither. Emitting `box_align` as `text-align` — as this once did — got
-/// both wrong at once: the box stopped being centered, and text that the
-/// source never aligned started being centered. It shows up on the pages
-/// built out of a centered box, which is most Japanese front matter and
-/// chapter openers.
+/// neither, so this must not be spelled as `text-align`: that both stops
+/// centering the box and centers text the source left alone, on every page
+/// built out of a centered box — most Japanese front matter and chapter
+/// openers.
 ///
 /// The margins are the same pair bokai's EPUB→KFX direction reads back as
 /// `box_align` (`formats::kfx::style_schema`), so a book that round-trips
-/// keeps the property instead of losing it to `text-align`.
+/// keeps the property instead of losing it to `text-align`. A block image is
+/// the one exception, and takes `text-align` on its wrapper instead — see
+/// [`take_box_align_margins`].
 ///
 /// Unlike calibre — which sets the margins only when the style also carries
 /// a `width` — this sets them whichever way the box is sized. Auto margins
@@ -1613,6 +1657,32 @@ pub fn img_wrapper_prop(prop: &str) -> bool {
     img_wrapper_trigger(prop) || prop == "box-sizing"
 }
 
+/// Read back the `box_align` an image style's auto margins stand for,
+/// removing them. `None` when the pair isn't the one [`resolve_box_align`]
+/// writes, so a style that states its own margins keeps them.
+///
+/// Auto margins position a *sized block*, which a block image's wrapper is
+/// not: the `<img>` is a replaced element sitting in the wrapper's line box,
+/// and the wrapper itself is an auto-width block filling the column — so its
+/// auto margins compute to zero and align nothing, leaving the image against
+/// the start edge whatever `width` the source gave it. The alignment has to
+/// be `text-align` on the wrapper instead, which is also where calibre puts
+/// it; the margin form is only right for a genuinely block-sized box.
+///
+/// [`resolve_box_align`] runs first and has already spent the marker, so the
+/// alignment is recovered from the margins it became.
+fn take_box_align_margins(decl: &mut CssDecl) -> Option<&'static str> {
+    let align = match (decl.get("margin-left"), decl.get("margin-right")) {
+        (Some("auto"), Some("auto")) => "center",
+        (Some("auto"), None) => "right",
+        (None, Some("auto")) => "left",
+        _ => return None,
+    };
+    decl.take("margin-left");
+    decl.take("margin-right");
+    Some(align)
+}
+
 /// Partition a block-flow image's merged style (named `$style` + the content
 /// element's own inline properties) into `(wrapper, img)` halves, or `None`
 /// when nothing triggers a wrapper and the image stays bare.
@@ -1621,6 +1691,11 @@ pub fn img_wrapper_prop(prop: &str) -> bool {
 /// child's percentage width would resolve against the float's own
 /// content-derived width — circular; the author meant % of the column. The
 /// percentage moves onto the float and the image fills it.
+///
+/// A `box_align` becomes the wrapper's `text-align`, which places the image
+/// however the image is sized — see [`take_box_align_margins`]. A float
+/// already positions the box, so a `box_align` beside one is dropped rather
+/// than fought with.
 pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
     if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
         return None;
@@ -1634,10 +1709,11 @@ pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
             img_decl.set(k, v);
         }
     }
-    if wrapper_decl
+    let floated = wrapper_decl
         .items
         .iter()
-        .any(|(k, v)| k == "float" && v != "none")
+        .any(|(k, v)| k == "float" && v != "none");
+    if floated
         && let Some(pos) = img_decl
             .items
             .iter()
@@ -1646,6 +1722,11 @@ pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
         let (_, w) = img_decl.items.remove(pos);
         wrapper_decl.set("width", w);
         img_decl.set("width", "100%");
+    }
+    if let Some(align) = take_box_align_margins(&mut wrapper_decl)
+        && !floated
+    {
+        wrapper_decl.set("text-align", align);
     }
     Some((wrapper_decl, img_decl))
 }
@@ -1673,6 +1754,27 @@ mod tests {
     fn css(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         let symbols = SymbolTable::from_fragment(None);
         convert_yj_properties(&style(pairs), &symbols).items
+    }
+
+    /// A `{value, unit}` length field, the shape every KFX dimension takes.
+    fn length(property: &str, value: &str, unit: &str) -> (u64, IonValue) {
+        (
+            symbol_id_for_name(property).unwrap_or_else(|| panic!("unknown property {property}")),
+            IonValue::Struct(vec![
+                (
+                    symbol_id_for_name("value").expect("value symbol"),
+                    IonValue::Decimal(value.to_string()),
+                ),
+                (
+                    symbol_id_for_name("unit").expect("unit symbol"),
+                    IonValue::Symbol(symbol_id_for_name(unit).expect("unit value")),
+                ),
+            ]),
+        )
+    }
+
+    fn convert(fields: &[(u64, IonValue)]) -> CssDecl {
+        convert_yj_properties(fields, &SymbolTable::from_fragment(None))
     }
 
     /// Superscript and subscript are the reason `baseline_style` matters:
@@ -1821,5 +1923,126 @@ mod tests {
             convert_yj_properties(&link_state_style(), &symbols).is_empty(),
             "state styles are not base declarations"
         );
+    }
+
+    /// The style a title page's publisher logo carries: `box_align: center`
+    /// with a percentage width. The margins that state a centered *block* do
+    /// nothing for a replaced element in an auto-width wrapper, so the
+    /// wrapper has to say `text-align` instead — without it the logo sits
+    /// against the left margin on every reader.
+    #[test]
+    fn a_centered_block_image_centers_from_its_wrapper() {
+        let fields = vec![
+            (
+                symbol_id_for_name("box_align").expect("box_align symbol"),
+                IonValue::Symbol(symbol_id_for_name("center").expect("center value")),
+            ),
+            length("width", "58.594", "percent"),
+            length("margin_top", "6.66667", "lh"),
+        ];
+        let (wrapper, img) = partition_image_style(convert(&fields)).expect("a wrapper");
+        assert_eq!(wrapper.get("text-align"), Some("center"));
+        assert_eq!(wrapper.get("margin-left"), None, "margins aligned nothing");
+        assert_eq!(wrapper.get("margin-right"), None);
+        assert_eq!(wrapper.get("margin-top"), Some("8em"));
+        // The width sizes the image itself; only a float hoists it upward.
+        assert_eq!(img.get("width"), Some("58.594%"));
+    }
+
+    /// A full-height plate — `box_align: center` and no width at all — is the
+    /// case auto margins could never have centered, since the wrapper has
+    /// nothing to shrink to.
+    #[test]
+    fn a_centered_block_image_without_a_width_still_centers() {
+        let fields = vec![
+            (
+                symbol_id_for_name("box_align").expect("box_align symbol"),
+                IonValue::Symbol(symbol_id_for_name("center").expect("center value")),
+            ),
+            length("height", "100", "percent"),
+        ];
+        let (wrapper, img) = partition_image_style(convert(&fields)).expect("a wrapper");
+        assert_eq!(wrapper.get("text-align"), Some("center"));
+        assert_eq!(img.get("height"), Some("100%"));
+    }
+
+    /// `box_align` states an edge as readily as the middle, and the wrapper
+    /// keeps the direction the margins encoded.
+    #[test]
+    fn a_right_aligned_block_image_keeps_its_edge() {
+        let fields = vec![
+            (
+                symbol_id_for_name("box_align").expect("box_align symbol"),
+                IonValue::Symbol(symbol_id_for_name("right").expect("right value")),
+            ),
+            length("width", "25", "percent"),
+        ];
+        let (wrapper, _) = partition_image_style(convert(&fields)).expect("a wrapper");
+        assert_eq!(wrapper.get("text-align"), Some("right"));
+    }
+
+    /// Margins a style set itself are not `box_align` residue and stay put.
+    #[test]
+    fn a_block_image_keeps_margins_it_stated_itself() {
+        let fields = vec![
+            length("margin_left", "2", "em"),
+            length("width", "50", "percent"),
+        ];
+        let (wrapper, _) = partition_image_style(convert(&fields)).expect("a wrapper");
+        assert_eq!(wrapper.get("margin-left"), Some("2em"));
+        assert_eq!(wrapper.get("text-align"), None);
+    }
+
+    /// A float already places the box; calibre reports `box_align` beside one
+    /// as a source error and drops it rather than fighting the float.
+    #[test]
+    fn a_floated_block_image_takes_no_box_alignment() {
+        let fields = vec![
+            (
+                symbol_id_for_name("box_align").expect("box_align symbol"),
+                IonValue::Symbol(symbol_id_for_name("center").expect("center value")),
+            ),
+            (
+                symbol_id_for_name("float").expect("float symbol"),
+                IonValue::Symbol(symbol_id_for_name("left").expect("left value")),
+            ),
+            length("width", "40", "percent"),
+        ];
+        let (wrapper, img) = partition_image_style(convert(&fields)).expect("a wrapper");
+        assert_eq!(wrapper.get("text-align"), None);
+        // The float still takes the percentage width, and the image fills it.
+        assert_eq!(wrapper.get("width"), Some("40%"));
+        assert_eq!(img.get("width"), Some("100%"));
+    }
+
+    /// `lh` counts line heights. CSS has the unit but only lately, so a
+    /// reader without it drops the declaration and the page loses the gap
+    /// entirely — resolve the multiple to `em` the way calibre does.
+    #[test]
+    fn a_line_height_multiple_resolves_to_em() {
+        let decl = convert(&[length("margin_top", "4.16667", "lh")]);
+        assert_eq!(decl.get("margin-top"), Some("5em"));
+        let decl = convert(&[length("margin_bottom", "0.166667", "lh")]);
+        assert_eq!(decl.get("margin-bottom"), Some("0.2em"));
+    }
+
+    /// `line-height: 1lh` is KFX for "the default line height". Resolved to a
+    /// multiple of the *inherited* one it would crush a display heading's
+    /// lines together; `normal` keeps tracking the element's own font-size.
+    #[test]
+    fn a_single_line_height_becomes_normal() {
+        let decl = convert(&[length("line_height", "1", "lh")]);
+        assert_eq!(decl.get("line-height"), Some("normal"));
+    }
+
+    /// Any other multiple is a real instruction and survives as the unitless
+    /// number CSS multiplies the font-size by, floored where a line box would
+    /// otherwise come out shorter than its text.
+    #[test]
+    fn other_line_height_multiples_survive_as_numbers() {
+        let decl = convert(&[length("line_height", "1.5", "lh")]);
+        assert_eq!(decl.get("line-height"), Some("1.8"));
+        let decl = convert(&[length("line_height", "0.5", "lh")]);
+        assert_eq!(decl.get("line-height"), Some("1"));
     }
 }

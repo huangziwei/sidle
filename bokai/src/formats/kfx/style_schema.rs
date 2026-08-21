@@ -2573,6 +2573,14 @@ impl ValueTransform {
                     id if id == KfxSymbol::Pt as u32 => {
                         (((num / KFX_PT_PER_CSS_PX) * 1e5).round() / 1e5, "px")
                     }
+                    // `lh` counts line heights, and one of those is
+                    // `DOCUMENT_LINE_HEIGHT_EM` em — the same baseline the
+                    // export direction divides by to reach `lh` again. The
+                    // factor is what keeps the two ends agreeing.
+                    id if id == KfxSymbol::Lh as u32 => {
+                        let em = num * DOCUMENT_LINE_HEIGHT_EM as f64;
+                        ((em * 1e5).round() / 1e5, "em")
+                    }
                     _ => (num, "em"), // Default fallback
                 };
 
