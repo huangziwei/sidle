@@ -202,8 +202,7 @@
     note.textContent = lines.join(" ");
     note.hidden = lines.length === 0;
 
-    // The button is enabled by what it would push, which is what `updateAll`
-    // sends: an app the Kindle does not hold leaves it disabled.
+    // `pending` counts the list `updateAll` sends.
     const updateAll = q("#apps-update-all");
     const pending = updatable(ov).length;
     updateAll.disabled = !ov?.device_connected || !pending || state.busy != null;
@@ -430,8 +429,8 @@
     await runInstall([id], id, true);
   }
 
-  // Every app the Kindle holds that this build has moved past. An app the
-  // Kindle does not hold is reached by its own row's Install.
+  // `updatable` lists the ids `updateAll` sends: an app with `write_count` > 0
+  // whose `overall.kind` is not "not_installed".
   function updatable(ov) {
     return (ov?.apps || []).filter((a) => hasUpdate(a)).map((a) => a.id);
   }
@@ -447,7 +446,7 @@
     await runInstall(ids, "*", false);
   }
 
-  // One path for a row and for the fleet; `only` is the single difference.
+  // `runInstall` serves a row and the fleet; `only` is the difference.
   async function runInstall(only, busyKey, force) {
     state.busy = busyKey;
     render();

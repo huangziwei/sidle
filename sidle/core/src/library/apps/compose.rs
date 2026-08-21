@@ -76,11 +76,8 @@ impl DevicePlan {
         self.apps.iter().find(|a| a.app.id == id)
     }
 
-    /// The same plan narrowed to the apps `ids` names, for a per-row install
-    /// and for a push scoped to what a device holds.
-    ///
-    /// Conflicts and errors do not carry across: both are facts about the whole
-    /// fleet, and name apps this install leaves alone.
+    /// A `DevicePlan` holding the apps `ids` names and their files. `conflicts`
+    /// and `errors` come out empty: both name apps outside `ids`.
     pub fn only<S: AsRef<str>>(&self, ids: &[S]) -> DevicePlan {
         let wanted = |id: &str| ids.iter().any(|w| w.as_ref() == id);
         DevicePlan {
@@ -101,9 +98,8 @@ impl DevicePlan {
         }
     }
 
-    /// [`DevicePlan::only`], refusing an id the fleet holds no tree for. An id
-    /// standing in [`DevicePlan::errors`] is refused with the error its source
-    /// produced.
+    /// [`DevicePlan::only`], erroring on an id `apps` holds no tree for. An id
+    /// in [`DevicePlan::errors`] carries that error.
     pub fn narrow<S: AsRef<str>>(&self, ids: &[S]) -> Result<DevicePlan> {
         for id in ids {
             let id = id.as_ref();
@@ -430,8 +426,7 @@ mod tests {
         );
     }
 
-    /// A push scoped to what a device holds names several ids at once, and one
-    /// it leaves out contributes no file.
+    /// `narrow` takes several ids, and an id it leaves out contributes no file.
     #[test]
     fn narrowing_takes_a_set_of_ids() {
         let tmp = tempfile::tempdir().unwrap();
@@ -449,8 +444,7 @@ mod tests {
         assert!(none.files.is_empty());
     }
 
-    /// An id the fleet holds no tree for is refused, and one whose source
-    /// failed to read is refused with the error that source produced.
+    /// `narrow` errors on an unknown id, and on one in `errors` with its error.
     #[test]
     fn narrowing_names_why_an_id_is_missing() {
         let tmp = tempfile::tempdir().unwrap();

@@ -453,8 +453,7 @@ fn pull(ctx: &Ctx) -> Result<()> {
 
 #[derive(Args)]
 pub struct AppArgs {
-    /// Act on the named apps, not the whole fleet. Repeatable.
-    /// `sidle-cli apps list` names the ids.
+    /// Act on the named apps. Repeatable. `sidle-cli apps list` names the ids.
     #[arg(long, value_name = "ID")]
     only: Vec<String>,
     /// Write the stale files to the device.
@@ -504,8 +503,7 @@ fn app(ctx: &Ctx, args: AppArgs) -> Result<()> {
         let conn = ctx.conn();
         sidle_core::library::apps::plan(&conn, &source.mount_dir)?
     };
-    // A narrowed plan carries neither list: both name apps this call leaves
-    // alone.
+    // `narrow` empties `errors` and `conflicts`; both name apps outside `only`.
     let plan = if args.only.is_empty() {
         for e in &fleet.errors {
             eprintln!("  skipping {}: {}", e.id, e.error);
