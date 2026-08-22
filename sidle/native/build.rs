@@ -1,13 +1,10 @@
-//! Bake the build timestamp into the picker so a running binary knows its own
-//! age. The LAN self-update (`selfupdate.rs`) compares this against the
-//! manifest's `built_at` and refuses anything not strictly newer — so a stale
-//! `device-dist` can no longer downgrade the device over Wi-Fi.
+//! `SIDLE_BUILD_TS` (unix seconds) baked in as a `rustc-env`.
 //!
-//! `build.sh` exports `SIDLE_BUILD_TS` (unix seconds) for the cross-compile and
-//! writes a matching `sidle.build-ts` sidecar that the server reads into the
-//! manifest, so both sides share one clock. A bare `cargo build` (no env) bakes
-//! `0` = "unknown", which disables the guard for that binary (the device falls
-//! back to the sha-only check).
+//! `selfupdate::decide` compares it against a manifest `built_at` and refuses
+//! anything not strictly newer. `build.sh` exports it for the cross-compile and
+//! writes the matching `sidle.build-ts` sidecar the manifest carries.
+//!
+//! A bare `cargo build` bakes `0`, leaving `decide` on its sha-only branch.
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SIDLE_BUILD_TS");

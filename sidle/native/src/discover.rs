@@ -1,18 +1,7 @@
-//! Find sidle-server on the LAN when `HOST=` no longer answers.
+//! LAN search for sidle-server.
 //!
-//! `etc/server.conf` carries the Mac's address as of the last cable install,
-//! and that address moves: DHCP hands out a new one, the Mac joins a different
-//! network. The picker then dials a host that is gone, and the file naming the
-//! new one is the single thing a Wi-Fi pull is not allowed to deliver
-//! (`apps::policy::PER_INSTALL` on the desktop) — so without a search here, a
-//! moved server can only be found again over a cable.
-//!
-//! The search is a TCP sweep of this Kindle's own subnet on the server port,
-//! and every hit then has to answer a real request through the CA-pinned agent.
-//! That pin is what makes the sweep safe to trust: only the machine holding the
-//! key to `etc/ca.pem`'s CA can complete the handshake, so "listens on 8731 and
-//! answers" identifies our server and nothing else. The token never leaves the
-//! device until the address it is about to be sent to has proved itself.
+//! [`find_server`] sweeps this Kindle's subnet on the server port and offers
+//! each open address to a CA-pinned probe.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Mutex;
@@ -20,39 +9,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-/// The kernel's routing table, in the format [`netmask_from_route`] parses.
+/// The table [`netmask_from_route`] parses.
 pub const ROUTE_TABLE: &str = "/proc/net/route";
 
-/// How long one candidate gets to complete a TCP handshake. A LAN peer answers
-/// in single-digit milliseconds; this is sized for a sleepy radio, not a slow
-/// host.
+/// Per-address TCP handshake budget in [`open_hosts`].
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
 
-/// Candidates probed at once. The sweep is latency-bound, not CPU-bound, so
-/// this is set by how long the whole search may take: a /24 in ~8 rounds.
+/// Addresses [`open_hosts`] probes at once.
 const SWEEP_THREADS: usize = 32;
 
-/// Stack per sweep thread. A `connect` and an `Ipv4Addr` need almost nothing,
-/// and the default 2 MiB reservation times [`SWEEP_THREADS`] is real address
-/// space on a 512 MB device.
+/// Stack size of each thread [`open_hosts`] spawns.
 const SWEEP_STACK: usize = 64 * 1024;
 
-/// Widest subnet swept, as a prefix length. A home LAN is a /24; a /16 route
-/// would be 65k probes for a machine that is almost certainly in this Kindle's
-/// own /24 anyway, so a wider mask is narrowed to this before sweeping.
+/// Widest prefix [`candidates`] returns addresses for.
 const MIN_PREFIX: u32 = 24;
 
 /// This Kindle's IPv4 on the interface holding the default route.
 ///
-/// The no-packet UDP trick, the same one the desktop uses to decide what to
-/// write into `HOST=`: `connect` on a UDP socket only fixes the route, so the
-/// kernel picks the outbound interface and names its address, and nothing is
-/// sent. `None` when no interface routes anywhere — a Kindle with the radio
-/// off, which no amount of sweeping would help.
+/// `connect` on a `UdpSocket` fixes the route and sends nothing; `local_addr`
+/// names the outbound interface's address.
 pub fn local_ipv4() -> Option<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // TEST-NET-3 (RFC 5737): guaranteed unrouted, and tells an observer
-    // nothing about this device.
+    // TEST-NET-3 (RFC 5737), unrouted.
     sock.connect("203.0.113.1:80").ok()?;
     match sock.local_addr().ok()? {
         SocketAddr::V4(v4) if !v4.ip().is_loopback() => Some(*v4.ip()),
@@ -60,11 +38,10 @@ pub fn local_ipv4() -> Option<Ipv4Addr> {
     }
 }
 
-/// An address from `/proc/net/route`'s hex form.
+/// An address from a [`ROUTE_TABLE`] hex field.
 ///
-/// The kernel prints these u32s in host byte order, so the leading hex pair is
-/// the *last* octet on every target this runs on (armv7 and the hosts the tests
-/// run on are all little-endian).
+/// The four bytes are host byte order: the leading hex pair is the last octet
+/// on every little-endian target.
 fn hex_ipv4(field: &str) -> Option<Ipv4Addr> {
     if field.len() != 8 {
         return None;
@@ -74,12 +51,11 @@ fn hex_ipv4(field: &str) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::new(d, c, b, a))
 }
 
-/// The netmask of the directly-connected route `ip` sits in, read from the text
-/// of `/proc/net/route`.
+/// The netmask of the directly-connected route holding `ip`, from [`ROUTE_TABLE`]
+/// text.
 ///
-/// A gateway route (`Gateway` non-zero) names the wider internet and says
-/// nothing about who is on this wire, so only routes with no gateway are
-/// considered, and among those the one whose network `ip` actually falls in.
+/// A non-zero `Gateway` field skips the row; among the rest the first network
+/// containing `ip` answers.
 pub fn netmask_from_route(table: &str, ip: Ipv4Addr) -> Option<Ipv4Addr> {
     let want = u32::from(ip);
     for line in table.lines().skip(1) {
@@ -100,11 +76,10 @@ pub fn netmask_from_route(table: &str, ip: Ipv4Addr) -> Option<Ipv4Addr> {
     None
 }
 
-/// Every address to probe on `ip`'s subnet, ascending, without `ip` itself and
-/// without the network and broadcast addresses.
+/// Every address on `ip`'s subnet, ascending, minus `ip` and the network and
+/// broadcast addresses.
 ///
-/// A mask wider than [`MIN_PREFIX`] is narrowed to it: the sweep is bounded by
-/// what can finish in seconds, not by what the route table permits.
+/// A `mask` shorter than [`MIN_PREFIX`] narrows to [`MIN_PREFIX`].
 pub fn candidates(ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<Ipv4Addr> {
     let narrowed = u32::from(mask) | !(u32::MAX >> MIN_PREFIX);
     let host = u32::from(ip);
@@ -118,9 +93,7 @@ pub fn candidates(ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<Ipv4Addr> {
 
 /// Which of `hosts` accept a TCP connection on `port`, in the order given.
 ///
-/// Concurrent because the cost is [`CONNECT_TIMEOUT`] per dead address and a
-/// subnet is mostly dead addresses. An open port is a candidate the caller then
-/// puts to a TLS request, never an answer on its own.
+/// [`SWEEP_THREADS`] threads share one cursor over `hosts`.
 pub fn open_hosts(hosts: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
     let next = AtomicUsize::new(0);
     let found: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -141,9 +114,6 @@ pub fn open_hosts(hosts: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
                             }
                         }
                     });
-            // A thread that will not start costs the search its share of the
-            // parallelism and nothing else — the ones already running drain the
-            // whole list between them.
             if spawned.is_err() {
                 break;
             }
@@ -155,12 +125,10 @@ pub fn open_hosts(hosts: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
     hits.into_iter().map(|i| hosts[i]).collect()
 }
 
-/// Sweep this Kindle's subnet for a host `verify` accepts as sidle-server.
+/// The first address on this Kindle's subnet that `verify` accepts, with one
+/// `log` line per stage.
 ///
-/// `verify` is the CA-pinned request that settles identity; `log` receives one
-/// line per stage, which is what a user reads back when a search comes up
-/// empty. `None` when the radio is down, the subnet holds nothing listening, or
-/// nothing listening is ours.
+/// `None` for no routable interface, no open `port`, or no `verify` match.
 pub fn find_server(
     port: u16,
     verify: impl Fn(Ipv4Addr) -> bool,
@@ -193,8 +161,7 @@ pub fn find_server(
 mod tests {
     use super::*;
 
-    /// A Kindle's table: the default route through the gateway, then the
-    /// directly-connected /24.
+    /// A [`ROUTE_TABLE`] holding a default route and a connected /24.
     const TABLE: &str = "\
 Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
 wlan0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0
@@ -218,8 +185,7 @@ wlan0\t0000A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         );
     }
 
-    /// The default route matches every address through a zero mask. Taking it
-    /// would sweep the whole internet.
+    /// The default route's zero mask matches every address.
     #[test]
     fn the_default_route_is_never_the_mask() {
         assert_eq!(netmask_from_route(TABLE, Ipv4Addr::new(10, 0, 0, 5)), None);
@@ -239,8 +205,8 @@ wlan0\t0000A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         assert!(!hosts.contains(&Ipv4Addr::new(192, 168, 0, 255)));
     }
 
-    /// A /16 route is 65k probes. The server is on this Kindle's own /24 in
-    /// every case worth sweeping for.
+    /// A /16 mask carries 65k addresses; [`MIN_PREFIX`] caps the sweep at the
+    /// /24 holding `ip`.
     #[test]
     fn a_wide_mask_is_narrowed_to_a_single_subnet() {
         let hosts = candidates(Ipv4Addr::new(10, 4, 7, 9), Ipv4Addr::new(255, 255, 0, 0));
@@ -249,21 +215,21 @@ wlan0\t0000A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         assert!(!hosts.contains(&Ipv4Addr::new(10, 4, 8, 1)));
     }
 
-    /// A narrower mask is kept — a /28 is 13 probes, not 253.
+    /// A /28 is 13 addresses.
     #[test]
     fn a_narrow_mask_is_kept() {
         let hosts = candidates(
             Ipv4Addr::new(192, 168, 0, 33),
             Ipv4Addr::new(255, 255, 255, 240),
         );
-        // .32/.47 are the network and broadcast of this /28, and .33 is us.
+        // .32 and .47 bound this /28, and .33 is `ip`.
         assert_eq!(hosts.len(), 13);
         assert_eq!(hosts[0], Ipv4Addr::new(192, 168, 0, 34));
         assert_eq!(hosts[12], Ipv4Addr::new(192, 168, 0, 46));
     }
 
-    /// The sweep runs against a real listener, so the thread pool, the cursor
-    /// and the result ordering are exercised rather than described.
+    /// [`open_hosts`] against a bound `TcpListener`: the thread pool, the
+    /// cursor, and the result order.
     #[test]
     fn a_sweep_reports_the_listener_it_finds() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

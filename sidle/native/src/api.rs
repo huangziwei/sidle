@@ -184,18 +184,13 @@ pub(crate) fn read_text(res: &mut Response, limit: usize) -> anyhow::Result<Stri
 /// below anything that would trouble the device.
 pub(crate) const JSON_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-/// Timeout for one candidate address in [`is_sidle_server`]. The host has
-/// already completed a TCP handshake by the time this runs, so the only work
-/// left is a TLS handshake and a one-page GET.
+/// Global timeout for one [`is_sidle_server`] request.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Whether `host:port` is this picker's sidle-server.
+/// Whether `host:port` presents a leaf issued by [`CA_PATH`]'s CA.
 ///
-/// The answer comes from the handshake, not the body: this agent trusts exactly
-/// one root, [`CA_PATH`]'s, so any host that completes TLS is holding a leaf our
-/// own CA issued. `GET /` is the unauthenticated liveness page, and no token
-/// rides along — an address that has not proved itself never sees the bearer
-/// secret ([`crate::discover`]).
+/// `agent` trusts that one root, making the handshake the identity check.
+/// `GET /` is unauthenticated and carries no token.
 pub fn is_sidle_server(agent: &ureq::Agent, host: &str, port: u16) -> bool {
     let url = format!("https://{host}:{port}/");
     agent

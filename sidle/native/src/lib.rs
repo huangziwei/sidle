@@ -1,10 +1,8 @@
-//! Library facade exposing the pure-logic modules so `cargo test` runs
-//! on the host. The full binary is Linux-only — `eink/fb.rs` and
-//! `eink/touch.rs` use `libc::ioctl` whose signature differs on macOS
-//! (BSD takes `c_ulong`, Linux takes `c_int`). Anything that depends on
-//! the framebuffer or touch driver lives in `main.rs` only; anything
-//! pure (parsing, HTTP shape, filesystem scans) is re-declared here so
-//! the test runner can build it without dragging in the device modules.
+//! The host-buildable half of the picker.
+//!
+//! `eink/fb.rs` and `eink/touch.rs` pass `libc::ioctl` a `c_ulong` on BSD and a
+//! `c_int` on Linux, and stay declared in `main.rs` alone. The modules below
+//! parse, shape HTTP, and scan the filesystem.
 
 pub mod api;
 pub mod collate;

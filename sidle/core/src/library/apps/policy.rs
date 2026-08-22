@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Suffix of the sidecar holding a file's build time in unix seconds.
 pub const BUILD_STAMP_SUFFIX: &str = ".build-ts";
 
-/// Mount-relative paths written as `<path>.new` for a process one level up to
-/// swap in. `sh` reads a script by offset, and FAT keeps no inode alive under a
-/// replacement.
+/// Mount-relative paths written as `<path>.new`, swapped in by a process one
+/// level up. `sh` reads a script by offset, and FAT keeps no inode alive under
+/// a replacement.
 const STAGED: &[&str] = &[
     "extensions/sidle/bin/sidle",
     "extensions/sidle/bin/sidle.sh",

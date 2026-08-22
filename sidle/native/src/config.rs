@@ -1,6 +1,5 @@
-//! Parse `etc/server.conf` — shell-style `KEY=VALUE` lines, `#`-prefix
-//! comments. Single source of truth for "where is the Mac, and what's the
-//! token". The file lives at `/mnt/us/extensions/sidle/etc/server.conf`.
+//! `/mnt/us/extensions/sidle/etc/server.conf` — `KEY=VALUE` lines with
+//! `#`-prefix comments, holding `HOST`, `PORT`, `TOKEN` and `SERIAL`.
 
 use std::path::Path;
 
@@ -8,14 +7,11 @@ use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Mac's LAN IP or hostname. Named `HOST` in the config file — it holds an
-    /// address, never a MAC.
+    /// `HOST=` — sidle-server's IP or DNS name.
     pub host: String,
     pub port: u16,
     pub token: String,
-    /// This Kindle's USB iSerial, echoed back as `device_serial` in the
-    /// `/sync/annotations` push. Empty when `server.conf` carries no `SERIAL=`;
-    /// only the push path reads it.
+    /// `SERIAL=` — this Kindle's USB iSerial, pushed as `device_serial`.
     pub serial: String,
 }
 
@@ -24,8 +20,7 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
     parse(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
-/// [`load`] over the file's text, so the shape of the format is testable
-/// without one on disk.
+/// [`load`] over the file's text.
 pub fn parse(raw: &str) -> Result<ServerConfig> {
     let mut host = String::new();
     let mut port_str = String::new();
@@ -46,7 +41,7 @@ pub fn parse(raw: &str) -> Result<ServerConfig> {
             "PORT" => port_str = v.to_string(),
             "TOKEN" => token = v.to_string(),
             "SERIAL" => serial = v.to_string(),
-            _ => {} // ignore unknown keys for forward compatibility
+            _ => {} // unknown keys parse to nothing
         }
     }
 
@@ -66,12 +61,11 @@ pub fn parse(raw: &str) -> Result<ServerConfig> {
     })
 }
 
-/// `raw` with its `HOST=` line naming `host`, appending the line when the file
-/// carries none.
+/// `raw` with its `HOST=` value replaced by `host`, appended when `raw` carries
+/// no `HOST=` line.
 ///
-/// Rewrites one line and copies the rest through: the file also holds the
-/// bearer token and this Kindle's serial, neither of which the picker knows how
-/// to regenerate.
+/// Every other line copies through: `TOKEN=` and `SERIAL=` have no second
+/// source on this device.
 pub fn set_host(raw: &str, host: &str) -> String {
     let mut out = String::with_capacity(raw.len() + host.len());
     let mut replaced = false;
@@ -91,12 +85,10 @@ pub fn set_host(raw: &str, host: &str) -> String {
     out
 }
 
-/// Point `path`'s `HOST=` at `host`, so the next launch dials the server
-/// directly instead of searching for it again.
+/// [`set_host`]'s result at `path`, through a sibling `.tmp` and a `rename(2)`
+/// within the one `/mnt/us` mount.
 ///
-/// Through a sibling temp file and a `rename(2)`: a half-written `server.conf`
-/// is a picker that cannot reach the server at all, and the two are in the same
-/// directory so the rename stays inside the one `/mnt/us` mount.
+/// A partially written `path` names no reachable server.
 pub fn save_host(path: &Path, host: &str) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut tmp = path.as_os_str().to_owned();
@@ -134,9 +126,7 @@ mod tests {
         assert_eq!(out, "PORT=8731\nTOKEN=abc\nHOST=10.0.0.2\n");
     }
 
-    /// A commented-out `HOST=` is prose, not the setting: rewriting it would
-    /// leave the live value untouched and the picker still dialling the old
-    /// address.
+    /// A `#`-prefixed `HOST=` line copies through; the bare one carries `host`.
     #[test]
     fn a_commented_host_line_is_left_alone() {
         let out = set_host("# HOST=1.2.3.4\nHOST=5.6.7.8\nTOKEN=abc\n", "10.0.0.2");

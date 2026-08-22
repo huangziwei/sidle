@@ -157,10 +157,8 @@ pub async fn serve_with_shutdown(
         .handle(handle)
         .serve(app.into_make_service());
 
-    // The address watch rides inside this future rather than in a task of its
-    // own, so it lives exactly as long as the server does. Embedded mode stops
-    // the server by aborting the task holding it, and a watch spawned beside
-    // that task would outlive every stop and pile up across restarts.
+    // `follow_lan_address` inside this future lives as long as `serving`: an
+    // aborted embedded task drops both.
     tokio::select! {
         served = serving => served.context("axum_server::serve")?,
         () = follow_lan_address(
@@ -173,29 +171,19 @@ pub async fn serve_with_shutdown(
     Ok(())
 }
 
-/// How often the running server re-checks which address the machine answers on.
-/// Cheap enough to be frequent — a UDP socket that sends no packet — and a
-/// Kindle that searches the LAN while the leaf is stale finds nothing, so the
-/// window wants to be short.
+/// Interval between [`follow_lan_address`] checks of `address`.
 const ADDRESS_POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Keep the served leaf covering the address clients dial.
+/// Re-issue and hot-swap `tls` for each new value of `address`.
 ///
-/// The leaf names the machine's LAN address in a SAN, and DHCP moves that
-/// address under a running daemon. A device that finds the server at its new
-/// address is then handed a certificate that does not name it and refuses the
-/// handshake — the same symptom, from the device's side, as no server at all.
-/// Re-issuing and hot-swapping the leaf keeps the move invisible: the CA
-/// underneath is never regenerated, so every device goes on trusting the same
-/// root it was installed with.
+/// `issue_server_cert` names the machine's address in a SAN; a client dialling
+/// an address the leaf omits refuses the handshake. `ensure_ca` leaves the root
+/// alone, so a device keeps trusting the CA it holds across every swap.
 ///
-/// A machine with no routable interface keeps the leaf it has. That is a radio
-/// or a cable, not a move, and dropping the LAN address from the certificate
-/// would break the devices that can still reach it.
+/// `address` of `None` keeps the loaded leaf: an interface that stopped routing
+/// leaves the addresses in the leaf reachable.
 ///
-/// `address` is where the machine believes it answers; production passes
-/// `detect_lan_ipv4`. Runs until dropped, so it is selected against the serve
-/// future rather than spawned.
+/// Runs until dropped.
 async fn follow_lan_address(
     paths: LibraryPaths,
     tls: RustlsConfig,
@@ -1612,14 +1600,10 @@ mod tests {
             .new_agent()
     }
 
-    /// A leaf that stops naming the address a device dials is, from the
-    /// device's side, indistinguishable from no server at all — so a running
-    /// daemon has to re-issue and hot-swap it when the machine moves.
-    ///
-    /// Driven over a real handshake, because none of it is visible in the cert
-    /// bytes: the server starts on a leaf covering `127.0.0.1` and nothing else,
-    /// a pinned client dialling `localhost` is refused, and once the watch sees
-    /// the address change the same client on the same pinned root is served.
+    /// [`follow_lan_address`] over a real handshake: `axum_server` starts on a
+    /// leaf covering `127.0.0.1` alone, a pinned client dialling `localhost`
+    /// is refused, and the address change re-issues a leaf the same client and
+    /// the same pinned root accept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_moved_machine_re_issues_and_hot_swaps_its_leaf() {
         use std::net::Ipv4Addr;
@@ -1630,8 +1614,7 @@ mod tests {
             root: tmp.path().to_path_buf(),
         };
         paths.ensure().unwrap();
-        // No `localhost` SAN: the name the client dials below is exactly what
-        // the re-issue has to add.
+        // No `localhost` SAN — the name `dial` uses below.
         sidle_core::library::tls::issue_server_cert(&paths, &["127.0.0.1".to_string()]).unwrap();
         let ca_pem = sidle_core::library::tls::ca_cert_pem(&paths).unwrap();
 
@@ -1664,7 +1647,7 @@ mod tests {
             }
         };
 
-        // Wait for the listener, dialling the address the leaf does cover.
+        // `127.0.0.1` is the SAN the loaded leaf carries.
         let ready_pem = ca_pem.clone();
         tokio::task::spawn_blocking(move || {
             let agent = device_shaped_agent(&ready_pem);
@@ -1686,7 +1669,7 @@ mod tests {
             "a leaf without a `localhost` SAN must not satisfy a client dialling `localhost`"
         );
 
-        // The machine moves once, then holds still.
+        // `address` yields 192.0.2.1 once, then 192.0.2.2 for every call after.
         let moved = AtomicBool::new(false);
         let watch = follow_lan_address(
             paths.clone(),
