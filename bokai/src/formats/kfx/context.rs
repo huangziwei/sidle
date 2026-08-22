@@ -209,6 +209,13 @@ impl ResourceRegistry {
         name
     }
 
+    /// Bind `href` to a caller-chosen resource name, outside the generated
+    /// `e{N}` sequence.
+    pub fn assign_name(&mut self, href: &str, name: &str) {
+        self.resource_names
+            .insert(href.to_string(), name.to_string());
+    }
+
     /// Get the symbol ID for a resource (if registered).
     pub fn get(&self, href: &str) -> Option<u64> {
         self.resources.get(href).copied()

@@ -3528,15 +3528,16 @@ struct MangaPage {
     image_id: u64,
 }
 
-/// One reading unit = one section + one storyline: the cover (a solo page) or a
-/// right-to-left facing spread of 1–2 pages.
+/// One reading unit = one section + one storyline: a solo page (the cover, or
+/// every page of a landscape-canvas book) or a facing spread of 1–2 pages.
 struct MangaUnit {
     section_name: String,
     section_sym: u64,
     story_sym: u64,
     /// EID of the section's single page_template container.
     pt_id: u64,
-    is_cover: bool,
+    /// `true` → fixed-box page_template + bare image; `false` → page_spread.
+    solo: bool,
     pages: Vec<MangaPage>,
 }
 
@@ -3581,6 +3582,10 @@ fn image_fxl_to_kfx(
 
     // ---- Load the per-page image href for every spine page ----
     let mut spine_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
+    // The source's declared facing-page pairing, one entry per spine page.
+    let mut sides: Vec<Option<crate::model::PageSpread>> =
+        book.spine().iter().map(|e| e.page_spread).collect();
+    let mut viewports: Vec<Option<(u32, u32)>> = book.spine().iter().map(|e| e.viewport).collect();
     let mut hrefs: Vec<String> = Vec::with_capacity(spine_ids.len());
     for &id in &spine_ids {
         let chapter = book.load_chapter(id)?;
@@ -3619,22 +3624,44 @@ fn image_fxl_to_kfx(
     {
         spine_ids.remove(0);
         hrefs.remove(0);
+        sides.remove(0);
+        viewports.remove(0);
     }
-    let n = spine_ids.len();
+    sides.resize(hrefs.len(), None);
+    viewports.resize(hrefs.len(), None);
 
-    // Register the cover page's image in the resource registry for the
-    // reflowable `build_book_metadata_fragment` to resolve the library-tile /
-    // sleep-screen cover. Page 0 is `e0` under the registry's hex naming and
-    // under the `e{i}` scheme, matching the resource entity. Interior pages
-    // take their `e{i}` names directly, with no registry entry.
-    if let Some(cover_href) = hrefs.first() {
-        ctx.resource_registry.register(cover_href, &mut ctx.symbols);
-        let _ = ctx.resource_registry.get_or_create_name(cover_href); // -> "e0"
+    // Fallback page box when no viewport was declared: the largest page image.
+    if box_dims.is_none() {
+        let mut mx = 0;
+        let mut my = 0;
+        for href in &hrefs {
+            let Some((w, h)) = resolve(href)
+                .and_then(|p| book.load_asset(&p).ok())
+                .and_then(|raw| crate::util::extract_image_dimensions(&raw))
+            else {
+                continue;
+            };
+            mx = mx.max(w);
+            my = my.max(h);
+        }
+        if mx > 0 && my > 0 {
+            box_dims = Some((mx, my));
+        }
     }
+    let (box_w, box_h) = box_dims.unwrap_or((1, 1));
+    // Facing-page pairing applies to a portrait canvas only.
+    let portrait_canvas = box_h > box_w;
 
-    let mut encs: Vec<MangaEnc> = Vec::with_capacity(n);
+    // ---- Encode pages, splitting a page that is itself a facing spread ----
+    // A wide page image in a portrait-canvas book carries one spread; its halves
+    // fill the two slots of one `page_spread` section.
+    let mut encs: Vec<MangaEnc> = Vec::with_capacity(hrefs.len());
+    // Emitted page → (source spine index, declared side).
+    let mut origin: Vec<(usize, Option<crate::model::PageSpread>)> =
+        Vec::with_capacity(hrefs.len());
+    let total = hrefs.len();
     for (i, href) in hrefs.iter().enumerate() {
-        on_progress("images", i + 1, n, "Encoding pages");
+        on_progress("images", i + 1, total, "Encoding pages");
         let path = resolve(href).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -3644,6 +3671,16 @@ fn image_fxl_to_kfx(
         let raw = book.load_asset(&path)?;
         reject_unrasterizable_svg(href, &raw)?;
         let (w, h) = crate::util::extract_image_dimensions(&raw).unwrap_or((0, 0));
+        let split =
+            i > 0 && portrait_canvas && is_facing_spread_image(w, h, box_w, box_h, viewports[i]);
+        if split && let Some(halves) = split_spread_image(&raw, color_mode, direction) {
+            let (first, second) = halves;
+            encs.push(first);
+            origin.push((i, Some(crate::model::PageSpread::Left)));
+            encs.push(second);
+            origin.push((i, Some(crate::model::PageSpread::Right)));
+            continue;
+        }
         let img = encode_asset_for_kfx(&raw, color_mode);
         let (thumb, tw, th) = make_manga_thumbnail(&raw, color_mode).unwrap_or((Vec::new(), 0, 0));
         encs.push(MangaEnc {
@@ -3654,16 +3691,38 @@ fn image_fxl_to_kfx(
             tw,
             th,
         });
+        origin.push((i, sides[i]));
     }
-    // Fallback page box when no viewport was declared: the largest page image.
-    if box_dims.is_none() {
-        let mx = encs.iter().map(|e| e.w).max().unwrap_or(0);
-        let my = encs.iter().map(|e| e.h).max().unwrap_or(0);
-        if mx > 0 && my > 0 {
-            box_dims = Some((mx, my));
-        }
+    let n = encs.len();
+
+    // The declared cover, resolved by `build_book_metadata_fragment` for the
+    // library tile. A cover that is page 0 shares that page's `e0`; one the
+    // spine never shows becomes a resource of its own.
+    let cover_href = book.metadata().cover_image.clone();
+    let cover_is_page0 = match (&cover_href, hrefs.first()) {
+        (Some(c), Some(p0)) => resolve(c) == resolve(p0),
+        _ => false,
+    };
+    if cover_is_page0 {
+        let href = hrefs[0].clone();
+        ctx.resource_registry.register(&href, &mut ctx.symbols);
+        let _ = ctx.resource_registry.get_or_create_name(&href); // -> "e0"
     }
-    let (box_w, box_h) = box_dims.unwrap_or((1, 1));
+    // Bytes for a cover the spine never shows, encoded once and emitted beside
+    // the page resources under `MANGA_COVER_RSRC`.
+    let standalone_cover: Option<(Vec<u8>, u32, u32)> = (!cover_is_page0)
+        .then_some(cover_href.as_deref())
+        .flatten()
+        .and_then(|c| Some((c.to_string(), resolve(c)?)))
+        .and_then(|(c, path)| {
+            let raw = book.load_asset(&path).ok()?;
+            let (w, h) = crate::util::extract_image_dimensions(&raw)?;
+            ctx.resource_registry.assign_name(&c, MANGA_COVER_RSRC);
+            ctx.symbols.get_or_intern(MANGA_COVER_RSRC);
+            ctx.symbols
+                .get_or_intern(&format!("resource/{MANGA_COVER_RSRC}"));
+            Some((encode_asset_for_kfx(&raw, color_mode), w, h))
+        });
 
     // Shared image styles (the reference KFX's `sJ` inner-container fill and
     // `sG` page-box image placement), interned once up front.
@@ -3671,16 +3730,20 @@ fn image_fxl_to_kfx(
     let sg_sym = ctx.symbols.get_or_intern("sG");
 
     // ---- Group pages into units, allocate section / story / EIDs ----
-    let groups = manga_page_groups(n);
+    let groups = manga_page_groups(&origin, portrait_canvas);
 
-    // Spine page index → its image EID (nav targets) and spine ChapterId → page
+    // Emitted page index → its image EID (nav targets) and spine ChapterId → page
     // index (TOC target resolution), filled as units are built.
     let mut page_image_id = vec![0u64; n];
-    let chapter_to_index: std::collections::HashMap<ChapterId, usize> = spine_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i))
-        .collect();
+    // A split spread emits two pages from one spine entry; the TOC lands on the
+    // first of them.
+    let mut chapter_to_index: std::collections::HashMap<ChapterId, usize> =
+        std::collections::HashMap::new();
+    for (emitted, &(src, _)) in origin.iter().enumerate() {
+        if let Some(&id) = spine_ids.get(src) {
+            chapter_to_index.entry(id).or_insert(emitted);
+        }
+    }
 
     let mut units: Vec<MangaUnit> = Vec::with_capacity(groups.len());
     let mut any_spread = false;
@@ -3689,7 +3752,8 @@ fn image_fxl_to_kfx(
         let section_name = format!("c{u}");
         let section_sym = ctx.register_section(&section_name);
         let story_sym = ctx.symbols.get_or_intern(&format!("story_c{u}"));
-        let is_cover = u == 0;
+        // The cover opens alone; on a landscape canvas every page does.
+        let solo = u == 0 || !portrait_canvas;
         let pt_id = ctx.next_fragment_id();
         if group.len() > 1 {
             any_spread = true;
@@ -3709,8 +3773,8 @@ fn image_fxl_to_kfx(
                 ctx.symbols.get_or_intern(&format!("resource/{tn}"));
                 (tn, ts)
             };
-            // EIDs: cover = bare image; content = outer→inner→image.
-            let (outer_id, inner_id, image_id) = if is_cover {
+            // EIDs: solo = bare image; facing = outer→inner→image.
+            let (outer_id, inner_id, image_id) = if solo {
                 (0, 0, ctx.next_fragment_id())
             } else {
                 let o = ctx.next_fragment_id();
@@ -3736,7 +3800,7 @@ fn image_fxl_to_kfx(
             section_sym,
             story_sym,
             pt_id,
-            is_cover,
+            solo,
             pages,
         });
     }
@@ -3754,20 +3818,20 @@ fn image_fxl_to_kfx(
     // 4. document_data ($538) — inserted here later, once max_id is known.
     let document_data_index = fragments.len();
 
-    // 5. sections ($260) + 6. storylines ($259). The solo cover's page_template
-    // is sized to the cover image's own dimensions (shown full-screen, no
-    // letterbox); content pages share the uniform page box so facing pages align.
+    // 5. sections ($260) + 6. storylines ($259). A solo page_template is sized to
+    // its own image (shown full-screen, no letterbox); facing pages share the
+    // uniform page box and align.
     let mut sections = Vec::with_capacity(units.len());
     let mut storylines = Vec::with_capacity(units.len());
     for unit in &units {
-        let cover_dims = unit
-            .is_cover
+        let solo_dims = unit
+            .solo
             .then(|| unit.pages.first())
             .flatten()
             .map(|p| &encs[p.enc])
             .filter(|e| e.w > 0 && e.h > 0)
             .map(|e| (e.w, e.h));
-        let (sw, sh) = cover_dims.unwrap_or((box_w, box_h));
+        let (sw, sh) = solo_dims.unwrap_or((box_w, box_h));
         sections.push(build_manga_section(unit, sw, sh));
         storylines.push(build_manga_storyline(unit, box_w, box_h, sj_sym, sg_sym));
     }
@@ -3778,7 +3842,30 @@ fn image_fxl_to_kfx(
     fragments.push(build_manga_style_sj(sj_sym, &language));
     fragments.push(build_manga_style_sg(sg_sym, box_w, box_h));
 
-    // 8. external_resource ($164) — full images (with `thumbnails` link) then thumbs
+    // 8. external_resource ($164) — full images (with `thumbnails` link) then
+    // thumbs, plus a cover the spine never shows, which belongs to no section.
+    if let Some((bytes, w, h)) = &standalone_cover {
+        let sym = ctx.symbols.get_or_intern(MANGA_COVER_RSRC);
+        let fmt_sym = detect_format_symbol(MANGA_COVER_RSRC, bytes);
+        let mut fields = vec![
+            (KfxSymbol::ResourceName as u64, IonValue::Symbol(sym)),
+            (
+                KfxSymbol::Location as u64,
+                IonValue::String(format!("resource/{MANGA_COVER_RSRC}")),
+            ),
+            (KfxSymbol::Format as u64, IonValue::Symbol(fmt_sym)),
+            (KfxSymbol::ResourceWidth as u64, IonValue::Int(*w as i64)),
+            (KfxSymbol::ResourceHeight as u64, IonValue::Int(*h as i64)),
+        ];
+        if let Some(m) = manga_format_mime(fmt_sym) {
+            fields.push((KfxSymbol::Mime as u64, IonValue::String(m.to_string())));
+        }
+        fragments.push(KfxFragment::new(
+            KfxSymbol::ExternalResource,
+            MANGA_COVER_RSRC,
+            IonValue::Struct(fields),
+        ));
+    }
     for unit in &units {
         for p in &unit.pages {
             let e = &encs[p.enc];
@@ -3791,6 +3878,13 @@ fn image_fxl_to_kfx(
         }
     }
     // 9. bcRawMedia ($417) — the actual bytes (moved out of `encs`)
+    if let Some((bytes, _, _)) = standalone_cover {
+        fragments.push(KfxFragment::raw(
+            KfxSymbol::Bcrawmedia as u64,
+            format!("resource/{MANGA_COVER_RSRC}"),
+            bytes,
+        ));
+    }
     for unit in &units {
         for p in &unit.pages {
             let img = std::mem::take(&mut encs[p.enc].img);
@@ -3858,19 +3952,32 @@ fn image_fxl_to_kfx(
     ))
 }
 
-/// Partition `n` spine pages into reading units: page 0 is the cover (shown
-/// solo), and the rest pair into consecutive facing spreads with an odd tail
-/// page standing alone — matching the reference manga's cover + consecutive-pair
-/// + solo-tail layout. Returns page-index groups (`[[0], [1,2], [3,4], …]`).
-fn manga_page_groups(n: usize) -> Vec<Vec<usize>> {
+/// Partition emitted pages into reading units: page 0 solo, then facing pairs
+/// keyed on the declared `page-spread-left` / `-right`, consecutive where none
+/// is declared, every page solo on a landscape canvas. Groups are page indices.
+fn manga_page_groups(
+    origin: &[(usize, Option<crate::model::PageSpread>)],
+    portrait_canvas: bool,
+) -> Vec<Vec<usize>> {
+    use crate::model::PageSpread;
+    let n = origin.len();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     if n == 0 {
         return groups;
     }
+    if !portrait_canvas {
+        return (0..n).map(|i| vec![i]).collect();
+    }
     groups.push(vec![0]);
     let mut i = 1;
     while i < n {
-        if i + 1 < n {
+        let pairs = match (origin[i].1, origin.get(i + 1).and_then(|o| o.1)) {
+            (Some(PageSpread::Left), Some(PageSpread::Right)) => true,
+            (Some(_), _) => false,
+            (None, Some(_)) => false,
+            (None, _) => i + 1 < n,
+        };
+        if pairs {
             groups.push(vec![i, i + 1]);
             i += 2;
         } else {
@@ -3881,12 +3988,79 @@ fn manga_page_groups(n: usize) -> Vec<Vec<usize>> {
     groups
 }
 
+/// Resource name for a cover the spine never shows.
+const MANGA_COVER_RSRC: &str = "ecover";
+
+/// True when a page image carries one facing spread: at least 1.5× as wide,
+/// against the page box, as a single page. A `viewport` half the canvas height
+/// states the same shape.
+fn is_facing_spread_image(
+    w: u32,
+    h: u32,
+    box_w: u32,
+    box_h: u32,
+    viewport: Option<(u32, u32)>,
+) -> bool {
+    if w == 0 || h == 0 || box_w == 0 || box_h == 0 {
+        return false;
+    }
+    if let Some((vw, vh)) = viewport
+        && vh > 0
+        && u64::from(vw) * u64::from(box_h) >= u64::from(vh) * u64::from(box_w) * 3 / 2
+    {
+        return true;
+    }
+    u64::from(w) * u64::from(box_h) * 2 >= u64::from(h) * u64::from(box_w) * 3
+}
+
+/// Cut a facing-spread image down its middle into two page images in reading
+/// order: the right half leads an rtl book, the left half an ltr one. `None`
+/// when `raw` doesn't decode.
+fn split_spread_image(
+    raw: &[u8],
+    mode: jxr::ColorMode,
+    direction: KfxSymbol,
+) -> Option<(MangaEnc, MangaEnc)> {
+    let img = ::image::load_from_memory(raw).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w < 2 || h == 0 {
+        return None;
+    }
+    let mid = w / 2;
+    let build = |x: u32, cw: u32| -> Option<MangaEnc> {
+        let half = img.crop_imm(x, 0, cw, h);
+        let (thumb, tw, th) = manga_thumbnail_of(&half, mode).unwrap_or((Vec::new(), 0, 0));
+        Some(MangaEnc {
+            img: encode_dynimg_jxr(&half, mode)?,
+            w: cw,
+            h,
+            thumb,
+            tw,
+            th,
+        })
+    };
+    let left = build(0, mid)?;
+    let right = build(mid, w - mid)?;
+    Some(if direction == KfxSymbol::Rtl {
+        (right, left)
+    } else {
+        (left, right)
+    })
+}
+
 /// Downscale a page image to a thumbnail (aspect preserved, fit within
 /// [`MANGA_THUMB_W`]×[`MANGA_THUMB_H`]) and JXR-encode it. `None` if the bytes
 /// aren't a decodable raster or the encoder rejects them — the page then ships
 /// without a thumbnail.
 fn make_manga_thumbnail(data: &[u8], mode: jxr::ColorMode) -> Option<(Vec<u8>, u32, u32)> {
-    let img = ::image::load_from_memory(data).ok()?;
+    manga_thumbnail_of(&::image::load_from_memory(data).ok()?, mode)
+}
+
+/// [`make_manga_thumbnail`] over a decoded image.
+fn manga_thumbnail_of(
+    img: &::image::DynamicImage,
+    mode: jxr::ColorMode,
+) -> Option<(Vec<u8>, u32, u32)> {
     let thumb = img.thumbnail(MANGA_THUMB_W, MANGA_THUMB_H);
     let (tw, th) = (thumb.width(), thumb.height());
     let bytes = encode_dynimg_jxr(&thumb, mode)?;
@@ -3967,7 +4141,7 @@ fn build_manga_document_data_fragment(
 /// `layout:page_spread` (its storyline's page containers hold the dimensions).
 /// Both enable `virtual_panel` (Kindle Panel View).
 fn build_manga_section(unit: &MangaUnit, box_w: u32, box_h: u32) -> KfxFragment {
-    let template = if unit.is_cover {
+    let template = if unit.solo {
         IonValue::Struct(vec![
             (KfxSymbol::Id as u64, IonValue::Int(unit.pt_id as i64)),
             (
@@ -4038,7 +4212,7 @@ fn build_manga_storyline(
     sj_sym: u64,
     sg_sym: u64,
 ) -> KfxFragment {
-    let content: Vec<IonValue> = if unit.is_cover {
+    let content: Vec<IonValue> = if unit.solo {
         unit.pages
             .iter()
             .map(|p| {
@@ -4390,7 +4564,7 @@ fn build_manga_toc_entries(
 fn manga_unit_eids(unit: &MangaUnit) -> Vec<u64> {
     let mut ids = vec![unit.pt_id];
     for p in &unit.pages {
-        if unit.is_cover {
+        if unit.solo {
             ids.push(p.image_id);
         } else {
             ids.push(p.outer_id);
@@ -7493,19 +7667,72 @@ mod manga_fxl_tests {
     use super::*;
     use crate::formats::kfx::fragment::FragmentData;
 
+    /// Pages carrying no declared side, as a source without `page-spread-*`
+    /// gives them.
+    fn undeclared(n: usize) -> Vec<(usize, Option<crate::model::PageSpread>)> {
+        (0..n).map(|i| (i, None)).collect()
+    }
+
     /// The cover is a solo unit; the rest pair into consecutive spreads with an
     /// odd tail page standing alone. Every page index appears exactly once, in
-    /// order — the RTL facing order the device reads.
+    /// order — the facing order the device reads.
     #[test]
     fn page_groups_cover_solo_then_pairs_with_odd_tail() {
-        assert!(manga_page_groups(0).is_empty());
-        assert_eq!(manga_page_groups(1), vec![vec![0]]);
-        assert_eq!(manga_page_groups(2), vec![vec![0], vec![1]]);
-        assert_eq!(manga_page_groups(3), vec![vec![0], vec![1, 2]]);
-        assert_eq!(manga_page_groups(4), vec![vec![0], vec![1, 2], vec![3]]);
-        assert_eq!(manga_page_groups(5), vec![vec![0], vec![1, 2], vec![3, 4]]);
-        let flat: Vec<usize> = manga_page_groups(11).into_iter().flatten().collect();
+        let g = |n: usize| manga_page_groups(&undeclared(n), true);
+        assert!(g(0).is_empty());
+        assert_eq!(g(1), vec![vec![0]]);
+        assert_eq!(g(2), vec![vec![0], vec![1]]);
+        assert_eq!(g(3), vec![vec![0], vec![1, 2]]);
+        assert_eq!(g(4), vec![vec![0], vec![1, 2], vec![3]]);
+        assert_eq!(g(5), vec![vec![0], vec![1, 2], vec![3, 4]]);
+        let flat: Vec<usize> = g(11).into_iter().flatten().collect();
         assert_eq!(flat, (0..11).collect::<Vec<_>>());
+    }
+
+    /// A source that states each page's side pairs on that statement, not on
+    /// position: a left page opens a facing pair and the right page closes it,
+    /// and a page whose partner is missing stands alone.
+    #[test]
+    fn page_groups_follow_the_declared_spread_sides() {
+        use crate::model::PageSpread::{Left, Right};
+        let pages = [
+            (0, Some(Right)),
+            (1, Some(Left)),
+            (2, Some(Right)),
+            (3, Some(Left)),
+            (4, Some(Left)),
+            (5, Some(Right)),
+        ];
+        assert_eq!(
+            manga_page_groups(&pages, true),
+            vec![vec![0], vec![1, 2], vec![3], vec![4, 5]]
+        );
+    }
+
+    /// A landscape canvas carries one whole view per page; nothing pairs.
+    #[test]
+    fn a_landscape_canvas_pairs_nothing() {
+        assert_eq!(
+            manga_page_groups(&undeclared(4), false),
+            vec![vec![0], vec![1], vec![2], vec![3]]
+        );
+    }
+
+    /// A page image twice as wide, against the page box, as a single page is one
+    /// facing spread shipped whole; a page matching the box is not.
+    #[test]
+    fn a_double_wide_page_reads_as_a_facing_spread() {
+        assert!(is_facing_spread_image(3600, 2700, 1800, 2700, None));
+        assert!(!is_facing_spread_image(1800, 2700, 1800, 2700, None));
+        assert!(!is_facing_spread_image(1146, 1719, 1800, 2700, None));
+        // A viewport half the canvas height states the same fact.
+        assert!(is_facing_spread_image(
+            1800,
+            1350,
+            1800,
+            2700,
+            Some((1800, 1350))
+        ));
     }
 
     fn unit(is_cover: bool, pages: &[(u64, u64, u64)]) -> MangaUnit {
@@ -7514,7 +7741,7 @@ mod manga_fxl_tests {
             section_sym: 1,
             story_sym: 2,
             pt_id: 100,
-            is_cover,
+            solo: is_cover,
             pages: pages
                 .iter()
                 .map(|&(o, i, im)| MangaPage {

@@ -146,12 +146,14 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
     let m = &pkg.metadata;
     let mut s = String::new();
 
-    // Fixed-layout books declare the `rendition:` property vocabulary on
-    // `<package>` so the rendition metas below validate.
-    let prefix_attr = if m.fixed_layout.is_some() {
-        " prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\""
-    } else {
-        ""
+    // `<package>` declares every property vocabulary the metas below use:
+    // `rendition:`, plus `fixed-layout-jp:` for an EBPAJ viewport (`OPF-028`).
+    let prefix_attr = match &m.fixed_layout {
+        Some(fxl) if fxl.ebpaj_viewport.is_some() => {
+            " prefix=\"rendition: http://www.idpf.org/vocab/rendition/# fixed-layout-jp: http://www.digital-comic.jp/\""
+        }
+        Some(_) => " prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\"",
+        None => "",
     };
     s.push_str(&format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\"{prefix_attr}>\n  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n"

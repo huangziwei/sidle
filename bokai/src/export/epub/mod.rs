@@ -333,7 +333,7 @@ impl EpubExporter {
             chapter_bytes.push(content);
             spine_items.push(OpfItemref {
                 idref: id,
-                properties: None,
+                properties: entry.page_spread.map(|p| p.opf_property().to_string()),
             });
         }
 
@@ -385,6 +385,15 @@ impl EpubExporter {
                     .map(|item| item.href.clone())
             });
 
+        // Page box for the synthesized cover of a pre-paginated book: the
+        // book-level viewport, else the first page's own.
+        let fxl_viewport = book.metadata().fixed_layout.then(|| {
+            book.metadata()
+                .default_viewport
+                .or_else(|| book.spine().first().and_then(|e| e.viewport))
+        });
+        let fxl_viewport = fxl_viewport.flatten();
+
         let titlepage_xhtml = match (&source_cover_page, &cover_id) {
             (Some(_), _) => None,
             (None, Some(cid)) => {
@@ -392,7 +401,7 @@ impl EpubExporter {
                 cover_item.and_then(|item| {
                     let bytes = book.load_asset(std::path::Path::new(&item.href)).ok()?;
                     let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
-                    Some(build_titlepage(&item.href, Some((w, h))))
+                    Some(build_titlepage(&item.href, Some((w, h)), fxl_viewport))
                 })
             }
             (None, None) => None,
@@ -513,7 +522,15 @@ impl EpubExporter {
                 .unwrap_or("unknown.xhtml")
                 .to_string();
             let zip_path = format!("OEBPS/{}", sanitize_path(&source_path));
-            let doc = normalize_passthrough_xhtml(content, &book_title);
+            // A declared box smaller than the canvas cannot hold the page's own
+            // content: a KF8 comic pads a half-height spread page out to the
+            // canvas and leaves the pre-padding viewport in the head.
+            let page_box = match (entry.viewport, fxl_viewport) {
+                (Some((vw, vh)), Some((bw, bh))) if vw < bw || vh < bh => Some((bw, bh)),
+                (Some(vp), _) => Some(vp),
+                (None, canvas) => canvas,
+            };
+            let doc = normalize_passthrough_xhtml(content, &book_title, page_box);
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(&doc)?;
@@ -1037,7 +1054,7 @@ pub fn build_package_into(
                     .iter()
                     .find(|a| sanitize_path(&a.href) == item.href)
                     .and_then(|a| Some((a.width?, a.height?)));
-                build_titlepage(&item.href, dims)
+                build_titlepage(&item.href, dims, None)
             })
         } else {
             None
@@ -1372,11 +1389,14 @@ pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
 }
 
 /// Normalize a passthrough content document to EPUB 3 conformance without
-/// touching rendered content: replace a non-`<!DOCTYPE html>` DOCTYPE (pre-EPUB-3
-/// source keeps its old one → epubcheck `HTM-004`) and fill an empty `<title>`
-/// (`RSC-005`). Returns the input unchanged when it is conformant or is not
-/// UTF-8 text.
-fn normalize_passthrough_xhtml(content: &[u8], fallback_title: &str) -> Vec<u8> {
+/// touching rendered content: `<!DOCTYPE html>` (`HTM-004`), a filled `<title>`
+/// (`RSC-005`), no attribute-less `<meta>` or placeholder `<link>` (`RSC-005`,
+/// `RSC-007`), and `page_box` as its `viewport` (`HTM-046`).
+fn normalize_passthrough_xhtml(
+    content: &[u8],
+    fallback_title: &str,
+    page_box: Option<(u32, u32)>,
+) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(content) else {
         return content.to_vec();
     };
@@ -1391,9 +1411,135 @@ fn normalize_passthrough_xhtml(content: &[u8], fallback_title: &str) -> Vec<u8> 
     if let Some(fixed) = fill_empty_title(owned.as_deref().unwrap_or(text), fallback_title) {
         owned = Some(fixed);
     }
+    if let Some(fixed) = drop_contentless_head_elements(owned.as_deref().unwrap_or(text)) {
+        owned = Some(fixed);
+    }
+    if let Some((w, h)) = page_box
+        && let Some(fixed) = ensure_viewport_meta(owned.as_deref().unwrap_or(text), w, h)
+    {
+        owned = Some(fixed);
+    }
     owned
         .map(String::into_bytes)
         .unwrap_or_else(|| content.to_vec())
+}
+
+/// Remove a `<meta>` whose only attribute is `content` (`RSC-005`) and a
+/// `<link>` whose `href` is the unfilled `XXXX…` placeholder (`RSC-007`).
+/// `None` when `s` carries neither.
+fn drop_contentless_head_elements(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut removed = false;
+    while let Some(open) = rest.find('<') {
+        let Some(close_rel) = rest[open..].find('>') else {
+            break;
+        };
+        let close = open + close_rel + 1;
+        let tag = &rest[open..close];
+        let drop = if tag.starts_with("<meta") {
+            let attrs = tag_attr_names(tag);
+            attrs.iter().any(|a| a == "content")
+                && !attrs.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "name" | "charset" | "http-equiv" | "property" | "itemprop"
+                    )
+                })
+        } else {
+            tag.starts_with("<link") && tag.contains("href=\"XXXX")
+        };
+        out.push_str(&rest[..open]);
+        if drop {
+            removed = true;
+        } else {
+            out.push_str(tag);
+        }
+        rest = &rest[close..];
+    }
+    if !removed {
+        return None;
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The attribute names `tag` carries, lowercased. Quoted values are skipped
+/// whole: `content="text/html; charset=UTF-8"` yields `content` alone.
+fn tag_attr_names(tag: &str) -> Vec<String> {
+    let b = tag.as_bytes();
+    let mut names = Vec::new();
+    let mut i = 1;
+    while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'>' && b[i] != b'/' {
+        i += 1;
+    }
+    while i < b.len() {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'/') {
+            i += 1;
+        }
+        if i >= b.len() || b[i] == b'>' {
+            break;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'>' | b'/') {
+            i += 1;
+        }
+        names.push(tag[start..i].to_ascii_lowercase());
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'=' {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            match b.get(i) {
+                Some(&q @ (b'"' | b'\'')) => {
+                    i += 1;
+                    while i < b.len() && b[i] != q {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                _ => {
+                    while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'>' {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// State `w`×`h` in `s`'s `<meta name="viewport">`, rewriting a meta that names
+/// a different box and inserting one after `<head>` when `s` declares none.
+/// `None` when `s` states this box, or carries no `<head>`.
+fn ensure_viewport_meta(s: &str, w: u32, h: u32) -> Option<String> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let want = format!("width={w}, height={h}");
+    if let Some(at) = s.find("name=\"viewport\"") {
+        let tag_start = s[..at].rfind('<')?;
+        let tag_end = tag_start + s[tag_start..].find('>')? + 1;
+        let tag = format!("<meta name=\"viewport\" content=\"{want}\"/>");
+        if s[tag_start..tag_end] == tag {
+            return None;
+        }
+        let mut out = String::with_capacity(s.len() + 32);
+        out.push_str(&s[..tag_start]);
+        out.push_str(&tag);
+        out.push_str(&s[tag_end..]);
+        return Some(out);
+    }
+    let head = s.find("<head")?;
+    let at = head + s[head..].find('>')? + 1;
+    let mut out = String::with_capacity(s.len() + 64);
+    out.push_str(&s[..at]);
+    out.push_str(&format!("\n<meta name=\"viewport\" content=\"{want}\"/>"));
+    out.push_str(&s[at..]);
+    Some(out)
 }
 
 /// Byte span of the document's `<!DOCTYPE …>` declaration, or `None` if it has
@@ -1881,8 +2027,8 @@ mod tests {
         let doc = "<?xml version=\"1.0\"?>\n\
             <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x.dtd\">\n\
             <html><head><title></title></head><body><p>hi</p></body></html>";
-        let out =
-            String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "My Book")).unwrap();
+        let out = String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "My Book", None))
+            .unwrap();
         assert!(out.contains("<!DOCTYPE html>") && !out.contains("XHTML 1.1"));
         assert!(
             out.contains("<title>My Book</title>"),
@@ -1894,7 +2040,7 @@ mod tests {
     fn passthrough_normalize_is_a_noop_for_conformant_docs() {
         let doc = "<!DOCTYPE html>\n<html><head><title>Ch. 1</title></head><body>x</body></html>";
         assert_eq!(
-            normalize_passthrough_xhtml(doc.as_bytes(), "Book"),
+            normalize_passthrough_xhtml(doc.as_bytes(), "Book", None),
             doc.as_bytes(),
             "already-valid doc is byte-identical"
         );
@@ -1909,7 +2055,8 @@ mod tests {
             "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x.dtd\">\n\
              <html><head><title></title></head><body><p>{filler}</p></body></html>"
         );
-        let out = String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "书")).unwrap();
+        let out =
+            String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "书", None)).unwrap();
         assert!(out.contains("<!DOCTYPE html>") && !out.contains("XHTML 1.1"));
         assert!(out.contains("<title>书</title>") && out.contains(&filler));
     }
@@ -1917,7 +2064,8 @@ mod tests {
     #[test]
     fn passthrough_normalize_fills_self_closing_title_and_escapes() {
         let doc = "<!DOCTYPE html>\n<html><head><title/></head><body>x</body></html>";
-        let out = String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "A & B")).unwrap();
+        let out =
+            String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "A & B", None)).unwrap();
         assert!(
             out.contains("<title>A &amp; B</title>"),
             "filled + escaped: {out}"
