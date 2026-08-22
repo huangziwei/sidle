@@ -20,6 +20,7 @@ mod config;
 mod cover_cache;
 mod dedrm;
 mod device_state;
+mod discover;
 mod eink;
 mod font;
 mod handwriting;
@@ -300,6 +301,59 @@ fn draw_panel(
     Ok(())
 }
 
+/// Re-point `cfg` at sidle-server after the Mac's address moved, and record the
+/// new one in `etc/server.conf`. `true` when the picker now has an address that
+/// answers.
+///
+/// `HOST=` is written by a cable install and by nothing else — a Wi-Fi pull is
+/// forbidden to carry `etc/server.conf` (`apps::policy::PER_INSTALL` on the
+/// desktop), since its bytes are rendered per device and hold this Kindle's
+/// bearer token. So when DHCP moves the Mac, the address that would fix the
+/// picker is the one file the picker cannot be sent, and every LAN feature —
+/// the gallery, Sync, the self-update that would deliver a new binary — is out
+/// of reach until someone plugs in a cable. Searching for the server closes
+/// that loop on the device.
+///
+/// The configured host is asked first: a failure with the server sitting right
+/// where it always was is a wedged request or a server-side error, and sweeping
+/// the subnet would answer a question nobody asked.
+fn relocate_server(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    agent: &ureq::Agent,
+    cfg: &mut config::ServerConfig,
+    log: &dyn Fn(&str),
+) -> bool {
+    if api::is_sidle_server(agent, &cfg.host, cfg.port) {
+        return false;
+    }
+    log(&format!(
+        "{} is not answering — searching the LAN",
+        cfg.host
+    ));
+    let _ = draw_panel(fb, renderer, "Looking for sidle on this network…");
+
+    let port = cfg.port;
+    let Some(found) = discover::find_server(
+        port,
+        |ip| api::is_sidle_server(agent, &ip.to_string(), port),
+        |m| log(m),
+    ) else {
+        log("search: no sidle-server on this network");
+        return false;
+    };
+
+    let host = found.to_string();
+    match config::save_host(Path::new(CONFIG_PATH), &host) {
+        // A picker that found the server but cannot record it still works this
+        // session; the next launch simply searches again.
+        Err(e) => log(&format!("search: found {host} but {CONFIG_PATH}: {e:#}")),
+        Ok(()) => log(&format!("search: {CONFIG_PATH} now points at {host}")),
+    }
+    cfg.host = host;
+    true
+}
+
 /// The one-line banner for a [`selfupdate::run_pull`] result, shared by the
 /// in-app **Update** button (inline in [`run`]) and [`run_update`]. One phrase
 /// per outcome the pull produced. A hard error reaches the update log whole.
@@ -354,7 +408,7 @@ fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> Strin
 fn run_update() -> anyhow::Result<()> {
     update_log("=== LAN self-update (--update): start ===");
     update_log(format!("argv: {:?}", std::env::args().collect::<Vec<_>>()));
-    let cfg = config::load(Path::new(CONFIG_PATH))?;
+    let mut cfg = config::load(Path::new(CONFIG_PATH))?;
     update_log(format!("server: https://{}:{}", cfg.host, cfg.port));
     // A missing or unusable CA ends `--update` here rather than at the first
     // request, so the log names the actual problem — this is the break-glass
@@ -372,6 +426,14 @@ fn run_update() -> anyhow::Result<()> {
     // Progress banner — the manifest fetch + ~1.8 MB download can take a beat on
     // a sleepy radio.
     draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
+
+    // The break-glass path is exactly the one a moved server strands: it exists
+    // to deliver a binary over the LAN, and it cannot until the address is
+    // right. Searching here costs one probe when the server is where it says it
+    // is, and the agent reuses that connection for the manifest fetch.
+    if relocate_server(&mut fb, &mut renderer, &agent, &mut cfg, &|m| update_log(m)) {
+        draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
+    }
 
     // Step-level breadcrumbs go to the dedicated update log via the closure.
     let message = update_result_message(selfupdate::run_pull(
@@ -407,7 +469,7 @@ fn run() -> anyhow::Result<()> {
         .unwrap_or(0);
     log(format!("sidle-native M9 start: ts={ts}"));
 
-    let cfg = config::load(Path::new(CONFIG_PATH))?;
+    let mut cfg = config::load(Path::new(CONFIG_PATH))?;
     log(format!("server: https://{}:{}", cfg.host, cfg.port));
 
     // One agent for the whole session: keep-alive across list + covers +
@@ -485,6 +547,12 @@ fn run() -> anyhow::Result<()> {
             Ok(b) => break b,
             Err(err) => {
                 log(format!("list_books failed: {err}"));
+                // Before the Diagnostics screen, since a moved server is a
+                // failure the picker can resolve on its own and Diagnostics
+                // would only offer to retry the address that just failed.
+                if relocate_server(&mut fb, &mut renderer, &agent, &mut cfg, &|m| log(m)) {
+                    continue;
+                }
                 match diag::run(&mut fb, &mut input, &mut renderer, &cfg, &err)? {
                     diag::Action::Retry => continue,
                     diag::Action::Exit => return Ok(()),

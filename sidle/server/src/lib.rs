@@ -152,13 +152,96 @@ pub async fn serve_with_shutdown(
         drain.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
-    axum_server::from_tcp_rustls(listener, tls)
+    let serving = axum_server::from_tcp_rustls(listener, tls.clone())
         .context("adopt TCP listener for TLS")?
         .handle(handle)
-        .serve(app.into_make_service())
-        .await
-        .context("axum_server::serve")?;
+        .serve(app.into_make_service());
+
+    // The address watch rides inside this future rather than in a task of its
+    // own, so it lives exactly as long as the server does. Embedded mode stops
+    // the server by aborting the task holding it, and a watch spawned beside
+    // that task would outlive every stop and pile up across restarts.
+    tokio::select! {
+        served = serving => served.context("axum_server::serve")?,
+        () = follow_lan_address(
+            paths.clone(),
+            tls,
+            sidle_core::library::device::deploy::detect_lan_ipv4,
+            ADDRESS_POLL,
+        ) => {}
+    }
     Ok(())
+}
+
+/// How often the running server re-checks which address the machine answers on.
+/// Cheap enough to be frequent — a UDP socket that sends no packet — and a
+/// Kindle that searches the LAN while the leaf is stale finds nothing, so the
+/// window wants to be short.
+const ADDRESS_POLL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Keep the served leaf covering the address clients dial.
+///
+/// The leaf names the machine's LAN address in a SAN, and DHCP moves that
+/// address under a running daemon. A device that finds the server at its new
+/// address is then handed a certificate that does not name it and refuses the
+/// handshake — the same symptom, from the device's side, as no server at all.
+/// Re-issuing and hot-swapping the leaf keeps the move invisible: the CA
+/// underneath is never regenerated, so every device goes on trusting the same
+/// root it was installed with.
+///
+/// A machine with no routable interface keeps the leaf it has. That is a radio
+/// or a cable, not a move, and dropping the LAN address from the certificate
+/// would break the devices that can still reach it.
+///
+/// `address` is where the machine believes it answers; production passes
+/// `detect_lan_ipv4`. Runs until dropped, so it is selected against the serve
+/// future rather than spawned.
+async fn follow_lan_address(
+    paths: LibraryPaths,
+    tls: RustlsConfig,
+    address: impl Fn() -> Option<std::net::Ipv4Addr>,
+    poll: std::time::Duration,
+) {
+    use sidle_core::library::daemon;
+
+    let mut current = address();
+    loop {
+        tokio::time::sleep(poll).await;
+        let found = address();
+        if found.is_none() || found == current {
+            continue;
+        }
+        current = found;
+
+        let issued = {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || daemon::ensure_tls_material(&paths)).await
+        };
+        match issued {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    ?err,
+                    "LAN address moved but the leaf could not be re-issued"
+                );
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(?err, "TLS re-issue task panicked");
+                continue;
+            }
+        }
+        match tls
+            .reload_from_pem_file(paths.server_cert(), paths.server_key())
+            .await
+        {
+            Ok(()) => tracing::info!(
+                address = ?current,
+                "LAN address moved — server certificate re-issued and reloaded"
+            ),
+            Err(err) => tracing::warn!(?err, "re-issued leaf could not be loaded"),
+        }
+    }
 }
 
 /// How long a drain waits for in-flight requests before the listener closes
@@ -1483,8 +1566,8 @@ fn filename_from_path(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, Config, build_router, import_changed_anything, load_or_generate_token,
-        serve_with_shutdown, staged_ext,
+        AppState, Config, Router, RustlsConfig, build_router, follow_lan_address, get, health,
+        import_changed_anything, load_or_generate_token, serve_with_shutdown, staged_ext,
     };
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -1527,6 +1610,119 @@ mod tests {
             )
             .build()
             .new_agent()
+    }
+
+    /// A leaf that stops naming the address a device dials is, from the
+    /// device's side, indistinguishable from no server at all — so a running
+    /// daemon has to re-issue and hot-swap it when the machine moves.
+    ///
+    /// Driven over a real handshake, because none of it is visible in the cert
+    /// bytes: the server starts on a leaf covering `127.0.0.1` and nothing else,
+    /// a pinned client dialling `localhost` is refused, and once the watch sees
+    /// the address change the same client on the same pinned root is served.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_moved_machine_re_issues_and_hot_swaps_its_leaf() {
+        use std::net::Ipv4Addr;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        // No `localhost` SAN: the name the client dials below is exactly what
+        // the re-issue has to add.
+        sidle_core::library::tls::issue_server_cert(&paths, &["127.0.0.1".to_string()]).unwrap();
+        let ca_pem = sidle_core::library::tls::ca_cert_pem(&paths).unwrap();
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls = RustlsConfig::from_pem_file(paths.server_cert(), paths.server_key())
+            .await
+            .unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route("/", get(health));
+        let serving = tokio::spawn(
+            axum_server::from_tcp_rustls(listener, tls.clone())
+                .unwrap()
+                .serve(app.into_make_service()),
+        );
+
+        let dial = {
+            let ca_pem = ca_pem.clone();
+            move || {
+                let ca_pem = ca_pem.clone();
+                tokio::task::spawn_blocking(move || {
+                    device_shaped_agent(&ca_pem)
+                        .get(&format!("https://localhost:{port}/"))
+                        .call()
+                        .map(|r| r.status().as_u16())
+                        .map_err(|e| e.to_string())
+                })
+            }
+        };
+
+        // Wait for the listener, dialling the address the leaf does cover.
+        let ready_pem = ca_pem.clone();
+        tokio::task::spawn_blocking(move || {
+            let agent = device_shaped_agent(&ready_pem);
+            let url = format!("https://127.0.0.1:{port}/");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if agent.get(&url).call().is_ok() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("server never accepted on 127.0.0.1:{port}");
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            dial().await.unwrap().is_err(),
+            "a leaf without a `localhost` SAN must not satisfy a client dialling `localhost`"
+        );
+
+        // The machine moves once, then holds still.
+        let moved = AtomicBool::new(false);
+        let watch = follow_lan_address(
+            paths.clone(),
+            tls,
+            move || {
+                Some(if moved.swap(true, Ordering::Relaxed) {
+                    Ipv4Addr::new(192, 0, 2, 2)
+                } else {
+                    Ipv4Addr::new(192, 0, 2, 1)
+                })
+            },
+            std::time::Duration::from_millis(10),
+        );
+
+        let served = tokio::select! {
+            () = watch => unreachable!("the watch runs until dropped"),
+            served = async {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Ok(code) = dial().await.unwrap() {
+                        return Ok(code);
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return Err("leaf never re-issued to cover `localhost`");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            } => served,
+        };
+        assert_eq!(
+            served,
+            Ok(200),
+            "the same pinned root must accept the re-issued leaf"
+        );
+
+        serving.abort();
     }
 
     /// Graceful shutdown, over a real TLS handshake: the daemon serves `GET /`
