@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "bokai"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "bstr",
@@ -5368,7 +5368,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidle"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5403,7 +5403,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "bokai",
@@ -5419,7 +5419,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5451,7 +5451,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-native"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -5471,7 +5471,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-server"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "axum",
