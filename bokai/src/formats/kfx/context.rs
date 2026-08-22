@@ -1,8 +1,4 @@
-//! Export context for KFX generation.
-//!
-//! The ExportContext is the central state management for KFX export.
-//! All shared state flows through this context, avoiding the pitfalls of
-//! scattered symbol tables, ID collision, and orphaned references.
+//! KFX export context: `ExportContext` holds symbol tables, fragment ids, anchors.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -14,23 +10,12 @@ use super::style_registry::StyleRegistry;
 use super::symbols::{KFX_SYMBOL_TABLE_SIZE, KfxSymbol};
 use super::transforms::encode_base32;
 
-/// KFX font family meaning "whatever font the reader has chosen".
-///
-/// Amazon's own converter emits this for the bulk of a book's styles; any other
-/// value pins a specific device font. See
-/// [`ExportContext::reader_font_families`].
+/// KFX font family naming the reader's chosen font; any other value pins one.
 const READER_DEFAULT_FONT: &str = "default";
 
-/// Put the reader's font at the head of a stack, keeping the source's own faces
-/// behind it as fallback: `booksming, serif` becomes `default,booksming,serif`.
-///
-/// Amazon writes exactly this shape — `default,serif`, `default,georgia,serif`,
-/// `default,hiraminpron-w3,serif-ja-v,serif-ja,serif` — rather than dropping
-/// what the source asked for. The fallback carries the glyph coverage a reader
-/// font may lack (a Latin face in a CJK book), which a bare `default` lacks.
-///
-/// A stack headed by `default` is returned unchanged: a KFX round trip keeps one
-/// `default`, not one per trip.
+/// Put the reader's font at the head of a stack, the source's own faces behind
+/// it: `booksming, serif` becomes `default,booksming,serif`, Amazon's shape. A
+/// stack headed by `default` is returned unchanged.
 fn with_reader_font_first(stack: &str) -> String {
     let compact = crate::style::compact_font_stack(stack);
     if crate::style::preferred_font_face(&compact).eq_ignore_ascii_case(READER_DEFAULT_FONT) {
@@ -39,9 +24,7 @@ fn with_reader_font_first(stack: &str) -> String {
     format!("{READER_DEFAULT_FONT},{compact}")
 }
 
-/// Symbol table for KFX export.
-///
-/// Maintains a mapping between strings and symbol IDs for the exported file.
+/// Symbol table for KFX export: string ↔ symbol ID for the exported file.
 /// Local symbols start after the shared YJ_symbols table.
 pub struct SymbolTable {
     /// Local symbols (book-specific IDs)
@@ -65,10 +48,8 @@ impl SymbolTable {
         }
     }
 
-    /// Get or create a symbol ID for a name.
-    ///
-    /// If the name starts with `$` followed by a number, it's treated as
-    /// a shared symbol reference and the number is returned directly.
+    /// Get or create a symbol ID for a name. A `$`-and-number name is a shared
+    /// symbol reference; its number is returned directly.
     pub fn get_or_intern(&mut self, name: &str) -> u64 {
         // Check if it's a shared symbol reference (starts with $)
         if let Some(id_str) = name.strip_prefix('$')
@@ -122,10 +103,8 @@ impl Default for SymbolTable {
     }
 }
 
-/// Fragment ID generator.
-///
-/// Generates unique IDs for fragments, starting at 200 to avoid
-/// collision with system fragments (0-199 are reserved).
+/// Fragment ID generator, starting at 200. IDs 0-199 are reserved for system
+/// fragments.
 pub struct IdGenerator {
     next_id: u64,
 }
@@ -246,10 +225,8 @@ impl Default for ResourceRegistry {
     }
 }
 
-/// Text accumulator for content entities.
-///
-/// Tracks text content during export and provides offset information
-/// for position maps.
+/// Text accumulator for content entities: the text seen during export and the
+/// offsets a position map needs.
 #[derive(Default)]
 pub struct TextAccumulator {
     /// Accumulated text segments
@@ -325,26 +302,9 @@ pub struct ExternalAnchor {
     pub uri: String,
 }
 
-/// Anchor registry for link resolution in KFX export.
-///
-/// KFX uses indirect anchor references: links point to anchor symbols,
-/// and anchor entities ($266) define where those symbols resolve to.
-///
-/// ## Design
-///
-/// The registry supports two lookup patterns:
-/// - **By GlobalNodeId**: For internal targets from `ResolvedLinks`
-/// - **By href string**: For link_to lookups in storyline generation
-///
-/// Both patterns share the same anchor symbols, ensuring consistency.
-///
-/// ## Example Flow
-///
-/// 1. ResolvedLinks says node X in chapter Y is an internal target
-/// 2. Registry assigns symbol "a0" to GlobalNodeId(Y, X)
-/// 3. Href "chapter.xhtml#id" is also mapped to "a0"
-/// 4. During storyline gen, link_to lookup uses href to get "a0"
-/// 5. During anchor creation, GlobalNodeId lookup confirms it's a target
+/// Anchor registry for link resolution: KFX links point to anchor symbols and
+/// anchor entities ($266) resolve them. One symbol per target, reachable by
+/// `GlobalNodeId` (internal targets) and by href string (`link_to` lookups).
 #[derive(Debug, Default)]
 pub struct AnchorRegistry {
     /// GlobalNodeId → anchor symbol name (e.g., "a0", "a1")
@@ -353,8 +313,7 @@ pub struct AnchorRegistry {
     /// ChapterId → anchor symbol (for chapter-level targets)
     chapter_to_symbol: HashMap<ChapterId, String>,
 
-    /// href string → anchor symbol (for link_to lookups)
-    /// Populated alongside node_to_symbol for href-based access
+    /// href string → anchor symbol, filled alongside `node_to_symbol`
     href_to_symbol: HashMap<String, String>,
 
     /// Symbols that have been resolved to positions (for deduplication)
@@ -382,10 +341,8 @@ impl AnchorRegistry {
         Self::default()
     }
 
-    /// Register an internal link target (a node that links point to).
-    ///
-    /// Also registers the href for href-based lookup.
-    /// Returns the anchor symbol for use in `link_to` style events.
+    /// Register an internal link target and its href. Returns the anchor symbol
+    /// a `link_to` style event carries.
     pub fn register_internal_target(&mut self, target: GlobalNodeId, href: &str) -> String {
         if let Some(symbol) = self.node_to_symbol.get(&target) {
             // Ensure href is also mapped
@@ -400,10 +357,8 @@ impl AnchorRegistry {
         symbol
     }
 
-    /// Register a chapter-level link target.
-    ///
-    /// Also registers the href for href-based lookup.
-    /// Returns the anchor symbol for use in `link_to` style events.
+    /// Register a chapter-level link target and its href. Returns the anchor
+    /// symbol a `link_to` style event carries.
     pub fn register_chapter_target(&mut self, chapter: ChapterId, href: &str) -> String {
         if let Some(symbol) = self.chapter_to_symbol.get(&chapter) {
             self.href_to_symbol.insert(href.to_string(), symbol.clone());
@@ -437,10 +392,8 @@ impl AnchorRegistry {
         symbol
     }
 
-    /// Get the anchor symbol for an href (for link_to lookups).
-    ///
-    /// This is the primary lookup method used during storyline generation.
-    /// Returns the symbol if the href was registered, or creates a new one.
+    /// The anchor symbol for an href, minted on a first lookup — the `link_to`
+    /// path taken during storyline generation.
     pub fn get_or_create_href_symbol(&mut self, href: &str) -> String {
         // A registered href keeps its symbol
         if let Some(symbol) = self.href_to_symbol.get(href) {
@@ -485,10 +438,8 @@ impl AnchorRegistry {
         self.chapter_to_symbol.contains_key(&chapter)
     }
 
-    /// Create an anchor entity for a node target.
-    ///
-    /// Call this during Pass 2 when processing a node that's a link target.
-    /// Returns the symbol for a created anchor, `None` for a resolved one.
+    /// Create an anchor entity for a node target, during Pass 2. Returns the
+    /// symbol for a created anchor, `None` for a resolved one.
     pub fn create_anchor(
         &mut self,
         target: GlobalNodeId,
@@ -517,10 +468,8 @@ impl AnchorRegistry {
         Some(symbol)
     }
 
-    /// Create an anchor entity for a chapter-level target.
-    ///
-    /// Call this during Pass 2 when generating the first content for a chapter
-    /// that's a link target.
+    /// Create an anchor entity for a chapter-level target, during Pass 2 as the
+    /// chapter's first content is generated.
     pub fn create_chapter_anchor(
         &mut self,
         chapter: ChapterId,
@@ -594,18 +543,9 @@ impl AnchorRegistry {
     }
 }
 
-/// Central context for KFX export.
-///
-/// All shared state flows through this context:
-/// - symbols: String → Symbol ID mapping
-/// - fragment_ids: Unique fragment ID generator
-/// - resource_registry: href → resource symbol mapping
-/// - section_ids: Section IDs in spine order (for reading order)
-/// - position_map: NodeId → (fragment_id, offset) for link resolution
-///
-/// The context also bridges the Schema (Micro) and Assembler (Macro) layers:
-/// - During `tokens_to_ion`, text strings are captured in `text_accumulator`
-/// - The assembler then packages these into separate Content entities
+/// Central context for KFX export: symbols, fragment ids, resources, section
+/// ids, position map. `tokens_to_ion` captures text into `text_accumulator`,
+/// which the assembler packages into Content entities.
 pub struct ExportContext {
     /// Global symbol table - strings → symbol IDs.
     pub symbols: SymbolTable,
@@ -619,20 +559,16 @@ pub struct ExportContext {
     /// Section IDs in spine order (for reading order).
     pub section_ids: Vec<u64>,
 
-    /// Text accumulator for current content entity.
-    /// Captures strings "falling out" of token conversion for the Assembler.
+    /// Text accumulator for the current content entity
     text_accumulator: TextAccumulator,
 
-    /// Current content entity name (symbol ID).
-    /// Set by the Assembler before calling tokens_to_ion.
+    /// Current content entity name (symbol ID), set before `tokens_to_ion`
     pub current_content_name: u64,
 
-    /// Position map: (ChapterId, NodeId) → Position.
-    /// Populated during Pass 1 survey for landmark resolution.
+    /// (ChapterId, NodeId) → Position, filled in the Pass 1 survey
     pub position_map: HashMap<(ChapterId, NodeId), Position>,
 
-    /// Chapter to fragment ID mapping.
-    /// Populated during Pass 1 to resolve section references.
+    /// Chapter → fragment ID, filled in Pass 1 for section references
     pub chapter_fragments: HashMap<ChapterId, u64>,
 
     /// Current chapter being processed.
@@ -644,25 +580,18 @@ pub struct ExportContext {
     /// Current text offset within the fragment.
     current_text_offset: usize,
 
-    /// Path to fragment ID mapping.
-    /// Maps source file paths (e.g., "chapter1.xhtml") to fragment IDs.
+    /// Source file path (`chapter1.xhtml`) → fragment ID
     pub path_to_fragment: HashMap<String, u64>,
 
-    /// Default style symbol ID.
-    /// All storyline elements reference this style for Kindle rendering.
+    /// Default style symbol ID, referenced by every storyline element
     pub default_style_symbol: u64,
 
     /// Style registry for deduplicating and tracking KFX styles.
     pub style_registry: StyleRegistry,
 
-    /// Memo for the `register_style_id` family: caches the built KFX style so
-    /// repeat lookups within a chapter skip the schema ingest/build. Keyed by
-    /// `(StyleId, class hint, is_link)` because the built style depends on all
-    /// three (the hint feeds the registry's dedup key and the link path forces
-    /// an underline field). The cached style flows through
-    /// `register_with_hint` on every lookup, which owns dedup and usage counts.
-    /// StyleIds are only meaningful within one chapter's `StylePool`,
-    /// so this is cleared per chapter.
+    /// Memo for the `register_style_id` family, keyed by `(StyleId, class hint,
+    /// is_link)`. Cleared per chapter: a StyleId names one chapter's
+    /// `StylePool`.
     ir_style_memo: HashMap<
         (StyleId, Option<String>, bool),
         crate::formats::kfx::style_registry::ComputedStyle,
@@ -671,8 +600,7 @@ pub struct ExportContext {
     /// Anchor registry for link target resolution.
     pub anchor_registry: AnchorRegistry,
 
-    /// Resolved landmarks mapping LandmarkType to (fragment ID, offset, label).
-    /// Populated during survey from IR landmarks and heuristics.
+    /// LandmarkType → (fragment ID, offset, label), filled during the survey
     pub landmark_fragments: HashMap<LandmarkType, LandmarkTarget>,
 
     /// Nav container name symbols (registered during Pass 1).
@@ -687,33 +615,19 @@ pub struct ExportContext {
     /// Content fragment ID for standalone cover.
     pub cover_content_id: Option<u64>,
 
-    /// Set once an in-spine chapter has been emitted via the cover storyline
-    /// path. Prevents subsequent image-only chapters (e.g. SVG-wrapped
-    /// thumbnail covers for each book section) from also being collapsed into
-    /// cover layout, which would drop their wrapping `<div id="...">` and
-    /// break TOC anchors targeting them.
+    /// Set once an in-spine chapter takes the cover storyline path
     pub inline_cover_emitted: bool,
 
-    /// Cover image pixel dimensions (width, height), probed in Pass 1 from
-    /// the cover asset's JPEG SOF / PNG IHDR header. Drives the
-    /// `fixed_width` / `fixed_height` of the cover `page_template` so the
-    /// `scale_fit` layout doesn't letterbox or pillarbox the cover.
-    /// Amazon's encoder sizes the page_template to the resource exactly;
-    /// kfx-zip-derived KFXs reliably do the same (e.g. 885×1260 cover →
-    /// 885×1260 page_template).
+    /// Cover pixel size from Pass 1: the cover `page_template`'s fixed box
     pub cover_dimensions: Option<(u32, u32)>,
 
-    /// Fixed-layout image book: drives the `kindle_capability_metadata` a
-    /// device reads to open the book in its comic reader.
+    /// Fixed-layout image book, keying `kindle_capability_metadata`.
     pub fixed_layout_book: bool,
 
-    /// Any section holds a facing pair, pairing `yj_double_page_spread` in
-    /// `content_features` with the same key in `kindle_capability_metadata`.
+    /// Any section holds a facing pair — the `yj_double_page_spread` key.
     pub double_page_spread: bool,
 
-    /// Pixel box a spine page declares for itself (`<meta name="viewport">`).
-    /// A full-page illustration or spread carries one inside an otherwise
-    /// reflowing book.
+    /// Pixel box a spine page declares (`<meta name="viewport">`)
     pub page_viewports: HashMap<ChapterId, (u32, u32)>,
 
     /// Chapters that need chapter-start anchors.
@@ -731,75 +645,34 @@ pub struct ExportContext {
     /// Text length for each content fragment ID.
     pub content_id_lengths: HashMap<u64, usize>,
 
-    /// Per-section image resource dependencies.
-    /// Maps section_name → set of resource short names (e.g., "e6") referenced by that section.
-    /// Used to build the container_entity_map dependency graph so Kindle can locate images.
+    /// section_name → its resource short names, for `container_entity_map`
     pub section_resource_deps: BTreeMap<String, BTreeSet<String>>,
 
-    /// Ruby annotation registry. Each <ruby><rt>annotation</rt></ruby> base text
-    /// gets a (ruby_name, ruby_id) pair attached as a style_event. After all
-    /// storylines emit, this registry is drained to produce ruby_content
-    /// fragments (one per chunk of N entries).
+    /// Ruby annotations, drained after the storylines into `ruby_content`
     pub ruby_registry: RubyContentRegistry,
 
-    /// Document-level writing mode symbol used in the `document_data`
-    /// fragment. Captured from the style registry *before* it is drained for
-    /// style fragment emission; defaults to `HorizontalTb`. The KOA2 reads
-    /// this to decide whether to expose the vertical-text layout controls.
+    /// `document_data` writing mode, from the style registry. `HorizontalTb`.
     pub document_writing_mode: KfxSymbol,
 
-    /// Document-level `direction` symbol (`Ltr` / `Rtl`) for `document_data`.
-    /// The device derives page-progression from this, overriding to rtl when
-    /// `document_writing_mode` ends in `-rl` (i.e. `vertical_rl`). So a
-    /// vertical-rl book keeps `Ltr` here (the override does the work, matching
-    /// Amazon), while a *horizontal* right-to-left book — an rtl manga, a
-    /// horizontally-typeset rtl title — must carry `Rtl` explicitly, since its
-    /// writing mode cannot signal the turn direction. Defaults to `Ltr`.
+    /// `document_data` `direction`; a `-rl` writing mode overrides it. `Ltr`.
     pub document_direction: KfxSymbol,
 
-    /// Writing mode the per-style `writing_mode` override is compared against —
-    /// the SOURCE's own content-derived dominant mode, NOT `document_writing_mode`
-    /// (which may be user-forced via `primary-writing-mode`). A style emits an
-    /// override only when it diverges from this. Without the split, a horizontal
-    /// source force-set to vertical stamps `horizontal_tb` on every style,
-    /// cancelling the vertical document default — the device rotates each glyph,
-    /// the webview falls back to horizontal. When the mode isn't forced this
-    /// equals `document_writing_mode`, so behavior is unchanged. Defaults to
-    /// `HorizontalTb`.
+    /// The SOURCE's dominant mode, which a per-style override is compared against
     pub style_writing_mode_baseline: KfxSymbol,
 
-    /// Whether the book ships typefaces of its own, which the device is told
-    /// through `override_kindle_font`. See
-    /// [`MetadataContext::has_publisher_fonts`](super::metadata::MetadataContext::has_publisher_fonts)
-    /// — it is what puts **Publisher Font** in the font picker and keeps the
-    /// device fonts selectable alongside it.
+    /// Whether the book ships typefaces of its own — `override_kindle_font`
     pub has_publisher_fonts: bool,
 
-    /// The `font-family` stack carrying the book's body text, which is written
-    /// with `default` at its head, deferring to the reader's font setting.
-    ///
-    /// A KFX style that names a family pins the device font; `default` defers
-    /// to the reader. So a source that puts `font-family` on its body text
-    /// would silently disable the Kindle's font control if the stack were
-    /// carried through as-is — the setting has nothing left to override. Only
-    /// the body defers; a deliberate contrast (`sans-serif-ja` headings, a
-    /// decorative `標楷體`) keeps its name, as does any face the book embeds.
-    /// `None` leaves every family untouched.
+    /// The body-text `font-family` stack; `None` leaves every family untouched
     pub reader_font_family: Option<String>,
 
-    /// Device-recognized content language stamped on every reflowable `$style`.
-    /// Amazon puts e.g. `zh-tw` on each style so the Kindle selects CJK fonts and
-    /// upright vertical orientation; without it a Chinese book gets Latin fonts
-    /// and sideways (rotated) glyphs. Empty for languages that need no hint (the
-    /// device's Latin default suffices). Set from book metadata at export start.
+    /// Content language stamped on every reflowable `$style` (`zh-tw`)
     pub content_language: String,
 }
 
-/// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
-///
-/// Calibre-produced KFX groups annotations into fragments of ~200 entries, one
-/// Ion entity each with a `content_list` of annotation structs. Base text
-/// style_events reference them via `ruby_name` (fragment kfx_id) + `ruby_id`.
+/// Ruby annotation string → `(ruby_name, ruby_id)`. Calibre groups annotations
+/// into fragments of ~200, one Ion entity each; a base text's style_event names
+/// the fragment kfx_id and the 1-indexed id within it.
 #[derive(Debug, Clone, Default)]
 pub struct RubyContentRegistry {
     /// Annotations in the order they were registered.
@@ -809,8 +682,7 @@ pub struct RubyContentRegistry {
 }
 
 impl RubyContentRegistry {
-    /// Max content_list entries per ruby_content fragment. Matches calibre's
-    /// observed grouping (10 fragments × ~220 entries for the 夏 reference).
+    /// Max content_list entries per ruby_content fragment, calibre's grouping
     pub const ENTRIES_PER_FRAGMENT: usize = 250;
 
     pub fn new() -> Self {
@@ -941,8 +813,7 @@ impl ExportContext {
     /// Prepare context for processing a new chapter.
     pub fn begin_chapter(&mut self, content_name: &str) -> u64 {
         self.text_accumulator = TextAccumulator::new();
-        // StyleIds are chapter-local, so the style memo must not survive across
-        // chapters (see `ir_style_memo`).
+        // StyleIds are chapter-local; `ir_style_memo` never crosses a chapter.
         self.ir_style_memo.clear();
         self.current_content_name = self.symbols.get_or_intern(content_name);
         self.current_content_name
@@ -1000,12 +871,9 @@ impl ExportContext {
         self.register_ir_style_with_hint(ir_style, None)
     }
 
-    /// Mirror `self.style_writing_mode_baseline` (a KFX symbol) as the IR
-    /// `WritingMode` enum — the baseline the style ingest pipeline compares each
-    /// style against when deciding whether to emit a `writing_mode` override.
-    /// This is the source's own content-derived mode, so a user-forced document
-    /// mode doesn't turn every source style into a spurious override. The export
-    /// entry point sets it before any IR style is registered.
+    /// `self.style_writing_mode_baseline` as the IR `WritingMode` enum — the
+    /// baseline a style's `writing_mode` override is compared against. Set by
+    /// the export entry point ahead of any IR style registration.
     pub fn ir_style_baseline_writing_mode(&self) -> crate::style::WritingMode {
         kfx_symbol_to_ir_writing_mode(self.style_writing_mode_baseline)
     }
@@ -1027,10 +895,9 @@ impl ExportContext {
         )
     }
 
-    /// Whether the book carries vertical text anywhere — either as the document
-    /// default or in the source's own authored axis. The two diverge only when
-    /// `primary-writing-mode` forces a document horizontal over vertical
-    /// content, which is what separates this from [`Self::is_vertical_document`].
+    /// Whether the book carries vertical text anywhere: the document default or
+    /// the source's authored axis. `primary-writing-mode` forcing a horizontal
+    /// document is what parts this from [`Self::is_vertical_document`].
     pub fn has_vertical_content(&self) -> bool {
         self.is_vertical_document()
             || matches!(
@@ -1039,15 +906,9 @@ impl ExportContext {
             )
     }
 
-    /// Rotate a style's physical box-model margins/padding into the document's
-    /// writing axis when the style was authored in a different one — i.e. when
-    /// the document mode is force-set (a horizontal EPUB converted to
-    /// vertical-rl). The source's block-flow `margin-top`/`margin-bottom`
-    /// (paragraph spacing) then lands on `margin-right`/`margin-left`, so the
-    /// device renders inter-column spacing instead of dropping it — matching
-    /// Amazon's own vertical KFX, which carries paragraph spacing as
-    /// `margin_right`. Returns the input untouched when the axes agree — the
-    /// common, non-forced case.
+    /// Rotate a style's physical margins/padding into the document's writing
+    /// axis. A horizontal source forced to vertical-rl moves its block-flow
+    /// `margin-top`/`-bottom` onto `margin-right`/`-left`, Amazon's shape.
     fn box_transposed_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
@@ -1065,12 +926,9 @@ impl ExportContext {
         std::borrow::Cow::Owned(s)
     }
 
-    /// The IR style as the KFX writer should see it: box model transposed for
-    /// the document's axis, and the body font handed back to the reader.
-    ///
-    /// See [`Self::reader_font_family`] for why the body family becomes
-    /// `default` — in short, a KFX style that names a family pins the device
-    /// font, leaving the reader's font setting nothing to override.
+    /// The IR style as the KFX writer sees it: box model transposed for the
+    /// document's axis, body font handed back to the reader. See
+    /// [`Self::reader_font_family`].
     fn prepared_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
@@ -1085,15 +943,9 @@ impl ExportContext {
         out
     }
 
-    /// The `layout` symbol to stamp on a `type: container`. A KFX container
-    /// stacks its children along the block-progression axis, so the axis is
-    /// governed by the document's writing mode: block flow runs *horizontally*
-    /// for vertical writing (縦書き — vertical-rl/lr) and *vertically* for
-    /// horizontal-tb. Amazon's KFXGEN follows this — every bordered box in a
-    /// vertical-rl book carries `layout: horizontal`. Emitting `vertical`
-    /// unconditionally puts a vertical-book box in the wrong formatting axis:
-    /// its inline size fills the container (an oversized, full-block box) and
-    /// its content pins to the inline start (left) edge.
+    /// The `layout` symbol for a `type: container` — its children's
+    /// block-progression axis, which the document's writing mode governs:
+    /// `horizontal` for vertical writing (縦書き), `vertical` for horizontal-tb.
     pub fn container_layout_symbol(&self) -> KfxSymbol {
         match self.document_writing_mode {
             KfxSymbol::VerticalRl | KfxSymbol::VerticalLr => KfxSymbol::Horizontal,
@@ -1101,11 +953,9 @@ impl ExportContext {
         }
     }
 
-    /// Register an IR style with an optional source-class hint.
-    ///
-    /// The hint is the originating element's `class` attribute string. The
-    /// registry takes it as the KFX style symbol when it is a single valid
-    /// unclaimed identifier. See `StyleRegistry::register_with_hint`.
+    /// Register an IR style with an optional source-class hint — the
+    /// originating element's `class`, taken as the KFX style symbol when it is a
+    /// single valid unclaimed identifier. See `StyleRegistry::register_with_hint`.
     pub fn register_ir_style_with_hint(
         &mut self,
         ir_style: &crate::style::ComputedStyle,
@@ -1116,13 +966,9 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    /// Build the KFX computed style for an IR style (schema ingest + finalize) —
-    /// the expensive half of registration, memoized across a chapter by
-    /// `register_style_id_with_hint`. Every built style flows through
-    /// `register_with_hint`, which owns dedup and usage counting.
-    /// The KFX properties an IR style states, for the few callers that need
-    /// them outside a `$157 style` fragment — a table's `column_format`
-    /// states its geometry inline rather than through a named style.
+    /// The KFX properties an IR style states, for a caller outside a
+    /// `$157 style` fragment — a table's `column_format` states its geometry
+    /// inline.
     pub fn kfx_properties(
         &self,
         ir_style: &crate::style::ComputedStyle,
@@ -1144,14 +990,9 @@ impl ExportContext {
         kfx_style
     }
 
-    /// Attach the style's background picture, if it declares one.
-    ///
-    /// KFX names the picture with a symbol pointing at an `external_resource`
-    /// — the same reference an `<img>` element carries — so this cannot go
-    /// through the schema's string transforms. Both the short name and its
-    /// symbol are minted in export Pass 1 for every media asset, so an
-    /// immutable lookup is enough here; a `background-image` naming something
-    /// the book does not ship simply resolves to nothing and is dropped.
+    /// Attach the style's background picture. KFX names it with a symbol
+    /// pointing at an `external_resource`, minted in Pass 1; a name the book
+    /// does not ship resolves to nothing and drops.
     fn apply_background_image(
         &self,
         ir_style: &crate::style::ComputedStyle,
@@ -1166,12 +1007,9 @@ impl ExportContext {
         }
     }
 
-    /// Register a Link-element style. Like `register_ir_style_with_hint`,
-    /// but forces an explicit `underline` field (either `solid` or `none`)
-    /// when the cascade didn't set one. Kindle's renderer defaults `<a>` to
-    /// underlined; without an explicit `underline: none`, source EPUBs that
-    /// kill link underlines via `text-decoration: none` (e.g. calibre's
-    /// `.calibre3`) render with stripes on device.
+    /// Register a Link-element style: `register_ir_style_with_hint` plus an
+    /// explicit `underline` (`solid` or `none`) where the cascade set none.
+    /// Kindle's renderer defaults `<a>` to underlined.
     pub fn register_link_ir_style_with_hint(
         &mut self,
         ir_style: &crate::style::ComputedStyle,
@@ -1247,14 +1085,9 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    /// Register an IR style with extra KFX properties the IR's own style
-    /// vocabulary has no room for.
-    ///
-    /// A table cell's `table_column_span` / `table_row_span` is such a
-    /// property: Amazon writes it into the cell's `$157 style` rather than
-    /// onto the content element, so it has to join the style at registration
-    /// — and because it participates in the style's identity, cells that span
-    /// differently correctly land on different styles.
+    /// Register an IR style with extra KFX properties the IR style vocabulary
+    /// has no room for. Amazon writes a cell's `table_column_span` /
+    /// `table_row_span` into its `$157 style`, part of the style's identity.
     pub fn register_style_id_with_extras(
         &mut self,
         style_id: StyleId,
@@ -1276,16 +1109,9 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    /// Register the bare tate-chu-yoko (縦中横) style and return its symbol.
-    /// The style carries only `text_combine_upright: all`;
-    /// `register_ir_style_with_hint` completes it with `writing_mode:
-    /// horizontal_tb` + `character_width: auto` (see `finalize_tatechuyoko`),
-    /// matching the combine style in Amazon's own vertical CJK KFX. Applied as
-    /// an INLINE span over a short digit run in a vertical book — the digits
-    /// then lay out flat/upright in one cell instead of rotating sideways.
-    /// Inline (not block) is deliberate: Amazon always renders the combine run
-    /// as `render: inline`, and a block-level `text_combine` is ignored by the
-    /// device.
+    /// Register the bare tate-chu-yoko (縦中横) style and return its symbol. It
+    /// carries `text_combine_upright: all`; `finalize_tatechuyoko` completes it.
+    /// Applied as an INLINE span, Amazon's `render: inline`.
     pub fn register_tatechuyoko_style(&mut self) -> u64 {
         let s = crate::style::ComputedStyle {
             text_combine_upright: crate::style::TextCombineUpright::All,
@@ -1322,9 +1148,7 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    // =========================================================================
     // Pass 1: Survey / Position Tracking
-    // =========================================================================
 
     /// Begin surveying a chapter.
     pub fn begin_chapter_survey(&mut self, chapter_id: ChapterId, path: &str) -> u64 {
@@ -1473,9 +1297,7 @@ impl ExportContext {
         self.current_text_offset
     }
 
-    // =========================================================================
     // Pass 2: Position Lookup
-    // =========================================================================
 
     /// Look up position for a node.
     pub fn get_position(&self, chapter_id: ChapterId, node_id: NodeId) -> Option<Position> {
@@ -1503,17 +1325,14 @@ impl ExportContext {
         format!("kindle:pos:fid:{}:off:{}", fid_encoded, off_encoded)
     }
 
-    // =========================================================================
     // TOC Anchor Management
-    // =========================================================================
 
     /// Register TOC entries to mark their targets for anchor creation.
     ///
     /// Uses the pre-resolved `target` field from `ResolvedLinks`.
     pub fn register_toc_targets(&mut self, entries: &[TocEntry]) {
         for entry in entries {
-            // `resolve_links` owns target resolution; this registers the entry
-            // for anchor creation.
+            // `resolve_links` owns target resolution; this registers the entry.
 
             // Recurse into children
             if !entry.children.is_empty() {
@@ -1525,12 +1344,8 @@ impl ExportContext {
     /// Update landmark fragment IDs to use storyline content IDs.
     pub fn fix_landmark_content_ids(&mut self) {
         for (landmark_type, target) in self.landmark_fragments.iter_mut() {
-            // The cover landmark stays at the section's page-template id (the
-            // container position), matching a real Amazon KFX, whose `cover_page`
-            // targets the page_template `id`. Remapping it to the storyline
-            // content id (like other landmarks) makes the device render the cover
-            // as an ordinary flowed page (chrome + margins) instead of the
-            // full-screen cover.
+            // The cover landmark stays at the section's page-template id, the
+            // target a real Amazon KFX gives `cover_page`.
             if *landmark_type == LandmarkType::Cover {
                 continue;
             }
@@ -1567,13 +1382,9 @@ impl ExportContext {
     }
 }
 
-/// Complete a tate-chu-yoko (縦中横) style. A run marked `text_combine: all`
-/// must lay out horizontally within the vertical column, so Amazon's own KFX
-/// pairs it with `writing_mode: horizontal_tb` + `character_width: auto` on
-/// every combine style. The schema suppresses `horizontal_tb` (it matches the
-/// source's horizontal baseline in a force-vertical book) and has no
-/// `character_width` rule, so set both here whenever a built style carries
-/// text_combine — otherwise the device leaves the digits rotated.
+/// Complete a tate-chu-yoko (縦中横) style: Amazon pairs `text_combine: all`
+/// with `writing_mode: horizontal_tb` + `character_width: auto`. The schema
+/// suppresses the first and has no rule for the second; both are set here.
 fn finalize_tatechuyoko(kfx_style: &mut crate::formats::kfx::style_registry::ComputedStyle) {
     use crate::formats::kfx::style_schema::KfxValue;
     if matches!(
@@ -1634,10 +1445,8 @@ fn rotate_box_model(
     s.padding_left = l;
 }
 
-/// `(top, right, bottom, left)` given in `from`'s axes, re-expressed as
-/// `(top, right, bottom, left)` in `to`'s axes with the same *logical* sides
-/// (block-start/end, inline-start/end). Assumes ltr inline direction for
-/// `horizontal-tb` — true for the CJK books this serves.
+/// `(top, right, bottom, left)` given in `from`'s axes, re-expressed in `to`'s
+/// with the same logical sides. `horizontal-tb` takes ltr inline direction.
 fn rotate_sides<T: Copy>(
     top: T,
     right: T,
@@ -1681,11 +1490,8 @@ mod tests {
     #[test]
     fn test_rotate_sides_horizontal_to_vertical_rl() {
         use crate::style::WritingMode::{HorizontalTb, VerticalRl};
-        // Physical (top, right, bottom, left) = (T, R, B, L). Forcing a
-        // horizontal-authored style into vertical-rl must move block-flow
-        // margins (top/bottom = paragraph spacing) onto the block axis, which
-        // is right/left in vertical-rl. Inline margins (left/right) move to
-        // top/bottom.
+        // Physical (top, right, bottom, left) = (T, R, B, L). vertical-rl puts
+        // the block axis on right/left and the inline axis on top/bottom.
         let (t, r, b, l) = rotate_sides("T", "R", "B", "L", HorizontalTb, VerticalRl);
         assert_eq!((t, r, b, l), ("L", "T", "R", "B"));
         // margin-top (block-start) → margin-right; margin-bottom → margin-left.

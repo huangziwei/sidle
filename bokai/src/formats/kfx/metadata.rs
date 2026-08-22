@@ -1,8 +1,5 @@
-//! KFX metadata schema - declarative mapping from IR to KFX metadata.
-//!
-//! This module defines the rules for converting book metadata into KFX's
-//! categorised_metadata format. Adding new metadata fields requires only
-//! updating the schema, not changing export logic.
+//! KFX metadata schema: [`metadata_schema`] holds the rules converting book
+//! metadata into KFX `categorised_metadata`. A new field is a new rule.
 
 use crate::model::Metadata;
 
@@ -25,9 +22,7 @@ pub enum CjkLang {
 
 /// Classify a book's (BCP-47-ish) language tag into a [`CjkLang`], or `None`
 /// for Latin/other. Case- and separator-insensitive (`zh_Hant`, `ZH-HANT`,
-/// `zh-hant` all match). This is the single source of truth both language
-/// mappers below share, so the book-level tag and the per-`$style` tag never
-/// drift apart.
+/// `zh-hant` all match). Both language mappers below share it.
 pub fn classify_cjk_language(book_lang: &str) -> Option<CjkLang> {
     let l = book_lang.trim().to_ascii_lowercase().replace('_', "-");
     match l.as_str() {
@@ -40,14 +35,9 @@ pub fn classify_cjk_language(book_lang: &str) -> Option<CjkLang> {
     }
 }
 
-/// The book-level `language` metadata value in Amazon's device form. The
-/// Kindle library service reads this to register the book's language (and pick
-/// CJK fonts); it wants the lowercase script-subtag form Amazon ships
-/// (`zh-hant`, not the BCP-47-canonical `zh-Hant`), or the device falls back
-/// to Latin fonts. Non-CJK tags pass through unchanged.
-///
-/// Distinct from [`kfx_content_language`]: Amazon stamps `zh-hant` on the book
-/// but `zh-tw` on each `$style` — verified against its own Chinese KFX.
+/// The book-level `language` metadata value in Amazon's device form: the
+/// lowercase script-subtag form (`zh-hant`, not `zh-Hant`). Non-CJK tags pass
+/// through. [`kfx_content_language`] stamps `zh-tw` on each `$style`.
 pub fn kfx_book_language(book_lang: &str) -> String {
     match classify_cjk_language(book_lang) {
         Some(CjkLang::ZhHant) => "zh-hant".to_string(),
@@ -59,13 +49,9 @@ pub fn kfx_book_language(book_lang: &str) -> String {
     }
 }
 
-/// The content-level `language` to stamp on each reflowable `$style`, mapping
-/// the book's language to the device locale Amazon uses on its own KFX styles —
-/// so the Kindle selects CJK fonts and upright vertical orientation instead of
-/// the Latin default (rotated glyphs). Returns empty for languages that need no
-/// such hint. Note the per-style form differs from the book-level one
-/// ([`kfx_book_language`]): Traditional Chinese is `zh-tw` here, `zh-hant`
-/// there.
+/// The content-level `language` for each reflowable `$style`, in Amazon's
+/// device locale form. Empty for languages needing no hint; Traditional Chinese
+/// is `zh-tw` here and `zh-hant` in [`kfx_book_language`].
 pub fn kfx_content_language(book_lang: &str) -> String {
     match classify_cjk_language(book_lang) {
         Some(CjkLang::ZhHant) => "zh-tw".to_string(),
@@ -78,11 +64,8 @@ pub fn kfx_content_language(book_lang: &str) -> String {
 }
 
 /// The `com.amazon.yjconversion` `content_features` reflow-language marker key
-/// for a CJK language, or `None` if the language has no such marker. Amazon
-/// stamps this alongside the book `language` to activate the device's per-script
-/// reflow typography; a Chinese/Japanese book without it renders with Latin
-/// fonts even when the `language` tag is correct. Keys and versions are from
-/// `kfxlib/yj_versions.py`. Korean has no marker in that table.
+/// for a CJK language, `None` where the language has none. Keys and versions
+/// come from `kfxlib/yj_versions.py`; Korean has no marker there.
 pub fn cjk_reflow_feature(book_lang: &str) -> Option<(&'static str, i64)> {
     match classify_cjk_language(book_lang) {
         Some(CjkLang::ZhHant) => Some(("tcn-reflow-language", 1)),
@@ -101,9 +84,8 @@ pub enum MetadataCategory {
     KindleEbook,
     /// Creator/audit information
     KindleAudit,
-    /// Device-level capability flags. Calibre emits this with an empty
-    /// metadata list; the on-device library scanner appears to need the
-    /// category present to classify the file as a complete Kindle book.
+    /// Device-level capability flags. A fixed-layout book states its
+    /// comic-reader keys here; calibre emits the category with an empty list.
     KindleCapability,
 }
 
@@ -141,10 +123,9 @@ pub enum MetadataSource {
     Dynamic(MetadataField),
 }
 
-/// Emitted metadata value — either a string or an Ion-native bool. Calibre's
-/// `is_sample` and `override_kindle_font` use Ion booleans, not the string
-/// "false"; `kindle_capability_metadata` uses Ion ints. Each Ion type has its
-/// own variant.
+/// Emitted metadata value. Calibre's `is_sample` and `override_kindle_font` are
+/// Ion bools and `kindle_capability_metadata` is Ion ints; each Ion type has a
+/// variant.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     Text(String),
@@ -179,11 +160,10 @@ pub enum MetadataField {
     AssetId,
     /// Book ID - from context (derived from identifier), not Metadata.
     BookId,
-    /// ASIN - from context. For sideloaded files we mint a 32-char
-    /// uppercase-alphanumeric value; the Kindle library uses it as the
-    /// per-book key when caching the cover thumbnail and sleep-screen art.
+    /// ASIN - from context. A sideloaded file gets a minted 32-char
+    /// uppercase-alphanumeric value, the Kindle library's per-book cache key.
     Asin,
-    /// content_id - calibre uses the same value as ASIN; we mirror that.
+    /// content_id - the same value as ASIN, matching calibre.
     ContentId,
     /// dcterms:modified timestamp
     ModifiedDate,
@@ -222,9 +202,8 @@ impl MetadataField {
                     Some(&meta.language)
                 }
             }
-            // Single-author convenience; `build_category_entries` emits one
-            // repeated `author` entry per author (Amazon's shape) — use that
-            // path instead when emitting to KFX.
+            // Single-author convenience. `build_category_entries` emits one
+            // repeated `author` entry per author, Amazon's shape.
             MetadataField::Author => meta.authors.first().map(|s| s.as_str()),
             MetadataField::Description => meta.description.as_deref(),
             MetadataField::Publisher => meta.publisher.as_deref(),
@@ -261,10 +240,8 @@ impl MetadataField {
     }
 }
 
-/// Get the standard KFX metadata schema.
-///
-/// This returns all the rules for converting book metadata to KFX format.
-/// To add a new metadata field, add a rule here - no export code changes needed.
+/// Get the standard KFX metadata schema: every rule converting book metadata to
+/// KFX. A new field is a new rule here, with no export-code change.
 pub fn metadata_schema() -> Vec<MetadataRule> {
     vec![
         // kindle_title_metadata category
@@ -323,14 +300,9 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             category: MetadataCategory::KindleTitle,
             source: MetadataSource::Dynamic(MetadataField::ContentId),
         },
-        // Always PDOC — `cde_content_type` states a file's provenance, not its
-        // genre, and everything this writer produces is a personal document.
-        // The device reads it as provenance too: any store type (EBOK, MAGZ, …)
-        // makes it try an ASIN-catalogue lookup, which fails for a sideload and
-        // leaves the library tile and sleep-screen art blank. So a periodical is
-        // declared PDOC like everything else, and `Metadata::periodical` stays a
-        // fact about the content — it names the issue, see
-        // `formats/mobi/metadata.rs::issue_title` — never a declaration.
+        // Always PDOC — `cde_content_type` states provenance, not genre, and
+        // this writer produces personal documents. A store type (EBOK, MAGZ, …)
+        // triggers an ASIN-catalogue lookup that fails for a sideload.
         MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
@@ -399,10 +371,8 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
 
 use crate::util::truncate_to_date;
 
-/// Context for metadata entry building.
-///
-/// This provides values that need transformation during export,
-/// such as resource names that are generated during the export process.
+/// Context for metadata entry building: the values transformed during export,
+/// such as resource names generated by the export pass.
 #[derive(Debug, Default)]
 pub struct MetadataContext<'a> {
     /// Version string for audit metadata.
@@ -415,39 +385,21 @@ pub struct MetadataContext<'a> {
     /// Book ID (stable per publication, derived from identifier).
     /// Format: 23-character URL-safe Base64.
     pub book_id: Option<String>,
-    /// ASIN — real Amazon catalogue identifier. Only set when the source
-    /// carries a genuine ASIN (e.g. KFX → EPUB → KFX where the catalogue
-    /// value travelled in); never fabricated, because anything that queries
-    /// Amazon's catalogue by ASIN (cover fetch, store lookup) gets nothing
-    /// back for a synthesized value.
+    /// ASIN — real Amazon catalogue identifier, set only when the source
+    /// carries a genuine one (KFX → EPUB → KFX). A synthesized value returns
+    /// nothing from any catalogue query.
     pub asin: Option<String>,
-    /// Whether the book ships typefaces of its own, written out as
-    /// `override_kindle_font`.
-    ///
-    /// The name reads backwards: `true` does not force the publisher's font, it
-    /// *offers* it. The device adds a **Publisher Font** entry to the font
-    /// picker, selects it, and lets the reader switch away to a device font.
-    /// Left `false`, a book whose styles name an embedded face renders in that
-    /// face with no way to change it — the font picker lists only device fonts,
-    /// and none of them takes effect.
+    /// `override_kindle_font`: `true` offers the publisher's font in the picker.
     pub has_publisher_fonts: bool,
 
-    /// `content_id` — device-internal identifier Kindle uses to key the
-    /// per-book `.sdr` state directory (bookmarks, reading position,
-    /// navigation overlay). Distinct from ASIN: it never leaves the device
-    /// so it can be safely synthesized from the publication identifier.
-    /// Empty `content_id` is what breaks the in-book exit menu on
-    /// sideloaded PDOC titles.
+    /// `content_id` — device-internal key for the per-book `.sdr` state
+    /// directory. An empty value breaks the in-book exit menu on a PDOC title.
     pub content_id: Option<String>,
 }
 
-/// Generate a book ID from a publication identifier.
-///
-/// The book ID is a stable identifier for the publication that persists
-/// across different exports of the same book. It's derived deterministically
-/// from the book's identifier (e.g., ISBN, UUID).
-///
-/// Format: 23-character URL-safe Base64 (version byte + 16 derived bytes)
+/// Generate a book ID from a publication identifier: 23-character URL-safe
+/// Base64 (version byte + 16 derived bytes), derived deterministically and
+/// stable across exports of the same book.
 pub fn generate_book_id(identifier: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -498,14 +450,9 @@ fn base64_url_encode(bytes: &[u8]) -> String {
     result
 }
 
-/// Generate a 32-char uppercase-alphanumeric `content_id` deterministically
-/// from the publication identifier. This is the **device-internal** key
-/// Kindle uses to name the per-book `.sdr` directory (bookmarks, reading
-/// position, navigation chrome). Same shape as an Amazon ASIN — Kindle's
-/// schema expects 32 chars from the Crockford-style alphabet — but the
-/// value is local-only and is never sent to Amazon. Sideloaded PDOC titles
-/// without a `content_id` lose their `.sdr` binding, which breaks the
-/// in-book exit menu on the device.
+/// Generate a 32-char uppercase-alphanumeric `content_id` deterministically from
+/// the publication identifier — the device-internal key naming the per-book
+/// `.sdr` directory. Local-only, never sent to Amazon.
 pub fn generate_content_id(identifier: &str) -> String {
     let digest = sha1_smol::Sha1::from(identifier.as_bytes())
         .digest()
@@ -529,40 +476,15 @@ pub fn looks_like_real_amazon_asin(s: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// Compute the identifier a produced file will carry, synthesized from
-/// `meta.identifier` via [`generate_content_id`]. `None` when the source has no
-/// identifier to derive from.
-///
-/// A source ASIN is deliberately **not** passed through, even when it has the
-/// real Amazon shape. The file we produce is a conversion, not the catalogue
-/// item it was made from, and a Kindle keys its catalog on this value: stamped
-/// with the original's ASIN, the two become one entry as far as the device is
-/// concerned — one covering the other in the library, sharing a series tile,
-/// sharing the sidecar that holds reading position. A synthesized value keeps
-/// the conversion distinct from the thing it was converted from.
-///
-/// Callers downstream of the export use this to learn what value Kindle will
-/// see on the device — it becomes the on-device `<title>_<ASIN>.sdr/`
-/// directory key, so anything managing those sidecars needs it without
-/// re-parsing the produced KFX.
+/// The identifier a produced file carries, synthesized from `meta.identifier`
+/// via [`generate_content_id`]; `None` without one. A source ASIN never passes
+/// through: it collapses the conversion and its source into one library entry.
 pub fn resolve_export_asin(meta: &Metadata) -> Option<String> {
     (!meta.identifier.is_empty()).then(|| generate_content_id(&meta.identifier))
 }
 
-/// Build metadata entries for a category from the schema.
-///
-/// This is a pure function that applies the schema rules to extract
-/// metadata values from the book's Metadata struct.
-///
-/// # Arguments
-///
-/// * `category` - The category to build entries for
-/// * `meta` - The book's metadata
-/// * `ctx` - Export context with transformed values (version, cover resource name)
-///
-/// # Returns
-///
-/// A vector of (key, value) pairs for the category.
+/// Build metadata entries for a category from the schema: applies the rules to
+/// `meta` and `ctx`, returning (key, value) pairs.
 pub fn build_category_entries(
     category: MetadataCategory,
     meta: &Metadata,
@@ -606,18 +528,14 @@ pub fn build_category_entries(
                         Some(MetadataValue::Bool(ctx.has_publisher_fonts))
                     }
                     MetadataField::ContentId => {
-                        // Device-internal `.sdr` key. Always synthesized from
-                        // the identifier so PDOC sideloads have stable per-book
-                        // state. Independent of the ASIN.
+                        // Device-internal `.sdr` key, synthesized from the
+                        // identifier. Independent of the ASIN.
                         ctx.content_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Author => {
-                        // One `author` entry PER author — Amazon's own
-                        // kindle_title_metadata repeats the key (calibre's
-                        // writer joins with " & ", but real Amazon files
-                        // don't, and the joined form flattens the author
-                        // list on every round-trip). The importer reads
-                        // each repeated key verbatim.
+                        // One `author` entry PER author — Amazon's
+                        // kindle_title_metadata repeats the key. The importer
+                        // reads each repeated key verbatim.
                         for a in &meta.authors {
                             entries.push((rule.key, MetadataValue::Text(a.clone())));
                         }
@@ -638,9 +556,8 @@ pub fn build_category_entries(
                         Some(MetadataValue::Text(crate::util::time_now_iso8601_utc()))
                     }
                     MetadataField::Language => {
-                        // Normalize to Amazon's device form (e.g. `zh-Hant` →
-                        // `zh-hant`) so the Kindle library service registers the
-                        // language and offers CJK fonts. Non-CJK tags pass through.
+                        // Normalize to Amazon's device form (`zh-Hant` →
+                        // `zh-hant`). Non-CJK tags pass through.
                         field
                             .extract(meta)
                             .map(|s| MetadataValue::Text(kfx_book_language(s)))
@@ -648,7 +565,7 @@ pub fn build_category_entries(
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
-                            // Format as integer if whole number, otherwise with decimal
+                            // A whole number formats as an integer
                             if p.fract() == 0.0 {
                                 MetadataValue::Text(format!("{}", p as i64))
                             } else {
@@ -942,8 +859,8 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "cde_content_type" && v == "PDOC")
         );
-        // The periodical keys are absent entirely — emitting them empty would
-        // declare the book a magazine.
+        // The periodical keys are absent entirely — an empty value declares the
+        // book a magazine.
         for key in ["itemType", "periodicals_generation_V2"] {
             assert!(
                 !entries.iter().any(|(k, _)| *k == key),
@@ -1008,8 +925,8 @@ mod tests {
             entry(&plain, "is_sample"),
             Some(MetadataValue::Bool(false))
         ));
-        // No typefaces of its own: the device's own fonts are the only choice,
-        // so there is no Publisher Font entry to offer.
+        // No typefaces of its own: the device fonts are the only choice, with
+        // no Publisher Font entry.
         assert!(matches!(
             entry(&plain, "override_kindle_font"),
             Some(MetadataValue::Bool(false))
@@ -1040,7 +957,7 @@ mod tests {
         assert_eq!(stamped, generate_content_id("urn:uuid:9f1c"));
         assert!(!looks_like_real_amazon_asin(&stamped));
 
-        // Derived from the identifier alone, so the same book converted twice
+        // Derived from the identifier alone: the same book converted twice
         // keeps the reading position bound to it.
         let no_asin = Metadata {
             identifier: "urn:uuid:9f1c".to_string(),

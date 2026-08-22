@@ -1,31 +1,6 @@
-//! Image sanitization for KFX bundling.
-//!
-//! Kindle's reflowable renderer is finicky about embedded image formats:
-//! KDP's "Image Guidelines — Reflowable" explicitly warns that multi-frame
-//! GIFs and images with transparent areas don't render correctly, and
-//! Amazon's authoritative KFX pipeline transcodes every input image to
-//! JPEG-XR on their backend. We don't have a JPEG-XR encoder on hand, but
-//! plain JPEG is a KFX-supported format and renders consistently on every
-//! Kindle reader, so this module re-encodes any non-JPEG image (GIF, PNG,
-//! WebP, BMP) as JPEG before the EPUB→KFX export bundles it.
-//!
-//! For JPEG inputs the bytes are NOT decoded — we walk the segments and
-//! strip APP1–APP15 + COM (metadata), then ensure a JFIF APP0 is present.
-//! Image data (DQT/DHT/SOF/SOS) is left untouched, so the operation is
-//! lossless. The reason: a KOA2 sleep-screen pre-generates the screensaver
-//! thumbnail with a stricter JPEG decoder than the in-book reader or the
-//! library cover view. An EXIF-tagged JPEG (`FF D8 FF E1`) with a TIFF/LZW
-//! thumbnail inside reads fine in both of those, but the screensaver
-//! pipeline rejects it and falls back to the auto-generated title card.
-//! Stripping APP1 before bundle restores the real cover on sleep.
-//!
-//! Animated images keep only the first frame — the device can't play
-//! frames anyway and most CJK ebook GIFs are single-frame (gaiji glyphs,
-//! photo-style illustrations).
-//!
-//! SVG is not transcoded here: it's already vector, and the export path
-//! already has a `MediaFormat::Svg` arm. JXR is handled separately in
-//! [`crate::formats::kfx::jxr`] for the reverse direction.
+//! Image sanitization for KFX bundling: a non-JPEG raster (GIF, PNG, WebP, BMP)
+//! re-encodes as JPEG; a JPEG keeps its image data and loses APP1–APP15 + COM.
+//! An animated image keeps its first frame; SVG passes through.
 
 use image::{DynamicImage, ImageReader};
 
@@ -37,14 +12,9 @@ const JFIF_APP0: [u8; 18] = [
     0x00, 0x00,
 ];
 
-/// Prepare a raster image for embedding in a KFX. For JPEG inputs, strip
-/// metadata segments (APP1–APP15, COM) and ensure a JFIF APP0 is present.
-/// For non-JPEG raster inputs (GIF, PNG, WebP, BMP), decode and re-encode
-/// as JFIF JPEG.
-///
-/// Returns `None` when no change is needed (already-clean JPEG, SVG,
-/// unknown format) or when sanitization fails. The caller should fall
-/// back to the original bytes on `None`.
+/// Prepare a raster image for embedding in a KFX: a JPEG loses APP1–APP15 + COM
+/// and gains a JFIF APP0; any other raster re-encodes as JFIF JPEG. `None` leaves
+/// the caller its original bytes.
 pub fn sanitize_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
@@ -59,18 +29,9 @@ pub fn sanitize_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
     encode_as_jpeg(&img)
 }
 
-/// Decode any raster image and re-encode it as a **baseline RGB** JPEG,
-/// returning the bytes with the pixel dimensions.
-///
-/// Unlike [`sanitize_for_kfx`], this always re-encodes — including JPEG input —
-/// and that is the point: it guarantees a known encoding and colorspace. The
-/// caller is [`crate::formats::pdf::cover`], which embeds the result as a PDF Image
-/// XObject declaring `/DeviceRGB` + `/DCTDecode`. Passing a JPEG through
-/// untouched would let a progressive, CMYK, or Adobe-inverted source reach that
-/// declaration and render as garbage (or not at all).
-///
-/// Alpha is flattened onto white, matching [`sanitize_for_kfx`]'s reasoning.
-/// `None` if the bytes aren't a decodable raster, or exceed JPEG's 65535px limit.
+/// Decode any raster image and re-encode it as a baseline RGB JPEG, with the
+/// pixel dimensions — the `/DeviceRGB` + `/DCTDecode` a PDF Image XObject
+/// declares. Alpha flattens onto white. `None` past JPEG's 65535px limit.
 pub fn to_baseline_rgb_jpeg(data: &[u8], quality: u8) -> Option<(Vec<u8>, u32, u32)> {
     let reader = ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
@@ -89,12 +50,9 @@ pub fn to_baseline_rgb_jpeg(data: &[u8], quality: u8) -> Option<(Vec<u8>, u32, u
     Some((out, w, h))
 }
 
-/// Walk a JPEG, drop APP1–APP15 and COM segments, and ensure a JFIF APP0
-/// segment is present right after SOI. Image data (SOS + entropy-coded
-/// scan) is copied verbatim — no decode, no re-encode. Returns `None` for
-/// non-JPEG input, malformed bytestreams, or JPEGs that are already
-/// JFIF-clean (no metadata segments). The caller treats `None` as
-/// "use the original bytes."
+/// Walk a JPEG, drop APP1–APP15 and COM segments, and ensure a JFIF APP0 sits
+/// right after SOI. Image data (SOS + entropy-coded scan) is copied verbatim.
+/// `None` for non-JPEG, malformed, or JFIF-clean input.
 pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
     if !is_jpeg(data) {
         return None;
@@ -152,7 +110,7 @@ pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
             had_metadata = true;
             continue;
         }
-        // Detect JFIF APP0 so we don't double-inject below.
+        // Detect JFIF APP0 against a double injection below.
         if marker == 0xE0 && seg.len() >= 7 && &seg[2..7] == b"JFIF\0" {
             had_jfif = true;
         }
@@ -160,8 +118,8 @@ pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(seg);
     }
 
-    // If we dropped nothing and already had JFIF APP0, the input was
-    // clean — signal "no change" so the caller keeps the original.
+    // Nothing dropped and a JFIF APP0 present: the input was clean, and `None`
+    // keeps the original.
     if !had_metadata && had_jfif {
         return None;
     }
@@ -178,11 +136,8 @@ pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
-    // Composite alpha onto white before encoding. JPEG has no alpha
-    // channel, and Kindle's renderer is documented as not compositing
-    // transparency correctly — flattening here matches what a publisher
-    // pipeline would do and avoids surprise gray fringes around gaiji
-    // glyphs that come with a soft alpha edge.
+    // Composite alpha onto white before encoding. JPEG has no alpha channel, and
+    // a Kindle renderer does not composite transparency.
     let rgb_bytes = flatten_to_rgb(img);
     let width = u16::try_from(img.width()).ok()?;
     let height = u16::try_from(img.height()).ok()?;
@@ -191,12 +146,8 @@ pub(crate) fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
     }
 
     let mut out: Vec<u8> = Vec::new();
-    // Quality 90: high enough that line-art (gaiji, diagrams) stays
-    // crisp, low enough that ebook payloads stay tight. Matches the
-    // JXR→JPEG re-encode quality used by `formats::kfx::jxr`
-    // (which uses 95) within a hair — we drop 5 points because source
-    // GIF/PNG content is often already palette-quantised or downsampled,
-    // making the extra precision wasted.
+    // Quality 90: line-art (gaiji, diagrams) stays crisp and ebook payloads stay
+    // tight. `formats::kfx::jxr` re-encodes at 95.
     let encoder = jpeg_encoder::Encoder::new(&mut out, 90);
     encoder
         .encode(&rgb_bytes, width, height, jpeg_encoder::ColorType::Rgb)
@@ -205,16 +156,8 @@ pub(crate) fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
 }
 
 /// Composite an image's alpha channel over white, returning an opaque RGB8
-/// image. Shared by the JPEG transcode path here and the JXR plate encoder
-/// (`export/kfx.rs`). JPEG has no alpha at all; JPEG-XR *can* carry it
-/// (T.832 alpha image plane) but the KFX plate formats we emit
-/// (8bppGray/24bppRGB) don't, and KDP's "Image Guidelines — Reflowable"
-/// documents that Kindle renderers don't composite transparent areas
-/// correctly anyway. Dropping the channel without compositing turns
-/// transparent pixels into their (usually black) stored color — a
-/// transparent-background GIF/PNG renders as a black slab. The e-ink page
-/// is white, so flattening over white at encode time yields the same
-/// pixels a correct renderer would draw, deterministically.
+/// image. JPEG carries no alpha and the KFX plate formats (8bppGray/24bppRGB)
+/// carry none; a dropped channel turns transparent pixels their stored color.
 pub(crate) fn flatten_alpha_over_white(img: &DynamicImage) -> DynamicImage {
     let rgb = flatten_to_rgb(img);
     let buf = image::RgbImage::from_raw(img.width(), img.height(), rgb)
@@ -261,9 +204,8 @@ mod tests {
 
     #[test]
     fn clean_jfif_jpeg_returns_none() {
-        // Round-trip a known clean JFIF-tagged JPEG (the PNG transcode
-        // path emits exactly that), then ask sanitize to look at it.
-        // There's no metadata to strip, so the result is `None`.
+        // A clean JFIF-tagged JPEG (what the PNG transcode path emits) has no
+        // metadata to strip, and sanitize returns `None`.
         let png = minimal_png();
         let jfif = sanitize_for_kfx(png).expect("PNG transcodes to JPEG");
         assert!(jfif.starts_with(&[0xFF, 0xD8, 0xFF, 0xE0]));
@@ -293,7 +235,7 @@ mod tests {
             !contains_subseq(&stripped, &[0xFF, 0xE1]),
             "APP1 marker should be gone after strip"
         );
-        // JFIF APP0 still present right after SOI.
+        // JFIF APP0 sits right after SOI.
         assert_eq!(&stripped[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
     }
 
@@ -306,8 +248,8 @@ mod tests {
             0xFF, 0xE1, 0x00, 0x0E, b'E', b'x', b'i', b'f', 0x00, 0x00, b'I', b'I', 0x2A, 0x00,
             0x08, 0x00,
         ]);
-        // Append JFIF payload AFTER its own APP0 segment (so the input
-        // has no APP0 at all).
+        // Append the JFIF payload AFTER its own APP0 segment, leaving the input
+        // with no APP0.
         let clean = sanitize_for_kfx(minimal_png()).unwrap();
         // The clean JPEG is [SOI, APP0(18 bytes), …]. Skip the APP0 too.
         let after_app0 = 2 + JFIF_APP0.len();
