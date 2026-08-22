@@ -357,7 +357,7 @@ mod tests {
             &dev.join("documents/Sidle.sh"),
             b"#!/bin/sh\n# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
-        write(&dev.join("extensions/bokai/bin/bokai-armhf"), b"elf");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         let ids: Vec<String> = discover(tmp.path())
             .unwrap()
             .into_iter()
@@ -370,7 +370,7 @@ mod tests {
     fn an_app_with_no_tile_walks_fine() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/bokai/bin/bokai-armhf"), b"elf");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         let tree = discover(tmp.path()).unwrap().pop().unwrap();
         assert!(tree.files.iter().all(|f| f.path.starts_with("extensions/")));
         assert_eq!(

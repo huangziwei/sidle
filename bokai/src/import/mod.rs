@@ -436,6 +436,44 @@ pub trait Importer: Send + Sync {
     }
 }
 
+/// `(width, height)` from `html`'s `<meta name="viewport" content="width=1800,
+/// height=2700">`. `None` when `html` declares no viewport, or omits a number.
+pub fn viewport_meta(html: &str) -> Option<(u32, u32)> {
+    let cut = (0..=html.len().min(4096))
+        .rev()
+        .find(|&i| html.is_char_boundary(i))?;
+    let head = &html[..cut];
+    let at = head
+        .find("name=\"viewport\"")
+        .or_else(|| head.find("name='viewport'"))?;
+    let (before, after) = head.split_at(at);
+    // `content` may precede or follow `name` on the same element.
+    let tag_start = before.rfind('<')?;
+    let tag_end = at + after.find('>')?;
+    let tag = &head[tag_start..tag_end];
+    let content_at = tag.find("content=")? + "content=".len();
+    let quoted = &tag[content_at..];
+    let quote = quoted.chars().next()?;
+    let body = &quoted[quote.len_utf8()..];
+    let value = &body[..body.find(quote)?];
+    let mut width = None;
+    let mut height = None;
+    for part in value.split(',') {
+        let Some((key, num)) = part.split_once('=') else {
+            continue;
+        };
+        let Ok(num) = num.trim().parse() else {
+            continue;
+        };
+        match key.trim() {
+            "width" => width = Some(num),
+            "height" => height = Some(num),
+            _ => {}
+        }
+    }
+    Some((width?, height?))
+}
+
 /// Helper for path-based href resolution (used by EPUB, AZW3, MOBI).
 ///
 /// Handles EPUB-style paths: `path#fragment`, `#fragment`, `path`
@@ -986,5 +1024,49 @@ mod tests {
             let expected = format!("{}#{}", base, fragment);
             prop_assert_eq!(normalized, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::viewport_meta;
+
+    /// A page states its pixel box in `<meta name="viewport">`, in either
+    /// attribute order and either quoting.
+    #[test]
+    fn a_declared_viewport_reads_as_a_pixel_box() {
+        assert_eq!(
+            viewport_meta(r#"<head><meta content="width=2048, height=1456" name="viewport"/>"#),
+            Some((2048, 1456))
+        );
+        assert_eq!(
+            viewport_meta(r#"<meta name="viewport" content="width=1800, height=2700"/>"#),
+            Some((1800, 2700))
+        );
+        assert_eq!(
+            viewport_meta(r#"<meta name='viewport' content='width=900, height=1200'/>"#),
+            Some((900, 1200))
+        );
+    }
+
+    /// A page that states no viewport, or states one without both numbers, has
+    /// no pixel box.
+    #[test]
+    fn an_undeclared_or_partial_viewport_is_none() {
+        assert_eq!(viewport_meta("<head><title>x</title></head>"), None);
+        assert_eq!(
+            viewport_meta(r#"<meta name="viewport" content="width=device-width"/>"#),
+            None
+        );
+    }
+
+    /// The head scan stops at a byte count; a multi-byte character spanning the
+    /// cut keeps the slice on a character boundary.
+    #[test]
+    fn a_multibyte_head_does_not_split() {
+        let pad = "そ".repeat(2000);
+        assert_eq!(viewport_meta(&pad), None);
+        let doc = format!(r#"<meta name="viewport" content="width=10, height=20"/>{pad}"#);
+        assert_eq!(viewport_meta(&doc), Some((10, 20)));
     }
 }

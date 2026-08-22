@@ -427,7 +427,7 @@ enum_property! {
     }
 }
 
-/// CSS text-emphasis-style — the `<fill> <shape>` pair used to mark emphasis
+/// CSS text-emphasis-style — the `<fill> <shape>` pair marking emphasis
 /// (圏点 in Japanese) above/beside characters. Each variant maps to one of
 /// KFX's pre-baked emphasis glyph symbols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

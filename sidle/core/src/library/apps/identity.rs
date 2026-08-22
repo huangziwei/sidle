@@ -285,7 +285,7 @@ mod tests {
     fn an_app_with_neither_descriptor_nor_tile_is_named_by_its_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/bokai/bin/bokai-armhf"), b"elf");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         let app = AppIdentity::read(&dev, "bokai").unwrap();
         assert_eq!(app.name, "bokai");
         assert_eq!(app.tile, None);
@@ -387,7 +387,7 @@ mod tests {
     fn an_app_with_no_tile_has_no_art() {
         let tmp = tempfile::tempdir().unwrap();
         let dev = tmp.path().join("device");
-        write(&dev.join("extensions/bokai/bin/bokai-armhf"), b"elf");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"elf");
         assert_eq!(AppIdentity::read(&dev, "bokai").unwrap().icon, None);
     }
 

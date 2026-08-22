@@ -21,7 +21,7 @@ pub const COVER_SECTION_NAME: &str = "c0";
 /// - Exactly one Image node
 /// - No text content (or whitespace-only text)
 ///
-/// This is used to detect cover pages that need special KFX formatting.
+/// A cover page takes the KFX cover formatting on this test.
 pub fn is_image_only_chapter(chapter: &Chapter) -> bool {
     let mut image_count = 0;
     let mut has_text = false;
@@ -85,7 +85,7 @@ pub fn get_chapter_image_path(chapter: &Chapter) -> Option<String> {
 pub fn needs_standalone_cover(cover_image_path: &str, first_chapter: &Chapter) -> bool {
     // Get the image from the first chapter (if it's image-only)
     let Some(first_image_path) = get_chapter_image_path(first_chapter) else {
-        // First chapter doesn't have a single image, so we need standalone cover
+        // A first chapter without a single image takes the standalone cover
         return true;
     };
 
@@ -144,10 +144,9 @@ pub fn build_cover_section(
     // Assign a fragment ID for the cover image content
     let cover_content_id = ctx.next_fragment_id();
 
-    // Record content ID for position_map and location_map
-    // Note: For standalone cover, there's no active chapter context, so we store
-    // it separately in cover_content_id (handled by build_position_id_map_fragment
-    // and build_location_map_fragment)
+    // Content ID for position_map and location_map. A standalone cover has no
+    // active chapter context; `cover_content_id` holds it for
+    // `build_position_id_map_fragment` and `build_location_map_fragment`.
     ctx.record_content_length(cover_content_id, 1);
 
     // Build storyline content: [{ id, type: image, resource_name, style }]

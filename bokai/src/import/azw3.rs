@@ -19,7 +19,7 @@ use crate::formats::mobi::{
     parse_exth, parse_fdst, strip_trailing_data, transform,
 };
 use crate::html::Stylesheet;
-use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
+use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href, viewport_meta};
 use crate::io::{ByteSource, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
@@ -668,7 +668,7 @@ impl Azw3Importer {
         };
         for (entry, (_, bytes)) in self.spine.iter_mut().zip(&flow.parts) {
             let html = String::from_utf8_lossy(bytes);
-            entry.viewport = parse_viewport_meta(&html);
+            entry.viewport = viewport_meta(&html);
             entry.page_spread = parse_spread_class(&html);
         }
     }
@@ -1032,29 +1032,6 @@ fn looks_like_svg_flow(bytes: &[u8]) -> bool {
 /// against the on-disk flow makes a backward walk from a chunk-start land on the
 /// skeleton's tail element (the wrong div). Reassembly runs once and anchors
 /// resolve against [`concat`](Self::concat).
-/// `(width, height)` from `html`'s `<meta name="viewport" content="width=1800,
-/// height=2700">`. `None` when `html` declares no viewport, or omits a number.
-fn parse_viewport_meta(html: &str) -> Option<(u32, u32)> {
-    let head = &html[..html.len().min(4096)];
-    let at = head.find("name=\"viewport\"")?;
-    let after = &head[at..];
-    let content_at = after.find("content=\"")? + "content=\"".len();
-    let value = &after[content_at..];
-    let value = &value[..value.find('"')?];
-    let mut width = None;
-    let mut height = None;
-    for part in value.split(',') {
-        let (key, num) = part.split_once('=')?;
-        let num = num.trim().parse().ok()?;
-        match key.trim() {
-            "width" => width = Some(num),
-            "height" => height = Some(num),
-            _ => {}
-        }
-    }
-    Some((width?, height?))
-}
-
 /// `html`'s spread side from the page div's `class="fs leftspread"` /
 /// `"fs rightspread"`. `None` when `html` carries neither.
 fn parse_spread_class(html: &str) -> Option<crate::model::PageSpread> {

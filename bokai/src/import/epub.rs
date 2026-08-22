@@ -14,7 +14,7 @@ use crate::formats::epub::{
 };
 use crate::html::Stylesheet;
 use crate::import::{
-    ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href,
+    ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href, viewport_meta,
 };
 use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
 use crate::model::{
@@ -317,6 +317,12 @@ impl EpubImporter {
                     .map(|loc| loc.compressed_size as usize)
                     .unwrap_or(0);
 
+                // A document's own `<meta name="viewport">` states the pixel box
+                // it is drawn to — a full-page illustration or spread carries one
+                // whether or not the package declares `rendition:layout`.
+                let viewport = read_entry(&source, &zip_index, &full_path)
+                    .ok()
+                    .and_then(|b| viewport_meta(&String::from_utf8_lossy(&b)));
                 spine.push(SpineEntry {
                     id: ChapterId(i as u32),
                     size_estimate,
@@ -324,7 +330,7 @@ impl EpubImporter {
                         .spine_properties
                         .get(spine_id)
                         .and_then(|p| crate::model::PageSpread::from_opf_properties(p)),
-                    viewport: None,
+                    viewport,
                 });
                 spine_paths.push(full_path);
             }

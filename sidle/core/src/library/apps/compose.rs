@@ -245,7 +245,7 @@ mod tests {
             &dev.join("documents/Sidle.sh"),
             b"#!/bin/sh\n# Name: Sidle\nexec /mnt/us/extensions/sidle/bin/sidle.sh\n",
         );
-        write(&dev.join("extensions/bokai/bin/bokai-armhf"), b"engine");
+        write(&dev.join("extensions/bokai/bin/bokai"), b"engine");
         dev
     }
 
@@ -292,7 +292,7 @@ mod tests {
             vec![
                 "documents/Sidle.sh",
                 "documents/Sprocket.sh",
-                "extensions/bokai/bin/bokai-armhf",
+                "extensions/bokai/bin/bokai",
                 "extensions/sidle/bin/sidle",
                 "extensions/sidle/bin/sidle.sh",
                 "extensions/sidle/config.xml",

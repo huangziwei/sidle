@@ -26,13 +26,11 @@ const READER_DEFAULT_FONT: &str = "default";
 ///
 /// Amazon writes exactly this shape — `default,serif`, `default,georgia,serif`,
 /// `default,hiraminpron-w3,serif-ja-v,serif-ja,serif` — rather than dropping
-/// what the source asked for. The fallback still earns its place after the
-/// substitution: a reader font that lacks the glyphs (a Latin face in a CJK
-/// book) falls through to faces that have them, which a bare `default` could
-/// not do.
+/// what the source asked for. The fallback carries the glyph coverage a reader
+/// font may lack (a Latin face in a CJK book), which a bare `default` lacks.
 ///
-/// A stack already headed by `default` is returned unchanged, so a book that
-/// came from KFX and goes back to it keeps one `default`, not one per trip.
+/// A stack headed by `default` is returned unchanged: a KFX round trip keeps one
+/// `default`, not one per trip.
 fn with_reader_font_first(stack: &str) -> String {
     let compact = crate::style::compact_font_stack(stack);
     if crate::style::preferred_font_face(&compact).eq_ignore_ascii_case(READER_DEFAULT_FONT) {
@@ -79,7 +77,7 @@ impl SymbolTable {
             return id;
         }
 
-        // Check if already interned
+        // An interned name keeps its id
         if let Some(&id) = self.symbol_map.get(name) {
             return id;
         }
@@ -444,7 +442,7 @@ impl AnchorRegistry {
     /// This is the primary lookup method used during storyline generation.
     /// Returns the symbol if the href was registered, or creates a new one.
     pub fn get_or_create_href_symbol(&mut self, href: &str) -> String {
-        // Check if already registered
+        // A registered href keeps its symbol
         if let Some(symbol) = self.href_to_symbol.get(href) {
             return symbol.clone();
         }
@@ -490,7 +488,7 @@ impl AnchorRegistry {
     /// Create an anchor entity for a node target.
     ///
     /// Call this during Pass 2 when processing a node that's a link target.
-    /// Returns the symbol if the anchor was created, None if already resolved.
+    /// Returns the symbol for a created anchor, `None` for a resolved one.
     pub fn create_anchor(
         &mut self,
         target: GlobalNodeId,
@@ -500,7 +498,6 @@ impl AnchorRegistry {
     ) -> Option<String> {
         let symbol = self.node_to_symbol.get(&target)?.clone();
 
-        // Skip if already resolved
         if self.resolved_symbols.contains(&symbol) {
             return None;
         }
@@ -532,7 +529,6 @@ impl AnchorRegistry {
     ) -> Option<String> {
         let symbol = self.chapter_to_symbol.get(&chapter)?.clone();
 
-        // Skip if already resolved
         if self.resolved_symbols.contains(&symbol) {
             return None;
         }
@@ -663,9 +659,9 @@ pub struct ExportContext {
     /// repeat lookups within a chapter skip the schema ingest/build. Keyed by
     /// `(StyleId, class hint, is_link)` because the built style depends on all
     /// three (the hint feeds the registry's dedup key and the link path forces
-    /// an underline field). The cached style still flows through
-    /// `register_with_hint` on every lookup, so dedup and usage counts are
-    /// unchanged. StyleIds are only meaningful within one chapter's `StylePool`,
+    /// an underline field). The cached style flows through
+    /// `register_with_hint` on every lookup, which owns dedup and usage counts.
+    /// StyleIds are only meaningful within one chapter's `StylePool`,
     /// so this is cleared per chapter.
     ir_style_memo: HashMap<
         (StyleId, Option<String>, bool),
@@ -706,6 +702,11 @@ pub struct ExportContext {
     /// kfx-zip-derived KFXs reliably do the same (e.g. 885×1260 cover →
     /// 885×1260 page_template).
     pub cover_dimensions: Option<(u32, u32)>,
+
+    /// Pixel box a spine page declares for itself (`<meta name="viewport">`).
+    /// A full-page illustration or spread carries one inside an otherwise
+    /// reflowing book.
+    pub page_viewports: HashMap<ChapterId, (u32, u32)>,
 
     /// Chapters that need chapter-start anchors.
     chapters_needing_anchor: HashSet<ChapterId>,
@@ -767,7 +768,7 @@ pub struct ExportContext {
     pub has_publisher_fonts: bool,
 
     /// The `font-family` stack carrying the book's body text, which is written
-    /// with `default` at its head so the reader's font setting still applies.
+    /// with `default` at its head, deferring to the reader's font setting.
     ///
     /// A KFX style that names a family pins the device font; `default` defers
     /// to the reader. So a source that puts `font-family` on its body text
@@ -788,10 +789,9 @@ pub struct ExportContext {
 
 /// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
 ///
-/// Calibre-produced KFX groups annotations into fragments of ~200 entries.
-/// We mirror that: each fragment is one Ion entity with `content_list` of
-/// annotation structs, and base text style_events reference them via
-/// `ruby_name` (fragment kfx_id) + `ruby_id` (1-indexed within the fragment).
+/// Calibre-produced KFX groups annotations into fragments of ~200 entries, one
+/// Ion entity each with a `content_list` of annotation structs. Base text
+/// style_events reference them via `ruby_name` (fragment kfx_id) + `ruby_id`.
 #[derive(Debug, Clone, Default)]
 pub struct RubyContentRegistry {
     /// Annotations in the order they were registered.
@@ -903,6 +903,7 @@ impl ExportContext {
             cover_content_id: None,
             inline_cover_emitted: false,
             cover_dimensions: None,
+            page_viewports: HashMap::new(),
             chapters_needing_anchor: HashSet::new(),
             pending_chapter_anchor: None,
             first_content_ids: HashMap::new(),
@@ -995,7 +996,7 @@ impl ExportContext {
     /// This is the source's own content-derived mode, so a user-forced document
     /// mode doesn't turn every source style into a spurious override. The export
     /// entry point sets it before any IR style is registered.
-    fn ir_style_baseline_writing_mode(&self) -> crate::style::WritingMode {
+    pub fn ir_style_baseline_writing_mode(&self) -> crate::style::WritingMode {
         kfx_symbol_to_ir_writing_mode(self.style_writing_mode_baseline)
     }
 
@@ -1035,9 +1036,8 @@ impl ExportContext {
     /// (paragraph spacing) then lands on `margin-right`/`margin-left`, so the
     /// device renders inter-column spacing instead of dropping it — matching
     /// Amazon's own vertical KFX, which carries paragraph spacing as
-    /// `margin_right`. Returns the input untouched when the axes already agree
-    /// (the common, non-forced case), so there's no cost or behavior change for
-    /// books converted in their native mode.
+    /// `margin_right`. Returns the input untouched when the axes agree — the
+    /// common, non-forced case.
     fn box_transposed_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
@@ -1094,8 +1094,8 @@ impl ExportContext {
     /// Register an IR style with an optional source-class hint.
     ///
     /// The hint is the originating element's `class` attribute string. The
-    /// registry will use it as the KFX style symbol if it's a single valid
-    /// identifier and not already taken. See `StyleRegistry::register_with_hint`.
+    /// registry takes it as the KFX style symbol when it is a single valid
+    /// unclaimed identifier. See `StyleRegistry::register_with_hint`.
     pub fn register_ir_style_with_hint(
         &mut self,
         ir_style: &crate::style::ComputedStyle,
@@ -1107,10 +1107,9 @@ impl ExportContext {
     }
 
     /// Build the KFX computed style for an IR style (schema ingest + finalize) —
-    /// the expensive half of registration. Split out so `register_style_id_with_hint`
-    /// can memoize it across a chapter; `register_with_hint` still owns dedup and
-    /// usage counting, so the built style always flows through it and output is
-    /// unchanged.
+    /// the expensive half of registration, memoized across a chapter by
+    /// `register_style_id_with_hint`. Every built style flows through
+    /// `register_with_hint`, which owns dedup and usage counting.
     /// The KFX properties an IR style states, for the few callers that need
     /// them outside a `$157 style` fragment — a table's `column_format`
     /// states its geometry inline rather than through a named style.
@@ -1162,7 +1161,7 @@ impl ExportContext {
     /// when the cascade didn't set one. Kindle's renderer defaults `<a>` to
     /// underlined; without an explicit `underline: none`, source EPUBs that
     /// kill link underlines via `text-decoration: none` (e.g. calibre's
-    /// `.calibre3`) still render with stripes on device.
+    /// `.calibre3`) render with stripes on device.
     pub fn register_link_ir_style_with_hint(
         &mut self,
         ir_style: &crate::style::ComputedStyle,
@@ -1221,10 +1220,9 @@ impl ExportContext {
             return self.default_style_symbol;
         }
 
-        // Memoize the built KFX style per (StyleId, hint, non-link) so repeated
-        // lookups within a chapter skip the schema ingest/build. The style still
-        // flows through `register_with_hint`, so dedup and usage counts (which
-        // drive line-height normalization) are unchanged.
+        // Memoize the built KFX style per (StyleId, hint, non-link); a repeated
+        // lookup within a chapter skips the schema ingest/build. The style flows
+        // through `register_with_hint`, which owns dedup and usage counts.
         let key = (style_id, class_hint.map(str::to_string), false);
         let kfx_style = if let Some(cached) = self.ir_style_memo.get(&key) {
             cached.clone()
@@ -1504,9 +1502,8 @@ impl ExportContext {
     /// Uses the pre-resolved `target` field from `ResolvedLinks`.
     pub fn register_toc_targets(&mut self, entries: &[TocEntry]) {
         for entry in entries {
-            // The target is already resolved by resolve_links()
-            // We just need to ensure it's registered for anchor creation
-            // (which happens when we process internal_targets from ResolvedLinks)
+            // `resolve_links` owns target resolution; this registers the entry
+            // for anchor creation.
 
             // Recurse into children
             if !entry.children.is_empty() {
@@ -1536,7 +1533,7 @@ impl ExportContext {
                 }
             }
 
-            // If we found the chapter, look up the first content ID
+            // A located chapter yields its first content ID
             if let Some(chapter_id) = found_chapter
                 && let Some(&content_id) = self.first_content_ids.get(&chapter_id)
             {
@@ -1785,7 +1782,7 @@ mod tests {
         let symbol = registry.create_anchor(target, 100, 200, 50);
         assert_eq!(symbol, Some("a0".to_string()));
 
-        // Second call should return None (already resolved)
+        // A resolved anchor returns None on a second call
         let symbol2 = registry.create_anchor(target, 100, 200, 50);
         assert_eq!(symbol2, None);
 

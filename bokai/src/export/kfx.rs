@@ -157,6 +157,13 @@ fn build_kfx_container(
         ctx.cover_dimensions = Some(dims);
     }
 
+    // Per-page pixel boxes, for the sections built from image-only pages.
+    ctx.page_viewports = book
+        .spine()
+        .iter()
+        .filter_map(|e| Some((e.id, e.viewport?)))
+        .collect();
+
     // If standalone cover needed, section offset starts at 1 (c0 reserved for cover)
     let section_offset = if standalone_cover_path.is_some() {
         1
@@ -2173,6 +2180,15 @@ fn build_chapter_entities_grouped(
         && !ctx.inline_cover_emitted
         && is_image_only_chapter(chapter);
 
+    // A page holding one image and declaring its own pixel box is a full-page
+    // illustration or a two-page spread inside an otherwise reflowing book.
+    let is_full_page_illustration = !is_cover
+        && is_image_only_chapter(chapter)
+        && ctx
+            .page_viewports
+            .get(&chapter_id)
+            .is_some_and(|&(w, h)| w > 0 && h > 0);
+
     // =========================================================================
     // 1. SETUP: Naming for this chapter's entity triad
     // =========================================================================
@@ -2207,6 +2223,10 @@ fn build_chapter_entities_grouped(
         ctx.inline_cover_emitted = true;
         // For cover chapters, generate flat storyline with direct image
         let content_list = build_cover_storyline(chapter, ctx);
+        let text = ctx.drain_text();
+        (content_list, text)
+    } else if is_full_page_illustration {
+        let content_list = build_illustration_storyline(chapter, ctx);
         let text = ctx.drain_text();
         (content_list, text)
     } else {
@@ -2320,6 +2340,82 @@ fn build_chapter_entities_grouped(
         KfxFragment::new_with_id(KfxSymbol::Section, section_id, section_name, section_ion);
 
     (section_fragment, storyline_fragment, content_fragment)
+}
+
+/// Storyline for a full-page illustration: a container filling the page holding
+/// one centred full-width image. Mirrors the shape Amazon gives an illustration
+/// page in a reflowing book.
+fn build_illustration_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue {
+    use crate::model::Role;
+    use crate::style::{ComputedStyle, Length};
+
+    // The source's own axis, keeping these two styles out of the per-style
+    // `writing_mode` overrides a vertical book must not carry.
+    let writing_mode = ctx.ir_style_baseline_writing_mode();
+    let wrapper_style = ComputedStyle {
+        width: Length::Percent(100.0),
+        height: Length::Percent(100.0),
+        writing_mode,
+        ..Default::default()
+    };
+    // `margin: auto` on both sides resolves to `box_align: center` in the style
+    // schema, which needs a definite width beside it.
+    let image_style = ComputedStyle {
+        width: Length::Percent(100.0),
+        margin_left: Length::Auto,
+        margin_right: Length::Auto,
+        writing_mode,
+        ..Default::default()
+    };
+
+    for node_id in chapter.iter_dfs() {
+        let Some(node) = chapter.node(node_id) else {
+            continue;
+        };
+        if node.role != Role::Image {
+            continue;
+        }
+        let Some(src) = chapter.semantics.src(node_id) else {
+            continue;
+        };
+        let resource_name = ctx.resource_registry.get_or_create_name(src);
+        let resource_symbol = ctx.symbols.get_or_intern(&resource_name);
+        let wrapper_symbol = ctx.register_ir_style(&wrapper_style);
+        let image_symbol = ctx.register_ir_style(&image_style);
+
+        let wrapper_id = ctx.fragment_ids.next_id();
+        let image_id = ctx.fragment_ids.next_id();
+        ctx.record_content_id(image_id);
+        ctx.record_content_length(image_id, 1);
+        ctx.resolve_pending_chapter_anchor(wrapper_id);
+
+        let image = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(image_id as i64)),
+            (KfxSymbol::Style as u64, IonValue::Symbol(image_symbol)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Image as u64),
+            ),
+            (
+                KfxSymbol::ResourceName as u64,
+                IonValue::Symbol(resource_symbol),
+            ),
+        ]);
+        return IonValue::List(vec![IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(wrapper_id as i64)),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::Vertical as u64),
+            ),
+            (KfxSymbol::Style as u64, IonValue::Symbol(wrapper_symbol)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+            (KfxSymbol::ContentList as u64, IonValue::List(vec![image])),
+        ])]);
+    }
+    IonValue::List(Vec::new())
 }
 
 /// Build a simplified storyline for cover chapters.
