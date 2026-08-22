@@ -29,8 +29,8 @@ use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
 use crate::model::Chapter;
 use crate::model::{
-    AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, PageSpread,
-    PositionMap, SourceText, TocEntry,
+    AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, OrientationLock,
+    PageSpread, PositionMap, SourceText, TocEntry,
 };
 use crate::style::CssDecl;
 
@@ -74,8 +74,8 @@ pub struct KfxImporter {
     toc: Vec<TocEntry>,
 
     /// Physical page list (from the `page_list` nav_container). Flat; empty
-    /// when the KFX carries no page numbers. Kept so a KFX→KFX reconvert (or the
-    /// IR-based export) re-emits the page list instead of silently dropping it.
+    /// when the KFX carries no page numbers. A KFX→KFX reconvert and the
+    /// IR-based export both re-emit it.
     page_list: Vec<TocEntry>,
 
     /// Landmarks (structural navigation points).
@@ -115,14 +115,13 @@ pub struct KfxImporter {
     /// `page-spread-*` property), from the section's FIRST page template
     /// (fixed-layout sections split that template into per-page documents;
     /// reflowable sections use the LAST). Walked once at spine expansion;
-    /// per-page loads index it by ordinal instead of re-walking the
-    /// template.
+    /// per-page loads index it by ordinal.
     fxl_leaves: HashMap<String, Vec<(IonValue, String)>>,
     /// story_name → storyline entity location, for resolving spread pages
     /// and container story references without a section hop.
     storylines_by_name: HashMap<String, EntityLoc>,
     /// Structure ($608) entity name → location, for `page_templates` entries
-    /// that are symbol references rather than inline containers.
+    /// holding a symbol reference.
     structures_by_name: HashMap<String, EntityLoc>,
     /// Content-walk page-progression direction: `document_data.direction`
     /// plus the vertical-writing-mode → rtl override, WITHOUT the explicit
@@ -147,10 +146,9 @@ pub struct KfxImporter {
     /// bcRawMedia location key (resolved entity symbol name) → payload location.
     image_media: HashMap<String, EntityLoc>,
 
-    /// Content (`$145`) entity name → location, built once in `from_source`
-    /// so text lookups resolve by direct index instead of a scan-and-parse
-    /// over every content entity (first entity wins on duplicate names,
-    /// like the scan did).
+    /// Content (`$145`) entity name → location, built once in `from_source`.
+    /// Text lookups resolve by direct index; first entity wins on duplicate
+    /// names.
     content_by_name: HashMap<String, EntityLoc>,
     /// Content cache: name -> list of strings (lazily populated). Behind a
     /// lock so `lookup_content_text` works from `&self` — chapter builds
@@ -208,9 +206,8 @@ impl From<ContainerError> for io::Error {
     }
 }
 
-/// Content references resolve through the entity index, parsing one content
-/// entity per distinct name (and caching it) rather than holding the book's
-/// whole fragment graph in memory.
+/// Content references resolve through the entity index, parsing and caching
+/// one content entity per distinct name.
 impl ContentSource for KfxImporter {
     fn symbols(&self) -> &SymbolTable {
         &self.symbols
@@ -775,7 +772,8 @@ impl KfxImporter {
                     if let Some(cat_fields) = category_elem.as_struct() {
                         let category = get_field(cat_fields, sym!(Category))
                             .and_then(|v| self.get_symbol_text(v))
-                            .unwrap_or("");
+                            .unwrap_or("")
+                            .to_string();
 
                         if category == "kindle_title_metadata"
                             && let Some(metadata_list) =
@@ -880,17 +878,34 @@ impl KfxImporter {
                                 }
                             }
                         }
+
+                        if category == "kindle_ebook_metadata"
+                            && let Some(metadata_list) =
+                                get_field(cat_fields, sym!(Metadata)).and_then(|v| v.as_list())
+                        {
+                            for meta in metadata_list {
+                                let Some(meta_fields) = meta.as_struct() else {
+                                    continue;
+                                };
+                                let key = get_field(meta_fields, sym!(Key))
+                                    .and_then(|v| v.as_string())
+                                    .unwrap_or("");
+                                let value = get_field(meta_fields, sym!(Value))
+                                    .and_then(|v| v.as_string())
+                                    .unwrap_or("");
+                                if key == "book_orientation_lock" {
+                                    self.metadata.orientation_lock = OrientationLock::parse(value);
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Fallback: the flat `$258 metadata` entity carries the same fields as
-        // direct symbol keys (`title`, `language`, `publisher`, `author`,
-        // `ASIN`, `cover_image`). Amazon KFX often ships `language` (and
-        // sometimes others) ONLY here, not in `kindle_title_metadata`.
-        // Calibre's loader reads both and fills empties from this struct, so
-        // mirror it — else the `<html lang>` and other fields silently drop.
+        // The flat `$258 metadata` entity fills what `kindle_title_metadata`
+        // left empty: `title`, `language`, `publisher`, `author`, `ASIN`,
+        // `cover_image`.
         self.parse_flat_metadata_fallback()?;
 
         Ok(())
@@ -1235,7 +1250,7 @@ impl KfxImporter {
         }
 
         // Structure ($608) entity name → location, for `page_templates`
-        // entries that are symbol references rather than inline containers.
+        // entries holding a symbol reference.
         for e in &self.entities {
             if e.type_id == KfxSymbol::Structure as u32 {
                 let name = self.symbols.resolve(e.id as u64).to_string();
@@ -1665,10 +1680,10 @@ impl KfxImporter {
 
     /// Point a converted rule's `background-image` at the exported file.
     ///
-    /// `convert_yj_properties` renders the KFX symbol as `url(eF)` because
-    /// that is all the style fragment says; the sheet ships next to the
-    /// extracted images, so the resource name becomes the filename here —
-    /// the stylesheet counterpart of [`Self::rewrite_image_srcs`].
+    /// `convert_yj_properties` renders the KFX symbol as `url(eF)`. The
+    /// sheet ships next to the extracted images, and the resource name
+    /// becomes the filename here — the counterpart of
+    /// [`Self::rewrite_image_srcs`].
     fn rewrite_css_image_urls(&self, decl: &mut CssDecl) {
         let Some(value) = decl.get("background-image") else {
             return;
@@ -2060,8 +2075,7 @@ impl KfxImporter {
     }
 
     /// Build the content (`$145`) name → location index: one pass, parsing
-    /// each content entity once. Looking one up on demand instead parses every
-    /// content entity per cache miss — O(entities) per distinct story name.
+    /// each content entity once.
     fn index_content_entities(&mut self) {
         let locs: Vec<EntityLoc> = self
             .entities

@@ -784,6 +784,8 @@ fn build_book_metadata_fragment(
     container_id: &str,
     ctx: &ExportContext,
 ) -> KfxFragment {
+    use crate::formats::kfx::metadata::MetadataValue;
+
     let meta = book.metadata();
 
     // Build metadata context with transformed values
@@ -841,28 +843,42 @@ fn build_book_metadata_fragment(
         has_publisher_fonts: ctx.has_publisher_fonts,
     };
 
-    // Category order: calibre's ebook → title → audit → capability for a
-    // reflowable book, Amazon's audit → capability → title for a fixed-layout
-    // one, which carries no ebook category.
-    let categories: &[MetadataCategory] = if ctx.fixed_layout_book {
-        &[
+    // Category order: ebook → title → audit → capability when reflowable,
+    // audit → capability → title when `fixed_layout_book`.
+    let mut categories: Vec<MetadataCategory> = if ctx.fixed_layout_book {
+        vec![
             MetadataCategory::KindleAudit,
             MetadataCategory::KindleCapability,
             MetadataCategory::KindleTitle,
         ]
     } else {
-        &[
+        vec![
             MetadataCategory::KindleEbook,
             MetadataCategory::KindleTitle,
             MetadataCategory::KindleAudit,
             MetadataCategory::KindleCapability,
         ]
     };
+    let fixed_layout_lock = ctx
+        .fixed_layout_book
+        .then_some(meta.orientation_lock)
+        .flatten();
+    if fixed_layout_lock.is_some() {
+        categories.push(MetadataCategory::KindleEbook);
+    }
 
     let categorised: Vec<IonValue> = categories
         .iter()
         .map(|&cat| {
-            let mut entries = build_category_entries(cat, meta, &meta_ctx);
+            // `KindleEbook` under `fixed_layout_book` holds
+            // `book_orientation_lock` alone.
+            let mut entries = match (cat, fixed_layout_lock) {
+                (MetadataCategory::KindleEbook, Some(lock)) => vec![(
+                    "book_orientation_lock",
+                    MetadataValue::Text(lock.kindle_value().to_string()),
+                )],
+                _ => build_category_entries(cat, meta, &meta_ctx),
+            };
             if cat == MetadataCategory::KindleCapability && ctx.fixed_layout_book {
                 entries.extend(fixed_layout_capabilities(ctx.double_page_spread));
             }
@@ -7363,8 +7379,104 @@ mod manga_fxl_tests {
         ));
     }
 
-    /// A fixed-layout book states its capabilities as Ion ints, and pairs
-    /// `yj_double_page_spread` with the same key in `content_features`.
+    /// Each `categorised_metadata` category name with its keys, in order.
+    fn metadata_categories(frag: &KfxFragment) -> Vec<(String, Vec<String>)> {
+        let crate::formats::kfx::fragment::FragmentData::Ion(IonValue::Struct(fields)) = &frag.data
+        else {
+            panic!("expected an Ion struct");
+        };
+        let Some((_, IonValue::List(categories))) = fields
+            .iter()
+            .find(|(id, _)| *id == KfxSymbol::CategorisedMetadata as u64)
+        else {
+            panic!("expected categorised_metadata");
+        };
+        categories
+            .iter()
+            .map(|cat| {
+                let IonValue::Struct(cat_fields) = cat else {
+                    panic!("expected a category struct");
+                };
+                let name = match cat_fields
+                    .iter()
+                    .find(|(id, _)| *id == KfxSymbol::Category as u64)
+                {
+                    Some((_, IonValue::String(s))) => s.clone(),
+                    _ => panic!("expected a category name"),
+                };
+                let entries = match cat_fields
+                    .iter()
+                    .find(|(id, _)| *id == KfxSymbol::Metadata as u64)
+                {
+                    Some((_, IonValue::List(list))) => list
+                        .iter()
+                        .map(|entry| {
+                            let IonValue::Struct(kv) = entry else {
+                                panic!("expected a key/value struct");
+                            };
+                            match kv.iter().find(|(id, _)| *id == KfxSymbol::Key as u64) {
+                                Some((_, IonValue::String(k))) => k.clone(),
+                                _ => panic!("expected a key"),
+                            }
+                        })
+                        .collect(),
+                    _ => panic!("expected a metadata list"),
+                };
+                (name, entries)
+            })
+            .collect()
+    }
+
+    /// `OrientationLock::Landscape` emits `kindle_ebook_metadata` holding
+    /// `book_orientation_lock` alone.
+    #[test]
+    fn fixed_layout_book_states_its_orientation_lock() {
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let mut meta = book.metadata().clone();
+        meta.fixed_layout = true;
+        meta.orientation_lock = Some(crate::model::OrientationLock::Landscape);
+        book.set_metadata_override(meta);
+
+        let mut ctx = ExportContext::new();
+        ctx.fixed_layout_book = true;
+        let container_id = generate_container_id("test");
+        let categories =
+            metadata_categories(&build_book_metadata_fragment(&book, &container_id, &ctx));
+
+        let ebook = categories
+            .iter()
+            .find(|(name, _)| name == "kindle_ebook_metadata")
+            .expect("a locked fixed-layout book carries an ebook category");
+        assert_eq!(ebook.1, vec!["book_orientation_lock".to_string()]);
+    }
+
+    /// `fixed_layout_book` without `orientation_lock` emits three categories.
+    #[test]
+    fn fixed_layout_book_without_a_lock_has_no_ebook_category() {
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let mut meta = book.metadata().clone();
+        meta.fixed_layout = true;
+        book.set_metadata_override(meta);
+
+        let mut ctx = ExportContext::new();
+        ctx.fixed_layout_book = true;
+        let container_id = generate_container_id("test");
+        let categories =
+            metadata_categories(&build_book_metadata_fragment(&book, &container_id, &ctx));
+
+        let names: Vec<&str> = categories.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "kindle_audit_metadata",
+                "kindle_capability_metadata",
+                "kindle_title_metadata",
+            ]
+        );
+    }
+
+    /// `fixed_layout_capabilities` emits Ion ints, `yj_double_page_spread`
+    /// only alongside a spread.
     #[test]
     fn fixed_layout_capabilities_state_the_comic_reader_keys() {
         use crate::formats::kfx::metadata::MetadataValue::Int;

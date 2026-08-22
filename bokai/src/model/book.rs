@@ -62,8 +62,7 @@ pub struct CollectionInfo {
     pub position: Option<f64>,
 }
 
-/// Which flavour of periodical a book is — the distinction Amazon's catalogue
-/// makes, and the reason a `.pobi` is shelved apart from a book.
+/// Which flavour of periodical a book is, as Amazon's catalogue names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeriodicalKind {
     /// MOBI header type 259, `cdetype = MAGZ`.
@@ -75,9 +74,7 @@ pub enum PeriodicalKind {
 }
 
 impl PeriodicalKind {
-    /// The Kindle catalogue's four-letter content type. Drives KFX
-    /// `cde_content_type` and, on device, which shelf the library uses and
-    /// whether back issues stack.
+    /// The four-letter content type KFX writes as `cde_content_type`.
     pub fn cde_type(self) -> &'static str {
         match self {
             PeriodicalKind::Magazine => "MAGZ",
@@ -115,11 +112,8 @@ pub struct Metadata {
     pub authors: Vec<String>,
     pub language: String,
     pub identifier: String,
-    /// Amazon Standard Identification Number, kept separate from `identifier`
-    /// because KFX carries both a generic `book_id` (internal Kindle UUID)
-    /// *and* an `ASIN` (catalogue id used by amazon.com / .co.jp /…). EPUB
-    /// imports populate this from a `<dc:identifier opf:scheme="ASIN">` line
-    /// when present.
+    /// Amazon Standard Identification Number, separate from `identifier`.
+    /// An EPUB import reads it from `<dc:identifier opf:scheme="ASIN">`.
     pub asin: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
@@ -133,56 +127,84 @@ pub struct Metadata {
     pub contributors: Vec<Contributor>,
     /// file-as for title (sort key)
     pub title_sort: Option<String>,
-    /// Per-author sort/pronunciation keys, positionally aligned with
-    /// `authors`. EPUB carries one `file-as` per `<dc:creator>`, KFX repeats
-    /// `author_pronunciation` per `author`, MOBI repeats EXTH 517 per
-    /// EXTH 100 — all positional. A source declaring a single shared key
-    /// yields one entry; empty means the source declared none.
+    /// Sort/pronunciation keys, positionally aligned with `authors`: EPUB
+    /// `file-as`, KFX `author_pronunciation`, MOBI EXTH 517. Empty when the
+    /// source declared none.
     pub author_sorts: Vec<String>,
     /// belongs-to-collection (series info)
     pub collection: Option<CollectionInfo>,
     /// OPF spine `page-progression-direction` attribute ("ltr" | "rtl" | "default").
     /// Required for vertical-RTL Japanese books to bind/swipe correctly on Kindle.
     pub page_progression_direction: Option<String>,
-    /// OPF `<meta name="primary-writing-mode">` value (e.g. "vertical-rl",
-    /// "vertical-lr"). Richer vocabulary than `page_progression_direction`:
-    /// distinguishes Japanese vertical-rl from Mongolian vertical-lr, which
-    /// share a `rtl` PPD but render differently.
+    /// OPF `<meta name="primary-writing-mode">` value: "vertical-rl" for
+    /// Japanese, "vertical-lr" for Mongolian, both `rtl` in
+    /// `page_progression_direction`.
     pub primary_writing_mode: Option<String>,
-    /// Book is fixed-layout (image-based manga / comic, or a paginated
-    /// picture book) — `rendition:layout = pre-paginated`. Drives FXL OPF
-    /// metadata on EPUB export and the `yj_non_pdf_fixed_layout` skeleton on
-    /// KFX export, instead of the reflowable path. When false the book flows.
+    /// `rendition:layout = pre-paginated`. Selects the FXL OPF metadata on
+    /// EPUB export and the `yj_non_pdf_fixed_layout` skeleton on KFX export.
     pub fixed_layout: bool,
     /// `book-type` OPF hint — `"comic"` for double-page-spread manga,
     /// `"children"` for picture books. Only meaningful when `fixed_layout`.
     pub book_type: Option<String>,
-    /// `rendition:spread` policy for a fixed-layout book (e.g. `"landscape"`
-    /// = show facing pages as a two-page spread in landscape). `None` leaves
-    /// it to the reader default.
+    /// `rendition:spread` policy for a fixed-layout book, e.g. `"landscape"`
+    /// for facing pages as a two-page spread.
     pub rendition_spread: Option<String>,
+    /// The `OrientationLock` the source declared. Read with `fixed_layout`.
+    pub orientation_lock: Option<OrientationLock>,
     /// Book-level default page viewport `(width, height)` in px — the
     /// `fixed-layout-jp:viewport` / KF8 `original-resolution`. Every FXL page
     /// is authored to this box unless it carries its own viewport.
     pub default_viewport: Option<(u32, u32)>,
-    /// Set when the book is an issue of a periodical rather than a book. `None`
-    /// for every ordinary title.
-    ///
-    /// The kind is all a periodical needs carried separately. Its issue date is
-    /// `date`, and the publication that groups its back issues is `title` —
-    /// which for a periodical names the magazine, not the issue, and is
-    /// literally what the device groups on: the Kindle's own
-    /// `periodicals_virtual_collections.lua` matches
-    /// `p_cdeGroup = ? or p_titles_0_nominal = ?`, so a sideload with no
-    /// cdeGroup stacks on the shared title.
+    /// `PeriodicalKind` for an issue of a periodical, `None` for a book. Its
+    /// issue date is `date`; `title` names the magazine, and a sideload with
+    /// no cdeGroup stacks on that shared title.
     pub periodical: Option<PeriodicalKind>,
+}
+
+/// A declared screen-orientation lock. `kindle_value` spells it for KF8
+/// `orientation-lock` and KFX `book_orientation_lock`, `rendition_value` for
+/// EPUB 3 `rendition:orientation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrientationLock {
+    /// `none` in the Kindle vocabulary, `auto` in EPUB.
+    Auto,
+    Portrait,
+    Landscape,
+}
+
+impl OrientationLock {
+    /// `none` / `portrait` / `landscape`.
+    pub fn kindle_value(self) -> &'static str {
+        match self {
+            OrientationLock::Auto => "none",
+            OrientationLock::Portrait => "portrait",
+            OrientationLock::Landscape => "landscape",
+        }
+    }
+
+    /// `auto` / `portrait` / `landscape`.
+    pub fn rendition_value(self) -> &'static str {
+        match self {
+            OrientationLock::Auto => "auto",
+            OrientationLock::Portrait => "portrait",
+            OrientationLock::Landscape => "landscape",
+        }
+    }
+
+    /// Parse `none` / `auto` / `portrait` / `landscape`, case-insensitive.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "auto" => Some(OrientationLock::Auto),
+            "portrait" => Some(OrientationLock::Portrait),
+            "landscape" => Some(OrientationLock::Landscape),
+            _ => None,
+        }
+    }
 }
 
 /// Which half of a two-page spread a fixed-layout page occupies — the OPF
 /// spine itemref `page-spread-left` / `page-spread-right` /
-/// `rendition:page-spread-center` property. Drives facing-page pairing in a
-/// manga/comic; carries the source's declared pairing so it round-trips
-/// losslessly rather than being re-derived by alternation.
+/// `rendition:page-spread-center` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSpread {
     Left,
@@ -296,7 +318,7 @@ impl LandmarkType {
     /// reading-start markers routinely carry nothing at all.
     ///
     /// Every surface that shows a landmark to a reader needs a word for it, so
-    /// the naming lives here rather than in whichever writer needed it first.
+    /// the naming lives here, off any one writer.
     pub fn default_label(self) -> &'static str {
         match self {
             Self::Cover => "Cover",
@@ -312,13 +334,12 @@ impl LandmarkType {
             Self::Endnotes => "Notes",
             Self::Loi => "List of Illustrations",
             Self::Lot => "List of Tables",
-            // Both mark where reading begins rather than a section of the book.
             Self::StartReading | Self::BodyMatter => "Start of Content",
         }
     }
 
-    /// Whether this landmark names a *part of the book* rather than a reading
-    /// position — i.e. whether it belongs in a chapter list.
+    /// Whether this landmark names a *part of the book* — whether it belongs
+    /// in a chapter list.
     ///
     /// A book's own Contents page links its chapters and, almost always, neither
     /// the cover nor itself; the landmarks are where those live. So a TOC derived
@@ -376,17 +397,12 @@ pub struct Book {
     /// Uses RwLock for thread-safe access and Arc for cheap cloning.
     ir_cache: Arc<RwLock<HashMap<ChapterId, Arc<Chapter>>>>,
     /// Caller-supplied metadata that shadows the backend's parsed metadata.
-    /// When set, [`Book::metadata`] returns this instead — so an exporter writes
-    /// the override (e.g. a title/author the caller edited in its own catalog)
-    /// without touching the source file. `None` = use the backend's metadata
-    /// verbatim (the default).
+    /// When set, [`Book::metadata`] returns it. `None` = the backend's
+    /// metadata verbatim.
     meta_override: Option<Metadata>,
-    /// How raster images are encoded into a KFX export: `Color` (default —
-    /// full `24bppRGB` JXR, for color devices like the Colorsoft and for
-    /// host-side readers) or `Grayscale` (luma-only `8bppGray`). `Color` is safe as
-    /// the default because the JXR encoder auto-collapses any image whose
-    /// channels are identical (a grayscale source) to `8bppGray`, so only
-    /// genuinely-color images carry chroma. Set via [`Book::set_image_color_mode`].
+    /// How raster images are encoded into a KFX export: `Color` (default,
+    /// `24bppRGB` JXR, collapsed to `8bppGray` when the channels are
+    /// identical) or `Grayscale` (`8bppGray`).
     image_color_mode: jxr::ColorMode,
     /// Worker-thread cap for every parallel stage of an import or export off
     /// this handle. `0` = the platform's reported parallelism. Set via
@@ -403,11 +419,9 @@ impl Format {
             .and_then(|ext| match ext.to_lowercase().as_str() {
                 "epub" => Some(Format::Epub),
                 "azw3" => Some(Format::Azw3),
-                // `.pobi` is a periodical delivery — a plain MOBI6 book at the
-                // container level, distinguished only by its MOBI header type,
-                // EXTH 501 `cdetype` and a hierarchical NCX. Amazon used the
-                // extension so the device could route it without opening the
-                // file; there is no separate container to parse.
+                // `.pobi` is a plain MOBI6 container, marked as a periodical
+                // by its MOBI header type, EXTH 501 `cdetype` and a
+                // hierarchical NCX.
                 "mobi" | "pobi" => Some(Format::Mobi),
                 // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
                 // importer auto-detects and dispatches it via its `open()`.
@@ -546,7 +560,7 @@ impl Book {
     }
 
     /// Book metadata. Returns the [override][Book::set_metadata_override] when
-    /// one has been installed, otherwise the backend's parsed metadata.
+    /// one has been installed, else the backend's parsed metadata.
     pub fn metadata(&self) -> &Metadata {
         self.meta_override
             .as_ref()
@@ -554,14 +568,11 @@ impl Book {
     }
 
     /// Shadow the backend's parsed metadata with `meta`. Every later
-    /// [`metadata`][Book::metadata] call — including the ones exporters make to
-    /// build the output's title/author/identifier — sees `meta` instead. The
-    /// source file is untouched: this only changes what *this* handle reports.
+    /// [`metadata`][Book::metadata] call sees `meta`. The source file is
+    /// untouched.
     ///
-    /// Use it to bake catalog-edited metadata into a (re)converted KFX
-    /// without rewriting the source EPUB. Build the override by cloning
-    /// `metadata()` and overwriting just the fields you mean to change, so
-    /// untouched fields (identifier, ASIN, cover) survive.
+    /// Clone `metadata()` and overwrite the fields to change; the untouched
+    /// fields (identifier, ASIN, cover) survive.
     pub fn set_metadata_override(&mut self, meta: Metadata) {
         self.meta_override = Some(meta);
     }

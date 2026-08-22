@@ -1,9 +1,9 @@
 //! Shared `content.opf` (OPF package document) emitter.
 //!
 //! Every EPUB writer in the crate — the exporter's raw and normalized paths
-//! alike — builds an [`OpfPackage`] and serializes it through [`emit_opf`], so
-//! the package document's shape (element order, refinement style, attribute
-//! forms) is identical by construction rather than by parallel maintenance.
+//! alike — builds an [`OpfPackage`] and serializes it through [`emit_opf`],
+//! giving one package-document shape: element order, refinement style,
+//! attribute forms.
 //!
 //! The emitted package is EPUB 3 throughout: creator roles and sort keys
 //! ride `<meta refines>` (the EPUB-2 `opf:role`/`opf:file-as`/`opf:scheme`
@@ -12,7 +12,7 @@
 //! (cover, primary-writing-mode, fixed-layout) are kept alongside their
 //! EPUB 3 equivalents for reader compatibility.
 
-use crate::model::LandmarkType;
+use crate::model::{LandmarkType, OrientationLock};
 
 /// One `<dc:creator>` / `<dc:contributor>` with optional refinements.
 pub struct OpfCreator {
@@ -57,9 +57,11 @@ pub struct OpfFixedLayout {
     /// EBPAJ `fixed-layout-jp:viewport` twin of `original-resolution`,
     /// emitted for Japanese fixed-layout sources that carried it.
     pub ebpaj_viewport: Option<(u32, u32)>,
-    /// Page pixel size for `original-resolution`; also derives the
-    /// `rendition:orientation` / `orientation-lock` hints.
+    /// Page pixel size for `original-resolution`.
     pub original_resolution: Option<(u32, u32)>,
+    /// `OrientationLock` the source declared, emitted as both
+    /// `rendition:orientation` and `orientation-lock`.
+    pub orientation_lock: Option<OrientationLock>,
     /// `book-type` OPF hint — `"comic"` for double-page-spread manga.
     pub book_type: Option<String>,
 }
@@ -317,12 +319,15 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
             s.push_str(&format!(
                 "    <meta name=\"original-resolution\" content=\"{w}x{h}\"/>\n"
             ));
-            let orientation = if w > h { "landscape" } else { "portrait" };
+        }
+        if let Some(lock) = fxl.orientation_lock {
             s.push_str(&format!(
-                "    <meta property=\"rendition:orientation\">{orientation}</meta>\n"
+                "    <meta property=\"rendition:orientation\">{}</meta>\n",
+                lock.rendition_value()
             ));
             s.push_str(&format!(
-                "    <meta name=\"orientation-lock\" content=\"{orientation}\"/>\n"
+                "    <meta name=\"orientation-lock\" content=\"{}\"/>\n",
+                lock.kindle_value()
             ));
         }
         if let Some(bt) = fxl.book_type.as_deref() {
@@ -725,6 +730,7 @@ mod tests {
             rendition_spread: None,
             ebpaj_viewport: None,
             original_resolution: Some((1600, 2560)),
+            orientation_lock: Some(OrientationLock::Portrait),
             book_type: Some("comic".to_string()),
         });
         let pkg = OpfPackage {
@@ -746,6 +752,74 @@ mod tests {
             .unwrap();
         let bt = opf.find("name=\"book-type\" content=\"comic\"").unwrap();
         assert!(layout < fxl && fxl < res && res < orient && orient < lock && lock < bt);
+    }
+
+    /// `original_resolution` alone emits no orientation metas.
+    #[test]
+    fn emit_opf_page_box_alone_locks_nothing() {
+        let mut md = minimal_metadata();
+        md.fixed_layout = Some(OpfFixedLayout {
+            rendition_spread: None,
+            ebpaj_viewport: None,
+            original_resolution: Some((1600, 2560)),
+            orientation_lock: None,
+            book_type: Some("comic".to_string()),
+        });
+        let pkg = OpfPackage {
+            metadata: md,
+            manifest: Vec::new(),
+            spine: Vec::new(),
+            guide: Vec::new(),
+        };
+        let opf = emit_opf(&pkg);
+        assert!(opf.contains("name=\"original-resolution\" content=\"1600x2560\""));
+        assert!(!opf.contains("rendition:orientation"));
+        assert!(!opf.contains("orientation-lock"));
+    }
+
+    /// `orientation_lock` emits `rendition:orientation` and `orientation-lock`.
+    #[test]
+    fn emit_opf_declared_orientation_is_emitted_in_both_vocabularies() {
+        let mut md = minimal_metadata();
+        md.fixed_layout = Some(OpfFixedLayout {
+            rendition_spread: None,
+            ebpaj_viewport: None,
+            original_resolution: Some((1600, 2560)),
+            orientation_lock: Some(OrientationLock::Landscape),
+            book_type: None,
+        });
+        let pkg = OpfPackage {
+            metadata: md,
+            manifest: Vec::new(),
+            spine: Vec::new(),
+            guide: Vec::new(),
+        };
+        let opf = emit_opf(&pkg);
+        assert!(opf.contains("<meta property=\"rendition:orientation\">landscape</meta>"));
+        assert!(opf.contains("name=\"orientation-lock\" content=\"landscape\""));
+        assert!(!opf.contains("portrait"));
+    }
+
+    /// `OrientationLock::Auto` emits `auto` and `none`.
+    #[test]
+    fn emit_opf_unlocked_orientation_takes_each_vocabularys_word() {
+        let mut md = minimal_metadata();
+        md.fixed_layout = Some(OpfFixedLayout {
+            rendition_spread: None,
+            ebpaj_viewport: None,
+            original_resolution: None,
+            orientation_lock: Some(OrientationLock::Auto),
+            book_type: None,
+        });
+        let pkg = OpfPackage {
+            metadata: md,
+            manifest: Vec::new(),
+            spine: Vec::new(),
+            guide: Vec::new(),
+        };
+        let opf = emit_opf(&pkg);
+        assert!(opf.contains("<meta property=\"rendition:orientation\">auto</meta>"));
+        assert!(opf.contains("name=\"orientation-lock\" content=\"none\""));
     }
 
     #[test]

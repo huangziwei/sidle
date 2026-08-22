@@ -1,13 +1,12 @@
 //! What a MOBI/KF8 file's headers say about the book.
 //!
 //! Both importers — MOBI 6's single text stream and KF8's skeleton/chunk
-//! layout — read the same PDB name, MOBI header and EXTH records, so the
-//! reading lives here once rather than in each of them. The KF8-only records
-//! (fixed layout, book type, page resolution) are simply absent from a MOBI 6
-//! file, so one reading covers both.
+//! layout — read the same PDB name, MOBI header and EXTH records. The
+//! KF8-only records (fixed layout, book type, page resolution) are absent
+//! from a MOBI 6 file.
 
 use crate::formats::mobi::{ExthHeader, MobiHeader, PdbInfo};
-use crate::model::{CollectionInfo, Metadata};
+use crate::model::{CollectionInfo, Metadata, OrientationLock};
 
 /// Read the book's metadata out of the headers.
 ///
@@ -44,17 +43,11 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
 /// Name the *issue*, not just the publication.
 ///
 /// A periodical's title field holds the publication, the same string on every
-/// issue, because the format expects the catalogue to group issues under a
-/// parent and distinguish them by date. A sideload gets no such grouping (see
-/// `Metadata::periodical`), so without the date the library shows a row of
-/// identical tiles with no way to tell which issue is which.
+/// issue; the catalogue groups issues under it and separates them by date. A
+/// sideload gets no such grouping (see `Metadata::periodical`).
 ///
-/// The date goes on in ISO form so a plain title sort is also chronological.
-/// Applied at import rather than in one exporter, so the EPUB side, the KFX
-/// side and any library row built from them agree on what the book is called.
-///
-/// Idempotent: a title that already ends with the date is returned unchanged,
-/// so a re-import of a converted file does not accumulate suffixes.
+/// The date goes on in ISO form, keeping a plain title sort chronological.
+/// Idempotent: a title ending with the date is returned unchanged.
 fn issue_title(title: &str, date: Option<&str>) -> String {
     let Some(date) = date
         .map(crate::util::truncate_to_date)
@@ -73,8 +66,7 @@ const ISSUE_DATE_SEPARATOR: &str = " — ";
 
 /// [`issue_title`] undone: the publication name inside an issue title.
 ///
-/// Somewhere that shows the date in its own right — a masthead — wants the
-/// publication rather than the issue, and would otherwise print the date twice.
+/// A masthead shows the date in its own right and wants the publication.
 pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a str {
     date.map(crate::util::truncate_to_date)
         .filter(|d| !d.is_empty())
@@ -84,15 +76,12 @@ pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a s
 
 /// Is this an issue of a periodical, and of what kind?
 ///
-/// Two independent declarations say so, and either alone is enough. The MOBI
-/// header type is what the reader switches its book model on; EXTH 501 is what
-/// the catalogue shelves by. They agree in every `.pobi` on hand, but a file
-/// rebuilt by a third-party tool can easily keep one and drop the other, so
-/// neither is required to confirm the other.
+/// Two independent declarations say so, and either alone is enough: the MOBI
+/// header type and EXTH 501. A file rebuilt by a third-party tool can carry
+/// one without the other.
 ///
-/// The third signal — the NCX's own tag-5 `kind` string — is not consulted here
-/// because it lives in the index, not the headers. An importer that has already
-/// read the index can override this with what the structure says.
+/// The NCX's own tag-5 `kind` string lives in the index, not the headers. An
+/// importer that has read the index can override this.
 fn periodical_kind(
     mobi: &MobiHeader,
     exth: &Option<ExthHeader>,
@@ -156,9 +145,7 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
             })
         });
 
-    // KF8 fixed-layout (comic / picture book): any of the three FXL EXTH
-    // records marks the book as pre-paginated so it round-trips as a
-    // fixed-layout EPUB instead of being flattened to reflowable.
+    // Any of the three FXL EXTH records marks the book pre-paginated.
     let book_type = exth.book_type.clone().filter(|s| !s.is_empty());
     let is_comic = book_type.as_deref() == Some("comic");
     metadata.fixed_layout = exth.fixed_layout.as_deref() == Some("true")
@@ -169,8 +156,11 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
         .original_resolution
         .as_deref()
         .and_then(parse_resolution);
-    // KF8 has no explicit `rendition:spread`; a comic implies facing-page
-    // (landscape) spreads, which is how the Kindle renders `book-type:comic`.
+    metadata.orientation_lock = exth
+        .orientation_lock
+        .as_deref()
+        .and_then(OrientationLock::parse);
+    // `book-type: comic` implies facing-page (landscape) spreads.
     if metadata.fixed_layout && is_comic {
         metadata.rendition_spread = Some("landscape".to_string());
     }
@@ -241,6 +231,26 @@ mod tests {
         assert_eq!(meta.rendition_spread.as_deref(), Some("landscape"));
     }
 
+    /// EXTH 124 becomes `orientation_lock`.
+    #[test]
+    fn an_orientation_lock_survives_the_headers() {
+        let meta = read(ExthHeader {
+            book_type: Some("comic".to_string()),
+            original_resolution: Some("1280x907".to_string()),
+            orientation_lock: Some("landscape".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(meta.orientation_lock, Some(OrientationLock::Landscape));
+
+        let unlocked = read(ExthHeader {
+            orientation_lock: Some("none".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(unlocked.orientation_lock, Some(OrientationLock::Auto));
+
+        assert_eq!(read(ExthHeader::default()).orientation_lock, None);
+    }
+
     #[test]
     fn a_page_resolution_reads_as_a_viewport() {
         assert_eq!(parse_resolution("1444x2048"), Some((1444, 2048)));
@@ -301,7 +311,7 @@ mod tests {
             "The New Yorker"
         );
         // A title that never carried a date, or a date that is not its suffix,
-        // is returned whole rather than trimmed on a guess.
+        // is returned whole.
         assert_eq!(
             publication_title("The New Yorker", Some("2014-12-14")),
             "The New Yorker"

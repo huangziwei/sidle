@@ -386,7 +386,7 @@ impl ExthHeader {
 /// The annotation is how a Kindle store title states series membership — the
 /// format carries no field for it — and it is always written in ASCII angle
 /// brackets, which nothing else in a title uses: an edition marker in a
-/// Japanese title takes the fullwidth 〈…〉 or ＜…＞ instead. A title without
+/// Japanese title takes the fullwidth 〈…〉 or ＜…＞. A title without
 /// the annotation comes back unchanged and series-less.
 fn split_series_annotation(title: &str) -> (String, Option<String>) {
     let Some(open) = title.find('<') else {

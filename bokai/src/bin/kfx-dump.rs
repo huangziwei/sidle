@@ -306,9 +306,7 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                 };
 
                 // An entity's id is usually doc-local (that's where fragment
-                // names live), so resolve both through the container's own
-                // base rather than indexing the static table — otherwise every
-                // named entity reports a base-table tail name.
+                // names live). Both resolve through the container's own base.
                 let id_name = resolve_symbol(id_idnum as u64, &extended_symbols, base_symbol_count);
                 let type_name =
                     resolve_symbol(type_idnum as u64, &extended_symbols, base_symbol_count);
@@ -2360,10 +2358,8 @@ impl EntityCatalog {
         // id in range has text and none is left undefined.
         let max_id = all_symbols.len() as i64;
 
-        // Every reader that imports this table copies its symbols wholesale, so
-        // hold the text behind `Arc`s: an import then costs a refcount bump per
-        // symbol instead of a fresh allocation. A container with tens of
-        // thousands of document symbols pays that on each of its entities.
+        // Every reader that imports this table copies its symbols wholesale.
+        // Text behind `Arc`s costs one refcount bump per symbol per entity.
         let mut catalog = MapCatalog::new();
         catalog.insert_table(SharedSymbolTable::new(
             "YJ_symbols",
@@ -5063,10 +5059,9 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
     let num_entries = index_length / entry_size;
     let position_map_type = KfxSymbol::PositionMap as u32;
     // The eid→pid chain has two container shapes — a reflowable `{eid, pid}`
-    // list, or per-section runs replayed from `section_position_id_map` — and
-    // the location scale sits on top of it. Collect the whole family and let
-    // `PositionFragments` resolve it, so this reports the same axis the
-    // importer reads rather than a second partial parse of one shape.
+    // list, or per-section runs replayed from `section_position_id_map` — with
+    // the location scale on top. `PositionFragments` resolves the whole
+    // family into the axis the importer reads.
     let mut chain: Vec<(u32, IonValue)> = Vec::new();
 
     println!("=== Position Maps ===\n");
