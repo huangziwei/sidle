@@ -25,8 +25,8 @@
 # wherever it is attached. What tells two same-named builds apart is inside:
 # BOKAI_BUILD stamps the release tag into `bokai --version`.
 #
-# The zip holds extensions/bokai with bokai-armhf and bokai-armsf in it, one
-# binary per ABI.
+# The zip holds extensions/bokai with bokai and bokai-armsf in it, one binary
+# per ABI.
 #
 # GitHub generates "Source code (zip/tar.gz)" for whatever tag exists and that
 # cannot be turned off, so a bokai-only release still shows sidle's tree behind

@@ -103,8 +103,8 @@ cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
 # their own lines. Staged when a cross-build has left one, skipped when it has
 # not; a packaged app then simply has no bokai to offer.
 #
-# $BOKAI_BIN is the hardfloat ABI, one of the two build-bokai.sh stages.
-BOKAI_BIN="bokai-armhf"
+# $BOKAI_BIN names the hardfloat binary, one of the two build-bokai.sh stages.
+BOKAI_BIN="bokai"
 if [ -f "device/extensions/bokai/bin/$BOKAI_BIN" ]; then
     mkdir -p "$RES_DEVICE/extensions/bokai/bin"
     cp "device/extensions/bokai/config.xml" "$RES_DEVICE/extensions/bokai/config.xml"

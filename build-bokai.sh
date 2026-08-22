@@ -1,7 +1,7 @@
 #!/bin/sh
 # Cross-compile bokai and stage device/extensions/bokai for a USB copy to
-# /mnt/us/extensions/bokai/. `armhf` targets armv7-unknown-linux-musleabihf,
-# `armsf` armv7-unknown-linux-musleabi; each binary is named for its ABI.
+# /mnt/us/extensions/bokai/. `armhf` targets armv7-unknown-linux-musleabihf and
+# stages bin/bokai; `armsf` targets armv7-unknown-linux-musleabi, bin/bokai-armsf.
 #
 # POSIX sh: this file runs on a GitHub runner and on a workstation.
 set -eu
@@ -14,11 +14,13 @@ ABI="${1:-armhf}"
 case "$ABI" in
 armhf)
     TARGET="armv7-unknown-linux-musleabihf"
+    NAME="bokai"
     # WANT_FLOAT is the e_flags byte at 0x25: 04 hardfloat, 02 soft-float.
     WANT_FLOAT="04"
     ;;
 armsf)
     TARGET="armv7-unknown-linux-musleabi"
+    NAME="bokai-armsf"
     WANT_FLOAT="02"
     ;;
 *)
@@ -26,7 +28,7 @@ armsf)
     exit 1
     ;;
 esac
-OUT="$EXT/bin/bokai-$ABI"
+OUT="$EXT/bin/$NAME"
 
 # `rustup target list --installed` gates the build on $TARGET, ahead of cargo's
 # "can't find core for armv7-..." panic.
@@ -86,5 +88,5 @@ cat <<EOF
 
     $EXT/  ->  /mnt/us/extensions/bokai/
 
-Then, over SSH:  /mnt/us/extensions/bokai/bin/bokai-$ABI --help
+Then, over SSH:  /mnt/us/extensions/bokai/bin/$NAME --help
 EOF
