@@ -5,9 +5,12 @@
 #   cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
 # Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
 #
-# armv7-unknown-linux-musleabihf = hardfloat NEON, one binary for the fleet. The
-# Colorsoft and Scribe run a 32-bit armv7 userspace, as the KOA2 does. musl links
-# statically, which makes the binary firmware-version-agnostic.
+# armv7-unknown-linux-musleabihf: hardfloat ABI, `+v7,+vfp3d16,+thumb2,-neon`.
+# One statically linked binary covers the Colorsoft, Scribe and KOA2, whatever
+# firmware each runs.
+#
+# armv7-unknown-linux-musleabi: soft-float ABI, `+v7,+thumb2,+soft-float,-neon`,
+# for the Paperwhite 2 generation. `build-bokai.sh armsf` is its only caller.
 #
 # Per-device CPU facts (read off each device 2026-08-12): the KOA2 is a
 # Cortex-A7 (Freescale i.MX7 Dual, `CPU part: 0xc07`, kernel 4.1) with no ARMv8
@@ -30,5 +33,9 @@
 #
 # A `rustup update` that reshuffles bundled tools needs it re-run.
 [target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes"]
+
+[target.armv7-unknown-linux-musleabi]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]

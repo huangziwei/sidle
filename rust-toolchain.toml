@@ -14,6 +14,8 @@
 [toolchain]
 channel = "1.97"
 components = ["clippy", "rustfmt"]
-# The Kindle cross target. Declaring it here means `build.sh` and
-# `build-bokai.sh` find it installed rather than stopping on their preflight.
-targets = ["armv7-unknown-linux-musleabihf"]
+# The Kindle cross targets. Declaring them here means `build.sh` and
+# `build-bokai.sh` find them installed rather than stopping on their preflight.
+# The hardfloat one builds everything; the soft-float one builds bokai for the
+# Paperwhite 2 generation, and .cargo/config.toml says what separates them.
+targets = ["armv7-unknown-linux-musleabihf", "armv7-unknown-linux-musleabi"]

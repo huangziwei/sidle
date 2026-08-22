@@ -15,7 +15,8 @@ artifacts/
 device/extensions/sidle/etc/server.conf
 device/extensions/sidle/bin/sidle
 device/extensions/sidle/bin/sidle.build-ts
-device/extensions/bokai/bin/bokai
+device/extensions/bokai/bin/bokai-armhf
+device/extensions/bokai/bin/bokai-armsf
 
 # build.sh staging: the sidle-server sidecar and on-device resources copied here
 # for `cargo tauri build` to fold into the bundle. Regenerated each build; never committed.

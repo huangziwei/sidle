@@ -1,39 +1,34 @@
 #!/bin/sh
-# Cross-compile bokai for the Kindle and stage the extension a USB copy installs.
+# Cross-compile bokai and stage device/extensions/bokai for a USB copy to
+# /mnt/us/extensions/bokai/. `armhf` targets armv7-unknown-linux-musleabihf,
+# `armsf` armv7-unknown-linux-musleabi; each binary is named for its ABI.
 #
-#   ./build-bokai.sh
-#
-# Output, ready to drag onto the Kindle's USB volume:
-#
-#   device/extensions/bokai/  ->  /mnt/us/extensions/bokai/
-#
-# **This is bokai's build, not sidle's.** The desktop app links bokai as a
-# library and wants nothing from here, so `build.sh` next door never calls this
-# one and a desktop build does not pay for a cross-compile it cannot use. The
-# two run independently, which is also what lets the two ship independently.
-#
-# The Kindle build is the `native` feature: KFX<->EPUB and the subcommands over
-# it, with `aozora`, `pdf` and `validate` absent — bokai/Cargo.toml says why for
-# each. `--profile device` is release plus fat LTO and `panic = "abort"`.
-#
-# One armv7 musl binary covers the fleet: the KOA2, Colorsoft and Scribe all run
-# a 32-bit armv7 userspace, and static linking makes it firmware-agnostic. No C
-# toolchain is needed, because the `native` feature graph is pure Rust — the C
-# dependencies (resvg, lopdf, rusqlite) all sit behind features it does not
-# take. rustc's bundled rust-lld links it; see .cargo/config.toml, which also
-# names the one-time symlink that puts rust-lld on PATH.
-#
-# Portable sh, unlike build.sh: a GitHub runner runs this file too, and the
-# release artifact has to be the same tree a workstation assembles.
+# POSIX sh: this file runs on a GitHub runner and on a workstation.
 set -eu
 
 cd "$(dirname "$0")"
 
-TARGET="armv7-unknown-linux-musleabihf"
 EXT="device/extensions/bokai"
-OUT="$EXT/bin/bokai"
 
-# Name the missing cross target in one line, ahead of cargo's opaque
+ABI="${1:-armhf}"
+case "$ABI" in
+armhf)
+    TARGET="armv7-unknown-linux-musleabihf"
+    # WANT_FLOAT is the e_flags byte at 0x25: 04 hardfloat, 02 soft-float.
+    WANT_FLOAT="04"
+    ;;
+armsf)
+    TARGET="armv7-unknown-linux-musleabi"
+    WANT_FLOAT="02"
+    ;;
+*)
+    echo "usage: $0 [armhf|armsf]" >&2
+    exit 1
+    ;;
+esac
+OUT="$EXT/bin/bokai-$ABI"
+
+# `rustup target list --installed` gates the build on $TARGET, ahead of cargo's
 # "can't find core for armv7-..." panic.
 if ! rustup target list --installed | grep -qx "$TARGET"; then
     echo "error: rustup target '$TARGET' is not installed" >&2
@@ -41,26 +36,22 @@ if ! rustup target list --installed | grep -qx "$TARGET"; then
     exit 1
 fi
 
-# bokai versions on its own line in bokai/Cargo.toml, deliberately outside the
-# root [workspace.package] the sidle-* crates share: the engine and the product
-# move at different rates, and this script exists so the engine can move alone.
-# The binary takes it through CARGO_PKG_VERSION; the copy here stamps the KUAL
-# metadata beside it, which is the one install file outside Cargo's reach.
+# VERSION is bokai/Cargo.toml's [package] version, which the binary carries as
+# CARGO_PKG_VERSION. $EXT/config.xml is the one install file outside Cargo's
+# reach and takes the same value here.
 VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' bokai/Cargo.toml | head -1)"
 [ -n "$VERSION" ] || { echo "error: no version in bokai/Cargo.toml [package]" >&2; exit 1; }
-# `-i.bak` + rm, not `-i ''`: BSD and GNU sed disagree about the bare form and
-# this file has to run on both.
+# `-i.bak` + rm: BSD and GNU sed disagree about the bare `-i ''`.
 sed -i.bak -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" "$EXT/config.xml"
 rm -f "$EXT/config.xml.bak"
 
-# The stamp that tells two builds of one version apart. bokai's version stands
-# still across most sidle releases — that is the point of releasing it attached
-# to them — so `bokai 0.1.2` on its own does not name what a device is carrying.
-# The release workflow passes the release tag in here and `--version` prints it.
-# An inherited value wins; a local build says `dev`.
+# BOKAI_BUILD reaches `bokai --version`, where the release workflow puts its
+# tag. An unset value builds `dev`.
 BUILD="${BOKAI_BUILD:-dev}"
 
 echo "==> building bokai $VERSION (build $BUILD) for $TARGET"
+# `--features native` is KFX<->EPUB without aozora, pdf and validate; `--profile
+# device` is release plus fat LTO and panic = "abort".
 BOKAI_BUILD="$BUILD" cargo build \
     --profile device \
     --target "$TARGET" \
@@ -73,23 +64,27 @@ mkdir -p "$(dirname "$OUT")"
 cp "target/$TARGET/device/bokai" "$OUT"
 chmod +x "$OUT"
 
-# Catch a cross path that quietly produced a host binary. It would run here and
-# do nothing on the device, and nothing else in the build would notice.
-if command -v file >/dev/null 2>&1; then
-    case "$(file -b "$OUT")" in
-    *ARM*) ;;
-    *) echo "warning: $OUT is not an ARM binary — check .cargo/config.toml" >&2 ;;
-    esac
-fi
+# $OUT's own header decides: e_machine at 0x12 (2800 = EM_ARM) and the e_flags
+# float byte at 0x25, against $WANT_FLOAT.
+MACHINE="$(od -An -tx1 -j18 -N2 "$OUT" | tr -d ' \n')"
+FLOAT="$(od -An -tx1 -j37 -N1 "$OUT" | tr -d ' \n')"
+[ "$MACHINE" = "2800" ] || {
+    echo "error: $OUT is not an ARM ELF (e_machine 0x$MACHINE) — check .cargo/config.toml" >&2
+    exit 1
+}
+[ "$FLOAT" = "$WANT_FLOAT" ] || {
+    echo "error: $OUT is not $ABI (ELF float ABI byte 0x$FLOAT, wanted 0x$WANT_FLOAT)" >&2
+    exit 1
+}
 
 echo "==> staged $(ls -lh "$OUT" | awk '{print $5}') -> $OUT"
 file "$OUT" 2>/dev/null || true
 
-cat <<'EOF'
+cat <<EOF
 
 ==> install — copy this onto the device
 
-    device/extensions/bokai/  ->  /mnt/us/extensions/bokai/
+    $EXT/  ->  /mnt/us/extensions/bokai/
 
-Then, over SSH:  /mnt/us/extensions/bokai/bin/bokai --help
+Then, over SSH:  /mnt/us/extensions/bokai/bin/bokai-$ABI --help
 EOF

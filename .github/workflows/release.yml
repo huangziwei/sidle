@@ -21,9 +21,12 @@
 #                 engine can take the spotlight on its own release page.
 #
 # Both build the identical artifact from the identical script, and both name it
-# after **bokai's** version rather than the tag, so one binary carries one name
+# after **bokai's** version rather than the tag, so one archive carries one name
 # wherever it is attached. What tells two same-named builds apart is inside:
 # BOKAI_BUILD stamps the release tag into `bokai --version`.
+#
+# The zip holds extensions/bokai with bokai-armhf and bokai-armsf in it, one
+# binary per ABI.
 #
 # GitHub generates "Source code (zip/tar.gz)" for whatever tag exists and that
 # cannot be turned off, so a bokai-only release still shows sidle's tree behind
@@ -142,7 +145,10 @@ jobs:
                   # several releases share. The branch name stands in on a dry
                   # run, where there is no tag.
                   BOKAI_BUILD: ${{ github.event.release.tag_name || github.ref_name }}
-              run: ./build-bokai.sh
+              # Two runs, one per ABI, into the same extension.
+              run: |
+                  ./build-bokai.sh armhf
+                  ./build-bokai.sh armsf
 
             - name: Package
               env:
