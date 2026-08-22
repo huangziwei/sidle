@@ -945,21 +945,33 @@ fn build_book_metadata_fragment(
         has_publisher_fonts: ctx.has_publisher_fonts,
     };
 
-    // Build each category using the schema. Order matches calibre's KFX:
-    // ebook → title → audit → capability (empty list, but its presence
-    // appears to be what makes the device library service treat the file as
-    // a complete Kindle book.)
-    let categories = [
-        MetadataCategory::KindleEbook,
-        MetadataCategory::KindleTitle,
-        MetadataCategory::KindleAudit,
-        MetadataCategory::KindleCapability,
-    ];
+    // Category order. A reflowable book takes calibre's: ebook → title → audit
+    // → capability (empty list, but its presence appears to be what makes the
+    // device library service treat the file as a complete Kindle book). A
+    // fixed-layout book takes Amazon's: audit → capability → title, with no
+    // ebook category at all.
+    let categories: &[MetadataCategory] = if ctx.fixed_layout_book {
+        &[
+            MetadataCategory::KindleAudit,
+            MetadataCategory::KindleCapability,
+            MetadataCategory::KindleTitle,
+        ]
+    } else {
+        &[
+            MetadataCategory::KindleEbook,
+            MetadataCategory::KindleTitle,
+            MetadataCategory::KindleAudit,
+            MetadataCategory::KindleCapability,
+        ]
+    };
 
     let categorised: Vec<IonValue> = categories
         .iter()
         .map(|&cat| {
-            let entries = build_category_entries(cat, meta, &meta_ctx);
+            let mut entries = build_category_entries(cat, meta, &meta_ctx);
+            if cat == MetadataCategory::KindleCapability && ctx.fixed_layout_book {
+                entries.extend(fixed_layout_capabilities(ctx.double_page_spread));
+            }
             let ion_entries: Vec<IonValue> = entries
                 .into_iter()
                 .map(|(k, v)| metadata_kv(k, &v))
@@ -983,6 +995,20 @@ fn build_book_metadata_fragment(
     KfxFragment::singleton(KfxSymbol::BookMetadata, book_metadata)
 }
 
+/// `kindle_capability_metadata` entries for a fixed-layout image book, in the
+/// key order and Ion int values Amazon writes.
+fn fixed_layout_capabilities(
+    double_page_spread: bool,
+) -> Vec<(&'static str, crate::formats::kfx::metadata::MetadataValue)> {
+    use crate::formats::kfx::metadata::MetadataValue;
+    let mut entries = vec![("continuous_popup_progression", MetadataValue::Int(0))];
+    if double_page_spread {
+        entries.push(("yj_double_page_spread", MetadataValue::Int(1)));
+    }
+    entries.push(("yj_fixed_layout", MetadataValue::Int(1)));
+    entries
+}
+
 /// Helper to create a metadata key-value struct. `value` may be a string or
 /// an Ion-native boolean (Amazon and calibre both emit `is_sample` and
 /// `override_kindle_font` as bool literals).
@@ -990,6 +1016,7 @@ fn metadata_kv(key: &str, value: &crate::formats::kfx::metadata::MetadataValue) 
     let ion_value = match value {
         crate::formats::kfx::metadata::MetadataValue::Text(s) => IonValue::String(s.clone()),
         crate::formats::kfx::metadata::MetadataValue::Bool(b) => IonValue::Bool(*b),
+        crate::formats::kfx::metadata::MetadataValue::Int(n) => IonValue::Int(*n),
     };
     IonValue::Struct(vec![
         (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
@@ -3908,6 +3935,8 @@ fn image_fxl_to_kfx(
     fragments.push(build_manga_content_features_fragment(any_spread, any_thumb));
     // 2. book_metadata ($490) — reuse the reflowable builder (reads Book metadata)
     ctx.has_publisher_fonts = has_publisher_fonts(book);
+    ctx.fixed_layout_book = true;
+    ctx.double_page_spread = any_spread;
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
     // 3. metadata ($258) — reading order + page-progression-direction
     fragments.push(build_fxl_metadata_fragment(&ctx, ppd_sym));
@@ -7829,6 +7858,28 @@ mod manga_fxl_tests {
             2700,
             Some((1800, 1350))
         ));
+    }
+
+    /// A fixed-layout book states its capabilities as Ion ints, and pairs
+    /// `yj_double_page_spread` with the same key in `content_features`.
+    #[test]
+    fn fixed_layout_capabilities_state_the_comic_reader_keys() {
+        use crate::formats::kfx::metadata::MetadataValue::Int;
+        assert_eq!(
+            fixed_layout_capabilities(true),
+            vec![
+                ("continuous_popup_progression", Int(0)),
+                ("yj_double_page_spread", Int(1)),
+                ("yj_fixed_layout", Int(1)),
+            ]
+        );
+        assert_eq!(
+            fixed_layout_capabilities(false),
+            vec![
+                ("continuous_popup_progression", Int(0)),
+                ("yj_fixed_layout", Int(1)),
+            ]
+        );
     }
 
     fn unit(is_cover: bool, pages: &[(u64, u64, u64)]) -> MangaUnit {

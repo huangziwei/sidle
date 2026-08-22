@@ -143,11 +143,13 @@ pub enum MetadataSource {
 
 /// Emitted metadata value — either a string or an Ion-native bool. Calibre's
 /// `is_sample` and `override_kindle_font` use Ion booleans, not the string
-/// "false". Keeping booleans separate lets us match that exactly.
-#[derive(Debug, Clone)]
+/// "false"; `kindle_capability_metadata` uses Ion ints. Each Ion type has its
+/// own variant.
+#[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     Text(String),
     Bool(bool),
+    Int(i64),
 }
 
 impl PartialEq<&str> for MetadataValue {
@@ -816,7 +818,7 @@ mod tests {
                 .filter(|(k, _)| *k == key)
                 .filter_map(|(_, v)| match v {
                     MetadataValue::Text(s) => Some(s.as_str()),
-                    MetadataValue::Bool(_) => None,
+                    MetadataValue::Bool(_) | MetadataValue::Int(_) => None,
                 })
                 .collect()
         };

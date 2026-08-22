@@ -703,6 +703,14 @@ pub struct ExportContext {
     /// 885×1260 page_template).
     pub cover_dimensions: Option<(u32, u32)>,
 
+    /// Fixed-layout image book: drives the `kindle_capability_metadata` a
+    /// device reads to open the book in its comic reader.
+    pub fixed_layout_book: bool,
+
+    /// Any section holds a facing pair, pairing `yj_double_page_spread` in
+    /// `content_features` with the same key in `kindle_capability_metadata`.
+    pub double_page_spread: bool,
+
     /// Pixel box a spine page declares for itself (`<meta name="viewport">`).
     /// A full-page illustration or spread carries one inside an otherwise
     /// reflowing book.
@@ -903,6 +911,8 @@ impl ExportContext {
             cover_content_id: None,
             inline_cover_emitted: false,
             cover_dimensions: None,
+            fixed_layout_book: false,
+            double_page_spread: false,
             page_viewports: HashMap::new(),
             chapters_needing_anchor: HashSet::new(),
             pending_chapter_anchor: None,
