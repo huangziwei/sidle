@@ -105,8 +105,8 @@ pub struct Azw3Importer {
 }
 
 /// Position metadata for a TOC entry (from NCX). The byte position resolves
-/// against the reassembled flow (built lazily), so we keep the pos:fid here and
-/// resolve it in `resolve_toc` rather than storing an eager on-disk offset.
+/// against the reassembled flow (built lazily). Holds the pos:fid for
+/// `resolve_toc` to resolve; no eager on-disk offset.
 #[derive(Debug, Clone, Copy)]
 struct TocPosition {
     /// pos:fid `(elem_idx, offset)` when the NCX entry carries one.
@@ -331,7 +331,7 @@ fn resolve_toc_with_positions(
         if let Some(pos) = positions.get(&key) {
             // Reassembled byte position: the pos:fid element's content start +
             // offset. An entry with no pos:fid resolves to the chapter-file
-            // start (its bare href already points there).
+            // start named by its bare href.
             let byte_pos = match pos.frag {
                 Some((fi, off)) => elems
                     .get(fi as usize)
@@ -555,10 +555,10 @@ impl Azw3Importer {
             let nodes = build_toc_from_ncx(&ncx, |entry| {
                 // KF8 entries carry a pos_fid (frag_idx, offset). The absolute
                 // byte position resolves against the *reassembled* flow, which
-                // isn't materialized until the text is decompressed, so store
-                // the pos_fid here and resolve lazily in `resolve_toc` /
-                // `ensure_linked_aids`. The file number is known now (from the
-                // pos_fid element, else `find_file_for_position`).
+                // isn't materialized until the text is decompressed. Stores the
+                // pos_fid for `resolve_toc` / `ensure_linked_aids` to resolve.
+                // The file number comes from the pos_fid element, else from
+                // `find_file_for_position`.
                 let (file_num, frag) = if let Some((frag_idx, offset)) = entry.pos_fid {
                     let fnum = elems
                         .get(frag_idx as usize)
@@ -838,8 +838,8 @@ impl Azw3Importer {
         // Ensure the root `<html>` carries both `xml:lang` and `lang`.
         // Calibre's AZW3 exporter scrubs `xml:lang` and leaves only `lang=`,
         // dropping per-spine-doc xml:lang counts versus the publisher EPUB.
-        // We pair them up; the fallback to `metadata.language` covers AZW3s
-        // that lack any lang signal on `<html>`.
+        // `ensure_html_lang_dual` pairs them; the fallback to
+        // `metadata.language` covers AZW3s with no lang signal on `<html>`.
         let with_lang = transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
 
         Ok(with_lang)
@@ -1012,8 +1012,8 @@ fn looks_like_svg_flow(bytes: &[u8]) -> bool {
 /// tables (`insert_pos`) and KindleUnpack's `getIDTag` address the *reassembled*
 /// text, where each chunk is spliced back into its skeleton. Resolving anchors
 /// against the on-disk flow makes a backward walk from a chunk-start land on the
-/// skeleton's tail element (the wrong div). So we reassemble once and resolve
-/// against [`concat`](Self::concat).
+/// skeleton's tail element (the wrong div). Reassembly runs once and anchors
+/// resolve against [`concat`](Self::concat).
 struct ReassembledFlow {
     /// Per-file `(filename, reassembled bytes)`, in spine order — the chapter
     /// content the importer emits.

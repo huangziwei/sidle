@@ -66,7 +66,7 @@ pub struct AssetInfo {
     /// transcode that fails passes the source type through instead.
     pub media_type: String,
     /// Declared pixel size, when the source states one. `None` means unknown,
-    /// not absent: the bytes may still decode to an image.
+    /// not absent: the bytes may decode to an image.
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
@@ -173,7 +173,7 @@ pub trait Importer: Send + Sync {
             stylesheets.push((sheet, Origin::Author));
         }
 
-        // Compile the already-parsed DOM to IR
+        // Compile the parsed DOM to IR
         let mut chapter = compile_dom(&dom, &stylesheets);
 
         // Post-process: Resolve relative paths in semantic attributes (src, href)
@@ -413,9 +413,8 @@ pub trait Importer: Send + Sync {
     /// registered at the position names the html id (`a85J`, `toc-148-0`, …)
     /// that content stamping emits. TOC and guide entries append the fragment
     /// whenever an anchor is registered; the page list additionally requires
-    /// it stamped (a page break on an already-anchored chapter start
-    /// registers a name that content never stamps — the bare chapter link is
-    /// where the page starts anyway). Only meaningful after `index_anchors`.
+    /// it stamped (a page break on an anchored chapter start registers a name
+    /// content never stamps). Only meaningful after `index_anchors`.
     /// Default `None`: formats whose nav hrefs are real `path#fragment`
     /// strings don't split resolution this way.
     fn nav_fragment(&self, _href: &str) -> Option<(String, bool)> {
@@ -497,8 +496,8 @@ pub fn resolve_path_based_href(
         // dropping the entry — calibre-built EPUBs routinely ship an NCX whose
         // entries point at generated anchor ids it never wrote into the HTML,
         // and a reader lands those at the top of the target file. Body links
-        // stay strict (`chapter_fallback = false`) so a genuinely broken
-        // in-text link is still reported as broken, not silently redirected.
+        // stay strict (`chapter_fallback = false`): a broken in-text link is
+        // reported as broken.
         if chapter_fallback {
             return Some(AnchorTarget::Chapter(target_chapter));
         }
@@ -524,8 +523,8 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
     }
 
     // The href/src is a URI reference; percent-decode it so it matches the
-    // archive's literal (decoded) zip entry names. `base` is already a decoded
-    // archive path, so the joined result stays in decoded space.
+    // archive's literal (decoded) zip entry names. `base` is a decoded archive
+    // path; the joined result stays in decoded space.
     let relative = crate::util::percent_decode(relative);
     let relative = relative.as_str();
 

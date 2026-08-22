@@ -568,9 +568,8 @@ impl Importer for KfxImporter {
             .iter()
             .map(|(name, fields)| {
                 let mut decl = convert_yj_properties(fields, &self.symbols);
-                // A `background-image` still names a KFX resource here; the
-                // sheet ships beside the exported files, so it has to point
-                // at those instead.
+                // A `background-image` names a KFX resource; the sheet ships
+                // beside the exported files and points at those.
                 self.rewrite_css_image_urls(&mut decl);
                 (name.clone(), decl)
             })
@@ -712,9 +711,9 @@ impl KfxImporter {
         // `parse_spine` (it is the strongest override).
         importer.derive_writing_direction();
         // Image index: needs metadata (declared cover) and the spine /
-        // section→storyline maps (first-section cover fallback) — so it runs
-        // while `section_names` still holds sections, before the fixed-layout
-        // expansion renames entries per page. Cheap — external_resource
+        // section→storyline maps (first-section cover fallback). Runs while
+        // `section_names` holds sections, ahead of the fixed-layout expansion
+        // that renames entries per page. Cheap — external_resource
         // fragments are tiny and media bytes are only peeked (≤ 64 bytes
         // each) for format sniffing.
         importer.build_image_index();
@@ -897,9 +896,8 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Fill still-empty metadata from the flat `$258 metadata` entity's direct
-    /// fields (calibre's `loader.rs::parse_metadata_struct` fallback).
-    /// Every write is empty-guarded so `kindle_title_metadata` wins.
+    /// Fill empty metadata from the flat `$258 metadata` entity's direct
+    /// fields. Every write is empty-guarded: `kindle_title_metadata` wins.
     fn parse_flat_metadata_fallback(&mut self) -> io::Result<()> {
         let loc = self
             .entities
@@ -1544,14 +1542,10 @@ impl KfxImporter {
         );
 
         // No generic `html::optimize` pass here: the KFX token→IR builder
-        // already produces a tree that mirrors calibre's pre-consolidation
-        // DOM, and `export::epub::dom::consolidate_part` does the
-        // calibre-faithful cleanup.
-        // Generic HTML-cleanup passes (list fusion, empty-node prune, span
-        // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
-        // two adjacent single-item `<ul>`s calibre keeps separate — so they
-        // must not run on the KFX path. `optimize` still serves the
-        // HTML-sourced importers via `compile_html`.
+        // produces a tree that mirrors calibre's pre-consolidation DOM, and
+        // `export::epub::dom::consolidate_part` does the calibre-faithful
+        // cleanup. `optimize` serves the HTML-sourced importers via
+        // `compile_html`.
 
         self.rewrite_image_srcs(&mut chapter);
 
@@ -1724,9 +1718,9 @@ impl KfxImporter {
     ///
     /// `document_data.writing_mode` states the book's axis and is taken as
     /// written; the style pool (see `kfx::writing_mode`) only answers for the
-    /// containers that omit the field. A horizontally-set book may still carry
-    /// vertical passages — those are styles within a horizontal document, not
-    /// evidence against what the document says. Any `-rl` writing mode forces
+    /// containers that omit the field. Vertical passages inside a
+    /// horizontally-set book are styles within a horizontal document, not
+    /// evidence against the document. Any `-rl` writing mode forces
     /// an RTL page turn — the common case for CJK vertical books, whose
     /// `direction` field literally says `ltr` — while an explicit
     /// `reading_orders[*].page_progression_direction` (captured by
@@ -2444,9 +2438,9 @@ impl KfxImporter {
     ///   ]
     /// }
     /// ```
-    /// We slot each entry's `content` string into a vec at position
-    /// `ruby_id - 1` (KFX uses 1-indexed ruby_id) so style_events can read it
-    /// with `ruby_index[ruby_name][ruby_id - 1]`.
+    /// Each entry's `content` string lands in a vec at position `ruby_id - 1`
+    /// (KFX uses 1-indexed ruby_id); style_events read it as
+    /// `ruby_index[ruby_name][ruby_id - 1]`.
     fn index_ruby_content(&mut self) -> io::Result<()> {
         if self.ruby_indexed {
             return Ok(());

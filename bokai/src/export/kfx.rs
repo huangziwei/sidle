@@ -110,8 +110,8 @@ fn build_kfx_container(
     // NO ION GENERATION HERE!
     // ========================================================================
 
-    // Check if we need a standalone cover section
-    // This happens when the EPUB cover image differs from the first spine chapter's image
+    // A standalone cover section: the EPUB cover image differs from the first
+    // spine chapter's image
     let asset_paths: Vec<_> = book.list_assets().to_vec();
     let cover_image = book.metadata().cover_image.clone();
     let first_chapter_id = book.spine().first().map(|e| e.id);
@@ -125,10 +125,9 @@ fn build_kfx_container(
                     .map(|first_chapter| {
                         let in_spine_image = get_chapter_image_path(&first_chapter);
                         let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
-                        // For dimension probe we want the file that's actually going
-                        // to render as the cover. Standalone path: the metadata cover.
-                        // In-spine titlepage path: whatever single image that chapter
-                        // hosts (which may or may not be the same file).
+                        // The dimension probe reads the file that renders as the
+                        // cover: the metadata cover on the standalone path, the
+                        // chapter's single image on the in-spine titlepage path.
                         let probe = if needs_standalone {
                             Some(normalized.clone())
                         } else {
@@ -182,7 +181,7 @@ fn build_kfx_container(
     // This ensures it appears in reading_orders.sections and landmarks point to it
     if standalone_cover_path.is_some() {
         ctx.register_section(COVER_SECTION_NAME);
-        // Assign fragment ID for cover section now (used by landmarks)
+        // Fragment ID for the cover section, keyed by landmarks
         let cover_section_id = ctx.next_fragment_id();
         ctx.cover_fragment_id = Some(cover_section_id);
         // Register Cover landmark pointing to the standalone cover section
@@ -270,7 +269,7 @@ fn build_kfx_container(
                     }
                 }
 
-                // Stop once we have both
+                // Stop once both are present
                 if ctx.landmark_fragments.contains_key(&LandmarkType::Cover)
                     && ctx
                         .landmark_fragments
@@ -335,7 +334,7 @@ fn build_kfx_container(
 
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
-    // Now ctx.position_map is populated. We can resolve links correctly.
+    // ctx.position_map is populated; links resolve against it.
     // ========================================================================
 
     let mut fragments = Vec::new();
@@ -371,8 +370,8 @@ fn build_kfx_container(
     // 2c. Metadata fragment ($258) - contains reading_orders
     fragments.push(build_metadata_fragment(book.metadata(), &ctx));
 
-    // NOTE: document_data ($538) is built AFTER chapters so max_id includes all content IDs.
-    // We'll insert it at this position (index 3) later.
+    // document_data ($538) is built AFTER chapters, giving max_id every content
+    // ID. It lands at this index.
     let document_data_index = fragments.len();
 
     // 2g. Chapter entities - collect separately for proper grouping
@@ -514,7 +513,7 @@ fn build_kfx_container(
     // cover), the metadata cover, and fonts (matched to @font-face rules in
     // `build_font_fragments` below). EPUBs routinely ship images nothing
     // displays — e.g. `display:none` raster fallbacks next to each SVG
-    // figure, which the IR transform already drops — and bundling them
+    // figure, which the IR transform drops — and bundling them
     // bloats the container with resources no storyline can reach.
     let referenced_names: HashSet<String> = ctx
         .section_resource_deps
@@ -572,8 +571,8 @@ fn build_kfx_container(
     // (`position_id_map` + one `section_position_id_map` per section), matching
     // Amazon's reflowable KFX — this is what makes a section-level nav target
     // (the cover) resolvable on-device. `section_names` is the per-section name
-    // string in `section_ids` order (cover first when standalone), used to key
-    // the `section_position_id_map` entities.
+    // string in `section_ids` order (cover first when standalone), keying the
+    // `section_position_id_map` entities.
     let section_names: Vec<String> = ctx
         .cover_fragment_id
         .map(|_| COVER_SECTION_NAME.to_string())
@@ -586,9 +585,9 @@ fn build_kfx_container(
     fragments.extend(build_section_position_id_map_fragments(&sec_pos));
     fragments.push(build_location_map_fragment(&ctx));
 
-    // Every resource and every section length now exists, so the real
-    // content_features replaces the placeholder pushed at 2a — in place, since
-    // the entity order is part of the format.
+    // With every resource and section length in hand, the real content_features
+    // replaces the placeholder pushed at 2a, in place: the entity order is part
+    // of the format.
     let facts = ContentFacts {
         max_section_pids: sec_pos
             .iter()
@@ -696,7 +695,7 @@ fn survey_node(chapter: &Chapter, node_id: NodeId, ctx: &mut ExportContext) {
     if !node.text.is_empty() {
         let text = chapter.text(node.text);
         ctx.advance_text_offset(text.len());
-        // We don't need to intern plain text content
+        // Plain text content needs no interning
     }
 
     // Recurse into children
@@ -902,7 +901,7 @@ fn build_book_metadata_fragment(
             .and_then(|href| ctx.resource_registry.get_name(href))
     });
 
-    // book_id: reuse `meta.identifier` if it already has the KFX shape (23-char
+    // book_id: reuse `meta.identifier` when it has the KFX shape (23-char
     // URL-safe Base64). Otherwise derive deterministically. Reuse keeps the
     // identifier stable across a KFX → EPUB → KFX round trip.
     let book_id = if !meta.identifier.is_empty() {
@@ -918,16 +917,15 @@ fn build_book_metadata_fragment(
     // ASIN: pass through when the source carries a real Amazon catalogue
     // value; otherwise synthesize from the identifier so PDOC sideloads
     // get a stable library-tile cover-cache key. Logic lives in
-    // `kfx::metadata::resolve_export_asin` so a caller can call the same
-    // function to learn what we stamp here (needed to manage the on-device
-    // `<title>_<ASIN>.sdr/` sidecar Kindle invents).
+    // `kfx::metadata::resolve_export_asin`; a caller reads the stamped value
+    // from the same function to address the on-device `<title>_<ASIN>.sdr/`
+    // sidecar.
     let asin = crate::formats::kfx::metadata::resolve_export_asin(meta);
 
     // content_id mirrors ASIN (calibre convention). The device `.sdr`
     // directory uses this as the per-book state key; matching ASIN means
-    // kfx-zip → kfx round-trips preserve the binding the user already has
-    // on the device. Schema keeps them as separate `MetadataContext` slots
-    // so future divergence is possible, but at write time they're equal.
+    // kfx-zip → kfx round-trips preserve the device-side binding. Schema keeps
+    // them as separate `MetadataContext` slots; at write time they are equal.
     let content_id = asin.clone();
 
     let meta_ctx = MetadataContext {
@@ -1200,8 +1198,8 @@ fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> 
 
     // A book whose document default is horizontal while its content runs
     // vertical is the only shape that needs the axes announced. When the
-    // document itself is vertical the reader already takes its vertical path,
-    // and inline horizontal spans (tate-chu-yoko) do not count as mixing.
+    // document itself is vertical the reader takes its vertical path, and
+    // inline horizontal spans (tate-chu-yoko) do not count as mixing.
     if !ctx.is_vertical_document() && ctx.has_vertical_content() {
         features.push(content_feature(
             "com.amazon.yjconversion",
@@ -1292,8 +1290,8 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
         // percentage-spacing to the horizontal axis, and in a vertical-rl book
         // that locks the device's Layout > Spacing slider to the wrong one — it
         // adjusts left/right page margins instead of column-to-column line
-        // spacing. Calibre-generated KFX omits the field entirely; we follow
-        // suit and let the device default rule.
+        // spacing. Calibre-generated KFX omits the field entirely; the device
+        // default rules.
         (
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),
@@ -1400,9 +1398,9 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// typeface (`booksming`) pin the device font equally hard.
 ///
 /// **The reader's own font is one of the candidates, which is why no threshold
-/// is needed.** Text that names no family at all is already set in whatever the
-/// reader chose, so it is not an absence to be discounted — it is a competing
-/// answer to "what is this book set in". The body font is simply the plurality,
+/// is needed.** Text that names no family is set in whatever the reader chose:
+/// a competing answer to "what is this book set in", not an absence to be
+/// discounted. The body font is the plurality,
 /// and when the plurality is the reader's font there is nothing left to hand
 /// over: what remains is decoration by construction. That is what keeps a book
 /// whose text is mostly unstyled from surrendering its one decorative `標楷體`,
@@ -1411,8 +1409,8 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// A fixed share cut ("hand over the stack past N% of the text") answers the
 /// same question, and across **917 stacks in 435 Amazon books and 1,625 books
 /// in the reference library** it never disagrees — it only restates what the
-/// book's own proportions already say, while needing a threshold chosen by
-/// hand. The plurality tunes itself instead: one Amazon book hands over a
+/// book's own proportions say, while needing a threshold chosen by hand.
+/// The plurality tunes itself: one Amazon book hands over a
 /// stack holding just 44.5% of its text, having split the rest across two
 /// other faces, and the plurality sees that without being told. Do not
 /// reintroduce a constant here.
@@ -1427,7 +1425,7 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// the platform wins; the divergence is not ours to introduce.
 ///
 /// **Embedding the face changes nothing.** A book that ships its own typefaces
-/// still hands its running text over: the shipped faces stay named on the cover
+/// hands its running text over: the shipped faces stay named on the cover
 /// and display styles that asked for them, and the reader's setting governs the
 /// reading. Keeping an embedded family on the body instead is what leaves the
 /// font control inert, and it is not what the publisher's own build does.
@@ -1455,7 +1453,7 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
             }
             match inherited_font_family(&chapter, id) {
                 Some(family) => *covered.entry(family.to_string()).or_default() += len,
-                // Already the reader's font — a rival candidate, not a gap.
+                // The reader's font — a rival candidate, not a gap.
                 None => reader_governed += len,
             }
         }
@@ -1476,9 +1474,8 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
 /// This runs *before* Pass 2 so the answer is available while IR styles are
 /// being ingested. The ingest side then compares each style's `writing_mode`
 /// against this — emitting `writing_mode: horizontal_tb` on overrides in
-/// vertical books, which the previous KFX-side scan couldn't recover
-/// because `extract_ir_field` had already filtered horizontal-tb out as
-/// the CSS-spec default.
+/// vertical books. A KFX-side scan cannot recover them: `extract_ir_field`
+/// filters horizontal-tb out as the CSS-spec default.
 ///
 /// Distinct styles in the pool are counted. Only the vertical axes are
 /// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
@@ -1842,10 +1839,9 @@ fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
 /// whose cover TOC entry and `cover_page` landmark share one section id. (A
 /// content-eid target instead gets dropped: the device keeps the landmark and
 /// drops a *separate* cover entry that lands in the same section.) Returns `None`
-/// when there's no cover landmark, or when the source TOC already leads with the
-/// cover.
+/// when there's no cover landmark, or when the source TOC leads with the cover.
 /// The cover's display word, localized like Amazon (表紙 for Japanese books,
-/// else "Cover"). Used for the cover TOC entry, the `cover_page` landmark (the
+/// else "Cover"). Names the cover TOC entry, the `cover_page` landmark (the
 /// device shows the landmark's label for the merged Go-To item), and to detect
 /// the source TOC's own cover entry.
 fn cover_label(book: &Book) -> &'static str {
@@ -1888,10 +1884,10 @@ fn build_cover_toc_entry(book: &Book, ctx: &ExportContext) -> Option<IonValue> {
     ))
 }
 
-/// EIDs of the cover section (root + content). Used to strip a cover entry the
-/// source TOC carries itself — some EPUBs (合本 editions, KFX→EPUB round-trips)
-/// list 表紙 pointing at a content eid — so the canonical cover entry (prepended
-/// at the section root, sharing the landmark's id) is the only one. Empty when
+/// EIDs of the cover section (root + content). Strips a cover entry the source
+/// TOC carries itself — some EPUBs (合本 editions, KFX→EPUB round-trips) list
+/// 表紙 pointing at a content eid — leaving the canonical cover entry (prepended
+/// at the section root, sharing the landmark's id) alone. Empty when
 /// the book has no cover.
 fn cover_section_eids(ctx: &ExportContext) -> Vec<u64> {
     let Some(cover) = ctx.landmark_fragments.get(&LandmarkType::Cover) else {
@@ -2165,8 +2161,8 @@ fn build_chapter_entities_grouped(
 
     // Check if this is a cover chapter (image-only).
     // Three gates:
-    //   1. No standalone c0 — when `cover_fragment_id` is set, c0 already
-    //      handles the cover so no in-spine chapter should claim it.
+    //   1. No standalone c0 — a set `cover_fragment_id` means c0 handles the
+    //      cover and no in-spine chapter claims it.
     //   2. Chapter is image-only (one Image node, no text).
     //   3. No in-spine cover has been claimed yet. EPUBs that put SVG-wrapped
     //      thumbnails on every section landing page (e.g. `<div id="toc-N">
@@ -2656,7 +2652,7 @@ fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
     encode_dynimg_jxr(&img, mode)
 }
 
-/// Encode an already-decoded raster as JPEG-XR in the requested
+/// Encode a decoded raster as JPEG-XR in the requested
 /// [`ColorMode`][jxr::ColorMode]. Shared by [`encode_jxr_asset`] (which decodes
 /// bytes first) and the fixed-layout manga thumbnailer (which downscales a
 /// `DynamicImage` before encoding).
@@ -2670,7 +2666,7 @@ fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Optio
     // `flatten_to_rgb`. JPEG-XR itself can carry alpha (T.832 alpha image
     // plane; the codec crate implements it), but the plate formats emitted
     // here don't: 8bppGray (the only JXR Amazon ships — real KFX has no
-    // color JXR at all) and 24bppRGB (our own color-mode extension). And
+    // color JXR at all) and 24bppRGB (this crate's color-mode extension). And
     // `to_luma8`/`to_rgb8` DROP the channel without compositing — a
     // transparent-background GIF/PNG would render as a black slab
     // (transparent pixels store (0,0,0)). See `flatten_alpha_over_white`
@@ -3027,8 +3023,8 @@ fn build_position_map_fragment(
     KfxFragment::singleton(KfxSymbol::PositionMap, ion)
 }
 
-/// One section's reading-position layout: its name (used to key the
-/// `section_position_id_map` entity) + symbol (used inside `position_id_map`),
+/// One section's reading-position layout: its name (keys the
+/// `section_position_id_map` entity) + symbol (read inside `position_id_map`),
 /// and its EIDs in reading order paired with each EID's span (advance in pids).
 /// The first EID is the section root (page-template / container, span 1); the
 /// rest are content EIDs (span = their UTF-16 text length, 1 for images).
@@ -3406,7 +3402,7 @@ fn resolve_landmarks_from_ir(
             };
 
             if let Some(target) = target {
-                // Only add if not already present (first wins)
+                // Add only on a vacant entry (first wins)
                 ctx.landmark_fragments
                     .entry(landmark.landmark_type)
                     .or_insert(target.clone());
@@ -3471,9 +3467,9 @@ fn serialize_fragments(
 // fixed-size, scale-to-fit image; consecutive pages pair into right-to-left
 // facing spreads; each full image carries a downscaled thumbnail
 // (`yj_thumbnails_present`) for the device's page scrubber. The reflow emitter
-// (`build_kfx_container`) would flatten this into one scrolling column, so we
-// branch here when `metadata.fixed_layout` is set and every spine page is a lone
-// image (see [`is_fixed_layout_image_book`]).
+// (`build_kfx_container`) flattens this into one scrolling column. The branch
+// here takes a book whose `metadata.fixed_layout` is set and whose every spine
+// page is a lone image (see [`is_fixed_layout_image_book`]).
 //
 // Structure, mirroring the reference KFX entity-for-entity:
 //   - cover  = its own section; the page_template carries the page box +
@@ -3484,9 +3480,8 @@ fn serialize_fragments(
 //              scale_fit/float:center page container per page, each an inner
 //              vertical container (style `sJ`) wrapping the page image
 //              (style `sG` = the uniform page box, centered).
-//   - document_data: writing_mode horizontal_tb + direction rtl (the device's
-//     RTL page-turn signal for a fixed-layout book — reading_orders' $425 is
-//     device-ignored; see reference_kfx_device_rtl_writing_mode).
+//   - document_data: writing_mode horizontal_tb + direction rtl. A device
+//     ignores reading_orders' $425.
 // ============================================================================
 
 /// Downscaled page-thumbnail box (Amazon uses ~270×384 for a portrait manga
@@ -3559,7 +3554,7 @@ struct MangaEnc {
 
 /// Convert a fixed-layout image book (manga/comic) into a `yj_non_pdf_fixed_layout`
 /// KFX. See the module section comment above for the emitted structure. The
-/// caller has already confirmed [`is_fixed_layout_image_book`].
+/// caller confirms [`is_fixed_layout_image_book`] first.
 fn image_fxl_to_kfx(
     book: &mut Book,
     on_progress: &dyn Fn(&str, usize, usize, &str),
@@ -3570,7 +3565,7 @@ fn image_fxl_to_kfx(
     // Book-level layout signals. A manga is horizontal_tb text with an rtl page
     // turn; `document_direction` resolves rtl from the spine's
     // page-progression-direction. Both are stamped into document_data and the
-    // reading order (reference_kfx_device_rtl_writing_mode).
+    // reading order.
     let writing_mode = book_writing_mode(book);
     let direction = document_direction(book, writing_mode);
     ctx.document_writing_mode = writing_mode;
@@ -3599,7 +3594,7 @@ fn image_fxl_to_kfx(
     }
 
     // Resolve each IR image href against the asset list (exact path, else by
-    // file name) so a `images/x.jpg` src still finds its bytes.
+    // file name): an `images/x.jpg` src finds its bytes either way.
     let assets: Vec<std::path::PathBuf> = book.list_assets().to_vec();
     let resolve = |href: &str| -> Option<std::path::PathBuf> {
         let want = std::path::Path::new(href);
@@ -3627,12 +3622,11 @@ fn image_fxl_to_kfx(
     }
     let n = spine_ids.len();
 
-    // Register the cover page's image in the resource registry so the reflowable
-    // `build_book_metadata_fragment` resolves the library-tile / sleep-screen
-    // cover. Page 0 is `e0` under both the registry's hex naming and our own
-    // `e{i}` scheme, so the metadata reference matches the actual resource
-    // entity. Interior pages use our `e{i}` names directly and need no registry
-    // entry.
+    // Register the cover page's image in the resource registry for the
+    // reflowable `build_book_metadata_fragment` to resolve the library-tile /
+    // sleep-screen cover. Page 0 is `e0` under the registry's hex naming and
+    // under the `e{i}` scheme, matching the resource entity. Interior pages
+    // take their `e{i}` names directly, with no registry entry.
     if let Some(cover_href) = hrefs.first() {
         ctx.resource_registry.register(cover_href, &mut ctx.symbols);
         let _ = ctx.resource_registry.get_or_create_name(cover_href); // -> "e0"
@@ -3818,10 +3812,9 @@ fn image_fxl_to_kfx(
 
     // 10. navigation — referenced nav_containers (a `landmarks` cover_page → the
     // cover's page_template, and a `toc` mapping the source table of contents to
-    // page image EIDs) + a thin book_navigation. A fixed-layout book rejects an
-    // inline nav_container, so this mirrors the PDF path's referenced form
-    // (feedback_kfx_nav_device_strict). `resolve_links` populates the TOC entry
-    // targets; a failure just yields a toc-less (landmarks-only) nav.
+    // page image EIDs) + a thin book_navigation, in the referenced form a
+    // fixed-layout book takes. `resolve_links` populates the TOC entry targets;
+    // a failure yields a toc-less (landmarks-only) nav.
     let _ = book.resolve_links();
     let toc = book.toc().to_vec();
     fragments.extend(build_manga_nav_fragments(
@@ -3846,7 +3839,7 @@ fn image_fxl_to_kfx(
         &ctx,
     ));
 
-    // document_data now that every EID is allocated (max_id correct).
+    // document_data, with every EID allocated (max_id correct).
     fragments.insert(
         document_data_index,
         build_manga_document_data_fragment(&ctx, ppd_sym),
@@ -4349,7 +4342,7 @@ fn toc_target_index(
 /// Convert source TOC entries into referenced-form KFX toc `nav_unit` entries,
 /// each `target_position` retargeted to its page's image EID. An entry whose
 /// target doesn't resolve to a page is dropped (with its subtree), so a partial
-/// TOC still yields the entries that do resolve.
+/// TOC yields the entries that do resolve.
 fn build_manga_toc_entries(
     entries: &[crate::model::TocEntry],
     page_image_id: &[u64],
@@ -4558,7 +4551,7 @@ fn build_manga_container_entity_map_fragment(
 //
 // This is NOT a content conversion. The PDF is embedded verbatim as a single
 // `bcRawMedia` and the *device* renders each page (which is what lets the
-// Scribe pen draw over it). We author only the thin fixed-layout skeleton:
+// Scribe pen draw over it). Only the thin fixed-layout skeleton is authored:
 // one section/storyline/external_resource per page, all referencing the shared
 // PDF blob with a `page_index`, plus PDOC metadata and the `yj_pdf_support` /
 // `yj_fixed_layout` feature flags.
@@ -4577,7 +4570,7 @@ pub struct PdfKfxMeta {
     /// Publication date — any of `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO
     /// timestamp. Emitted as the `issue_date` title-metadata entry (truncated to
     /// the date part). `None` → no `issue_date` (optional for a PDOC; Amazon
-    /// stamps the send date there, we stamp the work's date when known).
+    /// stamps the send date there; this stamps the work's date when known).
     pub date: Option<String>,
     /// Publisher imprint. Emitted as the `publisher` entry; `None`/blank yields
     /// the empty value Amazon's PDOC also carries.
@@ -4707,8 +4700,8 @@ pub fn pdf_to_kfx(
         // The page's rotation aux, and its text overlay: the storyline's name,
         // the `{story_name, ignore}` child EID, and one EID per run (carrying
         // the run's UTF-16 length as its position span). Allocated for every
-        // page — a textless page still gets the pair, holding an empty
-        // page-sized container.
+        // page: a textless page gets the pair too, holding an empty page-sized
+        // container.
         let rotation_aux_sym = ctx.symbols.get_or_intern(&format!("{section_name}-ad"));
         let runs = page_runs(i);
         let text_story_sym = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
@@ -4746,9 +4739,9 @@ pub fn pdf_to_kfx(
     ctx.symbols.get_or_intern(&raw_location);
 
     // Optional page-1 cover: a loose JPEG resource (external_resource +
-    // bcRawMedia) referenced by `book_metadata.cover_image`. Survey its symbols
-    // now so the entity map and metadata resolve. `(res_sym, width_px,
-    // height_px)`.
+    // bcRawMedia) referenced by `book_metadata.cover_image`. Its symbols are
+    // surveyed here for the entity map and metadata to resolve against.
+    // `(res_sym, width_px, height_px)`.
     let cover: Option<(u64, u32, u32)> = cover_jpeg.map(|jpeg| {
         let res_sym = ctx.symbols.get_or_intern(COVER_RSRC_NAME);
         ctx.symbols.get_or_intern(&cover_location);
@@ -4891,7 +4884,7 @@ pub fn pdf_to_kfx(
         &ctx,
     ));
 
-    // document_data now that every fragment ID is allocated (max_id correct).
+    // document_data, with every fragment ID allocated (max_id correct).
     fragments.insert(
         document_data_index,
         build_pdf_document_data_fragment(&ctx, ppd_sym),
@@ -5066,9 +5059,9 @@ fn build_pdf_text_storyline(
         })
         .collect();
 
-    // A page that yielded no runs still gets a storyline, holding one empty
-    // page-sized container — what Amazon puts there, and what keeps every page
-    // addressable through the same overlay EID.
+    // A page that yielded no runs gets a storyline holding one empty page-sized
+    // container — what Amazon puts there, keeping every page addressable through
+    // the same overlay EID.
     let items = if items.is_empty() {
         vec![IonValue::Struct(vec![
             (
@@ -5201,8 +5194,8 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
 /// point, an Ion decimal otherwise.
 ///
 /// Decimal rather than float because these are exact base-10 quantities —
-/// `hundredths` counts pt×100, the unit the text layer is already measured in —
-/// and a binary float would print them back as 30.219999999999999.
+/// `hundredths` counts pt×100, the unit the text layer is measured in. A binary
+/// float prints them back as 30.219999999999999.
 #[cfg(feature = "pdf")]
 fn pt_value(hundredths: i64) -> IonValue {
     if hundredths % 100 == 0 {
@@ -5254,8 +5247,8 @@ fn pdf_page_margins(
     let right = runs.iter().map(|r| r.left + r.width).max()?;
     let bottom = runs.iter().map(|r| r.top + r.height).max()?;
     // Clamped because a run may overhang the MediaBox (a bleed glyph, or a
-    // rotated page whose bounds we took unrotated); a negative inset would ask
-    // the reader to crop outwards.
+    // rotated page whose bounds were taken unrotated); a negative inset asks the
+    // reader to crop outwards.
     Some([
         left.max(0),
         top.max(0),
@@ -5469,8 +5462,8 @@ fn build_pdf_book_metadata_fragment(
     ]);
     // The cover_image value is the cover resource's symbolic name (a string the
     // device matches against an external_resource), mirroring the EPUB path.
-    // PDOC + a synthesized ASIN is what makes the Kindle render the tile from
-    // this embedded image (see reference_kfx_asin_pdoc_cover).
+    // PDOC + a synthesized ASIN renders the Kindle tile from this embedded
+    // image.
     if let Some(name) = cover_resource_name {
         title_entries.push(kv("cover_image", IonValue::String(name.to_string())));
     }
@@ -6329,8 +6322,7 @@ mod tests {
     }
 
     /// The Japanese vertical marker tracks vertical runs, not the document
-    /// default, so a book forced horizontal over vertical content still carries
-    /// it.
+    /// default: a book forced horizontal over vertical content carries it.
     #[test]
     fn the_jp_vertical_marker_follows_vertical_content() {
         let mut ctx = ExportContext::new();
@@ -6455,7 +6447,7 @@ mod tests {
             direction_for_progression(true, KfxSymbol::HorizontalTb),
             KfxSymbol::Rtl
         );
-        // Vertical-lr rtl (contradictory/Mongolian) still needs direction rtl.
+        // Vertical-lr rtl (contradictory/Mongolian) takes direction rtl.
         assert_eq!(
             direction_for_progression(true, KfxSymbol::VerticalLr),
             KfxSymbol::Rtl
@@ -6551,8 +6543,8 @@ mod tests {
             let max_id_field = fields.iter().find(|(id, _)| *id == KfxSymbol::MaxId as u64);
 
             if let Some((_, IonValue::Int(max_id))) = max_id_field {
-                // max_id should be at least 100 (the IDs we generated)
-                // Context starts at 866, so after 100 IDs we should be at 965
+                // max_id covers the 100 generated IDs; ExportContext starts at
+                // 866, putting 100 IDs at 965
                 assert!(
                     *max_id >= 100,
                     "max_id ({}) should reflect all generated fragment IDs",
@@ -6971,7 +6963,7 @@ mod entity_structure_tests {
             .take_while(|&&t| t == KfxSymbol::Content as u64)
             .count();
         // Content is optional (image-only chapters may not have content)
-        // Just verify that after storylines, we only have content entities (if any)
+        // After storylines, every remaining entity is content
         for t in after_storylines.iter().take(content_count) {
             assert_eq!(
                 *t,
@@ -7452,7 +7444,7 @@ mod anchor_resolution_tests {
             }
         }
 
-        // If we get here, no internal links were found (shouldn't happen with [太宰 治] 人間失格.epub)
+        // Reaching here means no internal link was found
         panic!("Should have found at least one internal link to verify");
     }
 
@@ -7599,7 +7591,7 @@ mod manga_fxl_tests {
     }
 
     /// document_data carries the book-level page-turn signal: horizontal_tb text
-    /// axis + rtl direction for a manga (reference_kfx_device_rtl_writing_mode).
+    /// axis + rtl direction for a manga.
     #[test]
     fn document_data_is_horizontal_rtl() {
         let mut ctx = ExportContext::new();

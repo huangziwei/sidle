@@ -360,7 +360,7 @@ impl EpubExporter {
         {
             item.properties.push("cover-image".to_string());
         }
-        // The source may already ship a cover page in the spine — a
+        // The source may ship a cover page in the spine — a
         // calibre-lineage EPUB's `titlepage.xhtml` is the same SVG wrapper
         // `build_titlepage` emits. Synthesizing on top of it puts two cover
         // pages in the reading flow, both rendering the same image. Reuse the
@@ -442,7 +442,7 @@ impl EpubExporter {
         zip.write_all(opf.as_bytes())?;
 
         // 6a. Write nav.xhtml (EPUB 3 navigation document). Passthrough TOC
-        // hrefs are already file paths — no resolution pass; entries keep
+        // hrefs are file paths — no resolution pass; entries keep
         // their source order (sources ship reading-ordered TOCs). Landmarks
         // reuse the OPF guide-type vocabulary; the emitter maps to EPUB 3.
         let toc_points = toc_to_navpoints(book.toc(), &|href| Some(href.to_string()));
@@ -491,7 +491,7 @@ impl EpubExporter {
             zip.write_all(xhtml.as_bytes())?;
         }
 
-        // 7. Write chapters (bytes already loaded for the manifest scan),
+        // 7. Write chapters (bytes loaded for the manifest scan),
         // normalized to EPUB 3 conformance — passthrough preserves source bytes,
         // and pre-EPUB-3 source content (e.g. a Sigil-authored book carried
         // through AZW3: XHTML 1.1 DOCTYPE, empty <title>) is otherwise emitted
@@ -736,9 +736,9 @@ pub fn build_package_into(
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<EpubPackage> {
     /// Assets described from the importer's declared manifest, in the given
-    /// order. An entry the manifest doesn't mention still appears — with the
-    /// media type guessed from its name — so the list stays a faithful
-    /// account of what the documents reference.
+    /// order. An entry the manifest doesn't mention appears too, with the media
+    /// type guessed from its name: the list accounts for every reference the
+    /// documents make.
     fn return_described(
         paths: Vec<std::path::PathBuf>,
         declared: &HashMap<String, crate::import::AssetInfo>,
@@ -894,7 +894,7 @@ pub fn build_package_into(
             };
             // Transcode in chunks so the progress bar moves through the long
             // pole (image decode) instead of sitting on one opaque step; each
-            // chunk still transcodes across cores. ~2 items per worker keeps
+            // chunk transcodes across cores. ~2 items per worker keeps
             // straggler idle time negligible — calibre's
             // `resources` chunking. Byte output is identical to a single bulk
             // load (`parallel_map` preserves input order within each chunk and
@@ -1023,8 +1023,8 @@ pub fn build_package_into(
             item.properties.push("cover-image".to_string());
         }
         let titlepage_xhtml = if book.metadata().fixed_layout {
-            // Fixed-layout: the first spine page already IS the cover; a
-            // titlepage would duplicate it and break the spread pairing.
+            // Fixed-layout: the first spine page IS the cover. A titlepage
+            // duplicates it and breaks the spread pairing.
             None
         } else if let Some(ref cid) = cover_id {
             manifest_items.iter().find(|i| &i.id == cid).map(|item| {
@@ -1065,8 +1065,8 @@ pub fn build_package_into(
         // 5. Resolve navigation targets (TOC tree, page list, landmarks).
         // Hrefs arrive as `#eid[:offset]` placeholders and resolve to chapter
         // files through the importer's anchor index — built from chapters the
-        // normalize pass already cached, so this costs one DFS per chapter,
-        // not a re-parse. Unresolvable landmarks and page-list entries are
+        // normalize pass cached: one DFS per chapter, not a re-parse.
+        // Unresolvable landmarks and page-list entries are
         // dropped (never emit a dangling reference); TOC entries keep their
         // label with an empty href, like calibre.
         on_progress("nav", 0, 1, "Writing navigation");
@@ -1086,9 +1086,9 @@ pub fn build_package_into(
         // TOC and guide/landmark entries carry the anchor registered at the
         // target position whenever one exists; the page list only keeps a
         // fragment that was actually stamped into content (a page break on an
-        // already-anchored chapter start registers a name content never
-        // stamps — the bare chapter link is where the page starts anyway, and
-        // a dangling `#page-…` would trip epubcheck RSC-012).
+        // anchored chapter start registers a name content never stamps; the
+        // bare chapter link marks the page start, and a dangling `#page-…`
+        // trips epubcheck RSC-012).
         let mut toc_points = toc_to_navpoints(book.toc(), &|href| {
             resolve_nav_href(
                 book,
@@ -1175,8 +1175,8 @@ pub fn build_package_into(
                 .max_by_key(|&(vp, n)| (n, vp))
                 .map(|(vp, _)| vp)
         };
-        // Packaging: OPF + nav/ncx (image bytes are already transcoded, so
-        // this is serialization, not the long pole).
+        // Packaging: OPF + nav/ncx. Image bytes are transcoded by this point —
+        // serialization only, not the long pole.
         on_progress("finalize", 1, 1, "Packaging");
         // A KFX source's metadata mirrors calibre's curated field set (see
         // `build_opf_metadata`), so the package document keeps calibre's
@@ -1250,9 +1250,9 @@ pub fn build_package_into(
         // Every spine document the source produced, under its own name. The
         // titlepage stays separate (spine position 0, but written last). When a
         // cover section was dropped for the synthesized `cover.xhtml`, remap the
-        // in-content links that still point at it (baked by normalize before the
-        // drop was known) — the nav did this via `resolve_nav_href`; the content
-        // docs need it too, or the link dangles (RSC-007).
+        // in-content links pointing at it (baked by normalize ahead of the
+        // drop). The nav remaps via `resolve_nav_href`; the content docs need
+        // the same remap to keep links live (RSC-007).
         let dropped_cover_href = cover_section_idx.map(|idx| document_files[idx].clone());
         let documents = content
             .chapters
@@ -1292,8 +1292,8 @@ pub fn build_package_into(
     }
 }
 
-/// Media types whose bytes are already compressed; running deflate over them
-/// gains <5% while consuming ~10-15 ms per MB.
+/// Media types whose bytes are compressed. Deflate over them gains <5% while
+/// consuming ~10-15 ms per MB.
 fn is_precompressed_mime(mime: &str) -> bool {
     matches!(
         mime,
@@ -1356,9 +1356,8 @@ fn find_cover_manifest_id(
 ///   reader's body margins, so it is dropped and the synthesized full-page SVG
 ///   survives. Both KFX→EPUB routes feed this the identical section bytes, so
 ///   they drop the same section and stay byte-for-byte 1:1.
-/// - Raw: the source's page is already the SVG shape, so it survives and
-///   synthesis is skipped — passthrough keeps the source's bytes rather than
-///   substituting an equivalent page and orphaning links into it.
+/// - Raw: the source's page carries the SVG shape, survives, and skips
+///   synthesis. Passthrough keeps the source's bytes and the links into them.
 ///
 /// The reader drops the SVG page and keeps the section instead (it renders the
 /// KFX natively and sizes the image itself) — a third resolution, correct for
@@ -1375,8 +1374,8 @@ pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
 /// Normalize a passthrough content document to EPUB 3 conformance without
 /// touching rendered content: replace a non-`<!DOCTYPE html>` DOCTYPE (pre-EPUB-3
 /// source keeps its old one → epubcheck `HTM-004`) and fill an empty `<title>`
-/// (`RSC-005`). Returns the input unchanged when it is already conformant or is
-/// not UTF-8 text.
+/// (`RSC-005`). Returns the input unchanged when it is conformant or is not
+/// UTF-8 text.
 fn normalize_passthrough_xhtml(content: &[u8], fallback_title: &str) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(content) else {
         return content.to_vec();
@@ -1408,7 +1407,7 @@ fn doctype_span(s: &str) -> Option<(usize, usize)> {
 }
 
 /// If the first `<title>` is empty (or self-closing), return the document with it
-/// filled by `fallback`; `None` when the title is already non-empty or absent.
+/// filled by `fallback`; `None` when the title is non-empty or absent.
 fn fill_empty_title(s: &str, fallback: &str) -> Option<String> {
     let open = s.find("<title")?;
     let gt = open + s[open..].find('>')?;
@@ -1540,16 +1539,15 @@ fn toc_to_navpoints(
         .collect()
 }
 
-/// The cover row a renderer's chapter list needs, or `None` when it already has
+/// The cover row a renderer's chapter list needs, or `None` when it carries
 /// one.
 ///
 /// A publisher's chapter list often opens with a "Cover" entry, but plenty of
 /// books leave the cover out of it and record the page only in the landmarks —
 /// and a chapter list mined from a book's own Contents page never has one at
 /// all, because a Contents page links neither the cover nor itself. A Kindle
-/// composes the two views and shows a Cover row either way; a renderer reading
-/// this package should reach the same page, so the row is synthesized here when
-/// the list doesn't already reach the cover document.
+/// composes the two views and shows a Cover row either way. The row is
+/// synthesized here when the list reaches no cover document.
 ///
 /// The row reaches the *renderer's* view only. The nav doc and NCX describe a
 /// container, which ships its own `cover.xhtml` under its own landmarks; the
@@ -1578,7 +1576,7 @@ fn cover_label(book: &Book) -> String {
         .to_string()
 }
 
-/// The row to put in front of `toc`, or `None` when it already reaches `href`.
+/// The row to put in front of `toc`, or `None` when `toc` reaches `href`.
 fn cover_row(label: String, href: &str, toc: &[NavPoint]) -> Option<NavPoint> {
     if toc_reaches(toc, href) {
         return None;
@@ -1590,9 +1588,8 @@ fn cover_row(label: String, href: &str, toc: &[NavPoint]) -> Option<NavPoint> {
     })
 }
 
-/// Whether any entry in the tree already sends the reader into `document`.
-/// Compared without fragments: a row aimed at an anchor inside the cover page is
-/// still a row that opens the cover page.
+/// Whether any entry in the tree opens `document`. Compared without fragments:
+/// a row aimed at an anchor inside the cover page opens the cover page.
 fn toc_reaches(toc: &[NavPoint], document: &str) -> bool {
     toc.iter()
         .any(|p| p.href.split('#').next() == Some(document) || toc_reaches(&p.children, document))
@@ -1611,8 +1608,8 @@ fn sanitize_path(path: &str) -> String {
 
 /// Output filename for each normalized chapter: `{source_id}.xhtml` (for KFX,
 /// the section name), unique via a `-N` suffix on collision. Both rules are
-/// calibre's (`push_book_part`), kept so spine filenames stay stable for
-/// anything already linking to them.
+/// calibre's (`push_book_part`), which keeps spine filenames stable for the
+/// links into them.
 /// Chapters without a usable source id fall back to positional names. Takes
 /// the chapters' source paths (also used pre-synthesis by the normalize
 /// pass's link resolver, which must know target filenames before any
@@ -1863,8 +1860,7 @@ mod tests {
             Some("cover-page.xhtml".to_string())
         );
 
-        // A publisher who already listed it gets nothing added — the row would
-        // be the same page twice.
+        // A listed cover row gets no second row for the same page.
         let with_cover = vec![row("表紙", "cover-page.xhtml"), row("1", "c1.xhtml")];
         assert!(cover_row("Cover".into(), "cover-page.xhtml", &with_cover).is_none());
 

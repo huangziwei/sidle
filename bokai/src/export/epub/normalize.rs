@@ -180,7 +180,7 @@ pub enum InlineStyleEmit {
     /// The declaration repeats across the book and was promoted to a
     /// generated class — emit `class="<name>"`.
     Class(String),
-    /// Emit as a `style="…"` attribute (already pruned of spec defaults).
+    /// Emit as a `style="…"` attribute, pruned of spec defaults.
     Style(String),
     /// Every declaration was a spec default — emit nothing.
     Drop,
@@ -295,9 +295,8 @@ pub fn normalize_book_with(
             let named_attr: HashMap<String, Option<String>> = used
                 .iter()
                 .map(|name| {
-                    // A style carrying only state rules still needs its class
-                    // on the element — otherwise the `:link` rule it exists
-                    // for has nothing to select.
+                    // A style carrying only state rules keeps its class on the
+                    // element: the `:link` rule needs something to select.
                     let has_decl = program.named.get(name).is_some_and(|d| !d.is_empty())
                         || program
                             .pseudo

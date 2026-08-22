@@ -46,7 +46,7 @@ struct EntityInfo {
     name: Option<String>,
 }
 
-/// Build an Ion binary preamble that imports our KFX symbol table.
+/// Build an Ion binary preamble that imports the KFX symbol table.
 /// This allows parsing Ion data that uses KFX symbols without an embedded import.
 fn build_symbol_table_preamble() -> Vec<u8> {
     use bokai::formats::kfx::symbols::KFX_MAX_SYMBOL_ID;
@@ -426,7 +426,7 @@ fn dump_kfx_stats(data: &[u8]) -> IonResult<()> {
         if *count == 1 {
             singleton_data.insert(type_name, (header_len + entity_offset, entity_len));
         } else {
-            // No longer a singleton
+            // A repeated type_name keeps no singleton entry
             singleton_data.remove(&type_name.clone());
         }
     }
@@ -854,7 +854,7 @@ fn report_anchors(data: &[u8]) -> IonResult<()> {
         }
     }
 
-    // Now collect anchors with full info
+    // Collect anchors with full info
     let mut anchors: Vec<AnchorInfo> = Vec::new();
 
     for i in 0..num_entries {
@@ -1641,12 +1641,12 @@ fn extract_fragment_content_from_list(
                     }
                 }
 
-                // Record container type if we have an ID
+                // Record container_type under fragment_id
                 if let (Some(fid), Some(ctype)) = (fragment_id, container_type) {
                     container_types.insert(fid, ctype);
                 }
 
-                // If we found all content info, add to map
+                // Map fragment_id to its content_name + content_index
                 if let (Some(fid), Some(cname), Some(cindex)) =
                     (fragment_id, content_name, content_index)
                 {
@@ -1753,7 +1753,7 @@ fn extract_link_to_from_content_list(
                     }
                 }
 
-                // If we found content info and inline refs, add them
+                // Attach inline_refs to content_name + content_index
                 if let (Some(cname), Some(cindex)) = (content_name, content_index) {
                     for (anchor_name, offset, length) in inline_refs {
                         refs.push(LinkToRef {
@@ -2323,29 +2323,25 @@ impl EntityCatalog {
     /// `base_symbol_count` is the container's declared import size (the id of
     /// its first doc-local symbol), not the static table's length — see
     /// [`SymbolTable`], which resolves through the same base. A container built
-    /// against an older YJ_symbols declares fewer imports than our table
+    /// against an older YJ_symbols declares fewer imports than KFX_SYMBOL_TABLE
     /// carries, and seating its doc symbols at the static length renders every
     /// doc-local id as a base-table tail name (section names coming out as
     /// `snap_block`, `end_x`, …).
     fn new(extended_symbols: &[String], base_symbol_count: usize) -> IonResult<Self> {
         // Build combined symbol table: base KFX symbols + extended doc symbols
         //
-        // Our KFX_SYMBOL_TABLE includes Ion system symbols at indices 0-9 which Amazon's
-        // YJ_symbols doesn't have. So our table[413] = Amazon's YJ[403] = "bcIndexTabLength".
+        // KFX_SYMBOL_TABLE holds Ion system symbols at indices 0-9, absent from
+        // YJ_symbols: KFX_SYMBOL_TABLE[413] == YJ[403] == "bcIndexTabLength".
+        // ion-rs maps SST[N] → SID $(10+N); SST[N] = KFX_SYMBOL_TABLE[N+10].
         //
-        // Ion-rs maps imported symbols: SST[N] → SID $(10+N).
-        // For SID $413 to resolve to "bcIndexTabLength" (our table[413]):
-        //   SID $413 → SST[403] → we need SST[403] = table[413]
-        // So we skip our first 10 entries: SST[N] = table[N+10].
-        //
-        // Doc-local symbols follow at `base_symbol_count`, so the base slice stops
-        // there: SST[base_symbol_count - 10 + k] = extended_symbols[k] → SID
-        // $(base_symbol_count + k), which is where the container put them.
+        // Doc-local symbols follow at `base_symbol_count`: the base slice ends
+        // there, and SST[base_symbol_count - 10 + k] = extended_symbols[k]
+        // → SID $(base_symbol_count + k).
         let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
 
         // The other direction: a container built against a *newer* YJ_symbols
-        // declares more imports than our static table carries (Amazon's own
-        // PDF conversions declare 854 against our 852). Stopping at the table's
+        // declares more imports than KFX_SYMBOL_TABLE carries (Amazon's own
+        // PDF conversions declare 854 against 852). Stopping at the table's
         // length would seat every doc symbol that many ids early — names silently
         // shifted throughout, and the highest ids past the end of the table, which
         // aborts the whole fragment. Fill the shortfall so a doc symbol keeps the
@@ -2389,7 +2385,7 @@ impl EntityCatalog {
     }
 }
 
-/// Dump Ion data through a catalog already seated for its container.
+/// Dump Ion data through a catalog seated for its container.
 fn dump_ion_data_extended(
     data: &[u8],
     catalog: &EntityCatalog,
@@ -2447,7 +2443,7 @@ fn is_int_entity_ref_field(field_name: &str) -> bool {
 struct FieldContext<'a> {
     /// Current field name (e.g., "id")
     field_name: Option<&'a str>,
-    /// Whether we're inside a target_position struct
+    /// True inside a target_position struct
     in_target_position: bool,
 }
 
@@ -3678,7 +3674,7 @@ fn report_document(data: &[u8]) -> IonResult<()> {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
 
-                    // Skip reading_orders (already has its own report)
+                    // reading_orders has its own report
                     if field_name == "reading_orders" {
                         continue;
                     }
@@ -4424,7 +4420,7 @@ fn collect_content_stats<F>(
                         }
                     }
                     "content" => {
-                        // Extract sample text if we don't have one yet
+                        // Extract sample text while stats.first_text is None
                         if stats.first_text.is_none()
                             && let bokai::formats::kfx::ion::IonValue::Struct(content_fields) =
                                 field_value
@@ -5780,8 +5776,7 @@ where
 /// Report ruby_content fragments from a KFX container.
 ///
 /// Inspects all entities of type ruby_content (symbol 756) and prints their
-/// full Ion structure. Used to reverse-engineer the on-the-wire shape so
-/// bokai can emit matching ruby_content fragments.
+/// full Ion structure.
 fn report_ruby_content(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::ion::IonParser;
     use bokai::formats::kfx::symbols::KfxSymbol;
@@ -5922,9 +5917,6 @@ fn report_ruby_content(data: &[u8]) -> IonResult<()> {
 }
 
 /// Report raw Ion for every storyline fragment.
-///
-/// Used to inspect how ruby_id references appear in actual KP3/calibre output
-/// so bokai can emit matching style_events.
 fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::ion::IonParser;
     use bokai::formats::kfx::symbols::KfxSymbol;
@@ -6044,10 +6036,6 @@ fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
 /// slices out the base text from the referenced content fragment using
 /// offset/length, looks up the annotation in the corresponding
 /// ruby_content fragment's content_list, and prints the pair.
-///
-/// Used to validate that bokai's KFX faithfully preserves every
-/// `<ruby>` element from the source EPUB — diff this output against an
-/// EPUB-side extractor to find missing or mispaired rubies.
 fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::ion::{IonParser, IonValue};
     use bokai::formats::kfx::symbols::KfxSymbol;

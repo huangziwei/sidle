@@ -26,8 +26,8 @@ pub struct OpfCreator {
 /// Per-creator `file-as` values, one per author. Creator `i` gets the
 /// positional `author_sorts[i]`; a creator past the end of the vec (or every
 /// creator, when the source declared no sort keys) falls back to the joined
-/// author list so EPUB libraries still sort multi-author books. Both EPUB
-/// writers derive their creators through this, so the shape can't drift.
+/// author list, keeping multi-author books sortable in an EPUB library. Both
+/// EPUB writers derive their creators through this.
 pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
     let joined = authors.join(" & ");
     (0..authors.len())
@@ -95,9 +95,9 @@ pub struct OpfMetadata {
     /// `<meta name="cover">` (the manifest item itself carries
     /// `properties="cover-image"` — the caller sets that).
     pub cover_manifest_id: Option<String>,
-    /// Kindle `primary-writing-mode` hint, already resolved (see
-    /// `primary_writing_mode`); `horizontal-lr` is the default and should
-    /// be passed as `None`.
+    /// Kindle `primary-writing-mode` hint, resolved by
+    /// `primary_writing_mode`; `horizontal-lr` is the default, passed as
+    /// `None`.
     pub primary_writing_mode: Option<String>,
     /// Spine `page-progression-direction`. `ltr` (the EPUB default) is
     /// suppressed at emission.
@@ -121,10 +121,10 @@ pub struct OpfItemref {
     pub properties: Option<String>,
 }
 
-/// One `<guide>` reference (EPUB 2.0 landmarks — still consulted by Apple
-/// Books / Kindle / calibre). An empty `title` is emitted as `title=""`.
-/// The nav doc's `<nav epub:type="landmarks">` renders from the same
-/// entries (see `export::nav::emit_nav`), so the two stay in lockstep.
+/// One `<guide>` reference (EPUB 2.0 landmarks, read by Apple Books / Kindle /
+/// calibre). An empty `title` is emitted as `title=""`. The nav doc's
+/// `<nav epub:type="landmarks">` renders from the same entries
+/// (`export::nav::emit_nav`).
 #[derive(Debug, Clone)]
 pub struct OpfGuideRef {
     pub guide_type: String,
@@ -412,7 +412,7 @@ fn push_person_refines(s: &mut String, cid: &str, c: &OpfCreator) {
 
 /// Derive a manifest id from `filename` (basename stem, non-id characters
 /// mapped to `_`, `id_` prefix when the result doesn't start with a letter).
-/// `taken` reports ids already in use; collisions get an `_{n}` suffix.
+/// `taken` reports ids in use; collisions get an `_{n}` suffix.
 pub fn make_manifest_id(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     let stem = filename
         .rsplit('/')
@@ -605,7 +605,7 @@ mod tests {
             w3cdtf_t_separator("2022-04-27 23:00:00+00:00"),
             "2022-04-27T23:00:00+00:00"
         );
-        // Already-valid forms pass through verbatim.
+        // A valid form passes through verbatim.
         for ok in [
             "2022-04-27T23:00:00+00:00",
             "2022-04-27",

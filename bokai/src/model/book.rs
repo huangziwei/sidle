@@ -324,8 +324,8 @@ impl LandmarkType {
     /// the cover nor itself; the landmarks are where those live. So a TOC derived
     /// from that page is completed from the landmarks — but only from the ones
     /// that name a section. `StartReading` and `BodyMatter` mark where the reader
-    /// is dropped in, which is a place the chapter list already has an entry
-    /// for, under the chapter's own name.
+    /// is dropped in, a place the chapter list carries an entry for under the
+    /// chapter's own name.
     pub fn names_a_section(self) -> bool {
         !matches!(self, Self::StartReading | Self::BodyMatter)
     }
@@ -590,7 +590,7 @@ impl Book {
     /// Choose how raster images are encoded into a KFX export. `Grayscale`
     /// (default) emits `8bppGray` JXR — the device is B&W and the source keeps
     /// the color master; `Color` emits full `24bppRGB` JXR (channels that are
-    /// identical everywhere still collapse to grayscale automatically). The
+    /// identical everywhere collapse to grayscale automatically). The
     /// cover stays JPEG regardless. Flipping this + reconverting is how a color
     /// book gets a color KFX for a color-capable reader.
     pub fn set_image_color_mode(&mut self, mode: jxr::ColorMode) {

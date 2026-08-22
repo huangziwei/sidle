@@ -183,8 +183,8 @@ impl Importer for EpubImporter {
     /// (and some retail) EPUBs collapse several headings into one file and emit
     /// a `#fragment`-less href for each, so every entry in that file jumps to
     /// its top. The fragments the hrefs *should* carry exist as element ids in
-    /// the content; we recover them by matching each fragment-less entry's
-    /// label to a unique id-bearing element in the target file.
+    /// the content, recovered by matching each fragment-less entry's label to
+    /// a unique id-bearing element in the target file.
     fn resolve_toc(&mut self) {
         // Disjoint field borrows: the repair reads the heading index while
         // mutating the TOC tree.
@@ -360,8 +360,8 @@ impl EpubImporter {
         // 5. Parse TOC. The EPUB 3 nav doc is the authoritative TOC; the legacy
         // EPUB 2 NCX is a fallback. Retail Japanese EPUBs (Kadokawa/EBPAJ)
         // routinely ship BOTH — a full nav doc AND a stub NCX that lists only
-        // cover/目次/奥付 — so we parse both and keep whichever is richer,
-        // preferring the nav on a tie. An NCX-first-unless-empty order loses
+        // cover/目次/奥付. Both are parsed and the richer kept, the nav winning
+        // a tie. An NCX-first-unless-empty order loses
         // every chapter on those books: the 3-entry stub NCX shadows the
         // 7-entry nav. A book with only one source gets that one; with neither,
         // the TOC is empty (a headings-only book is handled downstream).
@@ -435,9 +435,8 @@ impl EpubImporter {
         // none (or didn't exist). EPUB 2.0 books and calibre-style 3.0
         // OPFs both ship landmarks via `<guide>`, and this crate's own KFX→EPUB
         // output is guide-only by design (so Apple Books renders them).
-        // We merge missing types rather than wholesale replace, so a nav
-        // doc that omitted some EPUB-2-only landmarks (or vice versa)
-        // still gets the union.
+        // Missing types merge into the union: a nav doc that omits some
+        // EPUB-2-only landmarks keeps them, and the reverse holds.
         if let Ok(mut guide_marks) = parse_opf_guide(&opf_str) {
             for landmark in &mut guide_marks {
                 if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
@@ -465,7 +464,7 @@ impl EpubImporter {
         // asset keys downstream. The OPF parser leaves it as a manifest href
         // relative to opf_base; resolve it the same way as every other href so
         // a cover whose filename is escaped, or which sits outside the OPF's
-        // directory, still lands on its zip entry.
+        // directory, lands on its zip entry.
         let mut metadata = opf.metadata;
         if let Some(ref href) = metadata.cover_image
             && !href.is_empty()
@@ -518,8 +517,8 @@ impl EpubImporter {
     }
 
     /// Like load_asset, but takes &self (not &mut self) so it can be used
-    /// from within the recursive @import resolver. The EPUB asset reader
-    /// already only needs immutable state.
+    /// from within the recursive @import resolver. The EPUB asset reader needs
+    /// immutable state only.
     fn load_asset_immutable(&self, path: &Path) -> io::Result<Vec<u8>> {
         let key = path.to_string_lossy().replace('\\', "/");
         self.read_entry(&key)
@@ -543,9 +542,9 @@ where
     let mut out = String::with_capacity(src.len());
     let bytes = src.as_bytes();
     // Index of the first byte not yet copied into `out`. Byte scans are safe
-    // because every token we look for (@, " ', ;, whitespace, parens) is
-    // ASCII and therefore never appears as a UTF-8 continuation byte — so
-    // `i` always lands on a char boundary when we slice.
+    // because every scanned token (@, " ', ;, whitespace, parens) is ASCII and
+    // never appears as a UTF-8 continuation byte: `i` always lands on a char
+    // boundary.
     let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
@@ -728,7 +727,7 @@ fn strip_whitespace(s: &str) -> String {
 }
 
 /// Repair fragment-less TOC entries in place by matching each entry's label to
-/// a unique id-bearing element in its target file. Entries that already carry a
+/// a unique id-bearing element in its target file. Entries that carry a
 /// `#fragment`, that have no matching heading, or whose label matches more than
 /// one heading are left untouched. See [`EpubImporter::resolve_toc`].
 fn repair_flat_toc_fragments(
@@ -764,9 +763,8 @@ fn repair_flat_toc_fragments(
     }
 }
 
-/// Total entries in a TOC tree, counting nested children. Used to pick the
-/// richer of a book's NCX vs nav-doc TOC when it ships both (some retail EPUBs
-/// pair a full nav with a stub NCX, or vice versa).
+/// Total entries in a TOC tree, counting nested children. Picks the richer of a
+/// book's NCX vs nav-doc TOC when it ships both.
 fn count_toc_entries(entries: &[TocEntry]) -> usize {
     entries
         .iter()
