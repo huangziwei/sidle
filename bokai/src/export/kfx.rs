@@ -880,7 +880,10 @@ fn build_book_metadata_fragment(
                 _ => build_category_entries(cat, meta, &meta_ctx),
             };
             if cat == MetadataCategory::KindleCapability && ctx.fixed_layout_book {
-                entries.extend(fixed_layout_capabilities(ctx.double_page_spread));
+                entries.extend(fixed_layout_capabilities(
+                    ctx.double_page_spread,
+                    ctx.publisher_panels,
+                ));
             }
             let ion_entries: Vec<IonValue> = entries
                 .into_iter()
@@ -909,6 +912,7 @@ fn build_book_metadata_fragment(
 /// key order and Ion int values Amazon writes.
 fn fixed_layout_capabilities(
     double_page_spread: bool,
+    publisher_panels: bool,
 ) -> Vec<(&'static str, crate::formats::kfx::metadata::MetadataValue)> {
     use crate::formats::kfx::metadata::MetadataValue;
     let mut entries = vec![("continuous_popup_progression", MetadataValue::Int(0))];
@@ -916,6 +920,9 @@ fn fixed_layout_capabilities(
         entries.push(("yj_double_page_spread", MetadataValue::Int(1)));
     }
     entries.push(("yj_fixed_layout", MetadataValue::Int(1)));
+    if publisher_panels {
+        entries.push(("yj_publisher_panels", MetadataValue::Int(1)));
+    }
     entries
 }
 
@@ -3240,6 +3247,19 @@ struct MangaPage {
     outer_id: u64,
     inner_id: u64,
     image_id: u64,
+    /// One `PanelElements` per author-drawn panel; empty when the source
+    /// declared none.
+    panels: Vec<PanelElements>,
+}
+
+/// A `Panel` plus the EIDs of the four elements it emits: `region_id`,
+/// `target_id`, `window_id`, `image_id`.
+struct PanelElements {
+    panel: crate::model::Panel,
+    region_id: u64,
+    target_id: u64,
+    window_id: u64,
+    image_id: u64,
 }
 
 /// One reading unit = one section + one storyline: a solo page (the cover, or
@@ -3299,6 +3319,9 @@ fn image_fxl_to_kfx(
     let mut sides: Vec<Option<crate::model::PageSpread>> =
         book.spine().iter().map(|e| e.page_spread).collect();
     let mut viewports: Vec<Option<(u32, u32)>> = book.spine().iter().map(|e| e.viewport).collect();
+    // `page_panels[i]` pairs with `sides[i]` and `viewports[i]`.
+    let mut page_panels: Vec<Vec<crate::model::Panel>> =
+        book.spine().iter().map(|e| e.panels.clone()).collect();
     let mut hrefs: Vec<String> = Vec::with_capacity(spine_ids.len());
     for &id in &spine_ids {
         let chapter = book.load_chapter(id)?;
@@ -3337,9 +3360,11 @@ fn image_fxl_to_kfx(
         hrefs.remove(0);
         sides.remove(0);
         viewports.remove(0);
+        page_panels.remove(0);
     }
     sides.resize(hrefs.len(), None);
     viewports.resize(hrefs.len(), None);
+    page_panels.resize(hrefs.len(), Vec::new());
 
     // Fallback page box when no viewport was declared: the largest page image.
     if box_dims.is_none() {
@@ -3417,13 +3442,12 @@ fn image_fxl_to_kfx(
     if cover_is_page0 {
         let href = hrefs[0].clone();
         ctx.resource_registry.register(&href, &mut ctx.symbols);
-        let _ = ctx.resource_registry.get_or_create_name(&href); // -> "e0"
     }
-    // Bytes for a cover the spine never shows, encoded once and emitted beside
-    // the page resources under `MANGA_COVER_RSRC`.
-    let standalone_cover: Option<MangaEnc> = (!cover_is_page0)
-        .then_some(cover_href.as_deref())
-        .flatten()
+    // The cover's own JPEG copy, emitted beside the page resources under
+    // `MANGA_COVER_RSRC`. A page plate is JPEG-XR, which the library tile
+    // renders blank, so the cover gets this copy even when it is also page 0.
+    let standalone_cover: Option<MangaEnc> = cover_href
+        .as_deref()
         .and_then(|c| Some((c.to_string(), resolve(c)?)))
         .and_then(|(c, path)| {
             let raw = book.load_asset(&path).ok()?;
@@ -3448,13 +3472,9 @@ fn image_fxl_to_kfx(
 
     // The cover resource a fixed-layout book names in its `$258 metadata`:
     // `MANGA_COVER_RSRC` for a cover the spine never shows, page 0's `e0`.
-    let cover_resource_sym = if standalone_cover.is_some() {
-        Some(ctx.symbols.get_or_intern(MANGA_COVER_RSRC))
-    } else if cover_is_page0 {
-        Some(ctx.symbols.get_or_intern("e0"))
-    } else {
-        None
-    };
+    let cover_resource_sym = standalone_cover
+        .is_some()
+        .then(|| ctx.symbols.get_or_intern(MANGA_COVER_RSRC));
 
     // Shared image styles (the reference KFX's `sJ` inner-container fill and
     // `sG` page-box image placement), interned once up front.
@@ -3475,6 +3495,12 @@ fn image_fxl_to_kfx(
         if let Some(&id) = spine_ids.get(src) {
             chapter_to_index.entry(id).or_insert(emitted);
         }
+    }
+
+    // Emitted pages per source page; a split spread yields two.
+    let mut emitted_per_source = vec![0usize; hrefs.len()];
+    for &(src, _) in &origin {
+        emitted_per_source[src] += 1;
     }
 
     let mut units: Vec<MangaUnit> = Vec::with_capacity(groups.len());
@@ -3516,6 +3542,22 @@ fn image_fxl_to_kfx(
             };
             ctx.record_content_length(image_id, 1);
             page_image_id[pi] = image_id;
+            // `panels` ride only a source page that stayed whole.
+            let source = origin[pi].0;
+            let panels = if emitted_per_source[source] == 1 {
+                page_panels[source]
+                    .iter()
+                    .map(|&panel| PanelElements {
+                        panel,
+                        region_id: ctx.next_fragment_id(),
+                        target_id: ctx.next_fragment_id(),
+                        window_id: ctx.next_fragment_id(),
+                        image_id: ctx.next_fragment_id(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             pages.push(MangaPage {
                 res_name,
                 res_sym,
@@ -3525,6 +3567,7 @@ fn image_fxl_to_kfx(
                 outer_id,
                 inner_id,
                 image_id,
+                panels,
             });
         }
         units.push(MangaUnit {
@@ -3546,6 +3589,9 @@ fn image_fxl_to_kfx(
     ctx.has_publisher_fonts = has_publisher_fonts(book);
     ctx.fixed_layout_book = true;
     ctx.double_page_spread = any_spread;
+    ctx.publisher_panels = units
+        .iter()
+        .any(|u| u.pages.iter().any(|p| !p.panels.is_empty()));
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
     // 3. metadata ($258) — reading order + page-progression-direction
     fragments.push(build_fxl_metadata_fragment(
@@ -3990,9 +4036,108 @@ fn build_manga_section(unit: &MangaUnit, box_w: u32, box_h: u32) -> KfxFragment 
     KfxFragment::new(KfxSymbol::Section, &unit.section_name, ion)
 }
 
-/// storyline ($259) for a manga unit: a solo unit's is the bare image; a facing
-/// unit's holds one scale_fit/float:center page container per page, each an inner
-/// vertical container (`sJ`) around the page image (`sG`).
+/// A KFX length in percent: `{ value, unit: percent }`.
+fn percent(fraction: f32) -> IonValue {
+    IonValue::Struct(vec![
+        (
+            KfxSymbol::Value as u64,
+            IonValue::Decimal(format!("{:.4}", fraction * 100.0)),
+        ),
+        (
+            KfxSymbol::Unit as u64,
+            IonValue::Symbol(KfxSymbol::Percent as u64),
+        ),
+    ])
+}
+
+/// `position: fixed` plus the four sides of a rect, as page-box percentages.
+/// `Fixed` is KFX's name for CSS `absolute`.
+fn positioned(rect: crate::model::PanelRect) -> Vec<(u64, IonValue)> {
+    vec![
+        (
+            KfxSymbol::Position as u64,
+            IonValue::Symbol(KfxSymbol::Fixed as u64),
+        ),
+        (KfxSymbol::Left as u64, percent(rect.left)),
+        (KfxSymbol::Top as u64, percent(rect.top)),
+        (KfxSymbol::Width as u64, percent(rect.width)),
+        (KfxSymbol::Height as u64, percent(rect.height)),
+    ]
+}
+
+/// The two elements one panel adds to a page's content list: the region
+/// carrying `ordinal` and `activate`, then the `zoom_target` it names.
+fn build_panel_content(p: &PanelElements, res_sym: u64) -> [IonValue; 2] {
+    let mut region = positioned(p.panel.source);
+    region.extend([
+        (KfxSymbol::Id as u64, IonValue::Int(p.region_id as i64)),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Container as u64),
+        ),
+        (
+            KfxSymbol::Ordinal as u64,
+            IonValue::Int(p.panel.ordinal as i64),
+        ),
+        (
+            KfxSymbol::Activate as u64,
+            IonValue::List(vec![IonValue::Struct(vec![
+                (
+                    KfxSymbol::Action as u64,
+                    IonValue::Symbol(KfxSymbol::ZoomIn as u64),
+                ),
+                (KfxSymbol::Target as u64, IonValue::Int(p.target_id as i64)),
+                (KfxSymbol::Source as u64, IonValue::Int(p.region_id as i64)),
+            ])]),
+        ),
+        (KfxSymbol::ContentList as u64, IonValue::List(Vec::new())),
+    ]);
+
+    let mut image = positioned(p.panel.image);
+    image.extend([
+        (KfxSymbol::Id as u64, IonValue::Int(p.image_id as i64)),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Image as u64),
+        ),
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(res_sym)),
+    ]);
+
+    let mut window = positioned(p.panel.window);
+    window.extend([
+        (KfxSymbol::Id as u64, IonValue::Int(p.window_id as i64)),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Container as u64),
+        ),
+        (
+            KfxSymbol::ContentList as u64,
+            IonValue::List(vec![IonValue::Struct(image)]),
+        ),
+    ]);
+
+    let target = IonValue::Struct(vec![
+        (KfxSymbol::Id as u64, IonValue::Int(p.target_id as i64)),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::ZoomTarget as u64),
+        ),
+        (
+            KfxSymbol::Layout as u64,
+            IonValue::Symbol(KfxSymbol::Vertical as u64),
+        ),
+        (
+            KfxSymbol::ContentList as u64,
+            IonValue::List(vec![IonValue::Struct(window)]),
+        ),
+    ]);
+
+    [IonValue::Struct(region), target]
+}
+
+/// storyline ($259) for a manga unit: a solo unit's is the bare image; a
+/// facing unit's holds one scale_fit/float:center page container per page,
+/// each an inner vertical container (`sJ`) around the page image (`sG`).
 fn build_manga_storyline(
     unit: &MangaUnit,
     box_w: u32,
@@ -4003,15 +4148,20 @@ fn build_manga_storyline(
     let content: Vec<IonValue> = if unit.solo {
         unit.pages
             .iter()
-            .map(|p| {
-                IonValue::Struct(vec![
+            .flat_map(|p| {
+                let image = IonValue::Struct(vec![
                     (KfxSymbol::Id as u64, IonValue::Int(p.image_id as i64)),
                     (
                         KfxSymbol::Type as u64,
                         IonValue::Symbol(KfxSymbol::Image as u64),
                     ),
                     (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.res_sym)),
-                ])
+                ]);
+                std::iter::once(image).chain(
+                    p.panels
+                        .iter()
+                        .flat_map(|panel| build_panel_content(panel, p.res_sym)),
+                )
             })
             .collect()
     } else {
@@ -4065,7 +4215,18 @@ fn build_manga_storyline(
                         KfxSymbol::Type as u64,
                         IonValue::Symbol(KfxSymbol::Container as u64),
                     ),
-                    (KfxSymbol::ContentList as u64, IonValue::List(vec![inner])),
+                    (
+                        KfxSymbol::ContentList as u64,
+                        IonValue::List(
+                            std::iter::once(inner)
+                                .chain(
+                                    p.panels
+                                        .iter()
+                                        .flat_map(|panel| build_panel_content(panel, p.res_sym)),
+                                )
+                                .collect(),
+                        ),
+                    ),
                 ])
             })
             .collect()
@@ -7481,15 +7642,16 @@ mod manga_fxl_tests {
     fn fixed_layout_capabilities_state_the_comic_reader_keys() {
         use crate::formats::kfx::metadata::MetadataValue::Int;
         assert_eq!(
-            fixed_layout_capabilities(true),
+            fixed_layout_capabilities(true, true),
             vec![
                 ("continuous_popup_progression", Int(0)),
                 ("yj_double_page_spread", Int(1)),
                 ("yj_fixed_layout", Int(1)),
+                ("yj_publisher_panels", Int(1)),
             ]
         );
         assert_eq!(
-            fixed_layout_capabilities(false),
+            fixed_layout_capabilities(false, false),
             vec![
                 ("continuous_popup_progression", Int(0)),
                 ("yj_fixed_layout", Int(1)),
@@ -7515,6 +7677,7 @@ mod manga_fxl_tests {
                     outer_id: o,
                     inner_id: i,
                     image_id: im,
+                    panels: Vec::new(),
                 })
                 .collect(),
         }
@@ -7607,5 +7770,116 @@ mod manga_fxl_tests {
             get(KfxSymbol::SpacingPercentBase),
             Some(IonValue::Symbol(s)) if *s == KfxSymbol::Width as u64
         ));
+    }
+}
+
+#[cfg(test)]
+mod panel_export_tests {
+    use super::*;
+    use crate::model::{Panel, PanelRect};
+
+    fn rect(left: f32, top: f32, width: f32, height: f32) -> PanelRect {
+        PanelRect {
+            left,
+            top,
+            width,
+            height,
+        }
+    }
+
+    /// A field of a struct, by symbol.
+    fn field(v: &IonValue, sym: KfxSymbol) -> Option<&IonValue> {
+        match v {
+            IonValue::Struct(fields) => fields
+                .iter()
+                .find(|(id, _)| *id == sym as u64)
+                .map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// An `Int` field's value.
+    fn int_of(v: Option<&IonValue>) -> Option<i64> {
+        match v? {
+            IonValue::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// A `Symbol` field's id.
+    fn sym_of(v: Option<&IonValue>) -> Option<u64> {
+        match v? {
+            IonValue::Symbol(s) => Some(*s),
+            _ => None,
+        }
+    }
+
+    /// A `{value, unit: percent}` length's value.
+    fn pct_of(v: Option<&IonValue>) -> Option<String> {
+        let value = field(v?, KfxSymbol::Value)?;
+        assert_eq!(
+            sym_of(field(v?, KfxSymbol::Unit)),
+            Some(KfxSymbol::Percent as u64)
+        );
+        match value {
+            IonValue::Decimal(d) => Some(d.clone()),
+            _ => None,
+        }
+    }
+
+    /// A panel emits a tappable region carrying its ordinal and a `zoom_in`
+    /// activate, plus the `zoom_target` that activate names.
+    #[test]
+    fn a_panel_emits_a_region_and_the_target_it_activates() {
+        let p = PanelElements {
+            panel: Panel {
+                ordinal: 3,
+                source: rect(0.0445, 0.0771, 0.4171, 0.409),
+                window: rect(0.0234, 0.0374, 0.8335, 0.8169),
+                image: rect(-0.106, -0.1878, 2.0, 2.0),
+            },
+            region_id: 900,
+            target_id: 901,
+            window_id: 902,
+            image_id: 903,
+        };
+        let [region, target] = build_panel_content(&p, 42);
+
+        assert_eq!(int_of(field(&region, KfxSymbol::Id)), Some(900));
+        assert_eq!(int_of(field(&region, KfxSymbol::Ordinal)), Some(3));
+        assert_eq!(
+            sym_of(field(&region, KfxSymbol::Position)),
+            Some(KfxSymbol::Fixed as u64)
+        );
+        assert_eq!(
+            pct_of(field(&region, KfxSymbol::Left)).as_deref(),
+            Some("4.4500")
+        );
+
+        let Some(IonValue::List(activate)) = field(&region, KfxSymbol::Activate) else {
+            panic!("the region activates nothing");
+        };
+        assert_eq!(activate.len(), 1);
+        assert_eq!(
+            sym_of(field(&activate[0], KfxSymbol::Action)),
+            Some(KfxSymbol::ZoomIn as u64)
+        );
+        assert_eq!(int_of(field(&activate[0], KfxSymbol::Target)), Some(901));
+
+        assert_eq!(
+            sym_of(field(&target, KfxSymbol::Type)),
+            Some(KfxSymbol::ZoomTarget as u64)
+        );
+        let Some(IonValue::List(windows)) = field(&target, KfxSymbol::ContentList) else {
+            panic!("the target holds no window");
+        };
+        let Some(IonValue::List(images)) = field(&windows[0], KfxSymbol::ContentList) else {
+            panic!("the window holds no image");
+        };
+        assert_eq!(sym_of(field(&images[0], KfxSymbol::ResourceName)), Some(42));
+        assert_eq!(
+            pct_of(field(&images[0], KfxSymbol::Width)).as_deref(),
+            Some("200.0000")
+        );
     }
 }

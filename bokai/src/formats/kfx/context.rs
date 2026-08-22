@@ -627,6 +627,9 @@ pub struct ExportContext {
     /// Any section holds a facing pair — the `yj_double_page_spread` key.
     pub double_page_spread: bool,
 
+    /// The book states author-drawn comic panels — `yj_publisher_panels`.
+    pub publisher_panels: bool,
+
     /// Pixel box a spine page declares (`<meta name="viewport">`)
     pub page_viewports: HashMap<ChapterId, (u32, u32)>,
 
@@ -785,6 +788,7 @@ impl ExportContext {
             cover_dimensions: None,
             fixed_layout_book: false,
             double_page_spread: false,
+            publisher_panels: false,
             page_viewports: HashMap::new(),
             chapters_needing_anchor: HashSet::new(),
             pending_chapter_anchor: None,

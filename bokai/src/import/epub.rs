@@ -206,8 +206,8 @@ impl Importer for EpubImporter {
 }
 
 impl EpubImporter {
-    /// Shared href resolver; `chapter_fallback` lands a dead `path#fragment` at
-    /// the chapter start (navigation) instead of returning `None` (in-text).
+    /// Shared href resolver. `chapter_fallback` true lands a dead
+    /// `path#fragment` at the chapter start (navigation), false returns `None`.
     fn resolve_href_impl(
         &self,
         from_chapter: ChapterId,
@@ -320,9 +320,29 @@ impl EpubImporter {
                 // A document's own `<meta name="viewport">` states the pixel box
                 // it is drawn to — a full-page illustration or spread carries one
                 // whether or not the package declares `rendition:layout`.
-                let viewport = read_entry(&source, &zip_index, &full_path)
+                let page = read_entry(&source, &zip_index, &full_path)
                     .ok()
-                    .and_then(|b| viewport_meta(&String::from_utf8_lossy(&b)));
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let viewport = page.as_deref().and_then(viewport_meta);
+
+                // A comic's panels state their rectangles in the page's own
+                // `<link>`ed sheets, whose `top` / `left` the style model does
+                // not carry. The geometry comes off the CSS text.
+                let panels = match (&page, viewport.or(opf.metadata.default_viewport)) {
+                    (Some(html), Some(box_px)) if html.contains("app-amzn-magnify") => {
+                        let (linked, inline) = crate::html::extract_stylesheets(html);
+                        let mut sheets: Vec<String> = linked
+                            .into_iter()
+                            .map(|href| resolve_href(&dir_of(&full_path), &href))
+                            .filter_map(|path| read_entry(&source, &zip_index, &path).ok())
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .collect();
+                        sheets.extend(inline);
+                        crate::html::parse_panels(html, &sheets, box_px)
+                    }
+                    _ => Vec::new(),
+                };
+
                 spine.push(SpineEntry {
                     id: ChapterId(i as u32),
                     size_estimate,
@@ -331,6 +351,7 @@ impl EpubImporter {
                         .get(spine_id)
                         .and_then(|p| crate::model::PageSpread::from_opf_properties(p)),
                     viewport,
+                    panels,
                 });
                 spine_paths.push(full_path);
             }
@@ -349,10 +370,9 @@ impl EpubImporter {
             let ncx_path = opf.ncx_href.as_ref().map(|h| resolve_href(&opf_base, h));
             let nav_path = opf.nav_href.as_ref().map(|h| resolve_href(&opf_base, h));
             assets.retain(|p| {
-                // Bind `&str` explicitly rather than leaning on `as_ref()`
-                // inference: a dependency contributing another `AsRef`/`Borrow`
-                // impl for `Cow<str>` makes these calls ambiguous, so the build
-                // would depend on which crates are in the graph.
+                // `&str` bound explicitly: another `AsRef`/`Borrow` impl for
+                // `Cow<str>` in the dependency graph makes an inferred call
+                // ambiguous.
                 let name: &str = &p.to_string_lossy();
                 name != "mimetype"
                     && !name.starts_with("META-INF/")
@@ -547,10 +567,9 @@ where
 {
     let mut out = String::with_capacity(src.len());
     let bytes = src.as_bytes();
-    // Index of the first byte not yet copied into `out`. Byte scans are safe
-    // because every scanned token (@, " ', ;, whitespace, parens) is ASCII and
-    // never appears as a UTF-8 continuation byte: `i` always lands on a char
-    // boundary.
+    // Index of the first byte not yet copied into `out`. Every scanned token
+    // (@, " ', ;, whitespace, parens) is ASCII and never appears as a UTF-8
+    // continuation byte, keeping `i` on a char boundary.
     let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
@@ -1058,12 +1077,9 @@ mod tests {
 
     #[test]
     fn inline_css_imports_normalizes_parent_dir_in_url() {
-        // Mirrors the structure in books 2/5 of the
-        // `epub2kfx-missing-vertical-outliers/涼, 結城/` set: a stylesheet
-        // chains via `@import url("../Styles/x.css")`. The load callback must
-        // see the canonical zip key, not the literal un-normalized path —
-        // otherwise the writing-mode rules never reach the cascade and the
-        // KFX exporter falls back to horizontal-tb.
+        // A stylesheet chains via `@import url("../Styles/x.css")`. The load
+        // callback sees the canonical zip key, not the literal un-normalized
+        // path.
         let base = std::path::Path::new("OEBPS/Styles/style0011.css");
         let mut requested: Vec<String> = Vec::new();
         let out = inline_css_imports(
@@ -1089,5 +1105,33 @@ mod tests {
             Some(String::new())
         });
         assert_eq!(requested, vec!["OEBPS/Styles/flow0007.css"]);
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    /// Panels survive the AZW3 → EPUB → KFX route: the exported EPUB names
+    /// them, and the importer reads them back off the page's own sheets.
+    #[test]
+    #[ignore = "needs the EPUB fixtures under artifacts/"]
+    fn panels_reach_the_spine_from_a_converted_epub() {
+        let book = crate::Book::open(
+            "../artifacts/graphicnovel-azw3/converted-epub/Tetris_ The Games People Play_B01M28OM76.epub",
+        )
+        .unwrap();
+        let counts: Vec<usize> = book.spine().iter().map(|e| e.panels.len()).collect();
+        assert_eq!(counts.iter().sum::<usize>(), 893);
+        // The two densest spreads, matched by count.
+        let mut densest = counts.clone();
+        densest.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(&densest[..2], &[19, 18]);
+
+        let page = book
+            .spine()
+            .iter()
+            .find(|e| e.panels.len() == 19)
+            .expect("the 19-panel spread");
+        assert_eq!(page.panels[0].ordinal, 1);
+        assert!(page.panels[0].image.width > 1.0);
     }
 }

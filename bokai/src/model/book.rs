@@ -202,6 +202,33 @@ impl OrientationLock {
     }
 }
 
+/// A rectangle on a fixed-layout page, as fractions of the page box: `0.0` is
+/// its left/top edge and `1.0` its right/bottom. A magnified view's image runs
+/// negative and past `1.0`, so the fields are signed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelRect {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// One author-drawn comic panel on a fixed-layout page: a KF8
+/// `app-amzn-magnify` region, a KFX `zoom_panel`. Tapping `source` magnifies
+/// the page to fill `window` with `image`, and `ordinal` walks the panels in
+/// the order the author drew them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Panel {
+    /// Reading order within the page, as the source numbers it.
+    pub ordinal: u32,
+    /// The panel's own rectangle on the page.
+    pub source: PanelRect,
+    /// The rectangle the magnified view occupies, in page fractions.
+    pub window: PanelRect,
+    /// The page image at magnified scale, in fractions of `window`.
+    pub image: PanelRect,
+}
+
 /// Which half of a two-page spread a fixed-layout page occupies — the OPF
 /// spine itemref `page-spread-left` / `page-spread-right` /
 /// `rendition:page-spread-center` property.

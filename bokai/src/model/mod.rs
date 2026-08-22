@@ -1,12 +1,6 @@
-//! Core data model for ebook processing.
-//!
-//! This module contains:
-//! - Book metadata and runtime handle
-//! - Chapter representation (IR tree structure)
-//! - Node types and semantic roles
-//! - Semantic attributes (href, src, alt, etc.)
-//! - Link representation for internal/external links
-//! - Font face definitions
+//! Core data model for ebook processing: `book` (metadata and the runtime
+//! handle), `chapter` and `node` (the IR tree), `semantic`, `links`,
+//! `position`, `text`, `font`, `section_tree` and `toc_shape`.
 
 mod book;
 mod chapter;
@@ -21,36 +15,26 @@ mod semantic;
 mod text;
 pub mod toc_shape;
 
-// Re-export book types
 pub use book::{
     Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, OrientationLock,
-    PageSpread, PeriodicalKind, Resource, TocEntry,
+    PageSpread, Panel, PanelRect, PeriodicalKind, Resource, TocEntry,
 };
 
-// Re-export chapter and iteration
 pub use chapter::{Chapter, ChapterId, ChapterSummary, ChildIter, DfsIter};
 
-// Re-export node types
 pub use node::{Node, NodeId, Role, TextRange};
 
-// Re-export semantic attributes
 pub use semantic::SemanticMap;
 
-// Re-export link types
 pub use links::{AnchorTarget, GlobalNodeId, InternalLocation, Link, LinkTarget};
 
-// Re-export reading positions and the source's own text
 pub use position::PositionMap;
 pub use text::SourceText;
 
-// Re-export resolved links
 pub use resolved::ResolvedLinks;
 
-// Re-export font types
 pub use font::FontFace;
 
-// Re-export section tree
 pub use section_tree::{ContentBlock, SectionNode, SectionTree, extract_section_tree};
 
-// Re-export the format-agnostic TOC shaping rules
 pub use toc_shape::{TocNode, TocTree, merge_by_document_order, nest_by_label_indent};

@@ -546,6 +546,7 @@ impl Azw3Importer {
                         .unwrap_or(0),
                 page_spread: None,
                 viewport: None,
+                panels: Vec::new(),
             });
         }
 
@@ -656,9 +657,9 @@ impl Azw3Importer {
         Ok(importer)
     }
 
-    /// Read each fixed-layout page's viewport box and spread side out of its
-    /// reassembled HTML into the spine entry. A reflowable book keeps both
-    /// `None` and skips the reassembly.
+    /// Read each fixed-layout page's viewport box, spread side and comic panels
+    /// out of its reassembled HTML into the spine entry. A reflowable book keeps
+    /// the viewport and spread `None`, no panels, and skips the reassembly.
     fn fill_fixed_layout_spine(&mut self) {
         if !self.metadata.fixed_layout || self.ensure_reassembled().is_err() {
             return;
@@ -666,10 +667,36 @@ impl Azw3Importer {
         let Some(flow) = self.reassembled.as_ref() else {
             return;
         };
-        for (entry, (_, bytes)) in self.spine.iter_mut().zip(&flow.parts) {
-            let html = String::from_utf8_lossy(bytes);
-            entry.viewport = viewport_meta(&html);
-            entry.page_spread = parse_spread_class(&html);
+        let pages: Vec<String> = flow
+            .parts
+            .iter()
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+            .collect();
+
+        // A panel's rectangle rides in `top` / `left`, which the style model
+        // does not carry, so the geometry comes off the page's own stylesheet
+        // text rather than through the cascade.
+        let sheets: Vec<Vec<String>> = pages
+            .iter()
+            .map(|html| {
+                linked_stylesheets(html)
+                    .into_iter()
+                    .filter_map(|href| self.load_asset(Path::new(&href)).ok())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .collect()
+            })
+            .collect();
+
+        // A KF8 page states its box in `<meta name="viewport">` or leaves it to
+        // the book's `original-resolution`; a panel's percentages resolve
+        // against whichever answers.
+        let default_viewport = self.metadata.default_viewport;
+        for ((entry, html), css) in self.spine.iter_mut().zip(&pages).zip(&sheets) {
+            entry.viewport = viewport_meta(html);
+            entry.page_spread = parse_spread_class(html);
+            if let Some(viewport) = entry.viewport.or(default_viewport) {
+                entry.panels = crate::html::parse_panels(html, css, viewport);
+            }
         }
     }
 
@@ -1044,6 +1071,43 @@ fn parse_spread_class(html: &str) -> Option<crate::model::PageSpread> {
     }
 }
 
+/// The [`Importer::load_asset`] path of every `<link>`ed stylesheet in `html`,
+/// in document order.
+///
+/// The reassembled flow still names its sheets `kindle:flow:NNNN`; the
+/// `styles/styleNNNN.css` rewrite happens per chapter in
+/// [`transform::transform_kindle_refs`], so both forms resolve here.
+fn linked_stylesheets(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("<link") {
+        rest = &rest[at..];
+        let end = rest.find('>').unwrap_or(rest.len());
+        let tag = &rest[..end];
+        if let Some(hstart) = tag.find("href=") {
+            let after = &tag[hstart + 5..];
+            let quote = after.chars().next().unwrap_or('"');
+            if let Some(hend) = after[1..].find(quote) {
+                out.extend(stylesheet_asset_path(&after[1..1 + hend]));
+            }
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// A stylesheet `href` as an asset path, or `None` for a link to something
+/// else. A `kindle:flow:` id is base32, as
+/// [`transform::transform_kindle_refs`] reads it.
+fn stylesheet_asset_path(href: &str) -> Option<String> {
+    if let Some(rest) = href.strip_prefix("kindle:flow:") {
+        let id: Vec<u8> = rest.bytes().take_while(u8::is_ascii_alphanumeric).collect();
+        let flow_num = crate::formats::mobi::parse_base32(&id);
+        return Some(format!("styles/style{:04}.css", flow_num.saturating_sub(1)));
+    }
+    href.ends_with(".css").then(|| href.to_string())
+}
+
 struct ReassembledFlow {
     /// Per-file `(filename, reassembled bytes)`, in spine order — the chapter
     /// content the importer emits.
@@ -1162,4 +1226,38 @@ fn toc_node_to_entry(node: TocNode) -> TocEntry {
     let mut entry = TocEntry::new(&node.title, &node.href);
     entry.children = node.children.into_iter().map(toc_node_to_entry).collect();
     entry
+}
+
+#[cfg(test)]
+mod panel_tests {
+    /// Both graphic novels ship author-drawn panels; the importer reads each
+    /// page's geometry off its own stylesheet or inline styles.
+    #[test]
+    #[ignore = "needs the AZW3 fixtures under artifacts/"]
+    fn the_graphic_novels_panels_reach_the_spine() {
+        for (path, page, want) in [
+            (
+                "../artifacts/graphicnovel-azw3/original/Tetris_ The Games People Play_B01M28OM76.azw3",
+                42usize,
+                19usize,
+            ),
+            (
+                "../artifacts/graphicnovel-azw3/original/Eight Million Ways to Die_B07984B2HK.azw3",
+                27,
+                9,
+            ),
+        ] {
+            let book = crate::Book::open(path).unwrap();
+            let total: usize = book.spine().iter().map(|e| e.panels.len()).sum();
+            assert!(total > 500, "{path}: only {total} panels");
+            assert_eq!(book.spine()[page].panels.len(), want, "{path} page {page}");
+            let p = book.spine()[page].panels[0];
+            assert_eq!(p.ordinal, 1);
+            assert!(p.source.width > 0.0 && p.source.height > 0.0);
+            assert!(
+                p.image.width > 1.0,
+                "a magnified image exceeds the page box"
+            );
+        }
+    }
 }

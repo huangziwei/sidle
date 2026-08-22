@@ -21,6 +21,7 @@
 mod arena;
 pub mod element_ref;
 pub mod optimize;
+pub mod panels;
 mod transform;
 mod tree_sink;
 
@@ -37,6 +38,7 @@ pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
 pub use element_ref::{BokoSelectors, ElementRef};
 pub use optimize::optimize;
+pub use panels::parse_panels;
 pub use transform::user_agent_stylesheet;
 
 // Re-export style types for convenience

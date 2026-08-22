@@ -1206,6 +1206,7 @@ impl KfxImporter {
                 size_estimate,
                 page_spread: None,
                 viewport: None,
+                panels: Vec::new(),
             });
         }
 
@@ -1331,6 +1332,7 @@ impl KfxImporter {
                     size_estimate,
                     page_spread,
                     viewport,
+                    panels: Vec::new(),
                 });
                 names.push(name);
                 fxl_pages.push(FxlPage {

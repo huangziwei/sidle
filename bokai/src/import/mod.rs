@@ -49,6 +49,9 @@ pub struct SpineEntry {
     /// `<meta name="viewport">` box the page is authored to. `None` for
     /// reflowable documents.
     pub viewport: Option<(u32, u32)>,
+    /// The author-drawn comic panels on this page, in `ordinal` order. Empty
+    /// for a page the source gave none. See [`crate::model::Panel`].
+    pub panels: Vec<crate::model::Panel>,
 }
 
 /// One asset described without loading it.
@@ -849,12 +852,14 @@ mod tests {
                     size_estimate: 0,
                     page_spread: None,
                     viewport: None,
+                    panels: Vec::new(),
                 },
                 SpineEntry {
                     id: ChapterId(1),
                     size_estimate: 0,
                     page_spread: None,
                     viewport: None,
+                    panels: Vec::new(),
                 },
             ],
             source_ids: vec!["text/ch1.xhtml".to_string(), "text/ch2.xhtml".to_string()],
