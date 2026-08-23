@@ -196,8 +196,8 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     // Extract ALL semantic attributes using schema rules (GENERIC!)
     let mut semantics = extract_all_element_attrs(fields, kfx_type_id, ctx);
 
-    // A note's body states which kind of note it is, which is what makes the
-    // reader offer it as a popup.
+    // A note's body states which kind of note it is, the field a popup
+    // presentation keys on.
     if let Some(epub_type) = get_field(fields, sym!(YjClassification))
         .and_then(|v| v.as_symbol())
         .and_then(note_epub_type)
@@ -2175,19 +2175,25 @@ fn walk_node_for_export(
         &export_ctx,
     );
 
-    // Convert link_to values to anchor symbols via the AnchorRegistry
-    for (field_id, value) in &mut kfx_attrs {
-        if *field_id == sym!(LinkTo) {
-            let anchor_symbol = ctx.anchor_registry.get_or_create_href_symbol(value);
-            *value = anchor_symbol;
+    // A `link_to` carries the anchor symbol its href reaches; an href that
+    // reaches nothing carries no link.
+    kfx_attrs.retain_mut(|(field_id, value)| {
+        if *field_id != sym!(LinkTo) {
+            return true;
         }
-    }
+        match ctx.anchor_registry.link_symbol(value) {
+            Some(symbol) => {
+                *value = symbol;
+                true
+            }
+            None => false,
+        }
+    });
 
     // Store the transformed KFX attributes for tokens_to_ion
     elem.kfx_attrs = kfx_attrs;
 
-    // Also populate the semantic map for backward compatibility with IR operations
-    // (This is redundant but ensures the element has all info needed)
+    // The element's own semantic map, beside the KFX attributes above.
     if let Some(href) = chapter.semantics.href(node_id) {
         elem.set_semantic(SemanticTarget::Href, href.to_string());
     }
@@ -2626,9 +2632,10 @@ fn emit_flattened_segments(
                     // Build KFX attributes
                     let mut kfx_attrs = Vec::new();
 
-                    // Add link_to if present
-                    if let Some(ref href) = state.link_to {
-                        let anchor_symbol = ctx.anchor_registry.get_or_create_href_symbol(href);
+                    // Add link_to when the href reaches an anchor this book holds
+                    if let Some(ref href) = state.link_to
+                        && let Some(anchor_symbol) = ctx.anchor_registry.link_symbol(href)
+                    {
                         kfx_attrs.push((sym!(LinkTo), anchor_symbol));
                     }
 

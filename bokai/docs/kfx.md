@@ -711,7 +711,9 @@ A book's `font_family` may instead be a stack headed by `default` — the name o
       version_info: { version: { major_version: 6, minor_version: 0 } } } ] }
 ```
 
-Two keys change how a book must be interpreted structurally. Any key containing `fixed_layout` — `yj_fixed_layout`, `yj_non_pdf_fixed_layout` — puts the book on the fixed-layout path. `yj_double_page_spread` marks a spread comic, where facing pages pair. A book **may** carry several `content_features` fragments, one standalone and one nested in metadata; a reader **must** take the union.
+Two keys change how a book must be interpreted structurally. Any key containing `fixed_layout` — `yj_fixed_layout`, `yj_non_pdf_fixed_layout` — puts the book on the fixed-layout path. `yj_double_page_spread` marks a spread comic, where facing pages pair.
+
+Those same two capabilities are declared a second time, in the `kindle_capability_metadata` category of `book_metadata` (§13.1), where each is a value rather than a key's presence: a capability the book does not want is stated as `0` instead of being left out. A book carries one `content_features` fragment, so the union a reader **must** take is across the two declaration sites, not across repeated fragments.
 
 Two namespaces exist: `com.amazon.yjconversion`, and `SDK.Marker`, whose only key is `CanonicalFormat`.
 
@@ -761,7 +763,7 @@ The two reader vocabularies are stable across firmware generations.
 
 ### 12.3. Pages and spreads
 
-In a fixed-layout book each section's page template carries `$66` `fixed_width` and `$67` `fixed_height` in pixels, defining the viewport. A `$156` `layout` value of `page_spread` or `facing_page` marks a container whose storyline holds the two per-page containers rather than page content itself. `scale_fit` asks for the content to be fitted to the viewport.
+In a fixed-layout book each page carries `$66` `fixed_width` and `$67` `fixed_height` in pixels, defining the viewport its content is fitted into, and `$156` `layout: scale_fit` asks for that fitting. A `layout` value of `page_spread` or `facing_page` instead marks a container that holds no page content of its own: its storyline holds the per-page containers, and those carry the dimensions. So a section's pages are reached by resolving its page template through any spread container to the leaves below, and every leaf **must** state both dimensions — a page that states neither has no canvas to scale to.
 
 ### 12.4. PDF-backed books
 
@@ -778,7 +780,7 @@ Two rules a reading or converting implementation also needs:
 
 ### 13.1. Categorised metadata
 
-The current shape is `$490` `book_metadata`, holding `$491` `categorised_metadata` — a list of categories, each a list of key/value pairs. The category that matters is `kindle_title_metadata`.
+The current shape is `$490` `book_metadata`, holding `$491` `categorised_metadata` — a list of categories, each a list of key/value pairs. The category that carries the bibliographic record is `kindle_title_metadata`; `kindle_capability_metadata` is the second declaration site for the fixed-layout capabilities of §12.1, and `kindle_audit_metadata` names the tool that wrote the file (`file_creator`, `creator_version`).
 
 ```
 { categorised_metadata: [
@@ -836,6 +838,8 @@ A producer **must** give every content element a position (§10.2). A producer *
 A producer of a fixed-layout book **should** emit a `location_map` naming one Location per page — the first element id that page occupies, and the first entry repeated so Location 1 falls at the book's start. Every Amazon fixed-layout book carries one. Left to the 110-pid fallback (§10.3), which restarts at each section, a two-page spread section contains no boundary between its pages.
 
 A producer converting from CSS **should not** emit a `px` length in a reflowable book. An absolute length is a point read at 160 dpi — scale by `0.45` and emit `pt` — and `px` is the fixed-layout canvas unit (§8.2). It **should** likewise resolve an `auto` horizontal margin into the split it stands for and state that as `margin_left` and `margin_right`: `box_align` is a picture property and does not place a text block (§8.3).
+
+A producer of a fixed-layout book **must** declare the capability in both places a reader looks — the `content_features` key and the `kindle_capability_metadata` value (§12.1) — and **must** give every page a `fixed_width`/`fixed_height` viewport (§12.3). It **should not** declare `yj_double_page_spread` without a fixed-layout capability beside it: facing pages pair only on the fixed-layout path.
 
 A producer **should not** attempt to bound the symbol ids it emits by any device's table. The ids a book names follow from the constructs it contains; a producer that needs a construct emits the symbol that names it (§5.2).
 

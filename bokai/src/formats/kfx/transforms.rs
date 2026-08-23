@@ -284,7 +284,10 @@ fn encode_kfx_link(link: &LinkData) -> String {
 /// Transformer for image resource references.
 ///
 /// On import: passes through the short resource name (e.g., "e6")
-/// On export: looks up the short name in ResourceRegistry (e.g., "epub/images/cover.jpg" → "e0")
+/// On export: looks up the short name in ResourceRegistry (e.g., "epub/images/cover.jpg" → "e0").
+/// A source path the book holds no asset for yields no name at all: every KFX
+/// `resource_name` has to reach an `external_resource`, and one naming bytes
+/// the container cannot carry is a reference to nothing.
 #[derive(Debug, Clone)]
 pub struct ResourceTransform;
 
@@ -296,16 +299,11 @@ impl AttributeTransform for ResourceTransform {
 
     fn export(&self, data: &ParsedAttribute, context: &ExportContext) -> String {
         match data {
-            ParsedAttribute::String(s) => {
-                // Look up the short resource name if we have a registry
-                if let Some(registry) = context.resource_registry
-                    && let Some(short_name) = registry.get_name(s)
-                {
-                    return short_name.to_string();
-                }
-                // Fallback: return as-is (shouldn't happen in normal export)
-                s.clone()
-            }
+            ParsedAttribute::String(s) => context
+                .resource_registry
+                .and_then(|registry| registry.get_name(s))
+                .unwrap_or_default()
+                .to_string(),
             _ => String::new(),
         }
     }
@@ -354,6 +352,26 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A path the book holds an asset for exports as its short name; a path it
+    /// holds none for exports as the empty string.
+    #[test]
+    fn a_resource_name_is_only_given_for_an_asset_the_book_holds() {
+        let mut registry = ResourceRegistry::new();
+        let mut symbols = crate::formats::kfx::context::SymbolTable::new();
+        registry.register("images/cover.jpg", &mut symbols);
+        let name = registry.get_or_create_name("images/cover.jpg");
+
+        let context = ExportContext {
+            spine_map: None,
+            resource_registry: Some(&registry),
+        };
+        let held = ParsedAttribute::String("images/cover.jpg".to_string());
+        let absent = ParsedAttribute::String("images/plate.png".to_string());
+
+        assert_eq!(ResourceTransform.export(&held, &context), name);
+        assert_eq!(ResourceTransform.export(&absent, &context), "");
+    }
 
     #[test]
     fn test_decode_base32() {

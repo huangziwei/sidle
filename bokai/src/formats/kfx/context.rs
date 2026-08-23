@@ -392,25 +392,18 @@ impl AnchorRegistry {
         symbol
     }
 
-    /// The anchor symbol for an href, minted on a first lookup — the `link_to`
-    /// path taken during storyline generation.
-    pub fn get_or_create_href_symbol(&mut self, href: &str) -> String {
-        // A registered href keeps its symbol
+    /// The anchor symbol a `link_to` carries for `href`: a registered target's
+    /// symbol, or a fresh one for an external URL. `None` for an href reaching
+    /// nothing the book holds, whose `link_to` names an anchor no `anchor`
+    /// fragment defines.
+    pub fn link_symbol(&mut self, href: &str) -> Option<String> {
         if let Some(symbol) = self.href_to_symbol.get(href) {
-            return symbol.clone();
+            return Some(symbol.clone());
         }
-
-        // Check if this is an external link
         if href.starts_with("http://") || href.starts_with("https://") {
-            return self.register_external(href);
+            return Some(self.register_external(href));
         }
-
-        // Unknown internal link - create a symbol but it won't have an anchor entity
-        // This handles links that weren't in ResolvedLinks (shouldn't happen normally)
-        let symbol = format!("a{:X}", self.next_anchor_id);
-        self.next_anchor_id += 1;
-        self.href_to_symbol.insert(href.to_string(), symbol.clone());
-        symbol
+        None
     }
 
     /// Get the anchor symbol for a node target (if registered).
@@ -1589,6 +1582,26 @@ mod tests {
         let externals = registry.drain_external_anchors();
         assert_eq!(externals.len(), 1);
         assert_eq!(externals[0].uri, url);
+    }
+
+    /// An href reaches a symbol when it names a registered target or an
+    /// external URL, and none when it names an internal target the registry
+    /// has no entry for.
+    #[test]
+    fn link_symbol_only_names_a_target_that_exists() {
+        let mut registry = AnchorRegistry::new();
+        let target = GlobalNodeId::new(ChapterId(1), NodeId(42));
+        registry.register_internal_target(target, "chapter.xhtml#id42");
+
+        assert_eq!(
+            registry.link_symbol("chapter.xhtml#id42"),
+            Some("a0".to_string())
+        );
+        assert_eq!(registry.link_symbol("chapter.xhtml#gone"), None);
+        assert_eq!(
+            registry.link_symbol("https://example.com/"),
+            Some("a1".to_string())
+        );
     }
 
     #[test]

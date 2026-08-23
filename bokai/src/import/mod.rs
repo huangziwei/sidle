@@ -122,7 +122,7 @@ pub trait Importer: Send + Sync {
     /// Reading order (spine).
     fn spine(&self) -> &[SpineEntry];
 
-    // --- Track 1: Normalization (The Reader) ---
+    // --- Track 1: Normalization ---
 
     /// Load a chapter as normalized IR.
     ///

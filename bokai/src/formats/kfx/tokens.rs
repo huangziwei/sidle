@@ -101,10 +101,9 @@ pub struct ElementStart {
     /// itself. Absent means one; both directions leave `None` alone.
     pub column_span: Option<u32>,
     pub row_span: Option<u32>,
-    /// `$152 column_format` for a table: one entry per column. KFX states
-    /// column geometry on the table rather than in the row structure, so on
-    /// export the IR's `<colgroup>` collapses into this and emits no content
-    /// element of its own. Empty for every other element.
+    /// `$152 column_format` for a table: one entry per column, the column
+    /// geometry KFX states on the table itself. The IR's `<colgroup>`
+    /// collapses into it. Empty for every other element.
     pub column_format: Vec<ColumnFormat>,
     /// `$104 list_start_offset` — the ordinal this list, or this item, counts
     /// from. A publisher's numbered list interrupted by prose arrives as one

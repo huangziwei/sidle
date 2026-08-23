@@ -494,11 +494,8 @@ impl KfxSchema {
             vec![],
         );
 
-        // BlockQuote - maps to type: text with yj.semantics.type: block_quote
-        // KFX has no dedicated blockquote container. Instead it uses:
-        // 1. type: text (standard text container)
-        // 2. yj.semantics.type: block_quote (semantic annotation for round-trip)
-        // 3. Styling for visual appearance (margins, indentation)
+        // BlockQuote is `type: text` carrying `yj.semantics.type: block_quote`;
+        // its margins and indentation ride the style.
         self.export_strategy_table.insert(
             Role::BlockQuote,
             Strategy::StructureWithSemanticType {
@@ -589,8 +586,7 @@ impl KfxSchema {
             }],
         });
 
-        // Additional span rules (emphasis, strong) would have to consult style
-        // definitions; anything without link_to becomes Inline.
+        // A span carrying no `link_to` is Inline.
     }
 
     /// Register landmark type mappings.
@@ -598,9 +594,8 @@ impl KfxSchema {
         self.landmark_mapping = vec![
             (LandmarkType::Cover, KfxSymbol::CoverPage),
             (LandmarkType::StartReading, KfxSymbol::Srl),
-            // `$text` is an alternate start-reading marker some containers
-            // use instead of `$srl`. Listed after it so `landmark_to_kfx`
-            // (first match wins) keeps emitting `$srl`.
+            // `$text` is a second start-reading marker; `landmark_to_kfx`
+            // takes the first match, `$srl`.
             (LandmarkType::StartReading, KfxSymbol::Text),
             (LandmarkType::TitlePage, KfxSymbol::Titlepage),
             (LandmarkType::Toc, KfxSymbol::Toc),
@@ -851,19 +846,8 @@ impl KfxSchema {
         self.export_strategy(role).map(|s| s.kfx_type())
     }
 
-    /// Export attributes for a role using registered transforms.
-    ///
-    /// This is the schema-driven way to export attributes. Instead of hardcoding
-    /// attribute extraction, call this method to get properly transformed KFX
-    /// attribute values.
-    ///
-    /// # Arguments
-    /// * `role` - The IR role being exported
-    /// * `get_semantic` - Closure to get semantic values by target
-    /// * `export_ctx` - Export context for transformations (spine map, etc.)
-    ///
-    /// # Returns
-    /// Vector of (KFX field ID, transformed string value) pairs
+    /// `role`'s element attributes as (KFX field id, value) pairs, each read
+    /// from `get_semantic` and put through the rule's own transform.
     pub fn export_attributes<F>(
         &self,
         role: Role,
@@ -880,8 +864,12 @@ impl KfxSchema {
             for rule in self.element_attr_rules(kfx_type_id) {
                 if let Some(value) = get_semantic(rule.target) {
                     let parsed = crate::formats::kfx::transforms::ParsedAttribute::String(value);
+                    // A transform with nothing to say states nothing: an empty
+                    // attribute value is no attribute.
                     let kfx_value = rule.transform.export(&parsed, export_ctx);
-                    attrs.push((rule.kfx_field as u64, kfx_value));
+                    if !kfx_value.is_empty() {
+                        attrs.push((rule.kfx_field as u64, kfx_value));
+                    }
                 }
             }
         }
@@ -897,7 +885,7 @@ impl KfxSchema {
 
             if rule_matches {
                 for attr_rule in &span_rule.attr_rules {
-                    // Skip if we already have this attribute from element rules
+                    // An attribute the element rules have set stands.
                     if attrs
                         .iter()
                         .any(|(id, _)| *id == attr_rule.kfx_field as u64)
@@ -908,7 +896,9 @@ impl KfxSchema {
                         let parsed =
                             crate::formats::kfx::transforms::ParsedAttribute::String(value);
                         let kfx_value = attr_rule.transform.export(&parsed, export_ctx);
-                        attrs.push((attr_rule.kfx_field as u64, kfx_value));
+                        if !kfx_value.is_empty() {
+                            attrs.push((attr_rule.kfx_field as u64, kfx_value));
+                        }
                     }
                 }
             }
@@ -925,10 +915,8 @@ impl KfxSchema {
         matches!(role, Role::Link | Role::Inline)
     }
 
-    /// Export span attributes for an inline role.
-    ///
-    /// Similar to export_attributes but uses span rules instead of element rules.
-    /// Used when generating style_events for inline spans.
+    /// [`Self::export_attributes`] over the span rules, for the style_events
+    /// an inline role generates.
     pub fn export_span_attributes<F>(
         &self,
         role: Role,
@@ -940,8 +928,7 @@ impl KfxSchema {
     {
         let mut attrs = Vec::new();
 
-        // Find the matching span rule for this role
-        // For export, we match by examining the strategy's trigger_role or role
+        // The span rule matching this role, by its strategy's trigger_role or role.
         for span_rule in &self.span_rules {
             let rule_matches = match &span_rule.strategy {
                 Strategy::Dynamic { trigger_role, .. } => *trigger_role == role,
@@ -959,7 +946,9 @@ impl KfxSchema {
                         let parsed =
                             crate::formats::kfx::transforms::ParsedAttribute::String(value);
                         let kfx_value = attr_rule.transform.export(&parsed, export_ctx);
-                        attrs.push((attr_rule.kfx_field as u64, kfx_value));
+                        if !kfx_value.is_empty() {
+                            attrs.push((attr_rule.kfx_field as u64, kfx_value));
+                        }
                     }
                 }
 

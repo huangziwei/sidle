@@ -1,15 +1,10 @@
-//! Declarative style schema for KFX export.
+//! Declarative style schema for KFX export: one rule per IR style property,
+//! mapping it to a KFX Ion field.
 //!
-//! This module defines the schema-driven approach to style conversion.
-//! Instead of imperative CSS parsing, we define property rules that map
-//! IR style properties to KFX Ion structures.
-//!
-//! ## Architecture
-//!
-//! 1. **StylePropertyRule** - Declares how a single property maps (e.g., font-weight → fontWeight)
-//! 2. **ValueTransform** - Defines the conversion logic (enum lookup, unit scaling, etc.)
-//! 3. **StyleSchema** - Registry of all rules with fast lookup
-//! 4. **StyleContext** - Whether a property can be inline or requires a block container
+//! [`StylePropertyRule`] states the mapping for a single property,
+//! [`ValueTransform`] the conversion its value takes, [`StyleSchema`] the
+//! registry over all of them, and [`StyleContext`] whether a property rides an
+//! inline span or asks for a block container.
 
 use std::collections::BTreeMap;
 
@@ -752,9 +747,9 @@ impl StyleSchema {
         // Text emphasis marks (圏点)
         // ====================================================================
         // CSS text-emphasis-style → KFX text_emphasis_style symbol. The CSS
-        // value is a two-word `<fill> <shape>` pair; we render it as a single
-        // space-separated string and map each combination to its KFX glyph
-        // symbol. Inline-safe because emphasis applies to runs of text.
+        // value is a two-word `<fill> <shape>` pair, matched as one
+        // space-separated string against its KFX glyph symbol. Emphasis marks
+        // a run of text, and the rule is inline-safe.
         schema.register(StylePropertyRule {
             ir_key: "text-emphasis-style",
             ir_field: Some(IrField::TextEmphasisStyle),
@@ -1482,7 +1477,7 @@ impl ValueTransform {
                     RoundingMode::Round => scaled.round(),
                 };
 
-                // Guard against Infinity after clamping (shouldn't happen with proper min/max)
+                // Infinity or NaN surviving the clamp.
                 if result.is_infinite() || result.is_nan() {
                     return None;
                 }
@@ -1866,11 +1861,9 @@ fn extract_shorthand_value(
 // IR Field Extraction (Bidirectional Schema Bridge)
 // ============================================================================
 
-/// The em-multiple emitted as the document-level `line_height` in
-/// `document_data`. Per-paragraph line-heights in `lh` units multiply this
-/// baseline, so both sides need to agree on the same constant when we
-/// convert source-em values to `lh`. Keep in sync with the emission in
-/// `build_document_data_fragment` (src/export/kfx.rs).
+/// The em-multiple `document_data` states as its `line_height`, and the
+/// baseline a per-paragraph `lh` value multiplies. `build_document_data_fragment`
+/// emits this same constant.
 pub const DOCUMENT_LINE_HEIGHT_EM: f32 = 1.2;
 
 /// Treat `Length::Px(0.0)` as equivalent to the IR's `Auto` default when
@@ -1992,13 +1985,9 @@ pub fn extract_ir_field(
             }
         }
         IrField::LineHeight => {
-            // Emit as a plain em string here; the final em→lh normalisation
-            // (dividing each style's em value by the book's dominant
-            // line-height so body lands on 1.0 lh) happens in a second pass
-            // after all styles are registered — see
-            // `normalize_line_heights_to_lh` in src/kfx/style_registry.rs.
-            // Doing it here can't see the dominant value because we only
-            // have one style in hand.
+            // A plain em string. `normalize_line_heights_to_lh` divides each
+            // style's em value by the book's dominant line-height once every
+            // style is registered, landing body text on 1.0 lh.
             if ir_style.line_height != default.line_height {
                 Some(ir_style.line_height.to_css_string())
             } else {
@@ -3545,15 +3534,12 @@ mod tests {
 
     #[test]
     fn test_shorthand_out_of_bounds_uses_default() {
-        let _parts = ["10px", "20px"];
         let default = Some(KfxValue::String("0px".to_string()));
 
-        // Index 4 is out of bounds for 2 values, but our logic handles it
-        // Actually for 2 values, index 0-3 are all valid due to expansion
-        // Let's test with 4 values and index 5
+        // Index 5 sits past a four-value shorthand; a two-value one expands
+        // to fill indices 0–3.
         let parts4 = vec!["1px", "2px", "3px", "4px"];
         let result = extract_shorthand_value(&parts4, 5, default.clone());
-        // parts.get(5) returns None, so should use default
         assert_eq!(result, default);
     }
 

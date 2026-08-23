@@ -307,9 +307,7 @@ fn build_kfx_container(
     // content-derived mode, not the document mode above, which
     // `primary-writing-mode` may force. Unforced, the two coincide.
     ctx.style_writing_mode_baseline = dominant_writing_mode_from_ir(book);
-    // The body font defers to the reader's choice — see `reader_font_family`.
-    // Without this the content pins the device font and the Kindle's font
-    // control has nothing left to override.
+    // A `default`-headed stack defers the body font — see `reader_font_family`.
     ctx.reader_font_family = body_font_stack(book);
     // A device-recognized content language on every reflowable style, Amazon's
     // own shape (`zh-tw`).
@@ -391,15 +389,18 @@ fn build_kfx_container(
             }
 
             // The image resources this section depends on, for the
-            // container_entity_map dependency graph.
+            // container_entity_map dependency graph. Only a path the book
+            // holds an asset for was named in pass 1; a source that points at
+            // a file its container never carried names nothing.
             for node_id in chapter.iter_dfs() {
                 let Some(node) = chapter.node(node_id) else {
                     continue;
                 };
                 if node.role == crate::model::Role::Image
                     && let Some(src) = chapter.semantics.src(node_id)
+                    && let Some(short_name) = ctx.resource_registry.get_name(src)
                 {
-                    let short_name = ctx.resource_registry.get_or_create_name(src);
+                    let short_name = short_name.to_string();
                     ctx.record_section_image_ref(section_name, &short_name);
                 }
                 // A picture reached through the stylesheet counts as much as one
@@ -408,8 +409,9 @@ fn build_kfx_container(
                     .styles
                     .get(node.style)
                     .and_then(|s| s.background_image.as_deref())
+                    && let Some(short_name) = ctx.resource_registry.get_name(src)
                 {
-                    let short_name = ctx.resource_registry.get_or_create_name(src);
+                    let short_name = short_name.to_string();
                     ctx.record_section_image_ref(section_name, &short_name);
                 }
             }
@@ -1832,7 +1834,7 @@ fn resolve_toc_target(
             }
         }
         Some(AnchorTarget::External(_)) => {
-            // External links in TOC - shouldn't happen but handle gracefully
+            // A TOC entry targeting a URL names no position.
             return None;
         }
         None => {}
@@ -2095,6 +2097,15 @@ fn build_chapter_entities_grouped(
     (section_fragment, storyline_fragment, content_fragment)
 }
 
+/// Land every link target the chapter holds on `content_id`. A chapter whose
+/// storyline is one image keeps none of the elements an id was written on, and
+/// `content_id` is the page a link into it reaches.
+fn anchor_page_targets(chapter: &Chapter, content_id: u64, ctx: &mut ExportContext) {
+    for node_id in chapter.iter_dfs() {
+        ctx.create_anchor_if_needed(node_id, content_id, 0);
+    }
+}
+
 /// Storyline for a full-page illustration: a container filling the page holding
 /// one centred full-width image. Mirrors the shape Amazon gives an illustration
 /// page in a reflowing book.
@@ -2131,7 +2142,11 @@ fn build_illustration_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> I
         let Some(src) = chapter.semantics.src(node_id) else {
             continue;
         };
-        let resource_name = ctx.resource_registry.get_or_create_name(src);
+        // `get_name` answers for the assets pass 1 registered; a `src` naming
+        // none has no `external_resource` to reach.
+        let Some(resource_name) = ctx.resource_registry.get_name(src).map(str::to_string) else {
+            continue;
+        };
         let resource_symbol = ctx.symbols.get_or_intern(&resource_name);
         let wrapper_symbol = ctx.register_ir_style(&wrapper_style);
         let image_symbol = ctx.register_ir_style(&image_style);
@@ -2141,6 +2156,7 @@ fn build_illustration_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> I
         ctx.record_content_id(image_id);
         ctx.record_content_length(image_id, 1);
         ctx.resolve_pending_chapter_anchor(wrapper_id);
+        anchor_page_targets(chapter, wrapper_id, ctx);
 
         let image = IonValue::Struct(vec![
             (KfxSymbol::Id as u64, IonValue::Int(image_id as i64)),
@@ -2184,10 +2200,10 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
         };
 
         if node.role == Role::Image {
-            // Get the image source
-            if let Some(src) = chapter.semantics.src(node_id) {
-                // Look up the resource name (e.g., "e0")
-                let resource_name = ctx.resource_registry.get_or_create_name(src);
+            // Get the image source, skipping one the book holds no bytes for
+            if let Some(src) = chapter.semantics.src(node_id)
+                && let Some(resource_name) = ctx.resource_registry.get_name(src).map(str::to_string)
+            {
                 let resource_name_symbol = ctx.symbols.get_or_intern(&resource_name);
 
                 // Register style and get symbol. Cover image often has a
@@ -2209,6 +2225,7 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
 
                 // The pending chapter-start anchor, skipped by the cover path
                 ctx.resolve_pending_chapter_anchor(container_id);
+                anchor_page_targets(chapter, container_id, ctx);
 
                 // Build the image struct directly (no container wrapper)
                 let image_struct = IonValue::Struct(vec![

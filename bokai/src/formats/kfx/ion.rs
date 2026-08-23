@@ -91,9 +91,8 @@ impl IonValue {
     /// symbol at all.
     ///
     /// Counts every place an id can appear: symbol values, struct field keys,
-    /// and annotations. Ids are reported raw, so a caller separating shared
-    /// from document-local ones compares against the container's own local
-    /// base rather than expecting this to do it.
+    /// and annotations. Ids come back raw, shared and document-local alike,
+    /// measured against the container's own local base.
     pub fn max_symbol_id(&self) -> Option<u64> {
         fn take(best: &mut Option<u64>, id: u64) {
             *best = Some(best.map_or(id, |b: u64| b.max(id)));
@@ -279,8 +278,8 @@ impl<'a> IonParser<'a> {
 
             IonType::NegInt => {
                 let value = self.read_uint(length)?;
-                // For negative integers, the magnitude is stored, and we negate it.
-                // i64::MIN has magnitude 2^63, which fits in u64 but not as positive i64.
+                // A negative integer stores its magnitude.
+                // `i64::MIN` has magnitude 2^63, which fits u64 and no positive i64.
                 if value > (i64::MAX as u64) + 1 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -342,7 +341,7 @@ impl<'a> IonParser<'a> {
                     let multiplier = 10i64.pow(exponent as u32);
                     (coefficient * multiplier).to_string()
                 } else {
-                    // Negative exponent: we have decimal places
+                    // Negative exponent: decimal places.
                     let abs_exp = (-exponent) as usize;
                     let coef_str = coefficient.abs().to_string();
 
@@ -688,7 +687,7 @@ impl IonWriter {
             // Encode magnitude as big-endian bytes
             let coef_bytes = uint_bytes(coef_mag);
 
-            // Check if we need a sign byte
+            // A sign byte for a coefficient whose top bit is set.
             let needs_sign_byte = (coef_bytes[0] & 0x80) != 0;
 
             if is_neg {
@@ -838,7 +837,7 @@ fn write_varuint_to(buf: &mut Vec<u8>, value: u64) {
         return;
     }
 
-    // Count how many 7-bit groups we need
+    // 7-bit groups the value spans.
     let mut temp = value;
     let mut groups = Vec::new();
     while temp > 0 {
@@ -987,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_writer_roundtrip_int() {
-        // Write an integer and verify we can parse it back
+        // Write an integer and parse it back.
         let mut writer = IonWriter::new();
         writer.write_bvm();
         writer.write_int(42);
@@ -1169,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_decimal_roundtrip() {
-        // Test that we can write and read back decimal values
+        // Write decimal values and read them back.
         let mut writer = IonWriter::new();
         writer.write_bvm();
         writer.write_decimal("1.8");

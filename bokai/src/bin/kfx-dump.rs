@@ -2978,6 +2978,7 @@ fn report_features(data: &[u8]) -> IonResult<()> {
 
     // Find content_features entity (type 585)
     let content_features_type = KfxSymbol::ContentFeatures as u32;
+    let mut found = 0usize;
 
     for i in 0..num_entries {
         let entry_offset = index_offset + i * entry_size;
@@ -3056,18 +3057,10 @@ fn report_features(data: &[u8]) -> IonResult<()> {
 
                                     match fname {
                                         "namespace" => {
-                                            if let bokai::formats::kfx::ion::IonValue::String(s) =
-                                                fval
-                                            {
-                                                namespace = s.clone();
-                                            }
+                                            namespace = text_or_symbol(fval, &resolve_sym);
                                         }
                                         "key" => {
-                                            if let bokai::formats::kfx::ion::IonValue::String(s) =
-                                                fval
-                                            {
-                                                key = s.clone();
-                                            }
+                                            key = text_or_symbol(fval, &resolve_sym);
                                         }
                                         "version_info" => {
                                             // Extract version from nested struct
@@ -3118,13 +3111,26 @@ fn report_features(data: &[u8]) -> IonResult<()> {
                     }
                 }
             }
+            found += 1;
         }
-
-        return Ok(());
     }
 
-    eprintln!("No content_features entity found");
+    if found == 0 {
+        eprintln!("No content_features entity found");
+    }
     Ok(())
+}
+
+/// A field that may arrive as an Ion string or as a symbol id.
+fn text_or_symbol<'a>(
+    value: &bokai::formats::kfx::ion::IonValue,
+    resolve: &dyn Fn(u64) -> &'a str,
+) -> String {
+    match value {
+        bokai::formats::kfx::ion::IonValue::String(s) => s.clone(),
+        bokai::formats::kfx::ion::IonValue::Symbol(id) => resolve(*id).to_string(),
+        _ => String::new(),
+    }
 }
 
 /// Report metadata (book_metadata entity) from a KFX file

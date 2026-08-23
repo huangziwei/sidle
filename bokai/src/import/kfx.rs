@@ -111,12 +111,12 @@ pub struct KfxImporter {
     /// (chapter `<title>`, storyline lookup) and `ordinal` its leaf index in
     /// the section's spread walk.
     fxl_pages: Vec<FxlPage>,
-    /// Section name → its spread-walked leaf pages (container +
-    /// `page-spread-*` property), from the section's FIRST page template
+    /// Section name → its spread-walked leaf pages (container + the spread
+    /// half it occupies), from the section's FIRST page template
     /// (fixed-layout sections split that template into per-page documents;
     /// reflowable sections use the LAST). Walked once at spine expansion;
     /// per-page loads index it by ordinal.
-    fxl_leaves: HashMap<String, Vec<(IonValue, String)>>,
+    fxl_leaves: HashMap<String, Vec<(IonValue, Option<PageSpread>)>>,
     /// story_name → storyline entity location, for resolving spread pages
     /// and container story references without a section hop.
     storylines_by_name: HashMap<String, EntityLoc>,
@@ -1213,21 +1213,32 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Read the `content_features` entities for the book-level fixed-layout
-    /// signals: `yj_*fixed_layout` switches spine construction to the
-    /// per-page expansion; `yj_double_page_spread` marks a spread comic
-    /// (`book-type` OPF hint).
+    /// Read the book-level fixed-layout signals from both places that declare
+    /// them: `yj_*fixed_layout` switches spine construction to the per-page
+    /// expansion; `yj_double_page_spread` marks a spread comic (`book-type`
+    /// OPF hint).
     fn detect_fxl(&mut self) {
-        let locs: Vec<EntityLoc> = self
+        let features: Vec<EntityLoc> = self
             .entities
             .iter()
             .filter(|e| e.type_id == KfxSymbol::ContentFeatures as u32)
             .copied()
             .collect();
+        let capabilities: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::BookMetadata as u32)
+            .copied()
+            .collect();
         let mut acc = fxl::FxlFeatures::default();
-        for loc in locs {
+        for loc in features {
             if let Ok(elem) = self.parse_entity_ion(loc) {
                 fxl::scan_content_features(&elem, &self.symbols, &mut acc);
+            }
+        }
+        for loc in capabilities {
+            if let Ok(elem) = self.parse_entity_ion(loc) {
+                fxl::scan_capability_metadata(&elem, &self.symbols, &mut acc);
             }
         }
         self.metadata.fixed_layout = acc.fixed_layout;
@@ -1305,13 +1316,12 @@ impl KfxImporter {
                 .get(sec)
                 .map(|l| l.length)
                 .unwrap_or(0);
-            let leaves = self.collect_spread_leaves(template);
-            for (ordinal, (leaf, prop)) in leaves.iter().enumerate() {
-                let spread_type = prop.rsplit('-').next().unwrap_or("");
-                let name = if spread_type.is_empty() {
-                    sec.clone()
-                } else {
-                    format!("{sec}-{spread_type}")
+            let leaves = fxl::page_leaves(template, &self.symbols, &self.content_ppd, self);
+            for (ordinal, (leaf, page_spread)) in leaves.iter().enumerate() {
+                let name = match page_spread {
+                    Some(PageSpread::Left) => format!("{sec}-left"),
+                    Some(PageSpread::Right) => format!("{sec}-right"),
+                    _ => sec.clone(),
                 };
                 let viewport = leaf.unwrap_annotated().as_struct().and_then(|f| {
                     match (
@@ -1322,15 +1332,10 @@ impl KfxImporter {
                         _ => None,
                     }
                 });
-                let page_spread = match prop.as_str() {
-                    "page-spread-left" => Some(PageSpread::Left),
-                    "page-spread-right" => Some(PageSpread::Right),
-                    _ => None,
-                };
                 spine.push(SpineEntry {
                     id: ChapterId(names.len() as u32),
                     size_estimate,
-                    page_spread,
+                    page_spread: *page_spread,
                     viewport,
                     panels: Vec::new(),
                 });
@@ -1346,74 +1351,6 @@ impl KfxImporter {
         self.fxl_pages = fxl_pages;
         self.spine = spine;
         Ok(())
-    }
-
-    /// Collect a page template's leaf pages in emission order, each with its
-    /// `page-spread-*` property (empty for a spreadless page). Mirrors the
-    /// calibre's `process_spread_template` walk: spread containers
-    /// recurse into their storyline's containers with alternating sides;
-    /// anything else is a leaf.
-    fn collect_spread_leaves(&self, template: &IonValue) -> Vec<(IonValue, String)> {
-        let mut out = Vec::new();
-        self.walk_spread(template, "", &mut out);
-        out
-    }
-
-    fn walk_spread(
-        &self,
-        template: &IonValue,
-        spread_property: &str,
-        out: &mut Vec<(IonValue, String)>,
-    ) {
-        // Resolve a `$608 structure` symbol reference to the real struct.
-        let resolved;
-        let template = match template.unwrap_annotated() {
-            IonValue::Symbol(id) => {
-                let name = self.symbols.resolve(*id).to_string();
-                let Some(loc) = self.structures_by_name.get(&name) else {
-                    return;
-                };
-                let Ok(elem) = self.parse_entity_ion(*loc) else {
-                    return;
-                };
-                resolved = elem;
-                &resolved
-            }
-            _ => template,
-        };
-        let inner = template.unwrap_annotated();
-        let Some(fields) = inner.as_struct() else {
-            return;
-        };
-        let layout = get_field(fields, sym!(Layout))
-            .and_then(|v| self.symbols.text_of(v))
-            .unwrap_or("");
-        if fxl::is_spread_layout(layout) {
-            // The story holds the per-page containers; RTL spreads read the
-            // right-hand page first.
-            let Some(story) = get_field(fields, sym!(StoryName))
-                .and_then(|v| self.symbols.text_of(v))
-                .map(|s| s.to_string())
-            else {
-                return;
-            };
-            let (_, pages) = self.storyline_parts(&story);
-            let mut prop = if self.content_ppd == "ltr" {
-                "page-spread-left"
-            } else {
-                "page-spread-right"
-            };
-            for page in &pages {
-                self.walk_spread(page, prop, out);
-                prop = if prop == "page-spread-left" {
-                    "page-spread-right"
-                } else {
-                    "page-spread-left"
-                };
-            }
-            return;
-        }
-        out.push((template.clone(), spread_property.to_string()));
     }
 
     /// Parse a storyline by story name into its root element id (when the
@@ -2533,6 +2470,17 @@ impl KfxImporter {
 
         self.ruby_indexed = true;
         Ok(())
+    }
+}
+
+impl fxl::PageContext for KfxImporter {
+    fn structure(&self, name: &str) -> Option<IonValue> {
+        let loc = self.structures_by_name.get(name)?;
+        self.parse_entity_ion(*loc).ok()
+    }
+
+    fn storyline_pages(&self, story: &str) -> Vec<IonValue> {
+        self.storyline_parts(story).1
     }
 }
 

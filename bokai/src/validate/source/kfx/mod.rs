@@ -52,7 +52,11 @@
 //!   and has embedded bytes (missing cover = warning; dangling = error).
 //! - **Rule 11, declarations agree with content** — each `content_features`
 //!   entry states what the book contains. See [`ContentFacts`] for the facts
-//!   each claim is read against.
+//!   each claim is read against. The two fixed-layout capabilities are read
+//!   across both places a book declares them (§12.1): a spread declared with
+//!   no fixed-layout capability pairs no pages, and every page of a
+//!   fixed-layout book states the `fixed_width`/`fixed_height` viewport it is
+//!   drawn into (§12.3).
 //! - **Rule 12, metadata** — `title` and `language` are stated, and
 //!   `author_pronunciation` stays positional with `author`.
 //! - **Rule 13, element arithmetic** — an element id names one element
@@ -77,6 +81,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::formats::kfx::container::{ContainerHeader, ContainerInfo, get_field};
+use crate::formats::kfx::fxl;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, BookData};
 use crate::formats::kfx::symbols::KfxSymbol;
@@ -135,6 +140,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_position_map_coverage(&book));
     findings.extend(check_position_arithmetic(&book));
     findings.extend(check_feature_content_agreement(&book));
+    findings.extend(check_fixed_layout_pages(&book));
     findings
 }
 
@@ -233,10 +239,10 @@ fn container_id(bytes: &[u8]) -> Option<String> {
 /// The shared symbol table every container imports.
 const SHARED_SYMBOL_TABLE: &str = "YJ_symbols";
 
-/// Index-table fragment types a book holds at most one of. `content_features`
-/// is absent: a book states one standalone and one inside its metadata. `$270`
-/// and `$593` are absent too — the container info locates both by offset.
-const SINGLETON_TYPES: [KfxSymbol; 10] = [
+/// Index-table fragment types a book holds at most one of. `$270` and `$593`
+/// are absent: the container info locates both by offset.
+const SINGLETON_TYPES: [KfxSymbol; 11] = [
+    KfxSymbol::ContentFeatures,
     KfxSymbol::Metadata,
     KfxSymbol::PositionMap,
     KfxSymbol::PositionIdMap,
@@ -1019,7 +1025,7 @@ struct RefIndex {
     /// Each `ruby_content` ($756) name against the `ruby_id` ($758) values its
     /// `content_list` declares.
     ruby: HashMap<String, HashSet<i64>>,
-    /// A `content_features` key ending `fixed_layout`, which makes `px` a page
+    /// The book declares a fixed-layout capability, which makes `px` a page
     /// canvas unit (§8.2).
     fixed_layout: bool,
     /// The book default `writing_mode` ($560), the axis an element inherits.
@@ -1065,13 +1071,10 @@ impl RefIndex {
                 }
             }
         }
-        let (declared, _) = declared_features(book);
-        let fixed_layout = declared.keys().any(|key| key.ends_with("fixed_layout"));
-
         Self {
             anchors,
             ruby,
-            fixed_layout,
+            fixed_layout: fxl::book_signals(book).fixed_layout,
             document_writing_mode: document_writing_mode(book),
         }
     }
@@ -2621,6 +2624,24 @@ fn declared_features(book: &BookData) -> (HashMap<String, i64>, Vec<Finding>) {
 
 fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
     let (declared, mut out) = declared_features(book);
+
+    // §12.1: `double_page_spread` names an arrangement of fixed-layout pages,
+    // and both capabilities are read across the two places a book states them.
+    let signals = fxl::book_signals(book);
+    if signals.double_page_spread && !signals.fixed_layout {
+        out.push(warning(
+            "spread-without-fixed-layout",
+            "<content_features>",
+            "declares yj_double_page_spread but no fixed-layout capability — facing pages pair \
+             only on the fixed-layout path, so the spreads render as single reflowed pages",
+            Some(FixHint::new(
+                "declare-fixed-layout",
+                "declare yj_fixed_layout beside the spread capability, or drop the spread \
+                 declaration",
+            )),
+        ));
+    }
+
     if declared.is_empty() {
         return out; // No content_features: no claim to check.
     }
@@ -2679,6 +2700,85 @@ fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
         }
     }
 
+    out
+}
+
+// ============================================================================
+// Rule 11 — a fixed-layout book's pages state their viewport
+// ============================================================================
+
+/// The page walk's view of the loaded fragments: a page template may stand in
+/// for a `structure` ($608) fragment, and a spread container's pages come from
+/// the `storyline` ($259) it names.
+struct LoadedPages<'a>(&'a BookData);
+
+impl fxl::PageContext for LoadedPages<'_> {
+    fn structure(&self, name: &str) -> Option<IonValue> {
+        lookup(self.0, KfxSymbol::Structure, name).cloned()
+    }
+
+    fn storyline_pages(&self, story: &str) -> Vec<IonValue> {
+        lookup(self.0, KfxSymbol::Storyline, story)
+            .and_then(|v| v.unwrap_annotated().as_struct())
+            .and_then(|fields| get_field(fields, KfxSymbol::ContentList as u64))
+            .and_then(|v| v.unwrap_annotated().as_list())
+            .map(<[IonValue]>::to_vec)
+            .unwrap_or_default()
+    }
+}
+
+/// §12.3. Each page of a fixed-layout book carries the viewport it is drawn
+/// into: `fixed_width` ($66) and `fixed_height` ($67) on the leaf container
+/// the page template resolves to, directly or through the per-page containers
+/// of a `page_spread` / `facing_page` storyline. A page declaring neither
+/// states no canvas for its content to be fitted to.
+fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if !fxl::book_signals(book).fixed_layout {
+        return out;
+    }
+    let pages = LoadedPages(book);
+    for section_name in reading_order_sections(book) {
+        let Some(template) = lookup(book, KfxSymbol::Section, &section_name)
+            .and_then(|v| v.unwrap_annotated().as_struct())
+            .and_then(|fields| get_field(fields, KfxSymbol::PageTemplates as u64))
+            .and_then(|v| v.unwrap_annotated().as_list())
+            .and_then(<[IonValue]>::first)
+        else {
+            continue;
+        };
+        let leaves = fxl::page_leaves(template, &book.symbols, "ltr", &pages);
+        let unsized_pages = leaves
+            .iter()
+            .filter(|(leaf, _)| {
+                let Some(fields) = leaf.unwrap_annotated().as_struct() else {
+                    return true;
+                };
+                fxl::read_px(fields, KfxSymbol::FixedWidth).is_none()
+                    || fxl::read_px(fields, KfxSymbol::FixedHeight).is_none()
+            })
+            .count();
+        if unsized_pages > 0 {
+            let declares = if unsized_pages == 1 {
+                "declares"
+            } else {
+                "declare"
+            };
+            out.push(warning(
+                "fixed-layout-page-unsized",
+                &section_name,
+                format!(
+                    "{unsized_pages} of this fixed-layout section's {} pages {declares} no \
+                     fixed_width/fixed_height — drawn with no viewport to scale to",
+                    leaves.len()
+                ),
+                Some(FixHint::new(
+                    "declare-page-viewport",
+                    "state fixed_width and fixed_height in pixels on each page container",
+                )),
+            ));
+        }
+    }
     out
 }
 
@@ -5044,5 +5144,182 @@ mod tests {
                 .iter()
                 .any(|f| f.rule == "landmark-unreachable")
         );
+    }
+
+    // --- Rule 11 (fixed layout) ---------------------------------------------
+
+    /// A book whose `book_metadata` states one `kindle_capability_metadata`
+    /// capability.
+    fn with_capability(mut book: BookData, key: &str, value: IonValue) -> BookData {
+        book.by_type.insert(
+            KfxSymbol::BookMetadata as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::CategorisedMetadata as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (
+                            KfxSymbol::Category as u64,
+                            IonValue::String("kindle_capability_metadata".to_string()),
+                        ),
+                        (
+                            KfxSymbol::Metadata as u64,
+                            IonValue::List(vec![IonValue::Struct(vec![
+                                (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+                                (KfxSymbol::Value as u64, value),
+                            ])]),
+                        ),
+                    ])]),
+                )]),
+            )]),
+        );
+        book
+    }
+
+    /// A page container, sized when `viewport` is given.
+    fn page(viewport: Option<(i64, i64)>) -> IonValue {
+        let mut fields = vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::ScaleFit as u64),
+            ),
+        ];
+        if let Some((w, h)) = viewport {
+            fields.push((KfxSymbol::FixedWidth as u64, IonValue::Int(w)));
+            fields.push((KfxSymbol::FixedHeight as u64, IonValue::Int(h)));
+        }
+        IonValue::Struct(fields)
+    }
+
+    /// §12.3. A fixed-layout page states the viewport it is drawn into.
+    #[test]
+    fn a_fixed_layout_page_without_a_viewport_is_flagged() {
+        let unsized_page = with_feature(book_with_element(page(None)), "yj_fixed_layout");
+        let out = check_fixed_layout_pages(&unsized_page);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "fixed-layout-page-unsized");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "sec1");
+        assert!(out[0].message.contains("no viewport"), "{out:?}");
+
+        let sized = with_feature(
+            book_with_element(page(Some((1307, 1920)))),
+            "yj_fixed_layout",
+        );
+        assert!(check_fixed_layout_pages(&sized).is_empty());
+
+        // A reflowable book states no page viewport and is not asked for one.
+        assert!(check_fixed_layout_pages(&book_with_element(page(None))).is_empty());
+    }
+
+    /// A `page_spread` template holds no page of its own: its storyline holds
+    /// the per-page containers, and each states its own viewport.
+    #[test]
+    fn the_pages_of_a_spread_are_read_through_its_storyline() {
+        let spread = IonValue::Struct(vec![
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::PageSpread as u64),
+            ),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::String("story1".to_string()),
+            ),
+        ]);
+        let storyline = |pages: Vec<IonValue>| {
+            HashMap::from([(
+                "story1".to_string(),
+                IonValue::Struct(vec![(KfxSymbol::ContentList as u64, IonValue::List(pages))]),
+            )])
+        };
+
+        let mut half = with_feature(book_with_element(spread.clone()), "yj_fixed_layout");
+        half.by_type.insert(
+            KfxSymbol::Storyline as u64,
+            storyline(vec![page(Some((1307, 1920))), page(None)]),
+        );
+        let out = check_fixed_layout_pages(&half);
+        assert_eq!(out.len(), 1, "{out:?}");
+        // Only the unsized half of the spread is counted.
+        assert!(out[0].message.starts_with("1 of"), "{out:?}");
+        assert!(out[0].message.contains("'s 2 pages"), "{out:?}");
+
+        let mut both = with_feature(book_with_element(spread), "yj_fixed_layout");
+        both.by_type.insert(
+            KfxSymbol::Storyline as u64,
+            storyline(vec![page(Some((1307, 1920))), page(Some((1307, 1920)))]),
+        );
+        assert!(check_fixed_layout_pages(&both).is_empty());
+    }
+
+    /// §12.1. The fixed-layout capability is declared in two places, and
+    /// either one puts the book on the fixed-layout path.
+    #[test]
+    fn the_fixed_layout_capability_is_read_from_metadata_too() {
+        let book = with_capability(
+            book_with_element(page(None)),
+            "yj_fixed_layout",
+            IonValue::Int(1),
+        );
+        let out = check_fixed_layout_pages(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "fixed-layout-page-unsized");
+
+        // A key valued 0 states a capability the book disables.
+        let off = with_capability(
+            book_with_element(page(None)),
+            "yj_fixed_layout",
+            IonValue::Int(0),
+        );
+        assert!(check_fixed_layout_pages(&off).is_empty());
+    }
+
+    /// A `yj_double_page_spread` with no fixed-layout capability beside it.
+    #[test]
+    fn a_spread_declared_without_fixed_layout_is_flagged() {
+        let alone = with_feature(loader::empty_book_for_test(), "yj_double_page_spread");
+        let out = check_feature_content_agreement(&alone);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "spread-without-fixed-layout");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        // Declared in either place, the fixed-layout capability answers it.
+        let paired = with_capability(alone, "yj_fixed_layout", IonValue::Int(1));
+        assert!(
+            !check_feature_content_agreement(&paired)
+                .iter()
+                .any(|f| f.rule == "spread-without-fixed-layout")
+        );
+    }
+
+    /// A feature `key` arriving as a symbol reads as the name it resolves to.
+    #[test]
+    fn a_feature_key_arriving_as_a_symbol_is_read() {
+        let mut book = loader::empty_book_for_test();
+        let base = book.symbols.base_len();
+        book.symbols = crate::formats::kfx::container::SymbolTable::new(
+            base,
+            vec!["yj_fixed_layout".to_string()],
+        );
+        book.by_type.insert(
+            KfxSymbol::ContentFeatures as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::Features as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![(
+                        KfxSymbol::Key as u64,
+                        IonValue::Symbol(base),
+                    )])]),
+                )]),
+            )]),
+        );
+        let (declared, _) = declared_features(&book);
+        assert!(declared.contains_key("yj_fixed_layout"), "{declared:?}");
+        assert!(fxl::book_signals(&book).fixed_layout);
     }
 }

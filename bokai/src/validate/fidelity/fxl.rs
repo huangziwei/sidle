@@ -1,8 +1,8 @@
 //! Fixed-layout (manga / comic) validation — verify that an image-based
 //! fixed-layout source KFX produced a conformant pre-paginated EPUB.
 //!
-//! KFX side: read `content_features` ($585). `yj_*fixed_layout` ⇒ the book is
-//! image-based fixed layout; `yj_double_page_spread` ⇒ a spread comic.
+//! KFX side: read the book's fixed-layout signals. `yj_*fixed_layout` ⇒ the
+//! book is image-based fixed layout; `yj_double_page_spread` ⇒ a spread comic.
 //!
 //! EPUB side (mirrors what the EPUB export must emit, calibre
 //! `epub_output.py` + `yj_to_epub_content.py`):
@@ -23,15 +23,12 @@ use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
 use crate::formats::epub::{parse_container_xml, parse_opf};
-use crate::formats::kfx::container::get_field;
-use crate::formats::kfx::ion::IonValue;
-use crate::formats::kfx::symbols::KfxSymbol;
 
 #[derive(Debug, Default)]
 pub struct Report {
-    /// KFX `content_features` carries a `yj_*fixed_layout` key.
+    /// The KFX declares a `yj_*fixed_layout` capability.
     pub kfx_fixed_layout: bool,
-    /// KFX `content_features` carries `yj_double_page_spread`.
+    /// The KFX declares `yj_double_page_spread`.
     pub kfx_double_page_spread: bool,
 
     /// OPF declares `rendition:layout` = `pre-paginated`.
@@ -55,10 +52,10 @@ pub struct Report {
 }
 
 impl Report {
-    /// Clean iff: the EPUB matches the KFX's fixed-layout shape. A reflowable
-    /// source (not fixed layout) passes trivially. For a fixed-layout source we
-    /// require pre-paginated layout, a viewport on every page, no orphan images,
-    /// and — for a spread comic — at least one page-spread property.
+    /// Clean iff the EPUB matches the KFX's fixed-layout shape. A reflowable
+    /// source passes trivially. A fixed-layout source asks for pre-paginated
+    /// layout, a viewport on every page, no orphan images, and — for a spread
+    /// comic — at least one page-spread property.
     pub fn is_clean(&self) -> bool {
         if !self.kfx_fixed_layout {
             return true;
@@ -197,47 +194,12 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     Ok(report)
 }
 
-/// KFX `content_features` ($585) → `(fixed_layout, double_page_spread)`.
+/// The KFX's book-level fixed-layout signals → `(fixed_layout,
+/// double_page_spread)`.
 fn kfx_fxl_signals(kfx_bytes: &[u8]) -> Result<(bool, bool), String> {
     let book = crate::formats::kfx::loader::load(kfx_bytes).map_err(|e| e.to_string())?;
-    let mut fixed = false;
-    let mut dps = false;
-    if let Some(map) = book.by_type.get(&(KfxSymbol::ContentFeatures as u64)) {
-        for v in map.values() {
-            let inner = v.unwrap_annotated();
-            let Some(fields) = inner.as_struct() else {
-                continue;
-            };
-            let Some(features) =
-                get_field(fields, KfxSymbol::Features as u64).and_then(|x| x.as_list())
-            else {
-                continue;
-            };
-            for feat in features {
-                let Some(ff) = feat.unwrap_annotated().as_struct() else {
-                    continue;
-                };
-                let key = match get_field(ff, KfxSymbol::Key as u64) {
-                    Some(v) => match v.unwrap_annotated() {
-                        IonValue::String(s) => s.clone(),
-                        other => book
-                            .symbols
-                            .text_of(other)
-                            .map(|s| s.to_string())
-                            .unwrap_or_default(),
-                    },
-                    None => continue,
-                };
-                if key.contains("fixed_layout") {
-                    fixed = true;
-                }
-                if key == "yj_double_page_spread" {
-                    dps = true;
-                }
-            }
-        }
-    }
-    Ok((fixed, dps))
+    let signals = crate::formats::kfx::fxl::book_signals(&book);
+    Ok((signals.fixed_layout, signals.double_page_spread))
 }
 
 /// Extract `<meta name="NAME" content="VALUE"/>` value from OPF text.
