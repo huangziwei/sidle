@@ -65,8 +65,8 @@
 //! - **Rule 14, position arithmetic** — the `position_id_map` span shape
 //!   partitions the pid axis from 0 with no gap or overlap, and
 //!   `yj.location_pid_map` boundaries never go backwards.
-//! - **Rule 15, layout traps** — the two §8 shapes that render wrong rather
-//!   than fail: a `px` length on a book declaring no fixed layout, read as a
+//! - **Rule 15, layout traps** — two §8 shapes that render wrong and raise
+//!   no error: a `px` length on a book declaring no fixed layout, read as a
 //!   device dot (§8.2); and `box_align` ($580) on a `type: text`, which places
 //!   a picture and leaves a text block flush to the inline start (§8.3, info).
 //!
@@ -533,6 +533,9 @@ struct WalkDefects {
     /// `important_cells` ($700) coordinates outside their table's grid,
     /// rendered `[row, column] in RxC`.
     out_of_range_cells: BTreeSet<String>,
+    /// A `type: container` ($270) whose `layout` ($156) axis runs along its own
+    /// resolved writing mode, as `section \t eid N \t layout: X \t mode` (§8.6).
+    layout_axis_conflicts: BTreeSet<String>,
     /// `px` lengths (§8.2) on a book declaring no fixed layout.
     reflowable_px: usize,
     /// `box_align` ($580) declared on a `type: text` ($269) element (§8.3).
@@ -561,7 +564,8 @@ fn check_references(book: &BookData) -> Vec<Finding> {
                 if !has_page_template(section) {
                     defects.empty_sections.insert(section_name.clone());
                 }
-                walk_refs(section, book, &index, None, &mut visited, &mut defects);
+                let frame = Frame::root(&section_name, &index);
+                walk_refs(section, book, &index, frame, &mut visited, &mut defects);
             }
             None => {
                 defects.missing_sections.insert(section_name);
@@ -814,6 +818,27 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             ),
         ));
     }
+    for conflict in &defects.layout_axis_conflicts {
+        let mut parts = conflict.split('\t');
+        let section = parts.next().unwrap_or("");
+        let eid = parts.next().unwrap_or("");
+        let axis = parts.next().unwrap_or("");
+        let mode = parts.next().unwrap_or("");
+        findings.push(warning(
+            "container-layout-axis",
+            &format!("{section}/{eid}"),
+            format!(
+                "a container in section {section} ({eid}) states {axis} under \
+                 writing_mode: {mode} — layout is the block-progression axis of the children \
+                 and runs across the text axis, so the box takes the full block width with \
+                 its content pinned to the inline start"
+            ),
+            Some(FixHint::new(
+                "fix-layout-axis",
+                "state layout: horizontal under vertical writing and layout: vertical under horizontal",
+            )),
+        ));
+    }
     for mismatch in &defects.column_format_mismatch {
         findings.push(warning(
             "column-format-mismatch",
@@ -997,6 +1022,8 @@ struct RefIndex {
     /// A `content_features` key ending `fixed_layout`, which makes `px` a page
     /// canvas unit (§8.2).
     fixed_layout: bool,
+    /// The book default `writing_mode` ($560), the axis an element inherits.
+    document_writing_mode: &'static str,
 }
 
 impl RefIndex {
@@ -1045,7 +1072,96 @@ impl RefIndex {
             anchors,
             ruby,
             fixed_layout,
+            document_writing_mode: document_writing_mode(book),
         }
+    }
+}
+
+/// The `writing_mode` ($560) an element declares, inline or through the `style`
+/// ($157) it names — a tate-chu-yoko style carries `horizontal_tb` inside a
+/// vertical book.
+fn element_writing_mode(fields: &[(u64, IonValue)], book: &BookData) -> Option<&'static str> {
+    let read = |f: &[(u64, IonValue)]| -> Option<&'static str> {
+        let name = book
+            .symbols
+            .text_of(get_field(f, KfxSymbol::WritingMode as u64)?)?;
+        WRITING_MODES.iter().copied().find(|mode| *mode == name)
+    };
+    read(fields).or_else(|| named_style(fields, book).and_then(read))
+}
+
+/// The book default `writing_mode` ($560) from `document_data` ($538), or
+/// `horizontal_tb`, the CSS initial value a horizontal book states nowhere.
+fn document_writing_mode(book: &BookData) -> &'static str {
+    book.by_type
+        .get(&(KfxSymbol::DocumentData as u64))
+        .and_then(|entities| entities.values().next())
+        .and_then(|v| v.unwrap_annotated().as_struct())
+        .and_then(|fields| get_field(fields, KfxSymbol::WritingMode as u64))
+        .and_then(|v| book.symbols.text_of(v))
+        .and_then(|name| WRITING_MODES.iter().copied().find(|mode| *mode == name))
+        .unwrap_or(WRITING_MODES[0])
+}
+
+/// True when the element draws a box around its content, inline or through the
+/// `style` it names: a stroke on every side, or a fill. A per-side
+/// `border_style_top` draws a rule across the text, leaving no interior.
+fn encloses_content(fields: &[(u64, IonValue)], book: &BookData) -> bool {
+    let boxed = |f: &[(u64, IonValue)]| {
+        let stroked = get_field(f, KfxSymbol::BorderStyle as u64).is_some()
+            && get_field(f, KfxSymbol::BorderWeight as u64).is_some();
+        stroked || get_field(f, KfxSymbol::FillColor as u64).is_some()
+    };
+    boxed(fields) || named_style(fields, book).is_some_and(boxed)
+}
+
+/// §8.6. A `type: container`'s `layout` ($156) is the block-progression axis of
+/// its children, which runs across the text axis: `vertical_rl` text takes
+/// `layout: horizontal`, `horizontal_tb` text takes `layout: vertical`. A box
+/// on the axis of its own text inflates to full block width with its content
+/// pinned to the inline start.
+fn check_layout_axis(
+    fields: &[(u64, IonValue)],
+    book: &BookData,
+    section: &str,
+    inherited: &str,
+    out: &mut WalkDefects,
+) {
+    let Some(layout) = get_field(fields, KfxSymbol::Layout as u64).and_then(|v| v.as_symbol())
+    else {
+        return;
+    };
+    // `layout` also carries image fit modes, which state no block progression.
+    if layout != KfxSymbol::Horizontal as u64 && layout != KfxSymbol::Vertical as u64 {
+        return;
+    }
+    // An inline container is a run inside a line, and a childless one has no
+    // flow to give an axis to; neither states a block progression.
+    if get_field(fields, KfxSymbol::Render as u64).and_then(|v| v.as_symbol())
+        == Some(KfxSymbol::Inline as u64)
+    {
+        return;
+    }
+    let has_children = get_field(fields, KfxSymbol::ContentList as u64)
+        .and_then(|v| v.unwrap_annotated().as_list())
+        .is_some_and(|items| !items.is_empty());
+    if !has_children || !encloses_content(fields, book) {
+        return;
+    }
+    let writing_mode = inherited;
+    let expected = if writing_mode.starts_with("vertical") {
+        KfxSymbol::Horizontal
+    } else {
+        KfxSymbol::Vertical
+    };
+    if layout != expected as u64 {
+        let eid = get_field(fields, KfxSymbol::Id as u64)
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1);
+        let axis = book.symbols.resolve(layout);
+        out.layout_axis_conflicts.insert(format!(
+            "{section}\teid {eid}\tlayout: {axis}\t{writing_mode}"
+        ));
     }
 }
 
@@ -1468,14 +1584,45 @@ fn reading_order_sections(book: &BookData) -> Vec<String> {
     Vec::new()
 }
 
+/// What an element inherits from the struct holding it.
+#[derive(Clone, Copy)]
+struct Frame<'a> {
+    /// The enclosing element's `type` ($159), or `None` at a fragment root.
+    parent_type: Option<u64>,
+    /// The reading-order section the walk entered through.
+    section: &'a str,
+    /// The enclosing element's resolved `writing_mode` ($560) (§8.6).
+    writing_mode: &'static str,
+}
+
+impl<'a> Frame<'a> {
+    /// A fragment root: no enclosing element, the book's default axis.
+    fn root(section: &'a str, index: &RefIndex) -> Self {
+        Self {
+            parent_type: None,
+            section,
+            writing_mode: index.document_writing_mode,
+        }
+    }
+
+    /// A referenced storyline's root, keeping the section and axis it was
+    /// reached through.
+    fn nested(self) -> Self {
+        Self {
+            parent_type: None,
+            ..self
+        }
+    }
+}
+
 /// Depth-first walk of a content value into [`WalkDefects`], following
 /// `story_name` and `$608 structure` symbols into their fragments.
-/// `parent_type` is the enclosing element's `type` ($159) symbol id.
+/// `frame` carries what the enclosing struct passes down.
 fn walk_refs(
     value: &IonValue,
     book: &BookData,
     index: &RefIndex,
-    parent_type: Option<u64>,
+    frame: Frame<'_>,
     visited: &mut HashSet<String>,
     out: &mut WalkDefects,
 ) {
@@ -1485,10 +1632,16 @@ fn walk_refs(
             if let Some(frag) = lookup(book, KfxSymbol::Structure, &name)
                 && visited.insert(format!("struct:{name}"))
             {
-                walk_refs(frag, book, index, parent_type, visited, out);
+                walk_refs(frag, book, index, frame, visited, out);
             }
         }
         IonValue::Struct(fields) => {
+            // The struct's own axis (§8.6), settled before any descent: a
+            // page_template states the mode of the storyline it names.
+            let frame = Frame {
+                writing_mode: element_writing_mode(fields, book).unwrap_or(frame.writing_mode),
+                ..frame
+            };
             // Rule 6 — the element's `$157 style` as a named reference (a
             // symbol/string, per `text_of`). An inline style struct carries no
             // name and walks below as an ordinary child.
@@ -1515,7 +1668,7 @@ fn walk_refs(
                 match lookup(book, KfxSymbol::Storyline, story_name) {
                     Some(storyline) => {
                         if visited.insert(format!("story:{story_name}")) {
-                            walk_refs(storyline, book, index, None, visited, out);
+                            walk_refs(storyline, book, index, frame.nested(), visited, out);
                         }
                     }
                     None => {
@@ -1554,7 +1707,7 @@ fn walk_refs(
                         .insert(book.symbols.resolve(type_id).to_string());
                 }
                 if type_id == KfxSymbol::Listitem as u64
-                    && parent_type != Some(KfxSymbol::List as u64)
+                    && frame.parent_type != Some(KfxSymbol::List as u64)
                 {
                     out.orphan_list_items += 1;
                 }
@@ -1567,6 +1720,9 @@ fn walk_refs(
                 }
                 if type_id == KfxSymbol::Text as u64 && declares_box_align(fields, book) {
                     out.box_align_on_text += 1;
+                }
+                if type_id == KfxSymbol::Container as u64 {
+                    check_layout_axis(fields, book, frame.section, frame.writing_mode, out);
                 }
             }
 
@@ -1613,14 +1769,17 @@ fn walk_refs(
 
             // A struct with no `type` inherits `parent_type`, carrying it
             // through a `content_list` wrapper.
-            let child_parent = element_type.or(parent_type);
+            let child = Frame {
+                parent_type: element_type.or(frame.parent_type),
+                ..frame
+            };
             for (_, v) in fields {
-                walk_refs(v, book, index, child_parent, visited, out);
+                walk_refs(v, book, index, child, visited, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                walk_refs(item, book, index, parent_type, visited, out);
+                walk_refs(item, book, index, frame, visited, out);
             }
         }
         _ => {}
@@ -4416,6 +4575,201 @@ mod tests {
                 .any(|f| f.rule == "box-align-on-text")
         );
     }
+
+    /// §8.6. A box's `layout` is the block-progression axis of its children,
+    /// which runs across the text axis: `vertical_rl` text takes
+    /// `layout: horizontal`.
+    #[test]
+    fn a_box_on_the_text_axis_is_flagged() {
+        let boxed = |layout: KfxSymbol| {
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Container as u64),
+                ),
+                (
+                    KfxSymbol::WritingMode as u64,
+                    IonValue::String("vertical_rl".to_string()),
+                ),
+                (
+                    KfxSymbol::BorderStyle as u64,
+                    IonValue::String("solid".into()),
+                ),
+                (KfxSymbol::BorderWeight as u64, length(1, "pt")),
+                (KfxSymbol::Layout as u64, IonValue::Symbol(layout as u64)),
+                (
+                    KfxSymbol::ContentList as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![(
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::Text as u64),
+                    )])]),
+                ),
+            ])
+        };
+        let out = check_references(&book_with_element(boxed(KfxSymbol::Vertical)));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "container-layout-axis")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert_eq!(found[0].severity, Severity::Warning);
+        assert!(
+            found[0].location.contains("eid"),
+            "the finding names the element: {:?}",
+            found[0].location
+        );
+
+        assert!(
+            !check_references(&book_with_element(boxed(KfxSymbol::Horizontal)))
+                .iter()
+                .any(|f| f.rule == "container-layout-axis")
+        );
+    }
+
+    /// An inline run, a childless container and one that draws no box each
+    /// state no block progression, and none of the three is read for an axis.
+    #[test]
+    fn only_a_box_with_children_is_read() {
+        let base = |extra: Vec<(u64, IonValue)>| {
+            let mut fields = vec![
+                (
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Container as u64),
+                ),
+                (
+                    KfxSymbol::WritingMode as u64,
+                    IonValue::String("vertical_rl".to_string()),
+                ),
+                (
+                    KfxSymbol::Layout as u64,
+                    IonValue::Symbol(KfxSymbol::Vertical as u64),
+                ),
+            ];
+            fields.extend(extra);
+            IonValue::Struct(fields)
+        };
+        let children = || {
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Text as u64),
+                )])]),
+            )
+        };
+        let border = || {
+            vec![
+                (
+                    KfxSymbol::BorderStyle as u64,
+                    IonValue::String("solid".into()),
+                ),
+                (KfxSymbol::BorderWeight as u64, length(1, "pt")),
+            ]
+        };
+        let render_inline = || {
+            (
+                KfxSymbol::Render as u64,
+                IonValue::Symbol(KfxSymbol::Inline as u64),
+            )
+        };
+        for fields in [
+            base([border(), vec![children(), render_inline()]].concat()),
+            base(border()),
+            base(vec![children()]),
+        ] {
+            assert!(
+                !check_references(&book_with_element(fields))
+                    .iter()
+                    .any(|f| f.rule == "container-layout-axis")
+            );
+        }
+    }
+
+    /// A `writing_mode` override reaches the box through the `style` it names:
+    /// a tate-chu-yoko style carries `horizontal_tb` inside a vertical book.
+    #[test]
+    fn a_style_carried_writing_mode_settles_the_axis() {
+        let boxed = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+            (KfxSymbol::Style as u64, IonValue::String("sZE".to_string())),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::Vertical as u64),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Text as u64),
+                )])]),
+            ),
+        ]);
+        let vertical_doc = || {
+            HashMap::from([(
+                "doc".to_string(),
+                IonValue::Struct(vec![
+                    (
+                        KfxSymbol::ReadingOrders as u64,
+                        IonValue::List(vec![IonValue::Struct(vec![(
+                            KfxSymbol::Sections as u64,
+                            IonValue::List(vec![IonValue::String("sec1".to_string())]),
+                        )])]),
+                    ),
+                    (
+                        KfxSymbol::WritingMode as u64,
+                        IonValue::String("vertical_rl".to_string()),
+                    ),
+                ]),
+            )])
+        };
+        let style = |mode: &str| {
+            HashMap::from([(
+                "sZE".to_string(),
+                IonValue::Struct(vec![
+                    (
+                        KfxSymbol::BorderStyle as u64,
+                        IonValue::String("solid".into()),
+                    ),
+                    (KfxSymbol::BorderWeight as u64, length(1, "pt")),
+                    (
+                        KfxSymbol::WritingMode as u64,
+                        IonValue::String(mode.to_string()),
+                    ),
+                ]),
+            )])
+        };
+
+        let mut horizontal_box = book_with_element(boxed.clone());
+        horizontal_box
+            .by_type
+            .insert(KfxSymbol::DocumentData as u64, vertical_doc());
+        horizontal_box
+            .by_type
+            .insert(KfxSymbol::Style as u64, style("horizontal_tb"));
+        assert!(
+            !check_references(&horizontal_box)
+                .iter()
+                .any(|f| f.rule == "container-layout-axis"),
+            "a horizontal_tb box inside a vertical book states layout: vertical"
+        );
+
+        let mut vertical_box = book_with_element(boxed);
+        vertical_box
+            .by_type
+            .insert(KfxSymbol::DocumentData as u64, vertical_doc());
+        vertical_box
+            .by_type
+            .insert(KfxSymbol::Style as u64, style("vertical_rl"));
+        assert!(
+            check_references(&vertical_box)
+                .iter()
+                .any(|f| f.rule == "container-layout-axis")
+        );
+    }
+
     /// §7.6. `column_format` is read positionally, one entry per column.
     /// More entries than the widest row has columns is a grid that cannot be
     /// laid out; a column the tail omits simply states no width.
