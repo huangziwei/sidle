@@ -1,4 +1,4 @@
-//! KFX container deserialize + serialize (mirrors `kfx_container.py`).
+//! KFX container deserialize + serialize.
 //!
 //! A KFX container looks like:
 //!
@@ -15,9 +15,6 @@
 //!
 //! Each entity payload starts with `"ENTY"` + version u16 + header_len u32
 //! + entity_info Ion blob (bcComprType+bcDrmScheme) + body bytes.
-//!
-//! Calibre's deserialize/serialize live in `kfx_container.py`; this module
-//! is a near line-by-line port.
 
 use std::io;
 
@@ -47,9 +44,8 @@ struct EntityRow {
     length: usize,
 }
 
-/// State carried out of [`deserialize_container_phase1`]: everything needed
-/// to later turn the container into fragments once the shared symtab is
-/// fully populated.
+/// State carried out of [`deserialize_container_phase1`] into the fragment
+/// build, which runs on a fully populated shared symtab.
 pub struct LoadedContainer {
     pub container_id: String,
     pub container_format: String,
@@ -64,7 +60,7 @@ pub struct LoadedContainer {
 }
 
 /// Phase 1: read header, container_info, doc_symbols, format_capabilities,
-/// entity-table rows. Mutates `symtab` per calibre's `KfxContainer.deserialize`.
+/// entity-table rows. Mutates `symtab`.
 pub fn deserialize_container_phase1(
     data: Vec<u8>,
     symtab: &mut LocalSymbolTable,
@@ -92,8 +88,7 @@ pub fn deserialize_container_phase1(
         ));
     }
 
-    // Parse container_info with a fresh symtab snapshot — but the snapshot is
-    // really the current shared symtab. Calibre uses the live one too.
+    // container_info parses against the live shared `symtab`.
     let ci_bytes = &data[ci_off..ci_off + ci_len];
     let mut container_info = parse_single_value(ci_bytes, symtab)?;
     let ci_fields = container_info.as_struct_mut().ok_or_else(|| {
@@ -102,9 +97,8 @@ pub fn deserialize_container_phase1(
 
     let container_id = pop_string(ci_fields, "$409").unwrap_or_default();
     let _compression_type = pop_int(ci_fields, "$410").unwrap_or(DEFAULT_COMPRESSION_TYPE);
-    // The merged container declares `DEFAULT_DRM_SCHEME`, so an encrypted
-    // member would come out claiming to be readable while its payloads stay
-    // ciphertext. Refuse it here instead.
+    // Serialization declares `DEFAULT_DRM_SCHEME` on the merged container,
+    // over ciphertext payloads for an encrypted member.
     let drm_scheme = pop_int(ci_fields, "$411").unwrap_or(DEFAULT_DRM_SCHEME);
     if drm_scheme != DEFAULT_DRM_SCHEME {
         return Err(io::Error::new(
@@ -130,8 +124,8 @@ pub fn deserialize_container_phase1(
         let ds_bytes = &data[off..off + len];
         let parsed = parse_single_value(ds_bytes, symtab)?;
 
-        // calibre: subtract SYSTEM size from each import.max_id, then create()
-        // the symtab from the doc_symbols.value.
+        // Subtract SYSTEM size from each import.max_id, then build the symtab
+        // from `doc_symbols.value`.
         let inner = if let IonNode::Annotated(_, inner) = &parsed {
             inner.as_ref().clone()
         } else {
@@ -210,9 +204,8 @@ pub fn deserialize_container_phase1(
         }
     }
 
-    // kfxgen_info parse (light): we only need the app/package versions for
-    // re-serialization. Calibre parses it as JSON-ish; we look for simple
-    // key:"value" substrings to extract the two version fields.
+    // kfxgen_info: the app/package version fields, read out of `key:"value"`
+    // substrings.
     let kfxgen_info_bytes = &data[ci_off + ci_len..header_len];
     let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
     let kfxgen_application_version =
@@ -236,11 +229,9 @@ pub fn deserialize_container_phase1(
     })
 }
 
-/// Phase 2: now that the shared symtab is fully populated, turn the entity
-/// rows + their raw payload bytes into `YJFragment`s and prepend the synthetic
-/// `$270` (container_info), `$ion_symbol_table`, `$593` fragments.
-///
-/// Mirrors calibre's `KfxContainer.get_fragments`.
+/// Phase 2, over a fully populated shared symtab: turn the entity rows + their
+/// raw payload bytes into `YJFragment`s and prepend the synthetic `$270`
+/// (container_info), `$ion_symbol_table`, `$593` fragments.
 pub fn loaded_container_into_fragments(
     loaded: &LoadedContainer,
     symtab: &LocalSymbolTable,
@@ -248,10 +239,9 @@ pub fn loaded_container_into_fragments(
     let mut out = Vec::new();
 
     if let Some(ds) = &loaded.doc_symbols {
-        // doc_symbols carries its annotation; the YJFragment wraps the
-        // unannotated value. Calibre tracks the annotations on YJFragment
-        // itself; for our pipeline we store ftype="$ion_symbol_table",
-        // fid="$ion_symbol_table", value = unannotated struct.
+        // doc_symbols carries its annotation; the YJFragment holds
+        // ftype="$ion_symbol_table", fid="$ion_symbol_table" and the
+        // unannotated struct.
         let inner = match ds {
             IonNode::Annotated(_, inner) => (**inner).clone(),
             other => other.clone(),
@@ -259,8 +249,7 @@ pub fn loaded_container_into_fragments(
         out.push(YJFragment::singleton("$ion_symbol_table", inner));
     }
 
-    // synthetic $270 container_info fragment (calibre uses the original
-    // wire fields + entity-table summary).
+    // Synthetic $270 container_info fragment.
     let mut entries: Vec<IonNode> = Vec::with_capacity(loaded.entities.len());
     for e in &loaded.entities {
         entries.push(IonNode::List(vec![
@@ -326,7 +315,7 @@ fn entity_to_fragment(
         ));
     }
     let _info_bytes = &body_bytes[10..header_len];
-    // info contains bcComprType / bcDrmScheme — we trust defaults and skip.
+    // The entity info holds bcComprType / bcDrmScheme; both take defaults.
     let payload = &body_bytes[header_len..];
 
     let fid_initial = symtab.get_symbol(row.id_idnum);
@@ -338,11 +327,8 @@ fn entity_to_fragment(
         parse_single_value(payload, symtab)?
     };
 
-    // Calibre's two-step normalization for `id_idnum == $348`:
-    //  - If the body is wrapped `ftype::{...}`, unwrap it.
-    //  - Always treat as singleton (fid := ftype). The unwrap is independent
-    //    of the singleton normalization — see `KfxContainerEntity.deserialize`
-    //    in `kfx_container.py`.
+    // Two-step normalization for `id_idnum == $348`: unwrap a body wrapped
+    // `ftype::{...}`, and set `fid := ftype` for the singleton.
     let mut fid = fid_initial.clone();
     if fid_initial == "$348" {
         if let IonNode::Annotated(anns, inner) = &value
@@ -363,11 +349,9 @@ fn entity_to_fragment(
 // =========================================================================
 
 /// Build the final KFX container bytes from a fragment list + symtab.
-/// Mirrors `KfxContainer.serialize`.
 pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) -> Vec<u8> {
-    // Pull out the well-known singletons. The fragment list is already sorted
-    // by `PREFERED_FRAGMENT_TYPE_ORDER` so `$ion_symbol_table` should be at
-    // index 0 and `$270`/`$593` near the top.
+    // `PREFERED_FRAGMENT_TYPE_ORDER` sorts the fragment list, putting
+    // `$ion_symbol_table` at index 0 and `$270`/`$593` near the top.
     let mut container_id = String::new();
     let mut kfxgen_app_version = String::new();
     let mut kfxgen_pkg_version = String::new();
@@ -393,8 +377,8 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
         }
     }
 
-    // Build entity payloads. Entities are every non-container fragment plus
-    // `$419` (container_entity_map) — see calibre's special-case.
+    // Entity payloads: every non-container fragment plus `$419`
+    // (container_entity_map).
     let mut entity_data = Vec::new();
     let mut entity_table = Vec::new();
     let mut entity_offset: u64 = 0;
@@ -441,7 +425,7 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     let ci_len_pack = container.len();
     container.extend_from_slice(&[0u8; 4]);
 
-    // Build container_info struct progressively, mirroring calibre's order:
+    // container_info field order:
     //   $409 (bcContId), $410 (bcComprType), $411 (bcDRMScheme),
     //   $413/$414 (entity table off/len),
     //   $415/$416 (doc_symbols off/len),
@@ -456,8 +440,8 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     ];
     container.extend_from_slice(&entity_table);
 
-    // doc_symbols: calibre deep-copies the fragment, bumps every import's
-    // max_id by SYSTEM_SIZE, then serializes the annotated value.
+    // doc_symbols: deep-copy the fragment, bump every import's max_id by
+    // SYSTEM_SIZE, serialize the annotated value.
     let doc_symbol_data = if let Some(frag) = doc_symbols_fragment {
         let inner = bump_imports_max_id(&frag.value, SYSTEM_SIZE as i64);
         let annotated = IonNode::Annotated(vec!["$ion_symbol_table".into()], Box::new(inner));
@@ -477,11 +461,8 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     } else {
         Vec::new()
     };
-    // Calibre's gate: only include format_capabilities pointers when
-    // `symtab.local_min_id > 595` — i.e. once $593 itself is a known symbol.
-    // YJ_symbols always brings $593 into the SYSTEM+YJ window, so this is
-    // effectively "have we imported YJ_symbols?" — true once metadata.kfx has
-    // loaded.
+    // format_capabilities pointers ride on `symtab.local_min_id > 595`, the
+    // window where $593 is a known symbol.
     if symtab.local_min_id() > 595 && !fc_data.is_empty() {
         ci_fields.push(("$594".into(), IonNode::Int(container.len() as i64)));
         ci_fields.push(("$595".into(), IonNode::Int(fc_data.len() as i64)));
@@ -489,15 +470,14 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     }
 
     let ci_bytes = serialize_single_value(&IonNode::Struct(ci_fields), symtab);
-    // patch ci_length now; ci_offset = current container length.
+    // Patch ci_length; ci_offset = current container length.
     let ci_offset_value = container.len() as u32;
     patch_u32_le(&mut container, ci_off_pack, ci_offset_value);
     patch_u32_le(&mut container, ci_len_pack, ci_bytes.len() as u32);
     container.extend_from_slice(&ci_bytes);
 
-    // kfxgen_info JSON-textish trailer. Calibre's format: a compact JSON
-    // array of {"key":..., "value":...} objects, with "key" and "value"
-    // *unquoted* in the final wire form.
+    // kfxgen_info trailer: a compact JSON array of {"key":…, "value":…}
+    // objects, with "key" and "value" unquoted on the wire.
     let payload_sha1 = sha1_smol::Sha1::from(&entity_data).hexdigest();
     let kfxgen_info = format!(
         r#"[{{key:"kfxgen_package_version",value:"{}"}},{{key:"kfxgen_application_version",value:"{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
@@ -508,8 +488,7 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     );
     container.extend_from_slice(kfxgen_info.as_bytes());
 
-    // patch header_len now; it equals current container length (everything
-    // before the entity payloads).
+    // Patch header_len: the container length before the entity payloads.
     let header_len_value = container.len() as u32;
     patch_u32_le(&mut container, header_len_pack, header_len_value);
 
@@ -597,7 +576,7 @@ fn extract_imports_and_symbols(value: &IonNode) -> (Vec<SymbolTableImport>, Vec<
     (imports, symbols)
 }
 
-/// Calibre's deep-copy + max_id increment for the on-wire `$ion_symbol_table`.
+/// Deep-copy + max_id increment for the on-wire `$ion_symbol_table`.
 fn bump_imports_max_id(value: &IonNode, delta: i64) -> IonNode {
     let mut out = value.clone();
     let Some(fields) = out.as_struct_mut() else {
@@ -683,9 +662,8 @@ fn extract_kfxgen_field(s: &str, key: &str) -> Option<String> {
 }
 
 fn escape_json_string(s: &str) -> String {
-    // KFXGEN values we emit are container IDs and version strings — no
-    // embedded quotes/backslashes in practice. Provide a minimal escape so
-    // we don't generate malformed JSON if a value contains a quote.
+    // KFXGEN values are container IDs and version strings. A quote or
+    // backslash in one takes the minimal escape below.
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

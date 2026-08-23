@@ -1,13 +1,11 @@
 //! KFX → `BookData` loader.
 //!
-//! Mirrors calibre's `KFX_EPUB.organize_fragments_by_type`: parses the
-//! container, resolves every fragment's name from the symbol table, and
-//! groups them by ftype symbol id. For `bcRawMedia` ($417) the value
-//! stored is the raw payload bytes; for everything else it's the parsed
-//! `IonValue`.
+//! Parses the container, resolves every fragment's name from the symbol
+//! table, and groups the fragments by ftype symbol id. A `bcRawMedia` ($417)
+//! value is the raw payload bytes; every other value is a parsed `IonValue`.
 //!
-//! Loading is eager. KFX containers we care about are <100 MB and have
-//! a few hundred entities, so the simplicity wins over laziness.
+//! Loading is eager: a KFX container runs to a few hundred entities under
+//! 100 MB.
 
 use std::collections::HashMap;
 
@@ -21,9 +19,6 @@ use crate::formats::kfx::symbols::KfxSymbol;
 use super::error::KfxError;
 
 /// Book-wide metadata pulled out of `book_metadata` ($490).
-///
-/// This is the parsed shape we hand to the output stage. It's intentionally
-/// minimal; a fuller metadata port can expand it later.
 #[derive(Debug, Clone, Default)]
 pub struct BookMetadata {
     pub title: String,
@@ -31,30 +26,25 @@ pub struct BookMetadata {
     pub language: String,
     pub identifier: String,
     pub publisher: Option<String>,
-    /// Cover image's `resource_name` (e.g. `"eF"`), if declared by KFX. The
-    /// output stage resolves this to the actual file path during cover wiring.
+    /// Cover image's `resource_name` (e.g. `"eF"`), when KFX declares one.
     pub cover_resource_name: Option<String>,
-    /// `kindle_title_metadata/ASIN` — Amazon catalogue id. Calibre emits this
-    /// as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</dc:identifier>` and
-    /// (redundantly) also as `opf:scheme="MOBI-ASIN"`.
+    /// `kindle_title_metadata/ASIN` — Amazon catalogue id, emitted in OPF as
+    /// `<dc:identifier opf:scheme="ASIN">` and `opf:scheme="MOBI-ASIN"`.
     pub asin: Option<String>,
-    /// `kindle_title_metadata/issue_date` — publication date string. KFX
-    /// stores it as `YYYY-MM-DD`; calibre normalises to ISO-8601 with a UTC
-    /// offset. Surface raw and let the OPF emitter format it.
+    /// `kindle_title_metadata/issue_date` — publication date, `YYYY-MM-DD`,
+    /// raw for the OPF emitter to format.
     pub issue_date: Option<String>,
     /// `kindle_title_metadata/title_pronunciation` — title sort key
     /// (yomigana for Japanese books). Surfaces in OPF as
     /// `<dc:title opf:file-as="...">`.
     pub title_pronunciation: Option<String>,
     /// `kindle_title_metadata/author_pronunciation` — per-author sort keys,
-    /// one per repeated key in source order (positional with `authors`).
-    /// Surface in OPF as each `<dc:creator>`'s `file-as` refinement.
+    /// one per repeated key in source order, positional with `authors`.
     pub author_pronunciations: Vec<String>,
 }
 
-/// Everything we need from a KFX container to drive an EPUB write.
-///
-/// Mirrors calibre's `self.book_data` dict plus a few derived fields.
+/// A KFX container's fragments, media and symbols, as an EPUB write reads
+/// them.
 pub struct BookData {
     /// All entities indexed by `(ftype_symbol_id, fid_string)`.
     ///
@@ -62,28 +52,25 @@ pub struct BookData {
     /// `fid_string` is the resolved name from the symbol table (e.g.
     /// `"content_30"` for an external_resource named `content_30`).
     ///
-    /// `bcRawMedia` ($417) is intentionally NOT in here — see `raw_media`.
+    /// `bcRawMedia` ($417) lives in `raw_media`, not here.
     pub by_type: HashMap<u64, HashMap<String, IonValue>>,
 
     /// `bcRawMedia` payloads, keyed by entity name (e.g. `"resource/rsrc562"`).
     ///
-    /// Stored separately from `by_type` because the value is raw bytes (often
-    /// large), not a parsed Ion struct.
+    /// Raw bytes, often large, held apart from `by_type`'s parsed Ion.
     pub raw_media: HashMap<String, Vec<u8>>,
 
     /// Resolved extended symbol table (KFX base + container doc_symbols).
     ///
-    /// Indexed by full symbol id; for ids < `KFX_SYMBOL_TABLE.len()` it
-    /// returns the base symbol, otherwise the doc_symbol at the offset.
+    /// Indexed by full symbol id: a base symbol below the container's declared
+    /// import size, a doc_symbol at or above it.
     pub symbols: SymbolTable,
 
     /// Book metadata derived from `book_metadata` ($490).
     pub metadata: BookMetadata,
 }
 
-// The resolver lives in the shared substrate so every KFX reader (this
-// loader, the IR importer, validators, kfx-dump) resolves identically;
-// re-exported here for the existing `loader::SymbolTable` paths.
+// Re-export for the `loader::SymbolTable` paths.
 pub use crate::formats::kfx::container::SymbolTable;
 
 /// Load a KFX container in memory into `BookData`.
@@ -98,9 +85,8 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
         [header.container_info_offset..header.container_info_offset + header.container_info_length];
     let info = parse_container_info(info_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
 
-    // Encrypted payloads hold no readable Ion. Parsing on would drop every
-    // entity in turn and yield a `BookData` describing a book with no sections
-    // and no content, which is a false account of a perfectly good file.
+    // An encrypted payload holds no readable Ion, and every entity parse
+    // below drops it.
     if info.drm_scheme != 0 {
         return Err(KfxError::Encrypted(info.drm_scheme));
     }
@@ -130,10 +116,9 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
         let entity_bytes = &kfx_bytes[ent.offset..ent.offset + ent.length];
         let payload = skip_enty_header(entity_bytes);
 
-        // bcRawMedia ($417): payload is raw image/font bytes, not Ion.
-        // Calibre keys this by `location` field of the corresponding
-        // external_resource, which is the resolved symbol name of the
-        // entity id (e.g. "resource/rsrc562"). We mirror that here.
+        // bcRawMedia ($417): raw image/font bytes, keyed by the entity id's
+        // resolved symbol name (e.g. "resource/rsrc562") — the `location` of
+        // the matching external_resource.
         if ent.type_id == KfxSymbol::Bcrawmedia as u32 {
             let key = symbols.resolve(ent.id as u64).to_string();
             if !key.is_empty() && key != "?" {
@@ -142,9 +127,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
             continue;
         }
 
-        // bcRawFont ($418): also raw bytes; treat the same as bcRawMedia
-        // since calibre's process_fonts pulls from book_data["$418"] as bytes.
-        // Collected here so a font pass has the payloads to work from.
+        // bcRawFont ($418): raw bytes, keyed the same way as bcRawMedia.
         if ent.type_id == KfxSymbol::Bcrawfont as u32 {
             let key = symbols.resolve(ent.id as u64).to_string();
             if !key.is_empty() && key != "?" {
@@ -175,8 +158,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
     })
 }
 
-/// An empty `BookData` for unit tests that only exercise logic which doesn't
-/// read fragments (e.g. resolving inline `IonValue::String` content).
+/// An empty `BookData` for unit tests that read no fragments.
 #[cfg(test)]
 pub(crate) fn empty_book_for_test() -> BookData {
     BookData {
@@ -187,10 +169,8 @@ pub(crate) fn empty_book_for_test() -> BookData {
     }
 }
 
-/// Pick the fragment id for an entity. KFX entities carry their name via the
-/// symbol-table-resolvable `id` field on the index entry; some types nest
-/// the name inside the payload (`resource_name`, `style_name`, etc.) for
-/// redundancy. We prefer the entry-level id because it's always present.
+/// An entity's fragment id, taken from the index entry's `id` symbol. The
+/// payload's own `resource_name` / `style_name` restates it.
 fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> String {
     crate::formats::kfx::resource_index::entity_fid(ent.id as u64, symbols)
 }
@@ -202,8 +182,8 @@ fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> Str
 ///   category: kindle_title_metadata, metadata: [{key, value}, ...] }] }`.
 /// - bokai's own KFX exporter emits a plain struct (no annotation).
 ///
-/// We accept both. Cover image is `cover_image` or first occurrence of a
-/// `Value` that names an external_resource.
+/// Both shapes are read. The cover image is `cover_image`, or the first
+/// `Value` naming an external_resource.
 fn extract_book_metadata(
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
     symbols: &SymbolTable,
@@ -211,13 +191,11 @@ fn extract_book_metadata(
     let mut meta = BookMetadata::default();
     // Preferred source: Amazon's categorised `book_metadata` ($490) wrapper.
     extract_categorised_metadata(&mut meta, by_type, symbols);
-    // Fallback: the flat `metadata` ($258) fragment for anything still unset —
-    // notably `cover_image`, which older Amazon KFX store *only* here. See
-    // `fill_missing_from_flat_metadata`.
+    // Fallback: the flat `metadata` ($258) fragment, the sole home of
+    // `cover_image` in older Amazon KFX.
     fill_missing_from_flat_metadata(&mut meta, by_type, symbols);
-    // Last resort for the cover: some KFX declare no `cover_image` at all but
-    // open on a full-page cover image (the "loc 0" cover page). Resolve that
-    // image so the cover-swap / cover-extract / EPUB-cover paths can find it.
+    // Last resort: a KFX declaring no `cover_image` opening on a full-page
+    // cover image.
     if meta.cover_resource_name.is_none() {
         meta.cover_resource_name = resolve_cover_from_first_section(by_type, symbols);
     }
@@ -227,14 +205,9 @@ fn extract_book_metadata(
 /// Resolve the cover image from the first reading-order section when no
 /// `cover_image` metadata exists.
 ///
-/// A cover page is the book's first section whose single page-template drives a
-/// storyline that lays out one full-page image. We walk
-/// `reading_orders[0].sections[0]` → `section.$141[0].$176` (story) →
-/// `storyline.$146` → the first `resource_name` ($175) in that content tree,
-/// then confirm it names a real `external_resource`. This is the read-only core
-/// of calibre kfxlib's `check_cover_section_and_storyline` — enough to *find*
-/// the cover resource (calibre's extra validation there guards *rewriting* the
-/// cover page, which we don't do here).
+/// The walk is `reading_orders[0].sections[0]` → `section.$141[0].$176`
+/// (story) → `storyline.$146` → the first `resource_name` ($175) in that
+/// content tree, confirmed against a real `external_resource`.
 fn resolve_cover_from_first_section(
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
     symbols: &SymbolTable,
@@ -251,9 +224,8 @@ fn resolve_cover_from_first_section(
     let cfields = storyline.unwrap_annotated().as_struct()?;
     let content_list = get_field(cfields, KfxSymbol::ContentList as u64)?;
     let candidate = first_content_resource_name(content_list, symbols)?;
-    // Only accept a name that resolves to an `external_resource` with a raster
-    // image format. This rejects a non-cover first section (e.g. a PDF-backed
-    // KFX, whose first section renders a `format: pdf` page — not a cover).
+    // A raster `external_resource` only: a PDF-backed KFX's first section
+    // renders a `format: pdf` page.
     cover_candidate_is_image(by_type, symbols, &candidate).then_some(candidate)
 }
 
@@ -287,10 +259,8 @@ fn first_reading_order_section(
 
 use crate::formats::kfx::resource_index::first_content_resource_name;
 
-/// True if `name` matches an `external_resource` ($164) whose `format` is a
-/// raster image (the shapes a cover can legitimately be). Excludes `pdf`/`kvg`
-/// and anything unrecognised, so a PDF-backed first section isn't mistaken for
-/// a cover.
+/// True when `name` matches an `external_resource` ($164) whose `format` is a
+/// raster image. `pdf`, `kvg` and unrecognised formats are excluded.
 fn cover_candidate_is_image(
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
     symbols: &SymbolTable,
@@ -314,9 +284,8 @@ fn cover_candidate_is_image(
     })
 }
 
-/// Fill `meta` from Amazon's categorised `book_metadata` ($490) wrapper —
-/// `categorised_metadata / kindle_title_metadata` key/value pairs. bokai's own
-/// KFX exporter emits this shape too (see `extract_book_metadata` doc).
+/// Fill `meta` from the categorised `book_metadata` ($490) wrapper's
+/// `categorised_metadata / kindle_title_metadata` key/value pairs.
 fn extract_categorised_metadata(
     meta: &mut BookMetadata,
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
@@ -367,15 +336,8 @@ fn extract_categorised_metadata(
                 "title" if meta.title.is_empty() => {
                     meta.title = value.into();
                 }
-                // Authors are stored in source order in
-                // `kindle_title_metadata/author` entries. Calibre's library
-                // pathway (`yj_metadata.py:get_yj_metadata_from_book`) uses
-                // `authors.append(val)`, preserving source order in the OPF —
-                // that's the order in `horror.calibre.epub`. The other
-                // calibre code path in `yj_to_epub_metadata.py` uses
-                // `insert(0)` for the intermediate EPUB stage, but that
-                // intermediate is discarded by calibre's library importer.
-                // We match the library output, which the user reads.
+                // `kindle_title_metadata/author` entries hold source order,
+                // which `authors` keeps.
                 "author" if !value.is_empty() => {
                     meta.authors.push(value.into());
                 }
@@ -408,18 +370,11 @@ fn extract_categorised_metadata(
 }
 
 /// Fall back to the flat `metadata` ($258) fragment for any field the
-/// categorised `book_metadata` ($490) wrapper didn't provide. Older Amazon KFX
-/// (roughly pre-2015 `YJConversionTools` output — e.g. RosettaBooks and Open
-/// Yale Courses titles) carry their metadata *only* here, keyed by symbol id
-/// rather than as `kindle_title_metadata` key/value pairs. The most important
-/// of these is `cover_image` ($424): without this fallback the loader reports
-/// no cover, so the cover-swap and cover-extract paths can't find the image and
-/// leave the grayscale store cover in place.
+/// categorised `book_metadata` ($490) wrapper leaves unset. Older Amazon KFX
+/// carry their metadata only here, keyed by symbol id — `cover_image` ($424)
+/// among them.
 ///
-/// Mirrors the second lookup in calibre kfxlib `YJ_Metadata.get_metadata_value`
-/// (yj_metadata.py), which consults `METADATA_SYMBOLS[name]` against the `$258`
-/// fragment when the `$490` wrapper lacks the key. `$490` always wins, so this
-/// only fills gaps.
+/// `$490` wins every key it holds; this fills the gaps.
 fn fill_missing_from_flat_metadata(
     meta: &mut BookMetadata,
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
@@ -517,7 +472,7 @@ mod tests {
             resolve_cover_value(Some(&IonValue::String("e6".into())), &symbols).as_deref(),
             Some("e6")
         );
-        // Bare symbol (flat `$258` shape) — the case the original code missed.
+        // Bare symbol (flat `$258` shape).
         assert_eq!(
             resolve_cover_value(Some(&IonValue::Symbol(0)), &symbols).as_deref(),
             Some("resource/cover")

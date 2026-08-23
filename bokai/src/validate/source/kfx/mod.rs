@@ -1,60 +1,43 @@
-//! KFX standalone structural validator — the "is this KFX well-formed on its
-//! own?" check (job 2). No such tool exists anywhere else; this is bokai's
-//! `epubcheck` equivalent for KFX. It reads a single container natively (never a
-//! derived/converted copy) and reports defects **in the source book** for the
-//! book editor to repair.
+//! KFX structural validation: one container read natively, never a derived
+//! copy, reported as defects in the source book.
 //!
-//! Every rule is a check over structures bokai already parses (`kfx/container.rs`,
-//! `kfx/loader.rs` → [`BookData`]), so the checker just re-asks the
-//! resolution questions the converter answers — and flags the cases the
-//! converter silently tolerates (a dropped image, a chapterless nav).
+//! Every rule reads the structures `kfx/container.rs` and `kfx/loader.rs`
+//! ([`BookData`]) parse.
 //!
-//! Rule catalog. Each rule re-asks a
-//! resolution question the converter answers, so it can never flag a shape the
-//! converter itself resolves.
-//!
-//! - **Rule 1, container integrity** — the container parses at all (`CONT`
-//!   magic, info + index in bounds). A parse failure is one hard
-//!   `container-unreadable` error; the fine-grained per-entity offset check is
-//!   folded into this (an out-of-bounds entity surfaces transitively via rules
-//!   2/7). A container declaring a non-zero `bcDRMScheme` is reported as
-//!   `container-encrypted` instead: its payloads are ciphertext, so every later
-//!   rule would read a book with no sections and no content out of a file that
-//!   has both.
+//! - **Rule 1, container integrity** — `CONT` magic, info + index in bounds.
+//!   A parse failure is one `container-unreadable` error; a non-zero
+//!   `bcDRMScheme` is one `container-encrypted` error over ciphertext
+//!   payloads. An out-of-bounds entity reaches rules 2/7.
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
-//!   `storyline` (hard errors); `book_navigation` (a warning — no chapter list).
+//!   `storyline` (errors); `book_navigation` (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
 //!   real `section` ($260), and every `story_name` ($176) reachable from a
 //!   section names a real `storyline` ($259). A dangling ref is a missing
-//!   chapter / missing chapter body (hard errors). Mirrors the converter's
-//!   `process_section` / `collect_element_ids` walk.
+//!   chapter or a missing chapter body (errors).
 //! - **Rule 4, content refs resolve** — every `$145 content` `{name,index}`
-//!   indirection resolves to a real shared `$145 content` block (hard error —
-//!   that text is otherwise silently dropped). Mirrors `resolve_content_text`.
-//! - **Rule 5, nav reachability** — every navigation entry targets an element a
-//!   storyline contains; a dangling target tap-jumps to nowhere (a warning).
-//!   Delegates to `fidelity::nav`'s shared extraction (cover / section-
-//!   root positions exempt via `cover_target`).
+//!   indirection resolves to a real shared `$145 content` block (error:
+//!   dropped text).
+//! - **Rule 5, nav reachability** — every navigation entry targets an element
+//!   some storyline contains; a dangling target tap-jumps to nowhere
+//!   (warning). Delegates to `fidelity::nav`'s extraction, which exempts
+//!   cover / section-root positions via `cover_target`.
 //! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
-//!   names a real `style` entity. A dangling style renders unstyled (a warning —
-//!   the converter tolerates it by emitting no CSS). Mirrors `style_decl_for`.
-//! - **Rule 7, resource refs resolve** — every `external_resource` that names a
-//!   `location` has its bytes embedded in the container.
-//! - **Rule 8, position-map coverage** — every reading-order section appears in
-//!   the `position_map` ($264), so a device "go to location" can reach it (a
-//!   warning; only checked when a position_map exists, since some valid KFX
-//!   address purely by `position_id_map` $265).
+//!   names a real `style` entity (warning: unstyled render).
+//! - **Rule 7, resource refs resolve** — every `external_resource` that names
+//!   a `location` has its bytes embedded in the container.
+//! - **Rule 8, position-map coverage** — every reading-order section appears
+//!   in the `position_map` ($264), the device's "go to location" target
+//!   (warning; runs only on a container holding a `position_map`, some KFX
+//!   addressing purely by `position_id_map` $265).
 //! - **Rule 9, cover present + resolves** — the declared cover resource exists
 //!   and has embedded bytes (missing cover = warning; dangling = error).
-//! - **Rule 11, declarations agree with content** — every `content_features`
-//!   entry is a claim about what the book contains, and the renderer acts on
-//!   it, so content the renderer is told nothing about is a defect. See
-//!   [`ContentFacts`] for how each fact is read.
+//! - **Rule 11, declarations agree with content** — each `content_features`
+//!   entry states what the book contains. See [`ContentFacts`] for the facts
+//!   each claim is read against.
 //!
-//! Rule 10 (TOC deficiency) is contributed by the cross-format `source::toc`
-//! check via [`crate::validate::source::validate`]. Not yet handled: `.kfx-zip`
-//! bundles sniff as EPUB by their `PK` magic (single `.kfx` containers are the
-//! editor's case).
+//! Rule 10 (TOC deficiency) comes from the cross-format `source::toc` check
+//! via [`crate::validate::source::validate`]. A `.kfx-zip` bundle sniffs as
+//! EPUB by its `PK` magic.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -65,11 +48,11 @@ use crate::formats::kfx::symbols::KfxSymbol;
 
 use crate::validate::{Finding, FixHint, Severity};
 
-/// Run the KFX structural rules over `bytes` and return the defects as unified
-/// [`Finding`]s. If the container will not even parse, that is the single
-/// `container-unreadable` error (rule 1's catastrophic case) and no further
-/// rules run. Consumed by [`crate::validate::source::validate`] for the KFX
-/// branch; the TOC audit (rule 10) is added there separately.
+/// Run the KFX structural rules over `bytes` and return the defects as
+/// [`Finding`]s. A container that does not parse yields the single
+/// `container-unreadable` error and ends the run.
+/// [`crate::validate::source::validate`] calls this and adds the TOC audit
+/// (rule 10).
 pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     let book = match loader::load(bytes) {
         Ok(book) => book,
@@ -154,10 +137,9 @@ fn check_required_entities(by_type: &HashMap<u64, HashMap<String, IonValue>>) ->
 // Rules 3 & 6 — reference resolution (section → storyline, element → style)
 // ============================================================================
 
-/// Reference-resolution defects, accumulated **deduped by target name**: a style
-/// cited by 10 000 elements, or a storyline referenced from many places, yields
-/// one finding — not one per citation. `BTreeSet` also sorts the names, so the
-/// finding order is deterministic across runs.
+/// Reference-resolution defects, deduped by target name: a style cited by
+/// 10 000 elements yields one finding. `BTreeSet` sorts the names, holding
+/// finding order steady across runs.
 #[derive(Default)]
 struct RefDefects {
     /// Reading-order entries that don't resolve to a `section` ($260).
@@ -171,17 +153,14 @@ struct RefDefects {
     missing_content: BTreeSet<String>,
 }
 
-/// Rules 3 & 6. Walk the content graph the converter renders — reading order →
-/// section → page_templates → (referenced storylines) — and flag every named
-/// reference that doesn't resolve to a real entity. Starting from the reading
-/// order (not every `section` entity) matches the converter: an orphan section
-/// outside the reading order is dead content the reader never sees, so a
-/// dangling ref inside it is not a defect worth surfacing.
+/// Rules 3 & 6. Walk reading order → section → page_templates → referenced
+/// storylines, flagging every named reference that resolves to no entity. The
+/// walk starts at the reading order: a `section` entity outside it renders
+/// nowhere.
 fn check_references(book: &BookData) -> Vec<Finding> {
     let mut defects = RefDefects::default();
-    // A single visited set guards against cycles for both storyline and
-    // structure fragments; names are namespaced so a storyline and a structure
-    // that happen to share a name don't shadow each other.
+    // One visited set guards cycles in storyline and structure fragments,
+    // namespaced against a shared name.
     let mut visited: HashSet<String> = HashSet::new();
 
     for section_name in reading_order_sections(book) {
@@ -235,10 +214,9 @@ fn check_references(book: &BookData) -> Vec<Finding> {
     findings
 }
 
-/// If `value` is a `$145 content` `{name,index}` indirection (per the converter's
-/// `resolve_content_text`) that does **not** resolve to a `$145 content` string,
-/// return the dangling block name. Returns `None` for inline text (a plain
-/// string) and for anything without a `name` — those aren't indirections.
+/// The block name of a `$145 content` `{name,index}` indirection in `value`
+/// that resolves to no `$145 content` string. `None` for inline text (a plain
+/// string) and for a value carrying no `name`.
 fn dangling_content_ref(value: &IonValue, book: &BookData) -> Option<String> {
     let fields = value.unwrap_annotated().as_struct()?;
     let name = get_field(fields, KfxSymbol::Name as u64).and_then(|v| book.symbols.text_of(v))?;
@@ -258,10 +236,8 @@ fn dangling_content_ref(value: &IonValue, book: &BookData) -> Option<String> {
     (!resolves).then(|| name.to_string())
 }
 
-/// The flat, in-order list of reading-order section names, from `document_data`
-/// ($538) or the older flat `metadata` ($258). A read-only mirror of the
-/// converter's `extract_reading_orders` — kept here rather than exposing that
-/// `pub(super)` helper across the module tree.
+/// The flat, in-order list of reading-order section names, from
+/// `document_data` ($538) or the older flat `metadata` ($258).
 fn reading_order_sections(book: &BookData) -> Vec<String> {
     for type_id in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
         let Some(map) = book.by_type.get(&type_id) else {
@@ -300,13 +276,11 @@ fn reading_order_sections(book: &BookData) -> Vec<String> {
     Vec::new()
 }
 
-/// Depth-first walk of a content value, recording dangling `style` (rule 6) and
-/// `story_name` (rule 3) references. Follows `story_name` into its storyline and
-/// `$608 structure` symbols into their fragment — the two indirections the
-/// converter follows (`walk_ids_recursive`, `process_content`) — so the walk
-/// reaches the whole rendered body. A bare symbol that *doesn't* resolve to a
-/// structure is left alone: bare symbols are overwhelmingly enum values, not
-/// fragment references, so flagging them would false-positive.
+/// Depth-first walk of a content value, recording dangling `style` (rule 6)
+/// and `story_name` (rule 3) references. `story_name` and `$608 structure`
+/// symbols are followed into their fragments, covering the rendered body. A
+/// bare symbol resolving to no structure is left alone: most such symbols are
+/// enum values.
 fn walk_refs(
     value: &IonValue,
     book: &BookData,
@@ -323,9 +297,9 @@ fn walk_refs(
             }
         }
         IonValue::Struct(fields) => {
-            // Rule 6 — the element's `$157 style`, when it's a *named* reference
-            // (a symbol/string, per `text_of`); an inline style struct has no
-            // name to resolve and is walked as an ordinary child below.
+            // Rule 6 — the element's `$157 style` as a named reference (a
+            // symbol/string, per `text_of`). An inline style struct carries no
+            // name and walks below as an ordinary child.
             if let Some(style_name) =
                 get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))
                 && !style_exists(book, style_name)
@@ -341,8 +315,8 @@ fn walk_refs(
                 out.missing_content.insert(name);
             }
 
-            // Rule 3 — `$176 story_name` must resolve; descend into the storyline
-            // (once) so nested story references are checked too.
+            // Rule 3 — `$176 story_name` resolves, and the storyline is
+            // descended once for its own nested story references.
             if let Some(story_name) =
                 get_field(fields, KfxSymbol::StoryName as u64).and_then(|v| book.symbols.text_of(v))
             {
@@ -396,8 +370,7 @@ fn check_resource_bytes(
         return out;
     };
 
-    // Deterministic order — HashMap iteration is random and findings are shown
-    // to the user / diffed across corpus runs.
+    // Sorted names hold the finding order steady across HashMap iterations.
     let mut names: Vec<&String> = resources.keys().collect();
     names.sort();
 
@@ -405,8 +378,7 @@ fn check_resource_bytes(
         let Some(fields) = resources[name].unwrap_annotated().as_struct() else {
             continue;
         };
-        // A resource with no `location` ($165) is a location-less descriptor,
-        // not a dangling byte reference — nothing to resolve, so skip it.
+        // A resource with no `location` ($165) names no bytes to resolve.
         let Some(location) =
             get_field(fields, KfxSymbol::Location as u64).and_then(|v| v.as_string())
         else {
@@ -480,16 +452,14 @@ fn cover_resource_resolves(book: &BookData, cover_name: &str) -> bool {
 // Rule 5 — nav reachability
 // ============================================================================
 
-/// Rule 5. Every navigation entry (chapter list / headings) must jump to an
-/// element some storyline actually contains; a dangling target tap-jumps to
-/// nowhere on device. Delegates to `fidelity::nav`'s shared KFX
-/// extraction so this checker and the conversion-fidelity `nav` diff apply the
-/// exact same reachability rule (cover / section-root positions exempt). A
-/// warning, not an error: the book still reads, only the broken entry misbehaves.
+/// Rule 5. Every navigation entry (chapter list / headings) jumps to an
+/// element some storyline contains; a dangling target tap-jumps to nowhere on
+/// device, at warning severity. `fidelity::nav`'s extraction applies the
+/// reachability rule, exempting cover / section-root positions.
 ///
-/// Takes raw `bytes` because the nav extractor reads the container directly
-/// (independent of `loader::load`); a parse failure here is already reported as
-/// `container-unreadable` by rule 1, so it adds nothing.
+/// `bytes` is raw: the nav extractor reads the container without
+/// `loader::load`. Rule 1 reports a parse failure here as
+/// `container-unreadable`.
 fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
     let Ok(dangling) = crate::validate::fidelity::nav::dangling_nav_targets(bytes) else {
         return Vec::new();
@@ -517,17 +487,17 @@ fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
 // ============================================================================
 
 /// Rule 8. The `position_map` ($264) maps each section to the element ids it
-/// contains; the device uses it to resolve "go to location N". A reading-order
-/// section absent from it can't be reached by a location jump. A warning (the
-/// book still opens and scrolls); only checked when a `position_map` exists at
-/// all, since some valid KFX address purely by `position_id_map` ($265).
+/// contains, resolving a device "go to location N". A reading-order section
+/// absent from it takes no location jump, at warning severity. The rule runs
+/// only on a container holding a `position_map`; some KFX address purely by
+/// `position_id_map` ($265).
 fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
     let sections = reading_order_sections(book);
     if sections.is_empty() {
-        return Vec::new(); // no reading order → rules 2/3 already speak.
+        return Vec::new(); // No reading order: rules 2/3 report it.
     }
     let Some(pmaps) = book.by_type.get(&(KfxSymbol::PositionMap as u64)) else {
-        return Vec::new(); // no position_map — not this rule's business.
+        return Vec::new(); // No position_map: outside this rule.
     };
 
     // Every section the position_map covers (its `section_name` $174 symbols).
@@ -548,7 +518,7 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
         }
     }
     if covered.is_empty() {
-        return Vec::new(); // a position_map we couldn't read — don't guess.
+        return Vec::new(); // An unreadable position_map covers no section.
     }
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -575,29 +545,25 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
 // Rule 11 — declared features agree with the content
 // ============================================================================
 
-/// Positions a section may hold before the renderer needs its large-section
-/// support declared.
+/// Positions a section holds below the large-section declaration.
 const SECTION_PID_BOUND: i64 = 65536;
 
-/// What the book actually contains, for its `content_features` claims to be
-/// checked against. Every field is read from the container itself — never from
-/// a converted copy, and never from another implementation's account of the
-/// format.
+/// What the book contains, read from the container itself, for its
+/// `content_features` claims to be checked against.
 #[derive(Default, Debug)]
 struct ContentFacts {
-    /// A tiled image (`yj.tiles` / `yj.tile_padding` on an `external_resource`).
-    /// Tiling is the content `yj_hdv` covers; it is not a precondition for the
-    /// declaration, which Amazon also stamps on books that carry no tiles.
+    /// A tiled image (`yj.tiles` / `yj.tile_padding` on an
+    /// `external_resource`), the content `yj_hdv` covers. Amazon stamps
+    /// `yj_hdv` on untiled books too.
     tiled_image: bool,
     /// An `external_resource` whose format is `jxr`.
     jxr_image: bool,
-    /// A JPEG payload carrying restart markers (`FF D0`–`FF D7`). Read from the
-    /// `bcRawMedia` bytes, so it is the real payload rather than a byte pattern
-    /// that happened to fall in an Ion struct.
+    /// A JPEG payload carrying restart markers (`FF D0`–`FF D7`), read from
+    /// the `bcRawMedia` bytes.
     jpeg_restart_markers: bool,
     /// Positions in the longest section, from the `position_id_map` spans.
-    /// `None` when the container only ships the `{eid, pid}` pair shape, which
-    /// does not state section lengths — an unknown, not a zero.
+    /// `None` for a container shipping only the `{eid, pid}` pair shape, which
+    /// states no section length.
     max_section_pids: Option<i64>,
 }
 
@@ -634,8 +600,8 @@ impl ContentFacts {
         facts
     }
 
-    /// The `reflow-section-size` a book this long should declare, or `None`
-    /// when no section is long enough to need one.
+    /// The `reflow-section-size` for `max_section_pids`, `None` below
+    /// `SECTION_PID_BOUND`.
     fn expected_section_size(&self) -> Option<i64> {
         let max = self.max_section_pids?;
         (max > SECTION_PID_BOUND).then(|| (((max - SECTION_PID_BOUND) / 16384) + 2).min(256))
@@ -644,8 +610,8 @@ impl ContentFacts {
 
 /// Positions in the longest section, read from the `position_id_map` ($265)
 /// span shape (`{section_name, pid, length}`). The `{eid, pid}` pair shape
-/// states no section length, so it yields `None` rather than a guess — see
-/// [`crate::formats::kfx::position`] for why neither shape is a format tell.
+/// states no section length and yields `None`. Neither shape is a format
+/// tell — see [`crate::formats::kfx::position`].
 fn max_section_pids(book: &BookData) -> Option<i64> {
     let maps = book.by_type.get(&(KfxSymbol::PositionIdMap as u64))?;
     let mut max = None;
@@ -662,7 +628,7 @@ fn max_section_pids(book: &BookData) -> Option<i64> {
             let Some(ef) = entry.unwrap_annotated().as_struct() else {
                 continue;
             };
-            // Only the span shape names a section; the pair shape carries eids.
+            // The span shape names a section; the pair shape carries eids.
             if get_field(ef, KfxSymbol::SectionName as u64).is_none() {
                 continue;
             }
@@ -713,16 +679,14 @@ fn declared_features(book: &BookData) -> HashMap<String, i64> {
 fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
     let declared = declared_features(book);
     if declared.is_empty() {
-        return Vec::new(); // no content_features — rule 2's business, not this one.
+        return Vec::new(); // No content_features: no claim to check.
     }
     let facts = ContentFacts::read(book);
     let mut out = Vec::new();
 
-    // Media features are checked in the OMISSION direction only. A declaration
-    // may legitimately outrun the bytes: it can describe the material a book
-    // was built from rather than only what survived into the container, so a
-    // feature with no matching payload is not a defect. Content the renderer is
-    // told nothing about is the half that stays checkable.
+    // Media features are checked in the omission direction. A declaration
+    // describes the material a book was built from, which outruns the bytes
+    // the container holds; undeclared content is the checkable half.
     if facts.tiled_image && !declared.contains_key("yj_hdv") {
         out.push(warning(
             "feature-undeclared",
@@ -751,7 +715,7 @@ fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
         ));
     }
 
-    // Section size is only checkable when the container states section lengths.
+    // Section size is checkable over a container stating section lengths.
     if facts.max_section_pids.is_some() {
         let expected = facts.expected_section_size();
         let actual = declared.get("reflow-section-size").copied();
@@ -811,10 +775,9 @@ fn warning(
 mod tests {
     use super::*;
 
-    /// A container carrying nothing but a header and a container_info whose
-    /// `bcDRMScheme` is `scheme`. Its index table is empty, so with `scheme: 0`
-    /// it loads as an entity-less book — which is what makes it a control for
-    /// the encryption branch.
+    /// A container of a header and a container_info whose `bcDRMScheme` is
+    /// `scheme`, over an empty index table. At `scheme: 0` it loads as an
+    /// entity-less book.
     fn container_with_drm_scheme(scheme: i64) -> Vec<u8> {
         use crate::formats::kfx::ion::IonWriter;
 
@@ -847,7 +810,7 @@ mod tests {
         assert_eq!(out.len(), 1, "encryption ends the run: {out:?}");
         assert_eq!(out[0].rule, "container-encrypted");
         assert_eq!(out[0].severity, Severity::Error);
-        // The book's own structure is unreadable, never absent.
+        // The structure is unreadable, never absent.
         assert!(!out.iter().any(|f| f.rule == "no-sections"));
     }
 
@@ -888,7 +851,7 @@ mod tests {
         assert!(rules.contains(&"no-sections"));
         assert!(rules.contains(&"no-storylines"));
         assert!(rules.contains(&"no-nav"));
-        // document_data / section / storyline are hard errors; nav is a warning.
+        // document_data / section / storyline are errors; nav is a warning.
         assert_eq!(
             out.iter().filter(|f| f.severity == Severity::Error).count(),
             3
@@ -930,7 +893,7 @@ mod tests {
                 "r2",
                 resource(Some("resource/missing")),
             ),
-            // Location-less descriptor — must be skipped, not flagged.
+            // Location-less descriptor: skipped, never flagged.
             (KfxSymbol::ExternalResource as u64, "r3", resource(None)),
         ]);
         let mut raw_media: HashMap<String, Vec<u8>> = HashMap::new();
@@ -950,9 +913,8 @@ mod tests {
 
     // --- Rules 3 & 6 (reference resolution) --------------------------------
     //
-    // References are built as `IonValue::String`s, not symbols, so `text_of`
-    // resolves them without a populated doc-symbol table (`empty_book_for_test`
-    // has none). `by_type` is a public field we can populate directly.
+    // References are `IonValue::String`s, which `text_of` resolves over
+    // `empty_book_for_test`'s empty doc-symbol table.
 
     /// `document_data` whose one reading order lists `section_names` in order.
     fn doc_data(section_names: &[&str]) -> HashMap<String, IonValue> {
@@ -990,7 +952,7 @@ mod tests {
         m
     }
 
-    /// A minimal storyline entity — existence is all the reference check needs.
+    /// A minimal entity, named for a reference check to resolve.
     fn one_entity(name: &str) -> HashMap<String, IonValue> {
         HashMap::from([(name.to_string(), IonValue::Struct(vec![]))])
     }
@@ -1018,8 +980,8 @@ mod tests {
             KfxSymbol::DocumentData as u64,
             doc_data(&["sec1", "secMissing"]),
         );
-        // sec1 exists but points at a storyline that doesn't; secMissing has no
-        // section entity at all.
+        // sec1 points at an absent storyline; secMissing has no section
+        // entity.
         book.by_type.insert(
             KfxSymbol::Section as u64,
             sections(&[("sec1", "storyMissing", None)]),
@@ -1147,8 +1109,8 @@ mod tests {
 
     // --- Rule 8 (position-map coverage) ------------------------------------
 
-    /// A `position_map` ($264) covering `sections` (each a `{section_name,
-    /// contains}` struct; `contains` is irrelevant to the coverage check).
+    /// A `position_map` ($264) covering `covered`, one `{section_name,
+    /// contains}` struct each.
     fn position_map(covered: &[&str]) -> HashMap<String, IonValue> {
         let secs: Vec<IonValue> = covered
             .iter()
@@ -1198,7 +1160,7 @@ mod tests {
         let mut book = loader::empty_book_for_test();
         book.by_type
             .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
-        // No position_map: some valid KFX address purely by position_id_map.
+        // No position_map: some KFX address purely by position_id_map.
         assert!(check_position_map_coverage(&book).is_empty());
     }
 }
