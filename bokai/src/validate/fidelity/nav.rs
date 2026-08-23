@@ -71,8 +71,8 @@ pub struct Report {
     /// pairs a full nav with a stub NCX, or the reverse.
     pub epub_toc_entry_count: usize,
     /// Count of TOC entries pointing at manifest items not in the spine.
-    /// These can't be addressed by KFX position-based navigation and are
-    /// excluded from the count diff.
+    /// A manifest item outside the spine takes no KFX position-based
+    /// navigation, and drops out of the count diff.
     pub epub_non_spine_toc_entries: usize,
     /// Whether the EPUB has any usable TOC (nav or NCX). If not, TOC checks are
     /// skipped.

@@ -546,7 +546,7 @@ The format can name kerning, ligatures and OpenType features, and books do not s
 
 Vertical Japanese typesetting is a first-class case in KFX, not an add-on, and vertical books also exercise `word_boundary_list` and ruby.
 
-A `type: container`'s `$156` `layout` is the block-progression axis of its *children*, keyed to the box's own resolved writing mode: vertical writing runs block flow horizontally, so its boxes take `layout: horizontal`, and `horizontal_tb` text takes `layout: vertical`. `box_align` cannot repair a wrong axis — the symptom of one is a box inflated to full block width with its content pinned to the inline start.
+A `type: container`'s `$156` `layout` is the block-progression axis of its *children*, keyed to the box's own resolved writing mode: vertical writing runs block flow horizontally, so its boxes take `layout: horizontal`, and `horizontal_tb` text takes `layout: vertical`. A per-element override reaches the box through the `$157` `style` it names as readily as through its own fields. `box_align` cannot repair a wrong axis — the symptom of one is a box inflated to full block width with its content pinned to the inline start.
 
 ### 8.7. Ruby
 

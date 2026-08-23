@@ -1,8 +1,8 @@
 //! Book-level writing-mode derivation shared by every KFX reader.
 //!
-//! `document_data`'s `writing_mode` field states the book's axis and is what a
-//! reader honours. [`majority_vertical_mode`] recovers an axis from the book's
-//! own `$style` pool for the containers that omit the field.
+//! `document_data`'s `writing_mode` field states the book's axis.
+//! [`majority_vertical_mode`] recovers an axis from the book's own `$style`
+//! pool for the containers that omit the field.
 
 use std::collections::HashMap;
 
@@ -20,16 +20,13 @@ pub fn normalize_writing_mode(name: &str) -> &str {
     }
 }
 
-/// The vertical writing mode (`"vertical-rl"` / `"vertical-lr"`) the given
-/// style values predominantly declare, or `None` when horizontal text
-/// dominates (or no style declares a mode). Counting the style pool — not
-/// every entity — keeps the cost bounded and matches what becomes CSS classes.
+/// The vertical writing mode (`"vertical-rl"` / `"vertical-lr"`) `styles`
+/// predominantly declare, or `None` when horizontal text dominates.
 ///
-/// The majority is taken over **every** style, not over the styles that name a
-/// mode. `horizontal_tb` is the CSS initial value, so a horizontal style
-/// normally declares nothing at all; weighing vertical declarations against
-/// only the explicit `horizontal_tb` ones lets a single vertical passage
-/// outvote a book that is horizontal throughout.
+/// The majority runs over **every** style, not over the styles naming a mode:
+/// `horizontal_tb` is the CSS initial value that a horizontal style declares
+/// nowhere, and a count over explicit declarations alone lets one vertical
+/// passage outvote a horizontal book.
 pub fn majority_vertical_mode<'a>(
     styles: impl Iterator<Item = &'a IonValue>,
     symbols: &SymbolTable,

@@ -25,11 +25,15 @@
 //!   dropped text).
 //! - **Rule 5, nav and link reachability** — every navigation entry targets an
 //!   element some storyline contains; a dangling target tap-jumps to nowhere
-//!   (warning). Delegates to `fidelity::nav`'s extraction, which exempts
-//!   cover / section-root positions via `cover_target`. A `nav_containers`
-//!   entry naming a separate `nav_container` ($391) fragment resolves to one
-//!   (error: the whole list is gone), every `link_to` ($179) names an anchor,
-//!   and every anchor's `position` names an element the walk reached.
+//!   (warning). The `toc` and `headings` containers go through
+//!   `fidelity::nav`'s extraction, which exempts cover / section-root
+//!   positions via `cover_target`; the `landmarks` and `page_list` containers
+//!   are read against the walk's own element population, and every container's
+//!   `target_position` offset against the target's base text (§9.4). A
+//!   `nav_containers` entry naming a separate `nav_container` ($391) fragment
+//!   resolves to one (error: the whole list is gone), every `link_to` ($179)
+//!   names an anchor, and every anchor's `position` names an element the walk
+//!   reached.
 //! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
 //!   names a real `style` entity (warning: unstyled render), and a
 //!   style_event's `ruby_name` ($757) names a `ruby_content` ($756) declaring
@@ -55,11 +59,16 @@
 //!   book-wide; `style_events` and `word_boundary_list` ranges stay inside the
 //!   base text they count characters of; a length states a CSS unit and a
 //!   numeric magnitude; an `important_cells` coordinate lands inside its
-//!   table's grid. Gathered by rule 3's walk and a sweep of the `style`
-//!   entities.
+//!   table's grid, and a `column_format` ($152) states one entry per column of
+//!   the widest row, counting both spans of §7.6. Gathered by rule 3's walk
+//!   and a sweep of the `style` entities.
 //! - **Rule 14, position arithmetic** — the `position_id_map` span shape
 //!   partitions the pid axis from 0 with no gap or overlap, and
 //!   `yj.location_pid_map` boundaries never go backwards.
+//! - **Rule 15, layout traps** — the two §8 shapes that render wrong rather
+//!   than fail: a `px` length on a book declaring no fixed layout, read as a
+//!   device dot (§8.2); and `box_align` ($580) on a `type: text`, which places
+//!   a picture and leaves a text block flush to the inline start (§8.3, info).
 //!
 //! Rule 10 (TOC deficiency) comes from the cross-format `source::toc` check
 //! via [`crate::validate::source::validate`]. A `.kfx-zip` bundle sniffs as
@@ -524,6 +533,16 @@ struct WalkDefects {
     /// `important_cells` ($700) coordinates outside their table's grid,
     /// rendered `[row, column] in RxC`.
     out_of_range_cells: BTreeSet<String>,
+    /// `px` lengths (§8.2) on a book declaring no fixed layout.
+    reflowable_px: usize,
+    /// `box_align` ($580) declared on a `type: text` ($269) element (§8.3).
+    box_align_on_text: usize,
+    /// `table` ($279) elements whose `column_format` ($152) column count
+    /// disagrees with the widest row, rendered `N declared, M in widest row`.
+    column_format_mismatch: BTreeSet<String>,
+    /// Base-text character count per element id ($155), for a navigation
+    /// offset to be read against (§9.4).
+    eid_text_len: HashMap<i64, usize>,
 }
 
 /// Rules 3, 5, 6, 7 & 13. Walk reading order → section → page_templates →
@@ -552,7 +571,7 @@ fn check_references(book: &BookData) -> Vec<Finding> {
 
     if let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) {
         for style in styles.values() {
-            scan_style_fields(style, book, &mut defects);
+            scan_style_fields(style, book, &index, &mut defects);
         }
     }
 
@@ -769,12 +788,205 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             None,
         ));
     }
+    if defects.reflowable_px > 0 {
+        findings.push(warning(
+            "length-px-reflowable",
+            "<storyline>",
+            format!(
+                "{} lengths state px on a book declaring no fixed layout — a px is a device dot \
+                 here, not a CSS pixel, so the box comes out a fraction of the width asked for",
+                defects.reflowable_px
+            ),
+            Some(FixHint::new(
+                "fix-px-length",
+                "scale the absolute length by 0.45 and state it in pt",
+            )),
+        ));
+    }
+    if defects.box_align_on_text > 0 {
+        findings.push(info(
+            "box-align-on-text",
+            "<storyline>",
+            format!(
+                "{} text elements declare box_align ($580), which places a picture and leaves a \
+                 text block flush to the inline start — margin_left/margin_right place one",
+                defects.box_align_on_text
+            ),
+        ));
+    }
+    for mismatch in &defects.column_format_mismatch {
+        findings.push(warning(
+            "column-format-mismatch",
+            "<storyline>",
+            format!(
+                "a table's column_format states {mismatch} — the entries are read positionally, \
+                 so every width past the short point lands on the wrong column"
+            ),
+            None,
+        ));
+    }
     findings.extend(check_anchor_targets(book, &defects.seen_eids));
+    findings.extend(check_nav_positions(book, &defects));
     findings
 }
 
-/// The name sets a reference in the content graph resolves against, built
-/// once before the walk.
+/// §9.2, §9.4. A `nav_unit` ($393) `target_position` ($246) is the
+/// pair `{id, offset}`: an element the content walk met, and a character offset
+/// inside that element's base text. The `landmarks` and `page_list` containers
+/// are read here, the `toc` and `headings` ones by
+/// [`check_nav_reachability`]; every container's offsets are read here.
+fn check_nav_positions(book: &BookData, defects: &WalkDefects) -> Vec<Finding> {
+    let mut unreachable: HashMap<&'static str, BTreeSet<i64>> = HashMap::new();
+    let mut past_text: BTreeSet<String> = BTreeSet::new();
+
+    for (nav_type, positions) in nav_positions(book) {
+        for (eid, offset) in positions {
+            let checked_type = match nav_type.as_str() {
+                "landmarks" => Some("landmarks"),
+                "page_list" => Some("page_list"),
+                _ => None,
+            };
+            if let Some(kind) = checked_type
+                && !defects.seen_eids.contains(&eid)
+            {
+                unreachable.entry(kind).or_default().insert(eid);
+            }
+            // An offset is measurable only against an element whose base text
+            // the walk read; a container element states none.
+            if let Some(chars) = defects.eid_text_len.get(&eid)
+                && (offset < 0 || offset as usize > *chars)
+            {
+                past_text.insert(format!(
+                    "offset {offset} into element {eid} of {chars} chars"
+                ));
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (kind, eids) in [
+        ("landmarks", unreachable.remove("landmarks")),
+        ("page_list", unreachable.remove("page_list")),
+    ] {
+        for eid in eids.unwrap_or_default() {
+            let (rule, consequence) = if kind == "landmarks" {
+                (
+                    "landmark-unreachable",
+                    "the landmark it marks — the cover, the TOC, or the place the book opens — \
+                     lands nowhere",
+                )
+            } else {
+                (
+                    "page-target-unreachable",
+                    "the print page it maps lands nowhere",
+                )
+            };
+            findings.push(warning(
+                rule,
+                &format!("eid:{eid}"),
+                format!(
+                    "a {kind} entry targets element {eid}, which no storyline holds — {consequence}"
+                ),
+                Some(FixHint::new(
+                    "fix-nav-target",
+                    "repoint the navigation entry at a real element, or remove it",
+                )),
+            ));
+        }
+    }
+    for overrun in &past_text {
+        findings.push(warning(
+            "nav-offset-past-text",
+            "<book_navigation>",
+            format!(
+                "a navigation entry states {overrun} — the target resolves to the element but the \
+                 jump lands past its text"
+            ),
+            None,
+        ));
+    }
+    findings
+}
+
+/// Every `(nav_type, [(element id, offset)])` the book's navigation states,
+/// over both nav-container forms of §9.1: inline, and a symbol naming a
+/// `nav_container` ($391) fragment.
+fn nav_positions(book: &BookData) -> Vec<(String, Vec<(i64, i64)>)> {
+    let Some(entities) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for value in entities.values() {
+        collect_nav_positions(value, book, &mut out);
+    }
+    out
+}
+
+/// Push one entry per `nav_container` reachable from `value`, resolving the
+/// referenced form through the `nav_container` ($391) entities.
+fn collect_nav_positions(
+    value: &IonValue,
+    book: &BookData,
+    out: &mut Vec<(String, Vec<(i64, i64)>)>,
+) {
+    match value.unwrap_annotated() {
+        IonValue::Symbol(id) => {
+            let name = book.symbols.resolve(*id).to_string();
+            if let Some(frag) = lookup(book, KfxSymbol::NavContainer, &name) {
+                collect_nav_positions(frag, book, out);
+            }
+        }
+        IonValue::Struct(fields) => {
+            if let Some(nav_type) =
+                get_field(fields, KfxSymbol::NavType as u64).and_then(|v| book.symbols.text_of(v))
+            {
+                let mut positions = Vec::new();
+                collect_target_positions(value, &mut positions);
+                out.push((nav_type.to_string(), positions));
+                return;
+            }
+            for (_, v) in fields {
+                collect_nav_positions(v, book, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_nav_positions(item, book, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Push every `target_position` ($246) `{id, offset}` pair below `value`.
+fn collect_target_positions(value: &IonValue, out: &mut Vec<(i64, i64)>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(position) = get_field(fields, KfxSymbol::TargetPosition as u64)
+                .and_then(|v| v.unwrap_annotated().as_struct())
+                && let Some(eid) =
+                    get_field(position, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+            {
+                let offset = get_field(position, KfxSymbol::Offset as u64)
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                out.push((eid, offset));
+            }
+            for (_, v) in fields {
+                collect_target_positions(v, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_target_positions(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+/// The name sets a reference in the content graph resolves against, plus the
+/// book-level facts a per-element rule is read against. Built once before the
+/// walk.
 struct RefIndex {
     /// Every name a `link_to` ($179) may reach: an `anchor` ($266) fragment's
     /// id and the `anchor_name` ($180) it states.
@@ -782,6 +994,9 @@ struct RefIndex {
     /// Each `ruby_content` ($756) name against the `ruby_id` ($758) values its
     /// `content_list` declares.
     ruby: HashMap<String, HashSet<i64>>,
+    /// A `content_features` key ending `fixed_layout`, which makes `px` a page
+    /// canvas unit (§8.2).
+    fixed_layout: bool,
 }
 
 impl RefIndex {
@@ -823,11 +1038,72 @@ impl RefIndex {
                 }
             }
         }
+        let (declared, _) = declared_features(book);
+        let fixed_layout = declared.keys().any(|key| key.ends_with("fixed_layout"));
 
-        Self { anchors, ruby }
+        Self {
+            anchors,
+            ruby,
+            fixed_layout,
+        }
     }
 }
 
+/// True when the element declares `box_align` ($580) inline or through the
+/// `style` ($157) it names (§8.3).
+fn declares_box_align(fields: &[(u64, IonValue)], book: &BookData) -> bool {
+    if get_field(fields, KfxSymbol::BoxAlign as u64).is_some() {
+        return true;
+    }
+    named_style(fields, book)
+        .is_some_and(|style| get_field(style, KfxSymbol::BoxAlign as u64).is_some())
+}
+
+/// The fields of the `style` entity this element names, if it names one that
+/// resolves.
+fn named_style<'b>(
+    fields: &[(u64, IonValue)],
+    book: &'b BookData,
+) -> Option<&'b [(u64, IonValue)]> {
+    let name = get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))?;
+    lookup(book, KfxSymbol::Style, name)?
+        .unwrap_annotated()
+        .as_struct()
+}
+
+/// §7.6. `column_format` ($152) states one entry per column, positionally,
+/// each covering `column_span` ($118) columns. The widest row spans the same
+/// count, each cell covering the `table_column_span` ($148) its style names.
+/// A count short of the widest row slides every later width one column over.
+fn check_column_format(
+    fields: &[(u64, IonValue)],
+    table: &IonValue,
+    book: &BookData,
+    out: &mut WalkDefects,
+) {
+    let Some(entries) = get_field(fields, KfxSymbol::ColumnFormat as u64)
+        .and_then(|v| v.unwrap_annotated().as_list())
+    else {
+        return;
+    };
+    let declared: usize = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .unwrap_annotated()
+                .as_struct()
+                .and_then(|ef| get_field(ef, KfxSymbol::ColumnSpan as u64))
+                .and_then(|v| v.as_int())
+                .filter(|n| *n > 0)
+                .unwrap_or(1) as usize
+        })
+        .sum();
+    let (_, widest) = table_grid(table, book);
+    if declared > widest {
+        out.column_format_mismatch
+            .insert(format!("{declared} declared, {widest} in widest row"));
+    }
+}
 /// Rule 5's anchor half (§9.3). An `anchor` ($266) carrying a `position`
 /// names an element by id; `seen_eids` is the element population the content
 /// walk met. A URI anchor addresses no element and is skipped.
@@ -933,17 +1209,18 @@ fn dangling_content_ref(value: &IonValue, book: &BookData) -> Option<String> {
 }
 
 /// A `table` ($278) element's grid: `table_row` ($279) descendants, and the
-/// widest row's cell count. A row's children *are* its cells (§7.6); a
-/// nested table's rows stop at the row that holds it.
-fn table_grid(table: &IonValue) -> (usize, usize) {
+/// widest row's column count. A row's children *are* its cells (§7.6), each
+/// covering the `table_column_span` ($148) its style names; a nested table's
+/// rows stop at the row that holds it.
+fn table_grid(table: &IonValue, book: &BookData) -> (usize, usize) {
     let mut rows = Vec::new();
-    collect_rows(table, &mut rows);
+    collect_rows(table, book, &mut rows);
     let widest = rows.iter().copied().max().unwrap_or(0);
     (rows.len(), widest)
 }
 
-/// Push each `table_row` ($279) descendant's cell count into `out`.
-fn collect_rows(value: &IonValue, out: &mut Vec<usize>) {
+/// Push each `table_row` ($279) descendant's column count into `out`.
+fn collect_rows(value: &IonValue, book: &BookData, out: &mut Vec<usize>) {
     match value.unwrap_annotated() {
         IonValue::Struct(fields) => {
             if get_field(fields, KfxSymbol::Type as u64).and_then(|v| v.as_symbol())
@@ -952,31 +1229,58 @@ fn collect_rows(value: &IonValue, out: &mut Vec<usize>) {
                 out.push(
                     get_field(fields, KfxSymbol::ContentList as u64)
                         .and_then(|v| v.unwrap_annotated().as_list())
-                        .map_or(0, <[IonValue]>::len),
+                        .map_or(0, |cells| {
+                            cells.iter().map(|cell| cell_column_span(cell, book)).sum()
+                        }),
                 );
                 return;
             }
             for (_, v) in fields {
-                collect_rows(v, out);
+                collect_rows(v, book, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                collect_rows(item, out);
+                collect_rows(item, book, out);
             }
         }
         _ => {}
     }
 }
 
+/// The columns one cell covers: `table_column_span` ($148) from the style the
+/// cell references, a cell carrying no element of its own (§7.6). A cell
+/// naming no span covers one column.
+fn cell_column_span(cell: &IonValue, book: &BookData) -> usize {
+    let Some(fields) = cell.unwrap_annotated().as_struct() else {
+        return 1;
+    };
+    let inline = get_field(fields, KfxSymbol::TableColumnSpan as u64);
+    let referenced =
+        named_style(fields, book).and_then(|s| get_field(s, KfxSymbol::TableColumnSpan as u64));
+    inline
+        .or(referenced)
+        .and_then(|v| v.as_int())
+        .filter(|n| *n > 0)
+        .map_or(1, |n| n as usize)
+}
+
 /// The unit a finding names for a `unit` ($306) that is no symbol or string.
 const NAMELESS_UNIT: &str = "(not a name)";
+
+/// The fixed-layout page-canvas length unit (§8.2).
+const PX_UNIT: &str = "px";
 
 /// The style-level facts any struct may carry. The content walk calls it on an
 /// element's inline properties, [`scan_style_fields`] on every struct inside a
 /// `style` entity.
-fn check_style_fields(fields: &[(u64, IonValue)], book: &BookData, out: &mut WalkDefects) {
-    check_length(fields, book, out);
+fn check_style_fields(
+    fields: &[(u64, IonValue)],
+    book: &BookData,
+    index: &RefIndex,
+    out: &mut WalkDefects,
+) {
+    check_length(fields, book, index, out);
 
     // §11.1 — `background_image` ($479) is a symbol naming an
     // `external_resource`, not a URL.
@@ -990,13 +1294,24 @@ fn check_style_fields(fields: &[(u64, IonValue)], book: &BookData, out: &mut Wal
 
 /// One `{value, unit}` length (§8.2): the unit is a CSS length unit and the
 /// magnitude is a number. A struct carrying no `unit` ($306) is no length.
-fn check_length(fields: &[(u64, IonValue)], book: &BookData, out: &mut WalkDefects) {
+///
+/// `px` is the fixed-layout page-canvas unit, read as device dots on a book
+/// declaring no fixed layout.
+fn check_length(
+    fields: &[(u64, IonValue)],
+    book: &BookData,
+    index: &RefIndex,
+    out: &mut WalkDefects,
+) {
     use crate::formats::kfx::yj_properties::length_unit_for;
 
     let Some(unit) = get_field(fields, KfxSymbol::Unit as u64) else {
         return;
     };
     match book.symbols.text_of(unit) {
+        Some(PX_UNIT) if !index.fixed_layout => {
+            out.reflowable_px += 1;
+        }
         Some(name) if length_unit_for(name).is_some() => {}
         Some(name) => {
             out.unknown_units.insert(name.to_string());
@@ -1066,13 +1381,18 @@ fn word_boundaries_overrun(fields: &[(u64, IonValue)], chars: usize) -> bool {
 
 /// Every `important_cells` ($700) `[row, column]` coordinate lands inside the
 /// grid `table` spans (§7.6).
-fn check_important_cells(fields: &[(u64, IonValue)], table: &IonValue, out: &mut WalkDefects) {
+fn check_important_cells(
+    fields: &[(u64, IonValue)],
+    table: &IonValue,
+    book: &BookData,
+    out: &mut WalkDefects,
+) {
     let Some(cells) = get_field(fields, KfxSymbol::ImportantCells as u64)
         .and_then(|v| v.unwrap_annotated().as_list())
     else {
         return;
     };
-    let (rows, columns) = table_grid(table);
+    let (rows, columns) = table_grid(table, book);
     for cell in cells {
         let Some(pair) = cell.unwrap_annotated().as_list() else {
             continue;
@@ -1091,17 +1411,17 @@ fn check_important_cells(fields: &[(u64, IonValue)], table: &IonValue, out: &mut
 }
 
 /// [`check_style_fields`] over every struct in `value`.
-fn scan_style_fields(value: &IonValue, book: &BookData, out: &mut WalkDefects) {
+fn scan_style_fields(value: &IonValue, book: &BookData, index: &RefIndex, out: &mut WalkDefects) {
     match value.unwrap_annotated() {
         IonValue::Struct(fields) => {
-            check_style_fields(fields, book, out);
+            check_style_fields(fields, book, index, out);
             for (_, v) in fields {
-                scan_style_fields(v, book, out);
+                scan_style_fields(v, book, index, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                scan_style_fields(item, book, out);
+                scan_style_fields(item, book, index, out);
             }
         }
         _ => {}
@@ -1242,19 +1562,24 @@ fn walk_refs(
                     if !holds_table_row(value) {
                         out.rowless_tables += 1;
                     }
-                    check_important_cells(fields, value, out);
+                    check_important_cells(fields, value, book, out);
+                    check_column_format(fields, value, book, out);
+                }
+                if type_id == KfxSymbol::Text as u64 && declares_box_align(fields, book) {
+                    out.box_align_on_text += 1;
                 }
             }
 
             // §7.4 — one element per id, book-wide.
-            if let Some(eid) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+            let eid = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int());
+            if let Some(eid) = eid
                 && !out.seen_eids.insert(eid)
             {
                 out.duplicate_eids.insert(eid);
             }
 
             // §8.2 / §11.1 — the element's own inline style properties.
-            check_style_fields(fields, book, out);
+            check_style_fields(fields, book, index, out);
 
             // §8.4 / §7.4 — ranges over the base text. An element with no
             // `content` draws its text from interleaved children.
@@ -1267,6 +1592,9 @@ fn walk_refs(
                 }
                 if word_boundaries_overrun(fields, chars) {
                     out.word_boundaries_past_text += 1;
+                }
+                if let Some(eid) = eid {
+                    out.eid_text_len.insert(eid, chars);
                 }
             }
 
@@ -2597,7 +2925,7 @@ mod tests {
         assert!(check_entity_index(&singletons).is_empty());
     }
 
-    // --- Wave 4 (arithmetic over one fragment) -----------------------------
+    // --- Rules 1, 2 & 7 (container, required entities, resources) ----------
 
     #[test]
     fn symbol_table_max_id_must_reach_its_last_local_symbol() {
@@ -2820,7 +3148,7 @@ mod tests {
         assert_eq!(out[0].location, "r1");
     }
 
-    // --- Wave 2 (vocabulary) -----------------------------------------------
+    // --- Vocabulary membership (rules 2, 5, 11, 13) -------------------------
 
     /// A book whose one reading-order section holds `element` as its single
     /// page template.
@@ -2965,7 +3293,7 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Info);
     }
 
-    // --- Wave 3 (presence and shape) ---------------------------------------
+    // --- Presence and shape (rules 2, 12, 13) -------------------------------
 
     #[test]
     fn section_without_page_templates_is_flagged() {
@@ -3362,7 +3690,7 @@ mod tests {
         assert!(check_position_map_coverage(&book).is_empty());
     }
 
-    // --- Wave 4 (element and position arithmetic) --------------------------
+    // --- Rules 13 & 14 (element and position arithmetic) --------------------
 
     /// An element carrying `eid`, enough for the id rule to see it.
     fn element_with_id(eid: i64) -> IonValue {
@@ -3948,5 +4276,419 @@ mod tests {
             )]),
         );
         assert!(check_nav_containers(&inline).is_empty());
+    }
+
+    // --- Rules 5, 13 & 15 (navigation, tables, layout traps) ----------------
+
+    /// A `{value, unit}` length struct.
+    fn length(value: i64, unit: &str) -> IonValue {
+        IonValue::Struct(vec![
+            (KfxSymbol::Value as u64, IonValue::Int(value)),
+            (KfxSymbol::Unit as u64, IonValue::String(unit.to_string())),
+        ])
+    }
+
+    /// A book whose `content_features` declares one key.
+    fn with_feature(mut book: BookData, key: &str) -> BookData {
+        let feature = IonValue::Struct(vec![(
+            KfxSymbol::Key as u64,
+            IonValue::String(key.to_string()),
+        )]);
+        book.by_type.insert(
+            KfxSymbol::ContentFeatures as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::Features as u64,
+                    IonValue::List(vec![feature]),
+                )]),
+            )]),
+        );
+        book
+    }
+
+    /// §8.2. A `px` length is device dots on a page canvas; a book that
+    /// declares no fixed layout renders it at a fraction of the width asked
+    /// for.
+    #[test]
+    fn px_length_on_a_reflowable_book_is_flagged() {
+        let element = IonValue::Struct(vec![(KfxSymbol::Width as u64, length(220, PX_UNIT))]);
+        let book = book_with_element(element.clone());
+        let out = check_references(&book);
+        let px: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "length-px-reflowable")
+            .collect();
+        assert_eq!(px.len(), 1, "one finding for the book: {out:?}");
+        assert_eq!(px[0].severity, Severity::Warning);
+        assert!(px[0].message.contains("device dot"), "{:?}", px[0].message);
+
+        // The same length on a fixed-layout book is the unit's own home.
+        let fixed = with_feature(book_with_element(element), "yj_fixed_layout");
+        assert!(
+            !check_references(&fixed)
+                .iter()
+                .any(|f| f.rule == "length-px-reflowable")
+        );
+    }
+
+    /// `px` stays inside the CSS vocabulary: the reflowable rule fires, and
+    /// `length-unit-unknown` does not.
+    #[test]
+    fn px_is_not_reported_as_an_unknown_unit() {
+        let book = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::Width as u64,
+            length(220, PX_UNIT),
+        )]));
+        assert!(
+            !check_references(&book)
+                .iter()
+                .any(|f| f.rule == "length-unit-unknown")
+        );
+    }
+
+    /// §8.3. `box_align` places a picture. On a text element it is
+    /// inert — the block lays out flush to the inline start — so it reports as
+    /// info, not as a break.
+    #[test]
+    fn box_align_on_a_text_element_is_info() {
+        let text = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            ),
+            (
+                KfxSymbol::BoxAlign as u64,
+                IonValue::String("center".to_string()),
+            ),
+        ]);
+        let out = check_references(&book_with_element(text));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "box-align-on-text")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert_eq!(found[0].severity, Severity::Info);
+
+        // The same property on an image is what it is for.
+        let image = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Image as u64),
+            ),
+            (
+                KfxSymbol::BoxAlign as u64,
+                IonValue::String("center".to_string()),
+            ),
+        ]);
+        assert!(
+            !check_references(&book_with_element(image))
+                .iter()
+                .any(|f| f.rule == "box-align-on-text")
+        );
+    }
+
+    /// `box_align` reaches a text element through the `style` it names as
+    /// readily as inline.
+    #[test]
+    fn box_align_through_a_named_style_is_flagged() {
+        let text = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            ),
+            (KfxSymbol::Style as u64, IonValue::String("s1".to_string())),
+        ]);
+        let mut book = book_with_element(text);
+        book.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([(
+                "s1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::BoxAlign as u64,
+                    IonValue::String("center".to_string()),
+                )]),
+            )]),
+        );
+        assert!(
+            check_references(&book)
+                .iter()
+                .any(|f| f.rule == "box-align-on-text")
+        );
+    }
+    /// §7.6. `column_format` is read positionally, one entry per column.
+    /// More entries than the widest row has columns is a grid that cannot be
+    /// laid out; a column the tail omits simply states no width.
+    #[test]
+    fn column_format_wider_than_the_widest_row_is_flagged() {
+        let cell = || {
+            IonValue::Struct(vec![(
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            )])
+        };
+        let table = |columns: usize| {
+            let entries: Vec<IonValue> = (0..columns)
+                .map(|_| IonValue::Struct(vec![(KfxSymbol::IsEmpty as u64, IonValue::Bool(false))]))
+                .collect();
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Table as u64),
+                ),
+                (KfxSymbol::ColumnFormat as u64, IonValue::List(entries)),
+                (
+                    KfxSymbol::ContentList as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (
+                            KfxSymbol::Type as u64,
+                            IonValue::Symbol(KfxSymbol::TableRow as u64),
+                        ),
+                        (
+                            KfxSymbol::ContentList as u64,
+                            IonValue::List(vec![cell(), cell()]),
+                        ),
+                    ])]),
+                ),
+            ])
+        };
+        let out = check_references(&book_with_element(table(3)));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "column-format-mismatch")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert!(
+            found[0].message.contains("3 declared, 2 in widest row"),
+            "{:?}",
+            found[0].message
+        );
+
+        assert!(
+            !check_references(&book_with_element(table(2)))
+                .iter()
+                .any(|f| f.rule == "column-format-mismatch")
+        );
+        // A tail column with nothing to say may be omitted.
+        assert!(
+            !check_references(&book_with_element(table(1)))
+                .iter()
+                .any(|f| f.rule == "column-format-mismatch")
+        );
+    }
+
+    /// A cell's span lives in the style it references, not on its element
+    /// (§7.6): two entries cover a row of two cells where one spans two
+    /// columns.
+    #[test]
+    fn a_cell_span_comes_from_its_style() {
+        let spanning = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            ),
+            (KfxSymbol::Style as u64, IonValue::String("s2".to_string())),
+        ]);
+        let plain = IonValue::Struct(vec![(
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Text as u64),
+        )]);
+        let entries: Vec<IonValue> = (0..3)
+            .map(|_| IonValue::Struct(vec![(KfxSymbol::IsEmpty as u64, IonValue::Bool(false))]))
+            .collect();
+        let table = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Table as u64),
+            ),
+            (KfxSymbol::ColumnFormat as u64, IonValue::List(entries)),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::TableRow as u64),
+                    ),
+                    (
+                        KfxSymbol::ContentList as u64,
+                        IonValue::List(vec![spanning, plain]),
+                    ),
+                ])]),
+            ),
+        ]);
+        let mut book = book_with_element(table);
+        book.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([(
+                "s2".to_string(),
+                IonValue::Struct(vec![(KfxSymbol::TableColumnSpan as u64, IonValue::Int(2))]),
+            )]),
+        );
+        assert!(
+            !check_references(&book)
+                .iter()
+                .any(|f| f.rule == "column-format-mismatch"),
+            "the spanning cell covers two of the three columns"
+        );
+    }
+
+    /// A book whose navigation states one container of `nav_type` targeting
+    /// `(element id, offset)`.
+    fn book_with_nav_target(element: IonValue, nav_type: &str, target: (i64, i64)) -> BookData {
+        let mut book = book_with_element(element);
+        let unit = IonValue::Struct(vec![(
+            KfxSymbol::TargetPosition as u64,
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(target.0)),
+                (KfxSymbol::Offset as u64, IonValue::Int(target.1)),
+            ]),
+        )]);
+        let container = IonValue::Struct(vec![
+            (
+                KfxSymbol::NavType as u64,
+                IonValue::String(nav_type.to_string()),
+            ),
+            (KfxSymbol::Entries as u64, IonValue::List(vec![unit])),
+        ]);
+        book.by_type.insert(
+            KfxSymbol::BookNavigation as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::NavContainers as u64,
+                    IonValue::List(vec![container]),
+                )])]),
+            )]),
+        );
+        book
+    }
+
+    /// §9.2. A landmark names where the book opens; a target no storyline
+    /// holds opens nowhere.
+    #[test]
+    fn landmark_targeting_no_element_is_flagged() {
+        let element = IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(849))]);
+        let out = check_references(&book_with_nav_target(
+            element.clone(),
+            "landmarks",
+            (999, 0),
+        ));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "landmark-unreachable")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert_eq!(found[0].location, "eid:999");
+
+        assert!(
+            !check_references(&book_with_nav_target(element, "landmarks", (849, 0)))
+                .iter()
+                .any(|f| f.rule == "landmark-unreachable")
+        );
+    }
+
+    /// §9.2. The same for a `page_list` entry, the source of "page 214 of
+    /// 300".
+    #[test]
+    fn page_list_target_missing_its_element_is_flagged() {
+        let element = IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(849))]);
+        let out = check_references(&book_with_nav_target(element, "page_list", (42, 0)));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "page-target-unreachable")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert_eq!(found[0].location, "eid:42");
+    }
+
+    /// A `toc` container's reachability belongs to `check_nav_reachability`,
+    /// which reads the storyline population; this walk states nothing about it.
+    #[test]
+    fn toc_targets_are_left_to_the_conversion_extractor() {
+        let element = IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(849))]);
+        let out = check_references(&book_with_nav_target(element, "toc", (999, 0)));
+        assert!(
+            !out.iter()
+                .any(|f| f.rule.ends_with("-unreachable") || f.rule == "page-target-unreachable"),
+            "{out:?}"
+        );
+    }
+
+    /// §9.4. A target position is `{id, offset}` over the element's base
+    /// text; an offset past the end resolves to the element and lands nowhere
+    /// in it.
+    #[test]
+    fn nav_offset_past_the_target_text_is_flagged() {
+        let element = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(849)),
+            (
+                KfxSymbol::Content as u64,
+                IonValue::String("four".to_string()),
+            ),
+        ]);
+        let out = check_references(&book_with_nav_target(element.clone(), "toc", (849, 9)));
+        let found: Vec<_> = out
+            .iter()
+            .filter(|f| f.rule == "nav-offset-past-text")
+            .collect();
+        assert_eq!(found.len(), 1, "{out:?}");
+        assert!(
+            found[0]
+                .message
+                .contains("offset 9 into element 849 of 4 chars"),
+            "{:?}",
+            found[0].message
+        );
+
+        // An offset at the end of the text is a position, not an overrun.
+        assert!(
+            !check_references(&book_with_nav_target(element, "toc", (849, 4)))
+                .iter()
+                .any(|f| f.rule == "nav-offset-past-text")
+        );
+    }
+
+    /// §9.1's referenced form: a nav container that is a bare symbol naming a
+    /// `nav_container` ($391) fragment is read like an inline one.
+    #[test]
+    fn a_referenced_nav_container_is_read_for_its_targets() {
+        let element = IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(849))]);
+        let mut book = book_with_element(element);
+        // One local symbol, so the container name resolves to a symbol id.
+        let base = book.symbols.base_len();
+        book.symbols =
+            crate::formats::kfx::container::SymbolTable::new(base, vec!["n19W".to_string()]);
+        let unit = IonValue::Struct(vec![(
+            KfxSymbol::TargetPosition as u64,
+            IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(999))]),
+        )]);
+        book.by_type.insert(
+            KfxSymbol::NavContainer as u64,
+            HashMap::from([(
+                "n19W".to_string(),
+                IonValue::Struct(vec![
+                    (
+                        KfxSymbol::NavType as u64,
+                        IonValue::String("landmarks".to_string()),
+                    ),
+                    (KfxSymbol::Entries as u64, IonValue::List(vec![unit])),
+                ]),
+            )]),
+        );
+        book.by_type.insert(
+            KfxSymbol::BookNavigation as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::NavContainers as u64,
+                    IonValue::List(vec![IonValue::Symbol(base)]),
+                )])]),
+            )]),
+        );
+        assert!(
+            check_references(&book)
+                .iter()
+                .any(|f| f.rule == "landmark-unreachable")
+        );
     }
 }
