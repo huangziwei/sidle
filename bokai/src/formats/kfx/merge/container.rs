@@ -21,6 +21,7 @@ use std::io;
 use super::fragment::{CONTAINER_FRAGMENT_TYPES, YJFragment, is_raw};
 use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value, serialize_value};
 use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
+use crate::formats::kfx::container::{clamp_usize, slice_at};
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
 const ENTY_SIGNATURE: &[u8] = b"ENTY";
@@ -59,6 +60,14 @@ pub struct LoadedContainer {
     entities: Vec<EntityRow>,
 }
 
+/// The error a container section whose range falls outside the file yields.
+fn out_of_range(section: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{section} offset out of range"),
+    )
+}
+
 /// Phase 1: read header, container_info, doc_symbols, format_capabilities,
 /// entity-table rows. Mutates `symtab`.
 pub fn deserialize_container_phase1(
@@ -81,7 +90,7 @@ pub fn deserialize_container_phase1(
     let header_len = u32_le(&data, 6) as usize;
     let ci_off = u32_le(&data, 10) as usize;
     let ci_len = u32_le(&data, 14) as usize;
-    if ci_off + ci_len > data.len() || header_len > data.len() {
+    if header_len > data.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "container offsets out of range",
@@ -89,7 +98,7 @@ pub fn deserialize_container_phase1(
     }
 
     // container_info parses against the live shared `symtab`.
-    let ci_bytes = &data[ci_off..ci_off + ci_len];
+    let ci_bytes = slice_at(&data, ci_off, ci_len).ok_or_else(|| out_of_range("container_info"))?;
     let mut container_info = parse_single_value(ci_bytes, symtab)?;
     let ci_fields = container_info.as_struct_mut().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "container_info is not a struct")
@@ -113,15 +122,8 @@ pub fn deserialize_container_phase1(
     if doc_symbol_length > 0
         && let Some(off) = doc_symbol_offset
     {
-        let off = off as usize;
-        let len = doc_symbol_length as usize;
-        if off + len > data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "doc_symbols offset out of range",
-            ));
-        }
-        let ds_bytes = &data[off..off + len];
+        let ds_bytes = slice_at(&data, off as usize, doc_symbol_length as usize)
+            .ok_or_else(|| out_of_range("doc_symbols"))?;
         let parsed = parse_single_value(ds_bytes, symtab)?;
 
         // Subtract SYSTEM size from each import.max_id, then build the symtab
@@ -153,15 +155,8 @@ pub fn deserialize_container_phase1(
         if fc_len > 0
             && let Some(off) = fc_off
         {
-            let off = off as usize;
-            let len = fc_len as usize;
-            if off + len > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "format_capabilities offset out of range",
-                ));
-            }
-            let fc_bytes = &data[off..off + len];
+            let fc_bytes = slice_at(&data, off as usize, fc_len as usize)
+                .ok_or_else(|| out_of_range("format_capabilities"))?;
             fc_node = Some(parse_single_value(fc_bytes, symtab)?);
         }
     }
@@ -173,23 +168,16 @@ pub fn deserialize_container_phase1(
     if let Some(off) = idx_off
         && idx_len > 0
     {
-        if off + idx_len > data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "entity table offset out of range",
-            ));
-        }
-        let table = &data[off..off + idx_len];
+        let table = slice_at(&data, off, idx_len).ok_or_else(|| out_of_range("entity table"))?;
         const ROW: usize = 24;
         let n = idx_len / ROW;
         for i in 0..n {
             let base = i * ROW;
             let id = u32_le(table, base);
             let typ = u32_le(table, base + 4);
-            let off64 = u64_le(table, base + 8) as usize;
-            let len64 = u64_le(table, base + 16) as usize;
-            let abs_off = header_len + off64;
-            if abs_off + len64 > data.len() {
+            let abs_off = header_len.saturating_add(clamp_usize(u64_le(table, base + 8)));
+            let len64 = clamp_usize(u64_le(table, base + 16));
+            if slice_at(&data, abs_off, len64).is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "entity body overflows container",
@@ -206,7 +194,10 @@ pub fn deserialize_container_phase1(
 
     // kfxgen_info: the app/package version fields, read out of `key:"value"`
     // substrings.
-    let kfxgen_info_bytes = &data[ci_off + ci_len..header_len];
+    let kfxgen_start = ci_off.saturating_add(ci_len);
+    let kfxgen_info_bytes = data
+        .get(kfxgen_start..header_len)
+        .ok_or_else(|| out_of_range("kfxgen_info"))?;
     let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
     let kfxgen_application_version =
         extract_kfxgen_field(&kfxgen_info_str, "kfxgen_application_version")
@@ -288,7 +279,8 @@ pub fn loaded_container_into_fragments(
     }
 
     for e in &loaded.entities {
-        let body_bytes = &loaded.data[e.offset..e.offset + e.length];
+        let body_bytes = slice_at(&loaded.data, e.offset, e.length)
+            .ok_or_else(|| out_of_range("entity body"))?;
         let fragment = entity_to_fragment(e, body_bytes, symtab)?;
         out.push(fragment);
     }
@@ -425,12 +417,9 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     let ci_len_pack = container.len();
     container.extend_from_slice(&[0u8; 4]);
 
-    // container_info field order:
-    //   $409 (bcContId), $410 (bcComprType), $411 (bcDRMScheme),
-    //   $413/$414 (entity table off/len),
-    //   $415/$416 (doc_symbols off/len),
-    //   $412 (bcChunkSize),
-    //   $594/$595 (format_capabilities off/len, only if symtab has locals).
+    // container_info field order: $409 bcContId, $410 bcComprType, $411
+    // bcDRMScheme, $413/$414 entity table, $415/$416 doc_symbols, $412
+    // bcChunkSize, $594/$595 format_capabilities (only with symtab locals).
     let mut ci_fields: Vec<(String, IonNode)> = vec![
         ("$409".into(), IonNode::String(container_id.clone())),
         ("$410".into(), IonNode::Int(DEFAULT_COMPRESSION_TYPE)),

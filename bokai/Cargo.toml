@@ -10,42 +10,40 @@ readme = "README.md"
 [lib]
 crate-type = ["rlib"]
 
-# Two layers: the install targets a build selects, and the capabilities they are
-# assembled from. `kfx` and `epub` are the floor and are not gated — every
-# configuration converts between those two.
+# `[features]` has two layers: install targets, one per build, and the
+# capabilities they bundle. `kfx` and `epub` are ungated.
 [features]
 # --- install targets: one per build -----------------------------------------
 default = ["desktop"]
-# The host build: the complete CLI.
+# `desktop` is the host target: the complete CLI.
 desktop = ["cli"]
-# The Kindle build: KFX↔EPUB and the subcommands over it. `aozora`, `pdf` (a
-# macOS-only renderer) and `validate` (2.7 MB of schemas) are absent, and the
-# subcommands reaching them compile out along with their help text.
+# `native` is the Kindle target: KFX↔EPUB and the subcommands over it.
+# `aozora`, `pdf` and `validate` are absent, and the subcommands reaching them
+# compile out with their help text.
 native = ["bin"]
 
 # --- capabilities: named by a library consumer, bundled by the targets above -
-# The complete command line: every subcommand over every format.
+# `cli`: every subcommand over every format.
 cli = ["bin", "aozora", "pdf", "validate"]
-# The floor a `bokai` binary needs before any format capability: a command line
-# to parse, a JSON writer to report through.
+# `bin` is what a `bokai` binary needs before any format capability: a command
+# line to parse, a JSON writer to report through.
 bin = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs"]
-# Aozora Bunko TXT → EPUB. The source format is markup-heavy and the parser is
-# regex-heavy in turn; the generated cover is SVG, rasterized to JPEG.
+# `aozora`: Aozora Bunko TXT → EPUB, parsed through `regex`. Its generated
+# cover is SVG, rasterized to JPEG.
 aozora = ["dep:regex", "svg"]
 # PDF as a source format: `import::pdf` probes one, `formats::pdf` reads and
 # edits one, and the PDF→KFX route embeds one. `formats::pdf::structure` sits
 # outside the gate; a PDF-backed KFX carries those facts in its own fragments.
 pdf = ["dep:lopdf", "svg"]
-# Source validation: the EPUB conformance suite (embedded RELAX NG / Schematron
-# schemas, whose XPath assertions need a regex engine) and the KFX and TOC
-# checks beside it.
+# `validate`: the EPUB conformance suite (embedded RELAX NG / Schematron
+# schemas, whose XPath assertions call `regex`) and the KFX and TOC checks
+# beside it.
 validate = ["dep:regex"]
-# SVG rasterization, for vector art bound for a raster-only target: KFX bundles
-# no vector resource format, and PDF page assembly draws from SVG. A build
-# without it refuses such a conversion; the artwork never silently drops.
+# `svg`: SVG rasterization. KFX bundles no vector resource format and PDF page
+# assembly draws from SVG; a build without `svg` refuses such a conversion.
 svg = ["dep:resvg"]
-# Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
-# (bundled C SQLite). Off by default; enable it to read notebooks.
+# `nbk`: Kindle Scribe handwritten-notebook (.nbk) decode → SVG, through
+# `rusqlite` (bundled C SQLite). Off by default.
 nbk = ["dep:rusqlite"]
 
 [dependencies]
@@ -54,7 +52,7 @@ unicode-normalization = "0.1"
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 percent-encoding = "2.3"
 
-# High-performance byte operations (SIMD-accelerated)
+# SIMD-accelerated byte search.
 memchr = "2.7"
 bstr = { version = "1.11", default-features = false, features = ["alloc"] }
 
@@ -86,7 +84,7 @@ jpeg-encoder = { version = "0.6", default-features = false }
 
 # Pure-Rust JPEG-XR codec (top-level workspace crate; zero deps). Decodes KFX
 # raw media (KFX→EPUB + reader) and encodes EPUB→KFX interior plates.
-# Re-exported as `bokai::jxr` since `model::Book`'s API exposes its types.
+# Re-exported as `bokai::jxr`; `model::Book`'s API exposes its types.
 jxr = { path = "../jxr" }
 
 # Pure-Rust multi-format image decoder. The EPUB→KFX path transcodes every
@@ -103,9 +101,8 @@ image = { version = "0.25", default-features = false, features = [
 # Ion binary format parsing for KFX dump tool
 ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"], optional = true }
 
-# SHA1 for KFX content hashes, on the kfx-zip → kfx fast path. Pure-Rust with
-# no assembly backend: digests match OpenSSL and hashlib on every platform
-# tested.
+# SHA1 for KFX content hashes on the kfx-zip → kfx fast path. Pure-Rust, with
+# no assembly backend.
 sha1_smol = { version = "1.0", features = ["std"] }
 
 # CLI argument parsing (only for binary)
@@ -127,8 +124,7 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # macOS PDF engine for the PDF→KFX page-1 cover and selectable text layer:
-# Apple PDFKit (`PDFPage.draw(with:to:)`, `PDFPage.string`,
-# `characterBounds(at:)`) over a Core Graphics bitmap context. See `render.rs`.
+# Apple PDFKit over a Core Graphics bitmap context. See `render.rs`.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSGeometry"] }

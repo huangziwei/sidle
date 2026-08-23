@@ -1,7 +1,7 @@
-//! Test KFX bcRawFont entity extraction.
+//! `bcRawFont` entity extraction.
 //!
-//! Uses a stripped KFX fixture (fonts_only.kfx.gz) containing only
-//! bcRawFont ($418) and Font ($262) entities from a real book.
+//! `tests/fixtures/fonts_only.kfx.gz` holds bcRawFont ($418) and font ($262)
+//! entities and nothing else.
 
 use bokai::Book;
 use flate2::read::GzDecoder;
@@ -57,7 +57,7 @@ fn test_kfx_font_assets_discovered() {
         font_assets
     );
 
-    // Verify paths follow the expected naming pattern
+    // Each asset path is `fonts/font_NNNN.otf`, numbered from 0.
     for (i, asset) in font_assets.iter().enumerate() {
         let expected = format!("fonts/font_{i:04}.otf");
         assert_eq!(
@@ -76,7 +76,7 @@ fn test_kfx_font_assets_loadable() {
 
     let mut book = Book::open(tmp.path()).expect("Should open stripped KFX");
 
-    // Load each font and verify it contains real font data (not Ion metadata)
+    // The three faces the fixture embeds.
     let font_paths = [
         "fonts/font_0000.otf",
         "fonts/font_0001.otf",
@@ -88,24 +88,21 @@ fn test_kfx_font_assets_loadable() {
             .load_asset(Path::new(font_path))
             .unwrap_or_else(|e| panic!("Failed to load {font_path}: {e}"));
 
-        // Font data should be substantial (real OTF files)
+        // An OTF file runs to thousands of bytes.
         assert!(
             bytes.len() > 1000,
             "{font_path}: expected substantial font data, got {} bytes",
             bytes.len()
         );
 
-        // Should NOT be Ion binary data (Ion BVM starts with E0 01 00 EA)
+        // `E0 01 00 EA` opens a binary Ion document.
         assert!(
             !bytes.starts_with(&[0xE0, 0x01, 0x00, 0xEA]),
             "{font_path}: got Ion metadata instead of font data ({} bytes)",
             bytes.len()
         );
 
-        // Should start with valid font magic bytes
-        // OTF/CFF: 4F 54 54 4F ("OTTO")
-        // TTF: 00 01 00 00
-        // WOFF: 77 4F 46 46 ("wOFF")
+        // Font magic: "OTTO" for OTF/CFF, `00 01 00 00` for TTF, "wOFF" for WOFF.
         let is_otf = bytes.starts_with(b"OTTO");
         let is_ttf = bytes.starts_with(&[0x00, 0x01, 0x00, 0x00]);
         let is_woff = bytes.starts_with(b"wOFF");
@@ -125,7 +122,7 @@ fn test_kfx_font_stable_hashes() {
 
     let mut book = Book::open(tmp.path()).expect("Should open stripped KFX");
 
-    // Verify stable SHA-1 hashes for fixture fonts (regression test)
+    // The digest of each face the fixture embeds.
     let expected = [
         (
             "fonts/font_0000.otf",

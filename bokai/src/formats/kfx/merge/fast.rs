@@ -1,6 +1,6 @@
 //! Fast `.kfx-zip` → `.kfx` merge — pass entity bodies through verbatim.
 //!
-//! ## Why this can be fast
+//! ## What makes this fast
 //!
 //! In Amazon-distributed `.kfx-zip` bundles, **exactly one** of the inner
 //! `.kfx` files (`metadata.kfx`) carries a `doc_symbols` Ion symbol table.
@@ -8,17 +8,15 @@
 //! are authored against that same symtab — every symbol ID inside their
 //! entity bodies resolves through `metadata.kfx`'s locals.
 //!
-//! The mechanical merge path treats each entity body as opaque Ion that must
-//! be parsed → walked → re-encoded. That parse + serialize is ~75% of the merge
-//! time on a typical book. Once we know we can preserve the source symtab
-//! intact, none of that work is required: every entity body's bytes are
-//! **already valid** in the merged container with the same symtab attached.
+//! The mechanical merge path parses, walks and re-encodes each entity body,
+//! ~75% of the merge time on a typical book. A preserved source symtab leaves
+//! every entity body's bytes valid in the merged container.
 //!
-//! So this path:
+//! This path:
 //!  - parses only the 4 container headers (~100 bytes each),
 //!  - parses `doc_symbols` once and reuses it byte-for-byte,
 //!  - parses the source `$419` body once to keep its `$253` deps,
-//!  - **copies the other 349/350 entity bodies verbatim**,
+//!  - **copies every other entity body verbatim**,
 //!  - synthesizes a fresh `$270` container_info + `$419` entity_map.
 //!
 //! ## When this path bails out
@@ -26,20 +24,18 @@
 //! The fast path requires:
 //!  - at most one source container with `doc_symbols`, and
 //!  - the source `$419` (if any) entity-table row uses `id_idnum == $348`
-//!    (singleton form) so its body can be unwrapped cleanly.
+//!    (singleton form), whose body unwraps cleanly.
 //!
-//! Both hold for every Amazon `.kfx-zip` we've seen. When they don't, the merge
-//! returns an `io::ErrorKind::Unsupported` error rather than rerouting — the
-//! mechanical path is never chosen implicitly. A caller that wants the
-//! full-roundtrip path selects `MergeMode::Mechanical` explicitly; the
-//! `mechanical` module stays the correctness reference this path is validated
-//! against.
+//! Outside those two the merge returns `io::ErrorKind::Unsupported` and never
+//! reroutes: `MergeMode::Mechanical` is an explicit choice, and the
+//! `mechanical` module is this path's correctness reference.
 
 use std::io::{self, Read};
 use std::path::Path;
 
 use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value};
 use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
+use crate::formats::kfx::container::{clamp_usize, slice_at};
 use crate::trace::Trace;
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
@@ -50,7 +46,6 @@ const DEFAULT_CHUNK_SIZE: i64 = 4096;
 const SYM_DOLLAR_348: u32 = 348;
 const SYM_DOLLAR_419: u32 = 419;
 const SYM_DOLLAR_490: u32 = 490;
-const SYM_DOLLAR_270: u32 = 270;
 
 /// Compact view of one source `.kfx` after the cheap parse phase.
 struct RawContainer {
@@ -103,38 +98,15 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     }
     trace.mark("zip + entry list");
 
-    // ---- 2. Lightweight per-container parse (header + entity table only).
-    //
-    // We have to walk container_info Ion to learn the entity-table offset
-    // and the doc_symbols byte range. Each source `.kfx` is decompressed +
-    // shallow-parsed on its own thread — deflate is the merge's largest
-    // single phase (~5 ms on a 1.3 MB bundle) and fans out cleanly when
-    // each thread owns its own `ZipArchive` (parsing the central directory
-    // is cheap; the win is overlapping the deflate work).
-    //
-    // The per-container parser uses a *fresh* symtab because container_info
-    // only ever references SYSTEM + YJ catalog symbols (numeric `$N` form)
-    // — no local symbols, no shared state needed.
-    //
-    // The decompress and SHA1 phases overlap: the decompression threads
-    // join first (we need every container's entity table before we know
-    // what bytes to skip / hash), then a hasher thread runs in parallel
-    // with the main thread's symtab parse + `$419` build + body memcpy.
-    //
-    // We also experimented with *per-container pipelined* SHA1 (hash each
-    // container the moment it decompresses, in alphabetical/output order).
-    // That variant did shave ~1 ms off the hot trace, but its OnceLock +
-    // mpsc machinery costs more on average than it saves: process startup
-    // dominates the run, so the channel overhead lands on the warm work
-    // without shortening the cold part. The batch-join variant below wins.
+    // ---- 2. Per-container parse: header + entity table only.
+    // Every entity table lands before the hasher thread starts, and
+    // container_info names only SYSTEM + YJ symbols, which a fresh symtab reads.
     let raws = decompress_containers_parallel(path, &kfx_names)?;
     let raws_refs: Vec<&RawContainer> = raws.iter().collect();
     trace.mark("unzip + shallow parse");
 
-    // Channel for the bodies we synthesize on the main thread ($419 always,
-    // $490 when source metadata needs the `cde_content_type` → "PDOC" rewrite).
-    // The hasher loops until the sender is dropped, picking up each synth
-    // body in the order it was sent.
+    // Synthesized bodies: `$419` always, `$490` under the `cde_content_type` →
+    // "PDOC" rewrite. The hasher loops until the sender drops.
     let (synth_tx, synth_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
     let bytes = std::thread::scope(|scope| -> io::Result<Vec<u8>> {
         let raws_for_sha = &raws_refs;
@@ -159,11 +131,8 @@ fn decompress_containers_parallel(
     path: &Path,
     kfx_names: &[String],
 ) -> io::Result<Vec<RawContainer>> {
-    // Spawn one OS thread per source `.kfx`. Each thread opens its own
-    // `ZipArchive` (central-directory parse is ~tens of microseconds, so
-    // the duplication is cheap) and decompresses one entry. The deflate
-    // work overlaps across threads; wall time is bound by the largest
-    // single source.
+    // One OS thread per source `.kfx`, each opening its own `ZipArchive` and
+    // decompressing one entry. Wall time is bound by the largest source.
     if kfx_names.len() <= 1 {
         return kfx_names.iter().map(|n| decompress_one(path, n)).collect();
     }
@@ -188,11 +157,9 @@ fn decompress_containers_parallel(
     Ok(out)
 }
 
-/// Body byte ranges (offset, length) within a single source container that
-/// should be hashed — i.e. all entity bodies except the ones we synthesize
-/// on the main thread (`$419` always, `$490` because we rewrite
-/// `cde_content_type`). Within one container the entity bodies are laid out
-/// contiguously, so this is at most a handful of `(off, len)` runs.
+/// The `(offset, length)` body ranges of `rc` that reach the hash: every entity
+/// body but the synthesized `$419` and `$490`. Bodies sit contiguously inside
+/// one container, leaving at most a handful of runs.
 fn per_container_hash_chunks(rc: &RawContainer) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::with_capacity(2);
     let mut cur: Option<(usize, usize)> = None;
@@ -276,10 +243,9 @@ fn finish_merge<'a>(
                 continue;
             }
             if row.type_idnum == SYM_DOLLAR_490 {
-                // Parse $490 here so we can rewrite `cde_content_type` to
-                // "PDOC" before re-emitting. We always synthesize the merged
-                // $490 (rather than memcpy from source) because EBOK-flagged
-                // Amazon bundles are sideloaded as personal documents.
+                // The merged `$490` is synthesized, never copied: an EBOK-flagged
+                // Amazon bundle sideloads as a personal document, which
+                // `cde_content_type` states as "PDOC".
                 let body = extract_entity_body(&r.data, row.body_offset, row.body_length)?;
                 let mut node = parse_single_value(body, &symtab)?;
                 if let IonNode::Annotated(_, inner) = node {
@@ -305,7 +271,7 @@ fn finish_merge<'a>(
     }
     trace.mark("aggregate entities");
 
-    let chunks = coalesce_body_chunks(raws, &merged_entities);
+    let chunks = coalesce_body_chunks(&merged_entities);
     let new_419_body = build_419_body(&merged_id, &entity_fids, existing_419_deps);
     let new_419_ion_bytes = serialize_single_value(&new_419_body, &symtab);
     let new_419_entity = wrap_entity_body(&new_419_ion_bytes, &symtab);
@@ -318,7 +284,7 @@ fn finish_merge<'a>(
         let _ = synth_tx.send(entity.clone());
         (entity, id_idnum)
     });
-    // Close the channel so the hasher's `while let Ok(...)` loop exits.
+    // A closed channel ends the hasher's `while let Ok(...)` loop.
     drop(synth_tx);
     trace.mark("build $419 + $490 + sha1-thread fed");
 
@@ -344,12 +310,8 @@ fn finish_merge<'a>(
 }
 
 fn finalize_sha1_backfill(mut out: Vec<u8>, digest: [u8; 20]) -> Vec<u8> {
-    // The placeholder is the first run of 40 ASCII '0' bytes inside
-    // kfxgen_info — which is the only place 40 consecutive '0's can appear
-    // (entity body bytes can hold zeros but never 40 ASCII zeros in a row in
-    // practice, and we sized the placeholder specifically so it's findable).
-    // We use a fixed kfxgen_info template, so the offset was recorded into
-    // the buffer's `sha1_abs_off` slot via [`emit_container_streaming`].
+    // [`emit_container_streaming`] records the placeholder offset into the
+    // buffer's trailing `sha1_abs_off` slot.
     let sha1_abs_off = u32::from_le_bytes([
         out[out.len() - 4],
         out[out.len() - 3],
@@ -383,6 +345,14 @@ fn decompress_one(path: &Path, name: &str) -> io::Result<RawContainer> {
 // Shallow parse
 // =========================================================================
 
+/// The error a container section whose range falls outside the file yields.
+fn out_of_range(section: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{section} offset out of range"),
+    )
+}
+
 fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
     if data.len() < 18 || &data[0..4] != CONT_SIGNATURE {
         return Err(io::Error::new(
@@ -395,11 +365,11 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
     let ci_off = u32_le(&data, 10) as usize;
     let ci_len = u32_le(&data, 14) as usize;
 
-    // Container_info uses only SYSTEM + YJ catalog symbols, so a fresh
-    // (system-only) symtab resolves $409 / $413 / etc. just fine — those are
-    // all `$<id>` canonical names.
+    // container_info names SYSTEM + YJ catalog symbols alone — `$409`, `$413`
+    // and the rest in canonical `$<id>` form — which an empty symtab resolves.
     let probe_symtab = LocalSymbolTable::new();
-    let ci_node = parse_single_value(&data[ci_off..ci_off + ci_len], &probe_symtab)?;
+    let ci_bytes = slice_at(&data, ci_off, ci_len).ok_or_else(|| out_of_range("container_info"))?;
+    let ci_node = parse_single_value(ci_bytes, &probe_symtab)?;
     let ci_fields = ci_node.as_struct().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "container_info is not a struct")
     })?;
@@ -412,34 +382,44 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
     let idx_offset = field_int(ci_fields, "$413");
     let idx_length = field_int(ci_fields, "$414").unwrap_or(0);
 
-    let doc_symbols_range = match (doc_symbol_offset, doc_symbol_length) {
-        (Some(o), l) if l > 0 => Some((o as usize, l as usize)),
-        _ => None,
+    // A range is carried only once it lies inside the file. Every later reader
+    // slices it with no bounds test of its own.
+    let in_range = |offset: Option<i64>, length: i64| -> Option<(usize, usize)> {
+        let (offset, length) = (offset? as usize, length as usize);
+        slice_at(&data, offset, length).map(|_| (offset, length))
     };
-    let format_capabilities_range = match (fc_offset, fc_length) {
-        (Some(o), l) if l > 0 => Some((o as usize, l as usize)),
-        _ => None,
-    };
+    let doc_symbols_range = (doc_symbol_length > 0)
+        .then(|| in_range(doc_symbol_offset, doc_symbol_length))
+        .flatten();
+    let format_capabilities_range = (fc_length > 0)
+        .then(|| in_range(fc_offset, fc_length))
+        .flatten();
 
     let mut entity_rows = Vec::new();
-    if let Some(idx_off) = idx_offset {
-        let idx_off = idx_off as usize;
-        let idx_len = idx_length as usize;
+    if let Some((idx_off, idx_len)) = in_range(idx_offset, idx_length) {
         const ROW: usize = 24;
         let n = idx_len / ROW;
         let table = &data[idx_off..idx_off + idx_len];
         for i in 0..n {
             let base = i * ROW;
+            let body_offset = header_len.saturating_add(clamp_usize(u64_le(table, base + 8)));
+            let body_length = clamp_usize(u64_le(table, base + 16));
+            if slice_at(&data, body_offset, body_length).is_none() {
+                return Err(out_of_range("entity body"));
+            }
             entity_rows.push(RawEntityRow {
                 id_idnum: u32_le(table, base),
                 type_idnum: u32_le(table, base + 4),
-                body_offset: header_len + u64_le(table, base + 8) as usize,
-                body_length: u64_le(table, base + 16) as usize,
+                body_offset,
+                body_length,
             });
         }
     }
 
-    let kfxgen_info_bytes = &data[ci_off + ci_len..header_len];
+    let kfxgen_start = ci_off.saturating_add(ci_len);
+    let kfxgen_info_bytes = data
+        .get(kfxgen_start..header_len)
+        .ok_or_else(|| out_of_range("kfxgen_info"))?;
     let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
     let app_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_application_version")
         .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "appVersion"))
@@ -461,9 +441,8 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
 }
 
 fn populate_symtab_from_doc_symbols(symtab: &mut LocalSymbolTable, bytes: &[u8]) -> io::Result<()> {
-    // We need to parse doc_symbols just to populate the in-memory symtab.
-    // Symbol-table parse uses only the SYSTEM symbols, so an initial empty
-    // symtab is fine.
+    // A symbol-table parse reads SYSTEM symbols alone, which an empty
+    // `LocalSymbolTable` supplies.
     let probe = LocalSymbolTable::new();
     let mut value = parse_single_value(bytes, &probe)?;
     if let IonNode::Annotated(_, inner) = value {
@@ -541,8 +520,8 @@ fn pick_merged_metadata(
         }
     }
 
-    // Prefer asset_id from $490 (kindle_title_metadata). Same rule the
-    // mechanical path uses for parity.
+    // `asset_id` from `$490` (kindle_title_metadata) first — the rule the
+    // mechanical path applies.
     let merged_id = if let Some(asset) = find_asset_id(raws, symtab)? {
         asset
     } else if let Some((_, r)) = largest_container {
@@ -562,8 +541,7 @@ fn pick_merged_metadata(
 }
 
 fn find_asset_id(raws: &[&RawContainer], symtab: &LocalSymbolTable) -> io::Result<Option<String>> {
-    // $490 metadata lives in metadata.kfx as an entity. We must parse it.
-    // It's small (~3 KB), so the cost is negligible.
+    // `$490` metadata is an entity inside `metadata.kfx`, ~3 KB parsed.
     for r in raws {
         for row in &r.entity_rows {
             if row.type_idnum != 490 {
@@ -654,10 +632,9 @@ fn wrap_entity_body(body: &[u8], symtab: &LocalSymbolTable) -> Vec<u8> {
 // Container layout
 // =========================================================================
 
-/// Streaming container emit. Writes the full container minus the SHA1 digest
-/// (which a side thread is computing in parallel). The SHA1 placeholder slot's
-/// absolute offset is appended to the buffer as 4 trailing LE bytes — the
-/// caller strips them off after backfilling the real digest.
+/// Write the full container minus the SHA1 digest, which a side thread
+/// computes. The placeholder slot's absolute offset trails the buffer as 4 LE
+/// bytes, which [`finalize_sha1_backfill`] strips.
 #[allow(clippy::too_many_arguments)]
 fn emit_container_streaming(
     raws: &[&RawContainer],
@@ -702,10 +679,9 @@ fn emit_container_streaming(
     out.extend_from_slice(&[0u8; 4]);
 
     let entity_table_off = out.len();
-    // Entity-table rows. Source rows first (in source-walk order), then
-    // synthesized $419 row, then synthesized $490 row (if present). The
-    // synth-order must match the order bodies are written below AND the
-    // order the SHA1 hasher receives them on the channel.
+    // Entity-table rows: source rows in source-walk order, then the
+    // synthesized `$419`, then the synthesized `$490`. The body writes below
+    // and the hasher channel take that same order.
     let mut entity_offset: u64 = 0;
     for (row, _) in merged_entities {
         out.extend_from_slice(&row.id_idnum.to_le_bytes());
@@ -720,8 +696,8 @@ fn emit_container_streaming(
     out.extend_from_slice(&entity_offset.to_le_bytes());
     out.extend_from_slice(&(new_419_entity.len() as u64).to_le_bytes());
     entity_offset += new_419_entity.len() as u64;
-    // Synthesized $490: reuse the source row's id_idnum (singleton form,
-    // typically $348) so calibre/Kindle resolve it the same way.
+    // The synthesized `$490` keeps the source row's `id_idnum`, the singleton
+    // form `$348`.
     if let Some((body, id_idnum)) = new_490_entity {
         out.extend_from_slice(&id_idnum.to_le_bytes());
         out.extend_from_slice(&SYM_DOLLAR_490.to_le_bytes());
@@ -740,8 +716,7 @@ fn emit_container_streaming(
         out.extend_from_slice(fc);
     }
 
-    // Build container_info struct. Same field ordering as the mechanical
-    // path so calibre's deserializer sees the same shape.
+    // container_info struct, in the mechanical path's field order.
     let mut ci_fields: Vec<(String, IonNode)> = vec![
         ("$409".into(), IonNode::String(merged_id.to_string())),
         ("$410".into(), IonNode::Int(0)),
@@ -762,10 +737,8 @@ fn emit_container_streaming(
     patch_u32_le(&mut out, ci_len_pack, ci_bytes.len() as u32);
     out.extend_from_slice(&ci_bytes);
 
-    // kfxgen_info trailer (calibre's JSON-textish form). We write the SHA1
-    // field with a known-length placeholder (40 zeros), copy the entity
-    // bodies while incrementally hashing them, then backfill the real digest
-    // into the placeholder slot. One pass over the body bytes instead of two.
+    // kfxgen_info trailer, a JSON-textish key/value list. The SHA1 field takes
+    // a 40-zero placeholder, backfilled once the body copy finishes hashing.
     const SHA1_PLACEHOLDER: &str = "0000000000000000000000000000000000000000";
     let kfxgen_info = format!(
         r#"[{{key:"kfxgen_package_version",value:"{}"}},{{key:"kfxgen_application_version",value:"{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
@@ -774,9 +747,8 @@ fn emit_container_streaming(
         SHA1_PLACEHOLDER,
         escape_json(merged_id),
     );
-    // Locate the placeholder inside kfxgen_info so we can backfill after we
-    // know the real hash. The placeholder is unique within the trailer (all
-    // other fields are non-hex prose).
+    // `SHA1_PLACEHOLDER` is unique within the trailer; every other field is
+    // non-hex prose.
     let sha1_local_off = kfxgen_info
         .find(SHA1_PLACEHOLDER)
         .expect("SHA1 placeholder we just wrote must be present");
@@ -787,10 +759,8 @@ fn emit_container_streaming(
     patch_u32_le(&mut out, header_len_pack, header_len_value);
     trace.mark("header laid out");
 
-    // Entity body memcpy only — hashing is handled by the side thread spawned
-    // earlier in `merge_kfx_zip`. The chunks were already coalesced (per-
-    // source contiguous runs, ~5 for a typical book), so this is a tiny
-    // number of large memcpys.
+    // Entity body memcpy; the thread `merge_kfx_zip` spawned does the hashing.
+    // [`coalesce_body_chunks`] leaves a handful of large per-source runs.
     for &(c_idx, off, len) in chunks {
         out.extend_from_slice(&raws[c_idx].data[off..off + len]);
     }
@@ -804,9 +774,8 @@ fn emit_container_streaming(
     // trailer that they strip + read.
     out.extend_from_slice(&(sha1_abs_off as u32).to_le_bytes());
 
-    // version + format alignment with the mechanical path (we don't actually
-    // need `version` in the output; calibre reads it from the on-wire header
-    // u16). The local already has version=2 in the header.
+    // `version` reaches the output through the on-wire header u16, which
+    // carries 2.
     let _ = version;
 
     out
@@ -817,7 +786,7 @@ fn emit_container_streaming(
 // =========================================================================
 
 fn extract_entity_body(data: &[u8], offset: usize, length: usize) -> io::Result<&[u8]> {
-    let body = &data[offset..offset + length];
+    let body = slice_at(data, offset, length).ok_or_else(|| out_of_range("entity body"))?;
     if body.len() < 10 || &body[0..4] != ENTY_SIGNATURE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -892,17 +861,10 @@ fn patch_u32_le(buf: &mut [u8], at: usize, v: u32) {
     buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-/// Group contiguous entity-body byte ranges per source container into one
-/// (or two) merge-able chunks. Returns `(source_container_idx, offset_into_data, length)`.
-///
-/// Within a source `.kfx`, entity bodies are written contiguously starting at
-/// `header_len`. Two adjacent kept entities can be coalesced into a single
-/// `&[u8]` slice — and SHA1 + memcpy of one big slice is much faster than of
-/// many tiny ones (each `sha1::Sha1::update` call has fixed overhead).
-fn coalesce_body_chunks(
-    raws: &[&RawContainer],
-    merged_entities: &[(RawEntityRow, usize)],
-) -> Vec<(usize, usize, usize)> {
+/// Contiguous entity-body ranges per source container, as
+/// `(source_container_idx, offset_into_data, length)`. Bodies sit contiguously
+/// from `header_len`, and two adjacent kept entities coalesce into one `&[u8]`.
+fn coalesce_body_chunks(merged_entities: &[(RawEntityRow, usize)]) -> Vec<(usize, usize, usize)> {
     let mut out: Vec<(usize, usize, usize)> = Vec::with_capacity(8);
     let mut cur: Option<(usize, usize, usize)> = None; // (c_idx, off, len)
     for (row, c_idx) in merged_entities {
@@ -922,10 +884,6 @@ fn coalesce_body_chunks(
     if let Some(c) = cur {
         out.push(c);
     }
-    // We don't actually need `raws` here for the math, but borrowing it
-    // keeps the call site obvious and lets a future change (e.g. bounds
-    // assertions per container) plug in here.
-    let _ = raws;
     out
 }
 
@@ -937,9 +895,3 @@ fn write_hex_lower(src: &[u8; 20], out: &mut [u8; 40]) {
         out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
     }
 }
-
-// Suppress an unused-warning for SYM_DOLLAR_270 — kept for symmetry with the
-// `$270` discussion in the module docs even though the constant isn't read
-// (we emit $270 as a synthesized container_info struct, not an entity row).
-#[allow(dead_code)]
-const _: u32 = SYM_DOLLAR_270;

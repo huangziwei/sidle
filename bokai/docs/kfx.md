@@ -127,7 +127,7 @@ id : u32 [0..3]  |  type : u32 [4..7]  |  offset : u64 [8..15]  |  length : u64 
 
 `offset` is relative to the container's `header_len`; the absolute position of the entity is `header_len + offset`.
 
-The two symbol identifiers carry the entity's whole identity. `type` names the *kind* of record — `$260` for a section, `$259` for a storyline — and is always drawn from the shared symbol table. `id` names the *instance*, and is normally a document-local symbol: resolving it yields the fragment's name, such as `c0` or `content_14`. Singleton fragments, of which a book has at most one, use the reserved id `$348` (`null`) instead of a name.
+The two symbol identifiers carry the entity's whole identity. `type` names the *kind* of record — `$260` for a section, `$259` for a storyline — and is always drawn from the shared symbol table. `id` names the *instance*, and is normally a document-local symbol: resolving it yields the fragment's name, such as `c0` or `content_14`. The reserved id `$348` (`null`) stands where a fragment has no name. A singleton takes it, being addressed by type alone — and so does every instance of a type nothing refers to by name, of which a book may hold many (§6.1).
 
 ### 3.4. Entity wrapper
 
@@ -272,11 +272,13 @@ The same rule governs writing. A producer emitting local symbols **must** declar
 
 Each entity in the container is a *fragment*: a typed, named Ion value. Its type is the index entry's `type` symbol; its name is the resolved `id` symbol. Fragments reference each other *by name*, never by container offset, which is what makes multi-container distribution (§2.2) possible — a fragment does not know or care which container its referent lives in.
 
-A fragment type is either *singleton* — at most one per book, addressed by type alone, carrying the reserved id `$348` — or *named*, with one instance per local symbol. `document_data` and `book_metadata` are singletons; `section`, `storyline` and `style` are named.
+A fragment is either *named*, with one instance per local symbol, or *nameless*, carrying the reserved id `$348` (§3.3). `section`, `storyline` and `style` are named. `document_data` and `book_metadata` are nameless, and a book holds at most one of each, so type alone addresses them.
 
 > **Note**
 >
 > A name is unique per type, not globally. A section and its position map legitimately share the name `c0`, as do a storyline and its ruby content. An implementation keying fragments by name alone will lose records; the key **must** be the pair `(type, name)`.
+
+Nameless does not imply singleton. A book carries one `font` fragment per embedded face (§11.4) and every one of them takes `$348`, so `(type, name)` does not tell two faces apart. A reader **must** key nameless fragments by something outside that pair — their order in the index table is all the container offers — or it keeps one per type and drops the rest.
 
 A container may nonetheless list one fragment twice: the same `(type, name)` at two index-table offsets, over byte-identical payloads. `auxiliary_data` markers occur this way. A reader keying by `(type, name)` keeps one of the two and loses nothing, and **must not** read the repeat as corruption. Two entries sharing a key over *different* bytes are a different matter: whichever the reader keeps, the other record is unreachable.
 
@@ -689,7 +691,7 @@ Embedded fonts appear as `$262` `font` fragments, with the bytes in a `bcRawFont
   location:     "resource/rsrcPWZ" }
 ```
 
-The descriptor is a direct CSS `@font-face` analogue: five fields, no more. One fragment describes one face, so a family shipped in four weights is four fragments sharing a `font_family` and differing in `font_style` / `font_weight`.
+The descriptor is a direct CSS `@font-face` analogue: five fields, no more. One fragment describes one face, so a family shipped in four weights is four fragments sharing a `font_family` and differing in `font_style` / `font_weight`. Every one of them carries the reserved id `$348` rather than a name (§6.1): a book's faces are told apart by `location` and the descriptor fields, never by fragment name.
 
 Subsetting is visible in the naming rather than declared in a field. Families such as `cover-Charis`, `cover-Roboto-Medium` and `Kafk_9780307829481_epub_cvi_r1-Charis` show the producer prefixing the family with its use site, so the same typeface used on a cover and in body text becomes two independently subsetted faces under two family names. A converter **must** preserve the mangled family name, since the style fragments reference it verbatim.
 
@@ -839,7 +841,7 @@ A producer **should not** attempt to bound the symbol ids it emits by any device
 
 ## A. Fragment type registry
 
-Ids are symbols in the shared table; "cardinality" distinguishes singletons from named fragments (§6.1).
+Ids are symbols in the shared table; "cardinality" is how the fragment is identified and how many a book holds — *named* (one per local symbol), *singleton* (nameless, at most one) or *nameless* (no name, several per book). See §6.1.
 
 *Fragment types*
 
@@ -851,7 +853,7 @@ Ids are symbols in the shared table; "cardinality" distinguishes singletons from
 | $258 | metadata | singleton | Legacy flat metadata; also a fallback home for reading orders (§13.2). |
 | $259 | storyline | named | Content tree (§7.3). |
 | $260 | section | named | Spine item with page templates (§7.2). |
-| $262 | font | named | Embedded font descriptor (§11.4). |
+| $262 | font | nameless | Embedded font descriptor, one per face (§11.4). |
 | $264 | position_map | singleton | Section-level position summary. |
 | $265 | position_id_map | singleton | Element id to position id (§10.1). |
 | $266 | anchor | named | Named position or external URI (§9.3). |

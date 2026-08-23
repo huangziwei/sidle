@@ -2,12 +2,13 @@
 //!
 //! Parses the container, resolves every fragment's name from the symbol
 //! table, and groups the fragments by ftype symbol id. A `bcRawMedia` ($417)
-//! value is the raw payload bytes; every other value is a parsed `IonValue`.
+//! or `bcRawFont` ($418) value is the raw payload bytes; every other value is
+//! a parsed `IonValue`.
 //!
 //! Loading is eager: a KFX container runs to a few hundred entities under
 //! 100 MB.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::formats::kfx::container::{
     EntityLoc, entity_media, get_field, parse_container_header, parse_container_info,
@@ -43,18 +44,21 @@ pub struct BookMetadata {
     pub author_pronunciations: Vec<String>,
 }
 
-/// A KFX container's fragments, media and symbols, as an EPUB write reads
-/// them.
+/// A KFX container's fragments, media and symbols.
 pub struct BookData {
     /// All entities indexed by `(ftype_symbol_id, fid_string)`: the KFX type
     /// id (164 = `external_resource`) and the symbol table's resolved name
-    /// (`"content_30"`). `bcRawMedia` ($417) lives in `raw_media`.
+    /// (`"content_30"`). The raw payload types live in `raw_media`.
     pub by_type: HashMap<u64, HashMap<String, IonValue>>,
 
-    /// `bcRawMedia` payloads, keyed by entity name (e.g. `"resource/rsrc562"`).
-    ///
-    /// Raw bytes, often large, held apart from `by_type`'s parsed Ion.
+    /// `bcRawMedia` ($417) and `bcRawFont` ($418) payloads, keyed by entity name
+    /// (e.g. `"resource/rsrc562"`) — the `location` an `external_resource` or a
+    /// `font` fragment names. Large, held apart from `by_type`'s parsed Ion.
     pub raw_media: HashMap<String, Vec<u8>>,
+
+    /// The [`Self::raw_media`] keys whose bytes arrived as `bcRawFont` ($418).
+    /// §11.4 puts a typeface there and never in `bcRawMedia`.
+    pub font_locations: HashSet<String>,
 
     /// Resolved symbol table (KFX base + container doc_symbols), indexed by
     /// full symbol id: a base symbol below the container's declared import
@@ -102,27 +106,23 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
 
     let mut by_type: HashMap<u64, HashMap<String, IonValue>> = HashMap::new();
     let mut raw_media: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut font_locations: HashSet<String> = HashSet::new();
 
-    for ent in &entities {
+    for (row, ent) in entities.iter().enumerate() {
         let Some(payload) = entity_media(kfx_bytes, ent) else {
             continue;
         };
 
-        // bcRawMedia ($417): raw image/font bytes, keyed by the entity id's
-        // resolved symbol name (e.g. "resource/rsrc562") — the `location` of
-        // the matching external_resource.
-        if ent.type_id == KfxSymbol::Bcrawmedia as u32 {
+        // bcRawMedia ($417) and bcRawFont ($418) hold the media file verbatim
+        // (§11.2), keyed by the entity id's resolved symbol name — the
+        // `location` an external_resource or a font fragment names.
+        if ent.type_id == KfxSymbol::Bcrawmedia as u32 || ent.type_id == KfxSymbol::Bcrawfont as u32
+        {
             let key = symbols.resolve(ent.id as u64).to_string();
             if !key.is_empty() && key != "?" {
-                raw_media.insert(key, payload.to_vec());
-            }
-            continue;
-        }
-
-        // bcRawFont ($418): raw bytes, keyed the same way as bcRawMedia.
-        if ent.type_id == KfxSymbol::Bcrawfont as u32 {
-            let key = symbols.resolve(ent.id as u64).to_string();
-            if !key.is_empty() && key != "?" {
+                if ent.type_id == KfxSymbol::Bcrawfont as u32 {
+                    font_locations.insert(key.clone());
+                }
                 raw_media.insert(key, payload.to_vec());
             }
             continue;
@@ -133,7 +133,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
             continue;
         };
 
-        let fid = resolve_fid(ent, &value, &symbols);
+        let fid = resolve_fid(ent, row, &symbols);
         by_type
             .entry(ent.type_id as u64)
             .or_default()
@@ -145,6 +145,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
     Ok(BookData {
         by_type,
         raw_media,
+        font_locations,
         symbols,
         metadata,
     })
@@ -156,14 +157,19 @@ pub(crate) fn empty_book_for_test() -> BookData {
     BookData {
         by_type: HashMap::new(),
         raw_media: HashMap::new(),
+        font_locations: HashSet::new(),
         symbols: SymbolTable::from_fragment(None),
         metadata: BookMetadata::default(),
     }
 }
 
-/// An entity's fragment id, taken from the index entry's `id` symbol. The
-/// payload's own `resource_name` / `style_name` restates it.
-fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> String {
+/// An entity's fragment id: the index entry's `id` symbol, or `row` under the
+/// reserved id `$348`, which §3.3 gives a fragment carrying no name. A book
+/// holds one nameless `font` fragment per embedded face.
+fn resolve_fid(ent: &EntityLoc, row: usize, symbols: &SymbolTable) -> String {
+    if ent.id as u64 == KfxSymbol::Null as u64 {
+        return format!("#nameless_{row}");
+    }
     crate::formats::kfx::resource_index::entity_fid(ent.id as u64, symbols)
 }
 

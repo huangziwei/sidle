@@ -23,14 +23,23 @@
 //! - **Rule 4, content refs resolve** — every `$145 content` `{name,index}`
 //!   indirection resolves to a real shared `$145 content` block (error:
 //!   dropped text).
-//! - **Rule 5, nav reachability** — every navigation entry targets an element
-//!   some storyline contains; a dangling target tap-jumps to nowhere
+//! - **Rule 5, nav and link reachability** — every navigation entry targets an
+//!   element some storyline contains; a dangling target tap-jumps to nowhere
 //!   (warning). Delegates to `fidelity::nav`'s extraction, which exempts
-//!   cover / section-root positions via `cover_target`.
+//!   cover / section-root positions via `cover_target`. A `nav_containers`
+//!   entry naming a separate `nav_container` ($391) fragment resolves to one
+//!   (error: the whole list is gone), every `link_to` ($179) names an anchor,
+//!   and every anchor's `position` names an element the walk reached.
 //! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
-//!   names a real `style` entity (warning: unstyled render).
-//! - **Rule 7, resource refs resolve** — every `external_resource` that names
-//!   a `location` has its bytes embedded in the container.
+//!   names a real `style` entity (warning: unstyled render), and a
+//!   style_event's `ruby_name` ($757) names a `ruby_content` ($756) declaring
+//!   every `ruby_id` ($758) it selects (§8.7).
+//! - **Rule 7, resource refs resolve** — every `external_resource` and every
+//!   `font` ($262) that names a `location` has its bytes embedded, a font's
+//!   under `bcRawFont` ($418); every `resource_name` ($175) an element cites
+//!   and every `background_image` ($479) a style declares names a real
+//!   `external_resource`; and every embedded payload is named by one of them
+//!   (info: orphan bytes).
 //! - **Rule 8, position-map coverage** — every reading-order section appears
 //!   in the `position_map` ($264), the device's "go to location" target
 //!   (warning; runs only on a container holding a `position_map`, some KFX
@@ -107,9 +116,12 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_required_entities(&book.by_type));
     findings.extend(check_references(&book));
     findings.extend(check_resource_bytes(&book));
+    findings.extend(check_font_bytes(&book));
+    findings.extend(check_orphan_payloads(&book));
     findings.extend(check_cover(&book));
     findings.extend(check_metadata(&book, container_id(bytes).as_deref()));
     findings.extend(check_nav_reachability(bytes));
+    findings.extend(check_nav_containers(&book));
     findings.extend(check_nav_vocabulary(&book));
     findings.extend(check_position_map_coverage(&book));
     findings.extend(check_position_arithmetic(&book));
@@ -473,6 +485,17 @@ struct WalkDefects {
     /// `content` ($145) `{name,index}` indirections that don't resolve to a
     /// `$145 content` string (rule 4).
     missing_content: BTreeSet<String>,
+    /// `resource_name` ($175) refs that name no `external_resource` ($164).
+    missing_resources: BTreeSet<String>,
+    /// `background_image` ($479) refs that name no `external_resource`.
+    missing_backgrounds: BTreeSet<String>,
+    /// `link_to` ($179) refs that name no `anchor` ($266).
+    missing_link_targets: BTreeSet<String>,
+    /// `ruby_name` ($757) refs that name no `ruby_content` ($756).
+    missing_ruby: BTreeSet<String>,
+    /// `ruby_id` ($758) selections the named `ruby_content` has no annotation
+    /// for, rendered `<ruby_name>#<ruby_id>`.
+    out_of_range_ruby: BTreeSet<String>,
     /// `type` ($159) values the import schema holds no strategy for.
     unknown_types: BTreeSet<String>,
     /// `writing_mode` ($560) values outside [`WRITING_MODES`].
@@ -503,11 +526,12 @@ struct WalkDefects {
     out_of_range_cells: BTreeSet<String>,
 }
 
-/// Rules 3, 6 & 13. Walk reading order → section → page_templates →
-/// referenced storylines for unresolved references and element-level
-/// arithmetic defects, then sweep the `style` entities for their lengths.
+/// Rules 3, 5, 6, 7 & 13. Walk reading order → section → page_templates →
+/// referenced storylines, sweep the `style` entities, then read each `anchor`
+/// against the element population the walk met.
 fn check_references(book: &BookData) -> Vec<Finding> {
     let mut defects = WalkDefects::default();
+    let index = RefIndex::build(book);
     // One visited set guards cycles in storyline and structure fragments,
     // namespaced against a shared name.
     let mut visited: HashSet<String> = HashSet::new();
@@ -518,7 +542,7 @@ fn check_references(book: &BookData) -> Vec<Finding> {
                 if !has_page_template(section) {
                     defects.empty_sections.insert(section_name.clone());
                 }
-                walk_refs(section, book, None, &mut visited, &mut defects);
+                walk_refs(section, book, &index, None, &mut visited, &mut defects);
             }
             None => {
                 defects.missing_sections.insert(section_name);
@@ -528,7 +552,7 @@ fn check_references(book: &BookData) -> Vec<Finding> {
 
     if let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) {
         for style in styles.values() {
-            scan_lengths(style, book, &mut defects);
+            scan_style_fields(style, book, &mut defects);
         }
     }
 
@@ -569,6 +593,63 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             format!(
                 "an element's content references shared block {name:?} ($145) but it doesn't resolve — that text is missing"
             ),
+        ));
+    }
+    for name in &defects.missing_resources {
+        findings.push(error(
+            "resource-unresolved",
+            name,
+            format!(
+                "an element names resource {name:?} ($175) but no external_resource declares it \
+                 — the image is dropped"
+            ),
+        ));
+    }
+    for name in &defects.missing_backgrounds {
+        findings.push(warning(
+            "background-image-unresolved",
+            name,
+            format!(
+                "a style names background_image {name:?} ($479) but no external_resource \
+                 declares it — the background does not draw"
+            ),
+            None,
+        ));
+    }
+    for name in &defects.missing_link_targets {
+        findings.push(warning(
+            "link-target-unresolved",
+            name,
+            format!(
+                "a link_to ($179) names anchor {name:?} but no anchor entity carries that name \
+                 — tapping the link goes nowhere"
+            ),
+            Some(FixHint::new(
+                "fix-link-target",
+                "repoint the link at a real anchor, or drop the link_to",
+            )),
+        ));
+    }
+    for name in &defects.missing_ruby {
+        findings.push(warning(
+            "ruby-unresolved",
+            name,
+            format!(
+                "a style_event names ruby_content {name:?} ($757) but no such fragment exists — \
+                 the annotation it selects has no text"
+            ),
+            None,
+        ));
+    }
+    for selection in &defects.out_of_range_ruby {
+        findings.push(warning(
+            "ruby-id-out-of-range",
+            selection,
+            format!(
+                "a style_event selects ruby annotation {selection} ($758) but that ruby_content \
+                 declares no such id — the annotation renders empty"
+            ),
+            None,
         ));
     }
     for name in &defects.unknown_types {
@@ -688,7 +769,104 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             None,
         ));
     }
+    findings.extend(check_anchor_targets(book, &defects.seen_eids));
     findings
+}
+
+/// The name sets a reference in the content graph resolves against, built
+/// once before the walk.
+struct RefIndex {
+    /// Every name a `link_to` ($179) may reach: an `anchor` ($266) fragment's
+    /// id and the `anchor_name` ($180) it states.
+    anchors: HashSet<String>,
+    /// Each `ruby_content` ($756) name against the `ruby_id` ($758) values its
+    /// `content_list` declares.
+    ruby: HashMap<String, HashSet<i64>>,
+}
+
+impl RefIndex {
+    fn build(book: &BookData) -> Self {
+        let mut anchors = HashSet::new();
+        if let Some(entities) = book.by_type.get(&(KfxSymbol::Anchor as u64)) {
+            for (fid, value) in entities {
+                anchors.insert(fid.clone());
+                if let Some(fields) = value.unwrap_annotated().as_struct()
+                    && let Some(name) = get_field(fields, KfxSymbol::AnchorName as u64)
+                        .and_then(|v| book.symbols.text_of(v))
+                {
+                    anchors.insert(name.to_string());
+                }
+            }
+        }
+
+        let mut ruby: HashMap<String, HashSet<i64>> = HashMap::new();
+        if let Some(entities) = book.by_type.get(&(KfxSymbol::RubyContent as u64)) {
+            for (fid, value) in entities {
+                let Some(fields) = value.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                let name = get_field(fields, KfxSymbol::RubyName as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or(fid);
+                let ids = ruby.entry(name.to_string()).or_default();
+                let entries = get_field(fields, KfxSymbol::ContentList as u64)
+                    .and_then(|v| v.unwrap_annotated().as_list())
+                    .map(<[IonValue]>::to_vec)
+                    .unwrap_or_default();
+                for entry in &entries {
+                    if let Some(ef) = entry.unwrap_annotated().as_struct()
+                        && let Some(id) =
+                            get_field(ef, KfxSymbol::RubyId as u64).and_then(|v| v.as_int())
+                    {
+                        ids.insert(id);
+                    }
+                }
+            }
+        }
+
+        Self { anchors, ruby }
+    }
+}
+
+/// Rule 5's anchor half (§9.3). An `anchor` ($266) carrying a `position`
+/// names an element by id; `seen_eids` is the element population the content
+/// walk met. A URI anchor addresses no element and is skipped.
+fn check_anchor_targets(book: &BookData, seen_eids: &HashSet<i64>) -> Vec<Finding> {
+    let Some(anchors) = book.by_type.get(&(KfxSymbol::Anchor as u64)) else {
+        return Vec::new();
+    };
+    // Sorted names hold the finding order steady across HashMap iterations.
+    let mut names: Vec<&String> = anchors.keys().collect();
+    names.sort();
+
+    let mut out = Vec::new();
+    for name in names {
+        let Some(fields) = anchors[name].unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(eid) = get_field(fields, KfxSymbol::Position as u64)
+            .and_then(|v| v.unwrap_annotated().as_struct())
+            .and_then(|pos| get_field(pos, KfxSymbol::Id as u64))
+            .and_then(|v| v.as_int())
+        else {
+            continue;
+        };
+        if !seen_eids.contains(&eid) {
+            out.push(warning(
+                "anchor-target-unresolved",
+                name,
+                format!(
+                    "anchor {name:?} targets element {eid} but the reading order reaches no \
+                     element with that id — every link to it lands nowhere"
+                ),
+                Some(FixHint::new(
+                    "fix-anchor-target",
+                    "repoint the anchor at a real element, or drop it",
+                )),
+            ));
+        }
+    }
+    out
 }
 
 /// The `writing_mode` ($560) values, matching CSS.
@@ -794,6 +972,22 @@ fn collect_rows(value: &IonValue, out: &mut Vec<usize>) {
 /// The unit a finding names for a `unit` ($306) that is no symbol or string.
 const NAMELESS_UNIT: &str = "(not a name)";
 
+/// The style-level facts any struct may carry. The content walk calls it on an
+/// element's inline properties, [`scan_style_fields`] on every struct inside a
+/// `style` entity.
+fn check_style_fields(fields: &[(u64, IonValue)], book: &BookData, out: &mut WalkDefects) {
+    check_length(fields, book, out);
+
+    // §11.1 — `background_image` ($479) is a symbol naming an
+    // `external_resource`, not a URL.
+    if let Some(name) =
+        get_field(fields, KfxSymbol::BackgroundImage as u64).and_then(|v| book.symbols.text_of(v))
+        && resource_named(book, name).is_none()
+    {
+        out.missing_backgrounds.insert(name.to_string());
+    }
+}
+
 /// One `{value, unit}` length (§8.2): the unit is a CSS length unit and the
 /// magnitude is a number. A struct carrying no `unit` ($306) is no length.
 fn check_length(fields: &[(u64, IonValue)], book: &BookData, out: &mut WalkDefects) {
@@ -896,18 +1090,18 @@ fn check_important_cells(fields: &[(u64, IonValue)], table: &IonValue, out: &mut
     }
 }
 
-/// [`check_length`] over every struct in `value`.
-fn scan_lengths(value: &IonValue, book: &BookData, out: &mut WalkDefects) {
+/// [`check_style_fields`] over every struct in `value`.
+fn scan_style_fields(value: &IonValue, book: &BookData, out: &mut WalkDefects) {
     match value.unwrap_annotated() {
         IonValue::Struct(fields) => {
-            check_length(fields, book, out);
+            check_style_fields(fields, book, out);
             for (_, v) in fields {
-                scan_lengths(v, book, out);
+                scan_style_fields(v, book, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                scan_lengths(item, book, out);
+                scan_style_fields(item, book, out);
             }
         }
         _ => {}
@@ -960,6 +1154,7 @@ fn reading_order_sections(book: &BookData) -> Vec<String> {
 fn walk_refs(
     value: &IonValue,
     book: &BookData,
+    index: &RefIndex,
     parent_type: Option<u64>,
     visited: &mut HashSet<String>,
     out: &mut WalkDefects,
@@ -970,7 +1165,7 @@ fn walk_refs(
             if let Some(frag) = lookup(book, KfxSymbol::Structure, &name)
                 && visited.insert(format!("struct:{name}"))
             {
-                walk_refs(frag, book, parent_type, visited, out);
+                walk_refs(frag, book, index, parent_type, visited, out);
             }
         }
         IonValue::Struct(fields) => {
@@ -1000,7 +1195,7 @@ fn walk_refs(
                 match lookup(book, KfxSymbol::Storyline, story_name) {
                     Some(storyline) => {
                         if visited.insert(format!("story:{story_name}")) {
-                            walk_refs(storyline, book, None, visited, out);
+                            walk_refs(storyline, book, index, None, visited, out);
                         }
                     }
                     None => {
@@ -1008,6 +1203,25 @@ fn walk_refs(
                     }
                 }
             }
+
+            // Rule 7 — `$175 resource_name` names an `external_resource`
+            // ($164), the fragment describing the picture (§11.1).
+            if let Some(resource) = get_field(fields, KfxSymbol::ResourceName as u64)
+                .and_then(|v| book.symbols.text_of(v))
+                && resource_named(book, resource).is_none()
+            {
+                out.missing_resources.insert(resource.to_string());
+            }
+
+            // Rule 5 — `$179 link_to` names an `anchor` ($266) (§9.3).
+            if let Some(target) =
+                get_field(fields, KfxSymbol::LinkTo as u64).and_then(|v| book.symbols.text_of(v))
+                && !index.anchors.contains(target)
+            {
+                out.missing_link_targets.insert(target.to_string());
+            }
+
+            check_ruby_selection(fields, book, index, out);
 
             let element_type =
                 get_field(fields, KfxSymbol::Type as u64).and_then(|v| v.as_symbol());
@@ -1039,8 +1253,8 @@ fn walk_refs(
                 out.duplicate_eids.insert(eid);
             }
 
-            // §8.2 — the element's own inline lengths.
-            check_length(fields, book, out);
+            // §8.2 / §11.1 — the element's own inline style properties.
+            check_style_fields(fields, book, out);
 
             // §8.4 / §7.4 — ranges over the base text. An element with no
             // `content` draws its text from interleaved children.
@@ -1073,15 +1287,57 @@ fn walk_refs(
             // through a `content_list` wrapper.
             let child_parent = element_type.or(parent_type);
             for (_, v) in fields {
-                walk_refs(v, book, child_parent, visited, out);
+                walk_refs(v, book, index, child_parent, visited, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                walk_refs(item, book, parent_type, visited, out);
+                walk_refs(item, book, index, parent_type, visited, out);
             }
         }
         _ => {}
+    }
+}
+
+/// §8.7. A struct naming a `ruby_content` fragment selects annotations from
+/// it by `ruby_id` ($758), or by the per-sub-range ids in `ruby_id_list`
+/// ($759). Ids are one-based, and the named fragment declares which exist.
+fn check_ruby_selection(
+    fields: &[(u64, IonValue)],
+    book: &BookData,
+    index: &RefIndex,
+    out: &mut WalkDefects,
+) {
+    let Some(name) =
+        get_field(fields, KfxSymbol::RubyName as u64).and_then(|v| book.symbols.text_of(v))
+    else {
+        return;
+    };
+    let Some(declared) = index.ruby.get(name) else {
+        out.missing_ruby.insert(name.to_string());
+        return;
+    };
+
+    let mut selected: Vec<i64> = get_field(fields, KfxSymbol::RubyId as u64)
+        .and_then(|v| v.as_int())
+        .into_iter()
+        .collect();
+    if let Some(entries) =
+        get_field(fields, KfxSymbol::RubyIdList as u64).and_then(|v| v.unwrap_annotated().as_list())
+    {
+        for entry in entries {
+            if let Some(ef) = entry.unwrap_annotated().as_struct()
+                && let Some(id) = get_field(ef, KfxSymbol::RubyId as u64).and_then(|v| v.as_int())
+            {
+                selected.push(id);
+            }
+        }
+    }
+
+    for id in selected {
+        if id < 1 || !declared.contains(&id) {
+            out.out_of_range_ruby.insert(format!("{name}#{id}"));
+        }
     }
 }
 
@@ -1149,6 +1405,124 @@ fn check_resource_bytes(book: &BookData) -> Vec<Finding> {
     out
 }
 
+/// The fields of the `external_resource` ($164) named `name`, matched on its
+/// `resource_name` ($175) field or, absent one, its entity id.
+fn resource_named<'b>(book: &'b BookData, name: &str) -> Option<&'b [(u64, IonValue)]> {
+    let resources = book.by_type.get(&(KfxSymbol::ExternalResource as u64))?;
+    resources.iter().find_map(|(fid, value)| {
+        let fields = value.unwrap_annotated().as_struct()?;
+        let declared = get_field(fields, KfxSymbol::ResourceName as u64)
+            .and_then(|v| book.symbols.text_of(v))
+            .unwrap_or(fid);
+        (declared == name).then_some(fields)
+    })
+}
+
+/// Rule 7's font half (§11.4). Every `font` ($262) fragment names a
+/// `location` whose bytes are embedded as `bcRawFont` ($418).
+fn check_font_bytes(book: &BookData) -> Vec<Finding> {
+    let Some(fonts) = book.by_type.get(&(KfxSymbol::Font as u64)) else {
+        return Vec::new();
+    };
+
+    // Sorted names hold the finding order steady across HashMap iterations.
+    let mut names: Vec<&String> = fonts.keys().collect();
+    names.sort();
+
+    let mut out = Vec::new();
+    for name in names {
+        let Some(fields) = fonts[name].unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(location) =
+            get_field(fields, KfxSymbol::Location as u64).and_then(|v| v.as_string())
+        else {
+            out.push(error(
+                "font-missing-bytes",
+                name,
+                format!(
+                    "font {name:?} states no location ($165) — the face it describes has no bytes"
+                ),
+            ));
+            continue;
+        };
+        if !book.raw_media.contains_key(location) {
+            out.push(error(
+                "font-missing-bytes",
+                location,
+                format!(
+                    "font {name:?} points to location {location:?} but no embedded bytes exist \
+                     for it — its text falls back to a device face"
+                ),
+            ));
+        } else if !book.font_locations.contains(location) {
+            out.push(warning(
+                "font-bytes-wrong-type",
+                location,
+                format!(
+                    "font {name:?} points to location {location:?}, whose bytes are a bcRawMedia \
+                     ($417) entity — §11.4 puts a typeface in bcRawFont ($418)"
+                ),
+                None,
+            ));
+        }
+    }
+    out
+}
+
+/// Rule 7's orphan half. Every embedded payload is named by the fragment
+/// describing it: a `bcRawMedia` ($417) by an `external_resource` `location`,
+/// a `bcRawFont` ($418) by a `font` `location`.
+fn check_orphan_payloads(book: &BookData) -> Vec<Finding> {
+    let mut referenced: HashSet<&str> = HashSet::new();
+    for ftype in [KfxSymbol::ExternalResource, KfxSymbol::Font] {
+        let Some(entities) = book.by_type.get(&(ftype as u64)) else {
+            continue;
+        };
+        for value in entities.values() {
+            if let Some(fields) = value.unwrap_annotated().as_struct()
+                && let Some(location) =
+                    get_field(fields, KfxSymbol::Location as u64).and_then(|v| v.as_string())
+            {
+                referenced.insert(location);
+            }
+        }
+    }
+
+    // Sorted names hold the finding order steady across HashMap iterations.
+    let mut orphans: Vec<&String> = book
+        .raw_media
+        .keys()
+        .filter(|location| !referenced.contains(location.as_str()))
+        .collect();
+    orphans.sort();
+
+    orphans
+        .into_iter()
+        .map(|location| {
+            if book.font_locations.contains(location) {
+                info(
+                    "font-bytes-unreferenced",
+                    location,
+                    format!(
+                        "bcRawFont {location:?} is named by no font fragment — the typeface \
+                         ships without a face describing it"
+                    ),
+                )
+            } else {
+                info(
+                    "media-bytes-unreferenced",
+                    location,
+                    format!(
+                        "bcRawMedia {location:?} is named by no external_resource — the bytes \
+                         ship without a resource describing them"
+                    ),
+                )
+            }
+        })
+        .collect()
+}
+
 // ============================================================================
 // Rule 9 — cover present and resolves
 // ============================================================================
@@ -1177,23 +1551,10 @@ fn check_cover(book: &BookData) -> Vec<Finding> {
     }
 }
 
-/// True when some `external_resource` is named `cover_name` (by its
-/// `resource_name` field, or its entity id as a fallback) and its `location`
-/// resolves to embedded bytes.
+/// True when the `external_resource` named `cover_name` exists and its
+/// `location` resolves to embedded bytes.
 fn cover_resource_resolves(book: &BookData, cover_name: &str) -> bool {
-    let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
-        return false;
-    };
-    resources.iter().any(|(fid, value)| {
-        let Some(fields) = value.unwrap_annotated().as_struct() else {
-            return false;
-        };
-        let resource_name = get_field(fields, KfxSymbol::ResourceName as u64)
-            .and_then(|v| book.symbols.text_of(v))
-            .unwrap_or(fid);
-        if resource_name != cover_name {
-            return false;
-        }
+    resource_named(book, cover_name).is_some_and(|fields| {
         get_field(fields, KfxSymbol::Location as u64)
             .and_then(|v| v.as_string())
             .is_some_and(|location| book.raw_media.contains_key(location))
@@ -1338,6 +1699,61 @@ fn check_nav_vocabulary(book: &BookData) -> Vec<Finding> {
                 "nav-type-unknown",
                 &name,
                 format!("a nav_container states nav_type {name:?}, outside {NAV_TYPES:?}"),
+            )
+        })
+        .collect()
+}
+
+/// Rule 5's container half (§9.1). A `book_navigation` ($389) lists its
+/// `nav_containers` ($392) inline or as a symbol naming a separate
+/// `nav_container` ($391) fragment. A symbol naming none takes its list along.
+fn check_nav_containers(book: &BookData) -> Vec<Finding> {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return Vec::new();
+    };
+    let defined = book.by_type.get(&(KfxSymbol::NavContainer as u64));
+
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let reading_orders: Vec<&IonValue> = match unwrapped {
+            IonValue::List(items) => items.iter().collect(),
+            IonValue::Struct(_) => vec![unwrapped],
+            _ => Vec::new(),
+        };
+        for reading_order in reading_orders {
+            let Some(containers) = reading_order
+                .as_struct()
+                .and_then(|fields| get_field(fields, KfxSymbol::NavContainers as u64))
+                .and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let inner = container.unwrap_annotated();
+                if inner.as_struct().is_some() {
+                    continue; // Inline form: the container is the value.
+                }
+                let Some(name) = book.symbols.text_of(inner) else {
+                    continue;
+                };
+                if !defined.is_some_and(|m| m.contains_key(name)) {
+                    missing.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    missing
+        .into_iter()
+        .map(|name| {
+            error(
+                "nav-container-unresolved",
+                &name,
+                format!(
+                    "book_navigation names nav_container {name:?} but no such fragment exists — \
+                     every entry it held is gone"
+                ),
             )
         })
         .collect()
@@ -2168,8 +2584,8 @@ mod tests {
         .build();
         assert!(check_entity_index(&distinct).is_empty());
 
-        // Singletons all carry the reserved id `$348`; `singleton-repeated`
-        // counts those.
+        // A repeated reserved id `$348` names no fragment (§3.3);
+        // `singleton-repeated` counts those.
         let singletons = Container {
             entities: vec![
                 row(KfxSymbol::DocumentData, KfxSymbol::Null as u64 as u32).holding(ion_payload()),
@@ -3200,5 +3616,337 @@ mod tests {
             .by_type
             .insert(KfxSymbol::YjLocationPidMap as u64, map(&[0, 2, 2, 8, 13]));
         assert!(check_position_arithmetic(&repeated).is_empty());
+    }
+
+    // --- Rule 5 & 7: the resolution family -------------------------------
+
+    /// A one-entry `external_resource` ($164) map, named by its entity id.
+    fn named_resource(name: &str, location: &str) -> HashMap<String, IonValue> {
+        HashMap::from([(name.to_string(), resource(Some(location)))])
+    }
+
+    #[test]
+    fn element_naming_an_absent_resource_is_flagged() {
+        let image = |name: &str| {
+            IonValue::Struct(vec![(
+                KfxSymbol::ResourceName as u64,
+                IonValue::String(name.to_string()),
+            )])
+        };
+
+        let dangling = book_with_element(image("eF"));
+        let out = check_references(&dangling);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "resource-unresolved");
+        assert_eq!(out[0].severity, Severity::Error);
+        assert_eq!(out[0].location, "eF");
+
+        let mut declared = book_with_element(image("eF"));
+        declared.by_type.insert(
+            KfxSymbol::ExternalResource as u64,
+            named_resource("eF", "resource/rsrc7"),
+        );
+        assert!(check_references(&declared).is_empty());
+    }
+
+    #[test]
+    fn style_naming_an_absent_background_image_is_flagged() {
+        let styled = |name: &str| {
+            HashMap::from([(
+                "sty1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::BackgroundImage as u64,
+                    IonValue::String(name.to_string()),
+                )]),
+            )])
+        };
+
+        let mut dangling = loader::empty_book_for_test();
+        dangling
+            .by_type
+            .insert(KfxSymbol::Style as u64, styled("bg"));
+        let out = check_references(&dangling);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "background-image-unresolved");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        let mut declared = loader::empty_book_for_test();
+        declared
+            .by_type
+            .insert(KfxSymbol::Style as u64, styled("bg"));
+        declared.by_type.insert(
+            KfxSymbol::ExternalResource as u64,
+            named_resource("bg", "resource/rsrc9"),
+        );
+        assert!(check_references(&declared).is_empty());
+    }
+
+    /// An `anchor` ($266) at `eid`, or an external one when `eid` is `None`.
+    fn anchor(name: &str, eid: Option<i64>) -> (String, IonValue) {
+        let target = match eid {
+            Some(eid) => (
+                KfxSymbol::Position as u64,
+                IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(eid))]),
+            ),
+            None => (
+                KfxSymbol::Uri as u64,
+                IonValue::String("https://example.com".to_string()),
+            ),
+        };
+        (
+            name.to_string(),
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::AnchorName as u64,
+                    IonValue::String(name.to_string()),
+                ),
+                target,
+            ]),
+        )
+    }
+
+    #[test]
+    fn link_naming_no_anchor_is_flagged() {
+        let link = |name: &str| {
+            IonValue::Struct(vec![(
+                KfxSymbol::LinkTo as u64,
+                IonValue::String(name.to_string()),
+            )])
+        };
+
+        let dangling = book_with_element(link("a19X"));
+        let out = check_references(&dangling);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "link-target-unresolved");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "a19X");
+
+        // The anchor exists and targets the element carrying the link: nothing
+        // dangles in either direction.
+        let mut resolved = book_with_elements(vec![element_with_id(849), link("a19X")]);
+        resolved.by_type.insert(
+            KfxSymbol::Anchor as u64,
+            HashMap::from([anchor("a19X", Some(849))]),
+        );
+        assert!(check_references(&resolved).is_empty());
+    }
+
+    #[test]
+    fn anchor_targeting_no_element_is_flagged() {
+        let mut dangling = book_with_element(element_with_id(849));
+        dangling.by_type.insert(
+            KfxSymbol::Anchor as u64,
+            HashMap::from([anchor("a19X", Some(850))]),
+        );
+        let out = check_references(&dangling);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "anchor-target-unresolved");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "a19X");
+
+        // An external anchor addresses no element at all.
+        let mut external = book_with_element(element_with_id(849));
+        external.by_type.insert(
+            KfxSymbol::Anchor as u64,
+            HashMap::from([anchor("ext", None)]),
+        );
+        assert!(check_references(&external).is_empty());
+    }
+
+    /// A `ruby_content` ($756) named `name` whose entries declare `ids`.
+    fn ruby_content(name: &str, ids: &[i64]) -> HashMap<String, IonValue> {
+        let entries = ids
+            .iter()
+            .map(|id| {
+                IonValue::Struct(vec![
+                    (KfxSymbol::RubyId as u64, IonValue::Int(*id)),
+                    (
+                        KfxSymbol::Content as u64,
+                        IonValue::String("いとこ".to_string()),
+                    ),
+                ])
+            })
+            .collect();
+        HashMap::from([(
+            name.to_string(),
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::RubyName as u64,
+                    IonValue::String(name.to_string()),
+                ),
+                (KfxSymbol::ContentList as u64, IonValue::List(entries)),
+            ]),
+        )])
+    }
+
+    /// A style_event selecting annotation `ruby_id` from `ruby_name`.
+    fn ruby_event(ruby_name: &str, ruby_id: i64) -> IonValue {
+        IonValue::Struct(vec![(
+            KfxSymbol::StyleEvents as u64,
+            IonValue::List(vec![IonValue::Struct(vec![
+                (
+                    KfxSymbol::RubyName as u64,
+                    IonValue::String(ruby_name.to_string()),
+                ),
+                (KfxSymbol::RubyId as u64, IonValue::Int(ruby_id)),
+            ])]),
+        )])
+    }
+
+    #[test]
+    fn ruby_selection_must_name_a_declared_annotation() {
+        let absent = book_with_element(ruby_event("b1H", 1));
+        let out = check_references(&absent);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "ruby-unresolved");
+        assert_eq!(out[0].location, "b1H");
+
+        let mut past_end = book_with_element(ruby_event("b1H", 4));
+        past_end.by_type.insert(
+            KfxSymbol::RubyContent as u64,
+            ruby_content("b1H", &[1, 2, 3]),
+        );
+        let out = check_references(&past_end);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "ruby-id-out-of-range");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "b1H#4");
+
+        let mut declared = book_with_element(ruby_event("b1H", 2));
+        declared.by_type.insert(
+            KfxSymbol::RubyContent as u64,
+            ruby_content("b1H", &[1, 2, 3]),
+        );
+        assert!(check_references(&declared).is_empty());
+    }
+
+    /// A `font` ($262) fragment pointing at `location`.
+    fn font(name: &str, location: &str) -> (String, IonValue) {
+        (
+            name.to_string(),
+            IonValue::Struct(vec![(
+                KfxSymbol::Location as u64,
+                IonValue::String(location.to_string()),
+            )]),
+        )
+    }
+
+    #[test]
+    fn font_without_embedded_bytes_is_flagged() {
+        let mut missing = loader::empty_book_for_test();
+        missing.by_type.insert(
+            KfxSymbol::Font as u64,
+            HashMap::from([font("#nameless_0", "resource/rsrcPWZ")]),
+        );
+        let out = check_font_bytes(&missing);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "font-missing-bytes");
+        assert_eq!(out[0].severity, Severity::Error);
+        assert_eq!(out[0].location, "resource/rsrcPWZ");
+
+        // §11.4 — bytes under bcRawMedia describe a picture, not a typeface.
+        let mut as_media = loader::empty_book_for_test();
+        as_media.by_type.insert(
+            KfxSymbol::Font as u64,
+            HashMap::from([font("#nameless_0", "resource/rsrcPWZ")]),
+        );
+        as_media
+            .raw_media
+            .insert("resource/rsrcPWZ".to_string(), vec![0u8; 4]);
+        let out = check_font_bytes(&as_media);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "font-bytes-wrong-type");
+
+        let mut embedded = as_media;
+        embedded
+            .font_locations
+            .insert("resource/rsrcPWZ".to_string());
+        assert!(check_font_bytes(&embedded).is_empty());
+    }
+
+    #[test]
+    fn payload_no_fragment_names_is_reported_as_an_orphan() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type.insert(
+            KfxSymbol::ExternalResource as u64,
+            named_resource("eF", "resource/rsrc7"),
+        );
+        book.raw_media
+            .insert("resource/rsrc7".to_string(), vec![0u8; 4]);
+        book.raw_media
+            .insert("resource/rsrc8".to_string(), vec![0u8; 4]);
+        book.raw_media
+            .insert("resource/rsrcPWZ".to_string(), vec![0u8; 4]);
+        book.font_locations.insert("resource/rsrcPWZ".to_string());
+
+        let out = check_orphan_payloads(&book);
+        let rules: Vec<(&str, &str)> = out
+            .iter()
+            .map(|f| (f.rule.as_str(), f.location.as_str()))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                ("media-bytes-unreferenced", "resource/rsrc8"),
+                ("font-bytes-unreferenced", "resource/rsrcPWZ"),
+            ],
+            "{out:?}"
+        );
+        assert!(out.iter().all(|f| f.severity == Severity::Info));
+
+        // A font fragment naming the font bytes leaves only the stray image.
+        book.by_type.insert(
+            KfxSymbol::Font as u64,
+            HashMap::from([font("#nameless_0", "resource/rsrcPWZ")]),
+        );
+        let out = check_orphan_payloads(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].location, "resource/rsrc8");
+    }
+
+    #[test]
+    fn referenced_nav_container_must_resolve() {
+        let book_nav = |name: &str| {
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::NavContainers as u64,
+                    IonValue::List(vec![IonValue::String(name.to_string())]),
+                )])]),
+            )])
+        };
+
+        let mut dangling = loader::empty_book_for_test();
+        dangling
+            .by_type
+            .insert(KfxSymbol::BookNavigation as u64, book_nav("n19W"));
+        let out = check_nav_containers(&dangling);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "nav-container-unresolved");
+        assert_eq!(out[0].severity, Severity::Error);
+        assert_eq!(out[0].location, "n19W");
+
+        let mut resolved = dangling;
+        resolved
+            .by_type
+            .insert(KfxSymbol::NavContainer as u64, one_entity("n19W"));
+        assert!(check_nav_containers(&resolved).is_empty());
+
+        // The inline form carries the container itself and names nothing.
+        let mut inline = loader::empty_book_for_test();
+        inline.by_type.insert(
+            KfxSymbol::BookNavigation as u64,
+            HashMap::from([(
+                "#nameless_0".to_string(),
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::NavContainers as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![(
+                        KfxSymbol::NavType as u64,
+                        IonValue::String("toc".to_string()),
+                    )])]),
+                )])]),
+            )]),
+        );
+        assert!(check_nav_containers(&inline).is_empty());
     }
 }

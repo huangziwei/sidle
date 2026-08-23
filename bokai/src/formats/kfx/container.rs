@@ -116,7 +116,7 @@ pub fn slice_at(data: &[u8], offset: usize, length: usize) -> Option<&[u8]> {
 /// `value` as a `usize`, saturating at `usize::MAX` where the target's pointer
 /// width cannot hold it.
 #[inline]
-fn clamp_usize(value: u64) -> usize {
+pub fn clamp_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_parse_index_table() {
-        // Create a simple index table with 2 entries
+        // An index table of two entries.
         let mut data = vec![0u8; 48];
 
         // Entry 1: id=1, type_id=100, offset=1000, length=500
@@ -612,7 +612,7 @@ mod tests {
     fn test_extract_doc_symbols() {
         use crate::formats::kfx::ion::IonWriter;
 
-        // Build a valid $ion_symbol_table: $3::{ $7: ["hello", "world"] }
+        // A valid $ion_symbol_table: $3::{ $7: ["hello", "world"] }
         let mut writer = IonWriter::new();
         writer.write_bvm();
         let symtab = IonValue::Struct(vec![(
@@ -633,7 +633,7 @@ mod tests {
     fn test_extract_doc_symbols_with_imports() {
         use crate::formats::kfx::ion::IonWriter;
 
-        // Build $ion_symbol_table with imports and symbols
+        // An $ion_symbol_table carrying imports and symbols.
         let mut writer = IonWriter::new();
         writer.write_bvm();
         let import_entry = IonValue::Struct(vec![

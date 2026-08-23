@@ -3,24 +3,20 @@
 //! Every surgical KFX edit has the same shape: parse the container, transform a
 //! chosen handful of entities, and pass every *other* entity through byte for
 //! byte, letting [`serialize_container`] recompute the index-table offsets and
-//! `kfxgen_payload_sha1`. [`super::cover_replace`] was the first instance;
-//! this module factors that mechanism out so cover / image / metadata / nav
-//! edits all share one audited core instead of re-deriving the container walk.
+//! `kfxgen_payload_sha1`. Cover, image, metadata and nav edits share this core.
 //!
 //! Usage: [`crate::formats::kfx::loader::load`] the container first to resolve
 //! whatever identity the edit needs (symbol table, `by_type`, `raw_media`,
 //! metadata), then call [`edit_container`] with a callback that returns an
 //! [`EntityEdit`] per entity. The callback captures the resolved identity; the
-//! harness owns all the offset/slice/serialize bookkeeping.
+//! harness owns the offset/slice/serialize bookkeeping.
 //!
-//! What this harness deliberately does **not** touch: the doc-symbol table and
-//! format-capabilities section pass through verbatim. Edits that introduce a
-//! genuinely new doc-symbol need a symbol-table grow step this harness does not
-//! provide — text and most metadata/nav *values* are inline Ion strings and
-//! need no new symbol, so the common edits don't hit that limit.
+//! The doc-symbol table and format-capabilities section pass through verbatim.
+//! An edit introducing a new doc-symbol needs a symbol-table grow step absent
+//! here; text and most metadata/nav values are inline Ion strings.
 
 use crate::formats::kfx::container::{
-    self, EntityLoc, get_field, parse_container_header, parse_index_table,
+    self, EntityLoc, get_field, parse_container_header, parse_index_table, slice_at,
 };
 use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::{IonParser, IonValue};
@@ -75,10 +71,8 @@ impl<'a> EntityView<'a> {
         container::skip_enty_header(self.raw)
     }
 
-    /// Parse the payload as an Ion value. Errors if it is not valid Ion — do
-    /// not call this on a raw-media entity (an image/font); use [`media`] there.
-    ///
-    /// [`media`]: Self::media
+    /// The payload as an Ion value. Errors on a raw-media entity (an image or
+    /// font); [`Self::media`] returns those bytes.
     pub fn parse_ion(&self) -> Result<IonValue, KfxError> {
         IonParser::new(self.media())
             .parse()
@@ -88,8 +82,7 @@ impl<'a> EntityView<'a> {
 
 /// The transform [`edit_container`] applies to one entity.
 pub enum EntityEdit {
-    /// Pass the entity through byte for byte. The default for the overwhelming
-    /// majority of entities in any surgical edit.
+    /// Pass the entity through byte for byte.
     Keep,
     /// Replace with a fresh Ion value; the harness re-wraps it in an ENTY
     /// header (`create_entity_data`).
@@ -97,47 +90,34 @@ pub enum EntityEdit {
     /// Replace raw-media bytes (an image or font — stored without Ion encoding;
     /// `create_raw_media_data`).
     RawMedia(Vec<u8>),
-    /// Replace with bytes you have already ENTY-wrapped yourself. Advanced —
-    /// you own the framing; prefer [`Ion`](Self::Ion)/[`RawMedia`](Self::RawMedia).
+    /// Replace with ENTY-wrapped bytes, framing included.
+    /// [`Ion`](Self::Ion) and [`RawMedia`](Self::RawMedia) frame their own.
     Bytes(Vec<u8>),
 }
 
 /// Parse `kfx_bytes`, call `edit` once per entity in index-table order, and
-/// re-serialize the container. Entities the callback returns [`EntityEdit::Keep`]
-/// for are copied verbatim; the rest are rebuilt from the returned value. The
-/// doc-symbol table and format-capabilities section pass through unchanged, and
-/// [`serialize_container`] recomputes every index-table offset and the payload
-/// SHA-1.
-///
-/// An `Err` from the callback aborts the whole edit — nothing is written and the
-/// error propagates. This is the surgical write half of the "save = re-ingest
-/// the edited source" seam for KFX-source books.
+/// re-serialize. [`EntityEdit::Keep`] copies an entity verbatim, and
+/// [`serialize_container`] recomputes every offset and the payload SHA-1.
 pub fn edit_container(
     kfx_bytes: &[u8],
     mut edit: impl FnMut(&EntityView) -> Result<EntityEdit, KfxError>,
 ) -> Result<Vec<u8>, KfxError> {
     let layout = parse_layout(kfx_bytes)?;
 
-    // Passthrough sections. Out-of-range offsets collapse to empty, matching the
-    // original `cover_replace` behavior (valid KFX always keep these in range).
+    // Passthrough sections. Out-of-range offsets collapse to empty; a valid KFX
+    // keeps these in range.
     let slice = |sec: Option<(usize, usize)>| -> &[u8] {
-        match sec {
-            Some((o, l)) if o + l <= kfx_bytes.len() => &kfx_bytes[o..o + l],
-            _ => &[],
-        }
+        sec.and_then(|(o, l)| slice_at(kfx_bytes, o, l))
+            .unwrap_or(&[])
     };
     let symtab_ion = slice(layout.symtab);
     let format_caps_ion = slice(layout.format_caps);
 
     let mut out_entities: Vec<SerializedEntity> = Vec::with_capacity(layout.entities.len());
     for e in &layout.entities {
-        if e.offset + e.length > kfx_bytes.len() {
-            return Err(KfxError::InvalidKfx("entity payload out of bounds".into()));
-        }
-        let view = EntityView {
-            loc: *e,
-            raw: &kfx_bytes[e.offset..e.offset + e.length],
-        };
+        let raw = slice_at(kfx_bytes, e.offset, e.length)
+            .ok_or_else(|| KfxError::InvalidKfx("entity payload out of bounds".into()))?;
+        let view = EntityView { loc: *e, raw };
         let data = match edit(&view)? {
             EntityEdit::Keep => view.raw.to_vec(),
             EntityEdit::Ion(v) => create_entity_data(&v),
@@ -159,8 +139,8 @@ pub fn edit_container(
     ))
 }
 
-/// The passthrough sections + entity table of a parsed container: the read half
-/// of an edit, factored from `cover_replace`'s inline container-info walk.
+/// The passthrough sections and entity table of a parsed container: an edit's
+/// read half.
 struct ContainerLayout {
     container_id: String,
     /// `(offset, length)` of the doc-symbol Ion section, if declared.
@@ -175,12 +155,14 @@ struct ContainerLayout {
 fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, KfxError> {
     let header =
         parse_container_header(kfx_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
-    let ci_end = header.container_info_offset + header.container_info_length;
-    if ci_end > kfx_bytes.len() {
-        return Err(KfxError::InvalidKfx("container info out of bounds".into()));
-    }
+    let ci_bytes = slice_at(
+        kfx_bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )
+    .ok_or_else(|| KfxError::InvalidKfx("container info out of bounds".into()))?;
     let ci_fields = {
-        let mut p = IonParser::new(&kfx_bytes[header.container_info_offset..ci_end]);
+        let mut p = IonParser::new(ci_bytes);
         p.parse()
             .ok()
             .and_then(|v| v.as_struct().map(<[_]>::to_vec))
@@ -207,10 +189,9 @@ fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, KfxError> {
         KfxSymbol::Bcfcapabilitieslength,
     );
 
-    if idx_off + idx_len > kfx_bytes.len() {
-        return Err(KfxError::InvalidKfx("index table out of bounds".into()));
-    }
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let index_bytes = slice_at(kfx_bytes, idx_off, idx_len)
+        .ok_or_else(|| KfxError::InvalidKfx("index table out of bounds".into()))?;
+    let entities = parse_index_table(index_bytes, header.header_len);
 
     Ok(ContainerLayout {
         container_id,
@@ -228,9 +209,8 @@ mod tests {
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
     /// An all-`Keep` edit is a faithful passthrough: the rewritten container
-    /// re-loads, preserves every entity + raw-media resource, and still converts
-    /// to EPUB. This is the harness's core guarantee — everything not touched
-    /// survives byte-for-byte through the offset/sha1 recompute.
+    /// re-loads, holds every entity and raw-media resource, and converts to
+    /// EPUB.
     #[test]
     fn keep_all_is_faithful_passthrough() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");

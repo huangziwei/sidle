@@ -10,14 +10,13 @@
 //!
 //! [`page_text_layer`] follows the same chain a conversion walks (reading order
 //! → section → page_template → storyline → overlay storyline) but collects run
-//! geometry instead of building content. It keys on *structure*, not on
-//! fragment names, so it reads Amazon's Send-to-Kindle output as well as
-//! [`pdf_to_kfx`](crate::export::pdf_to_kfx)'s.
+//! geometry in place of content. It keys on *structure*, not on fragment
+//! names: Amazon's Send-to-Kindle output and
+//! [`pdf_to_kfx`](crate::export::pdf_to_kfx)'s both read.
 //!
-//! [`read_pages`] adds what the container's `book_navigation` already knows:
-//! the outline and the per-page labels. Both are baked in at authoring time, so
-//! a caller that has the KFX never has to parse the embedded PDF to learn its
-//! structure — the page box sizes come from the page templates here too.
+//! [`read_pages`] adds what the container's `book_navigation` states: the
+//! outline and the per-page labels, both written at authoring time. The page
+//! box sizes come from the page templates here too.
 
 use std::collections::HashMap;
 
@@ -34,14 +33,12 @@ use crate::formats::pdf::structure::PdfOutlineItem;
 #[derive(Debug, Clone, Default)]
 pub struct PdfPageText {
     /// Text runs to overlay, in document order. Geometry is a fraction in
-    /// `[0, 1]` of the page box, top-left origin, Y down — the same space as the
-    /// rendered page, so a run maps onto it as a percentage without knowing the
-    /// render scale.
+    /// `[0, 1]` of the page box, top-left origin, Y down — the rendered page's
+    /// own space, independent of render scale.
     pub runs: Vec<PdfTextRun>,
-    /// Every eid registered on this page: the run eids *and* the page-structural
+    /// Every eid registered on this page: the run eids and the page-structural
     /// eids (image, container, page_template). An eid-addressed position — a
-    /// bookmark, an annotation, a nav target — resolves to its page through this
-    /// set, which is what makes an image-only page (no runs at all) addressable.
+    /// bookmark, an annotation, a nav target — resolves to its page through it.
     pub eids: Vec<i64>,
     /// The page box (`fixed_width`/`fixed_height`) in **points** — the box the
     /// `runs` fractions are relative to, and the page's aspect ratio.
@@ -49,10 +46,9 @@ pub struct PdfPageText {
     pub box_h: f32,
 }
 
-/// One text run positioned over the page. Geometry is a page fraction.
-///
-/// A run is whatever unit the authoring tool emitted — usually a word, but the
-/// format guarantees nothing finer than "a positioned string".
+/// One text run positioned over the page, its geometry a page fraction. A run
+/// is whatever unit the authoring tool emitted — a word, or any positioned
+/// string.
 #[derive(Debug, Clone)]
 pub struct PdfTextRun {
     pub eid: i64,
@@ -79,13 +75,13 @@ pub struct PdfPages {
 
 /// Extract the per-page text layer from a PDF-backed KFX, in reading order (one
 /// entry per page). A page with no text storyline (image-only / scanned) yields
-/// empty `runs`; its `eids` still carry the page anchor.
+/// empty `runs`; its `eids` carry the page anchor.
 pub fn page_text_layer(kfx_bytes: &[u8]) -> Result<Vec<PdfPageText>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     Ok(page_text_layer_from_book(&book))
 }
 
-/// As [`page_text_layer`], from an already-loaded container.
+/// As [`page_text_layer`], from a loaded [`BookData`].
 pub fn page_text_layer_from_book(book: &BookData) -> Vec<PdfPageText> {
     let orders = reading_orders(book);
     let Some(order) = orders.first() else {
@@ -100,7 +96,7 @@ pub fn read_pages(kfx_bytes: &[u8]) -> Result<PdfPages, KfxError> {
     Ok(read_pages_from_book(&book))
 }
 
-/// As [`read_pages`], from an already-loaded container.
+/// As [`read_pages`], from a loaded [`BookData`].
 pub fn read_pages_from_book(book: &BookData) -> PdfPages {
     let pages = page_text_layer_from_book(book);
     // eid → 0-based page index, from each page's registered eids (which include
@@ -123,10 +119,9 @@ pub fn read_pages_from_book(book: &BookData) -> PdfPages {
     }
 }
 
-/// Read the `book_navigation`: the `page_list` container → per-page label
-/// strings, and the `toc` container → nested outline (each `target_position.id`
-/// mapped to a 0-based page index via `eid_to_page`). Falls back to sequential
-/// `"1".."N"` labels and an empty outline when the nav is absent.
+/// Read the `book_navigation`: `page_list` → per-page label strings, `toc` →
+/// nested outline, each `target_position.id` mapped through `eid_to_page`. An
+/// absent nav yields `"1".."N"` labels and an empty outline.
 fn read_nav(
     book: &BookData,
     eid_to_page: &HashMap<i64, usize>,
@@ -143,9 +138,8 @@ fn read_nav(
 }
 
 /// Overwrite `labels[page]` from each `page_list` entry's
-/// `representation.label`, placing it at the page its `target_position.id`
-/// resolves to (the entries are emitted in page order, so the ordinal is the
-/// fallback when the eid isn't mapped).
+/// `representation.label`, at the page its `target_position.id` resolves to.
+/// Entries arrive in page order; the ordinal covers an unmapped eid.
 fn fill_page_labels(
     entries: &[IonValue],
     eid_to_page: &HashMap<i64, usize>,
@@ -168,8 +162,7 @@ fn fill_page_labels(
 }
 
 /// One `toc` entry → [`PdfOutlineItem`], recursing into nested `entries`. The
-/// target eid maps to a page index (0 when unresolved — a defensive default;
-/// an authoring tool registers every toc target in the position map).
+/// target eid maps to a page index, 0 when unresolved.
 fn nav_item(entry: &IonValue, eid_to_page: &HashMap<i64, usize>) -> Option<PdfOutlineItem> {
     let fields = entry.unwrap_annotated().as_struct()?;
     let title = entry_label(fields).unwrap_or_default();
@@ -231,9 +224,9 @@ fn page_text(book: &BookData, section_name: &str) -> PdfPageText {
         collect_element_ids(tpl, book, &mut out.eids);
     }
 
-    // Geometry: follow the (last, "main") page_template's storyline chain,
-    // picking up the page box and every text run. Portrait and landscape
-    // reference the same storyline, so either resolves to the same runs.
+    // Geometry: follow the last ("main") page_template's storyline chain for
+    // the page box and every text run. Portrait and landscape reference one
+    // storyline; either resolves to the same runs.
     if let Some(tpl) = templates.last() {
         let mut page_box: Option<(f32, f32)> = None;
         let mut runs: Vec<PdfTextRun> = Vec::new();
@@ -265,12 +258,9 @@ fn sym(v: &IonValue) -> Option<u64> {
     }
 }
 
-/// Walk a page_template's storyline tree, collecting the page box (the first
-/// container with integer `fixed_width` *and* `fixed_height`, in pt×100) and
-/// every `type:text` run's geometry (also pt×100; normalized to a page fraction
-/// by the caller). `story_name` references are followed (cycle-guarded by
-/// `visited`), which is how the page image storyline pulls in its invisible
-/// text-overlay storyline.
+/// Walk a page_template's storyline tree for the page box (the first container
+/// with integer `fixed_width` and `fixed_height`, pt×100) and every `type:text`
+/// run's geometry. `story_name` references are followed, `visited` guarding.
 fn walk(
     value: &IonValue,
     book: &BookData,
@@ -280,10 +270,9 @@ fn walk(
 ) {
     let inner = value.unwrap_annotated();
     if let Some(fields) = inner.as_struct() {
-        // Page box — the page container. Both dims must be plain ints (pt×100):
-        // the landscape page_template carries `fixed_width: 100%` (a {value,unit}
-        // struct, no height), which `as_int()` rejects, so it is never mistaken
-        // for the box.
+        // Page box — the page container, both dims plain ints (pt×100). The
+        // landscape page_template's `fixed_width: 100%` is a {value,unit} struct
+        // with no height, which `as_int()` rejects.
         if page_box.is_none()
             && let Some(w) =
                 get_field(fields, KfxSymbol::FixedWidth as u64).and_then(|v| v.as_int())
@@ -355,13 +344,10 @@ mod tests {
     }
 
     /// A one-page book whose page template carries the box and whose referenced
-    /// storyline carries two `type:text` runs — the shape Amazon's overlay has.
-    ///
-    /// Built as a [`BookData`] rather than a serialized container because
-    /// `pdf_to_kfx` writes no overlay (it embeds the PDF and renders pages as
-    /// images), so a generated fixture leaves the run path unexercised.
+    /// storyline carries two `type:text` runs — the shape of Amazon's overlay.
+    /// `pdf_to_kfx` embeds the PDF and renders pages as images, writing none.
     fn book_with_overlay() -> BookData {
-        // Doc symbols land above the base, so ids are base + index.
+        // Doc symbols land above the base: an id is base + index.
         let base = 1000u64;
         let symbols = SymbolTable::new(base, vec!["sec1".to_string(), "story1".to_string()]);
         let (sec_sym, story_sym) = (IonValue::Symbol(base), IonValue::Symbol(base + 1));
@@ -426,6 +412,7 @@ mod tests {
         BookData {
             by_type,
             raw_media: HashMap::new(),
+            font_locations: std::collections::HashSet::new(),
             symbols,
             metadata: BookMetadata::default(),
         }
@@ -453,7 +440,7 @@ mod tests {
         assert_eq!(page.runs[1].eid, 21);
         assert_eq!(page.runs[1].top, 0.175, "second line sits below the first");
 
-        // The page's anchor set spans the template and both runs, so any of the
+        // The page's anchor set spans the template and both runs: each of the
         // three eids resolves to this page.
         assert!(
             [10, 20, 21].iter().all(|e| page.eids.contains(e)),
@@ -462,8 +449,8 @@ mod tests {
         );
     }
 
-    /// A page whose box never resolves reports no runs rather than fractions
-    /// divided by a guessed box — a wrong overlay is worse than none.
+    /// A page whose box never resolves reports no runs, never fractions over a
+    /// guessed box.
     #[test]
     fn a_page_without_a_box_reports_no_runs() {
         let mut book = book_with_overlay();
@@ -558,9 +545,9 @@ mod tests {
         pdf_to_kfx(doc, &meta, None, None)
     }
 
-    /// `read_pages` must recover the outline + page labels + page sizes that
-    /// `pdf_to_kfx` baked into `book_navigation` — the structure a consumer
-    /// would otherwise have to parse the embedded PDF to learn.
+    /// `read_pages` recovers the outline, page labels and page sizes that
+    /// `pdf_to_kfx` writes into `book_navigation` — the structure a consumer
+    /// reads without opening the embedded PDF.
     #[test]
     fn page_structure_round_trips_from_pdf_to_kfx() {
         let doc = nav_fixture();
@@ -595,9 +582,9 @@ mod tests {
         }
     }
 
-    /// Every eid a page registers must resolve back to that page, and to no
-    /// other — the property an eid-addressed position (bookmark, annotation,
-    /// nav target) depends on.
+    /// Every eid a page registers resolves back to that page and to no other —
+    /// the property an eid-addressed position (bookmark, annotation, nav
+    /// target) depends on.
     #[test]
     fn each_page_owns_its_eids() {
         let kfx = kfx_of(&nav_fixture());
