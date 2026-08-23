@@ -17,7 +17,10 @@
 //!   magic, info + index in bounds). A parse failure is one hard
 //!   `container-unreadable` error; the fine-grained per-entity offset check is
 //!   folded into this (an out-of-bounds entity surfaces transitively via rules
-//!   2/7).
+//!   2/7). A container declaring a non-zero `bcDRMScheme` is reported as
+//!   `container-encrypted` instead: its payloads are ciphertext, so every later
+//!   rule would read a book with no sections and no content out of a file that
+//!   has both.
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
 //!   `storyline` (hard errors); `book_navigation` (a warning — no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
@@ -70,6 +73,16 @@ use crate::validate::{Finding, FixHint, Severity};
 pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     let book = match loader::load(bytes) {
         Ok(book) => book,
+        Err(crate::formats::kfx::error::KfxError::Encrypted(scheme)) => {
+            return vec![error(
+                "container-encrypted",
+                "<container>",
+                format!(
+                    "container declares bcDRMScheme {scheme}: its payloads are encrypted under a \
+                     device-bound key, so nothing inside can be checked"
+                ),
+            )];
+        }
         Err(e) => {
             return vec![error(
                 "container-unreadable",
@@ -797,6 +810,53 @@ fn warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A container carrying nothing but a header and a container_info whose
+    /// `bcDRMScheme` is `scheme`. Its index table is empty, so with `scheme: 0`
+    /// it loads as an entity-less book — which is what makes it a control for
+    /// the encryption branch.
+    fn container_with_drm_scheme(scheme: i64) -> Vec<u8> {
+        use crate::formats::kfx::ion::IonWriter;
+
+        const HEADER_LEN: u32 = 18;
+        let mut writer = IonWriter::new();
+        writer.write_bvm();
+        writer.write_value(&IonValue::Struct(vec![
+            (KfxSymbol::Bcdrmscheme as u64, IonValue::Int(scheme)),
+            (
+                KfxSymbol::Bcindextaboffset as u64,
+                IonValue::Int(HEADER_LEN as i64),
+            ),
+            (KfxSymbol::Bcindextablength as u64, IonValue::Int(0)),
+        ]));
+        let info = writer.into_bytes();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"CONT");
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&HEADER_LEN.to_le_bytes());
+        bytes.extend_from_slice(&HEADER_LEN.to_le_bytes()); // container_info offset
+        bytes.extend_from_slice(&(info.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&info);
+        bytes
+    }
+
+    #[test]
+    fn encrypted_container_is_reported_as_encrypted() {
+        let out = validate(&container_with_drm_scheme(1));
+        assert_eq!(out.len(), 1, "encryption ends the run: {out:?}");
+        assert_eq!(out[0].rule, "container-encrypted");
+        assert_eq!(out[0].severity, Severity::Error);
+        // The book's own structure is unreadable, never absent.
+        assert!(!out.iter().any(|f| f.rule == "no-sections"));
+    }
+
+    #[test]
+    fn unencrypted_container_is_read_not_refused() {
+        let out = validate(&container_with_drm_scheme(0));
+        assert!(!out.iter().any(|f| f.rule == "container-encrypted"));
+        assert!(out.iter().any(|f| f.rule == "no-sections"));
+    }
 
     fn resource(location: Option<&str>) -> IonValue {
         let mut fields = Vec::new();

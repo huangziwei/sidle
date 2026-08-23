@@ -102,7 +102,16 @@ pub fn deserialize_container_phase1(
 
     let container_id = pop_string(ci_fields, "$409").unwrap_or_default();
     let _compression_type = pop_int(ci_fields, "$410").unwrap_or(DEFAULT_COMPRESSION_TYPE);
-    let _drm_scheme = pop_int(ci_fields, "$411").unwrap_or(DEFAULT_DRM_SCHEME);
+    // The merged container declares `DEFAULT_DRM_SCHEME`, so an encrypted
+    // member would come out claiming to be readable while its payloads stay
+    // ciphertext. Refuse it here instead.
+    let drm_scheme = pop_int(ci_fields, "$411").unwrap_or(DEFAULT_DRM_SCHEME);
+    if drm_scheme != DEFAULT_DRM_SCHEME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("container is encrypted (bcDRMScheme {drm_scheme})"),
+        ));
+    }
 
     let doc_symbol_offset = pop_int(ci_fields, "$415");
     let doc_symbol_length = pop_int(ci_fields, "$416").unwrap_or(0);

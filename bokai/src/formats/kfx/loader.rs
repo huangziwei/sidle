@@ -98,6 +98,13 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
         [header.container_info_offset..header.container_info_offset + header.container_info_length];
     let info = parse_container_info(info_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
 
+    // Encrypted payloads hold no readable Ion. Parsing on would drop every
+    // entity in turn and yield a `BookData` describing a book with no sections
+    // and no content, which is a false account of a perfectly good file.
+    if info.drm_scheme != 0 {
+        return Err(KfxError::Encrypted(info.drm_scheme));
+    }
+
     let symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
             SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))

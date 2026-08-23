@@ -1,7 +1,6 @@
 //! KFX container format parsing.
 //!
-//! This module contains pure functions for parsing KFX container structures.
-//! All functions operate on byte slices and do not perform I/O.
+//! Pure functions over byte slices. No I/O.
 
 use super::ion::{IonParser, IonValue};
 use super::symbols::KFX_SYMBOL_TABLE;
@@ -37,6 +36,9 @@ pub struct ContainerInfo {
     pub index: Option<(usize, usize)>,
     /// Document symbols offset and length.
     pub doc_symbols: Option<(usize, usize)>,
+    /// `bcDRMScheme` ($411): `0` for readable entity payloads, non-zero for
+    /// encrypted ones.
+    pub drm_scheme: i64,
 }
 
 /// Error type for container parsing.
@@ -149,6 +151,8 @@ pub fn parse_container_info(data: &[u8]) -> Result<ContainerInfo, ContainerError
         info.doc_symbols = Some((offset as usize, length as usize));
     }
 
+    info.drm_scheme = get_field_int(fields, "bcDRMScheme").unwrap_or(0);
+
     Ok(info)
 }
 
@@ -230,13 +234,9 @@ pub fn parse_entity(data: &[u8], ent: &EntityLoc) -> Option<IonValue> {
 
 // --- Document symbols parsing ---
 
-/// Extract document-specific symbols from the doc symbols section.
-///
-/// These are local symbols that extend the base KFX symbol table.
+/// The doc-symbols section's local symbols, extending the base KFX table.
 pub fn extract_doc_symbols(data: &[u8]) -> Vec<String> {
-    // Parse the $ion_symbol_table entity using the Ion parser.
-    // The data is: BVM + $3::{ $6: [{ $4: "YJ_symbols", $5: 10, $8: 851 }], $7: [...] }
-    // We need the strings from the $7 (symbols) field.
+    // BVM + $3::{ $6: [{ $4: "YJ_symbols", $5: 10, $8: 851 }], $7: [...] }
     let mut parser = IonParser::new(data);
     let value = match parser.parse() {
         Ok(v) => v,
@@ -277,26 +277,22 @@ pub fn extract_doc_symbols(data: &[u8]) -> Vec<String> {
 
 // --- Symbol resolution ---
 
-/// Fallback base when the doc_symbol fragment doesn't declare imports.
-/// Real KFX files always declare YJ_symbols and we read max_id from there.
+/// Base for a doc_symbol fragment declaring no imports.
 const FALLBACK_BASE_LEN: u64 = 833;
 
-/// Read the declared import size from a doc-symbols fragment: the fragment
-/// annotates a symbol-table struct whose `imports` list carries
-/// `[{name: "YJ_symbols", version: 10, max_id: N}]`, and local symbols
-/// occupy ids `N+1..`. We add 1 so the caller can use the return value as
-/// the base-id for the first local symbol.
+/// Summed import `max_id` of a doc-symbols fragment, whose `imports` list
+/// carries `[{name: "YJ_symbols", version: 10, max_id: N}]`. Local symbols
+/// occupy ids `N+1..`.
 ///
-/// Returns `None` if the fragment doesn't parse or doesn't declare imports
-/// — the caller falls back to a known-good constant.
+/// `None` for a fragment that neither parses nor declares imports.
 pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
     let mut parser = IonParser::new(doc_bytes);
     let value = parser.parse().ok()?;
     let inner = value.unwrap_annotated();
     let fields = inner.as_struct()?;
 
-    // KFX symbol-table struct field ids: 4=name, 5=version, 6=imports,
-    // 7=symbols, 8=max_id. We want imports → list of structs → field 8.
+    // Symbol-table field ids: 4=name, 5=version, 6=imports, 7=symbols,
+    // 8=max_id. Field 6 → list of structs → field 8.
     let imports_field = fields.iter().find(|(k, _)| *k == 6).map(|(_, v)| v)?;
     let imports = imports_field.as_list()?;
 
@@ -314,18 +310,14 @@ pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
 
 /// Resolved symbol table — base + per-container doc_symbols.
 ///
-/// `base_len` must match calibre's `LocalSymbolTable.local_min_id - 1`, i.e.
-/// the count of imported (system + shared) symbols **as declared by this
-/// container** — read from the doc-symbols fragment's imports `max_id`, NOT
-/// hardcoded. Our static `KFX_SYMBOL_TABLE` has 852 entries (13 trailing
-/// additions Amazon shipped after calibre's YJ_SYMBOLS was last updated);
-/// containers built against the older table declare a smaller max_id, and
-/// resolving their doc_symbols at a fixed `KFX_SYMBOL_TABLE.len()` base
-/// looks every one of them up ~12 positions off — doc-local names silently
-/// resolve to static-tail names like `character_width`.
+/// `base_len` is the count of imported (system + shared) symbols **as declared
+/// by this container**, read from the doc-symbols fragment's imports `max_id`.
+/// A container declaring fewer than `KFX_SYMBOL_TABLE.len()` resolves its
+/// doc_symbols at that smaller base; a fixed `KFX_SYMBOL_TABLE.len()` base
+/// shifts every doc-local name onto a static-tail name like `character_width`.
 ///
-/// This is THE symbol resolver: every KFX reader (importer, validators,
-/// kfx-dump) must resolve through it.
+/// Every KFX reader (importer, validators, kfx-dump) resolves through this
+/// type.
 pub struct SymbolTable {
     base_len: u64,
     doc_symbols: Vec<String>,
