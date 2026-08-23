@@ -4,20 +4,16 @@
 //! KFX side (mirrors calibre's `yj_to_epub_metadata.py`):
 //!
 //! 1. Start from `document_data.direction` (symbol field, defaults to `ltr`).
-//! 2. If `document_data.writing_mode` ends in `-rl` (`vertical_rl`), override
-//!    to `rtl`. This is calibre's hard rule and the only way a vertical-RTL
-//!    Japanese book gets the correct `rtl` flag — most CJK KFX files store
-//!    `direction: ltr` explicitly and rely on the writing-mode override.
+//! 2. A `document_data.writing_mode` ending in `-rl` (`vertical_rl`) overrides
+//!    to `rtl`. A vertical-RTL Japanese book carries `direction: ltr` and its
+//!    `rtl` flag comes from this override alone.
 //!
-//! EPUB side: read the `<spine page-progression-direction="...">` attribute
-//! from the OPF. When omitted, the EPUB3 default is `default` — which most
-//! readers interpret as `ltr`, so for comparison purposes we treat absent ==
+//! EPUB side: the `<spine page-progression-direction="...">` attribute of the
+//! OPF. An omitted attribute is the EPUB 3 value `default`, compared here as
 //! `ltr`.
 //!
-//! This validator is independent from `writing_mode.rs` and from `metadata.rs`'s
-//! informational PPD print — `metadata.rs` only flags PPD when the EPUB side
-//! declares one, which silently passes when bokai forgets to emit the attribute.
-//! This module catches the omission.
+//! `metadata.rs` flags PPD only where the EPUB side declares one; a missing
+//! attribute passes there and is caught here.
 
 use std::io::Cursor;
 
@@ -67,11 +63,9 @@ impl Direction {
 #[derive(Debug, Default)]
 pub struct Report {
     pub epub_ppd: Direction,
-    /// Whether the OPF actually carried the `page-progression-direction`
-    /// attribute (independent of the normalised value). When an EPUB omits the
-    /// attribute the validator still reports `epub_ppd = Ltr` since that's the
-    /// reading-system default — but `epub_attr_present` lets the report flag
-    /// "you should have emitted `rtl` but emitted nothing" specifically.
+    /// Whether the OPF carried the `page-progression-direction` attribute. An
+    /// EPUB omitting it reports `epub_ppd = Ltr`, and this field separates
+    /// that from a declared `ltr`.
     pub epub_attr_present: bool,
 
     pub kfx_ppd: Direction,
@@ -203,9 +197,8 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -258,11 +251,9 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
     {
         ppd = Direction::Rtl;
     }
-    // The explicit `reading_orders[*].page_progression_direction` ($425) is the
-    // authoritative book-level PPD. Calibre never reads it — it relies solely on
-    // the direction + writing-mode heuristic above, which misses rtl books whose
-    // *document-level* writing mode is `horizontal_tb` (so the `-rl` override
-    // never fires) even though the spine reads right-to-left. Trust it when set.
+    // An explicit `reading_orders[*].page_progression_direction` ($425) is the
+    // book-level PPD and wins. The heuristic above misses an rtl book whose
+    // document-level writing mode is `horizontal_tb`.
     if let Some(explicit) = explicit_ppd {
         ppd = explicit;
     }
@@ -310,10 +301,9 @@ fn walk_doc_data<F>(
     }
 }
 
-/// Pull the explicit `reading_orders[*].page_progression_direction` ($425) out
-/// of a `document_data` ($538) or `metadata` ($258) Ion struct. PPD is a single
-/// book-level value, so the first order that declares one wins. Mirrors
-/// `validate::fidelity::metadata::extract_ppd`.
+/// The explicit `reading_orders[*].page_progression_direction` ($425) of a
+/// `document_data` ($538) or `metadata` ($258) Ion struct. PPD is one
+/// book-level value, and the first order declaring one wins.
 fn walk_reading_order_ppd<F>(value: &IonValue, resolve_sym: &F, out: &mut Option<Direction>)
 where
     F: Fn(u64) -> String,

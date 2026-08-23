@@ -2,9 +2,9 @@
 //! EPUB has a corresponding link target in the converted KFX.
 //!
 //! Source-side: walk each spine XHTML, collect `<a href>` values plus every
-//! `id` attribute (so we can tell whether an internal `#frag` actually has a
-//! target in the source — a source-side dangling href is not bokai's fault and
-//! is reported separately from KFX-side defects).
+//! `id` attribute, which tells an internal `#frag` with a source-side target
+//! from one without. Source-side dangling hrefs are reported separately from
+//! KFX-side defects.
 //!
 //! KFX-side: enumerate Anchor entities (type 266). Each has an `anchor_name`
 //! plus either a `uri` (external link, e.g. `https://…`) or a `position`
@@ -19,7 +19,7 @@
 //!    must produce KFX `uri: "https://example.com"`.
 //! 2. **Dangling KFX anchors** — an Anchor whose `position.id` points to a
 //!    content fragment that doesn't exist in the entity index. The Kindle
-//!    reader would tap-to-nowhere on these.
+//!    reader taps to nowhere on these.
 //! 3. **Orphan KFX link_to** — a `style_event.link_to` symbol with no
 //!    matching `anchor_name` on any Anchor entity. The link is dead in KFX.
 //! 4. **Source-side dangling refs** — a `<a href="#frag">` (or
@@ -148,16 +148,9 @@ impl Report {
             && self.orphan_link_tos.is_empty()
     }
 
-    /// Direction-aware gate. The two dangling classes are each bokai's fault only
-    /// in the direction where bokai produced the side that carries them:
-    /// - **EPUB-side dangling ref** (`<a href="#x">` with no `id="x"`) — bokai's
-    ///   defect in KFX→EPUB; in EPUB→KFX it's source EPUB data quality.
-    /// - **KFX-side dangling anchor** (anchor → missing KFX element) — bokai's
-    ///   defect in EPUB→KFX; in KFX→EPUB it's source KFX data quality (calibre's
-    ///   `report_missing_positions` flags the very same positions, and bokai's
-    ///   EPUB carries no dangling href for it).
-    ///
-    /// `validate_all` and the standalone links check both gate on this.
+    /// Direction-aware gate on the two dangling classes, each counted only in
+    /// the direction that produced the side carrying it: an EPUB-side dangling
+    /// ref in KFX→EPUB, a KFX-side dangling anchor in EPUB→KFX.
     pub fn is_clean_for(&self, dir: super::Direction) -> bool {
         self.is_clean()
             && (dir.epub_is_source() || self.epub_dangling_refs.is_empty())
@@ -564,11 +557,8 @@ pub fn classify_href(raw: &str) -> HrefKind {
     // contains only [A-Za-z0-9+.-]. This catches http, https, mailto, tel,
     // ftp, data, javascript, etc. — all "external" from KFX's perspective.
     if has_scheme(trimmed) {
-        // EPUB hrefs are XML-escaped (`&amp;`), KFX uris are stored raw (`&`).
-        // Unescape so the external-URL round-trip compares logical URLs, not
-        // escaping (142 showed 9 "dropped" + 12 "fabricated" that were the same
-        // amazon.com URLs differing only by `&` vs `&amp;`). Idempotent on a URL
-        // with no entities.
+        // EPUB hrefs are XML-escaped (`&amp;`), KFX uris raw (`&`). Unescaping
+        // compares logical URLs, and is idempotent on a URL with no entities.
         let url = quick_xml::escape::unescape(trimmed)
             .map(|c| c.into_owned())
             .unwrap_or_else(|_| trimmed.to_string());
@@ -593,7 +583,7 @@ fn has_scheme(s: &str) -> bool {
     }
     for (i, &b) in bytes.iter().enumerate() {
         if b == b':' {
-            // Need at least one char before the colon (we have it: i >= 1).
+            // At least one char precedes the colon.
             return i >= 1;
         }
         let ok = b.is_ascii_alphanumeric() || b == b'+' || b == b'.' || b == b'-';
@@ -648,11 +638,9 @@ pub struct KfxLinkData {
     pub link_to_distinct: HashSet<String>,
     /// Total link_to references (one per style_event with link_to).
     pub link_to_total: usize,
-    /// Element-level `id` values present anywhere inside storyline entities.
-    /// Anchor `position.id` must resolve to one of these, NOT to top-level
-    /// container entity IDs — `position.id` references elements *within*
-    /// storylines (see `import/kfx.rs::resolve_href`: "position.id in anchor
-    /// entities references element IDs in storylines").
+    /// Element-level `id` values anywhere inside storyline entities. An anchor
+    /// `position.id` resolves to one of these, never to a top-level container
+    /// entity id.
     pub element_ids: HashSet<u64>,
 }
 
@@ -667,9 +655,8 @@ pub fn extract_anchors_and_link_tos_from_kfx(kfx_bytes: &[u8]) -> Result<KfxLink
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),

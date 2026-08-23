@@ -1,14 +1,12 @@
 //! Text-preservation validation — verify that every visible character in
 //! the source EPUB is preserved in the converted KFX.
 //!
-//! Compares the concatenated visible text of all spine XHTML files (including
-//! `<rt>` annotation content, since it's user-visible furigana) against the
-//! concatenated text of all `content` and `ruby_content` fragments. Whitespace
-//! is normalised out on both sides — HTML collapses runs of whitespace and
-//! KFX emits its own paragraph breaks, so a strict char-by-char compare would
-//! drown the real signal in whitespace noise. We compare per-character
-//! multisets and report any character whose count in KFX is lower than in
-//! the source.
+//! The concatenated visible text of every spine XHTML file, `<rt>` furigana
+//! included, against the concatenated text of every `content` and
+//! `ruby_content` fragment. Whitespace drops out on both sides: HTML collapses
+//! runs of it and KFX emits its own paragraph breaks. The comparison is per
+//! character over multisets, reporting each character whose KFX count is the
+//! lower one.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -43,10 +41,9 @@ pub struct Report {
 
 impl Report {
     pub fn is_clean_for(&self, dir: super::Direction) -> bool {
-        // "Clean" means nothing was dropped from source. Fabrication in the
-        // target is reported but rarely fatal (esp. nav metadata leaking into
-        // visible text); a stricter caller can check only_in_kfx/only_in_epub
-        // directly.
+        // Clean covers the source side alone. Fabrication in the target —
+        // nav metadata reaching visible text — is reported in
+        // `only_in_kfx` / `only_in_epub`.
         if dir.epub_is_source() {
             self.only_in_epub.is_empty()
         } else {
@@ -183,12 +180,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     })
 }
 
-/// Build a histogram of NON-whitespace characters in `s`.
-///
-/// Whitespace is excluded because HTML collapses runs of whitespace and KFX
-/// emits paragraph breaks on its own — comparing whitespace counts would
-/// surface noise from those normalisation differences instead of actual
-/// content loss.
+/// A histogram of the non-whitespace characters in `s`. HTML collapses runs
+/// of whitespace and KFX emits its own paragraph breaks, and neither side's
+/// whitespace counts carry content.
 fn char_counts(s: &str) -> HashMap<char, usize> {
     let mut out = HashMap::new();
     for c in s.chars() {
@@ -204,10 +198,9 @@ fn char_counts(s: &str) -> HashMap<char, usize> {
 // EPUB-side extraction
 // ============================================================================
 
-/// Extract all visible text from a source EPUB's spine XHTML files.
-/// Skips `<script>`, `<style>` content. `<rp>` parens are dropped (they are
-/// fallback for non-ruby renderers and we always render ruby). Other tags
-/// flow through as transparent containers — only their text leaves matter.
+/// The visible text of a source EPUB's spine XHTML files. `<script>`,
+/// `<style>` and `<rp>` content drops out; every other tag is a transparent
+/// container around its text leaves.
 pub fn extract_text_from_epub(epub_bytes: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -260,12 +253,9 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
     let mut reader = Reader::from_str(xhtml);
     reader.config_mut().trim_text(false);
 
-    // Suppress text inside non-reading-content regions: script, style, head,
-    // <rp> (ruby parens, drawn only by non-ruby renderers), and <nav>. nav
-    // matters because epub3 nav documents contain landmark/TOC labels like
-    // "目次" or "Cover" that the Kindle reader exposes through its own UI,
-    // not as readable text in the book — so they should not count as
-    // "expected" text on the source side.
+    // Text inside script, style, head, <rp> and <nav> is suppressed. An EPUB 3
+    // nav document holds landmark and TOC labels, which the Kindle reader
+    // draws in its own UI and not as book text.
     let mut suppress_depth: usize = 0;
 
     loop {
@@ -285,11 +275,9 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
             Ok(Event::Text(e)) if suppress_depth == 0 => {
                 out.push_str(&String::from_utf8_lossy(e.as_ref()));
             }
-            // quick-xml 0.39 emits entity references (`&amp;`, `&#160;`, …) as
-            // their own `GeneralRef` events, NOT inside Text — so without this
-            // arm every escaped `&`/`<`/`>` in the EPUB is silently dropped from
-            // the extracted text, showing up as false "dropped" chars vs the KFX
-            // (e.g. 142 had 7 `&`). Decode and append.
+            // quick-xml emits an entity reference (`&amp;`, `&#160;`) as its
+            // own `GeneralRef` event, outside `Text`. Each decodes and
+            // appends here.
             Ok(Event::GeneralRef(e)) if suppress_depth == 0 => {
                 let entity = String::from_utf8_lossy(e.as_ref());
                 if let Some(resolved) = crate::formats::epub::parser::resolve_entity(&entity) {
@@ -310,16 +298,9 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
 // KFX-side extraction
 // ============================================================================
 
-/// Extract all text from KFX as it would appear to the reader.
-///
-/// Concatenates every `content` fragment plus one copy of each ruby annotation
-/// **per style_event reference**. The latter is critical: `ruby_content`
-/// fragments deduplicate annotation strings (a kana like `めまい` shared by
-/// 12 different `<ruby>` instances appears as one `content_list` entry, with
-/// 12 style_events pointing at it), so naively summing `ruby_content` text
-/// would under-count by a factor equal to the dedup ratio. We instead reuse
-/// the ruby pair extractor — it produces one entry per reference — and add
-/// each pair's annotation that many times.
+/// Every `content` fragment's text, plus one copy of each ruby annotation per
+/// style_event reference. `extract_pairs_from_kfx` yields one pair per
+/// reference, undoing `ruby_content`'s deduplication of annotation strings.
 pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     let info_data = slice_at(
@@ -331,9 +312,8 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -347,12 +327,9 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     let index_data = slice_at(kfx_bytes, idx_off, idx_len).ok_or("kfx: index out of bounds")?;
     let entities = parse_index_table(index_data, header.header_len);
 
-    // Iterate every entity type that carries reading text. `$145 content` is
-    // the obvious one; `$259 storyline` ALSO carries text via its own
-    // content_list when KFX inlines the content rather than referencing a
-    // separate Content entity. Skipping storylines under-counts the source
-    // (e.g., on horror.bokai.kfx 35 Content entities cover only 35 of 40
-    // storylines; the other 5 inline their text).
+    // Both entity types that carry reading text: `$145 content`, and `$259
+    // storyline`, whose own `content_list` holds the text of a storyline that
+    // names no separate content fragment.
     let text_types: [u32; 2] = [KfxSymbol::Content as u32, KfxSymbol::Storyline as u32];
 
     let mut out = String::new();
@@ -369,9 +346,9 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
         collect_content_text(&value, &resolve_sym, &mut out);
     }
 
-    // Annotations: one copy per style_event reference, NOT one per deduped
-    // ruby_content entry. extract_pairs_from_kfx already produces one entry
-    // per reference, so push each annotation as-is.
+    // Annotations: one copy per style_event reference, not one per deduped
+    // ruby_content entry. `extract_pairs_from_kfx` yields one entry per
+    // reference.
     let pairs = super::ruby::extract_pairs_from_kfx(kfx_bytes)?;
     for pair in pairs {
         out.push_str(&pair.annotation);
@@ -392,20 +369,18 @@ where
     if let IonValue::Struct(fields) = inner {
         for (k, v) in fields {
             match resolve_sym(*k).as_str() {
-                // `$145 content`: leaf text. Direct string is the
-                // common case; struct (`$176 name` + `$169 index`)
-                // is a content_ref, resolved when its target Content
-                // entity is iterated by the outer loop.
+                // `$145 content`: leaf text as a string, or a content_ref
+                // struct (`$176 name` + `$169 index`) resolved when the
+                // outer loop reaches its target Content entity.
                 "content" => {
                     if let IonValue::String(s) = v.unwrap_annotated() {
                         out.push_str(s);
                         out.push(' ');
                     }
                 }
-                // `$146 content_list`: structural children. Strings
-                // are leaf text; structs may carry their own
-                // `content` / `content_list` fields and must be
-                // walked recursively.
+                // `$146 content_list`: structural children. A string is leaf
+                // text; a struct carries its own `content` /
+                // `content_list` and is walked recursively.
                 "content_list" => {
                     if let IonValue::List(items) = v {
                         for item in items {

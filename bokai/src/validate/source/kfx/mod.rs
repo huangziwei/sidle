@@ -188,9 +188,8 @@ fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
     out
 }
 
-/// The container info a header locates, `None` when its range runs past the
-/// end of `bytes` or the info does not parse. Such a container is reported
-/// once as `container-unreadable` from the load error.
+/// The container info `header` locates. `None` when its range runs past the
+/// end of `bytes` or the info does not parse.
 fn container_info(bytes: &[u8], header: &ContainerHeader) -> Option<ContainerInfo> {
     use crate::formats::kfx::container::{parse_container_info, slice_at};
 
@@ -315,9 +314,7 @@ fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
 
 /// Rule 1's per-entity half: each index entry against the bytes it addresses.
 /// The range lies inside the file, the payload parses as Ion outside the media
-/// types, and no two entities of one type carry both the same name and
-/// different bytes. `loader::load` drops each of these silently, leaving every
-/// later rule a fragment short.
+/// types, and no two entities of one type share a name over differing bytes.
 fn check_entity_index(bytes: &[u8]) -> Vec<Finding> {
     use crate::formats::kfx::container::{
         SymbolTable, entity_media, parse_container_header, parse_index_table, slice_at,
@@ -378,10 +375,9 @@ fn check_entity_index(bytes: &[u8]) -> Vec<Finding> {
             continue;
         }
 
-        // §6.1: `(type, name)` is a fragment's key, so a reader keeps one of
-        // any two that share it. A repeat carrying identical bytes costs
-        // nothing and is not reported. Singletons all carry the reserved id
-        // `$348` and are counted by `singleton-repeated` instead.
+        // §6.1: `(type, name)` is a fragment's key. Identical bytes under a
+        // repeated key lose nothing. `singleton-repeated` counts the reserved
+        // id `$348`.
         if ent.id as u64 != KfxSymbol::Null as u64 {
             let first = *seen.entry((ent.type_id, name.clone())).or_insert(payload);
             if first != payload {
@@ -1873,12 +1869,11 @@ mod tests {
         id: u32,
         payload: Vec<u8>,
         /// The length the row declares, where it differs from the payload
-        /// written — an out-of-bounds row names more bytes than the file holds.
+        /// written.
         declared_length: Option<u64>,
     }
 
-    /// An index row naming a zero-length entity, enough for the rules that
-    /// read only the table.
+    /// An index row naming a zero-length entity.
     fn row(ftype: KfxSymbol, id: u32) -> Entity {
         Entity {
             type_id: ftype as u64 as u32,
@@ -1919,8 +1914,8 @@ mod tests {
 
             const HEADER_LEN: u32 = 18;
 
-            // Entity payloads sit first, so the index rows can name offsets
-            // relative to the header. Index table and doc symbols follow.
+            // Entity payloads, then the index table, then doc symbols. A row
+            // names its offset relative to the header.
             let mut payloads: Vec<u8> = Vec::new();
             let mut index_table = Vec::new();
             for ent in &self.entities {
@@ -2094,7 +2089,7 @@ mod tests {
         assert_eq!(out[0].severity, Severity::Error);
         assert_eq!(out[0].location, "section/c0");
 
-        // A length that names only the bytes written reads fine.
+        // A length naming only the bytes written is in bounds.
         let honest = Container {
             entities: vec![row(KfxSymbol::Section, 852).holding(ion_payload())],
             local_symbols: vec!["c0".to_string()],
@@ -2133,7 +2128,7 @@ mod tests {
     #[test]
     fn two_fragments_of_one_type_sharing_a_name_are_flagged() {
         let mut second = ion_payload();
-        second.push(0x0F); // an Ion null, so the payload still parses
+        second.push(0x0F); // an Ion null: the payload parses
         let repeated = Container {
             entities: vec![
                 row(KfxSymbol::Section, 852).holding(ion_payload()),
@@ -2148,7 +2143,7 @@ mod tests {
         assert_eq!(out[0].rule, "fragment-name-collision");
         assert_eq!(out[0].severity, Severity::Error);
 
-        // The same name over identical bytes costs a reader nothing.
+        // The same name over identical bytes is not a collision.
         let identical = Container {
             entities: vec![
                 row(KfxSymbol::Section, 852).holding(ion_payload()),
@@ -2160,8 +2155,7 @@ mod tests {
         .build();
         assert!(check_entity_index(&identical).is_empty());
 
-        // One name per fragment, and the same name under another type, both
-        // read fine: §6.1 keys by the pair.
+        // §6.1 keys by the pair: one name per type is distinct.
         let distinct = Container {
             entities: vec![
                 row(KfxSymbol::Section, 852).holding(ion_payload()),

@@ -73,18 +73,14 @@ pub struct Report {
     pub epub_html_lang_present: usize,
     /// Total spine doc count.
     pub epub_html_doc_count: usize,
-    /// Parent-escape (`..`) usage in spine `<img src>` or stylesheet
-    /// `<link href>`. Apple Books rejects these even when they resolve
-    /// mathematically (because the resolution still leaves the document's
-    /// container) — the result is missing images and an unloaded
-    /// stylesheet, and therefore no vertical writing mode.
+    /// Parent-escape (`..`) in spine `<img src>` or stylesheet `<link href>`.
+    /// Apple Books rejects these, dropping the image or the stylesheet.
     pub epub_parent_escape_refs: Vec<String>,
     /// OPF `<package version>` string (e.g. `"2.0"`, `"3.0"`).
     pub epub_opf_version: String,
-    /// True if `<package version>` starts with `"3"` but the manifest has
-    /// no `<item properties="nav">`. EPUB 3.x mandates a nav document
-    /// separate from the NCX; strict readers reject 3.x packages without
-    /// one.
+    /// True when `<package version>` starts with `"3"` and the manifest has
+    /// no `<item properties="nav">`, the nav document EPUB 3.x mandates
+    /// separately from the NCX.
     pub epub_epub3_missing_nav: bool,
 
     pub kfx_title: String,
@@ -98,8 +94,8 @@ pub struct Report {
     pub kfx_author_pronunciations: Vec<String>,
     pub kfx_cover_image: Option<String>,
     pub kfx_ppd: Option<String>,
-    /// `book_id` field if present — derived from EPUB identifier in EPUB→KFX
-    /// flow, or already present from a prior conversion in KFX→EPUB flow.
+    /// `book_id` field: the EPUB identifier in EPUB→KFX, the source
+    /// container's own value in KFX→EPUB.
     pub kfx_book_id: Option<String>,
     /// `ASIN` field from `kindle_title_metadata` (Amazon catalogue id).
     pub kfx_asin: Option<String>,
@@ -225,10 +221,9 @@ pub fn validate(
 
     let mut diffs: Vec<FieldDiff> = Vec::new();
 
-    // Space-flavor differences (U+0020 vs U+3000 ideographic space) are not
-    // fidelity defects: Amazon's own AZW3 and KFX editions of one book
-    // disagree on them, so an exact compare would flag ground-truth pairs.
-    // Raw values still print in the diff when anything else differs.
+    // U+0020 and U+3000 count as one space: Amazon's own AZW3 and KFX
+    // editions of one book disagree on them. Raw values print in the diff
+    // when anything else differs.
     let ws_normalized = |s: &str| -> String {
         s.chars()
             .map(|c| if c.is_whitespace() { ' ' } else { c })
@@ -241,12 +236,9 @@ pub fn validate(
             kfx: kfx.title.clone(),
         });
     }
-    // Flag only when the KFX *has* a language that bokai didn't carry faithfully
-    // (dropped, or changed). When the KFX language is empty, bokai supplying a
-    // default `dc:language` is required by EPUB and isn't a fidelity defect —
-    // there's nothing in the source to be unfaithful to. (The hard-coded "en"
-    // fallback is a poor default for CJK content; it only misfires on a book
-    // whose KFX language is empty and whose text is not English.)
+    // A diff only where the KFX declares a language. Against an empty KFX
+    // language, the EPUB default `dc:language` answers to nothing in the
+    // source.
     if !kfx.language.is_empty() && epub.language != kfx.language {
         diffs.push(FieldDiff {
             field: "language",
@@ -254,10 +246,8 @@ pub fn validate(
             kfx: kfx.language.clone(),
         });
     }
-    // Authors: full ordered vector compare. KFX side preserves source order
-    // (mirrors `yj_metadata.py:get_yj_metadata_from_book` which uses
-    // `authors.append(val)`). EPUB side reads `<dc:creator>` elements in
-    // OPF source order.
+    // Authors: ordered vector compare. The KFX side holds source order, the
+    // EPUB side `<dc:creator>` elements in OPF order.
     if !kfx.authors.is_empty()
         && epub
             .authors
@@ -272,11 +262,8 @@ pub fn validate(
         });
     }
     // Per-author sort keys: EPUB per-creator `file-as` ↔ KFX repeated
-    // `author_pronunciation`, both positional with the author list. The
-    // EPUB emitters synthesize a joined-author `file-as` on every creator
-    // when the source declares none — `extract_epub_metadata` already
-    // reduced such an all-fallback set to empty, so a non-empty list here
-    // is declared source data.
+    // `author_pronunciation`, both positional with the author list.
+    // `extract_epub_metadata` empties an all-fallback `file-as` set.
     if !epub.author_file_as.is_empty() || !kfx.author_pronunciations.is_empty() {
         let mismatch = epub
             .author_file_as
@@ -302,9 +289,9 @@ pub fn validate(
         }
     }
 
-    // Cover: EPUB declares a cover path → KFX should have a non-empty
-    // cover_image pointing at a resource. We don't compare paths; the
-    // transformation OPF-path → KFX-resource-name is intentional.
+    // Cover: an EPUB cover path pairs with a non-empty KFX `cover_image`.
+    // The OPF-path → KFX-resource-name transformation leaves the two
+    // unequal as strings.
     if epub.has_cover && kfx.cover_image.as_deref().unwrap_or("").is_empty() {
         diffs.push(FieldDiff {
             field: "cover_image",
@@ -312,24 +299,18 @@ pub fn validate(
             kfx: "(missing)".into(),
         });
     }
-    // The PPD check lives in `validate::fidelity::page_progression`, which
-    // mirrors calibre's writing-mode → ppd override: a KFX with `direction: ltr`
-    // + `writing_mode: vertical_rl` still has PPD = rtl, which the literal
-    // field-by-field compare here would miss. PPD values are printed below as
-    // informational only.
+    // `validate::fidelity::page_progression` owns the PPD check: a KFX with
+    // `direction: ltr` and `writing_mode: vertical_rl` has PPD = rtl. The
+    // PPD values below are informational.
 
-    // The remaining checks depend on which side is bokai's output. When the
-    // EPUB is generated from a KFX ("port"), it must carry the KFX's
-    // metadata and satisfy EPUB-product hygiene. When the EPUB is the
-    // ground-truth source, those same conditions describe the *source* and
-    // are not conversion defects — the mirrored checks below apply instead
-    // (source hygiene is `validate source`'s job).
+    // The remaining checks key on `epub_is_output`. An EPUB generated from a
+    // KFX carries that KFX's metadata; an EPUB that is the source describes
+    // the source, whose hygiene `validate source` owns.
     let epub_is_output = !dir.epub_is_source();
 
     // ASIN: KFX `kindle_title_metadata.ASIN` is the Amazon catalogue id.
-    // Calibre emits it as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</...>`;
-    // EPUB-3-valid output tags it `id="asin"` instead (see
-    // `scan_opf_identifiers`).
+    // Calibre emits `<dc:identifier opf:scheme="ASIN">`; EPUB-3-valid output
+    // tags it `id="asin"` (`scan_opf_identifiers`).
     if epub_is_output {
         // If KFX has it but EPUB lacks any ASIN identifier (or no
         // identifier matching the value), that's a port defect.
@@ -366,9 +347,8 @@ pub fn validate(
     }
 
     // Publication date: KFX `kindle_title_metadata.issue_date` ↔ EPUB
-    // `<dc:date>`. We don't compare formats — KFX uses `YYYY-MM-DD` strings,
-    // calibre normalises to ISO-8601 with offset. The defect we catch is
-    // "the source has a date, bokai's output has none."
+    // `<dc:date>`. Formats differ — `YYYY-MM-DD` against ISO-8601 with
+    // offset — and the diff is on presence: a source date, no output date.
     if epub_is_output {
         if kfx.issue_date.is_some() && epub.date.is_none() {
             diffs.push(FieldDiff {
@@ -385,12 +365,9 @@ pub fn validate(
         });
     }
 
-    // Primary writing mode hint: calibre emits
-    // `<meta name="primary-writing-mode" content="vertical-rl"/>` for
-    // vertical books. The Kindle app uses it as a layout hint. When KFX
-    // declares a vertical writing mode, a generated EPUB should carry the
-    // meta. (In the EPUB→KFX direction, mode fidelity is covered by the
-    // dedicated writing-mode validator.)
+    // Primary writing mode hint: calibre emits `<meta
+    // name="primary-writing-mode" content="vertical-rl"/>` for a vertical
+    // book, and the Kindle app reads it as a layout hint.
     if epub_is_output && kfx.is_vertical && epub.primary_writing_mode.is_none() {
         diffs.push(FieldDiff {
             field: "meta primary-writing-mode",
@@ -399,11 +376,9 @@ pub fn validate(
         });
     }
 
-    // `xml:lang` on each spine XHTML `<html>` root — calibre adds it for
-    // every spine doc (the per-doc language hint that reading systems use
-    // for font selection and word-break behaviour). Source-of-truth is
-    // KFX `language`. If any generated spine doc is missing it, that's a
-    // port defect.
+    // `xml:lang` on each spine XHTML `<html>` root, the per-doc language
+    // hint driving font selection and word-break. Its value is the KFX
+    // `language`.
     if epub_is_output
         && !kfx.language.is_empty()
         && epub.html_doc_count > 0
@@ -419,11 +394,9 @@ pub fn validate(
         });
     }
 
-    // Parent-escape (`..`) in any spine `<img src>` / `<link href>`.
-    // Apple Books treats these as broken even when they mathematically
-    // resolve, causing missing images and an unloaded stylesheet (which
-    // suppresses vertical writing mode in CJK books). The correct path
-    // for a chapter resource is sibling-relative to the chapter file.
+    // Parent-escape (`..`) in any spine `<img src>` / `<link href>`. Apple
+    // Books treats these as broken, dropping images and the stylesheet. A
+    // chapter resource is sibling-relative to its chapter file.
     if epub_is_output && !epub.parent_escape_refs.is_empty() {
         diffs.push(FieldDiff {
             field: "spine resource refs with .. parent escape",
@@ -477,10 +450,9 @@ pub fn validate(
     })
 }
 
-/// Whether an OPF identifier scheme (scheme-or-id, per
-/// `scan_opf_identifiers`) denotes the Amazon ASIN. Mirrors
-/// `epub::parser`'s recovery: EPUB-2 `opf:scheme="ASIN"` / `"MOBI-ASIN"`,
-/// or the EPUB-3 `id="asin"` tag.
+/// Whether an OPF identifier scheme from `scan_opf_identifiers` denotes the
+/// Amazon ASIN: EPUB-2 `opf:scheme="ASIN"` / `"MOBI-ASIN"`, or the EPUB-3
+/// `id="asin"` tag.
 fn is_asin_identifier(scheme: &str) -> bool {
     scheme.eq_ignore_ascii_case("ASIN") || scheme.eq_ignore_ascii_case("MOBI-ASIN")
 }
@@ -538,11 +510,9 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
-    // The shared epub::parse_opf strips fields that round-trip checking needs,
-    // so rescan the raw OPF source for `<dc:identifier>` schemes, `<dc:date>`,
-    // and `<meta name="primary-writing-mode">`. The lossy
-    // representation in `Metadata` is fine for the existing extractors but
-    // can't tell us "0 identifiers" vs "1 unique" reliably across schemes.
+    // A rescan of the raw OPF for `<dc:identifier>` schemes, `<dc:date>` and
+    // `<meta name="primary-writing-mode">`: `epub::parse_opf` keeps one
+    // identifier and drops its scheme.
     let identifiers = scan_opf_identifiers(&opf_str);
     let date = scan_opf_dc_date(&opf_str);
     let primary_writing_mode = scan_opf_primary_writing_mode(&opf_str);
@@ -579,10 +549,9 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let has_nav_item = scan_opf_has_nav_item(&opf_str);
     let epub3_missing_nav = opf_version.starts_with('3') && !has_nav_item;
 
-    // Reduce an all-fallback `file-as` set (every entry = the joined author
-    // list) to empty: that's the EPUB emitters' no-data synthesis, not
-    // declared source data, and comparing it against real pronunciations
-    // would manufacture defects.
+    // An all-fallback `file-as` set, every entry the joined author list,
+    // reduces to empty: it is the emitters' no-data synthesis, not declared
+    // source data.
     let joined_authors = opf.metadata.authors.join(" & ");
     let author_file_as = if !opf.metadata.author_sorts.is_empty()
         && opf
@@ -616,13 +585,9 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     })
 }
 
-/// Resolve `ref` against `chapter_dir` (e.g. `"OEBPS"`) and check whether
-/// the `..` segments are gratuitous: does the resolved absolute path land
-/// back inside `chapter_dir`? When yes, the natural form is sibling-
-/// relative and the `..` is just noise — Apple Books rejects this form
-/// silently. When the `..` actually moves the target out of chapter_dir
-/// (calibre's `../stylesheet.css` from a chapter in `OEBPS/`), the form is
-/// legitimate.
+/// True when `href` resolved against `chapter_dir` lands back inside
+/// `chapter_dir`: its `..` segments are noise over a sibling-relative path,
+/// and Apple Books rejects that form silently.
 fn is_gratuitous_escape(href: &str, chapter_dir: &str) -> bool {
     let resolved = resolve_relative(chapter_dir, href);
     let resolved_dir = resolved.rfind('/').map(|i| &resolved[..i]).unwrap_or("");
@@ -774,13 +739,9 @@ fn html_root_has_xml_lang(xhtml: &str) -> bool {
     false
 }
 
-/// Scan the raw OPF XML for every `<dc:identifier>` element and return
-/// `(scheme, value)` pairs. The `scheme` comes from `opf:scheme` if present,
-/// falling back to the `id` attribute — EPUB 3 forbids `opf:scheme`
-/// (RSC-005), so EPUB-3-valid output tags identifiers by id (`id="asin"`),
-/// the same convention `epub::parser` recovers from. Otherwise `""`.
-/// (The shared `parse_opf` picks one identifier and loses schemes; we don't
-/// want to widen that struct for a validator-only need.)
+/// Every `<dc:identifier>` in the raw OPF XML as a `(scheme, value)` pair.
+/// `scheme` is `opf:scheme`, the `id` attribute where EPUB 3 forbids
+/// `opf:scheme` (RSC-005), and `""` where neither is present.
 fn scan_opf_identifiers(opf_str: &str) -> Vec<(String, String)> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -942,9 +903,8 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -1009,11 +969,9 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     Ok(out)
 }
 
-/// Walk every entity and look for `writing_mode` fields. Returns
-/// `(is_vertical, dominant_vertical_value)` — `is_vertical` is true iff any
-/// `writing_mode` ends in `_rl` or `_lr`, and the dominant value picks
-/// `vertical-rl` over `vertical-lr` when both exist (matches calibre's
-/// most-cited-non-default selection).
+/// `(is_vertical, dominant_vertical_value)` over every entity's `writing_mode`
+/// fields. `is_vertical` holds for any value ending in `_rl` or `_lr`, and the
+/// dominant value takes `vertical-rl` over `vertical-lr`.
 fn detect_vertical_writing_mode<F>(
     kfx_bytes: &[u8],
     resolve_sym: &F,
@@ -1126,9 +1084,8 @@ where
 }
 
 /// Walk `book_metadata` ($490): `{categorised_metadata: [{category, metadata: [{key, value}, ...]}, ...]}`.
-/// Collect all (key, value) pairs into an ordered `Vec` so repeated keys
-/// (like `author` for multi-author books) keep source order. A HashMap here
-/// would keep only the last value of any repeated key.
+/// Every (key, value) pair in an ordered `Vec`, which keeps the source order
+/// of a repeated key such as `author`.
 fn extract_categorised<F>(value: &IonValue, resolve_sym: &F, out: &mut Vec<(String, String)>)
 where
     F: Fn(u64) -> String,

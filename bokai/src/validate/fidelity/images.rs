@@ -49,19 +49,16 @@ use crate::formats::kfx::symbols::KfxSymbol;
 pub struct EpubImage {
     pub spine_path: String,
     pub raw_src: String,
-    /// `raw_src` resolved against `spine_path`'s base directory and normalised
-    /// (e.g. `../images/cover.jpg` → `OEBPS/images/cover.jpg`). The path is
-    /// percent-decoded so it matches the zip entry name. None when src has a
-    /// scheme (`http:`, `data:`, etc.) and therefore can't be a zip entry.
+    /// `raw_src` resolved against `spine_path`, normalised and percent-decoded
+    /// to match a zip entry name: `../images/cover.jpg` → `OEBPS/images/
+    /// cover.jpg`. `None` for a src with a scheme (`http:`, `data:`).
     pub resolved_path: Option<String>,
     /// Whether `resolved_path` is present as an entry in the EPUB zip. False
     /// for external URLs and for tags whose referenced bytes weren't bundled.
     pub bundled: bool,
     /// Recognised image format ("jpeg", "png", "gif", "webp", "bmp", "svg")
-    /// based on file-magic detection of the bundled bytes. `None` means the
-    /// bytes don't look like any standard image format — including the case
-    /// where bokai has bundled the raw KFX `external_resource` Ion struct
-    /// (~58 bytes) instead of decoding the image to JPEG/PNG/etc.
+    /// from the bundled bytes' magic. `None` covers bytes matching no image
+    /// format, an undecoded `external_resource` Ion struct among them.
     pub detected_format: Option<String>,
 }
 
@@ -135,10 +132,8 @@ pub struct Report {
     pub epub_renderable_image_count: usize,
     /// Count of `<img src>` whose resolved path doesn't exist in the bundle.
     pub epub_missing_image_count: usize,
-    /// Count of `<img src>` whose resolved path exists but the bytes don't
-    /// match any known image magic. bokai's current kfx→epub path bundles the
-    /// raw KFX Ion resource struct (~58 bytes) at the image path without
-    /// decoding it, so this catches that case.
+    /// Count of `<img src>` whose resolved path exists over bytes matching no
+    /// image magic, an undecoded KFX Ion resource struct among them.
     pub epub_unreadable_image_count: usize,
 
     // --- Defects (EPUB-side internal) ---
@@ -159,20 +154,9 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the conversion looks clean **for the reader**: every internal
-    /// `<img>` in the EPUB resolves to bundled bytes that parse as a real image.
-    ///
-    /// Gated ONLY on EPUB-side, bokai-controlled facts. Deliberately NOT gated on:
-    /// - `dangling_external_resources` / `orphan_image_refs` / `orphan_raw_media`
-    ///   — intrinsic to the *source KFX* (calibre's EPUB trips them with the same
-    ///   numbers), not something bokai introduces or can fix.
-    /// - `epub_image_count == kfx_image_element_count` — bokai adds a cover `<img>`
-    ///   with no KFX storyline element, so a book with a cover legitimately has
-    ///   one more EPUB image than KFX elements; this equality false-fails on every
-    ///   such book.
-    ///
-    /// All of the above stay printed-but-informational in the report (a real
-    /// dropped image still shows as `epub_missing_image_count`).
+    /// Whether every internal `<img>` in the EPUB resolves to bundled bytes
+    /// that parse as an image. `dangling_external_resources`, `orphan_image_refs`,
+    /// `orphan_raw_media` and the image counts print as informational.
     pub fn is_clean(&self) -> bool {
         self.epub_missing_image_count == 0 && self.epub_unreadable_image_count == 0
     }
@@ -395,11 +379,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
     let epub_image_count = epub_images.len();
 
-    // Bundled-bytes accounting. Internal references = ones with a resolved
-    // path (no scheme). External URLs are excluded from all three buckets.
-    // Renderable = bundled AND known image magic. Unreadable = bundled but no
-    // image magic (bokai's current path falls here — it bundles raw Ion blobs).
-    // Missing = path not in the zip at all.
+    // Bundled-bytes accounting over references with a resolved path, external
+    // URLs excluded: renderable is bundled with image magic, unreadable is
+    // bundled without, missing is absent from the zip.
     let mut epub_renderable_image_count = 0;
     let mut epub_missing_image_count = 0;
     let mut epub_unreadable_image_count = 0;
@@ -464,9 +446,8 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
-    // Snapshot every zip entry name so we can cross-check `<img src>` later.
-    // Used to detect bokai's biggest current kfx→epub defect: `<img>` tags
-    // emitted but bytes never bundled.
+    // Every zip entry name, the set each `<img src>` is checked against: an
+    // emitted `<img>` whose bytes were never bundled is absent from it.
     let zip_entries: HashSet<String> = (0..archive.len())
         .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
         .collect();
@@ -485,9 +466,8 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         extract_images_from_xhtml(&xhtml, &full_path, &mut images);
     }
 
-    // Resolve each src against its spine path; for bundled entries, also
-    // peek the leading bytes to detect the image format. We cache reads in a
-    // local map so repeated <img src> pointing at the same path don't reopen.
+    // Each src resolved against its spine path, with the leading bytes of a
+    // bundled entry read for its format. `head_cache` holds one read per path.
     let mut head_cache: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     for img in &mut images {
@@ -499,15 +479,8 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         }
         let Some(path) = resolved else { continue };
         let detected = head_cache.entry(path.clone()).or_insert_with(|| {
-            // Try both decoded and re-encoded forms against the zip.
-            let head_bytes = read_zip_head(&mut archive, &path)
-                .or({
-                    // Some zips use the un-decoded form; try the raw normalized
-                    // name too. We don't have the un-decoded version here; just
-                    // try `path` as a fallback (already attempted above).
-                    None
-                })
-                .unwrap_or_default();
+            // `path` is the decoded form, the only name tried against the zip.
+            let head_bytes = read_zip_head(&mut archive, &path).unwrap_or_default();
             detect_image_format(&head_bytes)
         });
         img.detected_format = detected.clone();
@@ -529,10 +502,9 @@ fn read_zip_head<R: std::io::Read + std::io::Seek>(
     Some(buf)
 }
 
-/// Resolve a possibly-relative href against the spine path's base directory,
-/// normalise `..`/`.`, percent-decode, and check whether the resulting path is
-/// a zip entry. Returns `(None, false)` for hrefs with a scheme (http://,
-/// data:, etc.) — those can't be zip entries by definition.
+/// An href resolved against the spine path's base directory, `..`/`.`
+/// normalised and percent-decoded, with whether it names a zip entry.
+/// `(None, false)` for an href carrying a scheme.
 fn resolve_against_zip(
     spine_path: &str,
     raw_src: &str,
@@ -671,9 +643,8 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -691,10 +662,9 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
     let bcrawmedia_type = KfxSymbol::Bcrawmedia as u32;
     let storyline_type = KfxSymbol::Storyline as u32;
 
-    // Each entity has `id: u32`, which is a symbol ID pointing at the fragment's
-    // name (its `fid`). For bcRawMedia, that name is `resource/<resource_name>`
-    // and matches what `external_resource.location` says. We just resolve
-    // the entity ID through the symbol table.
+    // An entity's `id: u32` is the symbol id of its fragment name. A
+    // bcRawMedia name is `resource/<resource_name>`, equal to that resource's
+    // `external_resource.location`.
 
     let mut external_resources: Vec<ExternalResource> = Vec::new();
     let mut raw_media_names: HashSet<String> = HashSet::new();
@@ -784,10 +754,8 @@ where
 }
 
 fn is_image_format(format: &str) -> bool {
-    // `jxr` (JPEG-XR) is bokai's default interior-plate codec (grayscale/colour);
-    // omitting it made every JXR resource invisible to this validator, so a
-    // JXR-heavy book (e.g. a fixed-layout manga, all pages JXR) reported every
-    // storyline image ref and bcRawMedia entity as orphan.
+    // `jxr` (JPEG-XR) is the default interior-plate codec, and a fixed-layout
+    // book carries every page in it.
     matches!(
         format,
         "$$png"

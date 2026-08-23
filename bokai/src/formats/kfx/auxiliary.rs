@@ -1,37 +1,16 @@
-//! Auxiliary data generation for KFX export.
+//! `auxiliary_data` ($597) and `ruby_content` ($756) fragments for KFX export.
 //!
-//! Each section gets an auxiliary_data entity marking it as a navigation target.
-//! This enables the Kindle reader to recognize which sections can be navigated to.
+//! One `auxiliary_data` entity per section marks it a navigation target.
 
 use super::context::ExportContext;
 use super::fragment::KfxFragment;
 use super::ion::IonValue;
 use super::symbols::KfxSymbol;
 
-/// Build an auxiliary_data fragment for a section.
-///
-/// Each section needs an auxiliary_data entity with metadata marking it
-/// as a target section for navigation.
-///
-/// # Arguments
-/// * `section_name` - The section name (e.g., "c0", "c1")
-/// * `ctx` - Export context for symbol interning
-///
-/// # Returns
-/// A KfxFragment with type auxiliary_data ($597)
-///
-/// # Structure
-/// ```ion
-/// {
-///   kfx_id: 'c0-ad',
-///   metadata: [
-///     { key: "IS_TARGET_SECTION", value: true }
-///   ]
-/// }
-/// ```
+/// The `auxiliary_data` ($597) fragment naming `section_name` a target
+/// section, keyed `<section_name>-ad`.
 pub fn build_auxiliary_data_fragment(section_name: &str, ctx: &mut ExportContext) -> KfxFragment {
     let kfx_id = format!("{}-ad", section_name);
-    // kfx_id must be a symbol, not a string (per reference KFX)
     let kfx_id_symbol = ctx.symbols.get_or_intern(&kfx_id);
 
     let metadata_entry = IonValue::Struct(vec![
@@ -53,23 +32,9 @@ pub fn build_auxiliary_data_fragment(section_name: &str, ctx: &mut ExportContext
     KfxFragment::new(KfxSymbol::AuxiliaryData, &kfx_id, ion)
 }
 
-/// Build ruby_content fragments from the registry.
-///
-/// Each fragment groups up to `RubyContentRegistry::ENTRIES_PER_FRAGMENT`
-/// annotation entries. Storyline style_events reference these via:
-///   - `ruby_name`: symbol matching the fragment's kfx_id (`b_ruby_<N>`)
-///   - `ruby_id`: 1-indexed position within the fragment's content_list
-///
-/// Shape (one fragment):
-/// ```ion
-/// {
-///   ruby_name: 'b_ruby_0',
-///   content_list: [
-///     { id: <int>, style: 's0', type: 'text', ruby_id: 1, content: "かな" },
-///     ...
-///   ]
-/// }
-/// ```
+/// The `ruby_content` fragments in `ctx.ruby_registry`, up to
+/// `RubyContentRegistry::ENTRIES_PER_FRAGMENT` annotations each, keyed
+/// `b_ruby_<N>`. A style_event cites one by `ruby_name` and 1-based `ruby_id`.
 pub fn build_ruby_content_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
     let frag_count = ctx.ruby_registry.fragment_count();
     if frag_count == 0 {
@@ -126,7 +91,6 @@ mod tests {
         assert_eq!(frag.fid, "c0-ad");
 
         if let FragmentData::Ion(IonValue::Struct(fields)) = &frag.data {
-            // Check kfx_id - should be a symbol now
             let kfx_id = fields.iter().find(|(id, _)| *id == KfxSymbol::KfxId as u64);
             assert!(kfx_id.is_some(), "should have kfx_id");
             assert!(

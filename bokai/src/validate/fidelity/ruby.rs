@@ -47,9 +47,8 @@ impl RubyPair {
 }
 
 /// Result of comparing EPUB-side and KFX-side pair sets. Direction-neutral:
-/// callers interpret `only_in_epub` and `only_in_kfx` based on which side is
-/// the ground truth for the conversion direction under test (see
-/// [`crate::validate::Direction`]).
+/// `only_in_epub` and `only_in_kfx` read against the ground-truth side named
+/// by [`crate::validate::Direction`].
 #[derive(Debug, Default)]
 pub struct Report {
     pub epub_pairs: Vec<RubyPair>,
@@ -244,7 +243,7 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
     Ok(buf)
 }
 
-/// State for the ruby walker: which element we're currently inside.
+/// The ruby element a walk is inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RubyState {
     /// Not inside any ruby-related element.
@@ -366,9 +365,8 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -427,10 +425,9 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     Ok(pairs)
 }
 
-/// True when a content_list member struct is a child element (it carries a
-/// `type` field — image, text, …). In the parent's style_event offset space
-/// every child element occupies exactly ONE position regardless of its own
-/// content length; only the parent's bare-string runs contribute per-char.
+/// True for a content_list member struct carrying a `type` field: a child
+/// element. Each occupies one position in the parent's style_event offset
+/// space, where only bare-string runs contribute per character.
 fn is_child_element<F>(fields: &[(u64, IonValue)], resolve_sym: &F) -> bool
 where
     F: Fn(u64) -> String,
@@ -554,14 +551,9 @@ fn collect_pairs_from_ion<F>(
 {
     match value {
         IonValue::Struct(fields) => {
-            // If this struct is a text element with style_events, pull base
-            // text out and emit one pair per ruby style_event. The text can
-            // arrive three ways: an externalized content ref (name + index),
-            // a direct inline string, or the interleave shape — bare-string
-            // runs mixed with child element structs (inline images, nested
-            // text runs) in content_list, where events offset into the JOINED
-            // run space and every child element occupies ONE position
-            // (U+FFFC placeholder here) no matter how long its own text is.
+            // Base text of a text element with style_events, one pair per ruby
+            // style_event. It arrives as a content ref (name + index), an
+            // inline string, or the interleave shape (see `is_child_element`).
             let mut content_name = String::new();
             let mut content_index: i64 = -1;
             let mut inline_text: Option<String> = None;
@@ -642,11 +634,9 @@ fn collect_pairs_from_ion<F>(
                     let mut length: i64 = -1;
                     let mut ruby_name = String::new();
                     let mut ruby_id: i64 = 0;
-                    // Sub-ranges from `ruby_id_list`: one style_event can annotate
-                    // several base spans, each with its own ruby_id. bokai's emitter
-                    // (content.rs try_emit_ruby_text) expands these into multiple
-                    // pairs, so the KFX side must too — otherwise every list-event
-                    // pair shows up as "fabricated".
+                    // Sub-ranges from `ruby_id_list`: one style_event annotates
+                    // several base spans, each with its own `ruby_id`, and each
+                    // yields one pair.
                     let mut id_list: Vec<(i64, i64, i64)> = Vec::new();
                     for (k, v) in efields {
                         match resolve_sym(*k).as_str() {
@@ -709,8 +699,8 @@ fn collect_pairs_from_ion<F>(
                     if offset < 0 || ruby_name.is_empty() {
                         continue;
                     }
-                    // A single `ruby_id` covers the whole [0, length) span; otherwise
-                    // use the `ruby_id_list` sub-ranges. Mirrors bokai's emitter.
+                    // A `ruby_id` above 0 covers the whole [0, length) span. Below
+                    // it, `ruby_id_list` carries the sub-ranges.
                     let ranges: Vec<(i64, i64, i64)> = if ruby_id > 0 {
                         vec![(0, length, ruby_id)]
                     } else {

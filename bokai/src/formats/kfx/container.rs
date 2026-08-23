@@ -106,17 +106,15 @@ pub fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     ])
 }
 
-/// The `length` bytes at `offset`, or `None` when that range runs past the end
-/// of `data`. A range whose end overflows `usize` is out of bounds like any
-/// other.
+/// The `length` bytes at `offset`. `None` when the range runs past the end of
+/// `data` or its end overflows `usize`.
 #[inline]
 pub fn slice_at(data: &[u8], offset: usize, length: usize) -> Option<&[u8]> {
     data.get(offset..offset.checked_add(length)?)
 }
 
-/// A `u64` container field as a `usize`, saturating where the target's pointer
-/// width cannot hold it. Such a value addresses nothing inside any container,
-/// and saturating keeps it out of bounds rather than truncating it into range.
+/// `value` as a `usize`, saturating at `usize::MAX` where the target's pointer
+/// width cannot hold it.
 #[inline]
 fn clamp_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
@@ -310,8 +308,7 @@ const FALLBACK_BASE_LEN: u64 = 833;
 
 /// Summed import `max_id` of a doc-symbols fragment, whose `imports` list
 /// carries `[{name: "YJ_symbols", version: 10, max_id: N}]`; local symbols
-/// occupy ids `N+1..`. `None` for a fragment that does not parse, or that
-/// declares none.
+/// occupy ids `N+1..`. `None` when no import declares one.
 pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
     let mut parser = IonParser::new(doc_bytes);
     let value = parser.parse().ok()?;
@@ -381,9 +378,8 @@ pub fn parse_import_names(doc_bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Resolved symbol table — base + per-container doc_symbols. `base_len` comes
-/// from the doc-symbols fragment's imports `max_id`; a fixed
-/// `KFX_SYMBOL_TABLE.len()` base shifts every doc-local name onto a tail name.
+/// Resolved symbol table — base + per-container doc_symbols. `base_len` is the
+/// doc-symbols fragment's imports `max_id` plus one.
 pub struct SymbolTable {
     base_len: u64,
     doc_symbols: Vec<String>,

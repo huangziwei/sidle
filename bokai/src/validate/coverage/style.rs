@@ -1,19 +1,15 @@
 //! Style-coverage validation — count CSS declarations in the source and
 //! report which property names bokai's parser silently drops.
 //!
-//! For each `(property_name, raw_value)` declaration found in the source's
-//! linked stylesheets, inline `<style>` blocks, and element `style=` attrs,
-//! we call `Declaration::parse(name, value)`. bokai's parser returns a non-
-//! empty `Vec<Declaration>` for supported properties and an empty `Vec` for
-//! unsupported ones (silently swallowing the property). The report tells
-//! the user, per book, which CSS properties they need to make bokai
-//! handle next — the biggest deficits matter most.
+//! Every `(property_name, raw_value)` declaration in the source's linked
+//! stylesheets, inline `<style>` blocks and element `style=` attributes goes
+//! through `Declaration::parse(name, value)`. A supported property yields a
+//! non-empty `Vec<Declaration>`; an unsupported one yields an empty `Vec`.
+//! The report ranks the dropped property names by count.
 //!
-//! Limitations: we do **not** verify that a parsed declaration produced a
-//! matching KFX style symbol on the export side — that's a separate
-//! validation pass. We also don't validate value correctness within a
-//! parsed property (e.g. an unsupported `font-size` keyword would parse
-//! to nothing without us noticing).
+//! Scope: property names alone. Whether a parsed declaration reaches a KFX
+//! style symbol belongs to the export-side pass, and a parsed property's
+//! value is not checked.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::{HashMap, HashSet};
@@ -69,17 +65,13 @@ pub struct Report {
     pub epub_class_rule_count: usize,
     /// Number of `<p>` elements with non-empty visible text in spine docs.
     pub epub_leaf_p_text: usize,
-    /// Number of `<div>` elements whose only children are inline-runs of
-    /// text (no block children) — paragraph-shaped containers that are
-    /// stuck as `<div>` instead of being promoted to `<p>` by
-    /// `consolidate_html`.
+    /// Number of `<div>` elements whose only children are inline runs of text:
+    /// paragraph-shaped containers `consolidate_html` leaves as `<div>`.
     pub epub_leaf_div_text: usize,
 
     // --- KFX baseline ---
-    /// Distinct `$style` ($157) entity count in KFX — the "class universe"
-    /// the EPUB ought to be able to assign per-element classes from. When
-    /// this is > 0 but `epub_class_rule_count` is 0, the styling pipeline
-    /// is missing entirely (the visible defect that's stuck on horror).
+    /// Distinct `$style` ($157) entity count in KFX: the class universe the
+    /// EPUB draws per-element classes from.
     pub kfx_distinct_style_count: usize,
 }
 
@@ -95,20 +87,17 @@ impl Report {
         self.dropped == 0 && !self.classes_collapsed_to_zero() && !self.paragraphs_stuck_as_divs()
     }
 
-    /// True when KFX has styles to emit but the EPUB has no class rules in
-    /// any bundled stylesheet AND no `class=` attrs on spine elements. This
-    /// is the "no styling pipeline" defect: every visible style choice from
-    /// the source is silently dropped.
+    /// True when KFX carries styles and the EPUB has no class rules in any
+    /// bundled stylesheet and no `class=` attributes on spine elements: every
+    /// style choice in the source is dropped.
     pub fn classes_collapsed_to_zero(&self) -> bool {
         self.kfx_distinct_style_count > 0
             && self.epub_class_rule_count == 0
             && self.epub_class_attr_occurrences == 0
     }
 
-    /// True when leaf-text containers are predominantly `<div>` instead of
-    /// `<p>`. Heuristic: at least 50 div-text containers AND fewer than 10
-    /// `<p>`s with text. Catches the "everything is `<div>`" port defect
-    /// without false-firing on tiny books.
+    /// True when leaf-text containers are predominantly `<div>` and not `<p>`:
+    /// at least 50 div-text containers against fewer than 10 `<p>`s with text.
     pub fn paragraphs_stuck_as_divs(&self) -> bool {
         self.epub_leaf_div_text >= 50 && self.epub_leaf_p_text < 10
     }
@@ -306,9 +295,9 @@ fn collect_class_richness(epub_bytes: &[u8]) -> Result<ClassRichness, String> {
     Ok(richness)
 }
 
-/// Count selectors in a CSS source that include at least one `.name`
-/// component. We do a tolerant scan: split on `{` to isolate the selector
-/// list, then split each selector on `,` and check for a `.<ident>` prefix.
+/// Count of selectors in `css` carrying at least one `.name` component. The
+/// scan splits on `{` for the selector list, splits each selector on `,`, and
+/// checks for a `.<ident>` prefix.
 fn count_class_selectors(css: &str) -> usize {
     let mut count = 0;
     for (i, segment) in css.split('{').enumerate() {
@@ -349,12 +338,9 @@ fn class_selector_count_in_list(selectors: &str) -> usize {
         .count()
 }
 
-/// Walk an XHTML and update `richness`: count `class=` attrs (and collect
-/// distinct class names), count `<p>` with text, and count `<div>` whose
-/// children are all inline (text/span/ruby/a/img/etc., no block elements
-/// like div/p/h*/ul/ol/li/table). The block-vs-inline split mirrors
-/// calibre's `consolidate_html` heuristic: a leaf `<div>` with only
-/// inline runs is paragraph-shaped.
+/// Walk an XHTML into `richness`: `class=` attributes with their distinct
+/// names, `<p>` with text, and `<div>` whose children are all inline. A leaf
+/// `<div>` holding only inline runs is paragraph-shaped.
 fn scan_xhtml_richness(
     xhtml: &str,
     richness: &mut ClassRichness,
@@ -385,10 +371,9 @@ fn scan_xhtml_richness(
         }
     }
 
-    // Pass 2: leaf-text container shape — walk depth-first tracking element
-    // children so we can tell "div with only inline kids + non-empty text"
-    // from "div with block kids". For each Start event, record the
-    // tag-name and whether any block child has appeared by End time.
+    // Pass 2: leaf-text container shape. A `Frame` per Start event holds the
+    // tag name and whether a block child appeared by its End, separating a
+    // div with inline kids and text from a div with block kids.
     let mut reader = Reader::from_str(xhtml);
     reader.config_mut().trim_text(false);
     struct Frame {
@@ -474,10 +459,9 @@ fn scan_xhtml_richness(
                             richness.leaf_div_text += 1;
                         }
                     }
-                    // Propagate descendant-text up so an ancestor `<div>`
-                    // whose only kids are inline runs (`<span>` etc.)
-                    // registers as a leaf-text container. Without this,
-                    // `<div><span>x</span></div>` would never tick.
+                    // `has_text` rises to the parent, which registers a
+                    // `<div>` whose only kids are inline runs — the text of
+                    // `<div><span>x</span></div>` — as leaf text.
                     if frame.has_text
                         && let Some(parent) = stack.last_mut()
                     {
@@ -493,8 +477,7 @@ fn scan_xhtml_richness(
 }
 
 /// KFX-side: number of distinct `$style` ($157) entities in the container.
-/// Mirrors what calibre's class system would draw from when emitting
-/// `class_sN` rules — one per style struct.
+/// Calibre emits one `class_sN` rule per style struct.
 fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
     let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     let info_data = slice_at(
@@ -523,10 +506,8 @@ fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
 // CSS collection
 // ============================================================================
 
-/// Collect every `(property, value)` declaration from the EPUB:
-/// - linked .css files in the manifest,
-/// - inline `<style>` blocks in spine XHTML,
-/// - element `style=` attributes in spine XHTML.
+/// Every `(property, value)` declaration in the EPUB: manifest `.css` files,
+/// inline `<style>` blocks in spine XHTML, and element `style=` attributes.
 fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -549,10 +530,9 @@ fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, Stri
 
     let mut decls: Vec<(String, String)> = Vec::new();
 
-    // 1. Linked stylesheets: walk manifest for items with css media-type
-    //    (text/css), plus any href ending in .css. We don't dedup — a sheet
-    //    referenced by N chapters still counts its declarations once because
-    //    we only parse each file once.
+    // 1. Linked stylesheets: manifest items with the text/css media type, plus
+    //    any href ending in `.css`. `seen_css` parses each file once, however
+    //    many chapters reference it.
     let mut seen_css: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (href, media_type) in opf.manifest.values() {
         let is_css = media_type == "text/css" || href.to_lowercase().ends_with(".css");
@@ -600,9 +580,8 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 }
 
 /// Parse a CSS blob (whole stylesheet or `<style>` body) and append every
-/// declaration found to `out`. We deliberately keep the parser tolerant:
-/// each rule's declaration block contributes whether or not the selector
-/// would match anything, since the *property* coverage is what we measure.
+/// declaration found to `out`. Every rule body contributes its declarations,
+/// whatever its selector matches: the measure is property coverage.
 fn parse_css_blob(css: &str, out: &mut Vec<(String, String)>) {
     use cssparser::{
         AtRuleParser, CowRcStr, DeclarationParser, ParseError, QualifiedRuleParser,

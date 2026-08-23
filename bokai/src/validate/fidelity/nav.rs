@@ -22,8 +22,7 @@
 //!    KFX headings container. (h1 is intentionally not navigated by Kindle:
 //!    `build_headings_entries` skips it; see `export/kfx.rs::level_to_symbol`.)
 //! 2. **TOC count balance** — flat-traversal entry count of source NCX
-//!    should match KFX TOC nav_unit count (leaves + inner; we count all
-//!    nodes that carry a target_position).
+//!    against KFX TOC nav_unit count, every node carrying a target_position.
 //! 3. **Reachability** — every `target_position.id` (headings and TOC)
 //!    must resolve to an element ID present in some storyline.
 
@@ -67,11 +66,9 @@ pub struct Report {
     // --- EPUB side ---
     /// Count of `<h1>`–`<h6>` per level in the EPUB spine (level → count).
     pub epub_headings_by_level: HashMap<u8, usize>,
-    /// Flat count of TOC entries from the EPUB's authoritative TOC (recursive
-    /// total). Ground truth is the richer of the EPUB 3 nav doc vs the EPUB 2
-    /// NCX — the same selection the importer makes — because retail EPUBs pair a
-    /// full nav with a stub NCX (or vice versa); validating against the NCX
-    /// alone masked whole-chapter TOC losses.
+    /// Recursive count of TOC entries from the richer of the EPUB 3 nav doc
+    /// and the EPUB 2 NCX, the selection the importer makes. A retail EPUB
+    /// pairs a full nav with a stub NCX, or the reverse.
     pub epub_toc_entry_count: usize,
     /// Count of TOC entries pointing at manifest items not in the spine.
     /// These can't be addressed by KFX position-based navigation and are
@@ -80,21 +77,17 @@ pub struct Report {
     /// Whether the EPUB has any usable TOC (nav or NCX). If not, TOC checks are
     /// skipped.
     pub epub_has_toc: bool,
-    /// Distinct `<content src>`/`<a href>` paths (everything before `#`) across
-    /// all TOC entries. A well-formed TOC has roughly one distinct path per
-    /// top-level chapter; when this collapses to 1 while `epub_toc_entry_count`
-    /// is many, every TOC entry is silently pointing at the same placeholder —
-    /// the most common port defect (bokai's `nav_unit_to_navpoint` placeholder
-    /// before `process_position` lands).
+    /// Distinct `<content src>`/`<a href>` paths, everything before `#`, over
+    /// all TOC entries. A well-formed TOC carries about one per top-level
+    /// chapter; a value of 1 against many entries is a placeholder href.
     pub epub_distinct_toc_hrefs: usize,
     /// TOC paths (before `#`) that don't resolve to any manifest entry. Each one
     /// is a broken TOC link.
     pub epub_unresolved_toc_hrefs: Vec<String>,
 
     // --- KFX side ---
-    /// Whether the KFX carries a headings nav container at all (official
-    /// Amazon KFX regularly ships none; heading-level comparison is skipped
-    /// then).
+    /// Whether the KFX carries a headings nav container. Amazon KFX regularly
+    /// ships none, and heading-level comparison runs only on one that does.
     pub kfx_has_headings_nav: bool,
     /// Count of nav_units under the KFX headings container, keyed by level.
     /// Only counts leaf entries (the inner ones with offsets), not the level
@@ -126,10 +119,9 @@ impl Report {
             && !self.toc_collapsed_to_placeholder()
     }
 
-    /// Heuristic: if the TOC has multiple entries but every entry points at the
-    /// same file (distinct hrefs == 1 while total > 1), a placeholder href
-    /// has been stamped on every entry. Real TOCs have at least one distinct
-    /// path per chapter.
+    /// True for a multi-entry TOC whose entries all point at one file: a
+    /// placeholder href stamped over every entry. A real TOC carries at least
+    /// one distinct path per chapter.
     pub fn toc_collapsed_to_placeholder(&self) -> bool {
         self.epub_has_toc && self.epub_toc_entry_count > 1 && self.epub_distinct_toc_hrefs <= 1
     }
@@ -247,11 +239,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     let epub_side = extract_epub_nav(epub_bytes)?;
     let kfx = extract_kfx_nav(kfx_bytes)?;
 
-    // h1 is intentionally NOT navigated by Kindle (h1 → None in
-    // export::kfx::level_to_symbol). When comparing levels we skip h1.
-    // The comparison only applies when the KFX carries a headings container
-    // at all: official Amazon KFX regularly ships none, and demanding one
-    // there would fail every ground-truth pair whose EPUB side has h2+.
+    // Levels h2–h6: `export::kfx::level_to_symbol` maps h1 to `None`. The
+    // comparison runs only on a KFX carrying a headings container, which
+    // Amazon's own KFX regularly ships without.
     let mut heading_count_diffs: Vec<(u8, i64)> = Vec::new();
     if kfx.has_headings_container {
         for level in 2..=6u8 {
@@ -267,10 +257,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         }
     }
 
-    // Exclude non-spine entries from the expected count — they can't survive
-    // into KFX (position-based nav requires spine content) — and discount the
-    // synthesized leading cover (表紙) entry bokai prepends to match Amazon, which
-    // the source NCX never carries, so the comparison stays source-vs-source.
+    // The expected count drops non-spine entries, which position-based nav
+    // cannot address, and the synthesized leading cover entry, which the
+    // source NCX does not carry.
     let toc_count_diff = epub_side.has_toc.then(|| {
         let expected = epub_side
             .toc_entry_count
@@ -280,11 +269,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         expected as i64 - kfx_count as i64
     });
 
-    // A nav target is dangling unless it resolves to a storyline element id — or
-    // it's the cover, a section-root / page-template position that's valid and
-    // navigable (via `section_position_id_map`) but never lives in a storyline.
-    // A real Amazon KFX is identical here: its cover TOC/landmark id is flagged
-    // by this same check without the exemption.
+    // A nav target is dangling unless it resolves to a storyline element id or
+    // to the cover, whose section-root position is navigable through
+    // `section_position_id_map` and lives in no storyline.
     let reachable = |id: u64| Some(id) == kfx.cover_target || kfx.element_ids.contains(&id);
     let mut dangling_nav: Vec<DanglingNav> = Vec::new();
     for t in &kfx.heading_targets {
@@ -322,14 +309,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     })
 }
 
-/// KFX-only nav reachability, reused by the standalone KFX checker (job 2,
-/// `source::kfx`). Returns the sorted, deduped element ids that navigation
-/// entries (headings + toc) target but no storyline contains — each is a nav
-/// entry that tap-jumps to nowhere on device. `Err` when the container can't be
-/// read (already surfaced as `container-unreadable` there, so the caller drops
-/// it). This is the exact reachability rule used by [`validate`]'s own
-/// `dangling_nav` — the cover / section-root exemption (`cover_target`) included
-/// — so the two can't diverge.
+/// The sorted, deduped element ids that headings and toc entries target and no
+/// storyline contains: each tap-jumps to nowhere on device. [`validate`]'s
+/// `dangling_nav` is this same rule, `cover_target` exemption included.
 pub(crate) fn dangling_nav_targets(kfx_bytes: &[u8]) -> Result<Vec<u64>, String> {
     let kfx = extract_kfx_nav(kfx_bytes)?;
     let reachable = |id: u64| Some(id) == kfx.cover_target || kfx.element_ids.contains(&id);
@@ -351,10 +333,9 @@ struct EpubNav {
     headings_by_level: HashMap<u8, usize>,
     /// Flat-recursive count of every TocEntry node.
     toc_entry_count: usize,
-    /// Count of TOC entries whose href path is in the manifest but not in the
-    /// spine. KFX position-based navigation can only address spine content,
-    /// so these entries are genuinely unreachable — bokai silently drops them
-    /// and the validator excludes them from the count diff.
+    /// Count of TOC entries whose href path is in the manifest and not the
+    /// spine. KFX position-based navigation addresses spine content alone, and
+    /// the count diff excludes these.
     non_spine_toc_entries: usize,
     has_toc: bool,
     distinct_toc_hrefs: usize,
@@ -396,13 +377,9 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         count_headings(&xhtml, &mut headings_by_level);
     }
 
-    // Build the set of spine paths so we can identify TOC entries that
-    // point at non-spine manifest items (calibre puts a "Beginning" landmark
-    // file in manifest+guide but not spine; the NCX still references it).
-    // Absolute zip paths, the one vocabulary in which two references to the
-    // same file compare equal. A nav doc and the OPF need not share a
-    // directory — comparing the hrefs as written makes every entry of a
-    // root-level nav look like it points outside the spine.
+    // The spine path set as absolute zip paths, the one vocabulary in which
+    // two references to a file compare equal: a nav doc and the OPF need not
+    // share a directory.
     let spine_paths: HashSet<String> = opf
         .spine_ids
         .iter()
@@ -418,11 +395,9 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         .map(|(href, _)| resolve_href(&opf_base, href))
         .collect();
 
-    // 2. TOC — parse both the EPUB 2 NCX and the EPUB 3 nav doc, and validate
-    // against the richer of the two (the same selection the importer makes).
-    // Retail EPUBs routinely pair a full nav with a stub NCX (or ship only the
-    // nav); validating against the NCX alone skipped nav-only books entirely and
-    // silently passed a book whose degenerate NCX shadowed a full nav.
+    // 2. TOC — both the EPUB 2 NCX and the EPUB 3 nav doc, validated against
+    //    the richer of the two, the selection the importer makes. A retail
+    //    EPUB pairs a full nav with a stub NCX, or ships only the nav.
     let mut load_toc = |href: Option<&String>,
                         parse: fn(&str) -> std::io::Result<Vec<TocEntry>>| {
         let href = href?;
@@ -491,9 +466,9 @@ fn collect_toc_hrefs(entries: &[TocEntry], out: &mut Vec<String>) {
     }
 }
 
-/// Count TOC entries whose href path (everything before `#`) isn't in the
-/// spine. These can't survive into KFX because KFX position-based navigation
-/// requires the target to be inside spine content.
+/// Count of TOC entries whose href path, everything before `#`, names no
+/// spine document. KFX position-based navigation addresses spine content
+/// alone.
 fn count_non_spine_entries(entries: &[TocEntry], spine_paths: &HashSet<String>) -> usize {
     let mut n = 0;
     for e in entries {
@@ -564,19 +539,12 @@ fn count_headings(xhtml: &str, out: &mut HashMap<u8, usize>) {
 
 #[derive(Debug, Default)]
 struct KfxNav {
-    /// Count of leaf nav_units per heading level. Computed at the end of
-    /// `extract_kfx_nav` from `heading_targets`/`heading_target_levels`,
-    /// EXCLUDING targets that point at an image element (`type: image`): calibre
-    /// and bokai both promote only `<div>`→`<hN>`, never `<img>`, so an
-    /// image-typed heading nav entry is a valid Kindle heading-jump target but
-    /// is never an `<hN>` in the EPUB. Counting it would over-state the expected
-    /// heading count and false-fail every book that decorates chapter titles
-    /// with a heading-level image.
+    /// Count of leaf nav_units per heading level, excluding targets on an
+    /// image element (`type: image`): only `<div>` promotes to `<hN>`, so such
+    /// a target is a Kindle heading-jump with no `<hN>` on the EPUB side.
     headings_by_level: HashMap<u8, usize>,
-    /// Whether the KFX carries a headings nav container at all. Official
-    /// Amazon KFX regularly ships none — heading-level comparison is only
-    /// meaningful when the container exists (bokai's exporter always emits
-    /// one for books with h2+ headings).
+    /// Whether the KFX carries a headings nav container. Amazon KFX regularly
+    /// ships none, and heading-level comparison runs only on one that does.
     has_headings_container: bool,
     /// Every nav_unit target_position inside the headings container.
     heading_targets: Vec<NavTarget>,
@@ -589,12 +557,9 @@ struct KfxNav {
     toc_targets: Vec<NavTarget>,
     /// Element IDs present in storylines (for reachability check).
     element_ids: HashSet<u64>,
-    /// The `cover_page` landmark's target id, if any — a signal that the book
-    /// has a cover, so bokai's synthesized leading 表紙 TOC entry is expected and
-    /// should be discounted from the source-count comparison. (The TOC entry
-    /// itself targets the cover's first *content* id, a real reachable storyline
-    /// element, so it needs no reachability exemption — unlike the landmark's
-    /// page-template target.)
+    /// The `cover_page` landmark's target id, marking a book with a cover,
+    /// whose synthesized leading TOC entry the source-count comparison
+    /// discounts. That entry targets a reachable storyline element.
     cover_target: Option<u64>,
 }
 
@@ -609,9 +574,8 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -631,9 +595,9 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
 
     let mut nav = KfxNav::default();
 
-    // Index every nav_container ($391) entity by its name first, so
-    // book_navigation's *referenced* (symbol) form — required by fixed-layout /
-    // PDOC books — resolves to the real container instead of counting zero.
+    // Every nav_container ($391) entity indexed by name, the form
+    // book_navigation's referenced (symbol) shape resolves through. Fixed-
+    // layout and PDOC books carry that shape.
     let mut nav_container_by_name: HashMap<String, IonValue> = HashMap::new();
     for ent in &entities {
         if ent.type_id == nav_container_type
@@ -660,9 +624,8 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
         }
     }
 
-    // Heading count per level, now that both the nav targets and the image
-    // element ids are known: count each heading target EXCEPT those pointing at
-    // an image element (never an `<hN>` in the EPUB; see `headings_by_level`).
+    // Heading count per level over every heading target except those on an
+    // image element, which carries no `<hN>` in the EPUB.
     let mut headings_by_level: HashMap<u8, usize> = HashMap::new();
     for (target, level) in nav.heading_targets.iter().zip(&nav.heading_target_levels) {
         if !nav.image_element_ids.contains(&target.element_id) {
@@ -674,10 +637,9 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
     Ok(nav)
 }
 
-/// Walk the book_navigation value: a list of reading_orders, each with
-/// `nav_containers` (list of {nav_type, entries}). Pick the headings and toc
-/// containers; for each, descend the `entries` tree counting every nav_unit
-/// that carries a `target_position`.
+/// Walk the book_navigation value — reading_orders, each with `nav_containers`
+/// of `{nav_type, entries}` — descending the headings and toc containers'
+/// `entries` trees for every nav_unit carrying a `target_position`.
 fn extract_from_book_nav<F>(
     value: &IonValue,
     resolve_sym: &F,
@@ -766,9 +728,9 @@ fn extract_from_nav_container<F>(
 
     match nav_type.as_str() {
         "$headings" | "headings" => {
-            // Per-level entries: each top-level nav_unit has a `landmark_type`
-            // ($h2..$h6) and nested `entries` for individual headings of that
-            // level. We count the nested entries (the actual headings).
+            // Per-level entries: a top-level nav_unit carries a
+            // `landmark_type` ($h2..$h6) and nested `entries`, one per
+            // heading at that level.
             out.has_headings_container = true;
             for level_unit in entries {
                 walk_heading_level_unit(level_unit, resolve_sym, out);

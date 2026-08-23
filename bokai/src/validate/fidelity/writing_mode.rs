@@ -11,9 +11,9 @@
 //! It typically appears on the `body` selector or a class applied to the
 //! storyline root.
 //!
-//! The validator pulls *all* declared writing-mode values from each side and
-//! reports the multiset. The "book writing mode" is the most-cited non-default
-//! value, falling back to `horizontal-tb` if nothing is declared.
+//! Every declared writing-mode value on each side enters a multiset. The book
+//! writing mode is the most-cited non-default value, `horizontal-tb` where
+//! none is declared.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -31,8 +31,7 @@ use crate::formats::kfx::container::{
 use crate::formats::kfx::ion::{IonParser, IonValue};
 
 /// One of `horizontal-tb` / `vertical-rl` / `vertical-lr`, or `Other` for any
-/// value we don't recognise (so callers can still see surprises). Default is
-/// `HorizontalTb` (the CSS spec initial value).
+/// value outside that set. `HorizontalTb` is the CSS initial value.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -76,11 +75,9 @@ impl Mode {
         matches!(self, Self::VerticalRl | Self::VerticalLr)
     }
 
-    /// Tie-break priority for [`dominant_mode`] (lower wins). Prefers
-    /// `vertical-rl` — the overwhelmingly common Japanese vertical axis — over
-    /// `vertical-lr`, which source CSS often defines only as an unused utility
-    /// class. Without this, an equal declaration count between the two would be
-    /// resolved by `HashMap` iteration order, i.e. differently run-to-run.
+    /// Tie-break priority for [`dominant_mode`], lower winning. `vertical-rl`
+    /// is the common Japanese vertical axis; source CSS defines `vertical-lr`
+    /// as an unused utility class.
     fn rank(&self) -> u8 {
         match self {
             Self::VerticalRl => 0,
@@ -98,8 +95,8 @@ pub struct Report {
     pub epub_modes: HashMap<Mode, usize>,
     /// Histogram of writing-mode values found in KFX style structs.
     pub kfx_modes: HashMap<Mode, usize>,
-    /// The dominant book-level writing mode on the EPUB side. The most-cited
-    /// non-default value if any exists; otherwise `horizontal-tb`.
+    /// The dominant book-level writing mode on the EPUB side: the most-cited
+    /// non-default value, or `horizontal-tb` where none is declared.
     pub epub_book_mode: Mode,
     /// Same for the KFX side.
     pub kfx_book_mode: Mode,
@@ -153,7 +150,7 @@ impl Report {
     }
 
     pub fn print_details(&self, _limit: usize, _dir: super::Direction) {
-        // Nothing per-instance; the histograms are already in print_summary.
+        // The histograms belong to print_summary.
     }
 }
 
@@ -170,12 +167,12 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     })
 }
 
-/// Most-cited non-default mode; fall back to `horizontal-tb` if no
+/// Most-cited non-default mode, or `horizontal-tb` where no
 /// non-default mode is declared.
 fn dominant_mode(modes: &HashMap<Mode, usize>) -> Mode {
     let mut items: Vec<(&Mode, &usize)> = modes.iter().collect();
-    // Count descending, then by deterministic tie-break rank (HashMap order is
-    // randomised, so ties would otherwise flip run-to-run — see `Mode::rank`).
+    // Count descending, then `Mode::rank`, which fixes ties that `HashMap`'s
+    // randomised order leaves open.
     items.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.rank().cmp(&b.0.rank())));
     for (m, _) in &items {
         if **m != Mode::HorizontalTb {
@@ -261,9 +258,8 @@ fn scan_css_for_modes(css: &str, out: &mut HashMap<Mode, usize>) {
     while let Some(rel) = lower[from..].find(needle_full) {
         let pos = from + rel;
         let after = pos + needle_full.len();
-        // Allow vendor prefix: -webkit-writing-mode / -epub-writing-mode.
-        // We match the property name; the prefix is part of the same
-        // identifier so the find above already includes it positionally.
+        // Vendor prefixes -webkit-writing-mode / -epub-writing-mode are part
+        // of the same identifier, and `find` includes them.
         // Expect `:` next (skipping whitespace).
         let mut i = after;
         while i < lower.len() && matches!(lower.as_bytes()[i], b' ' | b'\t') {
@@ -347,9 +343,8 @@ fn extract_modes_from_kfx(kfx_bytes: &[u8]) -> Result<HashMap<Mode, usize>, Stri
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    // Declared-base symbol table: doc-local ids start at the container's
-    // declared import max_id, not at our static table's length (see
-    // kfx::container::SymbolTable).
+    // SymbolTable::from_fragment seats doc-local ids at the container's
+    // declared import max_id.
     let symbols = SymbolTable::from_fragment(
         info.doc_symbols
             .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
@@ -376,10 +371,9 @@ fn extract_modes_from_kfx(kfx_bytes: &[u8]) -> Result<HashMap<Mode, usize>, Stri
     Ok(modes)
 }
 
-/// Recursively walk an Ion value looking for any struct field named
-/// `writing_mode` (whose key resolves through the symbol table). Values are
-/// expected to be Ion symbols (`$horizontal_tb` etc.) but we also handle
-/// strings defensively.
+/// Every struct field named `writing_mode` anywhere in `value`, keyed through
+/// the symbol table. A value arrives as an Ion symbol (`$horizontal_tb`) or as
+/// a string.
 fn collect_writing_mode<F>(value: &IonValue, resolve_sym: &F, out: &mut HashMap<Mode, usize>)
 where
     F: Fn(u64) -> String,
