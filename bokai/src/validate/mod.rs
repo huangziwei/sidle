@@ -1,30 +1,6 @@
-//! Book validation, grouped by the question each check answers and who
-//! consumes the answer:
-//!
-//! - [`source`] — **is one book file well-formed on its own?** Single-input
-//!   structural checks (`source::epub` = a Rust epubcheck replacement,
-//!   `source::toc` = a cross-format declared-TOC audit). These flag defects
-//!   **in the source book** and feed the book editor's repair list.
-//! - [`fidelity`] — **did EPUB ⇄ KFX conversion lose anything?** Pair-input
-//!   diffs (`validate(epub_bytes, kfx_bytes)`) comparing semantic preservation
-//!   across a conversion. A loss here is a bokai converter bug, so these are the
-//!   CI checks. Direction-aware (see [`Direction`]).
-//! - [`coverage`] — **what does bokai not handle yet?** Aggregate reports on
-//!   bokai's own parser coverage (unmapped HTML tags, dropped CSS properties).
-//!   These are roadmap tools, **not** book validators — they never judge a book
-//!   right or wrong.
-//!
-//! The `source` extractors read one format natively and never consult a
-//! derived/converted copy. The `fidelity` extractors deliberately parse the
-//! EPUB side with independent, minimal tokenization (NOT bokai's IR) so a
-//! parser-side bug surfaces here instead of being mirrored on both sides; the
-//! KFX side reuses bokai's own KFX parser (the format is shared with the reader
-//! anyway).
-//!
-//! Calibre's output is NEVER ground truth. Ground truth is per-direction: the
-//! SOURCE book for an import check, the target format's own specification and
-//! the devices that render it for an export check — never another converter's
-//! rendering of the same book.
+//! Book validation in three groups: [`source`] checks one book file on its own
+//! and feeds the editor's repair list, [`fidelity`] diffs an EPUB against a KFX
+//! across a conversion ([`Direction`]), [`coverage`] reports unmapped input.
 
 pub mod coverage;
 pub mod fidelity;
@@ -32,21 +8,9 @@ pub mod source;
 
 use std::fmt;
 
-// ============================================================================
-// Unified source-finding model
-// ============================================================================
-//
-// One shape for every [`source`] check's result. Each check (`source::epub`,
-// `source::toc`, `source::kfx`) keeps its own rich internal report
-// and *lowers* it into `Finding`s (see each module's `into_findings`); the
-// aggregator [`source::validate`] concatenates them into one [`Report`]. That
-// Report is the single type the book editor consumes to build a repair list —
-// no caller special-cases each check's bespoke report anymore.
-//
-// Deliberately serde-free: the library never depends on `serde` (it sits behind
-// the `cli` feature, which library consumers switch off with
-// `default-features = false`). The CLI serialises by reading these public
-// fields — see `main.rs`.
+// One `Finding` shape for every `source` check: each lowers its own report
+// through `into_findings`, and `source::validate` concatenates them into one
+// `Report`. Serde-free — the CLI serialises by reading these public fields.
 
 /// How bad a source [`Finding`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,12 +36,8 @@ impl Severity {
     }
 }
 
-/// A machine-actionable repair proposal attached to a [`Finding`]. The book
-/// editor reads [`action`](FixHint::action) to drive a repair panel; `detail`
-/// is the human-facing description. This is the shape the editor consumes;
-/// checks fill in the simple hints they can derive today, and richer payloads
-/// (e.g. a proposed nav tree for a deficient TOC) are added as the editor grows
-/// a UI for them.
+/// A machine-actionable repair proposal attached to a [`Finding`]:
+/// [`action`](FixHint::action) drives a repair panel, `detail` describes it.
 #[derive(Debug, Clone)]
 pub struct FixHint {
     /// Machine-readable repair action slug, e.g. `"add-nav-doc"`,
@@ -123,7 +83,7 @@ pub struct Report {
 }
 
 impl Report {
-    /// No error- or warning-level findings. Info-only reports are still clean.
+    /// No error- or warning-level findings. An info-only report is clean.
     pub fn is_clean(&self) -> bool {
         !self
             .findings
@@ -131,11 +91,9 @@ impl Report {
             .any(|f| matches!(f.severity, Severity::Error | Severity::Warning))
     }
 
-    /// Any error-level finding. This — not [`is_clean`](Self::is_clean) — is the
-    /// gate for "would epubcheck reject this?": epubcheck exits 0 on warnings,
-    /// so an EPUB with only warning findings is still epubcheck-valid. Every
-    /// conversion/repair gate that stands in for "epubcheck-clean" tests this;
-    /// warnings surface in the report and UI but never block.
+    /// Any error-level finding — the epubcheck-rejection gate, which
+    /// [`is_clean`](Self::is_clean) is not: epubcheck exits 0 on warnings, and
+    /// a warning-only EPUB passes it. A warning reports and never blocks.
     pub fn has_errors(&self) -> bool {
         self.findings.iter().any(|f| f.severity == Severity::Error)
     }
@@ -179,13 +137,9 @@ impl fmt::Display for Report {
     }
 }
 
-/// Which way the conversion under validation runs. Determines how printed
-/// [`fidelity`] reports interpret each side: which is "source / ground truth"
-/// vs "target (bokai's output)", and therefore which defects are bokai's fault.
-///
-/// All fidelity `Report` fields are stored direction-neutrally (`only_in_epub`,
-/// `only_in_kfx`, `epub_*`, `kfx_*`). The `Direction` is consulted only at
-/// presentation time.
+/// Which way the conversion under validation runs: which side a printed
+/// [`fidelity`] report reads as ground truth. Report fields stay
+/// direction-neutral (`only_in_epub`, `kfx_*`); presentation consults this.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Direction {
     /// EPUB is the source (ground truth); KFX is bokai's output.

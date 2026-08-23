@@ -626,6 +626,8 @@ and each section carries a `$609` `section_position_id_map` holding a compact de
 
 A reader replays each section's walk starting from that section's base pid to rebuild the same `eid → pid` mapping the reflowable form gives directly.
 
+Every content element a storyline holds is assigned a position. Across Amazon's own fixed-layout books the two sets differ in exactly one direction: the only ids in the position map that no storyline holds are the page templates, one per section. An element that renders but carries no position is unreachable to page turning, and a device that shows one page at a time can find no position to turn to inside a section holding two.
+
 ### 10.3. Locations
 
 Pids are too fine to show a reader. `$550` `location_map` divides the book into displayed Locations by listing boundary positions as `{id, offset}` pairs, resolved through the pid map. `$621` `yj.location_pid_map` is the newer alternative, listing boundary pids directly and needing no resolution. Where both are present, `$550` takes precedence.
@@ -823,7 +825,9 @@ A reader carrying its own `YJ_symbols` **should** carry the newest revision it c
 
 A conforming producer **must** emit a symbol table whose declared import `max_id` matches the shared-table revision actually used, **must** assign every content element a unique element id and record the ceiling in `document_data`'s `max_id`, and **must** emit a genuine SHA-1 in the generator trailer (§3.5).
 
-A producer **should** emit a position map. A book without one has no addressable reading positions: no Locations, no syncing, no highlights.
+A producer **must** give every content element a position (§10.2). A producer **should** emit a position map: a book without one has no addressable reading positions — no Locations, no syncing, no highlights.
+
+A producer of a fixed-layout book **should** emit a `location_map` naming one Location per page — the first element id that page occupies, and the first entry repeated so Location 1 falls at the book's start. Every Amazon fixed-layout book carries one. Left to the 110-pid fallback (§10.3), which restarts at each section, a two-page spread section contains no boundary between its pages.
 
 A producer converting from CSS **should not** emit a `px` length in a reflowable book. An absolute length is a point read at 160 dpi — scale by `0.45` and emit `pt` — and `px` is the fixed-layout canvas unit (§8.2). It **should** likewise resolve an `auto` horizontal margin into the split it stands for and state that as `margin_left` and `margin_right`: `box_align` is a picture property and does not place a text block (§8.3).
 
