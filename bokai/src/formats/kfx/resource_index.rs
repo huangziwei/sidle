@@ -2,18 +2,15 @@
 //!
 //! One walk over a container's `external_resource` ($164) entities produces
 //! the canonical image list: KFX resource name, `bcRawMedia` location, final
-//! OEBPS filename (calibre's `resource_location_filename` convention),
-//! predicted post-transcode MIME type, declared pixel dimensions, and whether
-//! the bytes are JPEG-XR (transcoded to JPEG on export). Keeping the naming
-//! and format-prediction rules in one place is what keeps the exported image
-//! tree calibre-shaped.
+//! OEBPS filename, predicted post-transcode MIME type, declared pixel
+//! dimensions, and whether the bytes are JPEG-XR (transcoded to JPEG on
+//! export).
 
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 
-/// Image format strings KFX may set on `external_resource.format`
-/// (calibre's `SYMBOL_FORMATS` mapping, image side).
+/// Image format strings KFX may set on `external_resource.format`.
 pub const FORMAT_JPG: &str = "jpg";
 pub const FORMAT_PNG: &str = "png";
 pub const FORMAT_GIF: &str = "gif";
@@ -22,10 +19,15 @@ pub const FORMAT_BMP: &str = "bmp";
 pub const FORMAT_SVG: &str = "svg";
 pub const FORMAT_JXR: &str = "jxr";
 
-/// `format` values a cover can legitimately be (raster only). Excludes
-/// `pdf`/`kvg`/`svg` and anything unrecognised, so a PDF-backed first
-/// section is never mistaken for a cover.
+/// `format` values a cover can be: raster only, excluding `pdf`, `kvg`,
+/// `svg` and anything unrecognised.
 pub const RASTER_COVER_FORMATS: [&str; 7] = ["jpg", "jpeg", "jxr", "png", "gif", "webp", "bmp"];
+
+/// Every `format` value an `external_resource` states: the seven raster
+/// formats plus `svg`, and `pdf`/`kvg` for non-raster page content.
+pub const DECLARED_FORMATS: [&str; 10] = [
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "jxr", "pdf", "kvg",
+];
 
 /// One image `external_resource`, resolved to its final exported identity.
 #[derive(Debug, Clone)]
@@ -36,15 +38,14 @@ pub struct ImageResource {
     /// `location` field: the `bcRawMedia` key holding the source bytes
     /// (e.g. "resource/rsrc562").
     pub location: String,
-    /// File path under `OEBPS/` (e.g. "image_rsrc562.jpg"). Cover renaming
-    /// to `cover.<ext>` is a separate step (see [`cover_filename`]) so the
-    /// calibre can keep its register-then-rename manifest order.
+    /// File path under `OEBPS/` (e.g. "image_rsrc562.jpg"). [`cover_filename`]
+    /// renames a cover to `cover.<ext>` in a separate step.
     pub filename: String,
     /// Predicted final MIME type (JXR predicts `image/jpeg`; a JXR that
     /// fails to decode passes through as `image/jxr` at transcode time).
     pub mime: String,
-    /// KFX `format` field as declared ("" when absent). Used for the
-    /// raster-cover check; `mime`/`filename` already fold in byte sniffing.
+    /// KFX `format` field as declared ("" when absent). `mime` and `filename`
+    /// fold in byte sniffing; this one does not.
     pub declared_format: String,
     /// Declared pixel dimensions when present.
     pub width: Option<u32>,
@@ -53,9 +54,8 @@ pub struct ImageResource {
     pub is_jxr: bool,
 }
 
-/// Fragment id for an entity: its id's resolved symbol name, or an opaque
-/// `#entity_N` fallback so collisions still distinguish. This string is the
-/// deterministic sort key for resource processing order.
+/// Fragment id for an entity: its id's resolved symbol name, or a distinct
+/// `#entity_N` fallback. Resource processing sorts on this string.
 pub fn entity_fid(entity_id: u64, symbols: &SymbolTable) -> String {
     let name = symbols.resolve(entity_id);
     if name.is_empty() || name == "?" {
@@ -65,14 +65,9 @@ pub fn entity_fid(entity_id: u64, symbols: &SymbolTable) -> String {
     }
 }
 
-/// Walk image-format `external_resource` fragments and produce the canonical
-/// image list in deterministic (sorted-fid) order.
-///
-/// `resources` is the unsorted `(fid, fragment)` set; `peek_raw` maps a
-/// `location` to the leading bytes of the matching `bcRawMedia` payload
-/// (≥ 12 bytes suffice for format sniffing; `None` means the media is
-/// missing, which skips the resource with a warning — calibre logs
-/// "Missing bcRawMedia" and does the same).
+/// The canonical image list, sorted by fid, from the unsorted `(fid,
+/// fragment)` set. `peek_raw` maps a `location` to ≥ 12 leading `bcRawMedia`
+/// bytes for sniffing; its `None` skips the resource with a warning.
 pub fn build_image_index<'a, F>(
     resources: Vec<(&'a str, &'a IonValue)>,
     symbols: &SymbolTable,
@@ -163,9 +158,8 @@ where
 }
 
 /// The cover's exported filename, derived from its canonical image filename:
-/// `cover.<ext>` (calibre's convention; `jpg` widens to `jpeg`). The rename
-/// is applied *after* all images are registered, so collision-suffix
-/// allocation is unaffected by it.
+/// `cover.<ext>`, with `jpg` widened to `jpeg`. The rename runs after every
+/// image is registered, leaving collision-suffix allocation untouched.
 pub fn cover_filename(canonical_filename: &str) -> String {
     let ext = std::path::Path::new(canonical_filename)
         .extension()
@@ -184,8 +178,7 @@ pub fn is_raster_cover(images: &[ImageResource], name: &str) -> bool {
 }
 
 /// First `resource_name` ($175) found anywhere in a storyline content tree.
-/// A cover storyline lays out exactly one image, so its first `$175` is the
-/// cover resource.
+/// A cover storyline lays out exactly one image.
 pub fn first_content_resource_name(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     match value.unwrap_annotated() {
         IonValue::List(items) => items
@@ -219,9 +212,8 @@ pub fn is_image_format_symbol(format: &str, mime: Option<&str>) -> bool {
 }
 
 /// Detect image format from leading bytes (≥ 12 bytes decide every case).
-/// Used as a sanity check and as a fallback when `format` is missing. The
-/// KFX `format` vocabulary happens to be the bare extension, so this is the
-/// shared sniffer named in KFX's terms.
+/// The returned name is the bare extension, matching the KFX `format`
+/// vocabulary.
 pub fn sniff_format(bytes: &[u8]) -> Option<String> {
     crate::image::ImageFormat::sniff(bytes).map(|f| f.extension().to_string())
 }
@@ -252,11 +244,9 @@ pub fn format_to_ext(format: &str) -> &'static str {
     }
 }
 
-/// Mirror calibre's `resource_location_filename`: take the external_resource
-/// `location` (e.g. `"resource/rsrc562"`), strip to the unique basename,
-/// prepend the resource-type prefix (`"image"` for image formats), and apply
-/// the extension: `"image_rsrc562.jpg"`. `taken` reports whether a candidate
-/// filename is already in use; collisions append `-0`, `-1`, ….
+/// `"resource/rsrc562"` → `"image_rsrc562.jpg"`: the basename, the
+/// resource-type prefix, the extension. `taken` reports a filename in use; a
+/// collision appends `-0`, `-1`, ….
 pub fn build_image_filename(
     location: &str,
     format: &str,
@@ -277,17 +267,13 @@ pub fn build_image_filename(
     // Split path / name; pull the basename's root (no extension).
     let name = safe.rsplit('/').next().unwrap_or(&safe);
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-    // Unique part: strip the `resource/`-style prefix that the on-disk
-    // location commonly uses. For SHORT-form symbols calibre's
-    // `unique_part_of_local_symbol` just strips `^resource/`; the basename
-    // split above already did that.
+    // Unique part: the basename split above strips the `resource/` prefix.
     let unique = stem
         .strip_prefix("rsrc")
         .map(|r| format!("rsrc{r}"))
         .unwrap_or_else(|| stem.to_string());
 
-    // Resource-type prefix. Mirrors calibre's RESOURCE_TYPE_OF_EXT mapping
-    // for image extensions: image → "image_<unique>".
+    // Resource-type prefix: an image extension takes "image_<unique>".
     let prefixed = if unique.is_empty() {
         "image".to_string()
     } else {

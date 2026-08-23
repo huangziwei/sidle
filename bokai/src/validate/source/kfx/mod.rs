@@ -6,8 +6,10 @@
 //!
 //! - **Rule 1, container integrity** — `CONT` magic, info + index in bounds.
 //!   A parse failure is one `container-unreadable` error; a non-zero
-//!   `bcDRMScheme` is one `container-encrypted` error over ciphertext
-//!   payloads. An out-of-bounds entity reaches rules 2/7.
+//!   `bcDRMScheme` or `bcComprType` is one `container-encrypted` /
+//!   `container-compressed` error over unreadable payloads. The header
+//!   `version`, the index table's entry alignment and the `bcContId` shape are
+//!   warnings. An out-of-bounds entity reaches rules 2/7.
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
 //!   `storyline` (errors); `book_navigation` (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
@@ -34,6 +36,8 @@
 //! - **Rule 11, declarations agree with content** — each `content_features`
 //!   entry states what the book contains. See [`ContentFacts`] for the facts
 //!   each claim is read against.
+//! - **Rule 12, metadata** — `title` and `language` are stated, and
+//!   `author_pronunciation` stays positional with `author`.
 //!
 //! Rule 10 (TOC deficiency) comes from the cross-format `source::toc` check
 //! via [`crate::validate::source::validate`]. A `.kfx-zip` bundle sniffs as
@@ -51,8 +55,6 @@ use crate::validate::{Finding, FixHint, Severity};
 /// Run the KFX structural rules over `bytes` and return the defects as
 /// [`Finding`]s. A container that does not parse yields the single
 /// `container-unreadable` error and ends the run.
-/// [`crate::validate::source::validate`] calls this and adds the TOC audit
-/// (rule 10).
 pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     let book = match loader::load(bytes) {
         Ok(book) => book,
@@ -66,6 +68,16 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
                 ),
             )];
         }
+        Err(crate::formats::kfx::error::KfxError::Compressed(kind)) => {
+            return vec![error(
+                "container-compressed",
+                "<container>",
+                format!(
+                    "container declares bcComprType {kind}: its payloads are compressed, so \
+                     nothing inside can be checked"
+                ),
+            )];
+        }
         Err(e) => {
             return vec![error(
                 "container-unreadable",
@@ -76,14 +88,203 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     };
 
     let mut findings = Vec::new();
+    findings.extend(check_container_scalars(bytes));
+    findings.extend(check_container_inventory(bytes));
     findings.extend(check_required_entities(&book.by_type));
     findings.extend(check_references(&book));
-    findings.extend(check_resource_bytes(&book.by_type, &book.raw_media));
+    findings.extend(check_resource_bytes(&book));
     findings.extend(check_cover(&book));
+    findings.extend(check_metadata(&book, container_id(bytes).as_deref()));
     findings.extend(check_nav_reachability(bytes));
+    findings.extend(check_nav_vocabulary(&book));
     findings.extend(check_position_map_coverage(&book));
     findings.extend(check_feature_content_agreement(&book));
     findings
+}
+
+// ============================================================================
+// Rule 1 — container-layer scalars
+// ============================================================================
+
+/// The container-layer version every KFX declares.
+const CONTAINER_VERSION: u16 = 2;
+
+/// Bytes per entity index table entry: id(4) + type(4) + offset(8) + len(8).
+const INDEX_ENTRY_SIZE: usize = 24;
+
+/// Rule 1's scalar half at warning severity: the header's `version`, the
+/// index table's entry alignment, and the `bcContId` shape. [`validate`]
+/// reports `bcDRMScheme` and `bcComprType` from the load error.
+fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
+    use crate::formats::kfx::container::{parse_container_header, parse_container_info};
+
+    let Ok(header) = parse_container_header(bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    if header.version != CONTAINER_VERSION {
+        out.push(warning(
+            "container-version-unexpected",
+            "<container>",
+            format!(
+                "container header declares version {} — KFX declares {CONTAINER_VERSION}",
+                header.version
+            ),
+            None,
+        ));
+    }
+
+    let info_end = header.container_info_offset + header.container_info_length;
+    if info_end > bytes.len() {
+        return out;
+    }
+    let Ok(info) = parse_container_info(&bytes[header.container_info_offset..info_end]) else {
+        return out;
+    };
+
+    if let Some((_, index_length)) = info.index
+        && !index_length.is_multiple_of(INDEX_ENTRY_SIZE)
+    {
+        let trailing = index_length % INDEX_ENTRY_SIZE;
+        out.push(warning(
+            "index-table-ragged",
+            "<container>",
+            format!(
+                "entity index table is {index_length} bytes, {trailing} past a whole \
+                 {INDEX_ENTRY_SIZE}-byte entry — the trailing bytes name no entity"
+            ),
+            None,
+        ));
+    }
+
+    match info.cont_id.as_deref() {
+        None => out.push(warning(
+            "container-id-missing",
+            "<container>",
+            "container info declares no bcContId ($409)",
+            None,
+        )),
+        Some(id) if !is_container_id(id) => out.push(warning(
+            "container-id-malformed",
+            "<container>",
+            format!("bcContId {id:?} is not \"CR!\" followed by 28 uppercase alphanumerics"),
+            None,
+        )),
+        Some(_) => {}
+    }
+
+    out
+}
+
+/// The container's `bcContId` ($409).
+fn container_id(bytes: &[u8]) -> Option<String> {
+    use crate::formats::kfx::container::{parse_container_header, parse_container_info};
+
+    let header = parse_container_header(bytes).ok()?;
+    let info_end = header.container_info_offset + header.container_info_length;
+    if info_end > bytes.len() {
+        return None;
+    }
+    parse_container_info(&bytes[header.container_info_offset..info_end])
+        .ok()?
+        .cont_id
+}
+
+/// The shared symbol table every container imports.
+const SHARED_SYMBOL_TABLE: &str = "YJ_symbols";
+
+/// Index-table fragment types a book holds at most one of. `content_features`
+/// is absent: a book states one standalone and one inside its metadata. `$270`
+/// and `$593` are absent too — the container info locates both by offset.
+const SINGLETON_TYPES: [KfxSymbol; 10] = [
+    KfxSymbol::Metadata,
+    KfxSymbol::PositionMap,
+    KfxSymbol::PositionIdMap,
+    KfxSymbol::BookNavigation,
+    KfxSymbol::ResourcePath,
+    KfxSymbol::ContainerEntityMap,
+    KfxSymbol::BookMetadata,
+    KfxSymbol::DocumentData,
+    KfxSymbol::LocationMap,
+    KfxSymbol::YjLocationPidMap,
+];
+
+/// The index table and the doc-symbols fragment: the container imports
+/// [`SHARED_SYMBOL_TABLE`], and no [`SINGLETON_TYPES`] entry appears twice —
+/// keying fragments by name hides the second one, the raw table shows it.
+fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
+    use crate::formats::kfx::container::{
+        parse_container_header, parse_container_info, parse_import_names, parse_index_table,
+    };
+
+    let Ok(header) = parse_container_header(bytes) else {
+        return Vec::new();
+    };
+    let info_end = header.container_info_offset + header.container_info_length;
+    if info_end > bytes.len() {
+        return Vec::new();
+    }
+    let Ok(info) = parse_container_info(&bytes[header.container_info_offset..info_end]) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    if let Some((off, len)) = info.doc_symbols
+        && off + len <= bytes.len()
+    {
+        let names = parse_import_names(&bytes[off..off + len]);
+        if !names.is_empty() && !names.iter().any(|n| n == SHARED_SYMBOL_TABLE) {
+            out.push(warning(
+                "symbol-import-unexpected",
+                "<symbols>",
+                format!(
+                    "the symbol table imports {names:?}, not {SHARED_SYMBOL_TABLE:?} — every \
+                     shared id resolves against a table the container never named"
+                ),
+                None,
+            ));
+        }
+    }
+
+    if let Some((idx_off, idx_len)) = info.index
+        && idx_off + idx_len <= bytes.len()
+    {
+        let entities = parse_index_table(&bytes[idx_off..idx_off + idx_len], header.header_len);
+        for singleton in SINGLETON_TYPES {
+            let count = entities
+                .iter()
+                .filter(|e| e.type_id as u64 == singleton as u64)
+                .count();
+            if count > 1 {
+                let name = format!("{singleton:?}");
+                out.push(warning(
+                    "singleton-repeated",
+                    &name,
+                    format!(
+                        "{count} {} (${}) fragments — a book holds at most one, and the later \
+                         one hides the rest",
+                        name.to_lowercase(),
+                        singleton as u64
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// True for `CR!` followed by exactly 28 uppercase alphanumerics.
+fn is_container_id(id: &str) -> bool {
+    let Some(suffix) = id.strip_prefix("CR!") else {
+        return false;
+    };
+    suffix.len() == 28
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 // ============================================================================
@@ -137,11 +338,11 @@ fn check_required_entities(by_type: &HashMap<u64, HashMap<String, IonValue>>) ->
 // Rules 3 & 6 — reference resolution (section → storyline, element → style)
 // ============================================================================
 
-/// Reference-resolution defects, deduped by target name: a style cited by
-/// 10 000 elements yields one finding. `BTreeSet` sorts the names, holding
-/// finding order steady across runs.
+/// Defects gathered by the one walk over the rendered content graph, deduped
+/// by the name or value at fault: a style cited by 10 000 elements yields one
+/// finding. `BTreeSet` sorts them, holding finding order steady across runs.
 #[derive(Default)]
-struct RefDefects {
+struct WalkDefects {
     /// Reading-order entries that don't resolve to a `section` ($260).
     missing_sections: BTreeSet<String>,
     /// `story_name` ($176) refs that don't resolve to a `storyline` ($259).
@@ -151,21 +352,37 @@ struct RefDefects {
     /// `content` ($145) `{name,index}` indirections that don't resolve to a
     /// `$145 content` string (rule 4).
     missing_content: BTreeSet<String>,
+    /// `type` ($159) values the import schema holds no strategy for.
+    unknown_types: BTreeSet<String>,
+    /// `writing_mode` ($560) values outside [`WRITING_MODES`].
+    unknown_writing_modes: BTreeSet<String>,
+    /// `listitem` ($277) elements whose parent is no `list` ($276).
+    orphan_list_items: usize,
+    /// Reading-order sections carrying no `page_templates` ($141) entry.
+    empty_sections: BTreeSet<String>,
+    /// Elements holding both `content` ($145) and `content_list` ($146).
+    content_and_children: usize,
+    /// `table` ($279) elements holding no `table_row` ($279) descendant.
+    rowless_tables: usize,
 }
 
 /// Rules 3 & 6. Walk reading order → section → page_templates → referenced
-/// storylines, flagging every named reference that resolves to no entity. The
-/// walk starts at the reading order: a `section` entity outside it renders
-/// nowhere.
+/// storylines, flagging every named reference that resolves to no entity. A
+/// `section` entity outside the reading order renders nowhere.
 fn check_references(book: &BookData) -> Vec<Finding> {
-    let mut defects = RefDefects::default();
+    let mut defects = WalkDefects::default();
     // One visited set guards cycles in storyline and structure fragments,
     // namespaced against a shared name.
     let mut visited: HashSet<String> = HashSet::new();
 
     for section_name in reading_order_sections(book) {
         match lookup(book, KfxSymbol::Section, &section_name) {
-            Some(section) => walk_refs(section, book, &mut visited, &mut defects),
+            Some(section) => {
+                if !has_page_template(section) {
+                    defects.empty_sections.insert(section_name.clone());
+                }
+                walk_refs(section, book, None, &mut visited, &mut defects);
+            }
             None => {
                 defects.missing_sections.insert(section_name);
             }
@@ -211,7 +428,92 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             ),
         ));
     }
+    for name in &defects.unknown_types {
+        findings.push(info(
+            "element-type-unknown",
+            name,
+            format!("an element declares type {name:?}, which bokai lays out as a container"),
+        ));
+    }
+    for name in &defects.unknown_writing_modes {
+        findings.push(warning(
+            "writing-mode-unknown",
+            name,
+            format!("a writing_mode of {name:?} is outside {WRITING_MODES:?}"),
+            None,
+        ));
+    }
+    if defects.orphan_list_items > 0 {
+        findings.push(warning(
+            "list-item-outside-list",
+            "<storyline>",
+            format!(
+                "{} listitem elements sit under no list element — each renders as a bare block",
+                defects.orphan_list_items
+            ),
+            None,
+        ));
+    }
+    for name in &defects.empty_sections {
+        findings.push(warning(
+            "section-empty",
+            name,
+            format!("section {name:?} lists no page_templates ($141) — it renders nothing"),
+            None,
+        ));
+    }
+    if defects.rowless_tables > 0 {
+        findings.push(warning(
+            "table-without-rows",
+            "<storyline>",
+            format!(
+                "{} table elements hold no table_row — each renders as an empty grid",
+                defects.rowless_tables
+            ),
+            None,
+        ));
+    }
+    if defects.content_and_children > 0 {
+        findings.push(info(
+            "element-content-and-children",
+            "<storyline>",
+            format!(
+                "{} elements carry both content ($145) and content_list ($146)",
+                defects.content_and_children
+            ),
+        ));
+    }
     findings
+}
+
+/// The `writing_mode` ($560) values, matching CSS.
+const WRITING_MODES: [&str; 3] = ["horizontal_tb", "vertical_rl", "vertical_lr"];
+
+/// True when `section` lists at least one `page_templates` ($141) entry, the
+/// only content a section contributes.
+fn has_page_template(section: &IonValue) -> bool {
+    section
+        .unwrap_annotated()
+        .as_struct()
+        .and_then(|fields| get_field(fields, KfxSymbol::PageTemplates as u64))
+        .and_then(|v| v.unwrap_annotated().as_list())
+        .is_some_and(|list| !list.is_empty())
+}
+
+/// True when `value` holds a `table_row` ($279) at any depth.
+fn holds_table_row(value: &IonValue) -> bool {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if get_field(fields, KfxSymbol::Type as u64).and_then(|v| v.as_symbol())
+                == Some(KfxSymbol::TableRow as u64)
+            {
+                return true;
+            }
+            fields.iter().any(|(_, v)| holds_table_row(v))
+        }
+        IonValue::List(items) => items.iter().any(holds_table_row),
+        _ => false,
+    }
 }
 
 /// The block name of a `$145 content` `{name,index}` indirection in `value`
@@ -276,16 +578,15 @@ fn reading_order_sections(book: &BookData) -> Vec<String> {
     Vec::new()
 }
 
-/// Depth-first walk of a content value, recording dangling `style` (rule 6)
-/// and `story_name` (rule 3) references. `story_name` and `$608 structure`
-/// symbols are followed into their fragments, covering the rendered body. A
-/// bare symbol resolving to no structure is left alone: most such symbols are
-/// enum values.
+/// Depth-first walk of a content value into [`WalkDefects`], following
+/// `story_name` and `$608 structure` symbols into their fragments.
+/// `parent_type` is the enclosing element's `type` ($159) symbol id.
 fn walk_refs(
     value: &IonValue,
     book: &BookData,
+    parent_type: Option<u64>,
     visited: &mut HashSet<String>,
-    out: &mut RefDefects,
+    out: &mut WalkDefects,
 ) {
     match value.unwrap_annotated() {
         IonValue::Symbol(id) => {
@@ -293,7 +594,7 @@ fn walk_refs(
             if let Some(frag) = lookup(book, KfxSymbol::Structure, &name)
                 && visited.insert(format!("struct:{name}"))
             {
-                walk_refs(frag, book, visited, out);
+                walk_refs(frag, book, parent_type, visited, out);
             }
         }
         IonValue::Struct(fields) => {
@@ -323,7 +624,7 @@ fn walk_refs(
                 match lookup(book, KfxSymbol::Storyline, story_name) {
                     Some(storyline) => {
                         if visited.insert(format!("story:{story_name}")) {
-                            walk_refs(storyline, book, visited, out);
+                            walk_refs(storyline, book, None, visited, out);
                         }
                     }
                     None => {
@@ -332,13 +633,49 @@ fn walk_refs(
                 }
             }
 
+            let element_type =
+                get_field(fields, KfxSymbol::Type as u64).and_then(|v| v.as_symbol());
+            if let Some(type_id) = element_type {
+                if crate::formats::kfx::schema::schema()
+                    .element_strategy(type_id as u32)
+                    .is_none()
+                {
+                    out.unknown_types
+                        .insert(book.symbols.resolve(type_id).to_string());
+                }
+                if type_id == KfxSymbol::Listitem as u64
+                    && parent_type != Some(KfxSymbol::List as u64)
+                {
+                    out.orphan_list_items += 1;
+                }
+                if type_id == KfxSymbol::Table as u64 && !holds_table_row(value) {
+                    out.rowless_tables += 1;
+                }
+            }
+
+            if get_field(fields, KfxSymbol::Content as u64).is_some()
+                && get_field(fields, KfxSymbol::ContentList as u64).is_some()
+            {
+                out.content_and_children += 1;
+            }
+
+            if let Some(mode) = get_field(fields, KfxSymbol::WritingMode as u64)
+                .and_then(|v| book.symbols.text_of(v))
+                && !WRITING_MODES.contains(&mode)
+            {
+                out.unknown_writing_modes.insert(mode.to_string());
+            }
+
+            // A struct with no `type` inherits `parent_type`, carrying it
+            // through a `content_list` wrapper.
+            let child_parent = element_type.or(parent_type);
             for (_, v) in fields {
-                walk_refs(v, book, visited, out);
+                walk_refs(v, book, child_parent, visited, out);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                walk_refs(item, book, visited, out);
+                walk_refs(item, book, parent_type, visited, out);
             }
         }
         _ => {}
@@ -358,15 +695,12 @@ fn lookup<'b>(book: &'b BookData, ftype: KfxSymbol, fid: &str) -> Option<&'b Ion
 }
 
 // ============================================================================
-// Rule 7 — external-resource bytes are embedded
+// Rule 7 — external-resource bytes are embedded, format is a known one
 // ============================================================================
 
-fn check_resource_bytes(
-    by_type: &HashMap<u64, HashMap<String, IonValue>>,
-    raw_media: &HashMap<String, Vec<u8>>,
-) -> Vec<Finding> {
+fn check_resource_bytes(book: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
-    let Some(resources) = by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
+    let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
         return out;
     };
 
@@ -378,13 +712,28 @@ fn check_resource_bytes(
         let Some(fields) = resources[name].unwrap_annotated().as_struct() else {
             continue;
         };
+
+        if let Some(format) =
+            get_field(fields, KfxSymbol::Format as u64).and_then(|v| book.symbols.text_of(v))
+            && !crate::formats::kfx::resource_index::DECLARED_FORMATS.contains(&format)
+        {
+            out.push(info(
+                "resource-format-unknown",
+                name,
+                format!(
+                    "external_resource {name:?} declares format {format:?}, outside the set a \
+                     Kindle decodes"
+                ),
+            ));
+        }
+
         // A resource with no `location` ($165) names no bytes to resolve.
         let Some(location) =
             get_field(fields, KfxSymbol::Location as u64).and_then(|v| v.as_string())
         else {
             continue;
         };
-        if !raw_media.contains_key(location) {
+        if !book.raw_media.contains_key(location) {
             out.push(error(
                 "resource-missing-bytes",
                 location,
@@ -449,17 +798,174 @@ fn cover_resource_resolves(book: &BookData, cover_name: &str) -> bool {
 }
 
 // ============================================================================
-// Rule 5 — nav reachability
+// Rule 12 — book metadata is stated and self-consistent
 // ============================================================================
 
+/// Rule 12. `title` and `language` are stated, `author_pronunciation` stays
+/// positional with `author`, and `asset_id` restates `bcContId`.
+fn check_metadata(book: &BookData, cont_id: Option<&str>) -> Vec<Finding> {
+    let meta = &book.metadata;
+    let mut out = Vec::new();
+
+    if let Some(cont_id) = cont_id
+        && let Some(asset_id) = title_metadata_value(book, "asset_id")
+        && asset_id != cont_id
+    {
+        out.push(warning(
+            "metadata-asset-id-mismatch",
+            "<metadata>",
+            format!("asset_id {asset_id:?} does not match the container's bcContId {cont_id:?}"),
+            None,
+        ));
+    }
+
+    if meta.title.trim().is_empty() {
+        out.push(warning(
+            "metadata-no-title",
+            "<metadata>",
+            "no title — a library lists the book by its filename",
+            None,
+        ));
+    }
+
+    match meta.language.as_str() {
+        "" => out.push(warning(
+            "metadata-no-language",
+            "<metadata>",
+            "no language — hyphenation and font selection have nothing to key on",
+            None,
+        )),
+        language if !is_language_tag(language) => out.push(warning(
+            "metadata-language-malformed",
+            "<metadata>",
+            format!("language {language:?} is not a BCP-47 tag"),
+            None,
+        )),
+        _ => {}
+    }
+
+    if meta.author_pronunciations.len() > meta.authors.len() {
+        out.push(warning(
+            "metadata-pronunciation-surplus",
+            "<metadata>",
+            format!(
+                "{} author_pronunciation values for {} author values — the surplus names nobody",
+                meta.author_pronunciations.len(),
+                meta.authors.len()
+            ),
+            None,
+        ));
+    }
+
+    out
+}
+
+/// One `kindle_title_metadata` key's value, from the categorised
+/// `book_metadata` ($490) wrapper.
+fn title_metadata_value<'b>(book: &'b BookData, key: &str) -> Option<&'b str> {
+    let entities = book.by_type.get(&(KfxSymbol::BookMetadata as u64))?;
+    for value in entities.values() {
+        let Some(fields) = value.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(categories) = get_field(fields, KfxSymbol::CategorisedMetadata as u64)
+            .and_then(|v| v.unwrap_annotated().as_list())
+        else {
+            continue;
+        };
+        for category in categories {
+            let Some(cf) = category.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(entries) = get_field(cf, KfxSymbol::Metadata as u64)
+                .and_then(|v| v.unwrap_annotated().as_list())
+            else {
+                continue;
+            };
+            for entry in entries {
+                let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                if get_field(ef, KfxSymbol::Key as u64).and_then(|v| v.as_string()) == Some(key) {
+                    return get_field(ef, KfxSymbol::Value as u64).and_then(|v| v.as_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True for a BCP-47 tag: a 2–3 letter primary subtag, then `-` subtags of
+/// alphanumerics.
+fn is_language_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let Some(primary) = parts.next() else {
+        return false;
+    };
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    parts.all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+// ============================================================================
+// Rule 5 — nav reachability and vocabulary
+// ============================================================================
+
+/// The `nav_type` ($235) values a `nav_container` states.
+const NAV_TYPES: [&str; 4] = ["toc", "landmarks", "page_list", "headings"];
+
+/// Every `nav_type` a `book_navigation` ($389) or `nav_container` ($391)
+/// states outside [`NAV_TYPES`]. An unrecognised `nav_type` contributes
+/// nothing to the chapter list.
+fn check_nav_vocabulary(book: &BookData) -> Vec<Finding> {
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+    for ftype in [KfxSymbol::BookNavigation, KfxSymbol::NavContainer] {
+        let Some(entities) = book.by_type.get(&(ftype as u64)) else {
+            continue;
+        };
+        for value in entities.values() {
+            collect_nav_types(value, book, &mut unknown);
+        }
+    }
+    unknown
+        .into_iter()
+        .map(|name| {
+            info(
+                "nav-type-unknown",
+                &name,
+                format!("a nav_container states nav_type {name:?}, outside {NAV_TYPES:?}"),
+            )
+        })
+        .collect()
+}
+
+/// Record every `nav_type` ($235) in `value` that is outside [`NAV_TYPES`].
+fn collect_nav_types(value: &IonValue, book: &BookData, out: &mut BTreeSet<String>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(nav_type) =
+                get_field(fields, KfxSymbol::NavType as u64).and_then(|v| book.symbols.text_of(v))
+                && !NAV_TYPES.contains(&nav_type)
+            {
+                out.insert(nav_type.to_string());
+            }
+            for (_, v) in fields {
+                collect_nav_types(v, book, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_nav_types(item, book, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Rule 5. Every navigation entry (chapter list / headings) jumps to an
-/// element some storyline contains; a dangling target tap-jumps to nowhere on
-/// device, at warning severity. `fidelity::nav`'s extraction applies the
-/// reachability rule, exempting cover / section-root positions.
-///
-/// `bytes` is raw: the nav extractor reads the container without
-/// `loader::load`. Rule 1 reports a parse failure here as
-/// `container-unreadable`.
+/// element some storyline contains; a dangling target tap-jumps to nowhere
+/// (warning). `fidelity::nav` reads `bytes` without `loader::load`.
 fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
     let Ok(dangling) = crate::validate::fidelity::nav::dangling_nav_targets(bytes) else {
         return Vec::new();
@@ -486,11 +992,9 @@ fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
 // Rule 8 — position-map coverage
 // ============================================================================
 
-/// Rule 8. The `position_map` ($264) maps each section to the element ids it
-/// contains, resolving a device "go to location N". A reading-order section
-/// absent from it takes no location jump, at warning severity. The rule runs
-/// only on a container holding a `position_map`; some KFX address purely by
-/// `position_id_map` ($265).
+/// Rule 8. The `position_map` ($264) maps each section to its element ids,
+/// resolving a device "go to location N". A reading-order section absent from
+/// it takes no location jump (warning; skipped without a `position_map`).
 fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
     let sections = reading_order_sections(book);
     if sections.is_empty() {
@@ -548,8 +1052,8 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
 /// Positions a section holds below the large-section declaration.
 const SECTION_PID_BOUND: i64 = 65536;
 
-/// What the book contains, read from the container itself, for its
-/// `content_features` claims to be checked against.
+/// Container contents, for the `content_features` claims to be checked
+/// against.
 #[derive(Default, Debug)]
 struct ContentFacts {
     /// A tiled image (`yj.tiles` / `yj.tile_padding` on an
@@ -608,10 +1112,9 @@ impl ContentFacts {
     }
 }
 
-/// Positions in the longest section, read from the `position_id_map` ($265)
-/// span shape (`{section_name, pid, length}`). The `{eid, pid}` pair shape
-/// states no section length and yields `None`. Neither shape is a format
-/// tell — see [`crate::formats::kfx::position`].
+/// Positions in the longest section, from the `position_id_map` ($265) span
+/// shape (`{section_name, pid, length}`). The `{eid, pid}` pair shape states
+/// no section length and yields `None`.
 fn max_section_pids(book: &BookData) -> Option<i64> {
     let maps = book.by_type.get(&(KfxSymbol::PositionIdMap as u64))?;
     let mut max = None;
@@ -640,13 +1143,18 @@ fn max_section_pids(book: &BookData) -> Option<i64> {
     max
 }
 
-/// The `com.amazon.yjconversion` features the book declares, keyed by feature
-/// name, valued by major version.
-fn declared_features(book: &BookData) -> HashMap<String, i64> {
+/// The two namespaces a `content_features` entry is declared under.
+const FEATURE_NAMESPACES: [&str; 2] = ["com.amazon.yjconversion", "SDK.Marker"];
+
+/// Declared features keyed by feature name, valued by major version, with one
+/// [`Finding`] per entry outside [`FEATURE_NAMESPACES`].
+fn declared_features(book: &BookData) -> (HashMap<String, i64>, Vec<Finding>) {
     let mut out = HashMap::new();
+    let mut findings = Vec::new();
     let Some(entities) = book.by_type.get(&(KfxSymbol::ContentFeatures as u64)) else {
-        return out;
+        return (out, findings);
     };
+    let mut unknown_namespaces: BTreeSet<String> = BTreeSet::new();
     for value in entities.values() {
         let Some(fields) = value.unwrap_annotated().as_struct() else {
             continue;
@@ -660,7 +1168,15 @@ fn declared_features(book: &BookData) -> HashMap<String, i64> {
             let Some(ff) = feature.unwrap_annotated().as_struct() else {
                 continue;
             };
-            let Some(key) = get_field(ff, KfxSymbol::Key as u64).and_then(|v| v.as_string()) else {
+            if let Some(namespace) =
+                get_field(ff, KfxSymbol::Namespace as u64).and_then(|v| book.symbols.text_of(v))
+                && !FEATURE_NAMESPACES.contains(&namespace)
+            {
+                unknown_namespaces.insert(namespace.to_string());
+            }
+            let Some(key) =
+                get_field(ff, KfxSymbol::Key as u64).and_then(|v| book.symbols.text_of(v))
+            else {
                 continue;
             };
             let major = get_field(ff, KfxSymbol::VersionInfo as u64)
@@ -673,16 +1189,22 @@ fn declared_features(book: &BookData) -> HashMap<String, i64> {
             out.insert(key.to_string(), major);
         }
     }
-    out
+    for namespace in unknown_namespaces {
+        findings.push(info(
+            "feature-namespace-unknown",
+            "<content_features>",
+            format!("a feature is declared under namespace {namespace:?}"),
+        ));
+    }
+    (out, findings)
 }
 
 fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
-    let declared = declared_features(book);
+    let (declared, mut out) = declared_features(book);
     if declared.is_empty() {
-        return Vec::new(); // No content_features: no claim to check.
+        return out; // No content_features: no claim to check.
     }
     let facts = ContentFacts::read(book);
-    let mut out = Vec::new();
 
     // Media features are checked in the omission direction. A declaration
     // describes the material a book was built from, which outruns the bytes
@@ -771,54 +1293,277 @@ fn warning(
     }
 }
 
+/// A [`Severity::Info`] finding: a value the format permits and no rule here
+/// recognises.
+fn info(rule: &str, location: &str, message: impl Into<String>) -> Finding {
+    Finding {
+        check: "kfx",
+        rule: rule.to_string(),
+        severity: Severity::Info,
+        location: location.to_string(),
+        message: message.into(),
+        fix: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A container of a header and a container_info whose `bcDRMScheme` is
-    /// `scheme`, over an empty index table. At `scheme: 0` it loads as an
-    /// entity-less book.
-    fn container_with_drm_scheme(scheme: i64) -> Vec<u8> {
-        use crate::formats::kfx::ion::IonWriter;
+    /// A header + container_info over an empty index table, with each
+    /// container-layer scalar settable. [`Container::default`] builds one that
+    /// loads as an entity-less book and raises no rule-1 finding.
+    struct Container {
+        version: u16,
+        drm_scheme: i64,
+        compr_type: i64,
+        cont_id: Option<String>,
+        index_length: i64,
+        /// Index-table rows as `(type_id, id)`; each names a zero-length
+        /// entity, enough for the inventory rules that read only the table.
+        index: Vec<(u32, u32)>,
+        /// Names for the doc-symbols fragment's `imports` list.
+        imports: Vec<String>,
+    }
 
-        const HEADER_LEN: u32 = 18;
-        let mut writer = IonWriter::new();
-        writer.write_bvm();
-        writer.write_value(&IonValue::Struct(vec![
-            (KfxSymbol::Bcdrmscheme as u64, IonValue::Int(scheme)),
-            (
-                KfxSymbol::Bcindextaboffset as u64,
-                IonValue::Int(HEADER_LEN as i64),
-            ),
-            (KfxSymbol::Bcindextablength as u64, IonValue::Int(0)),
-        ]));
-        let info = writer.into_bytes();
+    impl Default for Container {
+        fn default() -> Self {
+            Self {
+                version: CONTAINER_VERSION,
+                drm_scheme: 0,
+                compr_type: 0,
+                cont_id: Some("CR!2V5GMJ5B652W7ED0CNV1210FAXAR".to_string()),
+                index_length: 0,
+                index: Vec::new(),
+                imports: vec![SHARED_SYMBOL_TABLE.to_string()],
+            }
+        }
+    }
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"CONT");
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&HEADER_LEN.to_le_bytes());
-        bytes.extend_from_slice(&HEADER_LEN.to_le_bytes()); // container_info offset
-        bytes.extend_from_slice(&(info.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&info);
-        bytes
+    impl Container {
+        fn build(&self) -> Vec<u8> {
+            use crate::formats::kfx::ion::IonWriter;
+
+            const HEADER_LEN: u32 = 18;
+
+            // Index table, then doc symbols, both after the fixed header.
+            let mut index_table = Vec::new();
+            for (type_id, id) in &self.index {
+                index_table.extend_from_slice(&id.to_le_bytes());
+                index_table.extend_from_slice(&type_id.to_le_bytes());
+                index_table.extend_from_slice(&0u64.to_le_bytes()); // offset
+                index_table.extend_from_slice(&0u64.to_le_bytes()); // length
+            }
+            let index_length = if self.index.is_empty() {
+                self.index_length
+            } else {
+                index_table.len() as i64
+            };
+
+            let imports: Vec<IonValue> = self
+                .imports
+                .iter()
+                .map(|name| {
+                    IonValue::Struct(vec![
+                        (4, IonValue::String(name.clone())),
+                        (8, IonValue::Int(FALLBACK_IMPORT_MAX_ID)),
+                    ])
+                })
+                .collect();
+            let mut symbol_writer = IonWriter::new();
+            symbol_writer.write_bvm();
+            symbol_writer.write_value(&IonValue::Annotated(
+                vec![3],
+                Box::new(IonValue::Struct(vec![(6, IonValue::List(imports))])),
+            ));
+            let doc_symbols = symbol_writer.into_bytes();
+
+            let index_offset = HEADER_LEN as i64;
+            let symbols_offset = index_offset + index_length.max(index_table.len() as i64);
+
+            let mut fields = vec![
+                (
+                    KfxSymbol::Bcdrmscheme as u64,
+                    IonValue::Int(self.drm_scheme),
+                ),
+                (
+                    KfxSymbol::Bccomprtype as u64,
+                    IonValue::Int(self.compr_type),
+                ),
+                (
+                    KfxSymbol::Bcindextaboffset as u64,
+                    IonValue::Int(index_offset),
+                ),
+                (
+                    KfxSymbol::Bcindextablength as u64,
+                    IonValue::Int(index_length),
+                ),
+                (
+                    KfxSymbol::Bcdocsymboloffset as u64,
+                    IonValue::Int(symbols_offset),
+                ),
+                (
+                    KfxSymbol::Bcdocsymbollength as u64,
+                    IonValue::Int(doc_symbols.len() as i64),
+                ),
+            ];
+            if let Some(id) = &self.cont_id {
+                fields.push((KfxSymbol::Bccontid as u64, IonValue::String(id.clone())));
+            }
+
+            let mut writer = IonWriter::new();
+            writer.write_bvm();
+            writer.write_value(&IonValue::Struct(fields));
+            let info = writer.into_bytes();
+
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"CONT");
+            bytes.extend_from_slice(&self.version.to_le_bytes());
+            bytes.extend_from_slice(&HEADER_LEN.to_le_bytes());
+            // The index table and doc symbols sit where container_info says,
+            // and container_info follows them.
+            bytes.extend_from_slice(
+                &((symbols_offset + doc_symbols.len() as i64) as u32).to_le_bytes(),
+            );
+            bytes.extend_from_slice(&(info.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&index_table);
+            // An index_length past the written rows is the ragged case; the
+            // bytes it names are zero-filled here.
+            bytes.resize(
+                HEADER_LEN as usize + index_length.max(index_table.len() as i64) as usize,
+                0,
+            );
+            bytes.extend_from_slice(&doc_symbols);
+            bytes.extend_from_slice(&info);
+            bytes
+        }
+    }
+
+    /// Import `max_id` the test containers declare.
+    const FALLBACK_IMPORT_MAX_ID: i64 = 851;
+
+    /// The rules a container raises, sorted.
+    fn rules_of(bytes: &[u8]) -> Vec<String> {
+        let mut rules: Vec<String> = validate(bytes).into_iter().map(|f| f.rule).collect();
+        rules.sort();
+        rules
+    }
+
+    #[test]
+    fn singleton_type_appearing_twice_is_flagged() {
+        let doubled = Container {
+            index: vec![
+                (KfxSymbol::DocumentData as u32, 1),
+                (KfxSymbol::DocumentData as u32, 2),
+                (KfxSymbol::Section as u32, 3),
+                (KfxSymbol::Section as u32, 4),
+            ],
+            ..Default::default()
+        }
+        .build();
+        let out = check_container_inventory(&doubled);
+        assert_eq!(out.len(), 1, "only the singleton is flagged: {out:?}");
+        assert_eq!(out[0].rule, "singleton-repeated");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        let single = Container {
+            index: vec![(KfxSymbol::DocumentData as u32, 1)],
+            ..Default::default()
+        }
+        .build();
+        assert!(check_container_inventory(&single).is_empty());
+    }
+
+    #[test]
+    fn symbol_import_other_than_the_shared_table_is_flagged() {
+        let other = Container {
+            imports: vec!["OtherSymbols".to_string()],
+            ..Default::default()
+        }
+        .build();
+        let out = check_container_inventory(&other);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "symbol-import-unexpected");
+
+        assert!(check_container_inventory(&Container::default().build()).is_empty());
     }
 
     #[test]
     fn encrypted_container_is_reported_as_encrypted() {
-        let out = validate(&container_with_drm_scheme(1));
+        let out = validate(
+            &Container {
+                drm_scheme: 1,
+                ..Default::default()
+            }
+            .build(),
+        );
         assert_eq!(out.len(), 1, "encryption ends the run: {out:?}");
         assert_eq!(out[0].rule, "container-encrypted");
         assert_eq!(out[0].severity, Severity::Error);
-        // The structure is unreadable, never absent.
         assert!(!out.iter().any(|f| f.rule == "no-sections"));
     }
 
     #[test]
-    fn unencrypted_container_is_read_not_refused() {
-        let out = validate(&container_with_drm_scheme(0));
-        assert!(!out.iter().any(|f| f.rule == "container-encrypted"));
-        assert!(out.iter().any(|f| f.rule == "no-sections"));
+    fn compressed_container_is_reported_as_compressed() {
+        let out = validate(
+            &Container {
+                compr_type: 1,
+                ..Default::default()
+            }
+            .build(),
+        );
+        assert_eq!(out.len(), 1, "compression ends the run: {out:?}");
+        assert_eq!(out[0].rule, "container-compressed");
+        assert_eq!(out[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn readable_container_is_read_not_refused() {
+        let rules = rules_of(&Container::default().build());
+        assert!(!rules.iter().any(|r| r.starts_with("container-")));
+        assert!(rules.iter().any(|r| r == "no-sections"));
+    }
+
+    #[test]
+    fn container_scalars_flag_version_index_and_id() {
+        let bytes = Container {
+            version: 1,
+            cont_id: Some("not-an-acr".to_string()),
+            index_length: 30, // one whole 24-byte entry plus 6 bytes
+            ..Default::default()
+        }
+        .build();
+        let rules = rules_of(&bytes);
+        assert!(rules.iter().any(|r| r == "container-version-unexpected"));
+        assert!(rules.iter().any(|r| r == "index-table-ragged"));
+        assert!(rules.iter().any(|r| r == "container-id-malformed"));
+        for finding in validate(&bytes) {
+            if finding.rule.starts_with("container-id")
+                || finding.rule.starts_with("container-version")
+                || finding.rule == "index-table-ragged"
+            {
+                assert_eq!(finding.severity, Severity::Warning);
+            }
+        }
+    }
+
+    #[test]
+    fn container_id_absent_is_its_own_finding() {
+        let rules = rules_of(
+            &Container {
+                cont_id: None,
+                ..Default::default()
+            }
+            .build(),
+        );
+        assert!(rules.iter().any(|r| r == "container-id-missing"));
+        assert!(!rules.iter().any(|r| r == "container-id-malformed"));
+    }
+
+    #[test]
+    fn container_id_accepts_the_generated_shape() {
+        let id = crate::formats::kfx::serialization::generate_container_id("t");
+        assert!(is_container_id(&id), "{id}");
     }
 
     fn resource(location: Option<&str>) -> IonValue {
@@ -896,10 +1641,12 @@ mod tests {
             // Location-less descriptor: skipped, never flagged.
             (KfxSymbol::ExternalResource as u64, "r3", resource(None)),
         ]);
-        let mut raw_media: HashMap<String, Vec<u8>> = HashMap::new();
-        raw_media.insert("resource/present".to_string(), vec![0xFF, 0xD8]);
+        let mut book = loader::empty_book_for_test();
+        book.by_type = by_type;
+        book.raw_media
+            .insert("resource/present".to_string(), vec![0xFF, 0xD8]);
 
-        let out = check_resource_bytes(&by_type, &raw_media);
+        let out = check_resource_bytes(&book);
         assert_eq!(out.len(), 1, "only the missing-bytes resource is flagged");
         assert_eq!(out[0].rule, "resource-missing-bytes");
         assert_eq!(out[0].severity, Severity::Error);
@@ -908,11 +1655,323 @@ mod tests {
 
     #[test]
     fn resource_bytes_clean_when_no_resources() {
-        assert!(check_resource_bytes(&HashMap::new(), &HashMap::new()).is_empty());
+        assert!(check_resource_bytes(&loader::empty_book_for_test()).is_empty());
+    }
+
+    #[test]
+    fn resource_format_outside_the_decodable_set_is_info() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r1",
+                IonValue::Struct(vec![(
+                    KfxSymbol::Format as u64,
+                    IonValue::String("avif".to_string()),
+                )]),
+            ),
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r2",
+                IonValue::Struct(vec![(
+                    KfxSymbol::Format as u64,
+                    IonValue::String("jxr".to_string()),
+                )]),
+            ),
+        ]);
+
+        let out = check_resource_bytes(&book);
+        assert_eq!(out.len(), 1, "only the unknown format is flagged: {out:?}");
+        assert_eq!(out[0].rule, "resource-format-unknown");
+        assert_eq!(out[0].severity, Severity::Info);
+        assert_eq!(out[0].location, "r1");
+    }
+
+    // --- Wave 2 (vocabulary) -----------------------------------------------
+
+    /// A book whose one reading-order section holds `element` as its single
+    /// page template.
+    fn book_with_element(element: IonValue) -> BookData {
+        let mut book = loader::empty_book_for_test();
+        book.by_type
+            .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
+        book.by_type.insert(
+            KfxSymbol::Section as u64,
+            HashMap::from([(
+                "sec1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::PageTemplates as u64,
+                    IonValue::List(vec![element]),
+                )]),
+            )]),
+        );
+        book
+    }
+
+    #[test]
+    fn element_type_outside_the_schema_is_info() {
+        // $596 horizontal_rule has an import strategy; $445 text_vert_anchor
+        // names no element type at all.
+        let book = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::TextVertAnchor as u64),
+        )]));
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "element-type-unknown");
+        assert_eq!(out[0].severity, Severity::Info);
+
+        let known = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::HorizontalRule as u64),
+        )]));
+        assert!(check_references(&known).is_empty());
+    }
+
+    #[test]
+    fn writing_mode_outside_the_css_set_is_flagged() {
+        let book = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::WritingMode as u64,
+            IonValue::String("sideways_lr".to_string()),
+        )]));
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "writing-mode-unknown");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        for mode in WRITING_MODES {
+            let ok = book_with_element(IonValue::Struct(vec![(
+                KfxSymbol::WritingMode as u64,
+                IonValue::String(mode.to_string()),
+            )]));
+            assert!(check_references(&ok).is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn list_item_outside_a_list_is_flagged() {
+        let listitem = || {
+            IonValue::Struct(vec![(
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Listitem as u64),
+            )])
+        };
+        let orphan = book_with_element(listitem());
+        let out = check_references(&orphan);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "list-item-outside-list");
+
+        // The same item under a `list` parent, through a content_list wrapper.
+        let nested = book_with_element(IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::List as u64),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![listitem()]),
+            ),
+        ]));
+        assert!(check_references(&nested).is_empty());
+    }
+
+    #[test]
+    fn nav_type_outside_the_known_set_is_info() {
+        let nav = |nav_type: &str| {
+            let mut book = loader::empty_book_for_test();
+            book.by_type.insert(
+                KfxSymbol::BookNavigation as u64,
+                HashMap::from([(
+                    "nav".to_string(),
+                    IonValue::List(vec![IonValue::Struct(vec![(
+                        KfxSymbol::NavType as u64,
+                        IonValue::String(nav_type.to_string()),
+                    )])]),
+                )]),
+            );
+            book
+        };
+        let out = check_nav_vocabulary(&nav("guide"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "nav-type-unknown");
+        assert_eq!(out[0].severity, Severity::Info);
+        for known in NAV_TYPES {
+            assert!(check_nav_vocabulary(&nav(known)).is_empty(), "{known}");
+        }
+    }
+
+    #[test]
+    fn feature_namespace_outside_the_known_pair_is_info() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type.insert(
+            KfxSymbol::ContentFeatures as u64,
+            HashMap::from([(
+                "cf".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::Features as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (
+                            KfxSymbol::Namespace as u64,
+                            IonValue::String("com.example.other".to_string()),
+                        ),
+                        (KfxSymbol::Key as u64, IonValue::String("k".to_string())),
+                    ])]),
+                )]),
+            )]),
+        );
+        let (declared, findings) = declared_features(&book);
+        assert!(declared.contains_key("k"));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "feature-namespace-unknown");
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    // --- Wave 3 (presence and shape) ---------------------------------------
+
+    #[test]
+    fn section_without_page_templates_is_flagged() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type
+            .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
+        book.by_type.insert(
+            KfxSymbol::Section as u64,
+            HashMap::from([("sec1".to_string(), IonValue::Struct(vec![]))]),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "section-empty");
+        assert_eq!(out[0].location, "sec1");
+    }
+
+    #[test]
+    fn table_without_rows_is_flagged() {
+        let rowless = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Table as u64),
+        )]));
+        let out = check_references(&rowless);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "table-without-rows");
+
+        let with_row = book_with_element(IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Table as u64),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::TableRow as u64),
+                )])]),
+            ),
+        ]));
+        assert!(check_references(&with_row).is_empty());
+    }
+
+    #[test]
+    fn element_with_content_and_children_is_info() {
+        let book = book_with_element(IonValue::Struct(vec![
+            (
+                KfxSymbol::Content as u64,
+                IonValue::String("text".to_string()),
+            ),
+            (KfxSymbol::ContentList as u64, IonValue::List(vec![])),
+        ]));
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "element-content-and-children");
+        assert_eq!(out[0].severity, Severity::Info);
+    }
+
+    /// A book whose metadata is exactly `fields`.
+    fn book_with_metadata(meta: crate::formats::kfx::loader::BookMetadata) -> BookData {
+        let mut book = loader::empty_book_for_test();
+        book.metadata = meta;
+        book
+    }
+
+    #[test]
+    fn metadata_absences_are_flagged() {
+        let out = check_metadata(&book_with_metadata(Default::default()), None);
+        let rules: Vec<&str> = out.iter().map(|f| f.rule.as_str()).collect();
+        assert!(rules.contains(&"metadata-no-title"), "{rules:?}");
+        assert!(rules.contains(&"metadata-no-language"), "{rules:?}");
+    }
+
+    #[test]
+    fn metadata_clean_when_stated() {
+        let meta = crate::formats::kfx::loader::BookMetadata {
+            title: "人間失格".to_string(),
+            language: "ja".to_string(),
+            authors: vec!["太宰 治".to_string()],
+            author_pronunciations: vec!["だざい おさむ".to_string()],
+            ..Default::default()
+        };
+        assert!(check_metadata(&book_with_metadata(meta), None).is_empty());
+    }
+
+    #[test]
+    fn metadata_flags_malformed_language_and_surplus_pronunciations() {
+        let meta = crate::formats::kfx::loader::BookMetadata {
+            title: "t".to_string(),
+            language: "japanese!".to_string(),
+            authors: vec!["a".to_string()],
+            author_pronunciations: vec!["p1".to_string(), "p2".to_string()],
+            ..Default::default()
+        };
+        let out = check_metadata(&book_with_metadata(meta), None);
+        let rules: Vec<&str> = out.iter().map(|f| f.rule.as_str()).collect();
+        assert!(rules.contains(&"metadata-language-malformed"), "{rules:?}");
+        assert!(
+            rules.contains(&"metadata-pronunciation-surplus"),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_asset_id_must_match_the_container_id() {
+        let title_metadata = |asset_id: &str| {
+            let entry = IonValue::Struct(vec![
+                (
+                    KfxSymbol::Key as u64,
+                    IonValue::String("asset_id".to_string()),
+                ),
+                (
+                    KfxSymbol::Value as u64,
+                    IonValue::String(asset_id.to_string()),
+                ),
+            ]);
+            let category = IonValue::Struct(vec![(
+                KfxSymbol::Metadata as u64,
+                IonValue::List(vec![entry]),
+            )]);
+            HashMap::from([(
+                "bm".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::CategorisedMetadata as u64,
+                    IonValue::List(vec![category]),
+                )]),
+            )])
+        };
+
+        let mut book = book_with_metadata(crate::formats::kfx::loader::BookMetadata {
+            title: "t".to_string(),
+            language: "en".to_string(),
+            ..Default::default()
+        });
+        book.by_type
+            .insert(KfxSymbol::BookMetadata as u64, title_metadata("CR!OTHER"));
+        let out = check_metadata(&book, Some("CR!REAL"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "metadata-asset-id-mismatch");
+
+        book.by_type
+            .insert(KfxSymbol::BookMetadata as u64, title_metadata("CR!REAL"));
+        assert!(check_metadata(&book, Some("CR!REAL")).is_empty());
     }
 
     // --- Rules 3 & 6 (reference resolution) --------------------------------
-    //
     // References are `IonValue::String`s, which `text_of` resolves over
     // `empty_book_for_test`'s empty doc-symbol table.
 

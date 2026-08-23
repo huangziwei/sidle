@@ -51,25 +51,21 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
 
-        /// `.kfx-zip` → `.kfx` merge strategy. `fast` (default) passes
-        /// entity bodies through verbatim — fast and calibre-accepted.
-        /// `mechanical` is a faithful port of calibre's pipeline, kept as
-        /// the correctness reference.
+        /// `.kfx-zip` → `.kfx` merge strategy. `fast` (default) passes entity
+        /// bodies through verbatim; `mechanical` re-serializes every fragment.
         #[arg(long = "mode", default_value = "fast")]
         merge_mode: String,
 
         /// Page progression direction for PDF → KFX: `rtl` (Japanese/manga,
         /// turn pages right-to-left) or `ltr`. Omit for the device default
-        /// (ltr). A scanned/text PDF has no such metadata, so set it here.
+        /// (ltr). A scanned or text PDF carries no such metadata.
         #[cfg(feature = "pdf")]
         #[arg(long = "ppd")]
         ppd: Option<String>,
 
         /// Force the book's writing mode (EPUB → KFX): `vertical-rl`,
-        /// `vertical-lr`, `horizontal-lr`, or `horizontal-rl`. Sets the same
-        /// `primary-writing-mode` metadata override the library API exposes,
-        /// and derives the page-turn (a `-rl` mode turns right-to-left). Omit
-        /// to keep the source's own mode.
+        /// `vertical-lr`, `horizontal-lr`, or `horizontal-rl`. A `-rl` mode
+        /// turns pages right-to-left. Omit to keep the source's own mode.
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
 
@@ -154,9 +150,8 @@ enum Command {
     },
 
     /// Reorder an EPUB's spine to the order its own navigation reads, for a
-    /// book whose spine contradicts its TOC. Prints the proposed reading order;
-    /// with `output`, writes the reordered book. Reading positions move with a
-    /// spine — review the dry run first.
+    /// book whose spine contradicts its TOC. Prints the proposed reading
+    /// order; with `output`, writes the reordered book.
     ReorderSpine {
         /// Input EPUB file.
         input: String,
@@ -195,10 +190,9 @@ fn parse_direction(s: &str) -> Result<bokai::validate::Direction, String> {
     }
 }
 
-/// `bokai repair-toc <input> [output]` — derive the chapter list from the book's
-/// own structure and print it; with `output`, write the repaired book. Handles
-/// both KFX (in-book Contents page) and EPUB (declared NCX/nav, Contents page, or
-/// headings). A dry run (no output) is a safe way to preview what repair would do.
+/// `bokai repair-toc <input> [output]` — derive the chapter list from the
+/// book's own structure and print it; with `output`, write the repaired book.
+/// KFX reads its Contents page, EPUB its NCX/nav, Contents page or headings.
 fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
 
@@ -237,12 +231,9 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// `bokai reorder-spine <input> [output]` — show the reading order the book's
-/// own navigation implies against the one its spine declares, and with `output`
-/// write the reordered book. The dry run prints both orders side by side because
-/// this repair is the one a human has to adjudicate: it moves every reading
-/// position downstream, and where an unlisted document belongs is a judgement
-/// the book gives no evidence for.
+/// `bokai reorder-spine <input> [output]` — print the reading order the
+/// navigation implies beside the one the spine declares; with `output`, write
+/// the reordered book. The repair moves every reading position downstream.
 fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     use bokai::formats::epub::spine_repair as spine;
 
@@ -270,9 +261,8 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     );
 
     // The proposed order, one column, with each moved document's old position
-    // beside it. Everything fixed-width sits on the left: a CJK title is twice
-    // as wide as the column count says, so a title in the middle of a row would
-    // pull every following column out of true.
+    // beside it. Every fixed-width field sits on the left of the title: a CJK
+    // title measures twice its column count.
     let current = spine::current_spine(&bytes).map_err(|e| e.to_string())?;
     let proposed = spine::propose_spine(&bytes).map_err(|e| e.to_string())?;
     let was: std::collections::HashMap<&str, usize> = current
@@ -305,10 +295,9 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// `bokai split <input> [--out DIR] [--series NAME]` — print where a collection
-/// divides into volumes, one line per proposed cut, and with `--out` write the
-/// volumes. The dry run has no output side, and the numbers it proposes are
-/// meant to be reviewed before use.
+/// `bokai split <input> [--out DIR] [--series NAME]` — print where a
+/// collection divides into volumes, one line per proposed cut; with `--out`,
+/// write the volumes.
 fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(), String> {
     use bokai::formats::epub::split::{Numbering, propose_cuts, split};
 
@@ -370,10 +359,9 @@ fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(),
     Ok(())
 }
 
-/// Read a book as EPUB bytes, converting first when it is one of the other
-/// importable formats. Splitting is defined over the EPUB container — spine,
-/// manifest and nav are explicit there — so an AZW3 or KFX collection takes the
-/// same route the library does: import it, export an EPUB, split that.
+/// Read a book as EPUB bytes, converting first from another importable
+/// format. Splitting is defined over the EPUB container, whose spine,
+/// manifest and nav are explicit.
 fn as_epub(input: &str) -> Result<Vec<u8>, String> {
     use bokai::Exporter as _;
 
@@ -529,8 +517,7 @@ enum ValidateCheck {
     },
 
     /// Verify OPF `<spine page-progression-direction>` matches the source KFX
-    /// (ltr / rtl, with the writing-mode override calibre applies for vertical
-    /// books)
+    /// (ltr / rtl, with the writing-mode override a vertical book takes)
     PageProgression {
         epub: String,
         kfx: String,
@@ -548,10 +535,9 @@ enum ValidateCheck {
         details: usize,
     },
 
-    /// Validate one book's table of contents: is the declared TOC properly
-    /// formed, or chapterless while the content clearly has chapters? Source-
-    /// native and single-file — sniffs EPUB vs KFX and reads only that format
-    /// (never a derived copy). Reports OK / SUSPECT / SPARSE.
+    /// Validate one book's table of contents: properly formed, or
+    /// chapterless over content with chapters? Sniffs EPUB vs KFX and reads
+    /// only that source. Reports OK / SUSPECT / SPARSE.
     Toc {
         /// Input book (EPUB or KFX)
         file: String,
@@ -561,11 +547,9 @@ enum ValidateCheck {
         json: bool,
     },
 
-    /// Validate one book file's structural conformance on its own — is it
-    /// well-formed? Sniffs EPUB vs KFX and runs every single-file source check
-    /// for that format (EPUB structural / the KFX structural checker) plus the
-    /// cross-format TOC audit, reporting one unified list of source defects the
-    /// book editor can repair.
+    /// Validate one book file's structural conformance on its own. Sniffs
+    /// EPUB vs KFX, runs that format's source checks plus the cross-format
+    /// TOC audit, and reports one unified list of source defects.
     Source {
         /// Input book (EPUB or KFX)
         file: String,
@@ -619,8 +603,8 @@ fn main() -> ExitCode {
             no_validate,
             max_workers,
         } => {
-            // A build without the capability has no flag to read, and takes the
-            // value the absent flag's default would have produced.
+            // A build without the capability has no flag to read, and takes
+            // the absent flag's default value.
             #[cfg(feature = "pdf")]
             let ppd = ppd.as_deref();
             #[cfg(not(feature = "pdf"))]
@@ -1122,12 +1106,9 @@ fn validate_all(
     );
     let mut all_clean = true;
 
-    // Fixed-layout (manga / image) books are image pages: the reflow-text gates
-    // — ruby, text, CSS coverage, semantic tags, writing-mode — don't apply and
-    // would score a correct FXL book as broken (e.g. the deliberate FXL
-    // horizontal-tb forcing trips the writing-mode gate). Detect up front; for an
-    // FXL book those checks still run and print, but as INFORMATION only. The
-    // FXL-shape gate plus images / nav / metadata / links / PPD still gate.
+    // A fixed-layout (manga / image) book is image pages: ruby, text, CSS,
+    // tags and writing-mode print as information, while `fxl` shape plus
+    // images / nav / metadata / links / PPD gate.
     let fxl = bokai::validate::fidelity::fxl::validate(&epub_bytes, &kfx_bytes)?;
     let reflow_gated = !fxl.kfx_fixed_layout;
     if fxl.kfx_fixed_layout {
@@ -1262,10 +1243,9 @@ fn validate_all(
         "  HTML tags:    {:.2}% semantic",
         tags.semantic_ratio() * 100.0
     );
-    // External URLs: denominator is the source side's external count. KFX
-    // doesn't track external URL counts separately; use EPUB count as a proxy
-    // in both directions (the assumption is that EPUB anchors mirror KFX uri
-    // anchors 1:1 when preserved).
+    // External URLs: the denominator is the source side's external count.
+    // KFX tracks none separately, and the EPUB count stands in both
+    // directions, one EPUB anchor per preserved KFX uri anchor.
     let url_source_count = if dir.epub_is_source() {
         links.epub_external_count
     } else {
@@ -1353,12 +1333,9 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     } else {
         audit.print_summary();
     }
-    // A deficient TOC fails validation — chapterless, flattened (a multi-work
-    // book listed at one depth), or contradicted by the book's own reading
-    // order. SPARSE is inconclusive, not a failure. In --json mode the verdict
-    // is in the payload, so don't also emit a process-level error (batch tools
-    // read stdout). Each defect states itself: a book can carry more than one,
-    // and reporting the wrong one is worse than reporting none.
+    // A deficient TOC fails validation: chapterless, flattened, or
+    // contradicted by the reading order. SPARSE is inconclusive. In --json
+    // mode the verdict sits in the payload, with no process-level error.
     use bokai::validate::source::toc::Verdict;
     if json || audit.is_clean() {
         return Ok(());
@@ -1428,9 +1405,8 @@ fn validate_source(path: &str, json: bool) -> Result<(), String> {
     }
 
     println!("{report}");
-    // The process fails only on error-level defects (epubcheck convention);
-    // warnings are reported but don't fail the run, so batch/corpus scans read
-    // stdout for the full picture. In --json mode the verdict is in the payload.
+    // The process fails only on error-level defects; a warning prints without
+    // failing the run. In --json mode the verdict sits in the payload.
     let errors = report.count(Severity::Error);
     if errors == 0 {
         Ok(())
@@ -1725,15 +1701,9 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
     }
 }
 
-/// Post-conversion EPUB validation *diagnostic*. Never withholds output — the
-/// EPUB has already been produced and written by the time this runs. When
-/// `validate` is on, runs the native validator over the produced bytes and
-/// prints any findings so an invalid conversion is visible: a dev fixes the
-/// bokai converter and reconverts, or the book editor repairs the source.
-/// Off (`--no-validate`) skips the pass entirely. Error findings always print
-/// (an invalid EPUB is worth surfacing even under `--quiet`); warnings print
-/// only when not `quiet`. Advisory by policy — it prints, it never fails, so
-/// the conversion always succeeds.
+/// Post-conversion EPUB validation diagnostic over bytes the caller has
+/// written. `validate` runs the native validator and prints its findings; an
+/// error finding prints under `quiet` too. The pass prints and never fails.
 #[cfg(feature = "validate")]
 fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
     if !validate {
@@ -1757,11 +1727,8 @@ fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
 }
 
 /// Export `book` and, for an EPUB, run [`report_epub_validation`] over what
-/// was written.
-///
-/// A file sink takes the container's entries as the exporter produces them;
-/// `book` drops before the validator reads the result back from disk. Stdout
-/// is not seekable and buffers the container in memory.
+/// was written. A file sink streams the container; `book` drops before the
+/// validator reads it back. Stdout is unseekable and buffers in memory.
 #[cfg_attr(not(feature = "validate"), allow(unused_variables))]
 fn write_export(
     mut book: Book,
@@ -1801,10 +1768,9 @@ fn write_export(
     Ok(())
 }
 
-/// Report the error-level findings a book-mutating edit *introduced* (the
-/// differential gate: a wild book stays wild, but an edit must not add a
-/// defect). Non-blocking, like every other validation seam — the edited file is
-/// already written by the time this runs.
+/// Report the error-level findings a book-mutating edit introduced: a wild
+/// book stays wild, and an edit adds no defect. Non-blocking, over a file the
+/// caller has written.
 #[cfg(feature = "validate")]
 fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
     let added = bokai::validate::source::added_errors(before, after);
@@ -1824,8 +1790,7 @@ fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
     }
 }
 
-// A CLI command entry point: each argument mirrors a distinct flag, so bundling
-// them into a struct would just add indirection over the parsed options.
+// A CLI command entry point: each argument mirrors a distinct flag.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "pdf"), allow(unused_variables))]
 fn convert(
@@ -1946,10 +1911,8 @@ fn convert(
         return Ok(());
     }
 
-    // Aozora Bunko `.zip` → `.epub`. Detects an Aozora bundle by zip content
-    // sniff (a `.txt` with `底本：` or `［＃` markers). When matched, runs
-    // the dedicated `aozora` pipeline (parse → cover → build_epub) instead
-    // of any generic format detection.
+    // Aozora Bunko `.zip` → `.epub`. A zip holding a `.txt` with `底本：` or
+    // `［＃` markers takes the `aozora` pipeline: parse → cover → build_epub.
     #[cfg(feature = "aozora")]
     if !from_stdin
         && output_format == Format::Epub
@@ -1961,9 +1924,8 @@ fn convert(
         return Ok(());
     }
 
-    // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
-    // pipeline. This avoids storyline/section resolution (and the
-    // `document_regions` blocker) entirely. See `kfx::merge` for the design.
+    // Fast path: .kfx-zip -> .kfx merges fragments without the IR pipeline,
+    // skipping storyline/section resolution. See `kfx::merge`.
     if !from_stdin
         && output_format == Format::Kfx
         && std::path::Path::new(input)
@@ -2180,8 +2142,7 @@ fn dump_node_json(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     let node = chapter.node(id).unwrap();
 
     let text = if !opts.structure && node.role == Role::Text && !node.text.is_empty() {
-        // JSON output stays verbatim — the serializer does its own escaping,
-        // and escaping first would double-encode every newline.
+        // JSON output stays verbatim; the serializer escapes it.
         let content = chapter.text(node.text);
         Some(clip_text(content, 100))
     } else {
@@ -2385,9 +2346,8 @@ fn role_to_string(role: Role) -> String {
     }
 }
 
-/// Clip a string to `max_chars` characters, appending `...` when it was cut.
-///
-/// Character-counted, not byte-counted, so multi-byte text clips cleanly.
+/// Clip a string to `max_chars` characters, appending `...` after a cut.
+/// The count is characters, never bytes.
 fn clip_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -2398,12 +2358,7 @@ fn clip_text(text: &str, max_chars: usize) -> String {
 
 /// Render a string for one line of tree output: control characters escaped,
 /// everything else verbatim, clipped to `max_chars` source characters.
-///
-/// Whitespace is escaped rather than collapsed. Collapsing keeps the line tidy
-/// but erases the differences a dump is most often reaching for — a forced
-/// break carried as a lone `\n`, a tab, leading U+3000 indentation
-/// (`char::is_whitespace`, so `split_whitespace` drops it). A node holding
-/// `"\n"` printed as `""`, which reads as "the content is gone".
+/// Whitespace is escaped, never collapsed.
 fn truncate_text(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for c in clip_text(text, max_chars).chars() {
@@ -2432,9 +2387,8 @@ fn convert_pdf_to_kfx(
     quiet: bool,
     ppd: Option<&str>,
 ) -> Result<(), String> {
-    // Normalize/validate the page progression direction up front so a typo
-    // (e.g. `--ppd RTL` or `--ppd r2l`) errors loudly instead of silently
-    // shipping an ltr book.
+    // The page progression direction is normalized and validated up front:
+    // `--ppd RTL` lowercases, `--ppd r2l` errors.
     let ppd = match ppd.map(|s| s.trim().to_ascii_lowercase()) {
         None => None,
         Some(s) if s == "rtl" || s == "ltr" => Some(s),

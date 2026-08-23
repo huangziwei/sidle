@@ -15,6 +15,8 @@ pub enum KfxError {
     InvalidKfx(String),
     /// Non-zero `bcDRMScheme`: the entity payloads are encrypted.
     Encrypted(i64),
+    /// Non-zero `bcComprType`: the entity payloads are compressed.
+    Compressed(i64),
     /// A bundled JPEG-XR image could not be decoded.
     JxrDecode(String),
     /// A decoded image could not be re-encoded as JPEG.
@@ -28,6 +30,9 @@ impl std::fmt::Display for KfxError {
             KfxError::InvalidKfx(m) => write!(f, "invalid KFX: {m}"),
             KfxError::Encrypted(scheme) => {
                 write!(f, "KFX container is encrypted (bcDRMScheme {scheme})")
+            }
+            KfxError::Compressed(kind) => {
+                write!(f, "KFX container is compressed (bcComprType {kind})")
             }
             KfxError::JxrDecode(m) => write!(f, "JXR decode failed: {m}"),
             KfxError::JpegEncode(m) => write!(f, "JPEG encode failed: {m}"),

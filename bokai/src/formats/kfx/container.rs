@@ -8,6 +8,8 @@ use super::symbols::KFX_SYMBOL_TABLE;
 /// KFX container header (18 bytes).
 #[derive(Debug, Clone, Copy)]
 pub struct ContainerHeader {
+    /// Format version of the container layer.
+    pub version: u16,
     /// Header length (offset to entity data).
     pub header_len: usize,
     /// Container info offset.
@@ -36,9 +38,12 @@ pub struct ContainerInfo {
     pub index: Option<(usize, usize)>,
     /// Document symbols offset and length.
     pub doc_symbols: Option<(usize, usize)>,
-    /// `bcDRMScheme` ($411): `0` for readable entity payloads, non-zero for
-    /// encrypted ones.
+    /// `bcDRMScheme` ($411): `0` for unencrypted entity payloads.
     pub drm_scheme: i64,
+    /// `bcComprType` ($410): `0` for uncompressed entity payloads.
+    pub compr_type: i64,
+    /// `bcContId` ($409): `CR!` plus 28 uppercase alphanumerics.
+    pub cont_id: Option<String>,
 }
 
 /// Error type for container parsing.
@@ -116,6 +121,7 @@ pub fn parse_container_header(data: &[u8]) -> Result<ContainerHeader, ContainerE
     }
 
     Ok(ContainerHeader {
+        version: u16::from_le_bytes([data[4], data[5]]),
         header_len: read_u32_le(data, 6) as usize,
         container_info_offset: read_u32_le(data, 10) as usize,
         container_info_length: read_u32_le(data, 14) as usize,
@@ -152,6 +158,8 @@ pub fn parse_container_info(data: &[u8]) -> Result<ContainerInfo, ContainerError
     }
 
     info.drm_scheme = get_field_int(fields, "bcDRMScheme").unwrap_or(0);
+    info.compr_type = get_field_int(fields, "bcComprType").unwrap_or(0);
+    info.cont_id = get_field_str(fields, "bcContId").map(str::to_string);
 
     Ok(info)
 }
@@ -165,6 +173,15 @@ fn get_field_int(fields: &[(u64, IonValue)], name: &str) -> Option<i64> {
         .and_then(|(_, v)| v.as_int())
 }
 
+/// Get a string field from a struct by field name.
+fn get_field_str<'a>(fields: &'a [(u64, IonValue)], name: &str) -> Option<&'a str> {
+    let sym_id = symbol_id_for_name(name)?;
+    fields
+        .iter()
+        .find(|(k, _)| *k == sym_id)
+        .and_then(|(_, v)| v.as_string())
+}
+
 /// Look up a symbol ID by name from the static symbol table.
 pub fn symbol_id_for_name(name: &str) -> Option<u64> {
     KFX_SYMBOL_TABLE
@@ -175,10 +192,8 @@ pub fn symbol_id_for_name(name: &str) -> Option<u64> {
 
 // --- Index table parsing ---
 
-/// Parse the entity index table.
-///
-/// Each entry is 24 bytes: id(4) + type_id(4) + offset(8) + length(8).
-/// The `header_len` is added to offsets to get absolute positions.
+/// Parse the entity index table, 24 bytes per entry: id(4) + type_id(4) +
+/// offset(8) + length(8). Each offset is returned with `header_len` added.
 pub fn parse_index_table(data: &[u8], header_len: usize) -> Vec<EntityLoc> {
     const ENTRY_SIZE: usize = 24;
     let num_entries = data.len() / ENTRY_SIZE;
@@ -281,10 +296,8 @@ pub fn extract_doc_symbols(data: &[u8]) -> Vec<String> {
 const FALLBACK_BASE_LEN: u64 = 833;
 
 /// Summed import `max_id` of a doc-symbols fragment, whose `imports` list
-/// carries `[{name: "YJ_symbols", version: 10, max_id: N}]`. Local symbols
-/// occupy ids `N+1..`.
-///
-/// `None` for a fragment that neither parses nor declares imports.
+/// carries `[{name: "YJ_symbols", version: 10, max_id: N}]`; local symbols
+/// occupy ids `N+1..`. `None` for a fragment that parses or declares none.
 pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
     let mut parser = IonParser::new(doc_bytes);
     let value = parser.parse().ok()?;
@@ -308,16 +321,40 @@ pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
     Some(total)
 }
 
-/// Resolved symbol table — base + per-container doc_symbols.
-///
-/// `base_len` is the count of imported (system + shared) symbols **as declared
-/// by this container**, read from the doc-symbols fragment's imports `max_id`.
-/// A container declaring fewer than `KFX_SYMBOL_TABLE.len()` resolves its
-/// doc_symbols at that smaller base; a fixed `KFX_SYMBOL_TABLE.len()` base
-/// shifts every doc-local name onto a static-tail name like `character_width`.
-///
-/// Every KFX reader (importer, validators, kfx-dump) resolves through this
-/// type.
+/// The `name` of every import a doc-symbols fragment declares, in order.
+pub fn parse_import_names(doc_bytes: &[u8]) -> Vec<String> {
+    let mut parser = IonParser::new(doc_bytes);
+    let Ok(value) = parser.parse() else {
+        return Vec::new();
+    };
+    let inner = value.unwrap_annotated();
+    let Some(fields) = inner.as_struct() else {
+        return Vec::new();
+    };
+    // Symbol-table field ids: 4=name, 6=imports.
+    let Some(imports) = fields
+        .iter()
+        .find(|(k, _)| *k == 6)
+        .and_then(|(_, v)| v.as_list())
+    else {
+        return Vec::new();
+    };
+    imports
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_struct()?
+                .iter()
+                .find(|(k, _)| *k == 4)
+                .and_then(|(_, v)| v.as_string())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Resolved symbol table — base + per-container doc_symbols. `base_len` comes
+/// from the doc-symbols fragment's imports `max_id`; a fixed
+/// `KFX_SYMBOL_TABLE.len()` base shifts every doc-local name onto a tail name.
 pub struct SymbolTable {
     base_len: u64,
     doc_symbols: Vec<String>,

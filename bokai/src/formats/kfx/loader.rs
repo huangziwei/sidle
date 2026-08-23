@@ -46,13 +46,9 @@ pub struct BookMetadata {
 /// A KFX container's fragments, media and symbols, as an EPUB write reads
 /// them.
 pub struct BookData {
-    /// All entities indexed by `(ftype_symbol_id, fid_string)`.
-    ///
-    /// `ftype_symbol_id` is the KFX type id (e.g. 164 for `external_resource`).
-    /// `fid_string` is the resolved name from the symbol table (e.g.
-    /// `"content_30"` for an external_resource named `content_30`).
-    ///
-    /// `bcRawMedia` ($417) lives in `raw_media`, not here.
+    /// All entities indexed by `(ftype_symbol_id, fid_string)`: the KFX type
+    /// id (164 = `external_resource`) and the symbol table's resolved name
+    /// (`"content_30"`). `bcRawMedia` ($417) lives in `raw_media`.
     pub by_type: HashMap<u64, HashMap<String, IonValue>>,
 
     /// `bcRawMedia` payloads, keyed by entity name (e.g. `"resource/rsrc562"`).
@@ -60,10 +56,9 @@ pub struct BookData {
     /// Raw bytes, often large, held apart from `by_type`'s parsed Ion.
     pub raw_media: HashMap<String, Vec<u8>>,
 
-    /// Resolved extended symbol table (KFX base + container doc_symbols).
-    ///
-    /// Indexed by full symbol id: a base symbol below the container's declared
-    /// import size, a doc_symbol at or above it.
+    /// Resolved symbol table (KFX base + container doc_symbols), indexed by
+    /// full symbol id: a base symbol below the container's declared import
+    /// size, a doc_symbol at or above it.
     pub symbols: SymbolTable,
 
     /// Book metadata derived from `book_metadata` ($490).
@@ -85,10 +80,11 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
         [header.container_info_offset..header.container_info_offset + header.container_info_length];
     let info = parse_container_info(info_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
 
-    // An encrypted payload holds no readable Ion, and every entity parse
-    // below drops it.
     if info.drm_scheme != 0 {
         return Err(KfxError::Encrypted(info.drm_scheme));
+    }
+    if info.compr_type != 0 {
+        return Err(KfxError::Compressed(info.compr_type));
     }
 
     let symbols = match info.doc_symbols {
@@ -175,15 +171,9 @@ fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> Str
     crate::formats::kfx::resource_index::entity_fid(ent.id as u64, symbols)
 }
 
-/// Walk `book_metadata` ($490) to fill the `BookMetadata` struct.
-///
-/// KFX has at least two metadata shapes:
-/// - Amazon's own KFX wraps as `book_metadata::{ categorised_metadata: [{
-///   category: kindle_title_metadata, metadata: [{key, value}, ...] }] }`.
-/// - bokai's own KFX exporter emits a plain struct (no annotation).
-///
-/// Both shapes are read. The cover image is `cover_image`, or the first
-/// `Value` naming an external_resource.
+/// Walk `book_metadata` ($490) to fill the `BookMetadata` struct. Both the
+/// `book_metadata::{ categorised_metadata: [...] }` wrapper and a plain
+/// unannotated struct are read.
 fn extract_book_metadata(
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
     symbols: &SymbolTable,
@@ -202,12 +192,9 @@ fn extract_book_metadata(
     meta
 }
 
-/// Resolve the cover image from the first reading-order section when no
-/// `cover_image` metadata exists.
-///
-/// The walk is `reading_orders[0].sections[0]` → `section.$141[0].$176`
-/// (story) → `storyline.$146` → the first `resource_name` ($175) in that
-/// content tree, confirmed against a real `external_resource`.
+/// The cover image of a book with no `cover_image` metadata, walking
+/// `reading_orders[0].sections[0]` → `section.$141[0].$176` → `storyline.$146`
+/// → the first `resource_name` ($175), confirmed as an `external_resource`.
 fn resolve_cover_from_first_section(
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
     symbols: &SymbolTable,
@@ -369,12 +356,9 @@ fn extract_categorised_metadata(
     }
 }
 
-/// Fall back to the flat `metadata` ($258) fragment for any field the
-/// categorised `book_metadata` ($490) wrapper leaves unset. Older Amazon KFX
-/// carry their metadata only here, keyed by symbol id — `cover_image` ($424)
-/// among them.
-///
-/// `$490` wins every key it holds; this fills the gaps.
+/// Fall back to the flat `metadata` ($258) fragment for any field `$490`
+/// leaves unset. Older Amazon KFX carry their metadata only here, keyed by
+/// symbol id — `cover_image` ($424) among them.
 fn fill_missing_from_flat_metadata(
     meta: &mut BookMetadata,
     by_type: &HashMap<u64, HashMap<String, IonValue>>,
