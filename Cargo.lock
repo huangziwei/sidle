@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "bokai"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "bstr",
