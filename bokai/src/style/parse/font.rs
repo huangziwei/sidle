@@ -199,14 +199,8 @@ pub(crate) fn parse_font_shorthand(input: &mut Parser<'_, '_>) -> Vec<Declaratio
 pub(crate) fn parse_font_family(input: &mut Parser<'_, '_>) -> Option<String> {
     let mut families = Vec::new();
 
-    loop {
-        if let Ok(token) = input.try_parse(|i| i.expect_string_cloned()) {
-            families.push(token.to_string());
-        } else if let Ok(token) = input.try_parse(|i| i.expect_ident_cloned()) {
-            families.push(token.to_string());
-        } else {
-            break;
-        }
+    while let Some(name) = parse_one_family_name(input) {
+        families.push(name);
 
         if input.try_parse(|i| i.expect_comma()).is_err() {
             break;
@@ -217,6 +211,24 @@ pub(crate) fn parse_font_family(input: &mut Parser<'_, '_>) -> Option<String> {
         None
     } else {
         Some(families.join(", "))
+    }
+}
+
+/// One `<family-name>`: a quoted string verbatim, or the run of identifiers an
+/// unquoted name is written as (`Garamond Premier Pro Caption`), joined on
+/// single spaces so both sides of a `@font-face` match spell it the same way.
+fn parse_one_family_name(input: &mut Parser<'_, '_>) -> Option<String> {
+    if let Ok(s) = input.try_parse(|i| i.expect_string_cloned()) {
+        return Some(s.to_string());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    while let Ok(s) = input.try_parse(|i| i.expect_ident_cloned()) {
+        parts.push(s.to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
     }
 }
 
@@ -247,7 +259,7 @@ pub(crate) fn parse_font_face_block(input: &mut Parser<'_, '_>) -> Option<FontFa
         if input.expect_colon().is_ok() {
             match name_str {
                 "font-family" => {
-                    font_family = parse_font_face_family(input);
+                    font_family = parse_one_family_name(input);
                 }
                 "font-weight" => {
                     if let Some(w) = parse_font_weight(input) {
@@ -265,7 +277,7 @@ pub(crate) fn parse_font_face_block(input: &mut Parser<'_, '_>) -> Option<FontFa
                 _ => {
                     // Skip unknown properties
                     while input.next().is_ok() {
-                        // Consume until we hit a semicolon or end of block
+                        // Consume through the semicolon or the end of the block.
                         if matches!(input.current_source_location().line, _) {
                             break;
                         }
@@ -286,22 +298,9 @@ pub(crate) fn parse_font_face_block(input: &mut Parser<'_, '_>) -> Option<FontFa
     }
 }
 
-/// Parse font-family value in @font-face (quoted or unquoted name).
-fn parse_font_face_family(input: &mut Parser<'_, '_>) -> Option<String> {
-    // Try quoted string first
-    if let Ok(s) = input.try_parse(|i| i.expect_string_cloned()) {
-        return Some(s.to_string());
-    }
-    // Try unquoted identifier
-    if let Ok(s) = input.try_parse(|i| i.expect_ident_cloned()) {
-        return Some(s.to_string());
-    }
-    None
-}
-
 /// Parse src value in @font-face: url(...) or local(...).
 fn parse_font_face_src(input: &mut Parser<'_, '_>) -> Option<String> {
-    // We support url() format only
+    // url() is the one supported form.
     if let Ok(url) = input.try_parse(|i| i.expect_url_or_string()) {
         return Some(url.as_ref().to_string());
     }

@@ -2472,7 +2472,8 @@ fn convert_pdf_to_kfx(
         }
     };
 
-    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg, text_pages);
+    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg, text_pages)
+        .map_err(|e| format!("write KFX: {e}"))?;
 
     if to_stdout {
         use std::io::Write;

@@ -564,7 +564,7 @@ fn build_kfx_container(
     let format_caps_ion = build_format_capabilities_ion();
 
     // Serialize fragments to entities
-    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols());
+    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols())?;
 
     // PASS 3: SERIALIZATION
 
@@ -766,7 +766,7 @@ fn build_metadata_fragment(meta: &crate::model::Metadata, ctx: &ExportContext) -
     // $258 (metadata) contains reading_orders directly
     let metadata = IonValue::Struct(vec![(KfxSymbol::ReadingOrders as u64, reading_orders)]);
 
-    KfxFragment::singleton(KfxSymbol::Metadata, metadata)
+    KfxFragment::nameless(KfxSymbol::Metadata, metadata)
 }
 
 /// Build the book metadata fragment ($490) — categorised_metadata, mapped from
@@ -905,7 +905,7 @@ fn build_book_metadata_fragment(
         IonValue::List(categorised),
     )]);
 
-    KfxFragment::singleton(KfxSymbol::BookMetadata, book_metadata)
+    KfxFragment::nameless(KfxSymbol::BookMetadata, book_metadata)
 }
 
 /// `kindle_capability_metadata` entries for a fixed-layout image book, in the
@@ -967,6 +967,23 @@ fn content_feature(namespace: &str, key: &str, major: i64) -> IonValue {
             )]),
         ),
     ])
+}
+
+/// The `content_features` entries every route owes for the media it actually
+/// ships. A book whose plates a reader cannot decode without the declaration
+/// is the defect these close, so each route appends them to its own list.
+fn media_feature_entries(facts: ContentFacts) -> Vec<IonValue> {
+    const YJ: &str = "com.amazon.yjconversion";
+    let mut entries = Vec::new();
+    // JPEG-XR plates, which the image path encodes by default.
+    if facts.jxr_image {
+        entries.push(content_feature(YJ, "yj_jpegxr_sd", 1));
+    }
+    // Restart markers let a renderer decode a JPEG in segments.
+    if facts.jpeg_restart_markers {
+        entries.push(content_feature(YJ, "yj_jpg_rst_marker_present", 1));
+    }
+    entries
 }
 
 /// The content facts a `content_features` declaration has to agree with. Each
@@ -1081,24 +1098,7 @@ fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> 
     let mut features = vec![reflow_style, canonical_format];
 
     // `yj_hdv` is never declared: it covers tiled high-definition imagery.
-
-    // JPEG-XR plates, which the interior-image path encodes by default.
-    if facts.jxr_image {
-        features.push(content_feature(
-            "com.amazon.yjconversion",
-            "yj_jpegxr_sd",
-            1,
-        ));
-    }
-
-    // Restart markers let a renderer decode a JPEG in segments.
-    if facts.jpeg_restart_markers {
-        features.push(content_feature(
-            "com.amazon.yjconversion",
-            "yj_jpg_rst_marker_present",
-            1,
-        ));
-    }
+    features.extend(media_feature_entries(facts));
 
     // Sections past 65536 positions declare the renderer's large-section
     // support, scaled to the overflow; deep paging reads the declaration.
@@ -1144,7 +1144,7 @@ fn build_content_features_fragment(ctx: &ExportContext, facts: ContentFacts) -> 
     let content_features =
         IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(features))]);
 
-    KfxFragment::singleton(KfxSymbol::ContentFeatures, content_features)
+    KfxFragment::nameless(KfxSymbol::ContentFeatures, content_features)
 }
 
 /// Build the document data fragment ($538).
@@ -1224,7 +1224,7 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
         ),
     ]);
 
-    KfxFragment::singleton(KfxSymbol::DocumentData, document_data)
+    KfxFragment::nameless(KfxSymbol::DocumentData, document_data)
 }
 
 /// Resolve `document_data.direction` from the book's page-progression. A
@@ -1471,7 +1471,7 @@ fn build_book_navigation_fragment_with_positions(book: &Book, ctx: &ExportContex
 
     let book_nav = IonValue::List(vec![reading_order]);
 
-    KfxFragment::singleton(KfxSymbol::BookNavigation, book_nav)
+    KfxFragment::nameless(KfxSymbol::BookNavigation, book_nav)
 }
 
 /// Build headings navigation entries grouped by heading level: one nav_unit per
@@ -1599,7 +1599,7 @@ fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
         };
 
         // The cover TOC entry and the `cover_page` landmark share one section
-        // id; the device merges them and shows the LANDMARK's label. The
+        // id, merged on the device under the LANDMARK's label. The
         // localized cover word (表紙) matches the TOC entry.
         let label = if *landmark_type == LandmarkType::Cover {
             cover_label(book).to_string()
@@ -2646,22 +2646,9 @@ fn build_font_fragments(book: &mut Book, ctx: &mut ExportContext) -> Vec<KfxFrag
             ),
         ]);
 
-        // Generate unique fragment name for this font face
-        let frag_name = format!(
-            "font-{}-{}-{}",
-            font_face.font_family,
-            if font_face.font_weight.0 >= 700 {
-                "bold"
-            } else {
-                "normal"
-            },
-            match font_face.font_style {
-                FontStyle::Italic | FontStyle::Oblique => "italic",
-                FontStyle::Normal => "normal",
-            }
-        );
-
-        fragments.push(KfxFragment::new(KfxSymbol::Font, &frag_name, ion));
+        // A `font` fragment carries no name of its own: a book holds one per
+        // embedded face, each reached through its `location`.
+        fragments.push(KfxFragment::nameless(KfxSymbol::Font, ion));
     }
 
     fragments
@@ -2799,7 +2786,7 @@ fn build_position_map_fragment(
     }
 
     let ion = IonValue::List(entries);
-    KfxFragment::singleton(KfxSymbol::PositionMap, ion)
+    KfxFragment::nameless(KfxSymbol::PositionMap, ion)
 }
 
 /// One section's reading-position layout: name (keys `section_position_id_map`),
@@ -2881,7 +2868,7 @@ fn build_position_id_map_fragment(secs: &[SectionPos]) -> KfxFragment {
         pid += length;
     }
     let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
-    KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
+    KfxFragment::nameless(KfxSymbol::PositionIdMap, ion)
 }
 
 /// section_position_id_map ($609): one entity per section, the compact
@@ -2957,14 +2944,14 @@ fn build_location_map_fragment(ctx: &ExportContext) -> KfxFragment {
         IonValue::List(location_entries),
     )])]);
 
-    KfxFragment::singleton(KfxSymbol::LocationMap, ion)
+    KfxFragment::nameless(KfxSymbol::LocationMap, ion)
 }
 
 /// Build resource_path fragment ($395), listing additional resource paths. A
 /// simple conversion leaves the entries array empty.
 fn build_resource_path_fragment() -> KfxFragment {
     let ion = IonValue::Struct(vec![(KfxSymbol::Entries as u64, IonValue::List(vec![]))]);
-    KfxFragment::singleton(KfxSymbol::ResourcePath, ion)
+    KfxFragment::nameless(KfxSymbol::ResourcePath, ion)
 }
 
 /// Build container_entity_map fragment ($419): the container's entities plus an
@@ -2975,7 +2962,7 @@ fn build_container_entity_map_fragment(
     fragments: &[KfxFragment],
     ctx: &ExportContext,
 ) -> KfxFragment {
-    // Every non-singleton entity name symbol, bcRawMedia locations included
+    // Every named entity's name symbol, bcRawMedia locations included
     let mut entity_names: Vec<IonValue> = Vec::new();
 
     for frag in fragments {
@@ -3166,23 +3153,26 @@ fn resolve_landmarks_from_ir(
     let _ = resolved;
 }
 
-/// Serialize fragments to entities.
+/// Serialize fragments to entities. A named fragment's `fid` must be in
+/// `local_symbols`; a `fid` absent from that table is an error, not entity id `$0`.
 fn serialize_fragments(
     fragments: &[KfxFragment],
     local_symbols: &[String],
-) -> Vec<SerializedEntity> {
+) -> io::Result<Vec<SerializedEntity>> {
     fragments
         .iter()
         .map(|frag| {
-            let id = if frag.is_singleton() {
-                KfxSymbol::Null as u32 // Singleton marker ($348 = null)
+            let id = if frag.is_nameless() {
+                KfxSymbol::Null as u32
             } else {
-                // Look up local symbol ID
-                local_symbols
-                    .iter()
-                    .position(|s| s == &frag.fid)
-                    .map(|i| (crate::formats::kfx::symbols::KFX_SYMBOL_TABLE_SIZE + i) as u32)
-                    .unwrap_or(0)
+                let position = local_symbols.iter().position(|s| s == &frag.fid);
+                let Some(i) = position else {
+                    return Err(io::Error::other(format!(
+                        "fragment \"{}\" (${}) was never interned in the local symbol table",
+                        frag.fid, frag.ftype
+                    )));
+                };
+                (crate::formats::kfx::symbols::KFX_SYMBOL_TABLE_SIZE + i) as u32
             };
 
             let data = match &frag.data {
@@ -3194,11 +3184,11 @@ fn serialize_fragments(
                 }
             };
 
-            SerializedEntity {
+            Ok(SerializedEntity {
                 id,
                 entity_type: frag.ftype as u32,
                 data,
-            }
+            })
         })
         .collect()
 }
@@ -3582,9 +3572,15 @@ fn image_fxl_to_kfx(
 
     // ---- Synthesis (reference entity order) ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
-
-    // 1. content_features ($585)
-    fragments.push(build_manga_content_features_fragment(any_spread, any_thumb));
+    // 1. content_features ($585). Its media entries describe plates encoded
+    //    further down, so this holds the slot and is rebuilt from the finished
+    //    fragments; the entity order is part of the format.
+    let content_features_index = fragments.len();
+    fragments.push(build_manga_content_features_fragment(
+        any_spread,
+        any_thumb,
+        ContentFacts::default(),
+    ));
     // 2. book_metadata ($490) — reuse the reflowable builder (reads Book metadata)
     ctx.has_publisher_fonts = has_publisher_fonts(book);
     ctx.fixed_layout_book = true;
@@ -3752,6 +3748,14 @@ fn image_fxl_to_kfx(
     fragments.extend(build_manga_section_position_id_map_fragments(&units));
     fragments.push(build_manga_location_map_fragment(&units));
 
+    // With every plate encoded, the real content_features replaces the
+    // placeholder pushed at 1, in place.
+    fragments[content_features_index] = build_manga_content_features_fragment(
+        any_spread,
+        any_thumb,
+        ContentFacts::from_fragments(&fragments),
+    );
+
     // 12. container metadata
     fragments.push(build_resource_path_fragment());
     fragments.push(build_manga_container_entity_map_fragment(
@@ -3770,7 +3774,7 @@ fn image_fxl_to_kfx(
     // ---- Serialize ----
     let symtab_ion = build_symbol_table_ion(ctx.symbols.local_symbols());
     let format_caps_ion = build_format_capabilities_ion();
-    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols());
+    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols())?;
     on_progress("finalize", 1, 1, "Finalizing");
     Ok(serialize_container(
         &container_id,
@@ -3906,42 +3910,27 @@ fn manga_thumbnail_of(
     Some((bytes, tw, th))
 }
 
-/// A KFX `content_features` feature struct `{namespace, key, version_info}`.
-fn manga_feature(namespace: &str, key: &str, major: i64) -> IonValue {
-    IonValue::Struct(vec![
-        (
-            KfxSymbol::Namespace as u64,
-            IonValue::String(namespace.to_string()),
-        ),
-        (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
-        (
-            KfxSymbol::VersionInfo as u64,
-            IonValue::Struct(vec![(
-                KfxSymbol::Version as u64,
-                IonValue::Struct(vec![
-                    (KfxSymbol::MajorVersion as u64, IonValue::Int(major)),
-                    (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
-                ]),
-            )]),
-        ),
-    ])
-}
-
 /// content_features ($585) for a fixed-layout image manga: `CanonicalFormat` +
 /// `yj_non_pdf_fixed_layout` (v2), plus `yj_double_page_spread` for a real 2-page
-/// spread and `yj_thumbnails_present` for a page thumbnail.
-fn build_manga_content_features_fragment(any_spread: bool, any_thumb: bool) -> KfxFragment {
+/// spread, `yj_thumbnails_present` for a page thumbnail, and the media
+/// declarations the plates require.
+fn build_manga_content_features_fragment(
+    any_spread: bool,
+    any_thumb: bool,
+    facts: ContentFacts,
+) -> KfxFragment {
     const YJ: &str = "com.amazon.yjconversion";
-    let mut feats = vec![manga_feature("SDK.Marker", "CanonicalFormat", 2)];
+    let mut feats = vec![content_feature("SDK.Marker", "CanonicalFormat", 2)];
     if any_spread {
-        feats.push(manga_feature(YJ, "yj_double_page_spread", 1));
+        feats.push(content_feature(YJ, "yj_double_page_spread", 1));
     }
-    feats.push(manga_feature(YJ, "yj_non_pdf_fixed_layout", 2));
+    feats.push(content_feature(YJ, "yj_non_pdf_fixed_layout", 2));
     if any_thumb {
-        feats.push(manga_feature(YJ, "yj_thumbnails_present", 1));
+        feats.push(content_feature(YJ, "yj_thumbnails_present", 1));
     }
+    feats.extend(media_feature_entries(facts));
     let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(feats))]);
-    KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)
+    KfxFragment::nameless(KfxSymbol::ContentFeatures, ion)
 }
 
 /// document_data ($538) for a fixed-layout image manga: the book-level
@@ -3971,7 +3960,7 @@ fn build_manga_document_data_fragment(
             IonValue::List(vec![reading_order]),
         ),
     ];
-    KfxFragment::singleton(KfxSymbol::DocumentData, IonValue::Struct(fields))
+    KfxFragment::nameless(KfxSymbol::DocumentData, IonValue::Struct(fields))
 }
 
 /// section ($260) for a manga unit. A solo page_template carries the page box +
@@ -4443,7 +4432,7 @@ fn build_manga_nav_fragments(
         container_syms.push(toc_sym);
     }
 
-    fragments.push(KfxFragment::singleton(
+    fragments.push(KfxFragment::nameless(
         KfxSymbol::BookNavigation,
         IonValue::List(vec![IonValue::Struct(vec![
             (
@@ -4555,7 +4544,7 @@ fn build_manga_position_map_fragment(units: &[MangaUnit]) -> KfxFragment {
             ])
         })
         .collect();
-    KfxFragment::singleton(KfxSymbol::PositionMap, IonValue::List(entries))
+    KfxFragment::nameless(KfxSymbol::PositionMap, IonValue::List(entries))
 }
 
 /// position_id_map ($265): section-keyed `{section_name, pid, length}` — the
@@ -4577,7 +4566,7 @@ fn build_manga_position_id_map_fragment(units: &[MangaUnit]) -> KfxFragment {
         pid += length;
     }
     let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
-    KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
+    KfxFragment::nameless(KfxSymbol::PositionIdMap, ion)
 }
 
 /// section_position_id_map ($609): one entity per section walking its EIDs (span
@@ -4648,7 +4637,7 @@ fn build_manga_location_map_fragment(units: &[MangaUnit]) -> KfxFragment {
         KfxSymbol::Locations as u64,
         IonValue::List(entries),
     )])]);
-    KfxFragment::singleton(KfxSymbol::LocationMap, ion)
+    KfxFragment::nameless(KfxSymbol::LocationMap, ion)
 }
 
 /// container_entity_map ($419): the container's entity list + per-section
@@ -4713,7 +4702,7 @@ fn build_manga_container_entity_map_fragment(
 }
 
 // PDF → KFX (fixed-layout, PDF-backed PDOC). The PDF is embedded verbatim as one
-// `bcRawMedia` and the device renders each page; only the skeleton is authored —
+// `bcRawMedia`, one rendered page per PDF page; only the skeleton is authored —
 // section/storyline/external_resource per page, PDOC metadata, feature flags.
 
 /// Metadata stamped into a PDF→KFX (PDOC) conversion.
@@ -4790,7 +4779,7 @@ pub fn pdf_to_kfx(
     meta: &PdfKfxMeta,
     cover_jpeg: Option<&[u8]>,
     text: Option<&[crate::formats::pdf::render::PageText]>,
-) -> Vec<u8> {
+) -> io::Result<Vec<u8>> {
     let container_id = generate_container_id(&meta.title);
     let mut ctx = ExportContext::new();
     let n = pdf.pages.len();
@@ -4882,11 +4871,14 @@ pub fn pdf_to_kfx(
 
     // ---- Synthesis: build fragments in reference entity order ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
-
-    // 1. content_features ($585)
+    // 1. content_features ($585). Its media entries describe resources built
+    //    further down, so this holds the slot and is rebuilt from the finished
+    //    fragments; the entity order is part of the format.
+    let content_features_index = fragments.len();
     fragments.push(build_pdf_content_features_fragment(
         has_text,
         pdf.pages.iter().any(|p| p.rotation != 0),
+        ContentFacts::default(),
     ));
     // 2. book_metadata ($490) — PDOC (with cover_image when a cover is present)
     fragments.push(build_pdf_book_metadata_fragment(
@@ -4991,6 +4983,14 @@ pub fn pdf_to_kfx(
         &ctx,
     ));
 
+    // With every resource built, the real content_features replaces the
+    // placeholder pushed at 1, in place.
+    fragments[content_features_index] = build_pdf_content_features_fragment(
+        has_text,
+        pdf.pages.iter().any(|p| p.rotation != 0),
+        ContentFacts::from_fragments(&fragments),
+    );
+
     // document_data, with every fragment ID allocated (max_id correct).
     fragments.insert(
         document_data_index,
@@ -5000,8 +5000,13 @@ pub fn pdf_to_kfx(
     // ---- Serialize ----
     let symtab_ion = build_symbol_table_ion(ctx.symbols.local_symbols());
     let format_caps_ion = build_format_capabilities_ion();
-    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols());
-    serialize_container(&container_id, &entities, &symtab_ion, &format_caps_ion)
+    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols())?;
+    Ok(serialize_container(
+        &container_id,
+        &entities,
+        &symtab_ion,
+        &format_caps_ion,
+    ))
 }
 
 /// A percent dimension struct: `{ value: 100, unit: percent }`.
@@ -5437,44 +5442,30 @@ fn build_pdf_cover_external_resource(
 /// content_features ($585) for a PDF-backed fixed-layout book. `yj_pdf_links`
 /// stays off until link-annotation extraction exists.
 #[cfg(feature = "pdf")]
-fn build_pdf_content_features_fragment(has_text: bool, has_rotated_pages: bool) -> KfxFragment {
-    fn feature(namespace: &str, key: &str, major: i64) -> IonValue {
-        IonValue::Struct(vec![
-            (
-                KfxSymbol::Namespace as u64,
-                IonValue::String(namespace.to_string()),
-            ),
-            (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
-            (
-                KfxSymbol::VersionInfo as u64,
-                IonValue::Struct(vec![(
-                    KfxSymbol::Version as u64,
-                    IonValue::Struct(vec![
-                        (KfxSymbol::MajorVersion as u64, IonValue::Int(major)),
-                        (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
-                    ]),
-                )]),
-            ),
-        ])
-    }
+fn build_pdf_content_features_fragment(
+    has_text: bool,
+    has_rotated_pages: bool,
+    facts: ContentFacts,
+) -> KfxFragment {
     const YJ: &str = "com.amazon.yjconversion";
     let mut feats = vec![
-        feature("SDK.Marker", "CanonicalFormat", 2),
-        feature(YJ, "yj_fixed_layout", 1),
-        feature(YJ, "yj_graphical_highlights", 1),
-        feature(YJ, "yj_textbook", 1),
-        feature(YJ, "yj_pdf_support", 1),
+        content_feature("SDK.Marker", "CanonicalFormat", 2),
+        content_feature(YJ, "yj_fixed_layout", 1),
+        content_feature(YJ, "yj_graphical_highlights", 1),
+        content_feature(YJ, "yj_textbook", 1),
+        content_feature(YJ, "yj_pdf_support", 1),
     ];
     // The custom word iterator backs the selectable text layer's word model;
     // only advertise it when there actually is a text layer.
     if has_text {
-        feats.push(feature(YJ, "yj_custom_word_iterator", 1));
+        feats.push(content_feature(YJ, "yj_custom_word_iterator", 1));
     }
     if has_rotated_pages {
-        feats.push(feature(YJ, "yj_rotated_pages", 1));
+        feats.push(content_feature(YJ, "yj_rotated_pages", 1));
     }
+    feats.extend(media_feature_entries(facts));
     let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(feats))]);
-    KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)
+    KfxFragment::nameless(KfxSymbol::ContentFeatures, ion)
 }
 
 /// book_metadata ($490) for a PDOC, mirroring "Send to Kindle" categories.
@@ -5588,7 +5579,7 @@ fn build_pdf_book_metadata_fragment(
     ]);
 
     let ion = IonValue::Struct(vec![(KfxSymbol::CategorisedMetadata as u64, categorised)]);
-    KfxFragment::singleton(KfxSymbol::BookMetadata, ion)
+    KfxFragment::nameless(KfxSymbol::BookMetadata, ion)
 }
 
 /// Deterministic content_id/ASIN for a PDOC via
@@ -5608,7 +5599,7 @@ fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) ->
 
 /// Resolve a page-progression-direction string to its KFX symbol: `"rtl"` →
 /// `$rtl` (375), `"ltr"` → `$ltr` (376); anything else (incl. `None`) → `None`,
-/// meaning "omit the field" — the device then defaults to ltr.
+/// meaning "omit the field", for a device default of ltr.
 #[cfg(feature = "pdf")]
 fn ppd_symbol(ppd: Option<&str>) -> Option<KfxSymbol> {
     match ppd {
@@ -5658,7 +5649,7 @@ fn build_fxl_metadata_fragment(
         KfxSymbol::ReadingOrders as u64,
         IonValue::List(vec![default_reading_order(ctx, ppd_sym)]),
     ));
-    KfxFragment::singleton(KfxSymbol::Metadata, IonValue::Struct(fields))
+    KfxFragment::nameless(KfxSymbol::Metadata, IonValue::Struct(fields))
 }
 
 /// document_data ($538): minimal fixed-layout document — max_id, pan_zoom and
@@ -5687,7 +5678,7 @@ fn build_pdf_document_data_fragment(
     if let Some(sym) = ppd_sym {
         fields.push((KfxSymbol::Direction as u64, IonValue::Symbol(sym as u64)));
     }
-    KfxFragment::singleton(KfxSymbol::DocumentData, IonValue::Struct(fields))
+    KfxFragment::nameless(KfxSymbol::DocumentData, IonValue::Struct(fields))
 }
 
 /// position_map ($264): one entry per page enumerating the section's content
@@ -5733,7 +5724,7 @@ fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
             ])
         })
         .collect();
-    KfxFragment::singleton(KfxSymbol::PositionMap, IonValue::List(entries))
+    KfxFragment::nameless(KfxSymbol::PositionMap, IonValue::List(entries))
 }
 
 /// position_id_map ($265) for a fixed-layout (PDF) book: `{contains:
@@ -5756,7 +5747,7 @@ fn build_pdf_position_id_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
         pid += length;
     }
     let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
-    KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
+    KfxFragment::nameless(KfxSymbol::PositionIdMap, ion)
 }
 
 /// section_position_id_map ($609): one entity per section mapping reading
@@ -5810,7 +5801,7 @@ fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFr
             ]);
             // Key the entity by the SECTION NAME symbol, as Amazon does: a
             // `section` and its `section_position_id_map` share it. An uninterned
-            // name serializes to id $0 and the device rejects the book.
+            // name serializes to id $0, which a device rejects.
             KfxFragment::new(
                 KfxSymbol::SectionPositionIdMap,
                 rec.section_name.clone(),
@@ -5868,7 +5859,7 @@ fn build_pdf_nav_fragments(
         return Vec::new();
     }
 
-    fragments.push(KfxFragment::singleton(
+    fragments.push(KfxFragment::nameless(
         KfxSymbol::BookNavigation,
         IonValue::List(vec![IonValue::Struct(vec![
             (
@@ -6069,7 +6060,7 @@ mod tests {
 
         // Should be $258 (metadata) type
         assert_eq!(frag.ftype, KfxSymbol::Metadata as u64);
-        assert!(frag.is_singleton());
+        assert!(frag.is_nameless());
 
         // Extract Ion and verify structure
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
@@ -6098,7 +6089,7 @@ mod tests {
 
         // Should be $490 (book_metadata) type
         assert_eq!(frag.ftype, KfxSymbol::BookMetadata as u64);
-        assert!(frag.is_singleton());
+        assert!(frag.is_nameless());
 
         // Extract Ion and verify structure
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
@@ -6303,7 +6294,7 @@ mod tests {
         let frag = build_content_features_fragment(&ctx, ContentFacts::default());
 
         assert_eq!(frag.ftype, KfxSymbol::ContentFeatures as u64);
-        assert!(frag.is_singleton());
+        assert!(frag.is_nameless());
         assert_eq!(feature_keys(&frag), ["reflow-style", "CanonicalFormat"]);
     }
 
@@ -6454,8 +6445,8 @@ mod tests {
     #[test]
     fn pick_document_writing_mode_any_vertical_beats_horizontal_majority() {
         // The LV999 case: 63 vertical-rl styles against 91 horizontal from
-        // fixed-layout image pages. Vertical wins and the device turns
-        // right-to-left.
+        // fixed-layout image pages. Vertical wins, for a right-to-left
+        // page turn.
         assert_eq!(
             pick_document_writing_mode(63, 0),
             KfxSymbol::VerticalRl,
@@ -6512,7 +6503,7 @@ mod tests {
 
         // Should be $538 (document_data) type
         assert_eq!(frag.ftype, KfxSymbol::DocumentData as u64);
-        assert!(frag.is_singleton());
+        assert!(frag.is_nameless());
 
         // Extract Ion and verify structure
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
@@ -6595,12 +6586,13 @@ mod tests {
     }
 
     #[test]
-    fn test_singleton_uses_null_symbol() {
-        // Build a singleton fragment and serialize it
+    fn test_nameless_uses_null_symbol() {
+        // Build a nameless fragment and serialize it
         let ctx = ExportContext::new();
         let frag = build_content_features_fragment(&ctx, ContentFacts::default());
         let local_symbols: Vec<String> = vec![];
-        let entities = serialize_fragments(&[frag], &local_symbols);
+        let entities =
+            serialize_fragments(&[frag], &local_symbols).expect("nameless fragment serializes");
 
         // Singleton should use $348 (null) as ID
         assert_eq!(entities[0].id, KfxSymbol::Null as u32);
@@ -7230,7 +7222,7 @@ mod resource_export_tests {
             "interior plate must be JXR"
         );
         // The plate's fixed-layout page is sized from these dims; if unreadable
-        // the device letterboxes it (margins). Must round-trip through the IFD.
+        // the plate letterboxes (margins). Must round-trip through the IFD.
         assert_eq!(
             crate::util::extract_image_dimensions(&jxr),
             Some((32, 32)),
@@ -7858,12 +7850,20 @@ mod manga_fxl_tests {
     /// thumbnail.
     #[test]
     fn content_features_gate_spread_and_thumbnails() {
-        let full = feature_keys(&build_manga_content_features_fragment(true, true));
+        let full = feature_keys(&build_manga_content_features_fragment(
+            true,
+            true,
+            ContentFacts::default(),
+        ));
         assert!(full.iter().any(|k| k == "yj_non_pdf_fixed_layout"));
         assert!(full.iter().any(|k| k == "yj_double_page_spread"));
         assert!(full.iter().any(|k| k == "yj_thumbnails_present"));
 
-        let minimal = feature_keys(&build_manga_content_features_fragment(false, false));
+        let minimal = feature_keys(&build_manga_content_features_fragment(
+            false,
+            false,
+            ContentFacts::default(),
+        ));
         assert!(minimal.iter().any(|k| k == "yj_non_pdf_fixed_layout"));
         assert!(!minimal.iter().any(|k| k == "yj_double_page_spread"));
         assert!(!minimal.iter().any(|k| k == "yj_thumbnails_present"));

@@ -219,7 +219,7 @@ mod tests {
         // A stand-in JPEG cover (magic + EOI). `pdf_to_kfx` declares it
         // `format: jpg`, so the extractor passes it through without transcoding.
         let cover = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 0xFF, 0xD9];
-        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None);
+        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None).expect("pdf_to_kfx");
         assert!(
             crate::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx),
             "fixture must be PDF-backed"
@@ -263,7 +263,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         assert_eq!(kfx_extract_cover(&kfx).expect("valid KFX"), None);
     }
 

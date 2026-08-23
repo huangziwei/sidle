@@ -66,7 +66,7 @@ pub struct AssetInfo {
     /// Path as [`Importer::load_asset`] takes it.
     pub path: PathBuf,
     /// *Predicted* media type. The loaded bytes are the authority — a
-    /// transcode that fails passes the source type through instead.
+    /// transcode that fails passes the source type through.
     pub media_type: String,
     /// Declared pixel size, when the source states one. `None` means unknown,
     /// not absent: the bytes may decode to an image.
@@ -78,7 +78,7 @@ pub struct AssetInfo {
 /// style converted to CSS declarations (unpruned — the export pass prunes its
 /// own working copies), plus the doc-level layout facts the stylesheet
 /// header needs. Produced by [`Importer::stylesheet_program`]; `None` from
-/// an importer means the format ships its own CSS assets instead.
+/// an importer means the format ships its own CSS assets.
 #[derive(Debug, Default)]
 pub struct CssProgram {
     /// Raw source style name → converted declarations. A node whose
@@ -166,7 +166,7 @@ pub trait Importer: Send + Sync {
             }
         }
 
-        // Parse inline styles. Theirs are relative to the document instead.
+        // Inline styles resolve relative to the document.
         let inline_base = self.source_id(id).map(|p| p.to_string());
         for css in inline {
             let mut sheet = Stylesheet::parse(&css);
@@ -399,10 +399,9 @@ pub trait Importer: Send + Sync {
     /// Resolve a navigation href (TOC / page-list / landmarks) to its target.
     ///
     /// Same as [`Self::resolve_href`] but, for a `path#fragment` whose file is a
-    /// real chapter yet whose fragment is dead, falls back to the chapter start
-    /// instead of returning `None`. Navigation entries should survive a dangling
-    /// anchor (a common calibre NCX defect) by landing at the top of the target
-    /// file; in-text links must not, so they keep using [`Self::resolve_href`].
+    /// real chapter yet whose fragment is dead, lands on the chapter start. An
+    /// in-text link keeps [`Self::resolve_href`]'s strict resolution.
+    ///
     /// The default delegates to the strict resolver (importers with path-based
     /// resolution override it).
     fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
@@ -431,7 +430,7 @@ pub trait Importer: Send + Sync {
     /// When this returns `Some`, normalized export synthesizes `style.css`
     /// from it and class attributes come from each node's `semantics.class`
     /// (names sanitized to CSS-safe class names, gated on the named
-    /// declaration being non-empty) instead of the interned computed-style
+    /// declaration being non-empty), not the interned computed-style
     /// pool. Default `None`: formats that ship their own CSS assets, or
     /// whose classes carry no stylesheet of their own.
     fn stylesheet_program(&mut self) -> Option<CssProgram> {
@@ -532,13 +531,8 @@ pub fn resolve_path_based_href(
         if let Some(target) = anchor(&key) {
             return Some(AnchorTarget::Internal(target));
         }
-        // Dead fragment, but the file itself is a real chapter. For navigation
-        // (TOC/page-list/landmarks) fall back to the chapter start rather than
-        // dropping the entry — calibre-built EPUBs routinely ship an NCX whose
-        // entries point at generated anchor ids it never wrote into the HTML,
-        // and a reader lands those at the top of the target file. Body links
-        // stay strict (`chapter_fallback = false`): a broken in-text link is
-        // reported as broken.
+        // A dead fragment in a real chapter: `chapter_fallback` lands navigation
+        // on the chapter start, and leaves an in-text link unresolved.
         if chapter_fallback {
             return Some(AnchorTarget::Chapter(target_chapter));
         }
@@ -696,14 +690,12 @@ mod tests {
     #[test]
     fn test_dead_fragment_chapter_fallback() {
         use crate::model::{AnchorTarget, GlobalNodeId, NodeId};
-        // The target file is a real chapter; its fragment id does not exist —
-        // the shape of a calibre NCX pointing at generated anchors it never
-        // wrote into the HTML.
+        // `chapter_for` names the file as a real chapter; `dead_anchor` gives
+        // its fragment no target.
         let chapter_for = |p: &str| (p == "text/part0001.html").then_some(ChapterId(3));
         let dead_anchor = |_k: &str| None;
 
-        // In-text link (strict): a dead fragment stays unresolved so the link
-        // is reported broken rather than silently redirected.
+        // In-text link (strict): a dead fragment stays unresolved.
         assert_eq!(
             resolve_path_based_href(
                 "text/x.html",
@@ -714,8 +706,7 @@ mod tests {
             ),
             None,
         );
-        // Navigation (fallback): a dead fragment lands at the chapter start so
-        // the TOC/landmark entry survives instead of being dropped.
+        // Navigation (fallback): a dead fragment lands at the chapter start.
         assert_eq!(
             resolve_path_based_href(
                 "text/x.html",

@@ -890,7 +890,7 @@ impl ExportContext {
     }
 
     /// Whether text renders along a vertical axis (縦書き), i.e. the document
-    /// writing mode is `vertical-rl`/`vertical-lr`. Used to gate vertical-only
+    /// writing mode is `vertical-rl`/`vertical-lr`. Gates vertical-only
     /// typography such as tate-chu-yoko.
     pub fn is_vertical_document(&self) -> bool {
         matches!(

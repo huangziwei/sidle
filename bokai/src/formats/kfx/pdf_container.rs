@@ -220,7 +220,7 @@ mod tests {
 
         // No cover/text here: neither affects embedded-PDF extraction
         // (both need the PDFKit engine, exercised by the gitignored harness).
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         assert!(
             kfx_is_pdf_backed(&kfx),
             "bokai PDF KFX must be detected as PDF-backed"
@@ -291,8 +291,8 @@ mod tests {
             }],
         }];
 
-        let with_text = pdf_to_kfx(&doc, &meta, None, Some(&text));
-        let without = pdf_to_kfx(&doc, &meta, None, None);
+        let with_text = pdf_to_kfx(&doc, &meta, None, Some(&text)).expect("pdf_to_kfx");
+        let without = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
 
         // The text layer must not disturb the embedded PDF (byte-identical out).
         assert!(kfx_is_pdf_backed(&with_text));
@@ -386,7 +386,7 @@ mod tests {
             },
             PageText { runs: vec![] },
         ];
-        let kfx = pdf_to_kfx(&doc, &meta, None, Some(&text));
+        let kfx = pdf_to_kfx(&doc, &meta, None, Some(&text)).expect("pdf_to_kfx");
         let ents = entities(&kfx).unwrap();
 
         let field = |s: &IonValue, k: KfxSymbol| -> Option<IonValue> {
@@ -425,7 +425,7 @@ mod tests {
             .map(|s| int(&field(s, KfxSymbol::Pid).expect("pid")))
             .collect();
         // Page 0 span = anchor+container+image+textref+anchor_end (5) + 5 + 7.
-        // Page 1 has no text and still spans 6: the same 5, plus the one empty
+        // Page 1 has no text and spans 6: the same 5, plus the one empty
         // page-sized container its text storyline holds. Every page carries the
         // overlay, so no page is the odd one out of the position axis.
         assert_eq!(lengths, vec![5 + 5 + 7, 5 + 1]);
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn cover_jpeg_does_not_break_pdf_extraction() {
         // With a cover, the KFX has *two* bcRawMedia blobs (the PDF and the
-        // cover JPEG). `kfx_extract_pdf` must still return the PDF, picking it by
+        // cover JPEG). `kfx_extract_pdf` returns the PDF, picking it by
         // the `%PDF-` magic and skipping the JPEG — not raise `MultipleSlices`.
         let bytes = fake_pdf();
         let doc = PdfDoc {
@@ -490,7 +490,7 @@ mod tests {
 
         // A stand-in cover blob with JPEG magic (real rendering needs PDFKit).
         let cover = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 0xFF, 0xD9];
-        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None);
+        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None).expect("pdf_to_kfx");
 
         assert!(kfx_is_pdf_backed(&kfx), "still PDF-backed with a cover");
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed past the cover");
@@ -546,7 +546,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
 
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"Chapter One"), "TOC parent label must be embedded");
@@ -587,7 +587,7 @@ mod tests {
             publisher: Some("Acme Press".to_string()),
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"issue_date"), "issue_date key must be emitted");
         assert!(
@@ -622,7 +622,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         assert!(
             !kfx.windows(b"issue_date".len()).any(|w| w == b"issue_date"),
             "no issue_date entry when the library has no date"
@@ -665,7 +665,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
         assert!(has(b"npag"), "page_list container must exist");
         assert!(has(b"ntoc"), "toc container must coexist");
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn page_list_emitted_without_an_outline() {
-        // No bookmarks ⇒ still a `page_list` (page-number nav is unconditional),
+        // No bookmarks ⇒ a `page_list` (page-number nav is unconditional),
         // and no `ntoc`.
         let bytes = fake_pdf();
         let doc = PdfDoc {
@@ -703,7 +703,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx");
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
         assert!(has(b"npag"), "page_list present without an outline");
         assert!(has(b"folio-7"), "page label embedded");

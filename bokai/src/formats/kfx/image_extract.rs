@@ -56,8 +56,7 @@ pub fn kfx_extract_images(kfx_bytes: &[u8]) -> Result<Vec<ExtractedImage>, KfxEr
         return Ok(Vec::new());
     };
 
-    // The declared cover's backing location (if any), so `is_cover` is matched
-    // by bytes rather than by name.
+    // The declared cover's backing location, matched by bytes.
     let cover_location = book
         .metadata
         .cover_resource_name
@@ -261,7 +260,7 @@ mod tests {
             page_progression_direction: None,
         };
         let cover = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 0xFF, 0xD9];
-        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None);
+        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None).expect("pdf_to_kfx");
 
         let images = kfx_extract_images(&kfx).expect("valid KFX");
         assert_eq!(

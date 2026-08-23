@@ -20,7 +20,8 @@ pub enum FragmentData {
 pub struct KfxFragment {
     /// Fragment type (symbol ID like $260, $145, etc.)
     pub ftype: u64,
-    /// Fragment ID (unique identifier, or same as ftype for singletons)
+    /// Fragment name, or `$<ftype>` when the fragment carries no name — see
+    /// [`Self::nameless`].
     pub fid: String,
     /// The payload (Ion or raw bytes)
     pub data: FragmentData,
@@ -64,9 +65,11 @@ impl KfxFragment {
         }
     }
 
-    /// Create a singleton fragment (fid equals ftype name).
-    /// Used for fragments where only one instance exists (e.g., metadata).
-    pub fn singleton(ftype: impl Into<u64>, value: IonValue) -> Self {
+    /// Create a nameless fragment: one whose entity id is the reserved `$348`,
+    /// which a KFX container gives a fragment carrying no name of its own. Book-
+    /// wide singletons (`metadata`, `document_data`, …) and every `font` ($262)
+    /// travel this way. The `$<ftype>` `fid` is the in-memory marker for it.
+    pub fn nameless(ftype: impl Into<u64>, value: IonValue) -> Self {
         let ftype_val = ftype.into();
         Self {
             ftype: ftype_val,
@@ -75,7 +78,7 @@ impl KfxFragment {
         }
     }
 
-    /// The `container_entity_map` singleton, carrying the Ion annotation Amazon
+    /// The `container_entity_map` fragment, carrying the Ion annotation Amazon
     /// puts on it.
     ///
     /// This is the one annotated fragment in a KFX container — verified across a
@@ -85,11 +88,11 @@ impl KfxFragment {
     /// container byte-comparable with Amazon's.
     pub fn container_entity_map(value: IonValue) -> Self {
         let ftype = KfxSymbol::ContainerEntityMap as u64;
-        Self::singleton(ftype, IonValue::Annotated(vec![ftype], Box::new(value)))
+        Self::nameless(ftype, IonValue::Annotated(vec![ftype], Box::new(value)))
     }
 
-    /// Check if this is a singleton fragment.
-    pub fn is_singleton(&self) -> bool {
+    /// Check if this fragment carries no name.
+    pub fn is_nameless(&self) -> bool {
         self.fid == format!("${}", self.ftype)
     }
 
@@ -131,14 +134,14 @@ mod tests {
         let frag = KfxFragment::new(260u64, "section-1", IonValue::Null);
         assert_eq!(frag.ftype, 260);
         assert_eq!(frag.fid, "section-1");
-        assert!(!frag.is_singleton());
+        assert!(!frag.is_nameless());
         assert!(!frag.is_raw());
     }
 
     #[test]
-    fn test_fragment_singleton() {
-        let frag = KfxFragment::singleton(KfxSymbol::Metadata, IonValue::Null);
-        assert!(frag.is_singleton());
+    fn test_fragment_nameless() {
+        let frag = KfxFragment::nameless(KfxSymbol::Metadata, IonValue::Null);
+        assert!(frag.is_nameless());
         assert_eq!(frag.fid, "$258");
     }
 

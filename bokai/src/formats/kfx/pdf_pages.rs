@@ -542,7 +542,7 @@ mod tests {
             publisher: None,
             page_progression_direction: None,
         };
-        pdf_to_kfx(doc, &meta, None, None)
+        pdf_to_kfx(doc, &meta, None, None).expect("pdf_to_kfx")
     }
 
     /// `read_pages` recovers the outline, page labels and page sizes that

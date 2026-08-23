@@ -99,7 +99,7 @@ pub fn serialize_container(
         IonValue::Int(symtab_ion.len() as i64),
     ));
 
-    // Only include format capabilities offset if we have them
+    // Format-capabilities offset, present when format_caps_ion is non-empty.
     if !format_caps_ion.is_empty() {
         container_info_fields.push((
             KfxSymbol::Bcfcapabilitiesoffset as u64,
@@ -247,7 +247,7 @@ pub fn serialize_fragment(fragment: &KfxFragment) -> Vec<u8> {
 /// (the book's title or another stable identity): with the epoch pinned,
 /// the same book converts to the same id — repeat conversions are
 /// byte-comparable, like every other timestamp this converter stamps.
-/// Unset, exports still vary per build second the way Amazon's own
+/// Unset, exports vary per build second the way Amazon's own
 /// generator varies per build; the salt keeps two different books built
 /// in the same second distinct.
 pub fn generate_container_id(salt: &str) -> String {

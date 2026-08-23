@@ -454,4 +454,45 @@ mod tests {
         );
         assert!(modes.iter().all(|m| *m == WritingMode::VerticalRl));
     }
+
+    /// An unquoted `<family-name>` is a run of identifiers, not just the first
+    /// one: a `@font-face` and the rule referencing it must spell the same name,
+    /// or the face is never matched and its bytes ship unused.
+    #[test]
+    fn unquoted_multi_word_family_names_survive() {
+        let sheet = Stylesheet::parse(
+            r#"@font-face { font-family: Garamond Premier Pro Caption; src: url(f.otf); }"#,
+        );
+        assert_eq!(sheet.font_faces.len(), 1);
+        assert_eq!(
+            sheet.font_faces[0].font_family,
+            "Garamond Premier Pro Caption"
+        );
+
+        let sheet = Stylesheet::parse(r#"p { font-family: Garamond Premier Pro Caption; }"#);
+        assert!(
+            sheet.rules[0].declarations.iter().any(
+                |d| matches!(d, Declaration::FontFamily(f) if f == "Garamond Premier Pro Caption")
+            ),
+            "property side keeps every identifier: {:?}",
+            sheet.rules[0].declarations
+        );
+    }
+
+    /// A quoted name stays verbatim; a comma separates alternatives.
+    #[test]
+    fn family_list_separates_on_commas_only() {
+        let sheet = Stylesheet::parse(
+            r#"p { font-family: "Toppan Bunkyu", Hiragino Mincho ProN, serif; }"#,
+        );
+        let family = sheet.rules[0]
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                Declaration::FontFamily(f) => Some(f.clone()),
+                _ => None,
+            })
+            .expect("font-family parses");
+        assert_eq!(family, "Toppan Bunkyu, Hiragino Mincho ProN, serif");
+    }
 }

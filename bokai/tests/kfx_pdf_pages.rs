@@ -1,16 +1,9 @@
-//! What `formats::kfx::pdf_pages` recovers from a PDF-backed KFX.
+//! What `formats::kfx::pdf_pages` recovers from a PDF-backed KFX: page boxes,
+//! the eid sets a bookmark resolves through, the outline, and the page labels.
 //!
-//! This feeds the fixed-layout reader's text overlay and the ink-anchor page
-//! geometry, so a page box or an eid set that drifts moves annotations on the
-//! page.
-//!
-//! What a generated fixture can cover is page boxes, the eid sets a bookmark
-//! resolves through, the outline, and the page labels: `pdf_to_kfx` embeds the
-//! PDF and renders each page as an image, so it writes no text overlay and the
-//! run comparison below is vacuous on this input (it stays because it is the
-//! property under test, and would bite if that ever changed). Run geometry is
-//! pinned instead by `pdf_pages`'s own unit tests, against a hand-built
-//! overlay.
+//! `pdf_to_kfx` embeds the PDF and renders each page as an image, writing no
+//! text overlay; the run comparison below is empty on this input. Run geometry
+//! is pinned by `pdf_pages`'s own unit tests against a hand-built overlay.
 
 use bokai::export::{PdfKfxMeta, pdf_to_kfx};
 use bokai::formats::kfx::pdf_pages;
@@ -87,12 +80,10 @@ fn pdf_backed_kfx() -> Vec<u8> {
         publisher: None,
         page_progression_direction: None,
     };
-    pdf_to_kfx(&doc, &meta, None, None)
+    pdf_to_kfx(&doc, &meta, None, None).expect("pdf_to_kfx")
 }
 
-/// The fixture declares its own page boxes, so they are asserted literally
-/// rather than against another reader: these are the numbers a viewer sizes
-/// each page to.
+/// The page boxes `pdf_backed_kfx` declares, asserted as literals.
 #[test]
 fn the_page_reader_recovers_what_the_fixture_declares() {
     let kfx = pdf_backed_kfx();
