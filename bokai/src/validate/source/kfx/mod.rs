@@ -8,8 +8,9 @@
 //!   A parse failure is one `container-unreadable` error; a non-zero
 //!   `bcDRMScheme` or `bcComprType` is one `container-encrypted` /
 //!   `container-compressed` error over unreadable payloads. The header
-//!   `version`, the index table's entry alignment and the `bcContId` shape are
-//!   warnings. An out-of-bounds entity reaches rules 2/7.
+//!   `version`, the index table's entry alignment, the `bcContId` shape and
+//!   the symbol table's declared `max_id` are warnings. An out-of-bounds
+//!   entity reaches rules 2/7.
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
 //!   `storyline` (errors); `book_navigation` (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
@@ -38,6 +39,15 @@
 //!   each claim is read against.
 //! - **Rule 12, metadata** — `title` and `language` are stated, and
 //!   `author_pronunciation` stays positional with `author`.
+//! - **Rule 13, element arithmetic** — an element id names one element
+//!   book-wide; `style_events` and `word_boundary_list` ranges stay inside the
+//!   base text they count characters of; a length states a CSS unit and a
+//!   numeric magnitude; an `important_cells` coordinate lands inside its
+//!   table's grid. Gathered by rule 3's walk and a sweep of the `style`
+//!   entities.
+//! - **Rule 14, position arithmetic** — the `position_id_map` span shape
+//!   partitions the pid axis from 0 with no gap or overlap, and
+//!   `yj.location_pid_map` boundaries never go backwards.
 //!
 //! Rule 10 (TOC deficiency) comes from the cross-format `source::toc` check
 //! via [`crate::validate::source::validate`]. A `.kfx-zip` bundle sniffs as
@@ -98,6 +108,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_nav_reachability(bytes));
     findings.extend(check_nav_vocabulary(&book));
     findings.extend(check_position_map_coverage(&book));
+    findings.extend(check_position_arithmetic(&book));
     findings.extend(check_feature_content_agreement(&book));
     findings
 }
@@ -211,11 +222,12 @@ const SINGLETON_TYPES: [KfxSymbol; 10] = [
 ];
 
 /// The index table and the doc-symbols fragment: the container imports
-/// [`SHARED_SYMBOL_TABLE`], and no [`SINGLETON_TYPES`] entry appears twice —
-/// keying fragments by name hides the second one, the raw table shows it.
+/// [`SHARED_SYMBOL_TABLE`], its declared `max_id` accounts for exactly the
+/// local symbols it lists, and no [`SINGLETON_TYPES`] entry appears twice.
 fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
     use crate::formats::kfx::container::{
-        parse_container_header, parse_container_info, parse_import_names, parse_index_table,
+        extract_doc_symbols, parse_container_header, parse_container_info, parse_import_names,
+        parse_imports_max_id, parse_index_table, parse_local_max_id,
     };
 
     let Ok(header) = parse_container_header(bytes) else {
@@ -233,7 +245,8 @@ fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
     if let Some((off, len)) = info.doc_symbols
         && off + len <= bytes.len()
     {
-        let names = parse_import_names(&bytes[off..off + len]);
+        let table = &bytes[off..off + len];
+        let names = parse_import_names(table);
         if !names.is_empty() && !names.iter().any(|n| n == SHARED_SYMBOL_TABLE) {
             out.push(warning(
                 "symbol-import-unexpected",
@@ -244,6 +257,28 @@ fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
                 ),
                 None,
             ));
+        }
+
+        // §5.4: the table's own `max_id` is the summed import `max_id` plus
+        // the local symbols it lists.
+        if let (Some(declared), Some(imported)) =
+            (parse_local_max_id(table), parse_imports_max_id(table))
+        {
+            let expected = imported + extract_doc_symbols(table).len() as u64;
+            if declared != expected {
+                out.push(warning(
+                    "symbol-table-max-id-mismatch",
+                    "<symbols>",
+                    format!(
+                        "the symbol table declares max_id {declared} but imports {imported} ids \
+                         and lists {} local symbols, ending at {expected} — a reader seating \
+                         local ids by the declaration resolves them off by {}",
+                        expected - imported,
+                        declared.abs_diff(expected)
+                    ),
+                    None,
+                ));
+            }
         }
     }
 
@@ -364,11 +399,27 @@ struct WalkDefects {
     content_and_children: usize,
     /// `table` ($279) elements holding no `table_row` ($279) descendant.
     rowless_tables: usize,
+    /// Every element id ($155) the walk has met.
+    seen_eids: HashSet<i64>,
+    /// Element ids ($155) carried by more than one element.
+    duplicate_eids: BTreeSet<i64>,
+    /// Elements whose `style_events` ($142) reach past their base text.
+    style_events_past_text: usize,
+    /// Elements whose `word_boundary_list` ($696) reaches past their base
+    /// text, or whose entries don't pair up.
+    word_boundaries_past_text: usize,
+    /// `unit` ($306) values outside the CSS length vocabulary.
+    unknown_units: BTreeSet<String>,
+    /// Length structs whose `value` ($307) is no number.
+    non_numeric_lengths: usize,
+    /// `important_cells` ($700) coordinates outside their table's grid,
+    /// rendered `[row, column] in RxC`.
+    out_of_range_cells: BTreeSet<String>,
 }
 
-/// Rules 3 & 6. Walk reading order → section → page_templates → referenced
-/// storylines, flagging every named reference that resolves to no entity. A
-/// `section` entity outside the reading order renders nowhere.
+/// Rules 3, 6 & 13. Walk reading order → section → page_templates →
+/// referenced storylines for unresolved references and element-level
+/// arithmetic defects, then sweep the `style` entities for their lengths.
 fn check_references(book: &BookData) -> Vec<Finding> {
     let mut defects = WalkDefects::default();
     // One visited set guards cycles in storyline and structure fragments,
@@ -386,6 +437,12 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             None => {
                 defects.missing_sections.insert(section_name);
             }
+        }
+    }
+
+    if let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) {
+        for style in styles.values() {
+            scan_lengths(style, book, &mut defects);
         }
     }
 
@@ -483,6 +540,68 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             ),
         ));
     }
+    for eid in &defects.duplicate_eids {
+        findings.push(error(
+            "element-id-duplicate",
+            &eid.to_string(),
+            format!(
+                "element id {eid} is carried by more than one element — every position, anchor \
+                 and highlight addressing it reaches whichever the reader finds first"
+            ),
+        ));
+    }
+    if defects.style_events_past_text > 0 {
+        findings.push(warning(
+            "style-event-past-text",
+            "<storyline>",
+            format!(
+                "{} elements carry a style_event ($142) range reaching past their base text — \
+                 the styling it names has no characters to cover",
+                defects.style_events_past_text
+            ),
+            None,
+        ));
+    }
+    if defects.word_boundaries_past_text > 0 {
+        findings.push(warning(
+            "word-boundaries-past-text",
+            "<storyline>",
+            format!(
+                "{} elements carry a word_boundary_list ($696) that doesn't fit their base text \
+                 — word selection and hyphenation run off the end",
+                defects.word_boundaries_past_text
+            ),
+            None,
+        ));
+    }
+    for unit in &defects.unknown_units {
+        findings.push(warning(
+            "length-unit-unknown",
+            unit,
+            format!("a length declares unit {unit:?}, which is no CSS length unit"),
+            None,
+        ));
+    }
+    if defects.non_numeric_lengths > 0 {
+        findings.push(warning(
+            "length-value-not-numeric",
+            "<storyline>",
+            format!(
+                "{} length structs carry a non-numeric value ($307) — the dimension they state \
+                 cannot be read",
+                defects.non_numeric_lengths
+            ),
+            None,
+        ));
+    }
+    for cell in &defects.out_of_range_cells {
+        findings.push(warning(
+            "important-cell-out-of-range",
+            cell,
+            format!("important_cells ($700) names cell {cell}, which the table has no room for"),
+            None,
+        ));
+    }
     findings
 }
 
@@ -516,6 +635,27 @@ fn holds_table_row(value: &IonValue) -> bool {
     }
 }
 
+/// An element's base text (§7.5), whose characters `style_events` and
+/// `word_boundary_list` offsets count: a literal `$145 content` string, or a
+/// `{name, index}` indirection into the `$145 content` fragment it names.
+fn base_text<'b>(content: &'b IonValue, book: &'b BookData) -> Option<&'b str> {
+    let inner = content.unwrap_annotated();
+    if let Some(text) = inner.as_string() {
+        return Some(text);
+    }
+    let fields = inner.as_struct()?;
+    let name = get_field(fields, KfxSymbol::Name as u64).and_then(|v| book.symbols.text_of(v))?;
+    let index = get_field(fields, KfxSymbol::Index as u64)
+        .and_then(|v| v.as_int())
+        .unwrap_or(0) as usize;
+    lookup(book, KfxSymbol::Content, name)
+        .and_then(|entry| entry.unwrap_annotated().as_struct())
+        .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
+        .and_then(|v| v.as_list())
+        .and_then(|list| list.get(index))
+        .and_then(|item| item.as_string())
+}
+
 /// The block name of a `$145 content` `{name,index}` indirection in `value`
 /// that resolves to no `$145 content` string. `None` for inline text (a plain
 /// string) and for a value carrying no `name`.
@@ -525,17 +665,167 @@ fn dangling_content_ref(value: &IonValue, book: &BookData) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    let index = get_field(fields, KfxSymbol::Index as u64)
-        .and_then(|v| v.as_int())
-        .unwrap_or(0) as usize;
-    let resolves = lookup(book, KfxSymbol::Content, name)
-        .and_then(|entry| entry.unwrap_annotated().as_struct())
-        .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
-        .and_then(|v| v.as_list())
-        .and_then(|list| list.get(index))
-        .and_then(|item| item.as_string())
-        .is_some();
-    (!resolves).then(|| name.to_string())
+    base_text(value, book).is_none().then(|| name.to_string())
+}
+
+/// A `table` ($278) element's grid: `table_row` ($279) descendants, and the
+/// widest row's cell count. A row's children *are* its cells (§7.6); a
+/// nested table's rows stop at the row that holds it.
+fn table_grid(table: &IonValue) -> (usize, usize) {
+    let mut rows = Vec::new();
+    collect_rows(table, &mut rows);
+    let widest = rows.iter().copied().max().unwrap_or(0);
+    (rows.len(), widest)
+}
+
+/// Push each `table_row` ($279) descendant's cell count into `out`.
+fn collect_rows(value: &IonValue, out: &mut Vec<usize>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if get_field(fields, KfxSymbol::Type as u64).and_then(|v| v.as_symbol())
+                == Some(KfxSymbol::TableRow as u64)
+            {
+                out.push(
+                    get_field(fields, KfxSymbol::ContentList as u64)
+                        .and_then(|v| v.unwrap_annotated().as_list())
+                        .map_or(0, <[IonValue]>::len),
+                );
+                return;
+            }
+            for (_, v) in fields {
+                collect_rows(v, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_rows(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The unit a finding names for a `unit` ($306) that is no symbol or string.
+const NAMELESS_UNIT: &str = "(not a name)";
+
+/// One `{value, unit}` length (§8.2): the unit is a CSS length unit and the
+/// magnitude is a number. A struct carrying no `unit` ($306) is no length.
+fn check_length(fields: &[(u64, IonValue)], book: &BookData, out: &mut WalkDefects) {
+    use crate::formats::kfx::yj_properties::length_unit_for;
+
+    let Some(unit) = get_field(fields, KfxSymbol::Unit as u64) else {
+        return;
+    };
+    match book.symbols.text_of(unit) {
+        Some(name) if length_unit_for(name).is_some() => {}
+        Some(name) => {
+            out.unknown_units.insert(name.to_string());
+        }
+        // A unit that is neither symbol nor string names no unit at all.
+        None => {
+            out.unknown_units.insert(NAMELESS_UNIT.to_string());
+        }
+    }
+
+    if let Some(magnitude) = get_field(fields, KfxSymbol::Value as u64)
+        && !matches!(
+            magnitude.unwrap_annotated(),
+            IonValue::Int(_) | IonValue::Float(_) | IonValue::Decimal(_)
+        )
+    {
+        out.non_numeric_lengths += 1;
+    }
+}
+
+/// True when any `style_events` ($142) entry reaches past `chars` characters
+/// of base text (§8.4). Events may overlap; each is measured on its own.
+fn style_events_overrun(fields: &[(u64, IonValue)], chars: usize) -> bool {
+    let Some(events) = get_field(fields, KfxSymbol::StyleEvents as u64)
+        .and_then(|v| v.unwrap_annotated().as_list())
+    else {
+        return false;
+    };
+    events.iter().any(|event| {
+        let Some(ef) = event.unwrap_annotated().as_struct() else {
+            return false;
+        };
+        let offset = get_field(ef, KfxSymbol::Offset as u64)
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
+        let length = get_field(ef, KfxSymbol::Length as u64)
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
+        offset < 0 || length < 0 || offset.saturating_add(length) as usize > chars
+    })
+}
+
+/// True when the `word_boundary_list` ($696) doesn't fit `chars` characters of
+/// base text: a flat run of `(gap, length)` pairs walking the text from its
+/// start, where an odd entry count leaves a pair unclosed.
+fn word_boundaries_overrun(fields: &[(u64, IonValue)], chars: usize) -> bool {
+    let Some(entries) = get_field(fields, KfxSymbol::WordBoundaryList as u64)
+        .and_then(|v| v.unwrap_annotated().as_list())
+    else {
+        return false;
+    };
+    if !entries.len().is_multiple_of(2) {
+        return true;
+    }
+    let mut walked: i64 = 0;
+    for entry in entries {
+        let Some(step) = entry.as_int() else {
+            return true;
+        };
+        if step < 0 {
+            return true;
+        }
+        walked = walked.saturating_add(step);
+    }
+    walked as usize > chars
+}
+
+/// Every `important_cells` ($700) `[row, column]` coordinate lands inside the
+/// grid `table` spans (§7.6).
+fn check_important_cells(fields: &[(u64, IonValue)], table: &IonValue, out: &mut WalkDefects) {
+    let Some(cells) = get_field(fields, KfxSymbol::ImportantCells as u64)
+        .and_then(|v| v.unwrap_annotated().as_list())
+    else {
+        return;
+    };
+    let (rows, columns) = table_grid(table);
+    for cell in cells {
+        let Some(pair) = cell.unwrap_annotated().as_list() else {
+            continue;
+        };
+        let (Some(row), Some(column)) = (
+            pair.first().and_then(IonValue::as_int),
+            pair.get(1).and_then(IonValue::as_int),
+        ) else {
+            continue;
+        };
+        if row < 0 || column < 0 || row as usize >= rows || column as usize >= columns {
+            out.out_of_range_cells
+                .insert(format!("[{row}, {column}] in {rows}x{columns}"));
+        }
+    }
+}
+
+/// [`check_length`] over every struct in `value`.
+fn scan_lengths(value: &IonValue, book: &BookData, out: &mut WalkDefects) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            check_length(fields, book, out);
+            for (_, v) in fields {
+                scan_lengths(v, book, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                scan_lengths(item, book, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The flat, in-order list of reading-order section names, from
@@ -648,8 +938,35 @@ fn walk_refs(
                 {
                     out.orphan_list_items += 1;
                 }
-                if type_id == KfxSymbol::Table as u64 && !holds_table_row(value) {
-                    out.rowless_tables += 1;
+                if type_id == KfxSymbol::Table as u64 {
+                    if !holds_table_row(value) {
+                        out.rowless_tables += 1;
+                    }
+                    check_important_cells(fields, value, out);
+                }
+            }
+
+            // §7.4 — one element per id, book-wide.
+            if let Some(eid) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+                && !out.seen_eids.insert(eid)
+            {
+                out.duplicate_eids.insert(eid);
+            }
+
+            // §8.2 — the element's own inline lengths.
+            check_length(fields, book, out);
+
+            // §8.4 / §7.4 — ranges over the base text. An element with no
+            // `content` draws its text from interleaved children.
+            if let Some(text) = get_field(fields, KfxSymbol::Content as u64)
+                .and_then(|content| base_text(content, book))
+            {
+                let chars = text.chars().count();
+                if style_events_overrun(fields, chars) {
+                    out.style_events_past_text += 1;
+                }
+                if word_boundaries_overrun(fields, chars) {
+                    out.word_boundaries_past_text += 1;
                 }
             }
 
@@ -1046,6 +1363,141 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
 }
 
 // ============================================================================
+// Rule 14 — position and location arithmetic
+// ============================================================================
+
+/// Rule 14. The `position_id_map` ($265) span shape partitions the pid axis
+/// (§10.2): its spans run from 0, each starting where the last ended.
+/// `yj.location_pid_map` ($621) pids never go backwards (§10.3).
+fn check_position_arithmetic(book: &BookData) -> Vec<Finding> {
+    let mut out = Vec::new();
+
+    let spans = position_spans(book);
+    if let Some((name, pid, _)) = spans.first()
+        && *pid != 0
+    {
+        out.push(warning(
+            "position-spans-ragged",
+            name,
+            format!(
+                "the position_id_map starts section {name:?} at pid {pid} — the pids below it \
+                 belong to no section"
+            ),
+            None,
+        ));
+    }
+    for pair in spans.windows(2) {
+        let (prev_name, prev_pid, prev_len) = &pair[0];
+        let (name, pid, _) = &pair[1];
+        let end = prev_pid + prev_len;
+        if *pid != end {
+            let gap = if *pid > end {
+                "leaves a gap"
+            } else {
+                "overlaps"
+            };
+            out.push(warning(
+                "position-spans-ragged",
+                name,
+                format!(
+                    "section {prev_name:?} spans pids {prev_pid}..{end} and section {name:?} \
+                     starts at {pid} — the partition {gap}"
+                ),
+                None,
+            ));
+            break;
+        }
+    }
+
+    for (index, pid, prev) in descending_locations(book) {
+        out.push(warning(
+            "location-boundaries-unordered",
+            &index.to_string(),
+            format!(
+                "yj.location_pid_map boundary {index} is pid {pid}, below the {prev} before it — \
+                 the Location numbers it feeds don't advance"
+            ),
+            None,
+        ));
+    }
+
+    out
+}
+
+/// The `position_id_map` ($265) span shape as `(section_name, pid, length)` in
+/// fragment order. Empty for the `{eid, pid}` pair shape, which states no
+/// section length.
+fn position_spans(book: &BookData) -> Vec<(String, i64, i64)> {
+    let mut spans = Vec::new();
+    let Some(maps) = book.by_type.get(&(KfxSymbol::PositionIdMap as u64)) else {
+        return spans;
+    };
+    for value in maps.values() {
+        let Some(fields) = value.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(entries) = get_field(fields, KfxSymbol::Contains as u64)
+            .and_then(|v| v.unwrap_annotated().as_list())
+        else {
+            continue;
+        };
+        for entry in entries {
+            let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            // The span shape names a section; the pair shape carries eids.
+            let (Some(name), Some(pid), Some(length)) = (
+                get_field(ef, KfxSymbol::SectionName as u64).and_then(|v| book.symbols.text_of(v)),
+                get_field(ef, KfxSymbol::Pid as u64).and_then(|v| v.as_int()),
+                get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int()),
+            ) else {
+                continue;
+            };
+            spans.push((name.to_string(), pid, length));
+        }
+    }
+    spans
+}
+
+/// Every `yj.location_pid_map` ($621) boundary that sits below its
+/// predecessor, as `(index, pid, predecessor)`. Amazon repeats a pid where two
+/// Locations fall in one place; equality is not a defect.
+fn descending_locations(book: &BookData) -> Vec<(usize, i64, i64)> {
+    let mut out = Vec::new();
+    let Some(maps) = book.by_type.get(&(KfxSymbol::YjLocationPidMap as u64)) else {
+        return out;
+    };
+    for value in maps.values() {
+        let Some(groups) = value.unwrap_annotated().as_list() else {
+            continue;
+        };
+        for group in groups {
+            let Some(pids) = group
+                .unwrap_annotated()
+                .as_struct()
+                .and_then(|fields| get_field(fields, KfxSymbol::Locations as u64))
+                .and_then(|v| v.unwrap_annotated().as_list())
+            else {
+                continue;
+            };
+            let mut previous: Option<i64> = None;
+            for (index, entry) in pids.iter().enumerate() {
+                let Some(pid) = entry.as_int() else {
+                    continue;
+                };
+                if let Some(prev) = previous
+                    && pid < prev
+                {
+                    out.push((index, pid, prev));
+                }
+                previous = Some(pid);
+            }
+        }
+    }
+    out
+}
+
+// ============================================================================
 // Rule 11 — declared features agree with the content
 // ============================================================================
 
@@ -1113,34 +1565,13 @@ impl ContentFacts {
 }
 
 /// Positions in the longest section, from the `position_id_map` ($265) span
-/// shape (`{section_name, pid, length}`). The `{eid, pid}` pair shape states
-/// no section length and yields `None`.
+/// shape. The `{eid, pid}` pair shape states no section length and yields
+/// `None`.
 fn max_section_pids(book: &BookData) -> Option<i64> {
-    let maps = book.by_type.get(&(KfxSymbol::PositionIdMap as u64))?;
-    let mut max = None;
-    for value in maps.values() {
-        let Some(fields) = value.unwrap_annotated().as_struct() else {
-            continue;
-        };
-        let Some(entries) = get_field(fields, KfxSymbol::Contains as u64)
-            .and_then(|v| v.unwrap_annotated().as_list())
-        else {
-            continue;
-        };
-        for entry in entries {
-            let Some(ef) = entry.unwrap_annotated().as_struct() else {
-                continue;
-            };
-            // The span shape names a section; the pair shape carries eids.
-            if get_field(ef, KfxSymbol::SectionName as u64).is_none() {
-                continue;
-            }
-            if let Some(length) = get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int()) {
-                max = Some(max.map_or(length, |m: i64| m.max(length)));
-            }
-        }
-    }
-    max
+    position_spans(book)
+        .into_iter()
+        .map(|(_, _, length)| length)
+        .max()
 }
 
 /// The two namespaces a `content_features` entry is declared under.
@@ -1324,6 +1755,11 @@ mod tests {
         index: Vec<(u32, u32)>,
         /// Names for the doc-symbols fragment's `imports` list.
         imports: Vec<String>,
+        /// Local symbol names for the doc-symbols fragment's `symbols` list.
+        local_symbols: Vec<String>,
+        /// The doc-symbols fragment's own `max_id`. `None` declares the value
+        /// §5.4 asks for: the import ceiling plus the local symbols listed.
+        local_max_id: Option<i64>,
     }
 
     impl Default for Container {
@@ -1336,6 +1772,8 @@ mod tests {
                 index_length: 0,
                 index: Vec::new(),
                 imports: vec![SHARED_SYMBOL_TABLE.to_string()],
+                local_symbols: Vec::new(),
+                local_max_id: None,
             }
         }
     }
@@ -1370,11 +1808,23 @@ mod tests {
                     ])
                 })
                 .collect();
+            let locals: Vec<IonValue> = self
+                .local_symbols
+                .iter()
+                .map(|name| IonValue::String(name.clone()))
+                .collect();
+            let local_max_id = self.local_max_id.unwrap_or(
+                FALLBACK_IMPORT_MAX_ID * self.imports.len() as i64 + locals.len() as i64,
+            );
             let mut symbol_writer = IonWriter::new();
             symbol_writer.write_bvm();
             symbol_writer.write_value(&IonValue::Annotated(
                 vec![3],
-                Box::new(IonValue::Struct(vec![(6, IonValue::List(imports))])),
+                Box::new(IonValue::Struct(vec![
+                    (6, IonValue::List(imports)),
+                    (7, IonValue::List(locals)),
+                    (8, IonValue::Int(local_max_id)),
+                ])),
             ));
             let doc_symbols = symbol_writer.into_bytes();
 
@@ -1486,6 +1936,30 @@ mod tests {
         assert_eq!(out[0].rule, "symbol-import-unexpected");
 
         assert!(check_container_inventory(&Container::default().build()).is_empty());
+    }
+
+    // --- Wave 4 (arithmetic over one fragment) -----------------------------
+
+    #[test]
+    fn symbol_table_max_id_must_reach_its_last_local_symbol() {
+        let names = vec!["c0".to_string(), "c9".to_string(), "cR".to_string()];
+        let short = Container {
+            local_symbols: names.clone(),
+            local_max_id: Some(FALLBACK_IMPORT_MAX_ID + 1),
+            ..Default::default()
+        }
+        .build();
+        let out = check_container_inventory(&short);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "symbol-table-max-id-mismatch");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        let exact = Container {
+            local_symbols: names,
+            ..Default::default()
+        }
+        .build();
+        assert!(check_container_inventory(&exact).is_empty());
     }
 
     #[test]
@@ -1692,6 +2166,12 @@ mod tests {
     /// A book whose one reading-order section holds `element` as its single
     /// page template.
     fn book_with_element(element: IonValue) -> BookData {
+        book_with_elements(vec![element])
+    }
+
+    /// A book whose one reading-order section lists `elements` as its page
+    /// templates, in order.
+    fn book_with_elements(elements: Vec<IonValue>) -> BookData {
         let mut book = loader::empty_book_for_test();
         book.by_type
             .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
@@ -1701,7 +2181,7 @@ mod tests {
                 "sec1".to_string(),
                 IonValue::Struct(vec![(
                     KfxSymbol::PageTemplates as u64,
-                    IonValue::List(vec![element]),
+                    IonValue::List(elements),
                 )]),
             )]),
         );
@@ -2221,5 +2701,261 @@ mod tests {
             .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
         // No position_map: some KFX address purely by position_id_map.
         assert!(check_position_map_coverage(&book).is_empty());
+    }
+
+    // --- Wave 4 (element and position arithmetic) --------------------------
+
+    /// An element carrying `eid`, enough for the id rule to see it.
+    fn element_with_id(eid: i64) -> IonValue {
+        IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(eid)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            ),
+        ])
+    }
+
+    #[test]
+    fn one_element_id_on_two_elements_is_flagged() {
+        let book = book_with_elements(vec![element_with_id(7), element_with_id(7)]);
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "element-id-duplicate");
+        assert_eq!(out[0].severity, Severity::Error);
+
+        let unique = book_with_elements(vec![element_with_id(7), element_with_id(8)]);
+        assert!(check_references(&unique).is_empty());
+    }
+
+    /// A text element over the five-character base text `あいうえお`, with
+    /// whatever ranged fields `extra` adds. Its five characters occupy fifteen
+    /// bytes.
+    fn element_over_five_chars(extra: Vec<(u64, IonValue)>) -> IonValue {
+        let mut fields = vec![(
+            KfxSymbol::Content as u64,
+            IonValue::String("あいうえお".to_string()),
+        )];
+        fields.extend(extra);
+        IonValue::Struct(fields)
+    }
+
+    fn style_event(offset: i64, length: i64) -> Vec<(u64, IonValue)> {
+        vec![(
+            KfxSymbol::StyleEvents as u64,
+            IonValue::List(vec![IonValue::Struct(vec![
+                (KfxSymbol::Offset as u64, IonValue::Int(offset)),
+                (KfxSymbol::Length as u64, IonValue::Int(length)),
+            ])]),
+        )]
+    }
+
+    #[test]
+    fn style_event_reaching_past_the_base_text_is_flagged() {
+        let over = book_with_element(element_over_five_chars(style_event(3, 4)));
+        let out = check_references(&over);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "style-event-past-text");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        let flush = book_with_element(element_over_five_chars(style_event(3, 2)));
+        assert!(check_references(&flush).is_empty());
+    }
+
+    fn word_boundaries(steps: &[i64]) -> Vec<(u64, IonValue)> {
+        vec![(
+            KfxSymbol::WordBoundaryList as u64,
+            IonValue::List(steps.iter().copied().map(IonValue::Int).collect()),
+        )]
+    }
+
+    #[test]
+    fn word_boundary_list_must_fit_the_base_text() {
+        // The pairs walk (gap, length) from the start of the text.
+        let over = book_with_element(element_over_five_chars(word_boundaries(&[0, 3, 0, 4])));
+        let out = check_references(&over);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "word-boundaries-past-text");
+
+        let odd = book_with_element(element_over_five_chars(word_boundaries(&[0, 3, 0])));
+        assert_eq!(check_references(&odd).len(), 1, "an unclosed pair");
+
+        let fits = book_with_element(element_over_five_chars(word_boundaries(&[0, 3, 0, 2])));
+        assert!(check_references(&fits).is_empty());
+    }
+
+    /// A `margin_top` whose length struct states `value` and `unit`.
+    fn margin(value: IonValue, unit: &str) -> IonValue {
+        IonValue::Struct(vec![(
+            KfxSymbol::MarginTop as u64,
+            IonValue::Struct(vec![
+                (KfxSymbol::Value as u64, value),
+                (KfxSymbol::Unit as u64, IonValue::String(unit.to_string())),
+            ]),
+        )])
+    }
+
+    #[test]
+    fn length_unit_outside_the_css_set_is_flagged() {
+        let out = check_references(&book_with_element(margin(IonValue::Int(1), "furlong")));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "length-unit-unknown");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        assert!(check_references(&book_with_element(margin(IonValue::Int(1), "lh"))).is_empty());
+    }
+
+    #[test]
+    fn length_value_that_is_no_number_is_flagged() {
+        let out = check_references(&book_with_element(margin(
+            IonValue::String("1.2".to_string()),
+            "em",
+        )));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "length-value-not-numeric");
+
+        // An Ion decimal is a number held as text for precision.
+        let decimal = margin(IonValue::Decimal("0.982286".to_string()), "em");
+        assert!(check_references(&book_with_element(decimal)).is_empty());
+    }
+
+    #[test]
+    fn length_inside_a_style_entity_is_checked_too() {
+        // The content walk names styles but never descends into them.
+        let mut book = book_with_element(IonValue::Struct(vec![(
+            KfxSymbol::Style as u64,
+            IonValue::String("st1".to_string()),
+        )]));
+        book.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([("st1".to_string(), margin(IonValue::Int(1), "furlong"))]),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "length-unit-unknown");
+    }
+
+    /// A `rows`×`columns` table naming `cells` as its `important_cells`.
+    fn table(rows: usize, columns: usize, cells: &[(i64, i64)]) -> IonValue {
+        let row = IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::TableRow as u64),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(
+                    (0..columns)
+                        .map(|_| {
+                            IonValue::Struct(vec![(
+                                KfxSymbol::Type as u64,
+                                IonValue::Symbol(KfxSymbol::Text as u64),
+                            )])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Table as u64),
+            ),
+            (
+                KfxSymbol::ImportantCells as u64,
+                IonValue::List(
+                    cells
+                        .iter()
+                        .map(|(r, c)| IonValue::List(vec![IonValue::Int(*r), IonValue::Int(*c)]))
+                        .collect(),
+                ),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List((0..rows).map(|_| row.clone()).collect()),
+            ),
+        ])
+    }
+
+    #[test]
+    fn important_cell_outside_the_grid_is_flagged() {
+        let out = check_references(&book_with_element(table(2, 2, &[(0, 1), (2, 0)])));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "important-cell-out-of-range");
+        assert_eq!(out[0].location, "[2, 0] in 2x2");
+
+        assert!(check_references(&book_with_element(table(2, 2, &[(0, 1), (1, 0)]))).is_empty());
+    }
+
+    /// A `position_id_map` whose span shape lists `(section, pid, length)`.
+    fn span_map(spans: &[(&str, i64, i64)]) -> HashMap<String, IonValue> {
+        let entries: Vec<IonValue> = spans
+            .iter()
+            .map(|(name, pid, length)| {
+                IonValue::Struct(vec![
+                    (
+                        KfxSymbol::SectionName as u64,
+                        IonValue::String((*name).to_string()),
+                    ),
+                    (KfxSymbol::Pid as u64, IonValue::Int(*pid)),
+                    (KfxSymbol::Length as u64, IonValue::Int(*length)),
+                ])
+            })
+            .collect();
+        HashMap::from([(
+            "pidmap".to_string(),
+            IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]),
+        )])
+    }
+
+    #[test]
+    fn position_spans_must_tile_the_pid_axis() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            span_map(&[("c0", 0, 2), ("c9", 2, 20), ("cU", 22, 234)]),
+        );
+        assert!(check_position_arithmetic(&book).is_empty());
+
+        for spans in [
+            &[("c0", 0, 2), ("c9", 3, 20)][..], // a gap
+            &[("c0", 0, 2), ("c9", 1, 20)][..], // an overlap
+            &[("c0", 4, 2), ("c9", 6, 20)][..], // pids below the first span
+        ] {
+            let mut ragged = loader::empty_book_for_test();
+            ragged
+                .by_type
+                .insert(KfxSymbol::PositionIdMap as u64, span_map(spans));
+            let out = check_position_arithmetic(&ragged);
+            assert_eq!(out.len(), 1, "{spans:?} → {out:?}");
+            assert_eq!(out[0].rule, "position-spans-ragged");
+        }
+    }
+
+    #[test]
+    fn location_boundaries_never_go_backwards() {
+        let map = |pids: &[i64]| {
+            HashMap::from([(
+                "locmap".to_string(),
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::Locations as u64,
+                    IonValue::List(pids.iter().copied().map(IonValue::Int).collect()),
+                )])]),
+            )])
+        };
+
+        let mut back = loader::empty_book_for_test();
+        back.by_type
+            .insert(KfxSymbol::YjLocationPidMap as u64, map(&[0, 2, 8, 5, 13]));
+        let out = check_position_arithmetic(&back);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "location-boundaries-unordered");
+
+        // Amazon repeats a pid where two Locations fall in one place.
+        let mut repeated = loader::empty_book_for_test();
+        repeated
+            .by_type
+            .insert(KfxSymbol::YjLocationPidMap as u64, map(&[0, 2, 2, 8, 13]));
+        assert!(check_position_arithmetic(&repeated).is_empty());
     }
 }

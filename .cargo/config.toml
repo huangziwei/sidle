@@ -1,41 +1,19 @@
-# Workspace cargo config. Target-specific only: host (macOS) builds are
-# untouched, and this applies when cross-compiling sidle-native to the Kindle.
+# Cross-compilation to the Kindle. Host (macOS) builds read nothing here.
 #
-# Build the on-device picker:
 #   cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
-# Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
 #
-# armv7-unknown-linux-musleabihf: hardfloat ABI, `+v7,+vfp3d16,+thumb2,-neon`.
-# One statically linked binary covers the Colorsoft, Scribe and KOA2, whatever
-# firmware each runs.
-#
-# armv7-unknown-linux-musleabi: soft-float ABI, `+v7,+thumb2,+soft-float,-neon`,
-# for the Paperwhite 2 generation. `build-bokai.sh armsf` is its only caller.
-#
-# Per-device CPU facts (read off each device 2026-08-12): the KOA2 is a
-# Cortex-A7 (Freescale i.MX7 Dual, `CPU part: 0xc07`, kernel 4.1) with no ARMv8
-# crypto extensions; the Colorsoft and Scribe advertise `aes pmull sha1 sha2`,
-# which an armv7 build cannot reach. The KOA2 is the floor of the fleet.
-#
-# Linker: rustc's bundled rust-lld via `link-self-contained=yes` — the pure-Rust
-# cross path, with no zig and no GNU cross-binutils. It holds for a dependency
-# graph with no C build-script in it. A graph that gains one links through
-# `brew install zig && cargo install cargo-zigbuild` + `cargo zigbuild`.
-#
-# Prerequisite, one-time: rust-lld ships with rustup inside the active toolchain
-# at `$(rustc --print sysroot)/lib/rustlib/<host-triple>/bin/rust-lld`. The host
-# triple differs between Intel (`x86_64-apple-darwin`) and Apple Silicon
-# (`aarch64-apple-darwin`), and this file hardcodes neither. One symlink
-# resolves it at link time and puts rust-lld on PATH:
+# `link-self-contained=yes` links with rustc's bundled `rust-lld`, which the
+# active toolchain ships outside `PATH`:
 #
 #   ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
 #       ~/.cargo/bin/rust-lld
-#
-# A `rustup update` that reshuffles bundled tools needs it re-run.
+
+# Hardfloat: the Colorsoft, Scribe and KOA2.
 [target.armv7-unknown-linux-musleabihf]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]
 
+# Soft-float: the Paperwhite 2 generation, built by `build-bokai.sh armsf`.
 [target.armv7-unknown-linux-musleabi]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]

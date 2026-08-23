@@ -297,7 +297,8 @@ const FALLBACK_BASE_LEN: u64 = 833;
 
 /// Summed import `max_id` of a doc-symbols fragment, whose `imports` list
 /// carries `[{name: "YJ_symbols", version: 10, max_id: N}]`; local symbols
-/// occupy ids `N+1..`. `None` for a fragment that parses or declares none.
+/// occupy ids `N+1..`. `None` for a fragment that does not parse, or that
+/// declares none.
 pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
     let mut parser = IonParser::new(doc_bytes);
     let value = parser.parse().ok()?;
@@ -319,6 +320,21 @@ pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
         }
     }
     Some(total)
+}
+
+/// A doc-symbols fragment's own declared `max_id`: the highest symbol id the
+/// container claims to define, imports included. `None` for a fragment that
+/// does not parse, or that declares none.
+pub fn parse_local_max_id(doc_bytes: &[u8]) -> Option<u64> {
+    let mut parser = IonParser::new(doc_bytes);
+    let value = parser.parse().ok()?;
+    let fields = value.unwrap_annotated().as_struct()?;
+    // Symbol-table field id 8 = max_id, at the table's own level.
+    fields
+        .iter()
+        .find(|(k, _)| *k == 8)
+        .and_then(|(_, v)| v.as_int())
+        .and_then(|n| u64::try_from(n).ok())
 }
 
 /// The `name` of every import a doc-symbols fragment declares, in order.

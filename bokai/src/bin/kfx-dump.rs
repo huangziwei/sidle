@@ -2668,11 +2668,11 @@ fn element_to_ion_text_inner(
 
 /// Report the shared-table revision a container declares against the ids it
 /// actually names. `declared` fixes where document-local symbols start;
-/// `highest_used` bounds which readers can name everything the file references.
+/// `highest_used` and the local table's own `max_id` bound the id axis.
 fn report_symbols(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::container::{
-        parse_container_header, parse_container_info, parse_entity, parse_imports_max_id,
-        parse_index_table,
+        extract_doc_symbols, parse_container_header, parse_container_info, parse_entity,
+        parse_imports_max_id, parse_index_table, parse_local_max_id,
     };
     use bokai::formats::kfx::symbols::{KfxSymbol, symbol_name};
 
@@ -2690,6 +2690,12 @@ fn report_symbols(data: &[u8]) -> IonResult<()> {
         .doc_symbols
         .and_then(|(off, len)| parse_imports_max_id(&data[off..off + len]));
     let local_base = declared.map_or(u64::MAX, |d| d + 1);
+    let local_max = info
+        .doc_symbols
+        .and_then(|(off, len)| parse_local_max_id(&data[off..off + len]));
+    let local_count = info.doc_symbols.map_or(0, |(off, len)| {
+        extract_doc_symbols(&data[off..off + len]).len()
+    });
 
     let mut highest: Option<(u64, &'static str)> = None;
     let mut consider = |id: u64| {
@@ -2724,6 +2730,10 @@ fn report_symbols(data: &[u8]) -> IonResult<()> {
     match declared {
         Some(d) => println!("declared YJ_symbols max_id: {d}"),
         None => println!("declared YJ_symbols max_id: (none — no import declared)"),
+    }
+    match local_max {
+        Some(m) => println!("declared local max_id:      {m} ({local_count} local symbols)"),
+        None => println!("declared local max_id:      (none — no local table)"),
     }
     match highest {
         Some((id, name)) => println!("highest shared id used:     {id} ({name})"),

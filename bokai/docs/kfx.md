@@ -304,7 +304,7 @@ A book is assembled by descending five levels: document → reading order → se
   line_height:   { value: 1.2, unit: em },
   writing_mode:  vertical_rl,
   selection:     enabled,
-  max_id:        1354,           // highest element id in the book
+  max_id:        1354,           // an element-id counter (§C.2)
   reading_orders: [
     { reading_order_name: default,
       sections: [ c0, c9, cR, c16, c2A, c5S, cGP, c179, c18J ] }
@@ -312,7 +312,9 @@ A book is assembled by descending five levels: document → reading order → se
 }
 ```
 
-`max_id` here is the element-id ceiling (§7.5), unrelated to symbol table `max_id`. The two namespaces overlap numerically and must not be conflated.
+`max_id` here counts element ids (§7.5), unrelated to symbol table `max_id`. The two namespaces overlap numerically and must not be conflated.
+
+It is not the book's element-id ceiling. Amazon's SDK keeps `max_id` in its authoring store as one of a few reserved bookkeeping rows held apart from the content fragments, and tracks the real ceiling in a second such row, `max_eid_in_sections` — a name absent from `YJ_symbols`, so it cannot appear in a container at all. Only the first is carried into `document_data`, and it arrives bearing no fixed relation to the ids the finished book holds: elements commonly carry ids above it, a container may declare a value no element reaches, and the field is often absent altogether. A reader **must not** size an id space from it, nor treat it as a bound on the ids it will meet (§C.2).
 
 > **Note**
 >
@@ -362,7 +364,7 @@ Every node in a content list is a struct with a small common shape:
 - **$146 content_list** — Child elements, in document order.
 - **$145 content** — The element's own text (§7.5). Mutually exclusive with children in practice.
 - **$142 style_events** — Ranged inline styling over that text (§8.4).
-- **$696 word_boundary_list** — Offsets at which words begin, used for selection and hyphenation. Present chiefly where whitespace does not delimit words, as in Japanese.
+- **$696 word_boundary_list** — The element's words, used for selection and hyphenation. Present chiefly where whitespace does not delimit words, as in Japanese. A flat run of `(gap, length)` integer pairs walking the base text from its start: `[0, 2, 1, 3]` is a two-character word at offset 0 and a three-character word at offset 3, the character between them belonging to no word. A gap is 0 wherever one word abuts the next. The pairs therefore span at most the base text and never reach past its end.
 - **$175 resource_name** — On `image` elements, the external resource to draw (§11).
 - **$179 link_to** — An anchor name; the element is a hyperlink (§9.3).
 - **$761 layout_hints** — Semantic hints such as `heading`, `figure`, `caption` that survive the loss of markup structure.
@@ -823,7 +825,7 @@ A reader carrying its own `YJ_symbols` **should** carry the newest revision it c
 
 ### 14.2. Conforming producer
 
-A conforming producer **must** emit a symbol table whose declared import `max_id` matches the shared-table revision actually used, **must** assign every content element a unique element id and record the ceiling in `document_data`'s `max_id`, and **must** emit a genuine SHA-1 in the generator trailer (§3.5).
+A conforming producer **must** emit a symbol table whose declared import `max_id` matches the shared-table revision actually used, **must** assign every content element a unique element id, and **must** emit a genuine SHA-1 in the generator trailer (§3.5).
 
 A producer **must** give every content element a position (§10.2). A producer **should** emit a position map: a book without one has no addressable reading positions — no Locations, no syncing, no highlights.
 
@@ -918,6 +920,7 @@ The shared vocabulary and Amazon's authoring model both name constructs no known
 
 ### C.2. Fields whose meaning is unresolved
 
+- **document_data.max_id** — Authoring-store bookkeeping the producer carries into the container (§7.1). What it counts there is not settled: it bounds nothing in the finished book, and the store's separate element-id ceiling never reaches a container to be compared against.
 - **important_cells** — Not header cells: it appears on tables with no header section, and where a `type: header` section exists the coordinates fall outside it. It co-occurs with `yj.table_features: [pan_zoom, scale_fit]` and `yj.table_selection_mode: yj.regional`, which suggests a small set of cells to keep anchored when a wide table is panned or restacked. That reading is a hypothesis.
 - **yj_hdv** — Written by Amazon's converter and read by nothing (§12.2), so it is a build-time declaration rather than a rendering switch. What it declares is unknown; it is not an image-size threshold, since books with 1804×2560 covers do not carry it.
 - **The reserved typography properties** — `ot_features`, `ligatures`, `kerning`, `hyphen_dictionary` and `min_hyphen_word_length` are named by the vocabulary and set by no book (§8.5). Their value grammars are unknown. They may be authoring-side only, or reserved and never shipped.
