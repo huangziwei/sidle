@@ -1,23 +1,6 @@
-//! Reading positions: the KFX `eid → pid → device Location` chain.
-//!
-//! A KFX addresses text by *element id* (`eid`). The container ships two maps
-//! that turn an eid into a reading position:
-//!
-//! - `position_id_map` ($265) — `eid → pid`, a fine-grained monotonic position.
-//!   It comes in two shapes. Some books list `{eid, pid}` pairs directly. Others
-//!   describe per-section spans as `{section_name, pid, length}`, and the
-//!   eid-level mapping is replayed from each `section_position_id_map` ($609).
-//!   The span shape is **not** peculiar to fixed-layout books — ordinary
-//!   reflowable text books ship it too, vertical-CJK novels among them — so
-//!   neither shape may be treated as a format tell. Only the
-//!   span shape states the last element's length, which is what ends the axis.
-//! - `location_map` ($550) / `yj.location_pid_map` ($621) — the pid boundaries
-//!   dividing the book into the human "Location" numbers a Kindle displays. A
-//!   book with a position map but no location map falls back to the device's
-//!   own even spacing, so its Locations stay on the same scale.
-//!
-//! The assembled result is a [`PositionMap`], the format-agnostic scale; the
-//! pid is its coordinate axis.
+//! Reading positions: the KFX `eid → pid → device Location` chain, assembled
+//! from `position_id_map` ($265), `section_position_id_map` ($609) and
+//! `location_map` ($550) / `yj.location_pid_map` ($621) into a [`PositionMap`].
 
 use std::collections::HashMap;
 
@@ -27,20 +10,14 @@ use crate::formats::kfx::loader::BookData;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::model::PositionMap;
 
-/// One location boundary per this many raw pids — Amazon's own spacing when it
-/// generates an approximate `location_map` (kfxlib `KFX_POSITIONS_PER_LOCATION`).
-/// Used as the fallback spacing for a book that ships a position map but no
-/// location map, so its Location numbers stay on the device's scale. A
-/// displayed Location is ~1/110 of the raw pid; reporting the pid directly
-/// inflates the number ~50× and breaks position matching against the device.
+/// Location boundary spacing in raw pids — kfxlib's own
+/// `KFX_POSITIONS_PER_LOCATION`, the spacing for a book that ships a position
+/// map and no `location_map`.
 const KFX_POSITIONS_PER_LOCATION: i64 = 110;
 
 /// The container fragments the position chain is built from, gathered by type.
-///
-/// Collecting them up front lets the chain be assembled either from a fully
-/// loaded [`BookData`] or from a handful of entities read straight out of the
-/// container — the same rules, no whole-book parse required for a caller that
-/// only wants positions.
+/// [`Self::from_book`] fills them from a loaded [`BookData`]; [`Self::push`]
+/// takes entities read straight out of a container.
 #[derive(Default)]
 pub struct PositionFragments<'a> {
     position_id_maps: Vec<&'a IonValue>,
@@ -65,7 +42,7 @@ impl<'a> PositionFragments<'a> {
     }
 
     /// File a parsed fragment under its type. Types outside [`Self::TYPES`]
-    /// are ignored, so a caller may hand over whatever it has.
+    /// are ignored.
     pub fn push(&mut self, type_id: u32, fragment: &'a IonValue) {
         let bucket = if type_id == KfxSymbol::PositionIdMap as u32 {
             &mut self.position_id_maps
@@ -115,10 +92,8 @@ impl<'a> PositionFragments<'a> {
                 }
             }
         }
-        // The other shape: `position_id_map` is
-        // `{contains:[{section_name,pid,length}]}`, so the loop above finds
-        // nothing. Rebuild `eid→pid` by replaying each
-        // `section_position_id_map` walk.
+        // The span shape the loop above skips: rebuild `eid→pid` by replaying
+        // each `section_position_id_map` walk.
         if pid_of.is_empty() {
             pid_of = self.section_span_pid_map();
         }
@@ -171,17 +146,8 @@ impl<'a> PositionFragments<'a> {
     }
 
     /// The axis end from `position_id_map`'s per-section spans: the largest
-    /// `pid + length`, one past the book's last addressable position.
-    ///
-    /// This is the only statement of the **last** element's length in the
-    /// container. Every other element's length is implied by where the next one
-    /// starts, so a map keyed on start coordinates alone ends the axis at the
-    /// start of the final element and is short by its length. `None` when the
-    /// container states no spans (the `{eid, pid}` shape carries none).
-    ///
-    /// Amazon's own reading timer reports the book end as the last *valid*
-    /// position, which is this value minus one — the figure a device's
-    /// `ReadingTimerController` line prints.
+    /// `pid + length`, one past the book's last addressable position. `None`
+    /// when the container states no spans (the `{eid, pid}` shape has none).
     fn span_extent(&self) -> Option<i64> {
         let mut end: Option<i64> = None;
         for frag in &self.position_id_maps {
@@ -209,13 +175,9 @@ impl<'a> PositionFragments<'a> {
         end
     }
 
-    /// Assemble the whole chain into the format-agnostic scale, or `None` when
-    /// the container carries no position map — the book has no addressable
-    /// reading positions to report.
-    ///
-    /// A book with positions but no location map gets evenly spaced boundaries
-    /// at the device's own `KFX_POSITIONS_PER_LOCATION` interval, so its
-    /// Location numbers land on the same scale as a book that ships them.
+    /// Assemble the whole chain into the format-agnostic scale. `None` when the
+    /// container carries no position map. Positions with no location map get
+    /// boundaries every `KFX_POSITIONS_PER_LOCATION` pids.
     pub fn build(&self) -> Option<PositionMap> {
         let pid_of = self.pid_map();
         if pid_of.is_empty() {
@@ -237,10 +199,8 @@ impl<'a> PositionFragments<'a> {
     }
 
     /// `eid → pid` for the span shape of `position_id_map` ($265):
-    /// `{contains:[{section_name, pid, length}]}`, one span per section, with
-    /// every section carrying a `section_position_id_map` ($609) holding the
-    /// compact position→eid walk. Map each section to its base pid, then replay
-    /// the walk. Reflowable and fixed-layout books alike ship this shape.
+    /// `{contains:[{section_name, pid, length}]}`, one span per section. Map
+    /// each to its base pid, then replay its `section_position_id_map` walk.
     fn section_span_pid_map(&self) -> HashMap<i64, i64> {
         fn sym_id(v: &IonValue) -> Option<u64> {
             match v.unwrap_annotated() {
@@ -331,10 +291,9 @@ pub fn position_map(book: &BookData) -> Option<PositionMap> {
     PositionFragments::from_book(book).build()
 }
 
-/// The `$182` entry list inside a `location_map`/`yj.location_pid_map` fragment,
-/// which is wrapped as a single-element list holding one struct. Returns the
-/// inner list (location structs for $550, bare pids for $621) or `None` on a
-/// shape mismatch.
+/// The `$182` entry list inside a `location_map`/`yj.location_pid_map`
+/// fragment, wrapped as a single-element list holding one struct: location
+/// structs for $550, bare pids for $621. `None` on a shape mismatch.
 fn location_entry_list(frag: &IonValue) -> Option<&[IonValue]> {
     let items = frag.unwrap_annotated().as_list()?;
     let first = items.first()?;
@@ -349,15 +308,9 @@ mod tests {
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
-    /// The `eid → pid` map and the `eid → base text` map are built by separate
-    /// walks — one off the position fragments, one off the storyline content —
-    /// and an annotation slices its text out of the base map at coordinates
-    /// from the position map. Both are pinned so a change to either walk shows
-    /// up as a moved digest rather than as silently relocated highlights.
-    ///
-    /// Not every positioned element carries text: an image is positioned and
-    /// textless. What is asserted is that the *text-bearing* positioned
-    /// elements all resolve, and that both maps' content is stable.
+    /// The `eid → pid` and `eid → base text` maps come from separate walks, and
+    /// an annotation slices text out of the second at coordinates from the
+    /// first. Both are pinned: a change to either walk moves the digest.
     #[test]
     fn the_position_and_text_maps_are_pinned() {
         let Ok(kfx) = std::fs::read(FIXTURE) else {
@@ -372,8 +325,8 @@ mod tests {
         assert!(!pids.is_empty(), "fixture should carry positioned eids");
         assert!(scale.location_count() > 0, "fixture should carry locations");
 
-        // At least one positioned element resolves to base text — otherwise the
-        // two walks share no elements and every highlight would blank.
+        // The two walks share elements: at least one positioned element
+        // resolves to base text.
         assert!(
             pids.keys().any(|eid| text.contains_key(eid)),
             "no positioned element carries base text"
@@ -403,16 +356,9 @@ mod tests {
         );
     }
 
-    /// The axis has to end *past* the last element's start, by that element's
-    /// own length. Every other element's length is implied by where the next
-    /// one begins, so a map that ends at the furthest coordinate it names stops
-    /// at the final element's first character: the book reads as shorter than
-    /// it is and progress can never reach the end.
-    ///
-    /// `position_id_map`'s per-section `length` is the only statement of that
-    /// last length, and `max(pid + length)` is the axis end. Checked against
-    /// Amazon's own arithmetic: a device's `ReadingTimerController` reports the
-    /// book's last valid position as exactly this extent minus one.
+    /// The axis ends past the last element's start, by that element's own
+    /// length. `position_id_map`'s per-section `length` is the only statement
+    /// of that length, and `max(pid + length)` is the axis end.
     #[test]
     fn the_axis_ends_past_the_last_elements_start() {
         let Ok(kfx) = std::fs::read(FIXTURE) else {

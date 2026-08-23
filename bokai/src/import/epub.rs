@@ -62,10 +62,9 @@ pub struct EpubImporter {
     /// Maps "path#id" -> GlobalNodeId for fragment resolution
     anchor_map: HashMap<String, GlobalNodeId>,
 
-    /// Maps chapter path -> [(whitespace-stripped heading text, element id)] for
-    /// every short id-bearing element. Used by [`resolve_toc`] to repair flat
-    /// TOCs whose hrefs dropped the `#fragment` (a common calibre artifact: two
-    /// episodes share one `part00NN.html`, both pointing at the file start).
+    /// Chapter path → [(whitespace-stripped heading text, element id)] for every
+    /// short id-bearing element. [`resolve_toc`] repairs flat TOCs whose hrefs
+    /// dropped the `#fragment` against it.
     toc_heading_ids: HashMap<String, Vec<(String, String)>>,
 }
 
@@ -164,8 +163,8 @@ impl Importer for EpubImporter {
                     self.anchor_map
                         .insert(key, GlobalNodeId::new(*chapter_id, node_id));
 
-                    // Also index the id-bearing element by its (short) heading
-                    // text so a fragment-less TOC href can be repaired to it.
+                    // Index the id-bearing element by its (short) heading text:
+                    // the key a fragment-less TOC href is repaired against.
                     let text = collect_node_text(chapter, node_id, HEADING_TEXT_BYTE_CAP);
                     let normalized = strip_whitespace(&text);
                     if !normalized.is_empty() {
@@ -179,12 +178,9 @@ impl Importer for EpubImporter {
         }
     }
 
-    /// Repair flat TOCs. EPUB TOC hrefs are usually authoritative, but calibre
-    /// (and some retail) EPUBs collapse several headings into one file and emit
-    /// a `#fragment`-less href for each, so every entry in that file jumps to
-    /// its top. The fragments the hrefs *should* carry exist as element ids in
-    /// the content, recovered by matching each fragment-less entry's label to
-    /// a unique id-bearing element in the target file.
+    /// Repair flat TOCs: calibre and some retail EPUBs collapse several headings
+    /// into one file and emit a `#fragment`-less href for each. Match every such
+    /// entry's label to a unique id-bearing element in its target file.
     fn resolve_toc(&mut self) {
         // Disjoint field borrows: the repair reads the heading index while
         // mutating the TOC tree.
@@ -227,8 +223,8 @@ impl EpubImporter {
 
 impl EpubImporter {
     /// Scan the ZIP central directory and cache each entry's byte location.
-    /// Factored out of [`from_source`] so it can be retried against a repaired
-    /// in-memory copy when the raw bytes trip the `zip` crate.
+    /// [`from_source`] retries it against a repaired in-memory copy when the raw
+    /// bytes trip the `zip` crate.
     fn scan_zip(
         source: &Arc<dyn ByteSource>,
     ) -> io::Result<(HashMap<String, ZipEntryLoc>, Vec<PathBuf>)> {
@@ -242,10 +238,8 @@ impl EpubImporter {
             let file = archive.by_index(i)?;
 
             // Skip ZIP directory entries (names ending in `/`): a directory is
-            // not a resource. Some producers store them explicitly; enumerating
-            // one as an asset lands a bogus `href="OEBPS/"` manifest item that
-            // resolves to a missing file (epubcheck RSC-001) and writes a
-            // directory-named entry on re-export.
+            // not a resource, and one enumerated as an asset lands a bogus
+            // `href="OEBPS/"` manifest item (epubcheck RSC-001).
             if file.is_dir() {
                 continue;
             }
@@ -268,11 +262,9 @@ impl EpubImporter {
 
     /// Create an importer from a ByteSource.
     pub fn from_source(source: Arc<dyn ByteSource>) -> io::Result<Self> {
-        // 1. Scan ZIP central directory and cache entry locations. A handful of
-        //    EPUB producers (e.g. ScribdMpubToEpubConverter) emit spurious
-        //    ZIP64 extra fields that the `zip` crate misreads as
-        //    "Invalid local file header"; if the first scan fails, retry once
-        //    on a repaired in-memory copy. See `epub::neutralize_spurious_zip64`.
+        // 1. Scan the ZIP central directory and cache entry locations. A failed
+        //    scan retries once on a copy repaired by
+        //    `epub::neutralize_spurious_zip64`.
         let (zip_index, assets, source) = match Self::scan_zip(&source) {
             Ok((zip_index, assets)) => (zip_index, assets, source),
             Err(first_err) => {
@@ -288,8 +280,8 @@ impl EpubImporter {
             }
         };
 
-        // 2. Find OPF path from container.xml. The `full-path` is a URI
-        //    reference, so percent-decode it to the literal zip entry name.
+        // 2. Find the OPF path from container.xml. The `full-path` is a URI
+        //    reference: percent-decode it to the literal zip entry name.
         let container_bytes = read_entry(&source, &zip_index, "META-INF/container.xml")?;
         let opf_path = percent_decode(&parse_container_xml(&container_bytes)?);
         let opf_base = dir_of(&opf_path);
@@ -306,11 +298,9 @@ impl EpubImporter {
 
         for (i, spine_id) in opf.spine_ids.iter().enumerate() {
             if let Some((href, _media_type)) = opf.manifest.get(spine_id) {
-                // Manifest hrefs are URI references (calibre escapes `!` in
-                // `CR!….html` as `CR%21….html`), and they are only *relative*
-                // to the OPF's directory — Sigil writes `../nav.xhtml` for a
-                // resource kept above it. Resolving (not concatenating) both
-                // decodes and collapses `.`/`..` to the literal zip entry name.
+                // Manifest hrefs are URI references relative to the OPF's
+                // directory. `resolve_href` decodes them and collapses `.`/`..`
+                // to the literal zip entry name.
                 let full_path = resolve_href(&opf_base, href);
                 let size_estimate = zip_index
                     .get(&full_path)
@@ -357,12 +347,9 @@ impl EpubImporter {
             }
         }
 
-        // Assets = non-spine resources (images / CSS / fonts / audio).
-        // `scan_zip` collected every entry; drop the container structure
-        // (mimetype, META-INF/*, the OPF) and the navigation documents the
-        // exporters regenerate (NCX, nav doc), plus every spine chapter —
-        // re-bundling chapters as loose assets made an epub→epub re-export
-        // write each chapter twice (duplicate-zip-entry error).
+        // Assets = non-spine resources (images / CSS / fonts / audio): every
+        // `scan_zip` entry less the container structure (mimetype, META-INF/*,
+        // the OPF), the regenerated NCX and nav doc, and every spine chapter.
         let mut assets = assets;
         {
             let spine_set: std::collections::HashSet<&str> =
@@ -383,14 +370,9 @@ impl EpubImporter {
             });
         }
 
-        // 5. Parse TOC. The EPUB 3 nav doc is the authoritative TOC; the legacy
-        // EPUB 2 NCX is a fallback. Retail Japanese EPUBs (Kadokawa/EBPAJ)
-        // routinely ship BOTH — a full nav doc AND a stub NCX that lists only
-        // cover/目次/奥付. Both are parsed and the richer kept, the nav winning
-        // a tie. An NCX-first-unless-empty order loses
-        // every chapter on those books: the 3-entry stub NCX shadows the
-        // 7-entry nav. A book with only one source gets that one; with neither,
-        // the TOC is empty (a headings-only book is handled downstream).
+        // 5. Parse the TOC from both the EPUB 3 nav doc and the EPUB 2 NCX —
+        // retail Japanese EPUBs (Kadokawa/EBPAJ) ship a full nav doc beside a
+        // stub NCX. The richer of the two wins, the nav doc taking a tie.
         let read_toc = |href: Option<&String>, parse: fn(&str) -> io::Result<Vec<TocEntry>>| {
             let href = href?;
             let path = resolve_href(&opf_base, href);
@@ -398,12 +380,9 @@ impl EpubImporter {
             let hint_encoding = crate::util::extract_xml_encoding(&bytes);
             let text = crate::util::decode_text(&bytes, hint_encoding);
             let entries = parse(&text).ok()?;
-            // Hrefs in a nav doc / NCX are relative to THAT document's directory,
-            // not the OPF's. They coincide when the OPF and the nav/NCX share a
-            // directory (calibre-style OEBPS/), but retail EPUBs that keep the
-            // OPF+NCX at the archive root and the nav doc in a subdir (e.g.
-            // `xhtml/nav.xhtml`) resolve against different bases — prepending
-            // opf_base there leaves every fragment-less chapter href unmatched.
+            // Hrefs in a nav doc / NCX are relative to THAT document's
+            // directory, not the OPF's; the two coincide only where both
+            // documents sit in one directory.
             let doc_base = dir_of(&path);
             (!entries.is_empty()).then(|| prepend_base_to_toc(&entries, &doc_base))
         };
@@ -424,10 +403,8 @@ impl EpubImporter {
         };
 
         // 5b. Parse the physical page-list (`<nav epub:type="page-list">`) from
-        // the same EPUB 3 nav doc. Base-prefixed exactly like the TOC so its
-        // `cN.xhtml` / `cN.xhtml#page_M` hrefs resolve against chapter paths.
-        // Amazon preserves this as a `page_list` nav_container ("go to page N",
-        // citations); dropping it loses every printed page number.
+        // the same EPUB 3 nav doc, base-prefixed exactly like the TOC. Amazon
+        // carries it as a `page_list` nav_container.
         let page_list = read_toc(opf.nav_href.as_ref(), parse_nav_page_list).unwrap_or_default();
 
         // 6. Parse landmarks from EPUB 3 nav document
@@ -440,7 +417,7 @@ impl EpubImporter {
                 let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
                 let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
                 let mut parsed = parse_nav_landmarks(&nav_str)?;
-                // Resolve against the nav doc's directory so the targets match
+                // Resolve against the nav doc's directory: the targets match
                 // decoded chapter paths.
                 for landmark in &mut parsed {
                     if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
@@ -457,12 +434,9 @@ impl EpubImporter {
             Vec::new()
         };
 
-        // 6b. Fall back to EPUB 2.0 `<guide>` entries when the nav doc had
-        // none (or didn't exist). EPUB 2.0 books and calibre-style 3.0
-        // OPFs both ship landmarks via `<guide>`, and this crate's own KFX→EPUB
-        // output is guide-only by design (so Apple Books renders them).
-        // Missing types merge into the union: a nav doc that omits some
-        // EPUB-2-only landmarks keeps them, and the reverse holds.
+        // 6b. Merge EPUB 2.0 `<guide>` landmarks into the nav doc's. Missing
+        // types join the union in both directions: a nav doc omitting an
+        // EPUB-2-only landmark keeps it, and the reverse holds.
         if let Ok(mut guide_marks) = parse_opf_guide(&opf_str) {
             for landmark in &mut guide_marks {
                 if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
@@ -486,11 +460,9 @@ impl EpubImporter {
             path_to_chapter.insert(base_path.to_string(), ChapterId(i as u32));
         }
 
-        // Resolve cover_image to an absolute (zip-relative) path so it matches
+        // Resolve `cover_image` to an absolute (zip-relative) path matching the
         // asset keys downstream. The OPF parser leaves it as a manifest href
-        // relative to opf_base; resolve it the same way as every other href so
-        // a cover whose filename is escaped, or which sits outside the OPF's
-        // directory, lands on its zip entry.
+        // relative to `opf_base`.
         let mut metadata = opf.metadata;
         if let Some(ref href) = metadata.cover_image
             && !href.is_empty()
@@ -520,12 +492,9 @@ impl EpubImporter {
         read_entry(&self.source, &self.zip_index, path)
     }
 
-    /// Read a CSS file and inline any `@import` rules so the parser sees a
-    /// single flat stylesheet. bokai's CSS parser silently skips at-rules
-    /// other than @font-face; many Japanese EPUBs use `@import` heavily
-    /// (e.g. book-style.css imports style-standard.css where vertical
-    /// writing-mode lives) so without this step those rules never reach
-    /// the cascade.
+    /// Read a CSS file and inline its `@import` rules into one flat stylesheet.
+    /// The CSS parser skips at-rules other than `@font-face`; an un-inlined
+    /// `@import`'s rules never reach the cascade.
     fn read_css_with_imports(
         &self,
         path: &Path,
@@ -542,25 +511,17 @@ impl EpubImporter {
         }))
     }
 
-    /// Like load_asset, but takes &self (not &mut self) so it can be used
-    /// from within the recursive @import resolver. The EPUB asset reader needs
-    /// immutable state only.
+    /// `load_asset` over `&self`, for the recursive `@import` resolver. The
+    /// EPUB asset reader reads immutable state only.
     fn load_asset_immutable(&self, path: &Path) -> io::Result<Vec<u8>> {
         let key = path.to_string_lossy().replace('\\', "/");
         self.read_entry(&key)
     }
 }
 
-/// Replace each `@import` directive with the contents of the referenced
-/// file, resolved relative to `base`. Handles all three syntaxes the CSS
-/// spec defines:
-/// - `@import "url";` / `@import 'url';` (quoted)
-/// - `@import url("url");` / `url('url')` / `url(url)` (function form)
-///
-/// Japanese EPUBs converted from AZW3 commonly use `url(...)` to chain
-/// stylesheets (style0012.css imports style0010.css where `.vrtl` lives);
-/// without resolving these the `writing-mode: vertical-rl` rule never reaches
-/// the cascade and the KFX exporter falls back to horizontal_tb.
+/// Replace each `@import` directive with the contents of the file it names,
+/// resolved relative to `base`. Covers all three CSS syntaxes: `@import "url";`,
+/// `@import 'url';`, and `@import url(...)` quoted or bare.
 fn inline_css_imports<F>(src: &str, base: &Path, mut load: F) -> String
 where
     F: FnMut(&Path) -> Option<String>,
@@ -599,12 +560,9 @@ where
                 // Copy everything before the @import as-is, then splice in
                 // the imported file (or drop the @import on load failure).
                 out.push_str(&src[copied..i]);
-                // PathBuf::join doesn't collapse `..`, so a chained import
-                // like `style0011.css` → `url("../Styles/style0007.css")`
-                // yields `OEBPS/Styles/../Styles/style0007.css` and silently
-                // misses the canonical zip entry. Normalize before loading.
-                // `url` is a URI reference; decode it so the child path matches
-                // the literal zip entry name.
+                // `PathBuf::join` leaves `..` in place and `url` is a URI
+                // reference: decode and normalize before loading, to reach the
+                // canonical zip entry name.
                 let url = percent_decode(url);
                 let joined = base
                     .parent()
@@ -744,17 +702,15 @@ fn collect_subtree_text(chapter: &Chapter, node: NodeId, cap: usize, out: &mut S
     }
 }
 
-/// Strip every Unicode whitespace char (including the ideographic space U+3000
-/// these EPUBs put between a chapter number and its title) so a TOC label and a
-/// heading that differ only in spacing compare equal.
+/// Strip every Unicode whitespace char, the ideographic space U+3000 included.
+/// A TOC label and a heading differing only in spacing then compare equal.
 fn strip_whitespace(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// Repair fragment-less TOC entries in place by matching each entry's label to
-/// a unique id-bearing element in its target file. Entries that carry a
-/// `#fragment`, that have no matching heading, or whose label matches more than
-/// one heading are left untouched. See [`EpubImporter::resolve_toc`].
+/// Repair fragment-less TOC entries in place, matching each entry's label to a
+/// unique id-bearing element in its target file. An entry carrying a
+/// `#fragment`, or matching no heading or several, stays untouched.
 fn repair_flat_toc_fragments(
     entries: &mut [TocEntry],
     heading_ids: &HashMap<String, Vec<(String, String)>>,
@@ -797,12 +753,9 @@ fn count_toc_entries(entries: &[TocEntry]) -> usize {
         .sum()
 }
 
-/// Resolve TOC entry hrefs against `base` (NCX and nav use relative paths).
-///
-/// TOC hrefs are URI references, so they are percent-decoded and their `.`/`..`
-/// segments collapsed, to match the chapter paths and anchor-map keys they
-/// resolve against. An anchor-only href addresses the TOC document itself and
-/// stays as it is.
+/// Resolve TOC entry hrefs against `base`. A URI reference is percent-decoded
+/// and its `.`/`..` segments collapsed, matching the chapter paths and
+/// anchor-map keys; an anchor-only href stays as it is.
 fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
     entries
         .iter()
@@ -828,9 +781,8 @@ fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
 mod tests {
     use super::*;
 
-    /// Build a minimal EPUB (mimetype, container, OPF, one spine doc) plus an
-    /// explicit `OEBPS/` directory entry, so a test can assert the importer
-    /// does not treat that directory as a resource.
+    /// A minimal EPUB (mimetype, container, OPF, one spine doc) plus an
+    /// explicit `OEBPS/` directory entry.
     fn epub_with_directory_entry() -> Vec<u8> {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
@@ -895,7 +847,7 @@ mod tests {
                 br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c2</title></head><body><p>two</p></body></html>"#,
             );
             // Root-level nav: its own hrefs are written relative to the root,
-            // so they resolve against the nav's directory, not the OPF's.
+            // resolving against the nav's directory, not the OPF's.
             put(
                 "nav.xhtml",
                 br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="OEBPS/Text/ch1.xhtml">One</a></li><li><a href="ch2.xhtml">Two</a></li></ol></nav></body></html>"#,
@@ -933,8 +885,8 @@ mod tests {
                 "spine doc {id} unreadable"
             );
         }
-        // The nav doc lives at the root, so its own hrefs resolve against the
-        // root — not against `OEBPS/`.
+        // The nav doc lives at the root; its own hrefs resolve against the
+        // root, not against `OEBPS/`.
         let toc = importer.toc();
         assert_eq!(toc.len(), 2, "nav doc at `../nav.xhtml` was not read");
         assert_eq!(toc[0].href, "OEBPS/Text/ch1.xhtml");
@@ -958,8 +910,8 @@ mod tests {
                 "directory entry leaked into assets: {name:?}"
             );
         }
-        // The one real content doc is the spine chapter (not an asset), so the
-        // asset list is empty here — the directory was the only other entry.
+        // The one real content doc is the spine chapter (not an asset), leaving
+        // the asset list empty: the directory was the only other entry.
         assert!(
             importer.list_assets().is_empty(),
             "only entries were the spine doc + a directory; got assets: {:?}",
@@ -984,8 +936,7 @@ mod tests {
     fn test_toc_base_is_document_dir_not_opf_dir() {
         // A nav doc in a subdirectory (OPF+NCX at the archive root, nav at
         // `xhtml/nav.xhtml`) resolves its fragment-less chapter hrefs against
-        // the nav doc's own directory, not the OPF's. Prepending the OPF base
-        // (empty here) drops every chapter from the KFX TOC.
+        // the nav doc's own directory, not the OPF's.
         let nav_path = "e9781668011799/xhtml/nav.xhtml";
         let doc_base = dir_of(nav_path);
         let entries = vec![

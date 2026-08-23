@@ -30,11 +30,9 @@ struct Args {
     #[arg(short, long)]
     stat: bool,
 
-    /// Print detailed report for specified field/fragment (can be specified multiple times)
-    /// Supported: anchors, container, content, dependencies, document, features,
-    /// locations, metadata, navigation, positions, raw_storylines, reading_orders,
-    /// resources, ruby (= ruby_content), ruby_pairs, sections, storylines, symbols,
-    /// writing_mode
+    /// Print a detailed report for one field/fragment; repeatable. One of: anchors, container,
+    /// content, dependencies, document, features, locations, metadata, navigation, positions,
+    /// raw_storylines, reading_orders, resources, ruby, ruby_pairs, sections, storylines, symbols, writing_mode
     #[arg(short = 'f', long = "field")]
     field: Vec<String>,
 }
@@ -312,13 +310,9 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                     resolve_symbol(type_idnum as u64, &extended_symbols, base_symbol_count);
 
                 eprintln!("=== Entity {} ===", i);
-                // Show resolved info if available
-                // The payload's own name field, shown only when it disagrees
-                // with the index id's symbol. The recorded entry is keyed by id
-                // alone and several fragment types share one id (KFX names a
-                // section, its position map and its storyline with the same
-                // symbol), so its `entity_type` may describe a sibling — the
-                // Type: line below is what states this entity's type.
+                // The payload's own name field, shown only where it disagrees
+                // with the index id's symbol: several fragment types share one
+                // id, leaving the recorded `entity_type` describing a sibling.
                 match maps
                     .entity_map
                     .get(&(id_idnum as u64))
@@ -2070,9 +2064,8 @@ fn build_maps(
             continue;
         };
 
-        // Get entity type name. Fragment types are format-defined base
-        // symbols, but resolve through the container's base like every other
-        // id so the two never drift apart.
+        // Fragment types are format-defined base symbols, resolved through the
+        // container's base like every other id.
         let entity_type = resolve_symbol(type_idnum as u64, extended_symbols, base_symbol_count);
 
         // Parse entity to extract name field and fragment IDs
@@ -2222,9 +2215,9 @@ fn ion_value_to_string(
 
     match value {
         IonValue::String(s) => Some(s.clone()),
-        // The container's declared base decides which table an id belongs to;
-        // testing the static table first would swallow every doc-local id
-        // below its length.
+        // The container's declared base decides which table an id belongs to.
+        // A static-table test first swallows every doc-local id below its
+        // length.
         IonValue::Symbol(id) => Some(resolve_symbol(*id, extended_symbols, base_symbol_count)),
         IonValue::Int(i) => Some(i.to_string()),
         _ => None,
@@ -2284,16 +2277,14 @@ fn dump_ion_data(data: &[u8]) -> IonResult<()> {
         entity_map: HashMap::new(),
         fragment_map: HashMap::new(),
     };
-    // No doc symbols in play, so the base is the whole static table.
+    // No doc symbols in play: the base is the whole static table.
     let catalog = EntityCatalog::new(&[], KFX_SYMBOL_TABLE.len())?;
     dump_ion_data_extended(data, &catalog, &empty_maps, false)
 }
 
-/// A shareable view of one prepared [`MapCatalog`].
-///
-/// `Decoder::with_catalog` takes an owned `'static` catalog, so each reader
-/// needs its own value; handing out reference-counted clones keeps every reader
-/// on the one table that was built for the container.
+/// A shareable view of one prepared [`MapCatalog`]. `Decoder::with_catalog`
+/// takes an owned `'static` catalog; reference-counted clones keep every reader
+/// on the one table built for the container.
 #[derive(Clone)]
 struct CatalogHandle(Arc<MapCatalog>);
 
@@ -2307,11 +2298,9 @@ impl Catalog for CatalogHandle {
     }
 }
 
-/// The KFX symbol table plus a container's document symbols, seated for reading.
-///
-/// Build it once per container: the shared table copies every symbol name, so a
-/// container with tens of thousands of document symbols would pay that cost
-/// once per entity if each entity built its own.
+/// The KFX symbol table plus a container's document symbols, seated for
+/// reading. Built once per container: the shared table copies every symbol
+/// name.
 struct EntityCatalog {
     catalog: Arc<MapCatalog>,
     preamble: Vec<u8>,
@@ -2320,30 +2309,16 @@ struct EntityCatalog {
 impl EntityCatalog {
     /// `base_symbol_count` is the container's declared import size (the id of
     /// its first doc-local symbol), not the static table's length — see
-    /// [`SymbolTable`], which resolves through the same base. A container built
-    /// against an older YJ_symbols declares fewer imports than KFX_SYMBOL_TABLE
-    /// carries, and seating its doc symbols at the static length renders every
-    /// doc-local id as a base-table tail name (section names coming out as
-    /// `snap_block`, `end_x`, …).
+    /// [`SymbolTable`], which resolves through the same base.
     fn new(extended_symbols: &[String], base_symbol_count: usize) -> IonResult<Self> {
-        // Build combined symbol table: base KFX symbols + extended doc symbols
-        //
-        // KFX_SYMBOL_TABLE holds Ion system symbols at indices 0-9, absent from
-        // YJ_symbols: KFX_SYMBOL_TABLE[413] == YJ[403] == "bcIndexTabLength".
-        // ion-rs maps SST[N] → SID $(10+N); SST[N] = KFX_SYMBOL_TABLE[N+10].
-        //
-        // Doc-local symbols follow at `base_symbol_count`: the base slice ends
-        // there, and SST[base_symbol_count - 10 + k] = extended_symbols[k]
-        // → SID $(base_symbol_count + k).
+        // KFX_SYMBOL_TABLE holds Ion system symbols at 0-9, absent from
+        // YJ_symbols; ion-rs maps SST[N] → SID $(10+N). Doc-local symbols follow
+        // at `base_symbol_count`: SST[base_symbol_count - 10 + k] → that id + k.
         let base_end = base_symbol_count.clamp(10, KFX_SYMBOL_TABLE.len());
 
-        // The other direction: a container built against a *newer* YJ_symbols
-        // declares more imports than KFX_SYMBOL_TABLE carries (Amazon's own
-        // PDF conversions declare 854 against 852). Stopping at the table's
-        // length would seat every doc symbol that many ids early — names silently
-        // shifted throughout, and the highest ids past the end of the table, which
-        // aborts the whole fragment. Fill the shortfall so a doc symbol keeps the
-        // id the container gave it and only the unnamed base ids print bare.
+        // A container built against a *newer* YJ_symbols declares more imports
+        // than KFX_SYMBOL_TABLE carries. Fill the shortfall: a doc symbol keeps
+        // the id the container gave it, and unnamed base ids print bare.
         let unnamed: Vec<String> = (base_end..base_symbol_count)
             .map(|id| format!("${id}"))
             .collect();
@@ -2354,8 +2329,8 @@ impl EntityCatalog {
             all_symbols.push(sym.as_str());
         }
 
-        // The import allocates exactly as many ids as the table defines, so every
-        // id in range has text and none is left undefined.
+        // The import allocates exactly as many ids as the table defines: every
+        // id in range has text, none is left undefined.
         let max_id = all_symbols.len() as i64;
 
         // Every reader that imports this table copies its symbols wholesale.
@@ -2691,13 +2666,9 @@ fn element_to_ion_text_inner(
     result
 }
 
-/// Report container header and info from a KFX file
 /// Report the shared-table revision a container declares against the ids it
-/// actually names.
-///
-/// The two differ: `declared` fixes where document-local symbols start and so
-/// must be read from the file, while `highest_used` is the only figure that
-/// bounds which readers can name everything the file references.
+/// actually names. `declared` fixes where document-local symbols start;
+/// `highest_used` bounds which readers can name everything the file references.
 fn report_symbols(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::container::{
         parse_container_header, parse_container_info, parse_entity, parse_imports_max_id,
@@ -2726,9 +2697,8 @@ fn report_symbols(data: &[u8]) -> IonResult<()> {
             highest = Some((id, symbol_name(id).unwrap_or("<past the table>")));
         }
     };
-    // An entity whose payload does not parse contributes no ids, which would
-    // silently understate the maximum. Count what was read, not only what it
-    // yielded, so an unopened entity cannot pass for an empty one.
+    // An entity whose payload does not parse contributes no ids. Count what was
+    // read as well as what it yielded: an unopened entity is not an empty one.
     let (mut entities, mut opaque, mut unparsed) = (0usize, 0usize, 0usize);
     if let Some((idx_off, idx_len)) = info.index {
         for ent in parse_index_table(&data[idx_off..idx_off + idx_len], header.header_len) {
@@ -5058,10 +5028,9 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let position_map_type = KfxSymbol::PositionMap as u32;
-    // The eid→pid chain has two container shapes — a reflowable `{eid, pid}`
-    // list, or per-section runs replayed from `section_position_id_map` — with
-    // the location scale on top. `PositionFragments` resolves the whole
-    // family into the axis the importer reads.
+    // The eid→pid chain has two container shapes — a `{eid, pid}` list, or
+    // per-section runs replayed from `section_position_id_map` — with the
+    // location scale on top. `PositionFragments` resolves the whole family.
     let mut chain: Vec<(u32, IonValue)> = Vec::new();
 
     println!("=== Position Maps ===\n");
@@ -5198,9 +5167,8 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
         }
     }
 
-    // The eid→pid chain and the location scale on top of it, resolved through the
-    // same assembler the importer uses — so both container shapes report, and a
-    // container that carries the fragments never reports silence.
+    // The eid→pid chain and the location scale on top of it, resolved through
+    // the same assembler the importer uses: both container shapes report.
     let mut fragments = PositionFragments::default();
     for (type_id, value) in &chain {
         fragments.push(*type_id, value);
@@ -5682,10 +5650,8 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
     Ok(())
 }
 
-/// Deep Ion value formatter for ruby_content inspection.
-///
-/// Unlike format_ion_value_simple, this does NOT truncate lists or structs —
-/// the whole point is to see the full shape of the fragment.
+/// Deep Ion value formatter for ruby_content inspection. Unlike
+/// `format_ion_value_simple`, this prints lists and structs whole.
 fn format_ion_value_full<F>(
     value: &bokai::formats::kfx::ion::IonValue,
     indent: usize,
@@ -5768,10 +5734,8 @@ where
     }
 }
 
-/// Report ruby_content fragments from a KFX container.
-///
-/// Inspects all entities of type ruby_content (symbol 756) and prints their
-/// full Ion structure.
+/// Report ruby_content fragments from a KFX container: every entity of type
+/// ruby_content (symbol 756), with its full Ion structure.
 fn report_ruby_content(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::ion::IonParser;
     use bokai::formats::kfx::symbols::KfxSymbol;
@@ -6025,12 +5989,9 @@ fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
     Ok(())
 }
 
-/// Report ruby pairs found in the KFX as `base<TAB>annotation` lines.
-///
-/// For each storyline style_event that carries `ruby_name` + `ruby_id`,
-/// slices out the base text from the referenced content fragment using
-/// offset/length, looks up the annotation in the corresponding
-/// ruby_content fragment's content_list, and prints the pair.
+/// Report ruby pairs found in the KFX as `base<TAB>annotation` lines: for each
+/// storyline style_event carrying `ruby_name` + `ruby_id`, the base text sliced
+/// out by offset/length beside its ruby_content annotation.
 fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
     use bokai::formats::kfx::ion::{IonParser, IonValue};
     use bokai::formats::kfx::symbols::KfxSymbol;

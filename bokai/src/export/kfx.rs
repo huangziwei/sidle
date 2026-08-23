@@ -1288,9 +1288,9 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
     None
 }
 
-/// The `font-family` stack carrying the book's body text — the stack handed
-/// back to the reader as `default`. Chosen by the share of text it sets, with
-/// the reader's own font competing; `None` where that plurality wins.
+/// The `font-family` stack carrying the book's body text, handed back as
+/// `default`. Chosen by the share of text it sets, `reader_governed` text
+/// competing as a candidate; `None` where that share wins.
 fn body_font_stack(book: &mut Book) -> Option<String> {
     let mut covered: HashMap<String, usize> = HashMap::new();
     let mut reader_governed = 0usize;
@@ -1313,7 +1313,7 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
             }
             match inherited_font_family(&chapter, id) {
                 Some(family) => *covered.entry(family.to_string()).or_default() += len,
-                // The reader's font — a rival candidate, not a gap.
+                // `reader_governed` is a rival candidate, not a gap.
                 None => reader_governed += len,
             }
         }
@@ -3443,9 +3443,9 @@ fn image_fxl_to_kfx(
         let href = hrefs[0].clone();
         ctx.resource_registry.register(&href, &mut ctx.symbols);
     }
-    // The cover's own JPEG copy, emitted beside the page resources under
-    // `MANGA_COVER_RSRC`. A page plate is JPEG-XR, which the library tile
-    // renders blank, so the cover gets this copy even when it is also page 0.
+    // `standalone_cover` is the cover's own JPEG copy, emitted beside the page
+    // resources under `MANGA_COVER_RSRC`. A page plate is JPEG-XR, which the
+    // library tile renders blank.
     let standalone_cover: Option<MangaEnc> = cover_href
         .as_deref()
         .and_then(|c| Some((c.to_string(), resolve(c)?)))
@@ -3745,10 +3745,12 @@ fn image_fxl_to_kfx(
         &mut ctx,
     ));
 
-    // 11. position system — section-keyed; nav targets resolve on-device.
+    // 11. position system — section-keyed; nav targets resolve on-device. The
+    // location scale rides on top of it, one Location per page.
     fragments.push(build_manga_position_map_fragment(&units));
     fragments.push(build_manga_position_id_map_fragment(&units));
     fragments.extend(build_manga_section_position_id_map_fragments(&units));
+    fragments.push(build_manga_location_map_fragment(&units));
 
     // 12. container metadata
     fragments.push(build_resource_path_fragment());
@@ -4050,6 +4052,17 @@ fn percent(fraction: f32) -> IonValue {
     ])
 }
 
+/// A KFX length in CSS pixels: `{ value, unit: px }`.
+fn px(value: i64) -> IonValue {
+    IonValue::Struct(vec![
+        (KfxSymbol::Value as u64, IonValue::Int(value)),
+        (
+            KfxSymbol::Unit as u64,
+            IonValue::Symbol(KfxSymbol::Px as u64),
+        ),
+    ])
+}
+
 /// `position: fixed` plus the four sides of a rect, as page-box percentages.
 /// `Fixed` is KFX's name for CSS `absolute`.
 fn positioned(rect: crate::model::PanelRect) -> Vec<(u64, IonValue)> {
@@ -4200,7 +4213,7 @@ fn build_manga_storyline(
                         KfxSymbol::Direction as u64,
                         IonValue::Symbol(KfxSymbol::Ltr as u64),
                     ),
-                    (KfxSymbol::FontSize as u64, IonValue::Int(16)),
+                    (KfxSymbol::FontSize as u64, px(16)),
                     (KfxSymbol::FixedWidth as u64, IonValue::Int(box_w as i64)),
                     (KfxSymbol::FixedHeight as u64, IonValue::Int(box_h as i64)),
                     (
@@ -4503,18 +4516,22 @@ fn build_manga_toc_entries(
         .collect()
 }
 
-/// The content EIDs of a manga unit, in reading-position order: the
-/// page_template opens it, then each page contributes its EIDs (cover: the bare
-/// image; content: outer→inner→image).
+/// The content EIDs of a manga unit in document order, the page_template first:
+/// per page the bare image (solo) or outer→inner→image (facing), then each
+/// panel's region→target→window→image. Every storyline element is a position.
 fn manga_unit_eids(unit: &MangaUnit) -> Vec<u64> {
     let mut ids = vec![unit.pt_id];
     for p in &unit.pages {
-        if unit.solo {
-            ids.push(p.image_id);
-        } else {
+        if !unit.solo {
             ids.push(p.outer_id);
             ids.push(p.inner_id);
-            ids.push(p.image_id);
+        }
+        ids.push(p.image_id);
+        for panel in &p.panels {
+            ids.push(panel.region_id);
+            ids.push(panel.target_id);
+            ids.push(panel.window_id);
+            ids.push(panel.image_id);
         }
     }
     ids
@@ -4601,6 +4618,37 @@ fn build_manga_section_position_id_map_fragments(units: &[MangaUnit]) -> Vec<Kfx
             )
         })
         .collect()
+}
+
+/// location_map ($550): one Location per page, each addressing the first EID
+/// its page occupies — a facing page's `scale_fit` container, a solo page's
+/// `pt_id`. The first entry repeats, placing Location 1 at the book's start.
+fn build_manga_location_map_fragment(units: &[MangaUnit]) -> KfxFragment {
+    let mut eids: Vec<u64> = Vec::new();
+    for unit in units {
+        if unit.solo {
+            eids.push(unit.pt_id);
+        } else {
+            eids.extend(unit.pages.iter().map(|p| p.outer_id));
+        }
+    }
+    if let Some(&first) = eids.first() {
+        eids.insert(0, first);
+    }
+    let entries: Vec<IonValue> = eids
+        .into_iter()
+        .map(|eid| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(eid as i64)),
+                (KfxSymbol::Offset as u64, IonValue::Int(0)),
+            ])
+        })
+        .collect();
+    let ion = IonValue::List(vec![IonValue::Struct(vec![(
+        KfxSymbol::Locations as u64,
+        IonValue::List(entries),
+    )])]);
+    KfxFragment::singleton(KfxSymbol::LocationMap, ion)
 }
 
 /// container_entity_map ($419): the container's entity list + per-section
@@ -4884,8 +4932,8 @@ pub fn pdf_to_kfx(
     fragments.extend(text_storylines);
 
     // auxiliary_data ($597): one `<section>-ad` per page stating the page's
-    // rotation, the entire aux set of a Send-to-Kindle PDF KFX. Standalone, not
-    // referenced from the section; the reader finds it by name.
+    // rotation, the entire aux set of a Send-to-Kindle PDF KFX. Standalone,
+    // addressed by name, unreferenced from the section.
     for (i, rec) in recs.iter().enumerate() {
         fragments.push(build_kv_aux_fragment(
             &format!("{}-ad", rec.section_name),
@@ -5292,7 +5340,7 @@ fn pdf_page_margins(
 
 /// Build the external_resource ($164) for one PDF page: a `format: pdf` view of
 /// the shared blob at `page_index`, sized to the page and carrying the content
-/// box the reader's margin setting crops to. See [`pdf_page_margins`].
+/// box a margin setting crops to. See [`pdf_page_margins`].
 #[cfg(feature = "pdf")]
 fn build_pdf_external_resource(
     rec: &PdfPageRec,
@@ -7684,8 +7732,8 @@ mod manga_fxl_tests {
     }
 
     /// A section's reading-position span drives both position maps and matches
-    /// the EIDs laid down: a solo unit contributes page_template + 1, a facing
-    /// unit page_template + 3 per page.
+    /// the EIDs laid down: page_template + 1 per solo page, + 3 per facing page,
+    /// + 4 per panel.
     #[test]
     fn unit_eids_span_cover_vs_spread() {
         let cover = unit(true, &[(0, 0, 101)]);
@@ -7696,6 +7744,87 @@ mod manga_fxl_tests {
             manga_unit_eids(&spread),
             vec![100, 101, 102, 103, 104, 105, 106]
         );
+
+        let mut panelled = unit(true, &[(0, 0, 101)]);
+        panelled.pages[0].panels = vec![PanelElements {
+            panel: crate::model::Panel {
+                ordinal: 1,
+                source: crate::model::PanelRect {
+                    left: 0.0,
+                    top: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                window: crate::model::PanelRect {
+                    left: 0.0,
+                    top: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                image: crate::model::PanelRect {
+                    left: 0.0,
+                    top: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+            },
+            region_id: 102,
+            target_id: 103,
+            window_id: 104,
+            image_id: 105,
+        }];
+        assert_eq!(
+            manga_unit_eids(&panelled),
+            vec![100, 101, 102, 103, 104, 105]
+        );
+    }
+
+    /// The EIDs a location_map fragment addresses, in order.
+    fn location_eids(frag: &KfxFragment) -> Vec<i64> {
+        let FragmentData::Ion(IonValue::List(outer)) = &frag.data else {
+            panic!("location_map is not an Ion list");
+        };
+        let IonValue::Struct(fields) = &outer[0] else {
+            panic!("location_map holds no struct");
+        };
+        let Some((_, IonValue::List(entries))) = fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Locations as u64)
+        else {
+            panic!("location_map holds no locations");
+        };
+        entries
+            .iter()
+            .map(|e| {
+                let IonValue::Struct(fs) = e else {
+                    panic!("a location is not a struct");
+                };
+                assert!(matches!(
+                    fs.iter().find(|(k, _)| *k == KfxSymbol::Offset as u64),
+                    Some((_, IonValue::Int(0)))
+                ));
+                match fs.iter().find(|(k, _)| *k == KfxSymbol::Id as u64) {
+                    Some((_, IonValue::Int(id))) => *id,
+                    _ => panic!("a location names no EID"),
+                }
+            })
+            .collect()
+    }
+
+    /// One location per page — a facing page's `outer_id`, a solo page's
+    /// `pt_id` — with the first entry repeated. A facing unit holding a single
+    /// page contributes one.
+    #[test]
+    fn every_page_gets_its_own_location() {
+        let mut cover = unit(true, &[(0, 0, 101)]);
+        cover.pt_id = 100;
+        let mut spread = unit(false, &[(201, 202, 203), (204, 205, 206)]);
+        spread.pt_id = 200;
+        let mut tail = unit(false, &[(301, 302, 303)]);
+        tail.pt_id = 300;
+
+        let frag = build_manga_location_map_fragment(&[cover, spread, tail]);
+        assert_eq!(location_eids(&frag), vec![100, 100, 201, 204, 301]);
     }
 
     /// Collect the feature keys of a content_features fragment.
