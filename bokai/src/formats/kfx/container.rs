@@ -106,6 +106,22 @@ pub fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     ])
 }
 
+/// The `length` bytes at `offset`, or `None` when that range runs past the end
+/// of `data`. A range whose end overflows `usize` is out of bounds like any
+/// other.
+#[inline]
+pub fn slice_at(data: &[u8], offset: usize, length: usize) -> Option<&[u8]> {
+    data.get(offset..offset.checked_add(length)?)
+}
+
+/// A `u64` container field as a `usize`, saturating where the target's pointer
+/// width cannot hold it. Such a value addresses nothing inside any container,
+/// and saturating keeps it out of bounds rather than truncating it into range.
+#[inline]
+fn clamp_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 // --- Container header parsing ---
 
 /// Parse the KFX container header (first 18 bytes).
@@ -208,8 +224,8 @@ pub fn parse_index_table(data: &[u8], header_len: usize) -> Vec<EntityLoc> {
         entities.push(EntityLoc {
             id: read_u32_le(data, entry_offset),
             type_id: read_u32_le(data, entry_offset + 4),
-            offset: header_len + read_u64_le(data, entry_offset + 8) as usize,
-            length: read_u64_le(data, entry_offset + 16) as usize,
+            offset: header_len.saturating_add(clamp_usize(read_u64_le(data, entry_offset + 8))),
+            length: clamp_usize(read_u64_le(data, entry_offset + 16)),
         });
     }
 
@@ -234,10 +250,7 @@ pub fn skip_enty_header(data: &[u8]) -> &[u8] {
 /// The raw payload bytes of an entity (after its ENTY header). For media
 /// entities (e.g. `bcRawMedia`) this is the stored bytes verbatim.
 pub fn entity_media<'a>(data: &'a [u8], ent: &EntityLoc) -> Option<&'a [u8]> {
-    if ent.offset + ent.length > data.len() {
-        return None;
-    }
-    Some(skip_enty_header(&data[ent.offset..ent.offset + ent.length]))
+    Some(skip_enty_header(slice_at(data, ent.offset, ent.length)?))
 }
 
 /// Parse an entity's payload as an Ion value (for structured fragments).

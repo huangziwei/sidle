@@ -278,6 +278,8 @@ A fragment type is either *singleton* — at most one per book, addressed by typ
 >
 > A name is unique per type, not globally. A section and its position map legitimately share the name `c0`, as do a storyline and its ruby content. An implementation keying fragments by name alone will lose records; the key **must** be the pair `(type, name)`.
 
+A container may nonetheless list one fragment twice: the same `(type, name)` at two index-table offsets, over byte-identical payloads. `auxiliary_data` markers occur this way. A reader keying by `(type, name)` keeps one of the two and loses nothing, and **must not** read the repeat as corruption. Two entries sharing a key over *different* bytes are a different matter: whichever the reader keeps, the other record is unreachable.
+
 ### 6.2. Container entity map
 
 `$419` `container_entity_map` lists, per container id, the fragments that container holds. In a monolithic file it is redundant with the index table. In a bundle it is the manifest a reader uses to know what to expect, and merging (§2.2) requires rebuilding it. Its dependency-ordering fields are unresolved (§C.2).

@@ -26,7 +26,7 @@ use zip::ZipArchive;
 
 use crate::formats::epub::{parse_container_xml, parse_opf};
 use crate::formats::kfx::container::{
-    parse_container_header, parse_container_info, parse_index_table,
+    parse_container_header, parse_container_info, parse_index_table, slice_at,
 };
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::style::Declaration;
@@ -497,17 +497,21 @@ fn scan_xhtml_richness(
 /// `class_sN` rules — one per style struct.
 fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
     let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
-    if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
-        return Err("container info out of bounds".into());
-    }
-    let info_data = &kfx_bytes
-        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info_data = slice_at(
+        kfx_bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )
+    .ok_or("container info out of bounds")?;
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
     let Some((idx_off, idx_len)) = info.index else {
         return Ok(0);
     };
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let Some(index_data) = slice_at(kfx_bytes, idx_off, idx_len) else {
+        return Ok(0);
+    };
+    let entities = parse_index_table(index_data, header.header_len);
     let style_type = KfxSymbol::Style as u32;
     Ok(entities
         .iter()

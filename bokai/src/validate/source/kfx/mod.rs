@@ -9,8 +9,11 @@
 //!   `bcDRMScheme` or `bcComprType` is one `container-encrypted` /
 //!   `container-compressed` error over unreadable payloads. The header
 //!   `version`, the index table's entry alignment, the `bcContId` shape and
-//!   the symbol table's declared `max_id` are warnings. An out-of-bounds
-//!   entity reaches rules 2/7.
+//!   the symbol table's declared `max_id` are warnings. Each indexed entity is
+//!   read against the bytes it addresses: a range past the end of the file, a
+//!   payload outside the media types that is not Ion, and a name a second
+//!   fragment of the same type repeats over different bytes are errors, one
+//!   per lost fragment.
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
 //!   `storyline` (errors); `book_navigation` (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
@@ -55,7 +58,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::formats::kfx::container::get_field;
+use crate::formats::kfx::container::{ContainerHeader, ContainerInfo, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, BookData};
 use crate::formats::kfx::symbols::KfxSymbol;
@@ -100,6 +103,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(check_container_scalars(bytes));
     findings.extend(check_container_inventory(bytes));
+    findings.extend(check_entity_index(bytes));
     findings.extend(check_required_entities(&book.by_type));
     findings.extend(check_references(&book));
     findings.extend(check_resource_bytes(&book));
@@ -127,7 +131,7 @@ const INDEX_ENTRY_SIZE: usize = 24;
 /// index table's entry alignment, and the `bcContId` shape. [`validate`]
 /// reports `bcDRMScheme` and `bcComprType` from the load error.
 fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
-    use crate::formats::kfx::container::{parse_container_header, parse_container_info};
+    use crate::formats::kfx::container::parse_container_header;
 
     let Ok(header) = parse_container_header(bytes) else {
         return Vec::new();
@@ -146,11 +150,7 @@ fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
         ));
     }
 
-    let info_end = header.container_info_offset + header.container_info_length;
-    if info_end > bytes.len() {
-        return out;
-    }
-    let Ok(info) = parse_container_info(&bytes[header.container_info_offset..info_end]) else {
+    let Some(info) = container_info(bytes, &header) else {
         return out;
     };
 
@@ -188,18 +188,26 @@ fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
     out
 }
 
+/// The container info a header locates, `None` when its range runs past the
+/// end of `bytes` or the info does not parse. Such a container is reported
+/// once as `container-unreadable` from the load error.
+fn container_info(bytes: &[u8], header: &ContainerHeader) -> Option<ContainerInfo> {
+    use crate::formats::kfx::container::{parse_container_info, slice_at};
+
+    let info_bytes = slice_at(
+        bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )?;
+    parse_container_info(info_bytes).ok()
+}
+
 /// The container's `bcContId` ($409).
 fn container_id(bytes: &[u8]) -> Option<String> {
-    use crate::formats::kfx::container::{parse_container_header, parse_container_info};
+    use crate::formats::kfx::container::parse_container_header;
 
     let header = parse_container_header(bytes).ok()?;
-    let info_end = header.container_info_offset + header.container_info_length;
-    if info_end > bytes.len() {
-        return None;
-    }
-    parse_container_info(&bytes[header.container_info_offset..info_end])
-        .ok()?
-        .cont_id
+    container_info(bytes, &header)?.cont_id
 }
 
 /// The shared symbol table every container imports.
@@ -226,26 +234,22 @@ const SINGLETON_TYPES: [KfxSymbol; 10] = [
 /// local symbols it lists, and no [`SINGLETON_TYPES`] entry appears twice.
 fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
     use crate::formats::kfx::container::{
-        extract_doc_symbols, parse_container_header, parse_container_info, parse_import_names,
-        parse_imports_max_id, parse_index_table, parse_local_max_id,
+        extract_doc_symbols, parse_container_header, parse_import_names, parse_imports_max_id,
+        parse_index_table, parse_local_max_id, slice_at,
     };
 
     let Ok(header) = parse_container_header(bytes) else {
         return Vec::new();
     };
-    let info_end = header.container_info_offset + header.container_info_length;
-    if info_end > bytes.len() {
-        return Vec::new();
-    }
-    let Ok(info) = parse_container_info(&bytes[header.container_info_offset..info_end]) else {
+    let Some(info) = container_info(bytes, &header) else {
         return Vec::new();
     };
     let mut out = Vec::new();
 
-    if let Some((off, len)) = info.doc_symbols
-        && off + len <= bytes.len()
+    if let Some(table) = info
+        .doc_symbols
+        .and_then(|(off, len)| slice_at(bytes, off, len))
     {
-        let table = &bytes[off..off + len];
         let names = parse_import_names(table);
         if !names.is_empty() && !names.iter().any(|n| n == SHARED_SYMBOL_TABLE) {
             out.push(warning(
@@ -282,10 +286,8 @@ fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
         }
     }
 
-    if let Some((idx_off, idx_len)) = info.index
-        && idx_off + idx_len <= bytes.len()
-    {
-        let entities = parse_index_table(&bytes[idx_off..idx_off + idx_len], header.header_len);
+    if let Some(index) = info.index.and_then(|(off, len)| slice_at(bytes, off, len)) {
+        let entities = parse_index_table(index, header.header_len);
         for singleton in SINGLETON_TYPES {
             let count = entities
                 .iter()
@@ -303,6 +305,94 @@ fn check_container_inventory(bytes: &[u8]) -> Vec<Finding> {
                         singleton as u64
                     ),
                     None,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// Rule 1's per-entity half: each index entry against the bytes it addresses.
+/// The range lies inside the file, the payload parses as Ion outside the media
+/// types, and no two entities of one type carry both the same name and
+/// different bytes. `loader::load` drops each of these silently, leaving every
+/// later rule a fragment short.
+fn check_entity_index(bytes: &[u8]) -> Vec<Finding> {
+    use crate::formats::kfx::container::{
+        SymbolTable, entity_media, parse_container_header, parse_index_table, slice_at,
+    };
+    use crate::formats::kfx::ion::IonParser;
+    use crate::formats::kfx::resource_index::entity_fid;
+
+    let Ok(header) = parse_container_header(bytes) else {
+        return Vec::new();
+    };
+    let Some(info) = container_info(bytes, &header) else {
+        return Vec::new();
+    };
+    let Some(index) = info.index.and_then(|(off, len)| slice_at(bytes, off, len)) else {
+        return Vec::new();
+    };
+    let symbols = SymbolTable::from_fragment(
+        info.doc_symbols
+            .and_then(|(off, len)| slice_at(bytes, off, len)),
+    );
+
+    let mut out = Vec::new();
+    let mut seen: HashMap<(u32, String), &[u8]> = HashMap::new();
+    for ent in parse_index_table(index, header.header_len) {
+        let name = entity_fid(ent.id as u64, &symbols);
+        let ftype = symbols.resolve(ent.type_id as u64);
+        let location = format!("{ftype}/{name}");
+
+        let Some(payload) = entity_media(bytes, &ent) else {
+            out.push(error(
+                "entity-out-of-bounds",
+                &location,
+                format!(
+                    "the index places this fragment at byte {} for {} bytes, past the end of a \
+                     {}-byte container — nothing it holds reaches the book",
+                    ent.offset,
+                    ent.length,
+                    bytes.len()
+                ),
+            ));
+            continue;
+        };
+
+        // §11.2: a media payload is the media file verbatim; every other
+        // payload is binary Ion.
+        let media = ent.type_id == KfxSymbol::Bcrawmedia as u32
+            || ent.type_id == KfxSymbol::Bcrawfont as u32;
+        if !media && IonParser::new(payload).parse().is_err() {
+            out.push(error(
+                "entity-payload-unparsable",
+                &location,
+                format!(
+                    "the {} payload bytes are not binary Ion — nothing this fragment holds \
+                     reaches the book",
+                    payload.len()
+                ),
+            ));
+            continue;
+        }
+
+        // §6.1: `(type, name)` is a fragment's key, so a reader keeps one of
+        // any two that share it. A repeat carrying identical bytes costs
+        // nothing and is not reported. Singletons all carry the reserved id
+        // `$348` and are counted by `singleton-repeated` instead.
+        if ent.id as u64 != KfxSymbol::Null as u64 {
+            let first = *seen.entry((ent.type_id, name.clone())).or_insert(payload);
+            if first != payload {
+                out.push(error(
+                    "fragment-name-collision",
+                    &location,
+                    format!(
+                        "a second {ftype} fragment carries the name {name:?} with different \
+                         bytes — a reader keying by (type, name) keeps one of the two and loses \
+                         the other"
+                    ),
                 ));
             }
         }
@@ -1750,9 +1840,8 @@ mod tests {
         compr_type: i64,
         cont_id: Option<String>,
         index_length: i64,
-        /// Index-table rows as `(type_id, id)`; each names a zero-length
-        /// entity, enough for the inventory rules that read only the table.
-        index: Vec<(u32, u32)>,
+        /// The entities the index table names, in file order.
+        entities: Vec<Entity>,
         /// Names for the doc-symbols fragment's `imports` list.
         imports: Vec<String>,
         /// Local symbol names for the doc-symbols fragment's `symbols` list.
@@ -1770,12 +1859,58 @@ mod tests {
                 compr_type: 0,
                 cont_id: Some("CR!2V5GMJ5B652W7ED0CNV1210FAXAR".to_string()),
                 index_length: 0,
-                index: Vec::new(),
+                entities: Vec::new(),
                 imports: vec![SHARED_SYMBOL_TABLE.to_string()],
                 local_symbols: Vec::new(),
                 local_max_id: None,
             }
         }
+    }
+
+    /// One entity: an index-table row and the bytes it addresses.
+    struct Entity {
+        type_id: u32,
+        id: u32,
+        payload: Vec<u8>,
+        /// The length the row declares, where it differs from the payload
+        /// written — an out-of-bounds row names more bytes than the file holds.
+        declared_length: Option<u64>,
+    }
+
+    /// An index row naming a zero-length entity, enough for the rules that
+    /// read only the table.
+    fn row(ftype: KfxSymbol, id: u32) -> Entity {
+        Entity {
+            type_id: ftype as u64 as u32,
+            id,
+            payload: Vec::new(),
+            declared_length: None,
+        }
+    }
+
+    impl Entity {
+        fn holding(mut self, payload: Vec<u8>) -> Self {
+            self.payload = payload;
+            self
+        }
+
+        fn declaring_length(mut self, length: u64) -> Self {
+            self.declared_length = Some(length);
+            self
+        }
+    }
+
+    /// A minimal Ion payload: a struct naming one section.
+    fn ion_payload() -> Vec<u8> {
+        use crate::formats::kfx::ion::IonWriter;
+
+        let mut writer = IonWriter::new();
+        writer.write_bvm();
+        writer.write_value(&IonValue::Struct(vec![(
+            KfxSymbol::SectionName as u64,
+            IonValue::Symbol(KfxSymbol::Null as u64),
+        )]));
+        writer.into_bytes()
     }
 
     impl Container {
@@ -1784,15 +1919,20 @@ mod tests {
 
             const HEADER_LEN: u32 = 18;
 
-            // Index table, then doc symbols, both after the fixed header.
+            // Entity payloads sit first, so the index rows can name offsets
+            // relative to the header. Index table and doc symbols follow.
+            let mut payloads: Vec<u8> = Vec::new();
             let mut index_table = Vec::new();
-            for (type_id, id) in &self.index {
-                index_table.extend_from_slice(&id.to_le_bytes());
-                index_table.extend_from_slice(&type_id.to_le_bytes());
-                index_table.extend_from_slice(&0u64.to_le_bytes()); // offset
-                index_table.extend_from_slice(&0u64.to_le_bytes()); // length
+            for ent in &self.entities {
+                let offset = payloads.len() as u64;
+                let length = ent.declared_length.unwrap_or(ent.payload.len() as u64);
+                payloads.extend_from_slice(&ent.payload);
+                index_table.extend_from_slice(&ent.id.to_le_bytes());
+                index_table.extend_from_slice(&ent.type_id.to_le_bytes());
+                index_table.extend_from_slice(&offset.to_le_bytes());
+                index_table.extend_from_slice(&length.to_le_bytes());
             }
-            let index_length = if self.index.is_empty() {
+            let index_length = if self.entities.is_empty() {
                 self.index_length
             } else {
                 index_table.len() as i64
@@ -1828,7 +1968,7 @@ mod tests {
             ));
             let doc_symbols = symbol_writer.into_bytes();
 
-            let index_offset = HEADER_LEN as i64;
+            let index_offset = HEADER_LEN as i64 + payloads.len() as i64;
             let symbols_offset = index_offset + index_length.max(index_table.len() as i64);
 
             let mut fields = vec![
@@ -1876,13 +2016,11 @@ mod tests {
                 &((symbols_offset + doc_symbols.len() as i64) as u32).to_le_bytes(),
             );
             bytes.extend_from_slice(&(info.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&payloads);
             bytes.extend_from_slice(&index_table);
             // An index_length past the written rows is the ragged case; the
             // bytes it names are zero-filled here.
-            bytes.resize(
-                HEADER_LEN as usize + index_length.max(index_table.len() as i64) as usize,
-                0,
-            );
+            bytes.resize(symbols_offset as usize, 0);
             bytes.extend_from_slice(&doc_symbols);
             bytes.extend_from_slice(&info);
             bytes
@@ -1902,11 +2040,11 @@ mod tests {
     #[test]
     fn singleton_type_appearing_twice_is_flagged() {
         let doubled = Container {
-            index: vec![
-                (KfxSymbol::DocumentData as u32, 1),
-                (KfxSymbol::DocumentData as u32, 2),
-                (KfxSymbol::Section as u32, 3),
-                (KfxSymbol::Section as u32, 4),
+            entities: vec![
+                row(KfxSymbol::DocumentData, 1),
+                row(KfxSymbol::DocumentData, 2),
+                row(KfxSymbol::Section, 3),
+                row(KfxSymbol::Section, 4),
             ],
             ..Default::default()
         }
@@ -1917,7 +2055,7 @@ mod tests {
         assert_eq!(out[0].severity, Severity::Warning);
 
         let single = Container {
-            index: vec![(KfxSymbol::DocumentData as u32, 1)],
+            entities: vec![row(KfxSymbol::DocumentData, 1)],
             ..Default::default()
         }
         .build();
@@ -1936,6 +2074,117 @@ mod tests {
         assert_eq!(out[0].rule, "symbol-import-unexpected");
 
         assert!(check_container_inventory(&Container::default().build()).is_empty());
+    }
+
+    #[test]
+    fn entity_reaching_past_the_container_is_flagged() {
+        let overrun = Container {
+            entities: vec![
+                row(KfxSymbol::Section, 852)
+                    .holding(ion_payload())
+                    .declaring_length(1 << 20),
+            ],
+            local_symbols: vec!["c0".to_string()],
+            ..Default::default()
+        }
+        .build();
+        let out = check_entity_index(&overrun);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "entity-out-of-bounds");
+        assert_eq!(out[0].severity, Severity::Error);
+        assert_eq!(out[0].location, "section/c0");
+
+        // A length that names only the bytes written reads fine.
+        let honest = Container {
+            entities: vec![row(KfxSymbol::Section, 852).holding(ion_payload())],
+            local_symbols: vec!["c0".to_string()],
+            ..Default::default()
+        }
+        .build();
+        assert!(check_entity_index(&honest).is_empty());
+    }
+
+    #[test]
+    fn non_ion_payload_is_flagged_outside_the_media_types() {
+        let garbage = vec![0xFFu8; 16];
+        let ion_type = Container {
+            entities: vec![row(KfxSymbol::Section, 852).holding(garbage.clone())],
+            local_symbols: vec!["c0".to_string()],
+            ..Default::default()
+        }
+        .build();
+        let out = check_entity_index(&ion_type);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "entity-payload-unparsable");
+        assert_eq!(out[0].severity, Severity::Error);
+
+        // §11.2: media bytes are the media file, never Ion.
+        for media in [KfxSymbol::Bcrawmedia, KfxSymbol::Bcrawfont] {
+            let bytes = Container {
+                entities: vec![row(media, 852).holding(garbage.clone())],
+                local_symbols: vec!["c0".to_string()],
+                ..Default::default()
+            }
+            .build();
+            assert!(check_entity_index(&bytes).is_empty(), "{media:?}");
+        }
+    }
+
+    #[test]
+    fn two_fragments_of_one_type_sharing_a_name_are_flagged() {
+        let mut second = ion_payload();
+        second.push(0x0F); // an Ion null, so the payload still parses
+        let repeated = Container {
+            entities: vec![
+                row(KfxSymbol::Section, 852).holding(ion_payload()),
+                row(KfxSymbol::Section, 852).holding(second),
+            ],
+            local_symbols: vec!["c0".to_string()],
+            ..Default::default()
+        }
+        .build();
+        let out = check_entity_index(&repeated);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "fragment-name-collision");
+        assert_eq!(out[0].severity, Severity::Error);
+
+        // The same name over identical bytes costs a reader nothing.
+        let identical = Container {
+            entities: vec![
+                row(KfxSymbol::Section, 852).holding(ion_payload()),
+                row(KfxSymbol::Section, 852).holding(ion_payload()),
+            ],
+            local_symbols: vec!["c0".to_string()],
+            ..Default::default()
+        }
+        .build();
+        assert!(check_entity_index(&identical).is_empty());
+
+        // One name per fragment, and the same name under another type, both
+        // read fine: §6.1 keys by the pair.
+        let distinct = Container {
+            entities: vec![
+                row(KfxSymbol::Section, 852).holding(ion_payload()),
+                row(KfxSymbol::Section, 853).holding(ion_payload()),
+                row(KfxSymbol::PositionIdMap, 852).holding(ion_payload()),
+            ],
+            local_symbols: vec!["c0".to_string(), "c1".to_string()],
+            ..Default::default()
+        }
+        .build();
+        assert!(check_entity_index(&distinct).is_empty());
+
+        // Singletons all carry the reserved id `$348`; `singleton-repeated`
+        // counts those.
+        let singletons = Container {
+            entities: vec![
+                row(KfxSymbol::DocumentData, KfxSymbol::Null as u64 as u32).holding(ion_payload()),
+                row(KfxSymbol::DocumentData, KfxSymbol::Null as u64 as u32).holding(ion_payload()),
+            ],
+            ..Default::default()
+        }
+        .build();
+        assert!(check_entity_index(&singletons).is_empty());
     }
 
     // --- Wave 4 (arithmetic over one fragment) -----------------------------

@@ -37,9 +37,10 @@ use zip::ZipArchive;
 
 use crate::formats::epub::{parse_container_xml, parse_opf};
 use crate::formats::kfx::container::{
-    SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
+    SymbolTable, parse_container_header, parse_container_info, parse_entity, parse_index_table,
+    slice_at,
 };
-use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 
 /// A single `<img src>` from the EPUB side. May represent either the source
@@ -661,30 +662,30 @@ pub struct KfxImageData {
 
 pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, String> {
     let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
-    if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
-        return Err("container info out of bounds".into());
-    }
-    let info_data = &kfx_bytes
-        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info_data = slice_at(
+        kfx_bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )
+    .ok_or("container info out of bounds")?;
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     // Declared-base symbol table: doc-local ids start at the container's
     // declared import max_id, not at our static table's length (see
     // kfx::container::SymbolTable).
-    let symbols = match info.doc_symbols {
-        Some((off, len)) if off + len <= kfx_bytes.len() => {
-            SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))
-        }
-        _ => SymbolTable::from_fragment(None),
-    };
+    let symbols = SymbolTable::from_fragment(
+        info.doc_symbols
+            .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
+    );
 
     let resolve_sym = |id: u64| -> String { symbols.resolve(id).to_string() };
 
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let index_data = slice_at(kfx_bytes, idx_off, idx_len).ok_or("kfx: index out of bounds")?;
+    let entities = parse_index_table(index_data, header.header_len);
 
     let external_resource_type = KfxSymbol::ExternalResource as u32;
     let bcrawmedia_type = KfxSymbol::Bcrawmedia as u32;
@@ -731,15 +732,6 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
         image_refs_distinct,
         image_element_count,
     })
-}
-
-fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
-    if ent.offset + ent.length > data.len() {
-        return None;
-    }
-    let entity = &data[ent.offset..ent.offset + ent.length];
-    let ion = skip_enty_header(entity);
-    IonParser::new(ion).parse().ok()
 }
 
 fn extract_external_resource<F>(value: &IonValue, resolve_sym: &F) -> Option<ExternalResource>

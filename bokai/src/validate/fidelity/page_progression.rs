@@ -25,7 +25,8 @@ use zip::ZipArchive;
 
 use crate::formats::epub::{parse_container_xml, parse_opf};
 use crate::formats::kfx::container::{
-    SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
+    SymbolTable, entity_media, parse_container_header, parse_container_info, parse_index_table,
+    slice_at,
 };
 use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::symbols::KfxSymbol;
@@ -193,30 +194,30 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 /// Returns `(resolved_ppd, raw_direction, raw_writing_mode)`.
 fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), String> {
     let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
-    if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
-        return Err("container info out of bounds".into());
-    }
-    let info_data = &kfx_bytes
-        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info_data = slice_at(
+        kfx_bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )
+    .ok_or("container info out of bounds")?;
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     // Declared-base symbol table: doc-local ids start at the container's
     // declared import max_id, not at our static table's length (see
     // kfx::container::SymbolTable).
-    let symbols = match info.doc_symbols {
-        Some((off, len)) if off + len <= kfx_bytes.len() => {
-            SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))
-        }
-        _ => SymbolTable::from_fragment(None),
-    };
+    let symbols = SymbolTable::from_fragment(
+        info.doc_symbols
+            .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
+    );
 
     let resolve_sym = |id: u64| -> String { symbols.resolve(id).to_string() };
 
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let index_data = slice_at(kfx_bytes, idx_off, idx_len).ok_or("kfx: index out of bounds")?;
+    let entities = parse_index_table(index_data, header.header_len);
 
     let doc_data_type = KfxSymbol::DocumentData as u32;
     let metadata_type = KfxSymbol::Metadata as u32;
@@ -228,11 +229,9 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
         if ent.type_id != doc_data_type && ent.type_id != metadata_type {
             continue;
         }
-        if ent.offset + ent.length > kfx_bytes.len() {
+        let Some(ion) = entity_media(kfx_bytes, ent) else {
             continue;
-        }
-        let entity = &kfx_bytes[ent.offset..ent.offset + ent.length];
-        let ion = skip_enty_header(entity);
+        };
         let Ok(value) = IonParser::new(ion).parse() else {
             continue;
         };

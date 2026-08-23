@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use crate::formats::kfx::container::{
-    EntityLoc, get_field, parse_container_header, parse_container_info, parse_index_table,
-    skip_enty_header,
+    EntityLoc, entity_media, get_field, parse_container_header, parse_container_info,
+    parse_index_table, slice_at,
 };
 use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::symbols::KfxSymbol;
@@ -73,11 +73,12 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
     let header =
         parse_container_header(kfx_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
 
-    if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
-        return Err(KfxError::InvalidKfx("container info out of bounds".into()));
-    }
-    let info_bytes = &kfx_bytes
-        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info_bytes = slice_at(
+        kfx_bytes,
+        header.container_info_offset,
+        header.container_info_length,
+    )
+    .ok_or_else(|| KfxError::InvalidKfx("container info out of bounds".into()))?;
     let info = parse_container_info(info_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
 
     if info.drm_scheme != 0 {
@@ -87,30 +88,25 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, KfxError> {
         return Err(KfxError::Compressed(info.compr_type));
     }
 
-    let symbols = match info.doc_symbols {
-        Some((off, len)) if off + len <= kfx_bytes.len() => {
-            SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))
-        }
-        _ => SymbolTable::from_fragment(None),
-    };
+    let symbols = SymbolTable::from_fragment(
+        info.doc_symbols
+            .and_then(|(off, len)| slice_at(kfx_bytes, off, len)),
+    );
 
     let (idx_off, idx_len) = info
         .index
         .ok_or_else(|| KfxError::InvalidKfx("missing index table".into()))?;
-    if idx_off + idx_len > kfx_bytes.len() {
-        return Err(KfxError::InvalidKfx("index out of bounds".into()));
-    }
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let index_bytes = slice_at(kfx_bytes, idx_off, idx_len)
+        .ok_or_else(|| KfxError::InvalidKfx("index out of bounds".into()))?;
+    let entities = parse_index_table(index_bytes, header.header_len);
 
     let mut by_type: HashMap<u64, HashMap<String, IonValue>> = HashMap::new();
     let mut raw_media: HashMap<String, Vec<u8>> = HashMap::new();
 
     for ent in &entities {
-        if ent.offset + ent.length > kfx_bytes.len() {
+        let Some(payload) = entity_media(kfx_bytes, ent) else {
             continue;
-        }
-        let entity_bytes = &kfx_bytes[ent.offset..ent.offset + ent.length];
-        let payload = skip_enty_header(entity_bytes);
+        };
 
         // bcRawMedia ($417): raw image/font bytes, keyed by the entity id's
         // resolved symbol name (e.g. "resource/rsrc562") — the `location` of
