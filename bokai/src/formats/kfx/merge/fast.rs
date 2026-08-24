@@ -35,7 +35,7 @@ use std::path::Path;
 
 use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value};
 use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
-use crate::formats::kfx::container::{clamp_usize, slice_at};
+use crate::formats::kfx::container::{GeneratorTrailer, clamp_usize, slice_at};
 use crate::trace::Trace;
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
@@ -420,19 +420,13 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
     let kfxgen_info_bytes = data
         .get(kfxgen_start..header_len)
         .ok_or_else(|| out_of_range("kfxgen_info"))?;
-    let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
-    let app_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_application_version")
-        .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "appVersion"))
-        .unwrap_or_default();
-    let pkg_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_package_version")
-        .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "buildVersion"))
-        .unwrap_or_default();
+    let trailer = GeneratorTrailer::parse(&String::from_utf8_lossy(kfxgen_info_bytes));
 
     Ok(RawContainer {
         data,
         container_id,
-        kfxgen_app_version: app_version,
-        kfxgen_pkg_version: pkg_version,
+        kfxgen_app_version: trailer.application_version,
+        kfxgen_pkg_version: trailer.package_version,
         version,
         doc_symbols_range,
         format_capabilities_range,
@@ -815,16 +809,6 @@ fn field_int(fields: &[(String, IonNode)], key: &str) -> Option<i64> {
             IonNode::Int(n) => Some(*n),
             _ => None,
         })
-}
-
-fn extract_kfxgen_field(s: &str, key: &str) -> Option<String> {
-    let key_pat = format!("key:\"{}\"", key);
-    let pos = s.find(&key_pat)?;
-    let rest = &s[pos + key_pat.len()..];
-    let val_start = rest.find("value:\"")? + "value:\"".len();
-    let val_rest = &rest[val_start..];
-    let val_end = val_rest.find('"')?;
-    Some(val_rest[..val_end].to_string())
 }
 
 fn escape_json(s: &str) -> String {

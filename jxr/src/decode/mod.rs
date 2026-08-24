@@ -1,7 +1,6 @@
 //! JPEG-XR decoder: TIFF-like container parsing + full T.832 codestream
-//! reconstruction. Line-by-line port of `jxr_image.py` (John Howell, KFX
-//! Input plugin), itself written from the ITU-T T.832 pseudo-code — so the
-//! codestream side covers the whole spec, not just the Kindle subset.
+//! reconstruction. The codestream side follows the ITU-T T.832 pseudo-code
+//! and covers the whole specification, past the subset a Kindle emits.
 //!
 //! Entry points: [`container::parse`] for the outer file, then
 //! [`decoder::Decoder`] on the extracted codestream bytes.
@@ -25,10 +24,9 @@ pub mod pixels;
 pub(crate) mod state;
 pub(crate) mod tables;
 
-/// Decode a parsed container completely: the primary codestream, plus the
-/// separate planar-alpha codestream when the container carries one (the
-/// `-a 2` encoding — alpha as its own YONLY image appended via
-/// ALPHA_OFFSET/ALPHA_BYTE_COUNT), merged as the final component.
+/// Decode a parsed container completely: `c.image_data`, plus `c.alpha_data`
+/// where the container carries one — alpha as its own YONLY image, merged as
+/// the final component.
 pub fn decode_image(
     c: &container::JxrContainer<'_>,
 ) -> Result<decoder::DecodedImage, decoder::DecodeError> {
@@ -49,12 +47,9 @@ pub fn decode_image(
     Ok(img)
 }
 
-/// Apply a presentation orientation (the container's SPATIAL_XFRM_PRIMARY,
-/// also `JxrDecApp -O`) to a decoded image, in place. Values 0–7:
-/// 0 none, 1 flip vertical, 2 flip horizontal, 3 both (180°),
-/// 4 rotate 90° CW, 5–7 rotate 90° CW followed by the flips of 1–3.
-/// Not applied automatically by [`decoder::Decoder`] (matching the libjxr
-/// decoder, which only transforms on request).
+/// Apply the container's SPATIAL_XFRM_PRIMARY to `img` in place. `orientation`
+/// 0–7: 0 none, 1 flip vertical, 2 flip horizontal, 3 both (180°), 4 rotate
+/// 90° CW, 5–7 that rotation followed by the flips of 1–3.
 pub fn apply_orientation(img: &mut decoder::DecodedImage, orientation: u8) {
     if orientation == 0 || orientation > 7 {
         return;

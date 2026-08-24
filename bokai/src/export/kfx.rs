@@ -107,38 +107,32 @@ fn build_kfx_container(
     let cover_image = book.metadata().cover_image.clone();
     let first_chapter_id = book.spine().first().map(|e| e.id);
 
-    let (standalone_cover_path, probe_path): (Option<String>, Option<String>) =
-        match (cover_image, first_chapter_id) {
-            (Some(cover_img), Some(first_id)) => {
-                let normalized = normalize_cover_path(&cover_img, &asset_paths);
-                book.load_chapter(first_id)
-                    .ok()
-                    .map(|first_chapter| {
-                        let in_spine_image = get_chapter_image_path(&first_chapter);
-                        let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
-                        // The dimension probe reads the file that renders as the
-                        // cover: the metadata cover on the standalone path, the
-                        // chapter's single image on the in-spine titlepage path.
-                        let probe = if needs_standalone {
-                            Some(normalized.clone())
-                        } else {
-                            in_spine_image.or(Some(normalized.clone()))
-                        };
-                        let standalone = if needs_standalone {
-                            Some(normalized)
-                        } else {
-                            None
-                        };
-                        (standalone, probe)
-                    })
-                    .unwrap_or((None, None))
-            }
-            _ => (None, None),
-        };
+    let (standalone_cover_path, cover_path): (Option<String>, Option<String>) = first_chapter_id
+        .and_then(|first_id| book.load_chapter(first_id).ok())
+        .map(|first_chapter| {
+            let in_spine_image = get_chapter_image_path(&first_chapter);
+            let Some(cover_img) = cover_image else {
+                // Metadata names no cover: the first chapter's own image is
+                // what a reader shows in its place.
+                return (None, in_spine_image);
+            };
+            let normalized = normalize_cover_path(&cover_img, &asset_paths);
+            let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
+            // The file that renders as the cover: the metadata cover on the
+            // standalone path, the chapter's single image on the in-spine
+            // titlepage path.
+            let rendered = if needs_standalone {
+                Some(normalized.clone())
+            } else {
+                in_spine_image.or(Some(normalized.clone()))
+            };
+            (needs_standalone.then_some(normalized), rendered)
+        })
+        .unwrap_or((None, None));
     // Probe the cover image's pixel dimensions once, for both emission paths
     // (`build_cover_section` and `build_chapter_entities_grouped`) to size the
     // page_template's `fixed_width` / `fixed_height` to the image.
-    if let Some(ref p) = probe_path
+    if let Some(ref p) = cover_path
         && let Ok(bytes) = book.load_asset(std::path::Path::new(p))
         && let Some(dims) = crate::util::extract_image_dimensions(&bytes)
     {
@@ -455,7 +449,7 @@ fn build_kfx_container(
     // 2j. Resource fragments: external_resource (metadata) + bcRawMedia (bytes)
     // each. Interior images take `encode_asset_for_kfx` (JXR plates, JPEG on an
     // undecodable input); the cover stays JPEG for the sleep-screen thumbnailer.
-    let cover_filename = book.metadata().cover_image.as_ref().and_then(|c| {
+    let cover_filename = cover_path.as_ref().and_then(|c| {
         std::path::Path::new(c)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -2422,13 +2416,17 @@ const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
     hp: 32,
 };
 
-/// Prepare the cover image's bytes for KFX bundling as JPEG. An SVG cover is
-/// rasterized first — KFX has no vector resource format — then takes the same
-/// JFIF path as any other. `None` means the bytes stand as they are.
+/// The cover image's bytes as the JPEG §13.3 asks for: an SVG rasterizes and a
+/// JPEG-XR decodes through the codec `crate::image` lacks, both landing on the
+/// same JFIF path. `None` means the bytes stand as they are.
 fn cover_jpeg_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
     #[cfg(feature = "svg")]
     if let Some(img) = crate::image::svg::rasterize(data) {
         return crate::image::jpeg::encode_as_jpeg(&img);
+    }
+    if crate::image::ImageFormat::sniff(data) == Some(crate::image::ImageFormat::Jxr) {
+        let (bytes, format, _) = crate::formats::kfx::jxr::transcode(data, "cover").ok()?;
+        return (format == "jpg").then_some(bytes);
     }
     crate::image::jpeg::sanitize_for_kfx(data)
 }
@@ -3931,10 +3929,9 @@ fn manga_thumbnail_of(
     Some((bytes, tw, th))
 }
 
-/// content_features ($585) for a fixed-layout image manga: `CanonicalFormat` +
-/// `yj_non_pdf_fixed_layout` (v2), plus `yj_double_page_spread` for a real 2-page
-/// spread, `yj_thumbnails_present` for a page thumbnail, and the media
-/// declarations the plates require.
+/// content_features ($585) for a fixed-layout image manga: `CanonicalFormat`,
+/// `yj_non_pdf_fixed_layout` (v2), `yj_double_page_spread` on `any_spread`,
+/// `yj_thumbnails_present` on `any_thumb`, and `facts`' media declarations.
 fn build_manga_content_features_fragment(
     any_spread: bool,
     any_thumb: bool,
@@ -7248,6 +7245,30 @@ mod resource_export_tests {
             crate::util::extract_image_dimensions(&jxr),
             Some((32, 32)),
             "JXR plate dimensions must be readable for full-bleed page sizing"
+        );
+    }
+
+    /// §13.3. A cover arrives as JPEG-XR whenever its source is a KFX plate,
+    /// which the importer passes through undecoded. `crate::image` carries no
+    /// JPEG-XR decoder; the library tile draws JPEG alone.
+    #[test]
+    fn a_jpeg_xr_cover_is_transcoded_for_the_library_tile() {
+        let gray: ::image::GrayImage =
+            ::image::ImageBuffer::from_fn(32, 32, |x, _| ::image::Luma([(x * 8) as u8]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageLuma8(gray)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let jxr = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale).expect("plate → JXR");
+
+        let cover = cover_jpeg_for_kfx(&jxr).expect("a JPEG-XR cover transcodes");
+        assert_eq!(
+            crate::image::ImageFormat::sniff(&cover),
+            Some(crate::image::ImageFormat::Jpeg)
+        );
+        assert_eq!(
+            crate::util::extract_image_dimensions(&cover),
+            Some((32, 32))
         );
     }
 

@@ -3191,6 +3191,7 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
 
     // Find book_metadata entity (type 490)
     let book_metadata_type = KfxSymbol::BookMetadata as u32;
+    let mut cover_printed = false;
 
     for i in 0..num_entries {
         let entry_offset = index_offset + i * entry_size;
@@ -3296,6 +3297,7 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
                                                                             bokai::formats::kfx::ion::IonValue::String(s) => s.clone(),
                                                                             bokai::formats::kfx::ion::IonValue::Int(i) => i.to_string(),
                                                                             bokai::formats::kfx::ion::IonValue::Bool(b) => b.to_string(),
+                                                                            bokai::formats::kfx::ion::IonValue::Symbol(s) => resolve_sym(*s).to_string(),
                                                                             _ => format!("{:?}", ival),
                                                                         };
                                                                     }
@@ -3318,6 +3320,9 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
                                 if !cat_name.is_empty() {
                                     println!("=== {} ===\n", cat_name);
                                     for (key, val) in &metadata_list {
+                                        if key == "cover_image" {
+                                            cover_printed = true;
+                                        }
                                         // Truncate long values on a character
                                         // boundary — titles are frequently CJK.
                                         let display_val = match val.char_indices().nth(60) {
@@ -3335,11 +3340,31 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
             }
         }
 
+        report_fallback_cover(data, cover_printed);
         return Ok(());
     }
 
     eprintln!("No book_metadata entity found");
+    report_fallback_cover(data, false);
     Ok(())
+}
+
+/// The cover of a book whose `book_metadata` ($490) names none: §13.2 puts it
+/// in the flat `$258 metadata` fragment, whose value §13.3 lets take three
+/// forms. Silent where the categorised metadata named one.
+fn report_fallback_cover(data: &[u8], already_printed: bool) {
+    if already_printed {
+        return;
+    }
+    let Ok(book) = bokai::formats::kfx::loader::load(data) else {
+        return;
+    };
+    let Some(cover) = book.metadata.cover_resource_name else {
+        return;
+    };
+    println!("=== metadata ===\n");
+    println!("{:<25} {}", "cover_image:", cover);
+    println!();
 }
 
 /// Report reading orders from a KFX file
@@ -4069,6 +4094,7 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
                 let mut width: Option<i64> = None;
                 let mut height: Option<i64> = None;
                 let mut tiled = false;
+                let mut thumbnail = String::new();
 
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
@@ -4101,6 +4127,11 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
                                 height = Some(*h);
                             }
                         }
+                        "thumbnails" => {
+                            if let bokai::formats::kfx::ion::IonValue::Symbol(s) = field_value {
+                                thumbnail = resolve_sym(*s);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -4115,9 +4146,14 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
                         _ => String::new(),
                     };
                     let tiles = if tiled { " tiled" } else { "" };
+                    let thumb = if thumbnail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" thumbnail:{thumbnail}")
+                    };
                     println!(
-                        "{:<10} {:<6}{}{} → {}",
-                        resource_name, format, dims, tiles, location
+                        "{:<10} {:<6}{}{}{} → {}",
+                        resource_name, format, dims, tiles, thumb, location
                     );
                 }
             }

@@ -774,7 +774,7 @@ In a fixed-layout book each page carries `$66` `fixed_width` and `$67` `fixed_he
 
 Some KFX files carry a PDF as the rendered content, with the KFX layer supplying navigation, positions and text geometry over it. These are identifiable by an `external_resource` whose `format` is `pdf` and whose section templates reference it. Cover detection **must** exclude them: their first section renders a PDF page, not a cover image.
 
-The KFX layer over a PDF supplies one section per page, a section list and its navigation units, a text layer with each resource's dimensions stamped onto its container, and anchors derived from the PDF's link annotations — per URI, per section, and per container — with a baseline for each text container and vector paths attached to style events where the source drew them.
+The KFX layer over a PDF supplies one section per page, a section list and its navigation units, a text layer with each resource's dimensions stamped onto its container, and anchors derived from the PDF's link annotations — per URI, per section, and per container — with a baseline for each text container and vector paths attached to style events where the source drew them. Each page's rotation rides one `auxiliary_data` ($597) fragment per section, named `<section>-ad` and keyed `page_rotation`; the dimensions a page resource declares are of the page as rendered, so a quarter turn arrives as a transposed box rather than as a flag.
 
 Two rules a reading or converting implementation also needs:
 
@@ -814,6 +814,8 @@ Older containers carry metadata in `$258` `metadata` as a plain struct keyed by 
 
 The cover is named by `cover_image`, whose value may be a string, a bare symbol, or a single-element list — all three occur, and all resolve to an `external_resource` name. Where no `cover_image` exists at all, the cover **may** be recovered by walking the first section of the first reading order to its storyline's first `resource_name`, accepting it only if it names a raster image resource.
 
+The cover, and the resource its `thumbnails` ($214) field names, **must** be JPEG. The library gallery and the sleep screen draw them through a thumbnailer that reads JPEG and nothing else, so a JPEG-XR cover leaves a blank tile beside a book that opens and reads normally — a symptom that points at nothing, since the reference resolves, the resource exists and the bytes are there. Amazon ships both as `format: jpg`. This is the cover pair alone: interior plates are JPEG-XR in Amazon's own books and render. The `mime` value is not part of it — `image/jpg` and `image/jpeg` both display.
+
 ## 14. Conformance
 
 ### 14.1. Conforming reader
@@ -845,6 +847,10 @@ A producer of a fixed-layout book **should** emit a `location_map` naming one Lo
 A producer converting from CSS **should not** emit a `px` length in a reflowable book. An absolute length is a point read at 160 dpi — scale by `0.45` and emit `pt` — and `px` is the fixed-layout canvas unit (§8.2). It **should** likewise resolve an `auto` horizontal margin into the split it stands for and state that as `margin_left` and `margin_right`: `box_align` is a picture property and does not place a text block (§8.3).
 
 A producer of a fixed-layout book **must** declare the capability in both places a reader looks — the `content_features` key and the `kindle_capability_metadata` value (§12.1) — and **must** give every page a `fixed_width`/`fixed_height` viewport (§12.3). It **should not** declare `yj_double_page_spread` without a fixed-layout capability beside it: facing pages pair only on the fixed-layout path.
+
+A producer **must** encode the cover image and the thumbnail beside it as JPEG (§13.3). It **should** declare each resource's `format` as what its bytes are and state `resource_width`/`resource_height` as the decoded image's own size (§11.1, §11.3): a consumer that trusts a wrong declaration decodes the payload as the wrong format, or sizes a page container to a picture of another shape.
+
+A producer pairing two pages into a facing-page spread over a PDF **must** take them from one embedded PDF at one height and one rotation (§12.4). Pages that disagree are drawn side by side on a single canvas, and the one that does not fit is scaled, letterboxed or turned against its partner. A reader has only the geometry to judge this by: the rotation a PDF-backed container states is one `page_rotation` per section, which both halves of a spread section share, and the dimensions each page resource declares are of the page as rendered, so a quarter turn shows as a transposed box.
 
 A producer **should not** attempt to bound the symbol ids it emits by any device's table. The ids a book names follow from the constructs it contains; a producer that needs a construct emits the symbol that names it (§5.2).
 

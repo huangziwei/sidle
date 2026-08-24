@@ -21,7 +21,7 @@ use std::io;
 use super::fragment::{CONTAINER_FRAGMENT_TYPES, YJFragment, is_raw};
 use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value, serialize_value};
 use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
-use crate::formats::kfx::container::{clamp_usize, slice_at};
+use crate::formats::kfx::container::{GeneratorTrailer, clamp_usize, slice_at};
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
 const ENTY_SIGNATURE: &[u8] = b"ENTY";
@@ -192,26 +192,17 @@ pub fn deserialize_container_phase1(
         }
     }
 
-    // kfxgen_info: the app/package version fields, read out of `key:"value"`
-    // substrings.
     let kfxgen_start = ci_off.saturating_add(ci_len);
     let kfxgen_info_bytes = data
         .get(kfxgen_start..header_len)
         .ok_or_else(|| out_of_range("kfxgen_info"))?;
-    let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
-    let kfxgen_application_version =
-        extract_kfxgen_field(&kfxgen_info_str, "kfxgen_application_version")
-            .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "appVersion"))
-            .unwrap_or_default();
-    let kfxgen_package_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_package_version")
-        .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "buildVersion"))
-        .unwrap_or_default();
+    let trailer = GeneratorTrailer::parse(&String::from_utf8_lossy(kfxgen_info_bytes));
 
     Ok(LoadedContainer {
         container_id,
         container_format: KFX_CONTAINER_FORMAT_MAIN.to_string(),
-        kfxgen_application_version,
-        kfxgen_package_version,
+        kfxgen_application_version: trailer.application_version,
+        kfxgen_package_version: trailer.package_version,
         version: version as i64,
         doc_symbols: doc_symbols_node,
         format_capabilities: fc_node,
@@ -637,17 +628,6 @@ fn pop_int(fields: &mut Vec<(String, IonNode)>, key: &str) -> Option<i64> {
         IonNode::Int(n) => Some(n),
         _ => None,
     }
-}
-
-fn extract_kfxgen_field(s: &str, key: &str) -> Option<String> {
-    // matches: key:"<key>",value:"<value>"
-    let key_pat = format!("key:\"{}\"", key);
-    let pos = s.find(&key_pat)?;
-    let rest = &s[pos + key_pat.len()..];
-    let val_start = rest.find("value:\"")? + "value:\"".len();
-    let val_rest = &rest[val_start..];
-    let val_end = val_rest.find('"')?;
-    Some(val_rest[..val_end].to_string())
 }
 
 fn escape_json_string(s: &str) -> String {

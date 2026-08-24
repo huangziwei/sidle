@@ -13,7 +13,8 @@
 //!   read against the bytes it addresses: a range past the end of the file, a
 //!   payload outside the media types that is not Ion, and a name a second
 //!   fragment of the same type repeats over different bytes are errors, one
-//!   per lost fragment.
+//!   per lost fragment. The generator trailer's `kfxgen_payload_sha1` is read
+//!   against the payload region it digests (§3.5, warning).
 //! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
 //!   `storyline` (errors); `book_navigation` (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
@@ -43,20 +44,26 @@
 //!   under `bcRawFont` ($418); every `resource_name` ($175) an element cites
 //!   and every `background_image` ($479) a style declares names a real
 //!   `external_resource`; and every embedded payload is named by one of them
-//!   (info: orphan bytes).
+//!   (info: orphan bytes). Each resolved payload answers its own descriptor:
+//!   the magic number against the declared `format` (§11.3, info) and the
+//!   header's pixel size against `resource_width`/`resource_height` (§11.1,
+//!   warning).
 //! - **Rule 8, position-map coverage** — every reading-order section appears
 //!   in the `position_map` ($264), the device's "go to location" target
 //!   (warning; runs only on a container holding a `position_map`, some KFX
 //!   addressing purely by `position_id_map` $265).
 //! - **Rule 9, cover present + resolves** — the declared cover resource exists
-//!   and has embedded bytes (missing cover = warning; dangling = error).
+//!   and has embedded bytes (missing cover = warning; dangling = error), and
+//!   it and the `thumbnails` ($214) resource it names hold the JPEG the
+//!   library gallery draws (§13.3, warning).
 //! - **Rule 11, declarations agree with content** — each `content_features`
 //!   entry states what the book contains. See [`ContentFacts`] for the facts
 //!   each claim is read against. The two fixed-layout capabilities are read
 //!   across both places a book declares them (§12.1): a spread declared with
 //!   no fixed-layout capability pairs no pages, and every page of a
 //!   fixed-layout book states the `fixed_width`/`fixed_height` viewport it is
-//!   drawn into (§12.3).
+//!   drawn into (§12.3). In a PDF-backed book the two pages of a facing-page
+//!   spread draw one embedded PDF at one size (§12.4).
 //! - **Rule 12, metadata** — `title` and `language` are stated, and
 //!   `author_pronunciation` stays positional with `author`.
 //! - **Rule 13, element arithmetic** — an element id names one element
@@ -134,6 +141,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
 
     let mut findings = Vec::new();
     findings.extend(check_container_scalars(bytes));
+    findings.extend(check_payload_digest(bytes));
     findings.extend(check_container_inventory(bytes));
     findings.extend(check_entity_index(bytes));
     findings.extend(check_required_entities(&book.by_type));
@@ -150,6 +158,7 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_position_arithmetic(&book));
     findings.extend(check_feature_content_agreement(&book));
     findings.extend(check_fixed_layout_pages(&book));
+    findings.extend(check_pdf_spreads(&book));
     findings
 }
 
@@ -222,6 +231,48 @@ fn check_container_scalars(bytes: &[u8]) -> Vec<Finding> {
     }
 
     out
+}
+
+/// Rule 1's trailer half (§3.5, §14.2 MUST). `kfxgen_payload_sha1` digests
+/// the entity payload region — every byte from `header_len` to the end of the
+/// container. A trailer stating no digest is not read against anything.
+fn check_payload_digest(bytes: &[u8]) -> Vec<Finding> {
+    use crate::formats::kfx::container::{
+        GeneratorTrailer, parse_container_header, payload_region, trailer_bytes,
+    };
+
+    let Ok(header) = parse_container_header(bytes) else {
+        return Vec::new();
+    };
+    let Some(trailer) = trailer_bytes(bytes, &header) else {
+        return Vec::new();
+    };
+    let declared = GeneratorTrailer::parse(&String::from_utf8_lossy(trailer)).payload_sha1;
+    let Some(payload) = payload_region(bytes, &header) else {
+        return Vec::new();
+    };
+    if declared.is_empty() {
+        return Vec::new();
+    }
+
+    let digest = sha1_smol::Sha1::from(payload).hexdigest();
+    if digest.eq_ignore_ascii_case(&declared) {
+        return Vec::new();
+    }
+    vec![warning(
+        "payload-digest-mismatch",
+        "<container>",
+        format!(
+            "kfxgen_payload_sha1 states {declared}, and the {} payload bytes digest to {digest} — \
+             a delivery pipeline reading the trailer sees a container that does not match its \
+             own manifest",
+            payload.len()
+        ),
+        Some(FixHint::new(
+            "recompute-payload-digest",
+            "restate kfxgen_payload_sha1 as the SHA-1 of the entity payload region",
+        )),
+    )]
 }
 
 /// The container info `header` locates. `None` when its range runs past the
@@ -874,11 +925,9 @@ fn check_references(book: &BookData) -> Vec<Finding> {
     findings
 }
 
-/// §9.2, §9.4. A `nav_unit` ($393) `target_position` ($246) is the
-/// pair `{id, offset}`: an element the content walk met, and a character offset
-/// inside that element's base text. The `landmarks` and `page_list` containers
-/// are read here, the `toc` and `headings` ones by
-/// [`check_nav_reachability`]; every container's offsets are read here.
+/// §9.2, §9.4. A `nav_unit` ($393) `target_position` ($246) is `{id, offset}`:
+/// an element the walk met, an offset into its base text. `landmarks` and
+/// `page_list` here; [`check_nav_reachability`] takes `toc` and `headings`.
 fn check_nav_positions(book: &BookData, defects: &WalkDefects) -> Vec<Finding> {
     let mut unreachable: HashMap<&'static str, BTreeSet<i64>> = HashMap::new();
     let mut past_text: BTreeSet<String> = BTreeSet::new();
@@ -1131,11 +1180,9 @@ fn encloses_content(fields: &[(u64, IonValue)], book: &BookData) -> bool {
     boxed(fields) || named_style(fields, book).is_some_and(boxed)
 }
 
-/// §8.6. A `type: container`'s `layout` ($156) is the block-progression axis of
-/// its children, which runs across the text axis: `vertical_rl` text takes
-/// `layout: horizontal`, `horizontal_tb` text takes `layout: vertical`. A box
-/// on the axis of its own text inflates to full block width with its content
-/// pinned to the inline start.
+/// §8.6. A `type: container`'s `layout` ($156) is its children's
+/// block-progression axis, across the text axis: `vertical_rl` text takes
+/// `layout: horizontal`, `horizontal_tb` text takes `layout: vertical`.
 fn check_layout_axis(
     fields: &[(u64, IonValue)],
     book: &BookData,
@@ -1204,9 +1251,8 @@ fn named_style<'b>(
 }
 
 /// §7.6. `column_format` ($152) states one entry per column, positionally,
-/// each covering `column_span` ($118) columns. The widest row spans the same
+/// each covering `column_span` ($118) columns; the widest row spans the same
 /// count, each cell covering the `table_column_span` ($148) its style names.
-/// A count short of the widest row slides every later width one column over.
 fn check_column_format(
     fields: &[(u64, IonValue)],
     table: &IonValue,
@@ -1340,10 +1386,9 @@ fn dangling_content_ref(value: &IonValue, book: &BookData) -> Option<String> {
     base_text(value, book).is_none().then(|| name.to_string())
 }
 
-/// A `table` ($278) element's grid: `table_row` ($279) descendants, and the
-/// widest row's column count. A row's children *are* its cells (§7.6), each
-/// covering the `table_column_span` ($148) its style names; a nested table's
-/// rows stop at the row that holds it.
+/// A `table` ($278) element's grid: `table_row` ($279) descendants down to a
+/// nested table, and the widest row's column count. A row's children are its
+/// cells (§7.6), each covering the `table_column_span` ($148) its style names.
 fn table_grid(table: &IonValue, book: &BookData) -> (usize, usize) {
     let mut rows = Vec::new();
     collect_rows(table, book, &mut rows);
@@ -1425,10 +1470,8 @@ fn check_style_fields(
 }
 
 /// One `{value, unit}` length (§8.2): the unit is a CSS length unit and the
-/// magnitude is a number. A struct carrying no `unit` ($306) is no length.
-///
-/// `px` is the fixed-layout page-canvas unit, read as device dots on a book
-/// declaring no fixed layout.
+/// magnitude is a number; a struct carrying no `unit` ($306) is no length.
+/// `px` is the page-canvas unit, read as device dots on a reflowable book.
 fn check_length(
     fields: &[(u64, IonValue)],
     book: &BookData,
@@ -1902,7 +1945,7 @@ fn check_resource_bytes(book: &BookData) -> Vec<Finding> {
         else {
             continue;
         };
-        if !book.raw_media.contains_key(location) {
+        let Some(payload) = book.raw_media.get(location) else {
             out.push(error(
                 "resource-missing-bytes",
                 location,
@@ -1910,9 +1953,81 @@ fn check_resource_bytes(book: &BookData) -> Vec<Finding> {
                     "external_resource {name:?} points to location {location:?} but no embedded bytes exist for it"
                 ),
             ));
-        }
+            continue;
+        };
+        out.extend(check_declared_media(book, name, fields, payload));
     }
     out
+}
+
+/// Rule 7's payload half (§11.1, §11.3). The magic number names the format an
+/// `external_resource` declares and the header states its pixel size. A
+/// payload no magic number names — SVG, PDF, a font — is read against neither.
+fn check_declared_media(
+    book: &BookData,
+    name: &str,
+    fields: &[(u64, IonValue)],
+    payload: &[u8],
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let Some(sniffed) = crate::image::ImageFormat::sniff(payload) else {
+        return out;
+    };
+
+    if let Some(declared) =
+        get_field(fields, KfxSymbol::Format as u64).and_then(|v| book.symbols.text_of(v))
+        && !names_format(declared, sniffed)
+    {
+        out.push(info(
+            "resource-format-mismatch",
+            name,
+            format!(
+                "external_resource {name:?} declares format {declared:?} over {} bytes — a \
+                 consumer trusting the declaration decodes it as the wrong format",
+                sniffed.extension()
+            ),
+        ));
+    }
+
+    // A tiled resource's declared size is of the image its tiles assemble
+    // into; `location` holds one tile.
+    if get_field(fields, KfxSymbol::YjTiles as u64).is_some()
+        || get_field(fields, KfxSymbol::YjTilePadding as u64).is_some()
+    {
+        return out;
+    }
+    let (Some(width), Some(height)) = (
+        fxl::read_px(fields, KfxSymbol::ResourceWidth),
+        fxl::read_px(fields, KfxSymbol::ResourceHeight),
+    ) else {
+        return out;
+    };
+    let Some((actual_width, actual_height)) = crate::util::extract_image_dimensions(payload) else {
+        return out;
+    };
+    if (width, height) != (actual_width, actual_height) {
+        out.push(warning(
+            "resource-dimensions-mismatch",
+            name,
+            format!(
+                "external_resource {name:?} declares {width}×{height} over a \
+                 {actual_width}×{actual_height} image — a page container sized from the \
+                 declaration holds a picture of another shape"
+            ),
+            Some(FixHint::new(
+                "restate-resource-dimensions",
+                "set resource_width and resource_height to the decoded image's own size",
+            )),
+        ));
+    }
+    out
+}
+
+/// Whether a `format` value names what the bytes are. `jpg` and `jpeg` both
+/// name a JPEG; every other format has one spelling.
+fn names_format(declared: &str, sniffed: crate::image::ImageFormat) -> bool {
+    declared == sniffed.extension()
+        || (sniffed == crate::image::ImageFormat::Jpeg && declared == "jpeg")
 }
 
 /// The fields of the `external_resource` ($164) named `name`, matched on its
@@ -2050,15 +2165,14 @@ fn check_cover(book: &BookData) -> Vec<Finding> {
         )];
     };
 
-    if cover_resource_resolves(book, cover_name) {
-        Vec::new()
-    } else {
-        vec![error(
+    if !cover_resource_resolves(book, cover_name) {
+        return vec![error(
             "cover-unresolved",
             "<metadata>",
             format!("cover names resource {cover_name:?} but it has no embedded image bytes"),
-        )]
+        )];
     }
+    check_cover_encoding(book, cover_name)
 }
 
 /// True when the `external_resource` named `cover_name` exists and its
@@ -2069,6 +2183,58 @@ fn cover_resource_resolves(book: &BookData, cover_name: &str) -> bool {
             .and_then(|v| v.as_string())
             .is_some_and(|location| book.raw_media.contains_key(location))
     })
+}
+
+/// Rule 9's encoding half (§13.3). The cover and the `thumbnails` ($214)
+/// resource it names hold JPEG: the library gallery and the sleep screen
+/// decode nothing else, and draw a blank tile for what they cannot.
+fn check_cover_encoding(book: &BookData, cover_name: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut name = cover_name.to_string();
+    let mut seen = HashSet::new();
+
+    while seen.insert(name.clone()) {
+        let Some(fields) = resource_named(book, &name) else {
+            break;
+        };
+        if let Some(payload) = get_field(fields, KfxSymbol::Location as u64)
+            .and_then(|v| v.as_string())
+            .and_then(|location| book.raw_media.get(location))
+            && crate::image::ImageFormat::sniff(payload) != Some(crate::image::ImageFormat::Jpeg)
+        {
+            let role = if name == cover_name {
+                "cover"
+            } else {
+                "cover thumbnail"
+            };
+            out.push(warning(
+                "cover-not-jpeg",
+                &name,
+                format!(
+                    "the {role} resource {name:?} holds {} bytes — the library gallery and the \
+                     sleep screen draw JPEG alone and show a blank tile for anything else",
+                    described_encoding(payload)
+                ),
+                Some(FixHint::new(
+                    "encode-cover-as-jpeg",
+                    "re-encode the cover image and its thumbnail as baseline JPEG",
+                )),
+            ));
+        }
+        let Some(thumbnail) =
+            get_field(fields, KfxSymbol::Thumbnails as u64).and_then(|v| book.symbols.text_of(v))
+        else {
+            break;
+        };
+        name = thumbnail.to_string();
+    }
+    out
+}
+
+/// What a payload's magic number names it, or `"unrecognized"` for bytes no
+/// magic number covers.
+fn described_encoding(payload: &[u8]) -> &'static str {
+    crate::image::ImageFormat::sniff(payload).map_or("unrecognized", |f| f.extension())
 }
 
 // ============================================================================
@@ -2489,13 +2655,9 @@ fn position_spans(book: &BookData) -> Vec<(String, i64, i64)> {
     spans
 }
 
-/// Rule 14. The `eid → pid → Location` chain of §10 read end to end: every
-/// element a storyline holds carries a position, every positioned id belongs to
-/// a content fragment, each `section_position_id_map` ($609) walk ends at the
-/// length its span declares, every `location_map` ($550) coordinate resolves
-/// through the pid map, `yj.location_pid_map` ($621) states the same
-/// boundaries where both are present, and a fixed-layout book names one
-/// Location per page (§14.2).
+/// Rule 14. The `eid → pid → Location` chain of §10 read end to end, from a
+/// storyline's element ids through `section_position_id_map` ($609) and
+/// `position_id_map` ($265) to `location_map` ($550)'s boundaries.
 fn check_position_chain(book: &BookData, defects: &WalkDefects) -> Vec<Finding> {
     let fragments = position::PositionFragments::from_book(book);
     let axis = fragments.pid_axis();
@@ -2985,10 +3147,8 @@ fn fixed_layout_pages(book: &BookData) -> Vec<(String, Vec<IonValue>)> {
 }
 
 /// §12.3. Each page of a fixed-layout book carries the viewport it is drawn
-/// into: `fixed_width` ($66) and `fixed_height` ($67) on the leaf container
-/// the page template resolves to, directly or through the per-page containers
-/// of a `page_spread` / `facing_page` storyline. A page declaring neither
-/// states no canvas for its content to be fitted to.
+/// into: `fixed_width` ($66) and `fixed_height` ($67) on the leaf container a
+/// page template resolves to, direct or through a `page_spread` storyline.
 fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
     for (section_name, leaves) in fixed_layout_pages(book) {
@@ -3024,6 +3184,151 @@ fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// One page of a PDF-backed book, as its `external_resource` states it.
+struct PdfPage {
+    /// The `location` ($165) of the embedded PDF the page draws from.
+    source: String,
+    /// `resource_width` ($422) and `resource_height` ($423), in points.
+    size: Option<(f64, f64)>,
+}
+
+/// §12.4. The two pages of a facing-page spread come from one embedded PDF at
+/// one size. A resource's dimensions are of the page as rendered: a quarter
+/// turn shows as a transposed box.
+fn check_pdf_spreads(book: &BookData) -> Vec<Finding> {
+    let pages = pdf_pages(book);
+    if pages.is_empty() {
+        return Vec::new();
+    }
+
+    let context = LoadedPages(book);
+    let mut out = Vec::new();
+    for section_name in reading_order_sections(book) {
+        let Some(template) = lookup(book, KfxSymbol::Section, &section_name)
+            .and_then(|v| v.unwrap_annotated().as_struct())
+            .and_then(|fields| get_field(fields, KfxSymbol::PageTemplates as u64))
+            .and_then(|v| v.unwrap_annotated().as_list())
+            .and_then(<[IonValue]>::first)
+        else {
+            continue;
+        };
+        let sides: Vec<&PdfPage> = fxl::page_leaves(template, &book.symbols, "ltr", &context)
+            .iter()
+            .filter(|(_, side)| side.is_some())
+            .filter_map(|(leaf, _)| leaf_resource(leaf, book))
+            .filter_map(|name| pages.get(&name))
+            .collect();
+        let [left, right] = sides[..] else {
+            continue;
+        };
+
+        if left.source != right.source {
+            out.push(warning(
+                "spread-pages-differ",
+                &section_name,
+                format!(
+                    "this spread's pages are drawn from {:?} and {:?} — a facing pair comes from \
+                     one embedded PDF",
+                    left.source, right.source
+                ),
+                Some(FixHint::new(
+                    "unpair-spread",
+                    "give each page its own section rather than pairing pages from two sources",
+                )),
+            ));
+        } else if let (Some((aw, ah)), Some((bw, bh))) = (left.size, right.size)
+            && (aw, ah) != (bw, bh)
+        {
+            out.push(warning(
+                "spread-pages-differ",
+                &section_name,
+                format!(
+                    "this spread's pages are {aw}×{ah} and {bw}×{bh} points — the one that does \
+                     not fit is scaled or letterboxed against its partner"
+                ),
+                Some(FixHint::new(
+                    "unpair-spread",
+                    "pair only pages of one size into a facing-page spread",
+                )),
+            ));
+        }
+    }
+    out
+}
+
+/// Every page of a PDF-backed book by `resource_name` (§12.4): an
+/// `external_resource` declaring `format: pdf` draws a slice of the embedded
+/// PDF its `location` names. Empty for a book rendering no PDF.
+fn pdf_pages(book: &BookData) -> HashMap<String, PdfPage> {
+    let mut out = HashMap::new();
+    let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
+        return out;
+    };
+    for (fid, value) in resources {
+        let Some(fields) = value.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        if get_field(fields, KfxSymbol::Format as u64).and_then(|v| book.symbols.text_of(v))
+            != Some("pdf")
+        {
+            continue;
+        }
+        let Some(source) =
+            get_field(fields, KfxSymbol::Location as u64).and_then(|v| v.as_string())
+        else {
+            continue;
+        };
+        let name = get_field(fields, KfxSymbol::ResourceName as u64)
+            .and_then(|v| book.symbols.text_of(v))
+            .unwrap_or(fid);
+        let width = get_field(fields, KfxSymbol::ResourceWidth as u64).and_then(ion_number);
+        let height = get_field(fields, KfxSymbol::ResourceHeight as u64).and_then(ion_number);
+        out.insert(
+            name.to_string(),
+            PdfPage {
+                source: source.to_string(),
+                size: width.zip(height),
+            },
+        );
+    }
+    out
+}
+
+/// The `resource_name` ($175) a page container draws, from the container
+/// itself or from the first descendant naming one.
+fn leaf_resource(leaf: &IonValue, book: &BookData) -> Option<String> {
+    match leaf.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(name) = get_field(fields, KfxSymbol::ResourceName as u64)
+                .and_then(|v| book.symbols.text_of(v))
+            {
+                return Some(name.to_string());
+            }
+            fields
+                .iter()
+                .find_map(|(_, value)| leaf_resource(value, book))
+        }
+        IonValue::List(items) => items.iter().find_map(|item| leaf_resource(item, book)),
+        _ => None,
+    }
+}
+
+/// A magnitude an Ion int, float or decimal states. A page measure in whole
+/// points arrives as an int and a fractional one as a decimal string.
+fn ion_number(value: &IonValue) -> Option<f64> {
+    let inner = value.unwrap_annotated();
+    if let Some(n) = inner.as_int() {
+        return Some(n as f64);
+    }
+    if let Some(f) = inner.as_float() {
+        return Some(f);
+    }
+    match inner {
+        IonValue::Decimal(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -3649,6 +3954,206 @@ mod tests {
         assert_eq!(out[0].rule, "resource-format-unknown");
         assert_eq!(out[0].severity, Severity::Info);
         assert_eq!(out[0].location, "r1");
+    }
+
+    // --- Bytes against declarations (rules 1, 7, 9, 11) ---------------------
+
+    /// A JPEG header stating `width` × `height`: SOI, then a baseline SOF0
+    /// carrying the frame size.
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        out.extend_from_slice(&height.to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
+        out.resize(32, 0);
+        out
+    }
+
+    /// A PNG header stating `width` × `height`: the signature, then IHDR.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        out.extend_from_slice(&13u32.to_be_bytes());
+        out.extend_from_slice(b"IHDR");
+        out.extend_from_slice(&width.to_be_bytes());
+        out.extend_from_slice(&height.to_be_bytes());
+        out.resize(32, 0);
+        out
+    }
+
+    /// An `external_resource` naming `location`, with the extra fields a rule
+    /// reads appended.
+    fn media_resource(location: &str, fields: Vec<(u64, IonValue)>) -> IonValue {
+        let mut all = vec![(
+            KfxSymbol::Location as u64,
+            IonValue::String(location.to_string()),
+        )];
+        all.extend(fields);
+        IonValue::Struct(all)
+    }
+
+    /// A container whose generator trailer states `digest` over `payload`.
+    /// The container info is empty, which puts the trailer between the header
+    /// and the payload region.
+    fn container_with_trailer(digest: &str, payload: &[u8]) -> Vec<u8> {
+        let trailer = format!(r#"[{{key:"kfxgen_payload_sha1",value:"{digest}"}}]"#);
+        let header_len = 18 + trailer.len() as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"CONT");
+        bytes.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&18u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(trailer.as_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn the_trailer_digest_is_read_against_the_payload_region() {
+        let payload = b"the entity payloads".as_slice();
+        let digest = sha1_smol::Sha1::from(payload).hexdigest();
+
+        assert!(
+            check_payload_digest(&container_with_trailer(&digest, payload)).is_empty(),
+            "a genuine digest raises nothing"
+        );
+
+        let out = check_payload_digest(&container_with_trailer(&digest, b"other payloads"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "payload-digest-mismatch");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        assert!(
+            check_payload_digest(&container_with_trailer("", payload)).is_empty(),
+            "a trailer stating no digest is read against nothing"
+        );
+    }
+
+    #[test]
+    fn a_format_the_bytes_contradict_is_info() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r1",
+                media_resource(
+                    "resource/1",
+                    vec![(
+                        KfxSymbol::Format as u64,
+                        IonValue::String("jpg".to_string()),
+                    )],
+                ),
+            ),
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r2",
+                media_resource(
+                    "resource/2",
+                    vec![(
+                        KfxSymbol::Format as u64,
+                        IonValue::String("jpeg".to_string()),
+                    )],
+                ),
+            ),
+        ]);
+        book.raw_media.insert("resource/1".to_string(), png(4, 4));
+        book.raw_media.insert("resource/2".to_string(), jpeg(4, 4));
+
+        let out = check_resource_bytes(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "resource-format-mismatch");
+        assert_eq!(out[0].severity, Severity::Info);
+        assert_eq!(out[0].location, "r1");
+    }
+
+    #[test]
+    fn declared_dimensions_are_read_against_the_decoded_size() {
+        let sized = |w: i64, h: i64| {
+            vec![
+                (KfxSymbol::ResourceWidth as u64, IonValue::Int(w)),
+                (KfxSymbol::ResourceHeight as u64, IonValue::Int(h)),
+            ]
+        };
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r1",
+                media_resource("resource/1", sized(600, 800)),
+            ),
+            (
+                KfxSymbol::ExternalResource as u64,
+                "r2",
+                media_resource("resource/2", sized(40, 60)),
+            ),
+            (KfxSymbol::ExternalResource as u64, "r3", {
+                let mut fields = sized(600, 800);
+                fields.push((KfxSymbol::YjTiles as u64, IonValue::Int(4)));
+                media_resource("resource/3", fields)
+            }),
+        ]);
+        book.raw_media
+            .insert("resource/1".to_string(), jpeg(40, 60));
+        book.raw_media
+            .insert("resource/2".to_string(), jpeg(40, 60));
+        book.raw_media
+            .insert("resource/3".to_string(), jpeg(40, 60));
+
+        let out = check_resource_bytes(&book);
+        assert_eq!(
+            out.len(),
+            1,
+            "the tiled resource states no payload size: {out:?}"
+        );
+        assert_eq!(out[0].rule, "resource-dimensions-mismatch");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "r1");
+    }
+
+    /// A book whose cover names `cover`, with a thumbnail chained off it.
+    fn book_with_cover(cover: IonValue, thumbnail: Option<IonValue>) -> BookData {
+        let mut book = loader::empty_book_for_test();
+        book.metadata.cover_resource_name = Some("cover".to_string());
+        let mut pairs = vec![(KfxSymbol::ExternalResource as u64, "cover", cover)];
+        if let Some(thumb) = thumbnail {
+            pairs.push((KfxSymbol::ExternalResource as u64, "thumb", thumb));
+        }
+        book.by_type = entities(pairs);
+        book
+    }
+
+    #[test]
+    fn a_cover_the_gallery_cannot_draw_is_flagged() {
+        let thumbnail = || {
+            (
+                KfxSymbol::Thumbnails as u64,
+                IonValue::String("thumb".to_string()),
+            )
+        };
+        let mut book = book_with_cover(
+            media_resource("resource/cover", vec![thumbnail()]),
+            Some(media_resource("resource/thumb", Vec::new())),
+        );
+        book.raw_media
+            .insert("resource/cover".to_string(), jpeg(600, 800));
+        book.raw_media
+            .insert("resource/thumb".to_string(), jpeg(60, 80));
+        assert!(check_cover(&book).is_empty(), "a JPEG pair raises nothing");
+
+        book.raw_media
+            .insert("resource/thumb".to_string(), png(60, 80));
+        let out = check_cover(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "cover-not-jpeg");
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].location, "thumb");
+
+        book.raw_media
+            .insert("resource/cover".to_string(), png(600, 800));
+        assert_eq!(
+            check_cover(&book).len(),
+            2,
+            "the cover and its thumbnail are each drawn"
+        );
     }
 
     // --- Vocabulary membership (rules 2, 5, 11, 13) -------------------------
@@ -5769,6 +6274,105 @@ mod tests {
             storyline(vec![page(Some((1307, 1920))), page(Some((1307, 1920)))]),
         );
         assert!(check_fixed_layout_pages(&both).is_empty());
+    }
+
+    /// §12.4. Two pages pair into a facing-page spread only where both draw
+    /// the same embedded PDF at one size. A quarter turn transposes the box.
+    #[test]
+    fn a_pdf_spread_pairs_only_matching_pages() {
+        let page_drawing = |resource: &str| {
+            IonValue::Struct(vec![(
+                KfxSymbol::ResourceName as u64,
+                IonValue::String(resource.to_string()),
+            )])
+        };
+        let pdf_page = |source: &str, width: i64, height: i64| {
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::Format as u64,
+                    IonValue::String("pdf".to_string()),
+                ),
+                (
+                    KfxSymbol::Location as u64,
+                    IonValue::String(source.to_string()),
+                ),
+                (KfxSymbol::ResourceWidth as u64, IonValue::Int(width)),
+                (KfxSymbol::ResourceHeight as u64, IonValue::Int(height)),
+            ])
+        };
+        let spread = IonValue::Struct(vec![
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::PageSpread as u64),
+            ),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::String("story1".to_string()),
+            ),
+        ]);
+
+        let build = |left: IonValue, right: IonValue| {
+            let mut book = book_with_element(spread.clone());
+            book.by_type.insert(
+                KfxSymbol::Storyline as u64,
+                HashMap::from([(
+                    "story1".to_string(),
+                    IonValue::Struct(vec![(
+                        KfxSymbol::ContentList as u64,
+                        IonValue::List(vec![page_drawing("p1"), page_drawing("p2")]),
+                    )]),
+                )]),
+            );
+            book.by_type.insert(
+                KfxSymbol::ExternalResource as u64,
+                HashMap::from([("p1".to_string(), left), ("p2".to_string(), right)]),
+            );
+            book
+        };
+
+        let matched = build(
+            pdf_page("resource/pdf", 612, 792),
+            pdf_page("resource/pdf", 612, 792),
+        );
+        assert!(check_pdf_spreads(&matched).is_empty());
+
+        for (left, right, expected) in [
+            (
+                pdf_page("resource/one", 612, 792),
+                pdf_page("resource/two", 612, 792),
+                "one embedded PDF",
+            ),
+            (
+                pdf_page("resource/pdf", 612, 792),
+                pdf_page("resource/pdf", 612, 1008),
+                "612×792 and 612×1008",
+            ),
+            (
+                pdf_page("resource/pdf", 612, 792),
+                pdf_page("resource/pdf", 792, 612),
+                "612×792 and 792×612",
+            ),
+        ] {
+            let out = check_pdf_spreads(&build(left, right));
+            assert_eq!(out.len(), 1, "{expected}: {out:?}");
+            assert_eq!(out[0].rule, "spread-pages-differ");
+            assert_eq!(out[0].severity, Severity::Warning);
+            assert_eq!(out[0].location, "sec1");
+            assert!(out[0].message.contains(expected), "{out:?}");
+        }
+
+        // A book rendering no PDF states no page geometry to compare.
+        let images = build(
+            IonValue::Struct(vec![(
+                KfxSymbol::Location as u64,
+                IonValue::String("resource/one".to_string()),
+            )]),
+            IonValue::Struct(vec![(
+                KfxSymbol::Location as u64,
+                IonValue::String("resource/two".to_string()),
+            )]),
+        );
+        assert!(check_pdf_spreads(&images).is_empty());
     }
 
     /// §14.2. A fixed-layout book names one Location per page and repeats the

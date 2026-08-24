@@ -204,6 +204,66 @@ pub fn symbol_id_for_name(name: &str) -> Option<u64> {
         .map(|i| i as u64)
 }
 
+// --- Generator trailer parsing ---
+
+/// The generator trailer (§3.5): an Ion **text** list of `key`/`value` pairs
+/// naming the toolchain that produced the container.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GeneratorTrailer {
+    /// `kfxgen_application_version`, or the older `appVersion`.
+    pub application_version: String,
+    /// `kfxgen_package_version`, or the older `buildVersion`.
+    pub package_version: String,
+    /// `kfxgen_payload_sha1`: SHA-1 of the entity payload region, as 40 hex
+    /// digits. Empty when the trailer states none.
+    pub payload_sha1: String,
+    /// `kfxgen_acr`: the container id, restating `bcContId`.
+    pub acr: String,
+}
+
+impl GeneratorTrailer {
+    /// Read the four fields out of the trailer's text.
+    pub fn parse(text: &str) -> Self {
+        let field = |key: &str| trailer_value(text, key).unwrap_or_default().to_string();
+        Self {
+            application_version: trailer_value(text, "kfxgen_application_version")
+                .or_else(|| trailer_value(text, "appVersion"))
+                .unwrap_or_default()
+                .to_string(),
+            package_version: trailer_value(text, "kfxgen_package_version")
+                .or_else(|| trailer_value(text, "buildVersion"))
+                .unwrap_or_default()
+                .to_string(),
+            payload_sha1: field("kfxgen_payload_sha1"),
+            acr: field("kfxgen_acr"),
+        }
+    }
+}
+
+/// The bytes between the container info and the first entity payload, which
+/// is where a retail container writes its [`GeneratorTrailer`]. `None` when
+/// that region runs past the end of `data`.
+pub fn trailer_bytes<'a>(data: &'a [u8], header: &ContainerHeader) -> Option<&'a [u8]> {
+    let start = header
+        .container_info_offset
+        .checked_add(header.container_info_length)?;
+    data.get(start..header.header_len)
+}
+
+/// The entity payload region: everything from `header_len` to the end of the
+/// container, which is what `kfxgen_payload_sha1` digests.
+pub fn payload_region<'a>(data: &'a [u8], header: &ContainerHeader) -> Option<&'a [u8]> {
+    data.get(header.header_len..)
+}
+
+/// The value stated for `key`, out of one `key:"…",value:"…"` pair.
+fn trailer_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("key:\"{key}\"");
+    let after_key = &text[text.find(&pattern)? + pattern.len()..];
+    let value = &after_key[after_key.find("value:\"")? + "value:\"".len()..];
+    Some(&value[..value.find('"')?])
+}
+
 // --- Index table parsing ---
 
 /// Parse the entity index table, 24 bytes per entry: id(4) + type_id(4) +

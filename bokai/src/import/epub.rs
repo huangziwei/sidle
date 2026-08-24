@@ -5,6 +5,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use quick_xml::Reader;
+use quick_xml::events::Event;
 use zip::ZipArchive;
 
 use crate::formats::epub::{
@@ -467,7 +469,10 @@ impl EpubImporter {
         if let Some(ref href) = metadata.cover_image
             && !href.is_empty()
         {
-            metadata.cover_image = Some(resolve_href(&opf_base, href));
+            let path = resolve_href(&opf_base, href);
+            let wrapped = svg_wrapped_image(&source, &zip_index, &path)
+                .filter(|inner| zip_index.contains_key(inner));
+            metadata.cover_image = Some(wrapped.unwrap_or(path));
         }
 
         Ok(Self {
@@ -622,6 +627,62 @@ fn parse_url_function(src: &str, u_pos: usize) -> Option<(&str, usize)> {
         return None;
     }
     Some((url, k + 1))
+}
+
+/// The picture an SVG at `path` frames: the `href` of its one `<image>`,
+/// resolved against the SVG's own directory. `None` for anything that is not
+/// an SVG holding a single image. A manifest names both the frame and this.
+fn svg_wrapped_image(
+    source: &Arc<dyn ByteSource>,
+    index: &HashMap<String, ZipEntryLoc>,
+    path: &str,
+) -> Option<String> {
+    if !path.to_ascii_lowercase().ends_with(".svg") {
+        return None;
+    }
+    let bytes = read_entry(source, index, path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let base = match path.rfind('/') {
+        Some(cut) => &path[..cut],
+        None => "",
+    };
+
+    let mut reader = Reader::from_str(&text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut href: Option<String> = None;
+    loop {
+        let event = reader.read_event_into(&mut buf);
+        let (Ok(Event::Start(e)) | Ok(Event::Empty(e))) = event else {
+            match event {
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {
+                    buf.clear();
+                    continue;
+                }
+            }
+        };
+        if local_name_of(e.name().as_ref()) == b"image" {
+            if href.is_some() {
+                return None;
+            }
+            href = e.attributes().flatten().find_map(|a| {
+                (local_name_of(a.key.as_ref()) == b"href")
+                    .then(|| String::from_utf8_lossy(&a.value).into_owned())
+            });
+        }
+        buf.clear();
+    }
+    let href = href?;
+    (!href.is_empty() && !href.contains("://")).then(|| resolve_href(base, &href))
+}
+
+/// A qualified XML name without its namespace prefix.
+fn local_name_of(name: &[u8]) -> &[u8] {
+    match name.iter().position(|&b| b == b':') {
+        Some(cut) => &name[cut + 1..],
+        None => name,
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -780,6 +841,60 @@ fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An EPUB whose declared cover is an SVG framing `image/pic.jpg`, the
+    /// shape a converter writes for a cover page. `trailing` appends bytes past
+    /// the closing tag, which no XML parser accepts.
+    fn epub_with_svg_cover(trailing: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opt = SimpleFileOptions::default();
+            let mut put = |name: &str, body: &[u8]| {
+                zip.start_file(name, opt).unwrap();
+                zip.write_all(body).unwrap();
+            };
+            put("mimetype", b"application/epub+zip");
+            put(
+                "META-INF/container.xml",
+                br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            put(
+                "OEBPS/content.opf",
+                br#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="cov" href="cover.svg" media-type="image/svg+xml" properties="cover-image"/><item id="pic" href="image/pic.jpg" media-type="image/jpeg"/></manifest><spine><itemref idref="c1"/></spine></package>"#,
+            );
+            put(
+                "OEBPS/ch1.xhtml",
+                br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c1</title></head><body><p>one</p></body></html>"#,
+            );
+            let mut svg = br#"<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 640 920"><image xlink:href="image/pic.jpg" width="640" height="920"/></svg>"#.to_vec();
+            svg.extend_from_slice(trailing);
+            put("OEBPS/cover.svg", &svg);
+            put("OEBPS/image/pic.jpg", b"\xFF\xD8\xFFnot-really-a-jpeg");
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    /// The cover of a book whose manifest names an SVG frame is the picture
+    /// inside it: KFX and PDF carry no vector resource format, and the frame
+    /// reaches a device as a resource that draws nothing.
+    #[test]
+    fn a_cover_svg_resolves_to_the_picture_it_frames() {
+        for trailing in [b"".as_slice(), b"\x88\x99\x26\xd6".as_slice()] {
+            let bytes = epub_with_svg_cover(trailing);
+            let importer =
+                EpubImporter::from_source(Arc::new(MemorySource::new(bytes))).expect("opens");
+            assert_eq!(
+                importer.metadata().cover_image.as_deref(),
+                Some("OEBPS/image/pic.jpg"),
+                "trailing bytes: {}",
+                trailing.len()
+            );
+        }
+    }
 
     /// A minimal EPUB (mimetype, container, OPF, one spine doc) plus an
     /// explicit `OEBPS/` directory entry.
