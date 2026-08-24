@@ -16,10 +16,8 @@ use crate::style as ir_style;
 // Computed Style
 // ============================================================================
 
-/// A computed style is a set of resolved KFX property values.
-///
-/// This is what we hash for deduplication - identical property sets
-/// get the same style ID.
+/// A set of resolved KFX property values, hashed for deduplication: identical
+/// property sets share one style ID.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
     /// Resolved properties: (KfxSymbol, KfxValue)
@@ -87,10 +85,8 @@ impl ComputedStyle {
         false
     }
 
-    /// Split into block and inline styles.
-    ///
-    /// Returns (block_style, inline_style) where each contains only
-    /// properties appropriate for that context.
+    /// Split into `(block_style, inline_style)`, each holding the properties
+    /// its `StyleContext` admits.
     pub fn split_by_context(&self, schema: &StyleSchema) -> (ComputedStyle, ComputedStyle) {
         let mut block = ComputedStyle::new();
         let mut inline = ComputedStyle::new();
@@ -181,25 +177,13 @@ fn hash_kfx_value<H: Hasher>(value: &KfxValue, hasher: &mut H) {
 
 /// Registry for collecting and deduplicating styles during export.
 pub struct StyleRegistry {
-    /// Hash -> (style_id, style_name_symbol, name_string, computed_style, uses)
-    ///
-    /// `name_string` is the actual symbol text. For source-EPUB-origin styles
-    /// where the IR carried a single source class name, this is that class
-    /// (e.g. "bold", "vrtl") so the round-trip preserves identity. For styles
-    /// without a usable hint it falls back to `format!("s{:X}", style_id)`.
-    ///
-    /// `uses` counts how many `register_with_hint` calls hit this entry —
-    /// roughly the number of storyline nodes that reference this style.
-    /// Used by `normalize_line_heights_to_lh` to weight the "dominant"
-    /// line-height by actual usage rather than distinct-style count, so a
-    /// `1.75em` body paragraph used on every block outweighs many `1em`
-    /// ruby/inline styles that each appear only a handful of times.
+    /// Hash -> (style_id, style_name_symbol, name_string, computed_style, uses).
+    /// `name_string` is a hint's source class name or `format!("s{:X}", style_id)`;
+    /// `uses` counts the `register_with_hint` calls that hit the entry.
     styles: HashMap<u64, (u64, u64, String, ComputedStyle, u64)>,
 
-    /// Names already taken as style symbols. Lets us avoid two distinct
-    /// `ComputedStyle`s competing for the same source-class name. First-
-    /// registration wins; later styles with the same hint get the synthesized
-    /// `s<N>` fallback.
+    /// Source-class names held as style symbols. The first registration keeps
+    /// the name; a later `ComputedStyle` under the same hint takes `s<N>`.
     taken_names: std::collections::HashSet<String>,
 
     /// Next style ID to assign
@@ -213,13 +197,11 @@ pub struct StyleRegistry {
 }
 
 impl StyleRegistry {
-    /// Create a new style registry.
-    ///
-    /// The `default_style_symbol` is the symbol ID for "s0" (or similar),
-    /// pre-registered in the symbol table.
+    /// Create a new style registry. `default_style_symbol` is the symbol id
+    /// for `"s0"`, interned ahead of this call.
     pub fn new(default_style_symbol: u64) -> Self {
         let mut taken_names = std::collections::HashSet::new();
-        // "s0" is the default-style name; everything we generate starts at s1.
+        // `"s0"` names the default style; `next_style_id` opens at 1.
         taken_names.insert("s0".to_string());
         Self {
             styles: HashMap::new(),
@@ -240,10 +222,8 @@ impl StyleRegistry {
         self.default_style_symbol
     }
 
-    /// Register a computed style and get its symbol.
-    ///
-    /// If an identical style was already registered, returns the existing
-    /// symbol. Otherwise, assigns a new ID with synthesized name `s<N>`.
+    /// Register a computed style and get its symbol. An identical style
+    /// returns the symbol it holds; a new one takes the name `s<N>`.
     pub fn register(
         &mut self,
         style: ComputedStyle,
@@ -252,22 +232,9 @@ impl StyleRegistry {
         self.register_with_hint(style, None, symbols)
     }
 
-    /// Register a computed style with an optional name hint.
-    ///
-    /// The hint is the original CSS class attribute string from the source
-    /// element. When the hint is a single valid identifier (no whitespace,
-    /// ASCII alphanumeric + `_` + `-`, doesn't start with a digit) and not
-    /// already taken by another style, it becomes the KFX style symbol. This
-    /// preserves names like `bold`, `vrtl`, `main` through the round-trip.
-    /// Otherwise (multi-class, special characters, or collision) the symbol
-    /// falls back to the synthesized `s<N>` form.
-    ///
-    /// Dedup uses `(computed_style, usable_hint)` — not the computed style
-    /// alone. Two elements with `class="main"` and `class="align-center"`
-    /// whose cascades resolve to identical computed styles still get distinct
-    /// KFX style entries (same CSS, different names) so the round-trip can
-    /// route each element back to its original class name. The cost is a few
-    /// extra `$style` fragments in the KFX, all visually equivalent.
+    /// Register a computed style under `class_hint`. A hint `usable_class_hint`
+    /// accepts and `taken_names` leaves free becomes the style symbol. Dedup
+    /// keys on `(computed_style, usable_hint)`: one fragment per class name.
     pub fn register_with_hint(
         &mut self,
         style: ComputedStyle,
@@ -323,17 +290,13 @@ impl StyleRegistry {
         self.styles.is_empty()
     }
 
-    /// Drain all styles into KFX fragments.
-    ///
-    /// Returns a list of (style_name, IonValue) pairs for building style
-    /// entities. The `style_name` matches the symbol attached to the style —
-    /// either the preserved source-class name or the synthesized `s<N>`.
+    /// Drain all styles into `(style_name, IonValue)` pairs. `style_name` is
+    /// the symbol attached to the style: a source class name or `s<N>`.
     pub fn drain_to_ion(&mut self, language: &str) -> Vec<(String, IonValue)> {
         let mut result = Vec::new();
 
-        // First, add the default style — stamped with the content language too, so
-        // text that resolves to the default style still gets CJK font/orientation
-        // selection on device (Amazon stamps language on every style).
+        // The default style carries `language`, which drives CJK font and
+        // orientation selection.
         let mut default_fields = vec![(
             KfxSymbol::StyleName as u64,
             IonValue::Symbol(self.default_style_symbol),
@@ -346,11 +309,9 @@ impl StyleRegistry {
         }
         result.push(("s0".to_string(), IonValue::Struct(default_fields)));
 
-        // Then all registered styles, each stamped with the content language,
-        // in REGISTRATION order (style_id = first use in the document walk).
-        // The map's own order is random per process, and these become style
-        // entities in container order — unsorted, the same book exported
-        // twice differs byte-wise.
+        // The `sort_by_key` on `style_id` fixes registration order: `styles`
+        // drains in the map's order, and these become entities in container
+        // order.
         let mut drained: Vec<_> = self.styles.drain().map(|(_, entry)| entry).collect();
         drained.sort_by_key(|(style_id, _, _, _, _)| *style_id);
         for (_style_id, name_symbol, name, style, _uses) in drained {
@@ -374,28 +335,9 @@ impl StyleRegistry {
         self.styles.values().map(|(id, _, _, style, _)| (id, style))
     }
 
-    /// Normalise per-paragraph `line_height` values so the book's dominant
-    /// (most-common em-based) value becomes `1.0 lh` and the rest are emitted
-    /// as proportional `lh` ratios.
-    ///
-    /// Why this pass exists: the document-level `line_height` in
-    /// `document_data` is fixed at `1.2 em` (a sensible E-Ink baseline). The
-    /// Kindle Layout > Spacing slider scales any `lh`-unit value against
-    /// that baseline. Emitting per-paragraph line-heights in `em` makes the
-    /// slider unable to adjust them; emitting raw source-em values as `lh`
-    /// (e.g. source `line-height: 1.75` → `1.75 lh`) renders at
-    /// `1.75 × 1.2em = 2.1em` — much wider than what the original publisher
-    /// KFX shows. Calibre normalises so the body lands on `1.0 lh` and
-    /// outliers carry proportional ratios; this method matches that.
-    ///
-    /// Dominant is picked by *usage count* (sum of `uses` from
-    /// `register_with_hint` calls), not the number of distinct registered
-    /// styles. A book with many rare ruby/inline styles at `1em` and one
-    /// body style at `1.75em` would otherwise pick `1em` as dominant —
-    /// inverting every body paragraph's line-height into `1.75 lh` and
-    /// blowing it up to `2.1em` on device.
-    ///
-    /// Returns the dominant em value if any line-heights were normalised.
+    /// Normalise per-paragraph `line_height` so the dominant em value becomes
+    /// `1.0 lh` and the rest carry proportional `lh` ratios. Dominant is the
+    /// largest summed `uses`. Returns that em value when any were normalised.
     pub fn normalize_line_heights_to_lh(&mut self) -> Option<f32> {
         // Pass 1: tally em-based line-heights weighted by usage.
         let mut tally: HashMap<u32, u64> = HashMap::new();
@@ -445,23 +387,9 @@ impl Default for StyleRegistry {
     }
 }
 
-/// Validate a CSS class string for use as a KFX style symbol.
-///
-/// Returns the trimmed class name when it's a single token suitable as a
-/// symbol identifier; returns `None` for multi-class, empty, or special-
-/// character cases.
-///
-/// Rules:
-/// - One token only (no whitespace) — multi-class like "main top-block" maps
-///   to a single style symbol in KFX, so preserving more than one would
-///   require a separate mechanism. Falls back to synthesized.
-/// - ASCII alphanumeric, `_`, or `-` only. CSS allows more (e.g. escaped
-///   Unicode), but KFX/Kindle readers tolerate a narrower set safely.
-/// - Doesn't start with a digit (would collide with `s<N>` fallback shape
-///   only when the digit is hex; keep symmetry).
-/// - Doesn't collide with the reserved synthesized prefix shape `s<hex>` —
-///   actually fine; the registry tracks taken names separately, so a literal
-///   "s5" hint coexists with synthesized counterparts safely.
+/// The trimmed `class` when it is one token of ASCII alphanumerics, `_` and
+/// `-` that opens with a non-digit — the shape a KFX style symbol takes.
+/// `None` for a multi-token, empty, or special-character string.
 fn usable_class_hint(class: &str) -> Option<String> {
     let trimmed = class.trim();
     if trimmed.is_empty() {
@@ -526,24 +454,9 @@ impl<'a> StyleBuilder<'a> {
         }
     }
 
-    /// Ingest an IR ComputedStyle through the schema pipeline.
-    ///
-    /// This is the **single source of truth** for converting IR styles to KFX.
-    /// The schema drives which properties to extract and how to transform them:
-    /// 1. Iterate over schema rules that have IR field mappings
-    /// 2. Extract CSS string value from IR struct via `extract_ir_field()`
-    /// 3. Apply schema transform to convert CSS → KFX
-    ///
-    /// `doc_writing_mode` is the document-effective writing-mode, computed
-    /// once before any ingest. It's only consulted by the `WritingMode`
-    /// arm so per-page horizontal-tb overrides survive in vertical books;
-    /// callers without a doc-level mode hint can pass
-    /// `WritingMode::default()`.
-    ///
-    /// Adding new properties only requires:
-    /// 1. Add variant to `IrField` enum
-    /// 2. Add extraction case to `extract_ir_field()`
-    /// 3. Add schema rule with `ir_field: Some(IrField::NewField)`
+    /// Ingest an IR `ComputedStyle` through the schema: each rule carrying an
+    /// `ir_field` reads its CSS value with `extract_ir_field` and applies the
+    /// rule's transform. The `WritingMode` arm reads `doc_writing_mode`.
     pub fn ingest_ir_style(
         &mut self,
         ir_style: &ir_style::ComputedStyle,
@@ -694,7 +607,6 @@ mod tests {
         let id1 = registry.register(style1, &mut symbols);
         let id2 = registry.register(style2, &mut symbols);
 
-        // Same style should get same ID
         assert_eq!(id1, id2);
         assert_eq!(registry.len(), 1);
     }

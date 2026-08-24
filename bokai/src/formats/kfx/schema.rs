@@ -1078,7 +1078,6 @@ mod tests {
     #[test]
     fn test_export_lookup_heading() {
         let schema = KfxSchema::new();
-        // All heading levels should map to Text
         for level in 1..=6 {
             assert_eq!(
                 schema.kfx_symbol_for_role(Role::Heading(level)),
@@ -1099,7 +1098,6 @@ mod tests {
     #[test]
     fn test_export_blockquote_with_semantic_type() {
         let schema = KfxSchema::new();
-        // BlockQuote should emit type: text with yj.semantics.type: block_quote
         let strategy = schema.export_strategy(Role::BlockQuote).unwrap();
         assert!(matches!(
             strategy,
