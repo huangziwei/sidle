@@ -15,6 +15,7 @@
 
 mod cmd;
 mod ctx;
+mod progress;
 mod select;
 
 use anyhow::Result;
@@ -42,13 +43,12 @@ fn main() -> std::process::ExitCode {
     max_term_width = 100
 )]
 struct Cli {
-    /// Work on the library under this directory instead of the configured one.
-    /// A copy of a library is a library, so this is how a sweep gets tried
-    /// before it is run for real.
+    /// Work on the library under DIR, in place of the configured root.
+    /// A copy of a library is a library: `--root` points a sweep at one.
     #[arg(long, global = true, value_name = "DIR")]
     root: Option<std::path::PathBuf>,
 
-    /// Report as JSON instead of prose.
+    /// Report as JSON.
     #[arg(long, global = true)]
     json: bool,
 
@@ -64,7 +64,7 @@ enum Command {
     List {
         #[command(flatten)]
         select: Select,
-        /// Print one column instead of a table: `id`, `sha`, `title`, `path`,
+        /// Print one column: `id`, `sha`, `title`, `path`,
         /// `kfx`, `epub`, `pdf`, `asin`. Ideal for feeding another command.
         #[arg(long, value_name = "FIELD")]
         field: Option<String>,

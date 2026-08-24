@@ -31,22 +31,17 @@ if ! rustup target list --installed | grep -qx "$DEVICE_TARGET"; then
     exit 1
 fi
 
-# Stamp the workspace version into the KUAL menu entry's config.xml, the one
-# release artifact outside Cargo's reach. The desktop app pushes the file
-# verbatim to the Kindle, where a menu reads it.
-#
-# [workspace.package].version in the root Cargo.toml is the source of truth. The
-# sidle-* crates, the on-device binary among them, take it through
-# `version.workspace = true`.
+# config.xml is the one release artifact outside Cargo's reach, and the app
+# pushes it verbatim to the Kindle. $VERSION comes from
+# [workspace.package].version, which every sidle-* crate takes as well.
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
 [ -n "$VERSION" ] || { echo "error: no version found in root Cargo.toml [workspace.package]" >&2; exit 1; }
 echo "==> Stamping config.xml version ($VERSION)"
 sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" device/extensions/sidle/config.xml
 
-# One build timestamp (unix seconds) per run, baked into the picker binary
-# (build.rs reads SIDLE_BUILD_TS) and written to the sidle.build-ts sidecar the
-# server folds into the LAN-update manifest as `built_at`. One clock on both
-# sides is what the device compares a self-update against.
+# One $BUILD_TS per run reaches the picker through SIDLE_BUILD_TS and the
+# server through the sidle.build-ts sidecar, which the LAN-update manifest
+# carries as `built_at` — the value a device self-update compares against.
 BUILD_TS="$(date +%s)"
 echo "==> Cross-compiling sidle-native for Kindle ($DEVICE_TARGET)  [build_ts=$BUILD_TS]"
 SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$DEVICE_TARGET" -p sidle-native
@@ -64,13 +59,12 @@ cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
 echo "==> Building sidle-server (LAN daemon: app spawns it; the Kindle reaches it)"
 cargo build --release -p sidle-server
 
-# Everything the bundle carries for a standalone .app. Tauri names sidecars
-# `<path>-<target-triple>` and strips the suffix when copying into
-# Contents/MacOS; a host-native build takes the host triple.
-#
-# The device resources reproduce the `device/` mount mirror
-# DeploySource::from_resource_root() reads under Contents/Resources/resources/
-# device. Each file sits at the path it installs to; etc/server.conf is absent.
+echo "==> Building sidle-cli (the library from a script; bundled, then symlinked)"
+cargo build --release -p sidle-cli
+
+# Tauri names a sidecar `<path>-$HOST_TRIPLE` and strips the suffix copying it
+# into Contents/MacOS. $RES_DEVICE mirrors `device/` under
+# Contents/Resources, each file at the path it installs to.
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "$HOST_TRIPLE" ] || { echo "error: could not read host target triple from rustc -vV" >&2; exit 1; }
 
@@ -86,7 +80,12 @@ SIDECAR_DIR="$APP_DIR/binaries"
 RES_DEVICE="$APP_DIR/resources/device"
 rm -rf "$SIDECAR_DIR" "$RES_DEVICE"
 mkdir -p "$SIDECAR_DIR" "$RES_DEVICE/extensions/sidle/bin" "$RES_DEVICE/documents"
-cp target/release/sidle-server "$SIDECAR_DIR/sidle-server-$HOST_TRIPLE"
+# Both host binaries stage the same way. sidle-server is spawned by the app;
+# sidle-cli is spawned by nobody and rides in so `cargo tauri build` signs it
+# with everything else — the symlink at the end is what puts it on a PATH.
+for host_bin in sidle-server sidle-cli; do
+    cp "target/release/$host_bin" "$SIDECAR_DIR/$host_bin-$HOST_TRIPLE"
+done
 cp device/extensions/sidle/config.xml   "$RES_DEVICE/extensions/sidle/config.xml"
 cp device/extensions/sidle/menu.json    "$RES_DEVICE/extensions/sidle/menu.json"
 cp device/extensions/sidle/bin/sidle.sh "$RES_DEVICE/extensions/sidle/bin/sidle.sh"
@@ -98,12 +97,9 @@ cp "target/$DEVICE_TARGET/release/sidle-native" \
 cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
     "$RES_DEVICE/extensions/sidle/bin/sidle.build-ts"
 
-# bokai is a second app in the same tree, built by build-bokai.sh — which this
-# script deliberately never calls, so the engine and the product can ship on
-# their own lines. Staged when a cross-build has left one, skipped when it has
-# not; a packaged app then simply has no bokai to offer.
-#
-# $BOKAI_BIN names the hardfloat binary, one of the two build-bokai.sh stages.
+# build-bokai.sh builds $BOKAI_BIN, the hardfloat binary, on its own line.
+# A cross-build that left one gets staged; a packaged app carrying none
+# offers no bokai.
 BOKAI_BIN="bokai"
 if [ -f "device/extensions/bokai/bin/$BOKAI_BIN" ]; then
     mkdir -p "$RES_DEVICE/extensions/bokai/bin"
@@ -115,10 +111,8 @@ else
 fi
 
 echo "==> Building sidle desktop app"
-# From inside the app dir. With `tauri.conf.json` in the cwd the CLI stops there
-# and walks no further up the tree, leaving the build independent of what the
-# directories are named. Config paths resolve against the config file, which
-# holds `frontendDist: "../web"` and the bundle output under workspace `target/`.
+# From $APP_DIR: `tauri.conf.json` in the cwd stops the CLI walking up the
+# tree, and its own paths resolve against itself.
 (cd "$APP_DIR" && cargo tauri build)
 
 echo "==> Installing to /Applications/Sidle.app"
@@ -131,5 +125,29 @@ fi
 
 rm -rf "$DST"
 ditto "$SRC" "$DST"
+
+# The command line, on a PATH. The binary stays inside the bundle so it is
+# replaced with the app and never drifts from the library code it opens; the
+# symlink is the only thing outside it. First writable candidate wins.
+CLI="$DST/Contents/MacOS/sidle-cli"
+echo "==> Linking sidle-cli"
+linked=""
+for dir in /usr/local/bin "$HOME/.local/bin"; do
+    [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || continue
+    if ln -sfn "$CLI" "$dir/sidle-cli" 2>/dev/null; then
+        linked="$dir/sidle-cli"
+        break
+    fi
+done
+if [ -n "$linked" ]; then
+    echo "    $linked -> $CLI"
+    case ":$PATH:" in
+        *":${linked%/*}:"*) ;;
+        *) echo "    note: ${linked%/*} is not on this shell's PATH" >&2 ;;
+    esac
+else
+    echo "    no writable directory found; link it by hand:" >&2
+    echo "      sudo ln -sfn '$CLI' /usr/local/bin/sidle-cli" >&2
+fi
 
 echo "==> Done."

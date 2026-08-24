@@ -10,16 +10,15 @@ use sidle_core::library::paths::LibraryPaths;
 
 pub struct Ctx {
     pub paths: LibraryPaths,
-    /// Behind a mutex because the conversion sweep hands it to worker threads,
-    /// which take it only to record a finished book — see
-    /// [`sidle_core::library::db::Access`].
+    /// The conversion sweep hands this to worker threads, which take it
+    /// through [`sidle_core::library::db::Access`] to record a finished book.
     pub db: std::sync::Mutex<Connection>,
-    /// Report as JSON rather than prose.
+    /// Report as JSON.
     pub json: bool,
 }
 
 impl Ctx {
-    /// Open the library the desktop app would open, or the one under `root`.
+    /// Open the configured library, or the one under `root`.
     pub fn open(root: Option<PathBuf>, json: bool) -> Result<Self> {
         let paths = match root {
             Some(root) => LibraryPaths {
@@ -39,11 +38,9 @@ impl Ctx {
         })
     }
 
-    /// Borrow the connection.
-    ///
-    /// Every command is single-threaded except the conversion sweep, whose
-    /// workers borrow through [`db::Access`] — so a command that ends in a sweep
-    /// must release this first. Nothing here is re-entrant.
+    /// Borrow the connection. The guard is not re-entrant, and a command
+    /// ending in a sweep drops it first: the sweep's workers take the same
+    /// mutex through [`db::Access`].
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -67,13 +64,9 @@ impl Ctx {
     }
 }
 
-/// A library root is a location, so it is absolute.
-///
-/// The stored file paths are root-relative and resolved against the directory
-/// SQLite reports for the open database — which is absolute. A relative `--root`
-/// would have every path comparison in the library measuring one form against
-/// the other, and a book's own file would read as a stranger sitting on its
-/// name.
+/// `root` as an absolute path. A stored file path is root-relative and
+/// resolves against the absolute directory SQLite reports for the open
+/// database, so both sides of a path comparison take the one form.
 pub fn absolute(root: PathBuf) -> Result<PathBuf> {
     std::path::absolute(&root).with_context(|| format!("resolve {}", root.display()))
 }

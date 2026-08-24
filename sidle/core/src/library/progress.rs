@@ -10,13 +10,8 @@
 use std::cell::Cell;
 
 /// Map a phase report to a monotonic 0.0–1.0 progress-bar fraction.
-///
-/// `pipeline` is the conversion direction (`epub_to_kfx`, …) or, for the
-/// formats converted inline at import, `<ext>_import`. Bands are heuristics —
-/// the slow phase gets the widest span — and within a band we interpolate by
-/// `cur/total`. Not wall-clock-exact; the live label names the precise step.
-/// What matters is that the bands run in emission order, so the bar never snaps
-/// backward between phases.
+/// `pipeline` is a conversion direction (`epub_to_kfx`, …) or an import's
+/// `<ext>_import`; a band spans one phase and `cur`/`total` interpolates it.
 pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
     let (lo, hi): (f32, f32) = match (pipeline, phase) {
         ("epub_to_kfx", "survey") => (0.00, 0.08),
@@ -24,12 +19,8 @@ pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
         ("epub_to_kfx", "images") => (0.40, 0.92),
         ("epub_to_kfx", "finalize") => (0.92, 1.00),
 
-        // IR route emission order: `load` (Book::from_bytes container parse) →
-        // `content` (per-chapter storyline→IR) → `resources` (image transcode,
-        // real per-chunk counts) → `nav` → `finalize`. `resources` gets the
-        // widest band (it's 95%+ of the wall time on image-heavy books).
-        // `resources` sits before the (cheap) `nav` resolution because images
-        // transcode inline, before the manifest needs each image's MIME.
+        // Emission order: `load`, `content`, `resources`, `nav`, `finalize`.
+        // `resources` transcodes every image and takes the widest band.
         ("kfx_to_epub", "load") => (0.00, 0.08),
         ("kfx_to_epub", "content") => (0.08, 0.24),
         ("kfx_to_epub", "resources") => (0.24, 0.92),
@@ -44,14 +35,9 @@ pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
 
         ("kfx_to_pdf", _) => (0.00, 1.00),
 
-        // An `.azw3` import is two conversions back to back — the EPUB side by
-        // passthrough, then the KFX side from a second parse of the same bytes
-        // — which is why the import pipeline namespaces each leg's phases.
-        //
-        // Weights measured on a 32 MB collection (291 chapters, 292 images,
-        // 30 s all-in): the EPUB leg is 4% of that, because passthrough only
-        // deflates what the azw3 already holds, while re-encoding every image
-        // to JXR under `kfx/images` is three quarters of the whole import.
+        // An `.azw3` import runs two conversions back to back, each leg's
+        // phases under its own `epub/` or `kfx/` prefix. The `epub/` legs
+        // deflate what the azw3 holds; `kfx/images` re-encodes every image.
         ("azw3_import", "epub/parse") => (0.00, 0.01),
         ("azw3_import", "epub/content") => (0.01, 0.02),
         ("azw3_import", "epub/resources") => (0.02, 0.05),
@@ -63,30 +49,27 @@ pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
         ("azw3_import", "kfx/images") => (0.26, 0.93),
         ("azw3_import", "kfx/finalize") => (0.93, 0.95),
 
-        // One leg only: a `.mobi`'s KFX side is left to the background queue,
-        // so the EPUB export is the whole of the import's work — and within it
-        // the same shares the azw3's EPUB leg showed, writing the container
-        // dominating the parse.
+        // A `.mobi` import runs the `epub/` leg alone; the background queue
+        // takes its KFX side. `epub/resources` writes the container.
         ("mobi_import", "epub/parse") => (0.00, 0.10),
         ("mobi_import", "epub/content") => (0.10, 0.20),
         ("mobi_import", "epub/resources") => (0.20, 0.90),
         ("mobi_import", "epub/nav") => (0.90, 0.93),
         ("mobi_import", "epub/finalize") => (0.93, 0.95),
 
-        // Aozora: a text parse, a rendered cover, and a small EPUB build. No
-        // per-item counts anywhere — each phase is one tick.
+        // An Aozora import parses text, renders a cover and builds an EPUB.
+        // No phase carries per-item counts; each is one tick.
         ("aozora_import", "epub/parse") => (0.00, 0.35),
         ("aozora_import", "epub/cover") => (0.35, 0.70),
         ("aozora_import", "epub/finalize") => (0.70, 0.95),
 
         ("kfx_zip_import", "merge") => (0.00, 0.95),
 
-        // Every import ends by reading metadata, extracting the cover, and
-        // writing the library slot. Same tail whatever came in.
+        // Every import ends at `store`: metadata, cover, library slot.
         (_, "store") => (0.95, 1.00),
 
-        // Unrecognized (shouldn't happen): span the whole bar so cur/total still
-        // reads as a plain fraction rather than snapping to a band edge.
+        // A phase with no band of its own spans the whole bar, leaving
+        // `cur`/`total` to read as a plain fraction.
         _ => (0.00, 1.00),
     };
     let within = if total == 0 {
@@ -98,8 +81,8 @@ pub fn fraction(pipeline: &str, phase: &str, cur: usize, total: usize) -> f32 {
 }
 
 /// The pipeline key for a book being converted at import time, or `None` for
-/// the formats stored as they arrive — those land in the library too fast for a
-/// bar to mean anything.
+/// the formats stored as they arrive: a `SourceKind` mapping to `None` lands
+/// in the library in one step.
 pub fn import_pipeline(kind: crate::library::import::SourceKind) -> Option<&'static str> {
     use crate::library::import::SourceKind as K;
     match kind {
@@ -111,10 +94,8 @@ pub fn import_pipeline(kind: crate::library::import::SourceKind) -> Option<&'sta
     }
 }
 
-/// Suppresses progress ticks too small to see. The image phases fire once per
-/// image — hundreds of events on an illustrated book, each one a webview
-/// round-trip for a bar that moves less than a pixel. Anything under a percent
-/// of movement is dropped; the final 100% always gets through.
+/// Suppresses progress ticks too small to see: an image phase fires once per
+/// image. Movement under a percent is dropped, and `1.0` always passes.
 pub struct Throttle(Cell<f32>);
 
 impl Default for Throttle {
@@ -143,9 +124,9 @@ impl Throttle {
 mod tests {
     use super::*;
 
-    /// The phases each pipeline emits, in the order it emits them. A band table
-    /// is only correct relative to this order — the bands are hand-written, and
-    /// one out of sequence sends the bar backward mid-job.
+    /// The phases each pipeline emits, in emission order. `fraction`'s bands
+    /// are hand-written against this order; one out of sequence sends a bar
+    /// backward mid-job.
     const SEQUENCES: &[(&str, &[&str])] = &[
         ("epub_to_kfx", &["survey", "chapters", "images", "finalize"]),
         (
@@ -192,8 +173,8 @@ mod tests {
         for (pipeline, phases) in SEQUENCES {
             let mut previous = 0.0_f32;
             for phase in *phases {
-                // Every phase interpolates across its own band, so check both
-                // ends: the start must not undo the phase before it.
+                // Both ends of each band: the start of one phase sits at or
+                // past the end of the phase before it.
                 for (cur, total) in [(0, 4), (1, 4), (3, 4), (4, 4)] {
                     let f = fraction(pipeline, phase, cur, total);
                     assert!(
@@ -212,8 +193,8 @@ mod tests {
 
     #[test]
     fn an_unreported_phase_does_not_jump_the_bar_to_full() {
-        // A phase with no band spans the whole bar, so a mid-job report reads as
-        // a plain fraction rather than snapping to an edge.
+        // A phase with no band spans the whole bar: a mid-job report reads as
+        // a plain fraction.
         assert_eq!(fraction("azw3_import", "kfx/something-new", 1, 4), 0.25);
     }
 
@@ -226,14 +207,13 @@ mod tests {
             "half a percent is invisible"
         );
         assert!(throttle.worth_emitting(0.02));
-        // Movement is measured from the last tick that got through, not from the
-        // last one offered — otherwise a slow phase would creep past the gate.
+        // Movement is measured from the last tick through the gate, not from
+        // the last one offered.
         assert!(!throttle.worth_emitting(0.025));
         assert!(!throttle.worth_emitting(0.029));
         assert!(throttle.worth_emitting(0.03));
 
-        // The end always gets through, however small the last step was — a bar
-        // left at 99% is the one thing worse than a bar that stutters.
+        // `1.0` passes however small the step into it.
         let throttle = Throttle::new();
         assert!(throttle.worth_emitting(0.995));
         assert!(!throttle.worth_emitting(0.999));

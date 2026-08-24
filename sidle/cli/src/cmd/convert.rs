@@ -1,10 +1,10 @@
 //! Converting many books at once.
 //!
 //! The desktop's queue is a dispatcher over a tokio `JoinSet`, sized to the
-//! machine, feeding a window that wants progress bars. Here there is no window,
-//! so the sweep is what a sweep should be: N worker threads pulling from one
-//! list, each running the same [`convert`] pipeline the desktop runs, printing a
-//! line per finished book.
+//! machine, feeding a window that wants progress bars. Here there is no window:
+//! the sweep is N worker threads pulling from one list, each running the same
+//! [`convert`] pipeline the desktop runs. On a terminal the run draws a
+//! [`crate::progress::Bar`]; redirected, it prints a line per finished book.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,8 +14,10 @@ use clap::Args;
 use serde::Serialize;
 use sidle_core::library::convert::{self, Mode};
 use sidle_core::library::db::{self, Access, BookRow};
+use sidle_core::library::progress::{Throttle, fraction};
 
 use crate::ctx::Ctx;
+use crate::progress::{Bar, stdout_is_terminal};
 use crate::select::Select;
 
 #[derive(Args)]
@@ -23,12 +25,9 @@ pub struct ConvertArgs {
     #[command(flatten)]
     select: Select,
 
-    /// Convert books that already have their output, too — the sweep to run
-    /// after bokai changes.
-    ///
-    /// Source→target only: the import-time cover enrichment is skipped, so the
-    /// source KFX (and the `kfx_sha256` the device names its file after) is left
-    /// alone and a book already on a Kindle keeps its highlights.
+    /// Convert every selected book, output or no output — the sweep to run
+    /// after a bokai change. Source→target only: the import-time cover
+    /// enrichment is skipped, leaving the source KFX and its `kfx_sha256`.
     #[arg(long)]
     force: bool,
 
@@ -36,7 +35,7 @@ pub struct ConvertArgs {
     #[arg(long, short = 'j', value_name = "N")]
     jobs: Option<usize>,
 
-    /// List what would be converted and stop.
+    /// List the selection and stop.
     #[arg(long)]
     dry_run: bool,
 
@@ -81,9 +80,8 @@ struct Report {
 }
 
 pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
-    // The workers take the connection themselves, a book at a time. A caller
-    // still holding it would leave them waiting on a lock nothing will release,
-    // so say so now instead of hanging.
+    // The workers take `ctx.db` themselves, a book at a time. A caller holding
+    // the guard leaves them waiting on a lock nothing releases.
     if ctx.db.try_lock().is_err() {
         anyhow::bail!("the library connection is still held by the caller of this sweep");
     }
@@ -92,13 +90,12 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
         args.select.resolve(&conn)?
     };
 
-    // A book with no job kind was never enqueued for anything — a row that
-    // predates its own conversion, or one whose source vanished. There is
-    // nothing to dispatch on, so it is reported as skipped rather than failed.
+    // A `kind` of `None` names no direction to dispatch on, which counts as
+    // skipped.
     let (mut work, no_kind): (Vec<BookRow>, Vec<BookRow>) =
         books.into_iter().partition(|b| b.kind.is_some());
-    // Without `--force` this is "finish what's outstanding": books already
-    // converted are left alone.
+    // Without `--force` the sweep finishes what is outstanding: a `done` row
+    // is left alone.
     let mut skipped = no_kind.len();
     if !args.force {
         let before = work.len();
@@ -165,14 +162,25 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
     ));
 
     let total = work.len();
+    let slots = jobs.min(total);
+    let bar = Bar::new(
+        "converting",
+        total,
+        slots,
+        !ctx.json && stdout_is_terminal(),
+    );
     let queue = Mutex::new(work);
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Done>> = Mutex::new(Vec::new());
     let stop = std::sync::atomic::AtomicBool::new(false);
 
+    let stop_on_error = args.stop_on_error;
     std::thread::scope(|scope| {
-        for _ in 0..jobs.min(total) {
-            scope.spawn(|| {
+        for slot in 0..slots {
+            // `slot` is this worker's own, so the closure takes it by value and
+            // every shared operand by reference.
+            let (bar, queue, next, results, stop) = (&bar, &queue, &next, &results, &stop);
+            scope.spawn(move || {
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         return;
@@ -182,20 +190,33 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
                     };
                     let n = next.fetch_add(1, Ordering::Relaxed) + 1;
                     let kind = book.kind.clone().unwrap_or_default();
+                    bar.start(slot, &book.title);
                     let started = std::time::Instant::now();
-                    let outcome = convert_one(ctx, &book, &kind, mode);
+                    // The phase report becomes this slot's share of the bar.
+                    // `Throttle` drops the movement a redraw cannot show.
+                    let throttle = Throttle::new();
+                    let tick = |phase: &str, cur: usize, steps: usize, _label: &str| {
+                        let f = fraction(&kind, phase, cur, steps);
+                        if throttle.worth_emitting(f) {
+                            bar.tick(slot, f);
+                        }
+                    };
+                    let outcome = convert_one(ctx, &book, &kind, mode, &tick);
                     let seconds = started.elapsed().as_secs_f32();
 
                     let done = match outcome {
                         Ok(converted) => {
-                            ctx.say(format!(
-                                "[{n}/{total}] {} — {kind} in {seconds:.1}s{}",
-                                book.title,
-                                match converted.reanchored {
-                                    0 => String::new(),
-                                    moved => format!(", {moved} annotation(s) re-anchored"),
-                                }
-                            ));
+                            bar.finish_item(slot, true);
+                            if !bar.enabled() {
+                                ctx.say(format!(
+                                    "[{n}/{total}] {} — {kind} in {seconds:.1}s{}",
+                                    book.title,
+                                    match converted.reanchored {
+                                        0 => String::new(),
+                                        moved => format!(", {moved} annotation(s) re-anchored"),
+                                    }
+                                ));
+                            }
                             Done {
                                 book_id: book.id,
                                 title: book.title,
@@ -208,8 +229,9 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
                         }
                         Err(e) => {
                             let error = format!("{e:#}");
-                            eprintln!("[{n}/{total}] {} FAILED: {error}", book.title);
-                            if args.stop_on_error {
+                            bar.finish_item(slot, false);
+                            bar.note(&format!("[{n}/{total}] {} FAILED: {error}", book.title));
+                            if stop_on_error {
                                 stop.store(true, Ordering::Relaxed);
                             }
                             Done {
@@ -228,6 +250,7 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
             });
         }
     });
+    bar.finish();
 
     let mut books = results.into_inner().unwrap_or_else(|e| e.into_inner());
     books.sort_by_key(|d| d.book_id);
@@ -256,10 +279,16 @@ pub fn run(ctx: &Ctx, args: ConvertArgs) -> Result<()> {
 
 /// Convert one book: the slow half with no database at all, then the connection
 /// for as long as it takes to write the result down.
-fn convert_one(ctx: &Ctx, book: &BookRow, kind: &str, mode: Mode) -> Result<convert::Converted> {
+fn convert_one(
+    ctx: &Ctx,
+    book: &BookRow,
+    kind: &str,
+    mode: Mode,
+    on_progress: convert::OnProgress<'_>,
+) -> Result<convert::Converted> {
     ctx.db
         .with(|conn| db::set_job_status(conn, book.id, "converting", None))?;
-    let outcome = convert::run(&ctx.paths, book, kind, mode, &|_, _, _, _| {})
+    let outcome = convert::run(&ctx.paths, book, kind, mode, on_progress)
         .and_then(|produced| ctx.db.with(|conn| convert::record(conn, book, produced)));
     match &outcome {
         Ok(_) => ctx

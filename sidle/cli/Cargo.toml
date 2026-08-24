@@ -34,6 +34,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Stages files pulled off a device so the extension-dispatch importer can read
 # them from a path.
 tempfile = "3"
+# Terminal width and tty detection for the sweep's progress bar.
+libc = "0.2"
 
 [dev-dependencies]
 # Hermetic libraries for the selection tests.
