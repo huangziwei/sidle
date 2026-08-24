@@ -10,7 +10,6 @@ Sidle contains three main parts:
 
 1. a Rust/Tauri app for managing books, converting various formats to EPUB and KFX, and reading them on macOS;
 2. a native Kindle app to pull books from the library and sync annotations back to the library via WIFI;
-3. `sidle-cli`, which does the same things to the same library from a script — see [Command line](#command-line).
 
 The Tauri app doesn't require the Kindle to be jailbroken, but the Kindle app does.
 
