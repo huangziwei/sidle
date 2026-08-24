@@ -48,9 +48,8 @@
 //!   every `ruby_id` ($758) it selects (§8.7). Each of `link_unvisited_style`
 //!   ($577) and `link_visited_style` ($576) holds a nested style struct (§8.1),
 //!   and a `list_style` ($100) names one of the markers the import property
-//!   table maps (§7.7, info). A `style` fragment no element cites and a
-//!   `font_family` ($11) stack pinning a face no `font` fragment embeds are
-//!   each reported as shipped weight nothing reads (info).
+//!   table maps (§7.7, info). A `style` fragment no fragment cites ships
+//!   declarations nothing reads (info).
 //! - **Rule 7, resource refs resolve** — every `external_resource` and every
 //!   `font` ($262) that names a `location` has its bytes embedded, a font's
 //!   under `bcRawFont` ($418); every `resource_name` ($175) an element cites
@@ -757,8 +756,6 @@ struct WalkDefects {
     unknown_writing_modes: BTreeSet<String>,
     /// `list_style` ($100) values [`known_list_style`] does not name.
     unknown_list_styles: BTreeSet<String>,
-    /// `font_family` ($11) stacks headed by a face the book embeds none of.
-    unembedded_families: BTreeSet<String>,
     /// `listitem` ($277) elements whose parent is no `list` ($276).
     orphan_list_items: usize,
     /// Reading-order sections carrying no `page_templates` ($141) entry.
@@ -971,16 +968,6 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             format!(
                 "a list_style of {name:?} names no list marker — the list draws the reader's \
                  default"
-            ),
-        ));
-    }
-    for name in &defects.unembedded_families {
-        findings.push(info(
-            "font-family-unembedded",
-            name,
-            format!(
-                "a style pins font_family {name:?}, which no font fragment embeds — the device \
-                 substitutes a face of its own"
             ),
         ));
     }
@@ -1317,8 +1304,6 @@ struct RefIndex {
     fixed_layout: bool,
     /// The book default `writing_mode` ($560), the axis an element inherits.
     document_writing_mode: &'static str,
-    /// The `font_family` ($11) each `font` ($262) fragment describes.
-    embedded_faces: HashSet<String>,
 }
 
 impl RefIndex {
@@ -1360,23 +1345,11 @@ impl RefIndex {
                 }
             }
         }
-        let mut embedded_faces = HashSet::new();
-        if let Some(entities) = book.by_type.get(&(KfxSymbol::Font as u64)) {
-            for value in entities.values() {
-                if let Some(fields) = value.unwrap_annotated().as_struct()
-                    && let Some(family) = get_field(fields, KfxSymbol::FontFamily as u64)
-                        .and_then(|v| book.symbols.text_of(v))
-                {
-                    embedded_faces.insert(family.to_string());
-                }
-            }
-        }
         Self {
             anchors,
             ruby,
             fixed_layout: fxl::book_signals(book).fixed_layout,
             document_writing_mode: document_writing_mode(book),
-            embedded_faces,
         }
     }
 }
@@ -1734,17 +1707,6 @@ fn check_style_fields(
         && !known_list_style(value)
     {
         out.unknown_list_styles.insert(value.to_string());
-    }
-
-    // §11.4 — a `font_family` stack headed by `default` defers to the
-    // reader's face; a named head pins one.
-    if let Some(stack) =
-        get_field(fields, KfxSymbol::FontFamily as u64).and_then(|v| book.symbols.text_of(v))
-        && let Some(head) = stack.split(',').next().map(|f| f.trim().trim_matches('"'))
-        && !head.eq_ignore_ascii_case("default")
-        && !index.embedded_faces.contains(head)
-    {
-        out.unembedded_families.insert(head.to_string());
     }
 
     // §8.1 — each link state holds a nested style struct of its own.
@@ -7128,55 +7090,5 @@ mod tests {
             .collect();
         assert_eq!(orphans.len(), 1, "{out:?}");
         assert_eq!(orphans[0].location, "spare");
-    }
-
-    /// §11.4 — a `font_family` stack headed by a face the book embeds none of
-    /// leaves the device to substitute; a `default`-headed stack asks it to.
-    #[test]
-    fn a_font_family_no_font_fragment_embeds_is_flagged() {
-        let styled = |stack: &str, embedded: Option<&str>| {
-            let mut book = loader::empty_book_for_test();
-            book.by_type.insert(
-                KfxSymbol::Style as u64,
-                HashMap::from([(
-                    "s1".to_string(),
-                    IonValue::Struct(vec![(
-                        KfxSymbol::FontFamily as u64,
-                        IonValue::String(stack.to_string()),
-                    )]),
-                )]),
-            );
-            if let Some(family) = embedded {
-                book.by_type.insert(
-                    KfxSymbol::Font as u64,
-                    HashMap::from([(
-                        "f1".to_string(),
-                        IonValue::Struct(vec![
-                            (
-                                KfxSymbol::FontFamily as u64,
-                                IonValue::String(family.to_string()),
-                            ),
-                            (
-                                KfxSymbol::Location as u64,
-                                IonValue::String("font/f1".to_string()),
-                            ),
-                        ]),
-                    )]),
-                );
-                book.raw_media.insert("font/f1".to_string(), vec![0u8; 4]);
-                book.font_locations.insert("font/f1".to_string());
-            }
-            check_references(&book)
-                .into_iter()
-                .filter(|f| f.rule == "font-family-unembedded")
-                .collect::<Vec<_>>()
-        };
-
-        let out = styled("cover-Charis, serif", None);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert_eq!(out[0].location, "cover-Charis");
-
-        assert!(styled("cover-Charis, serif", Some("cover-Charis")).is_empty());
-        assert!(styled("default, serif", None).is_empty());
     }
 }

@@ -65,14 +65,9 @@ pub struct Converted {
     pub stranded: usize,
 }
 
-/// Convert one book, and bring the library row and everything derived from the
-/// file back into agreement with the result.
-///
-/// Marks the job `converting` on entry and `done`/`error` on the way out. An
-/// `Err` is both recorded and returned.
-///
-/// Holds `conn` for the whole conversion. [`run`] + [`record`] is the same work
-/// split, with the minutes-long half taking no database.
+/// Convert one book and bring the library row and everything derived from the
+/// file into agreement with the result. Marks the job `converting` on entry
+/// and `done` / `error` on the way out, holding `conn` throughout.
 pub fn convert_book(
     conn: &Connection,
     paths: &LibraryPaths,
@@ -103,9 +98,7 @@ pub fn convert_book(
 
 /// The half of a conversion that touches no database: run bokai, write the
 /// produced file, fetch and embed the cover, parse the rebuilt book's position
-/// axis and text index.
-///
-/// Minutes of CPU on a large book. [`record`] takes the result.
+/// axis and text index. [`record`] takes the result.
 pub fn run(
     paths: &LibraryPaths,
     book: &BookRow,
@@ -116,9 +109,8 @@ pub fn run(
     let mut produced = run_direction(paths, book, kind, on_progress)?;
 
     // A KFX from Amazon's monochrome-device build carries a grayscale-baked
-    // cover; the colour one comes from the product page, keyed by the catalogue
-    // ASIN. A KFX bokai produced from a colour EPUB carries no such ASIN, and
-    // [`enrich_cover`] leaves its embedded cover alone.
+    // cover, and the colour one comes from the product page keyed by the
+    // catalogue ASIN.
     if kind == "kfx_to_epub" && !mode.is_reconvert() {
         enrich_cover(paths, book, &mut produced);
     }
@@ -157,11 +149,9 @@ pub fn run(
     Ok(produced)
 }
 
-/// The half of a conversion that touches only the database: record the produced
-/// paths on the book row, store the position axis, and move the book's
-/// annotations onto the rebuilt text.
-///
-/// Fast: [`run`] owns every expensive parse.
+/// The half of a conversion that touches only the database: record the
+/// produced paths on the book row, store the position axis, and move the
+/// book's annotations onto the rebuilt text. [`run`] owns every parse.
 pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::Result<Converted> {
     let book_id = book.id;
     if let Some(epub) = &produced.epub_path {
@@ -227,11 +217,9 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
     Ok(converted)
 }
 
-/// Re-fetch the catalogue colour cover and put it everywhere this book keeps
-/// one: the sidecar, the produced EPUB, and the source KFX.
-///
-/// Best-effort throughout: every failure here leaves the conversion's result
-/// intact.
+/// Re-fetch the catalogue colour cover into everywhere this book keeps one:
+/// the sidecar, the produced EPUB and the source KFX. Every failure here
+/// leaves the conversion's result intact.
 fn enrich_cover(paths: &LibraryPaths, book: &BookRow, produced: &mut Produced) {
     let book_id = book.id;
     let Some(asin) = book.amazon_asin.as_deref() else {
@@ -514,7 +502,7 @@ fn convert_pdf_to_kfx(
     }
 
     on_progress("build", 0, 1, "Building KFX");
-    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
+    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref())?;
     write_bytes_atomic(&out_path, &kfx)?;
 
     // The ink-anchor geometry cache (eid→page map + page boxes), keyed by the
