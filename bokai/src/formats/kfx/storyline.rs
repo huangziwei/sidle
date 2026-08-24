@@ -1881,7 +1881,7 @@ fn walk_node_for_export(
                 // Wrap in a synthetic Paragraph, a real element for the inline
                 // emit machinery to anchor style_events to.
                 let mut wrapper = ElementStart::new(Role::Paragraph);
-                wrapper.style_symbol = Some(ctx.default_style_symbol);
+                wrapper.style_symbol = Some(ctx.cite_default_style());
                 stream.push(KfxToken::StartElement(wrapper));
                 walk_node_for_export(chapter, child_id, sch, ctx, stream);
                 stream.push(KfxToken::EndElement);
@@ -2552,7 +2552,7 @@ fn emit_definition_list(
                     chapter.semantics.class(dd_node_id),
                 )
             } else {
-                ctx.default_style_symbol
+                ctx.cite_default_style()
             };
             wrapper_elem.style_symbol = Some(wrapper_style);
             stream.push(KfxToken::StartElement(wrapper_elem));
@@ -2663,7 +2663,10 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     }
 
                     // Style reference - outer container gets full style with borders
-                    let style_sym = elem.style_symbol.unwrap_or(ctx.default_style_symbol);
+                    let style_sym = match elem.style_symbol {
+                        Some(sym) => sym,
+                        None => ctx.cite_default_style(),
+                    };
                     outer_fields.push((sym!(Style), IonValue::Symbol(style_sym)));
 
                     // Type: container (not text) - this is key for borders to render
@@ -2782,7 +2785,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
 
                     // Inner element uses default style (minimal, no borders)
                     // This matches KPR behavior where inner text has separate style
-                    inner_fields.push((sym!(Style), IonValue::Symbol(ctx.default_style_symbol)));
+                    let inner_style = ctx.cite_default_style();
+                    inner_fields.push((sym!(Style), IonValue::Symbol(inner_style)));
 
                     // Type: text - inner element holds the actual content
                     inner_fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Text as u64)));
@@ -2820,14 +2824,23 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
 
                     // Style reference - use per-element style if available, else default
                     // Required for text rendering on Kindle
-                    let style_sym = elem.style_symbol.unwrap_or(ctx.default_style_symbol);
+                    let style_sym = match elem.style_symbol {
+                        Some(sym) => sym,
+                        None => ctx.cite_default_style(),
+                    };
                     fields.push((sym!(Style), IonValue::Symbol(style_sym)));
 
-                    // A bordered element with block children (a 罫囲み `<div>` of
-                    // `<p>` lines) takes `type: container` with an explicit
-                    // `layout`; its `<p>` children become the content list.
+                    // A bordered element with block children takes
+                    // `type: container` and an explicit `layout`. A list keeps
+                    // its own type, which parents its `listitem` children.
                     if elem.needs_container_wrapper {
-                        fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
+                        let bordered = match elem.role {
+                            Role::OrderedList | Role::UnorderedList => schema()
+                                .kfx_type_for_role(elem.role)
+                                .unwrap_or(KfxSymbol::Container),
+                            _ => KfxSymbol::Container,
+                        };
+                        fields.push((sym!(Type), IonValue::Symbol(bordered as u64)));
                         let layout = elem
                             .container_layout
                             .unwrap_or(ctx.container_layout_symbol() as u64);
@@ -3176,7 +3189,8 @@ impl IonBuilder {
             event_fields.push((sym!(Style), IonValue::Symbol(style_sym)));
         } else {
             // Use default style if no specific style
-            event_fields.push((sym!(Style), IonValue::Symbol(ctx.default_style_symbol)));
+            let default_style = ctx.cite_default_style();
+            event_fields.push((sym!(Style), IonValue::Symbol(default_style)));
         }
 
         // Add span-specific attributes (e.g., link_to for links, yj.display for noterefs)
@@ -3246,6 +3260,21 @@ impl IonBuilder {
             // Skip if the only content is zero-width spaces (anchor markers from empty ID elements)
             // These interfere with image display when mixed with image children
             let has_real_text = self.accumulated_text.chars().any(|c| c != '\u{200B}');
+
+            // §7.4 — an element states `content` or `content_list`, never both.
+            // Text beside block children takes the interleave shape: a bare
+            // string ahead of them in the list.
+            if has_real_text && !self.children.is_empty() {
+                if !self.style_events.is_empty() {
+                    self.fields
+                        .push((sym!(StyleEvents), IonValue::List(self.style_events)));
+                }
+                let mut list = vec![IonValue::String(std::mem::take(&mut self.accumulated_text))];
+                list.append(&mut self.children);
+                self.fields.push((sym!(ContentList), IonValue::List(list)));
+                return IonValue::Struct(self.fields);
+            }
+
             if has_real_text {
                 let (content_idx, _offset) = ctx.append_text(&self.accumulated_text);
                 let content_ref = IonValue::Struct(vec![

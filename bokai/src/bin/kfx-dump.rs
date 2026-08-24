@@ -10,6 +10,9 @@ use std::fs;
 use std::sync::Arc;
 
 /// Ion 1.0 Binary Version Marker
+/// Content types with at most this many Locations get each one printed.
+const LOCATIONS_LISTED_PER_TYPE: usize = 40;
+
 const ION_BVM: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
 
 /// Dump KFX/KDF/Ion files for debugging
@@ -5013,8 +5016,29 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
                 }
                 let mut type_list: Vec<_> = type_counts.iter().collect();
                 type_list.sort_by(|(_, a), (_, b)| b.cmp(a)); // Sort by count descending
-                for (content_type, count) in type_list {
+                for (content_type, count) in &type_list {
                     println!("  {}: {} locations", content_type, count);
+                }
+
+                // A `content_type` holding at most
+                // `LOCATIONS_LISTED_PER_TYPE` Locations gets each one printed.
+                println!("\n--- Locations by content type ---");
+                for (content_type, count) in &type_list {
+                    if **count > LOCATIONS_LISTED_PER_TYPE {
+                        println!("  {content_type}: {count} locations, not listed");
+                        continue;
+                    }
+                    let locs: Vec<String> = all_locations
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| {
+                            position_to_content
+                                .get(&entry.id)
+                                .is_some_and(|info| info.content_type == ***content_type)
+                        })
+                        .map(|(loc, entry)| format!("{loc} (eid {})", entry.id))
+                        .collect();
+                    println!("  {content_type}: {}", locs.join(", "));
                 }
             }
         }

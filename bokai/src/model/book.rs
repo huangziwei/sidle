@@ -215,8 +215,7 @@ pub struct PanelRect {
 
 /// One author-drawn comic panel on a fixed-layout page: a KF8
 /// `app-amzn-magnify` region, a KFX `zoom_panel`. Tapping `source` magnifies
-/// the page to fill `window` with `image`, and `ordinal` walks the panels in
-/// the order the author drew them.
+/// the page to fill `window` with `image`; `ordinal` orders the panels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Panel {
     /// Reading order within the page, as the source numbers it.
@@ -341,11 +340,8 @@ pub enum LandmarkType {
 
 impl LandmarkType {
     /// Human-readable name for a landmark whose source carried no label of its
-    /// own — some containers mark the cover with a placeholder, and the
-    /// reading-start markers routinely carry nothing at all.
-    ///
-    /// Every surface that shows a landmark to a reader needs a word for it, so
-    /// the naming lives here, off any one writer.
+    /// own: a cover marked with a placeholder, or a reading-start marker
+    /// carrying nothing at all.
     pub fn default_label(self) -> &'static str {
         match self {
             Self::Cover => "Cover",
@@ -365,24 +361,16 @@ impl LandmarkType {
         }
     }
 
-    /// Whether this landmark names a *part of the book* — whether it belongs
-    /// in a chapter list.
-    ///
-    /// A book's own Contents page links its chapters and, almost always, neither
-    /// the cover nor itself; the landmarks are where those live. So a TOC derived
-    /// from that page is completed from the landmarks — but only from the ones
-    /// that name a section. `StartReading` and `BodyMatter` mark where the reader
-    /// is dropped in, a place the chapter list carries an entry for under the
-    /// chapter's own name.
+    /// Whether this landmark names a part of the book, belonging in a chapter
+    /// list. `StartReading` and `BodyMatter` mark a place the chapter list
+    /// carries under the chapter's own name.
     pub fn names_a_section(self) -> bool {
         !matches!(self, Self::StartReading | Self::BodyMatter)
     }
 }
 
-/// A landmark navigation entry.
-///
-/// Landmarks identify structural locations in a book (cover, start of content,
-/// endnotes, etc.) used for navigation and reader features.
+/// A landmark navigation entry: a structural location in a book — cover,
+/// start of content, endnotes — that navigation and reader features target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landmark {
     /// Type of landmark
@@ -397,10 +385,8 @@ pub struct Landmark {
 // Book Runtime Handle
 // ============================================================================
 
-/// Runtime handle for an ebook.
-///
-/// `Book` wraps a format-specific `Importer` backend and provides
-/// unified access to metadata, table of contents, and content.
+/// Runtime handle for an ebook: `Book` wraps a format-specific `Importer` and
+/// reaches its metadata, table of contents and content through one surface.
 ///
 /// # Example
 ///
@@ -494,13 +480,9 @@ impl Book {
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::open(path)?),
             Format::Azw3 => Box::new(Azw3Importer::open(path)?),
-            // `Format::Mobi` covers three on-disk shapes: pure MOBI6, pure
-            // KF8, and MOBI6+KF8 combo (older Amazon kindlegen output). The
-            // KF8-aware shapes route through `Azw3Importer` so the source CSS,
-            // KF8 spine, and per-chapter `xml:lang` make it into the EPUB —
-            // strict readers (Apple Books, KOReader) need that for vertical
-            // Japanese rendering. Pure MOBI6 — every `.pobi` periodical among
-            // it — stays on `MobiImporter`.
+            // `Format::Mobi` covers pure MOBI6, pure KF8, and the two
+            // combined. `Azw3Importer` carries the KF8 shapes' CSS, spine and
+            // per-chapter `xml:lang`; `MobiImporter` takes pure MOBI6.
             Format::Mobi => {
                 let file = std::fs::File::open(path)?;
                 let source: Arc<dyn crate::io::ByteSource> =
@@ -512,11 +494,9 @@ impl Book {
                 }
             }
             Format::Kfx => {
-                // `.kfx-zip` bundles are merged into a single in-memory KFX
-                // container before import. This unifies per-container symbol
-                // tables — without that, references that span containers (the
-                // newer-schema symbols beyond bokai's static table among
-                // them) fail to resolve. See `kfx::merge` for the algorithm.
+                // `kfx::merge` folds a `.kfx-zip` bundle into one in-memory
+                // container, unifying the per-container symbol tables a
+                // cross-container reference resolves through.
                 if path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
@@ -594,12 +574,9 @@ impl Book {
             .unwrap_or_else(|| self.backend.metadata())
     }
 
-    /// Shadow the backend's parsed metadata with `meta`. Every later
-    /// [`metadata`][Book::metadata] call sees `meta`. The source file is
-    /// untouched.
-    ///
-    /// Clone `metadata()` and overwrite the fields to change; the untouched
-    /// fields (identifier, ASIN, cover) survive.
+    /// Shadow the backend's parsed metadata with `meta`; every later
+    /// [`metadata`][Book::metadata] call sees it, and the source file is
+    /// untouched. Clone `metadata()` to keep identifier, ASIN and cover.
     pub fn set_metadata_override(&mut self, meta: Metadata) {
         self.meta_override = Some(meta);
     }
@@ -609,11 +586,9 @@ impl Book {
         self.image_color_mode
     }
 
-    /// Cap the worker threads any one parallel stage of an import or export
-    /// may run at once; `0` restores the platform's reported parallelism.
-    ///
-    /// Each worker holds one job's working set: a decoded image, a chapter's
-    /// DOM. The cap bounds a conversion's peak memory.
+    /// Cap the worker threads one parallel import or export stage may run at
+    /// once; `0` restores the platform's reported parallelism. Each worker
+    /// holds one job's working set, and the cap bounds peak memory.
     pub fn set_max_workers(&mut self, workers: usize) {
         self.max_workers = workers;
         self.backend.set_max_workers(workers);
@@ -625,12 +600,9 @@ impl Book {
         self.max_workers
     }
 
-    /// Choose how raster images are encoded into a KFX export. `Grayscale`
-    /// (default) emits `8bppGray` JXR — the device is B&W and the source keeps
-    /// the color master; `Color` emits full `24bppRGB` JXR (channels that are
-    /// identical everywhere collapse to grayscale automatically). The
-    /// cover stays JPEG regardless. Flipping this + reconverting is how a color
-    /// book gets a color KFX for a color-capable reader.
+    /// Choose how raster images encode into a KFX export. `Grayscale` emits
+    /// `8bppGray` JXR, `Color` emits `24bppRGB` JXR, and an image whose
+    /// channels match everywhere collapses to grayscale. The cover stays JPEG.
     pub fn set_image_color_mode(&mut self, mode: jxr::ColorMode) {
         self.image_color_mode = mode;
     }
@@ -671,10 +643,9 @@ impl Book {
         self.backend.load_raw(id)
     }
 
-    /// Load a chapter as normalized IR.
+    /// Load a chapter as normalized IR: its HTML content and any linked or
     ///
-    /// This parses the chapter's HTML content and any linked or inline CSS,
-    /// producing a normalized tree structure suitable for rendering.
+    /// inline CSS, parsed into a tree.
     ///
     /// # Example
     ///
@@ -699,11 +670,10 @@ impl Book {
         self.backend.load_chapter(id)
     }
 
-    /// Load a chapter as IR with caching.
+    /// Load a chapter as IR, holding each parsed chapter in a cache. A second
     ///
-    /// The cache holds each parsed chapter, so a second load of the same id
-    /// re-parses nothing. The `Arc<Chapter>` clones cheaply and crosses
-    /// threads.
+    /// load of one id re-parses nothing, and the `Arc<Chapter>` clones cheaply
+    /// across threads.
     ///
     /// # Example
     ///
@@ -748,10 +718,9 @@ impl Book {
         Ok(chapter_arc)
     }
 
-    /// Load several chapters as IR with caching, one bulk backend call for
-    /// the misses — importers with thread-safe internals build those in
-    /// parallel (`Importer::load_chapters`). Results come back in input
-    /// order; the first backend error aborts (matching a serial `?` loop).
+    /// Load several chapters as IR with caching, one bulk
+    /// `Importer::load_chapters` call for the misses. Results come back in
+    /// input order; the first backend error aborts.
     pub fn load_chapters_cached(&mut self, ids: &[ChapterId]) -> io::Result<Vec<Arc<Chapter>>> {
         let misses: Vec<ChapterId> = {
             let cache = self
@@ -826,26 +795,20 @@ impl Book {
         resolve_book_links(self)
     }
 
-    /// Index anchors for link resolution.
-    ///
-    /// Called internally by `resolve_links()`. Delegates to the format-specific
-    /// importer to build anchor maps.
+    /// Index anchors for link resolution, through the format-specific
+    /// importer. `resolve_links` calls this.
     pub(crate) fn index_anchors(&mut self, chapters: &[(ChapterId, Arc<Chapter>)]) {
         self.backend.index_anchors(chapters);
     }
 
-    /// Resolve TOC hrefs (fills in fragments for AZW3/MOBI).
-    ///
-    /// Called internally by `resolve_links()`. Delegates to the format-specific
-    /// importer.
+    /// Resolve TOC hrefs through the format-specific importer, filling in an
+    /// AZW3/MOBI fragment. `resolve_links` calls this.
     pub(crate) fn resolve_toc(&mut self) {
         self.backend.resolve_toc();
     }
 
-    /// Resolve TOC entry targets using `resolve_href()`.
-    ///
-    /// Called internally by `resolve_links()`. Walks TOC entries and sets their
-    /// `target` field.
+    /// Walk the TOC entries, setting each `target` from `resolve_href`.
+    /// `resolve_links` calls this.
     pub(crate) fn resolve_toc_targets(&mut self) {
         // First, collect all hrefs with their targets
         fn collect_targets(
@@ -883,11 +846,9 @@ impl Book {
         apply_targets(toc, &mut targets.into_iter());
     }
 
-    /// Resolve page-list entry targets using `resolve_href()`.
-    ///
     /// The flat sibling of [`Self::resolve_toc_targets`]: walks the page-list
-    /// entries and sets each `target` so the KFX exporter can look up its
-    /// content position. Called internally by `resolve_links()`.
+    /// entries, setting each `target` from `resolve_href` to the content
+    /// position the KFX exporter looks up.
     pub(crate) fn resolve_page_list_targets(&mut self) {
         // Cloned hrefs: the resolve pass holds no borrow of the page list,
         // which the write-back below takes mutably.
@@ -906,10 +867,8 @@ impl Book {
         }
     }
 
-    /// Resolve a single href using format-specific logic.
-    ///
-    /// Called internally by `resolve_links()`. Delegates to the format-specific
-    /// importer.
+    /// Resolve a single href through the format-specific importer.
+    /// `resolve_links` calls this.
     pub(crate) fn resolve_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         self.backend.resolve_href(from_chapter, href)
     }
@@ -967,19 +926,14 @@ impl Book {
         self.backend.asset_manifest()
     }
 
-    /// Collect all @font-face definitions from CSS files.
-    ///
-    /// Returns font-face rules that map font family names to font files.
-    /// Used by KFX export to create font entities linking font-family
-    /// names to resource locations.
+    /// The `@font-face` rules the CSS files declare, mapping a font family
+    /// name to its file. A KFX export builds one `font` entity per rule.
     pub fn font_faces(&mut self) -> Vec<crate::model::FontFace> {
         self.backend.font_faces()
     }
 
-    /// Whether this book requires normalized export for HTML-based formats.
-    ///
-    /// Returns true for binary formats (KFX) where the raw content is not HTML.
-    /// Exporters should use IR-based output when this returns true.
+    /// Whether an HTML-based export takes the normalized route: true for a
+    /// binary source such as KFX, whose raw content is not HTML.
     pub fn requires_normalized_export(&self) -> bool {
         self.backend.requires_normalized_export()
     }
@@ -1025,12 +979,9 @@ impl Book {
         self.export_with_progress(format, writer, &|_, _, _, _| {})
     }
 
-    /// Like [`Book::export`], but reports coarse conversion progress to
-    /// `on_progress` as `(phase_key, current, total, human_label)` — enough for
-    /// a caller's conversion queue to drive a determinate progress bar. KFX
-    /// export emits `survey → chapters → images → finalize`; both EPUB routes
-    /// emit `content → resources → …  → finalize`. The remaining targets are
-    /// fast enough to report nothing.
+    /// [`Book::export`], reporting `(phase_key, current, total, human_label)`
+    /// to `on_progress`. A KFX export emits `survey → chapters → images →
+    /// finalize`, an EPUB one `content → resources → … → finalize`.
     pub fn export_with_progress<W: Write + Seek>(
         &mut self,
         format: Format,

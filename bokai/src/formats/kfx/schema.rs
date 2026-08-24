@@ -454,6 +454,17 @@ impl KfxSchema {
             },
         );
 
+        // §12.6 — a `zoom_target` holds one comic panel's magnified view.
+        // `fxl::page_panels` reads it into the page's `panels`, and a walk that
+        // reaches one lays it out as a container.
+        self.register_import_element(
+            KfxSymbol::ZoomTarget,
+            Strategy::Structure {
+                role: Role::Container,
+                kfx_type: KfxSymbol::ZoomTarget,
+            },
+        );
+
         // Sidebar
         self.register_element(
             KfxSymbol::Sidebar,
@@ -602,6 +613,13 @@ impl KfxSchema {
             (LandmarkType::Lot, KfxSymbol::Lot),
             // Note: LandmarkType::Endnotes has no direct KFX equivalent
         ];
+    }
+
+    /// Register a KFX type the importer reads and the export role table never
+    /// names. `Role::Container` maps to `KfxSymbol::Container`; a second
+    /// `register_element` under that role takes the mapping over.
+    fn register_import_element(&mut self, symbol: KfxSymbol, strategy: Strategy) {
+        self.import_table.insert(symbol as u32, strategy);
     }
 
     /// Register an element rule with attributes.

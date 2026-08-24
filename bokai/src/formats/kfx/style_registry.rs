@@ -194,6 +194,10 @@ pub struct StyleRegistry {
 
     /// Default style name symbol
     default_style_symbol: u64,
+
+    /// Set by [`Self::cite_default`]. [`Self::drain_to_ion`] emits the `s0`
+    /// fragment only for a book some element resolves to it.
+    default_cited: bool,
 }
 
 impl StyleRegistry {
@@ -209,7 +213,13 @@ impl StyleRegistry {
             next_style_id: 1, // Start at 1, 0 is default
             default_style_id: 0,
             default_style_symbol,
+            default_cited: false,
         }
+    }
+
+    /// Record that an element resolves to the default style.
+    pub fn cite_default(&mut self) {
+        self.default_cited = true;
     }
 
     /// Get the default style ID.
@@ -296,18 +306,21 @@ impl StyleRegistry {
         let mut result = Vec::new();
 
         // The default style carries `language`, which drives CJK font and
-        // orientation selection.
-        let mut default_fields = vec![(
-            KfxSymbol::StyleName as u64,
-            IonValue::Symbol(self.default_style_symbol),
-        )];
-        if !language.is_empty() {
-            default_fields.push((
-                KfxSymbol::Language as u64,
-                IonValue::String(language.to_string()),
-            ));
+        // orientation selection. A book whose every element carries a style of
+        // its own resolves to it nowhere, and ships no `s0` fragment.
+        if self.default_cited {
+            let mut default_fields = vec![(
+                KfxSymbol::StyleName as u64,
+                IonValue::Symbol(self.default_style_symbol),
+            )];
+            if !language.is_empty() {
+                default_fields.push((
+                    KfxSymbol::Language as u64,
+                    IonValue::String(language.to_string()),
+                ));
+            }
+            result.push(("s0".to_string(), IonValue::Struct(default_fields)));
         }
-        result.push(("s0".to_string(), IonValue::Struct(default_fields)));
 
         // The `sort_by_key` on `style_id` fixes registration order: `styles`
         // drains in the map's order, and these become entities in container

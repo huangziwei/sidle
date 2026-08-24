@@ -8,16 +8,17 @@
 //! section's pages, and [`read_px`] reads the `fixed_width`/`fixed_height`
 //! each states.
 
+use std::collections::HashMap;
+
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::BookData;
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::model::PageSpread;
+use crate::model::{PageSpread, PanelRect};
 
-/// Book-level fixed-layout signals. `fixed_layout` ⇒ image-based fixed layout
-/// (each section's page template splits into per-page spine documents);
-/// `double_page_spread` ⇒ a spread comic (drives `book-type: comic` and the
-/// `page-spread-left`/`-right` pairing).
+/// Book-level fixed-layout signals. `fixed_layout` splits each section's page
+/// template into per-page spine documents; `double_page_spread` marks a spread
+/// comic, driving `book-type: comic` and the `page-spread-left`/`-right` pairing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FxlFeatures {
     pub fixed_layout: bool,
@@ -155,6 +156,129 @@ pub fn read_px(fields: &[(u64, IonValue)], sym: KfxSymbol) -> Option<u32> {
     None
 }
 
+/// Read a `{value, unit: percent}` length as a fraction of the page box.
+/// `Fixed` positioning states all four sides this way (§12.5).
+fn read_percent(fields: &[(u64, IonValue)], sym: KfxSymbol) -> Option<f32> {
+    let inner = get_field(fields, sym as u64)?.unwrap_annotated();
+    let struct_fields = inner.as_struct()?;
+    let value = get_field(struct_fields, KfxSymbol::Value as u64)?.unwrap_annotated();
+    let number = match value {
+        IonValue::Decimal(text) => text.parse::<f32>().ok()?,
+        other => other.as_int()? as f32,
+    };
+    Some(number / 100.0)
+}
+
+/// The `left`/`top`/`width`/`height` of a positioned element, as page-box
+/// fractions. `None` unless all four are stated.
+fn read_rect(fields: &[(u64, IonValue)]) -> Option<PanelRect> {
+    Some(PanelRect {
+        left: read_percent(fields, KfxSymbol::Left)?,
+        top: read_percent(fields, KfxSymbol::Top)?,
+        width: read_percent(fields, KfxSymbol::Width)?,
+        height: read_percent(fields, KfxSymbol::Height)?,
+    })
+}
+
+/// The element id an `activate` ($442) entry zooms to: the `target` of its
+/// `zoom_in` action.
+fn zoom_target_id(fields: &[(u64, IonValue)]) -> Option<i64> {
+    let entries = get_field(fields, KfxSymbol::Activate as u64)?
+        .unwrap_annotated()
+        .as_list()?;
+    for entry in entries {
+        let Some(entry_fields) = entry.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let action = get_field(entry_fields, KfxSymbol::Action as u64)
+            .and_then(|v| v.unwrap_annotated().as_symbol());
+        if action == Some(KfxSymbol::ZoomIn as u64) {
+            return get_field(entry_fields, KfxSymbol::Target as u64).and_then(|v| v.as_int());
+        }
+    }
+    None
+}
+
+/// The author-drawn comic panels a page's `content_list` states, in `ordinal`
+/// order (§12.6): a region carrying `ordinal` and an `activate` naming a
+/// `zoom_target`, whose window container holds the magnified page image.
+pub fn page_panels(items: &[IonValue]) -> Vec<crate::model::Panel> {
+    let mut targets: HashMap<i64, &[(u64, IonValue)]> = HashMap::new();
+    for item in items {
+        let Some(fields) = item.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let is_target = get_field(fields, KfxSymbol::Type as u64)
+            .and_then(|v| v.unwrap_annotated().as_symbol())
+            == Some(KfxSymbol::ZoomTarget as u64);
+        if is_target
+            && let Some(id) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+        {
+            targets.insert(id, fields);
+        }
+    }
+
+    let mut panels = Vec::new();
+    for item in items {
+        let Some(fields) = item.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let (Some(ordinal), Some(target_id)) = (
+            get_field(fields, KfxSymbol::Ordinal as u64).and_then(|v| v.as_int()),
+            zoom_target_id(fields),
+        ) else {
+            continue;
+        };
+        let (Some(source), Some(target)) = (read_rect(fields), targets.get(&target_id)) else {
+            continue;
+        };
+        // The target's one child is the window; the window's one child is the
+        // magnified image.
+        let Some(window_fields) = first_child(target) else {
+            continue;
+        };
+        let (Some(window), Some(image_fields)) =
+            (read_rect(window_fields), first_child(window_fields))
+        else {
+            continue;
+        };
+        let Some(image) = read_rect(image_fields) else {
+            continue;
+        };
+        panels.push(crate::model::Panel {
+            ordinal: ordinal.max(0) as u32,
+            source,
+            window,
+            image,
+        });
+    }
+    panels.sort_by_key(|p| p.ordinal);
+    panels
+}
+
+/// Whether a page's content-list item is one half of a panel: the
+/// `zoom_target` holding the magnified view, or the region whose `activate`
+/// names it. [`page_panels`] reads both, so a content walk skips them.
+pub fn is_panel_element(item: &IonValue) -> bool {
+    let Some(fields) = item.unwrap_annotated().as_struct() else {
+        return false;
+    };
+    let is_target = get_field(fields, KfxSymbol::Type as u64)
+        .and_then(|v| v.unwrap_annotated().as_symbol())
+        == Some(KfxSymbol::ZoomTarget as u64);
+    is_target || zoom_target_id(fields).is_some()
+}
+
+/// The fields of the first struct in `fields`' `content_list`.
+fn first_child(fields: &[(u64, IonValue)]) -> Option<&[(u64, IonValue)]> {
+    get_field(fields, KfxSymbol::ContentList as u64)?
+        .unwrap_annotated()
+        .as_list()?
+        .first()?
+        .unwrap_annotated()
+        .as_struct()
+}
+
 /// Whether a page-template `layout` value names a facing-page spread
 /// container, whose story holds the per-page containers.
 pub fn is_spread_layout(layout: &str) -> bool {
@@ -169,12 +293,9 @@ pub trait PageContext {
     fn storyline_pages(&self, story: &str) -> Vec<IonValue>;
 }
 
-/// A page template's leaf pages in reading order, each with the half of the
-/// facing-page spread it occupies (`None` for a page that stands alone).
-///
-/// A `page_spread` / `facing_page` container holds no page content itself: its
-/// storyline holds the per-page containers, the first of which is the left
-/// page of an `ltr` book and the right page of an `rtl` one (§12.3).
+/// A page template's leaf pages in reading order, each with the spread half it
+/// occupies (`None` for a page alone). A `page_spread` storyline's first
+/// container is an `ltr` book's left page (§12.3).
 pub fn page_leaves(
     template: &IonValue,
     symbols: &SymbolTable,
@@ -395,6 +516,160 @@ mod tests {
         let alone = page_leaves(&leaf(3), &symbols, "ltr", &ctx);
         assert_eq!(alone.len(), 1);
         assert_eq!(alone[0].1, None);
+    }
+
+    /// A `{value, unit: percent}` length, the form a positioned side takes.
+    fn pct(fraction: f32) -> IonValue {
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::Value as u64,
+                IonValue::Decimal(format!("{:.4}", fraction * 100.0)),
+            ),
+            (
+                KfxSymbol::Unit as u64,
+                IonValue::Symbol(KfxSymbol::Percent as u64),
+            ),
+        ])
+    }
+
+    /// The four sides of `rect`, as an element's fields.
+    fn sides(rect: PanelRect) -> Vec<(u64, IonValue)> {
+        vec![
+            (KfxSymbol::Left as u64, pct(rect.left)),
+            (KfxSymbol::Top as u64, pct(rect.top)),
+            (KfxSymbol::Width as u64, pct(rect.width)),
+            (KfxSymbol::Height as u64, pct(rect.height)),
+        ]
+    }
+
+    /// The region/`zoom_target` pair one panel adds to a page's content list.
+    fn panel_pair(panel: crate::model::Panel, target_id: i64) -> Vec<IonValue> {
+        let mut region = sides(panel.source);
+        region.extend([
+            (
+                KfxSymbol::Ordinal as u64,
+                IonValue::Int(panel.ordinal as i64),
+            ),
+            (
+                KfxSymbol::Activate as u64,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (
+                        KfxSymbol::Action as u64,
+                        IonValue::Symbol(KfxSymbol::ZoomIn as u64),
+                    ),
+                    (KfxSymbol::Target as u64, IonValue::Int(target_id)),
+                ])]),
+            ),
+        ]);
+
+        let mut image = sides(panel.image);
+        image.push((
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Image as u64),
+        ));
+        let mut window = sides(panel.window);
+        window.push((
+            KfxSymbol::ContentList as u64,
+            IonValue::List(vec![IonValue::Struct(image)]),
+        ));
+        let target = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(target_id)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::ZoomTarget as u64),
+            ),
+            (
+                KfxSymbol::ContentList as u64,
+                IonValue::List(vec![IonValue::Struct(window)]),
+            ),
+        ]);
+        vec![IonValue::Struct(region), target]
+    }
+
+    fn rect(left: f32, top: f32, width: f32, height: f32) -> PanelRect {
+        PanelRect {
+            left,
+            top,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_panel_pair_reads_back_to_its_four_rectangles() {
+        let panel = crate::model::Panel {
+            ordinal: 1,
+            source: rect(0.1, 0.2, 0.3, 0.4),
+            window: rect(0.0, 0.0, 1.0, 0.5),
+            image: rect(-0.2, -0.4, 2.0, 2.0),
+        };
+        let read = page_panels(&panel_pair(panel, 77));
+        assert_eq!(read.len(), 1, "{read:?}");
+        assert_eq!(read[0].ordinal, 1);
+        for (got, want) in [
+            (read[0].source, panel.source),
+            (read[0].window, panel.window),
+            (read[0].image, panel.image),
+        ] {
+            for (a, b) in [
+                (got.left, want.left),
+                (got.top, want.top),
+                (got.width, want.width),
+                (got.height, want.height),
+            ] {
+                assert!((a - b).abs() < 1e-4, "{a} != {b} in {read:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn panels_come_back_in_ordinal_order() {
+        let make = |ordinal: u32| crate::model::Panel {
+            ordinal,
+            source: rect(0.0, 0.0, 1.0, 1.0),
+            window: rect(0.0, 0.0, 1.0, 1.0),
+            image: rect(0.0, 0.0, 1.0, 1.0),
+        };
+        let mut items = panel_pair(make(3), 30);
+        items.extend(panel_pair(make(1), 10));
+        items.extend(panel_pair(make(2), 20));
+        let read = page_panels(&items);
+        assert_eq!(
+            read.iter().map(|p| p.ordinal).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn a_region_whose_target_is_absent_yields_no_panel() {
+        let panel = crate::model::Panel {
+            ordinal: 0,
+            source: rect(0.0, 0.0, 1.0, 1.0),
+            window: rect(0.0, 0.0, 1.0, 1.0),
+            image: rect(0.0, 0.0, 1.0, 1.0),
+        };
+        // The region alone: its `activate` names an id nothing carries.
+        let region = vec![panel_pair(panel, 5).remove(0)];
+        assert!(page_panels(&region).is_empty());
+    }
+
+    #[test]
+    fn both_halves_of_a_pair_are_panel_elements() {
+        let panel = crate::model::Panel {
+            ordinal: 0,
+            source: rect(0.0, 0.0, 1.0, 1.0),
+            window: rect(0.0, 0.0, 1.0, 1.0),
+            image: rect(0.0, 0.0, 1.0, 1.0),
+        };
+        for item in panel_pair(panel, 9) {
+            assert!(is_panel_element(&item));
+        }
+        // A page image is not one.
+        let image = IonValue::Struct(vec![(
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Image as u64),
+        )]);
+        assert!(!is_panel_element(&image));
     }
 
     #[test]

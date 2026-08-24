@@ -394,8 +394,7 @@ impl AnchorRegistry {
 
     /// The anchor symbol a `link_to` carries for `href`: a registered target's
     /// symbol, or a fresh one for an external URL. `None` for an href reaching
-    /// nothing the book holds, whose `link_to` names an anchor no `anchor`
-    /// fragment defines.
+    /// nothing the book holds, whose `link_to` is dropped.
     pub fn link_symbol(&mut self, href: &str) -> Option<String> {
         if let Some(symbol) = self.href_to_symbol.get(href) {
             return Some(symbol.clone());
@@ -513,6 +512,29 @@ impl AnchorRegistry {
         self.chapter_positions.get(&chapter).copied()
     }
 
+    /// Node targets carrying a symbol that Pass 2 placed nowhere — an id on a
+    /// node the export flattens into its parent, whose `link_to` names an
+    /// anchor no fragment defines.
+    pub fn stranded_targets(&self) -> Vec<(GlobalNodeId, String)> {
+        self.node_to_symbol
+            .iter()
+            .filter(|(_, symbol)| !self.resolved_symbols.contains(*symbol))
+            .map(|(target, symbol)| (*target, symbol.clone()))
+            .collect()
+    }
+
+    /// Place `symbol` at `fragment_id` within `section_id`, offset 0.
+    pub fn place_anchor(&mut self, symbol: String, fragment_id: u64, section_id: u64) {
+        if self.resolved_symbols.insert(symbol.clone()) {
+            self.resolved.push(AnchorPosition {
+                symbol,
+                fragment_id,
+                section_id,
+                offset: 0,
+            });
+        }
+    }
+
     /// Drain all resolved internal anchors for entity emission.
     pub fn drain_anchors(&mut self) -> Vec<AnchorPosition> {
         std::mem::take(&mut self.resolved)
@@ -577,6 +599,8 @@ pub struct ExportContext {
     pub path_to_fragment: HashMap<String, u64>,
 
     /// Default style symbol ID, referenced by every storyline element
+    /// The symbol for `"s0"`. Read it through [`Self::cite_default_style`],
+    /// which is what puts the fragment in the container.
     pub default_style_symbol: u64,
 
     /// Style registry for deduplicating and tracking KFX styles.
@@ -666,9 +690,9 @@ pub struct ExportContext {
     pub content_language: String,
 }
 
-/// Ruby annotation string → `(ruby_name, ruby_id)`. Calibre groups annotations
-/// into fragments of ~200, one Ion entity each; a base text's style_event names
-/// the fragment kfx_id and the 1-indexed id within it.
+/// Ruby annotation string → `(ruby_name, ruby_id)`. Annotations group into
+/// fragments of `ENTRIES_PER_FRAGMENT`, one Ion entity each; a base text's
+/// style_event names the fragment kfx_id and the 1-indexed id within it.
 #[derive(Debug, Clone, Default)]
 pub struct RubyContentRegistry {
     /// Annotations in the order they were registered.
@@ -678,7 +702,7 @@ pub struct RubyContentRegistry {
 }
 
 impl RubyContentRegistry {
-    /// Max content_list entries per ruby_content fragment, calibre's grouping
+    /// Max content_list entries per ruby_content fragment.
     pub const ENTRIES_PER_FRAGMENT: usize = 250;
 
     pub fn new() -> Self {
@@ -1045,6 +1069,14 @@ impl ExportContext {
         kfx_style
     }
 
+    /// The default style's symbol, recorded as cited. Every element resolving
+    /// to `s0` takes it from here, and `drain_to_ion` emits the fragment for a
+    /// book that has one.
+    pub fn cite_default_style(&mut self) -> u64 {
+        self.style_registry.cite_default();
+        self.default_style_symbol
+    }
+
     /// Register an IR style by StyleId.
     pub fn register_style_id(
         &mut self,
@@ -1062,7 +1094,7 @@ impl ExportContext {
         class_hint: Option<&str>,
     ) -> u64 {
         if style_id == StyleId::DEFAULT {
-            return self.default_style_symbol;
+            return self.cite_default_style();
         }
 
         // Memoize the built KFX style per (StyleId, hint, non-link); a repeated
@@ -1076,7 +1108,7 @@ impl ExportContext {
             self.ir_style_memo.insert(key, built.clone());
             built
         } else {
-            return self.default_style_symbol;
+            return self.cite_default_style();
         };
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
@@ -1126,7 +1158,7 @@ impl ExportContext {
         class_hint: Option<&str>,
     ) -> u64 {
         if style_id == StyleId::DEFAULT {
-            return self.default_style_symbol;
+            return self.cite_default_style();
         }
 
         // Same per-chapter memo as `register_style_id_with_hint`, keyed on the
@@ -1139,7 +1171,7 @@ impl ExportContext {
             self.ir_style_memo.insert(key, built.clone());
             built
         } else {
-            return self.default_style_symbol;
+            return self.cite_default_style();
         };
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
@@ -1619,7 +1651,6 @@ mod tests {
         let symbol2 = registry.create_anchor(target, 100, 200, 50);
         assert_eq!(symbol2, None);
 
-        // Position should be recorded
         assert_eq!(registry.get_node_position(target), Some((100, 50)));
     }
 

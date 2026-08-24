@@ -1280,12 +1280,19 @@ impl KfxImporter {
                         _ => None,
                     }
                 });
+                // §12.6 — the panels sit in the page's own content list, each
+                // a region paired with the `zoom_target` its `activate` names.
+                let panels = leaf
+                    .unwrap_annotated()
+                    .as_struct()
+                    .map(|f| fxl::page_panels(&self.page_children(f).0))
+                    .unwrap_or_default();
                 spine.push(SpineEntry {
                     id: ChapterId(names.len() as u32),
                     size_estimate,
                     page_spread: *page_spread,
                     viewport,
-                    panels: Vec::new(),
+                    panels,
                 });
                 names.push(name);
                 fxl_pages.push(FxlPage {
@@ -1452,6 +1459,31 @@ impl KfxImporter {
         }
     }
 
+    /// A page container's children with every `story_name` reference inlined,
+    /// and the root element id its storyline declares. An inline
+    /// `content_list` wins over the container's story.
+    fn page_children(&self, cfields: &[(u64, IonValue)]) -> (Vec<IonValue>, Option<i64>) {
+        let mut story_eid: Option<i64> = None;
+        let children: Vec<IonValue> =
+            if let Some(list) = get_field(cfields, sym!(ContentList)).and_then(|v| v.as_list()) {
+                list.to_vec()
+            } else if let Some(story) = get_field(cfields, sym!(StoryName))
+                .and_then(|v| self.symbols.text_of(v))
+                .map(|s| s.to_string())
+            {
+                let (root_eid, items) = self.storyline_parts(&story);
+                story_eid = root_eid;
+                items
+            } else {
+                Vec::new()
+            };
+        let children = children
+            .into_iter()
+            .map(|c| self.inline_story_refs(c, &mut Vec::new()))
+            .collect();
+        (children, story_eid)
+    }
+
     /// Build one fixed-layout page as a chapter: the page's leaf container
     /// from the cached spread walk, a storyline synthesized from its children
     /// (inline `content_list` over its story), the container as the root.
@@ -1478,24 +1510,12 @@ impl KfxImporter {
             ));
         };
 
-        // Children: inline content_list wins; else the container's story.
-        let mut story_eid: Option<i64> = None;
-        let children: Vec<IonValue> =
-            if let Some(list) = get_field(cfields, sym!(ContentList)).and_then(|v| v.as_list()) {
-                list.to_vec()
-            } else if let Some(story) = get_field(cfields, sym!(StoryName))
-                .and_then(|v| self.symbols.text_of(v))
-                .map(|s| s.to_string())
-            {
-                let (root_eid, items) = self.storyline_parts(&story);
-                story_eid = root_eid;
-                items
-            } else {
-                Vec::new()
-            };
+        let (children, story_eid) = self.page_children(cfields);
+        // §12.6 — `expand_fxl_spine` reads the panel elements into the spine
+        // entry's `panels`, and the page's content carries the page image.
         let children: Vec<IonValue> = children
             .into_iter()
-            .map(|c| self.inline_story_refs(c, &mut Vec::new()))
+            .filter(|c| !fxl::is_panel_element(c))
             .collect();
         let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
 
