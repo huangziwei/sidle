@@ -166,8 +166,8 @@ fn build_kfx_container(
         })
         .collect();
 
-    // Register cover section in Pass 1 if standalone cover is needed
-    // This ensures it appears in reading_orders.sections and landmarks point to it
+    // `COVER_SECTION_NAME` registers in pass 1: `reading_orders.sections` and
+    // the landmarks both name it.
     if standalone_cover_path.is_some() {
         ctx.register_section(COVER_SECTION_NAME);
         // Fragment ID for the cover section, keyed by landmarks
@@ -730,7 +730,7 @@ fn build_metadata_fragment(meta: &crate::model::Metadata, ctx: &ExportContext) -
         .map(|&id| IonValue::Symbol(id))
         .collect();
 
-    // reading_order_name should be a STRING (not a symbol) per KFX spec
+    // `reading_order_name` takes an Ion string, not a symbol.
     let mut order_fields = vec![
         (
             KfxSymbol::ReadingOrderName as u64,
@@ -5989,7 +5989,7 @@ fn build_pdf_container_entity_map_fragment(
     ]);
 
     let Some(raw_sym) = ctx.symbols.get(raw_location) else {
-        // Should never happen — interned in the survey pass.
+        // `raw_location` interns in the survey pass.
         let ion = IonValue::Struct(vec![(
             KfxSymbol::ContainerList as u64,
             IonValue::List(vec![container_entry]),
@@ -6052,7 +6052,6 @@ mod tests {
         let symbols = vec!["section-1".to_string(), "section-2".to_string()];
         let ion = build_symbol_table_ion(&symbols);
 
-        // Should start with Ion BVM
         assert_eq!(&ion[..4], &[0xe0, 0x01, 0x00, 0xea]);
     }
 
@@ -6060,7 +6059,6 @@ mod tests {
     fn test_build_format_capabilities_ion() {
         let ion = build_format_capabilities_ion();
 
-        // Should start with Ion BVM
         assert_eq!(&ion[..4], &[0xe0, 0x01, 0x00, 0xea]);
     }
 
@@ -6074,14 +6072,12 @@ mod tests {
         let meta = crate::model::Metadata::default();
         let frag = build_metadata_fragment(&meta, &ctx);
 
-        // Should be $258 (metadata) type
         assert_eq!(frag.ftype, KfxSymbol::Metadata as u64);
         assert!(frag.is_nameless());
 
         // Extract Ion and verify structure
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
-                // Should have reading_orders field
                 let has_reading_orders = fields
                     .iter()
                     .any(|(id, _)| *id == KfxSymbol::ReadingOrders as u64);
@@ -6103,14 +6099,12 @@ mod tests {
 
         let frag = build_book_metadata_fragment(&book, &container_id, &ctx);
 
-        // Should be $490 (book_metadata) type
         assert_eq!(frag.ftype, KfxSymbol::BookMetadata as u64);
         assert!(frag.is_nameless());
 
         // Extract Ion and verify structure
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
-                // Should have categorised_metadata field
                 let has_categorised = fields
                     .iter()
                     .any(|(id, _)| *id == KfxSymbol::CategorisedMetadata as u64);
@@ -6126,9 +6120,8 @@ mod tests {
                     .map(|(_, v)| v);
 
                 if let Some(IonValue::List(categories)) = categorised {
-                    // Should have 4 categories: ebook, title, audit, capability
-                    // (capability is empty but its presence appears required
-                    // for the device library cover extractor).
+                    // Four categories: ebook, title, audit, capability. The
+                    // capability list is empty and its slot is held.
                     assert_eq!(categories.len(), 4, "should have 4 metadata categories");
                 } else {
                     panic!("categorised_metadata should be a list");
@@ -6197,15 +6190,12 @@ mod tests {
 
         let frag = build_book_navigation_fragment_with_positions(&book, &ctx);
 
-        // Should be $389 (book_navigation) type
         assert_eq!(frag.ftype, KfxSymbol::BookNavigation as u64);
 
         if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
-            // Should be a list with one reading order entry
             if let IonValue::List(reading_orders) = ion {
                 assert_eq!(reading_orders.len(), 1, "should have one reading order");
 
-                // The reading order should have reading_order_name and nav_containers
                 if let IonValue::Struct(fields) = &reading_orders[0] {
                     let has_reading_order_name = fields
                         .iter()
@@ -6517,7 +6507,6 @@ mod tests {
 
         let frag = build_document_data_fragment(&ctx);
 
-        // Should be $538 (document_data) type
         assert_eq!(frag.ftype, KfxSymbol::DocumentData as u64);
         assert!(frag.is_nameless());
 
@@ -6610,7 +6599,6 @@ mod tests {
         let entities =
             serialize_fragments(&[frag], &local_symbols).expect("nameless fragment serializes");
 
-        // Singleton should use $348 (null) as ID
         assert_eq!(entities[0].id, KfxSymbol::Null as u32);
     }
 
@@ -6649,14 +6637,12 @@ mod tests {
 
         let entries = build_headings_entries(&ctx);
 
-        // Should have 1 level entry (h2)
         assert_eq!(entries.len(), 1, "Should have one level group for h2");
 
         // Verify it's a nav_unit with h2 landmark_type
         if let IonValue::Annotated(annotations, inner) = &entries[0] {
             assert_eq!(annotations[0], KfxSymbol::NavUnit as u64);
             if let IonValue::Struct(fields) = inner.as_ref() {
-                // Should have landmark_type = h2
                 let landmark = fields
                     .iter()
                     .find(|(id, _)| *id == KfxSymbol::LandmarkType as u64);
@@ -6665,7 +6651,6 @@ mod tests {
                     assert_eq!(*sym, KfxSymbol::H2 as u64);
                 }
 
-                // Should have nested entries
                 let nested = fields
                     .iter()
                     .find(|(id, _)| *id == KfxSymbol::Entries as u64);
@@ -6709,7 +6694,6 @@ mod tests {
 
         let entries = build_headings_entries(&ctx);
 
-        // Should have 3 level entries (h2, h3, h4)
         assert_eq!(entries.len(), 3, "Should have three level groups");
 
         // Verify ordering is by level (BTreeMap ensures h2 < h3 < h4)
@@ -6979,14 +6963,12 @@ mod entity_structure_tests {
 
         let types: Vec<u64> = fragments.iter().map(|f| f.ftype).collect();
 
-        // First 5 should be the header entities in order
         assert_eq!(types[0], KfxSymbol::ContentFeatures as u64);
         assert_eq!(types[1], KfxSymbol::BookMetadata as u64);
         assert_eq!(types[2], KfxSymbol::Metadata as u64);
         assert_eq!(types[3], KfxSymbol::DocumentData as u64);
         assert_eq!(types[4], KfxSymbol::BookNavigation as u64);
 
-        // After header, all sections should come first, then storylines, then content
         let after_header = &types[5..];
         let section_count = after_header
             .iter()
@@ -7083,7 +7065,6 @@ mod entity_structure_tests {
             assert!(has_content_list, "storyline should have content_list");
         }
 
-        // Content is optional but if present should have name and content_list
         if let Some(content_frag) = content {
             assert_eq!(content_frag.ftype, KfxSymbol::Content as u64);
             if let FragmentData::Ion(IonValue::Struct(fields)) = &content_frag.data {
@@ -7446,11 +7427,9 @@ mod anchor_resolution_tests {
         // Step 1: Resolve all links using centralized resolver
         let resolved = book.resolve_links().unwrap();
 
-        // Should have resolved links (the TOC targets resolve internally)
         assert!(!resolved.is_empty(), "Should have resolved some links");
 
         // Check for some broken links (external links won't resolve)
-        // but internal endnote links should resolve
         let broken_count = resolved.broken_links().len();
         eprintln!("Resolved {} links, {} broken", resolved.len(), broken_count);
     }
@@ -7487,7 +7466,6 @@ mod anchor_resolution_tests {
                 if let Ok(chapter) = book.load_chapter(source.chapter)
                     && let Some(href) = chapter.semantics.href(source.node)
                 {
-                    // Both lookups should return the same symbol
                     let href_symbol = ctx.anchor_registry.get_href_symbol(href);
                     let node_symbol = ctx.anchor_registry.get_symbol(*gid);
 

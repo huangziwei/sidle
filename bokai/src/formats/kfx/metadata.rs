@@ -64,8 +64,7 @@ pub fn kfx_content_language(book_lang: &str) -> String {
 }
 
 /// The `com.amazon.yjconversion` `content_features` reflow-language marker key
-/// for a CJK language, `None` where the language has none. Keys and versions
-/// come from `kfxlib/yj_versions.py`; Korean has no marker there.
+/// for a CJK language, `None` where the language has none.
 pub fn cjk_reflow_feature(book_lang: &str) -> Option<(&'static str, i64)> {
     match classify_cjk_language(book_lang) {
         Some(CjkLang::ZhHant) => Some(("tcn-reflow-language", 1)),
@@ -85,7 +84,7 @@ pub enum MetadataCategory {
     /// Creator/audit information
     KindleAudit,
     /// Device-level capability flags. A fixed-layout book states its
-    /// comic-reader keys here; calibre emits the category with an empty list.
+    /// comic-reader keys here.
     KindleCapability,
 }
 
@@ -123,9 +122,7 @@ pub enum MetadataSource {
     Dynamic(MetadataField),
 }
 
-/// Emitted metadata value. Calibre's `is_sample` and `override_kindle_font` are
-/// Ion bools and `kindle_capability_metadata` is Ion ints; each Ion type has a
-/// variant.
+/// Emitted metadata value: one variant per Ion type a metadatum takes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     Text(String),
@@ -163,7 +160,7 @@ pub enum MetadataField {
     /// ASIN - from context. A sideloaded file gets a minted 32-char
     /// uppercase-alphanumeric value, the Kindle library's per-book cache key.
     Asin,
-    /// content_id - the same value as ASIN, matching calibre.
+    /// content_id - the same value as `Asin`.
     ContentId,
     /// dcterms:modified timestamp
     ModifiedDate,
@@ -662,7 +659,6 @@ mod tests {
         let ctx = MetadataContext::default();
         let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
 
-        // Should have title, language, author (but not description/publisher since they're None)
         assert!(
             entries
                 .iter()
@@ -755,12 +751,12 @@ mod tests {
             ..Default::default()
         };
 
-        // Without resource name in context, cover_image should not appear
+        // An empty `MetadataContext` names no resource.
         let ctx = MetadataContext::default();
         let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
         assert!(!entries.iter().any(|(k, _)| *k == "cover_image"));
 
-        // With resource name in context, cover_image should use the resource name
+        // A `MetadataContext` naming a resource.
         let ctx = MetadataContext {
             cover_resource_name: Some("e6"),
             ..Default::default()
@@ -811,10 +807,8 @@ mod tests {
     fn test_generate_book_id_format() {
         let id = super::generate_book_id("urn:uuid:12345678-1234-1234-1234-123456789abc");
 
-        // Should be 23 characters (URL-safe Base64, no padding)
         assert_eq!(id.len(), 23, "book_id should be 23 characters");
 
-        // Should only contain URL-safe Base64 characters
         assert!(
             id.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
@@ -827,7 +821,6 @@ mod tests {
         let id1 = super::generate_book_id("urn:uuid:12345678-1234-1234-1234-123456789abc");
         let id2 = super::generate_book_id("urn:uuid:12345678-1234-1234-1234-123456789abc");
 
-        // Same identifier should produce same book_id
         assert_eq!(id1, id2, "book_id should be deterministic");
     }
 
@@ -836,7 +829,6 @@ mod tests {
         let id1 = super::generate_book_id("urn:uuid:aaaaaaaa-1234-1234-1234-123456789abc");
         let id2 = super::generate_book_id("urn:uuid:bbbbbbbb-1234-1234-1234-123456789abc");
 
-        // Different identifiers should produce different book_ids
         assert_ne!(
             id1, id2,
             "different identifiers should produce different book_ids"

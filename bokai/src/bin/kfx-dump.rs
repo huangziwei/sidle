@@ -2239,7 +2239,7 @@ fn dump_entity(
     // Check for ENTY signature
     if &data[0..4] != b"ENTY" {
         eprintln!("  Not an ENTY (found: {:?})", &data[0..4]);
-        // Maybe it's raw Ion?
+        // A raw Ion stream opens with `ION_BVM`.
         if data[0..4] == ION_BVM {
             eprintln!("  Raw Ion data:");
             return dump_ion_data_extended(data, catalog, maps, resolve);

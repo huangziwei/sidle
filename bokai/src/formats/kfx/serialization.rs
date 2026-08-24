@@ -24,16 +24,9 @@ const CONTAINER_MAGIC: &[u8; 4] = b"CONT";
 /// Entity magic bytes.
 const ENTITY_MAGIC: &[u8; 4] = b"ENTY";
 
-/// Serialize a complete KFX container.
-///
-/// Container layout:
-/// - Header: CONT magic + version + header_len + ci_offset + ci_len
-/// - Entity table (indexed by $413/$414)
-/// - Doc symbols ION (indexed by $415/$416)
-/// - Format capabilities ION (indexed by $594/$595)
-/// - Container info ION
-/// - kfxgen_info JSON
-/// - Entity payloads (after header_len)
+/// Serialize a complete KFX container: an 18-byte header, the entity table
+/// ($413/$414), `symtab_ion` ($415/$416), `format_caps_ion` ($594/$595), the
+/// container info, `kfxgen_info`, then every entity payload past `header_len`.
 #[allow(clippy::vec_init_then_push)]
 pub fn serialize_container(
     container_id: &str,
@@ -53,12 +46,8 @@ pub fn serialize_container(
         current_offset += entity.data.len() as u64;
     }
 
-    // Real SHA1 of the entity payload bytes. Amazon's KFXGEN and calibre's
-    // kfxlib emit a real 40-hex SHA1 here. bokai was emitting a
-    // DefaultHasher-derived 40-char string with an obvious repeating pattern;
-    // the on-device library service appears to validate or at least sniff
-    // this field, and a malformed hash may be why the library tile and
-    // sleep-screen cover stay blank for bokai KFXs.
+    // `kfxgen_payload_sha1` digests the entity payloads, concatenated in
+    // table order.
     let mut entity_data = Vec::new();
     for entity in entities {
         entity_data.extend_from_slice(&entity.data);
@@ -118,11 +107,8 @@ pub fn serialize_container(
 
     let container_info_offset = format_caps_offset + format_caps_ion.len();
 
-    // kfxgen_info Ion-text header. Amazon's KFXGEN and calibre's kfxlib emit
-    // *quoted* string values; bokai was emitting unquoted Ion symbols, which
-    // the device library service parses as opaque atoms. Quoting the values
-    // makes the parser treat them as strings the way the cover-extraction
-    // routine expects.
+    // The `kfxgen_info` header, Ion text: four `key`/`value` pairs whose
+    // values are quoted strings.
     let kfxgen_info = format!(
         r#"[{{key:"kfxgen_package_version",value:""}},{{key:"kfxgen_application_version",value:"bokai-{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
         env!("CARGO_PKG_VERSION"),
@@ -241,15 +227,9 @@ pub fn serialize_fragment(fragment: &KfxFragment) -> Vec<u8> {
     }
 }
 
-/// Generate a container ID (`CR!` + 28 uppercase alphanumerics).
-///
-/// Seeded from the `SOURCE_DATE_EPOCH`-honoring clock plus a caller salt
-/// (the book's title or another stable identity): with the epoch pinned,
-/// the same book converts to the same id — repeat conversions are
-/// byte-comparable, like every other timestamp this converter stamps.
-/// Unset, exports vary per build second the way Amazon's own
-/// generator varies per build; the salt keeps two different books built
-/// in the same second distinct.
+/// Generate a container ID (`CR!` + 28 uppercase alphanumerics), seeded from
+/// `crate::util::time_now_secs` and `salt`. One `salt` at one pinned clock
+/// yields one id; two salts in the same second yield two.
 pub fn generate_container_id(salt: &str) -> String {
     let mut state: u128 = crate::util::time_now_secs() as u128;
     for b in salt.bytes() {
@@ -269,8 +249,8 @@ pub fn generate_container_id(salt: &str) -> String {
     id
 }
 
-/// Real SHA1 digest as 40 lowercase hex characters — the form Amazon's
-/// KFXGEN and calibre's kfxlib emit for `kfxgen_payload_sha1`.
+/// SHA-1 digest as 40 lowercase hex characters, the form
+/// `kfxgen_payload_sha1` states.
 fn sha1_hex(data: &[u8]) -> String {
     sha1_smol::Sha1::from(data).hexdigest()
 }
@@ -304,9 +284,7 @@ mod tests {
         )]);
         let data = create_entity_data(&value);
 
-        // Should start with ENTY magic
         assert_eq!(&data[..4], b"ENTY");
-        // Version should be 1
         assert_eq!(u16::from_le_bytes([data[4], data[5]]), 1);
     }
 
@@ -315,9 +293,7 @@ mod tests {
         let raw = vec![0xFF, 0xD8, 0xFF, 0xE0]; // JPEG header
         let data = create_raw_media_data(&raw);
 
-        // Should start with ENTY magic
         assert_eq!(&data[..4], b"ENTY");
-        // Raw data should be at the end
         assert!(data.ends_with(&raw));
     }
 
@@ -326,7 +302,6 @@ mod tests {
         let value = IonValue::List(vec![IonValue::String("symbol1".into())]);
         let data = serialize_annotated_ion(3, &value); // $ion_symbol_table
 
-        // Should start with Ion BVM
         assert_eq!(&data[..4], &[0xe0, 0x01, 0x00, 0xea]);
     }
 }

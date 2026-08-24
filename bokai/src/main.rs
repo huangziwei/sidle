@@ -1319,8 +1319,7 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
             "flattened_volumes": audit.flattened.volumes,
             "flattened_entries": audit.flattened.misplaced,
             // How many levels the declared TOC itself has: 1 is a flat list, 0
-            // no TOC at all. Distinct from `flattened_*`, which is how many it
-            // *should* have.
+            // no TOC at all. `flattened_*` counts the levels it lacks.
             "nav_depth": toc_depth(&audit.nav_tree),
             "nav_labels": audit.nav_labels,
             "contents_sample": audit.contents_sample,

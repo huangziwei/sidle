@@ -3267,7 +3267,6 @@ mod tests {
             mapped_count
         );
 
-        // All mapped rules should have ir_field set
         for rule in schema.ir_mapped_rules() {
             assert!(
                 rule.ir_field.is_some(),
@@ -3348,10 +3347,8 @@ mod tests {
             precision: RoundingMode::Round,
         };
 
-        // Should clamp to max
         assert_eq!(transform.apply("10.0"), Some(KfxValue::Integer(500)));
 
-        // Should clamp to min
         assert_eq!(transform.apply("-5.0"), Some(KfxValue::Integer(0)));
 
         // Within range
@@ -3412,7 +3409,6 @@ mod tests {
             target_unit: KfxUnitType::Em,
         };
 
-        // Should return None, not panic
         assert_eq!(transform.apply("10px"), None);
     }
 
@@ -3421,7 +3417,6 @@ mod tests {
         let parts: Vec<&str> = vec![];
         let default = Some(KfxValue::String("0px".to_string()));
 
-        // Should return default when no parts
         let result = extract_shorthand_value(&parts, 0, default.clone());
         assert_eq!(result, default);
     }
@@ -3439,7 +3434,6 @@ mod tests {
 
     #[test]
     fn test_parse_color_with_whitespace() {
-        // Colors should handle whitespace
         assert_eq!(parse_css_color("  red  "), Some((255, 0, 0)));
         assert_eq!(parse_css_color("  #ff0000  "), Some((255, 0, 0)));
     }
@@ -3533,7 +3527,7 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("font-style").unwrap();
 
-        // Oblique should map to Oblique, NOT Italic (per Amazon's ElementEnums.data)
+        // `oblique` maps to `KfxSymbol::Oblique`, not `Italic`.
         assert!(matches!(
             rule.transform.apply("oblique"),
             Some(KfxValue::Symbol(KfxSymbol::Oblique))
@@ -3549,7 +3543,6 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("text-align").unwrap();
 
-        // Start/End should be distinct from Left/Right for RTL support
         assert!(matches!(
             rule.transform.apply("start"),
             Some(KfxValue::Symbol(KfxSymbol::Start))
@@ -3573,7 +3566,6 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("color").unwrap();
 
-        // Colors should output packed ARGB integers with 0xFF alpha
         // 0xFFFF0000 = 4294901760
         let result = rule.transform.apply("#ff0000");
         assert!(matches!(result, Some(KfxValue::Integer(4294901760))));
@@ -3588,7 +3580,6 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("vertical-align").unwrap();
 
-        // Should use BaselineStyle symbol, not TextBaseline
         assert_eq!(rule.kfx_symbol, KfxSymbol::BaselineStyle);
 
         assert!(matches!(
@@ -3868,7 +3859,6 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("letter-spacing").unwrap();
 
-        // 0.1em should convert to dimensioned value
         let result = rule.transform.apply("0.1em");
         assert!(matches!(result, Some(KfxValue::Dimensioned { .. })));
     }
@@ -4205,8 +4195,8 @@ mod tests {
     fn test_sizing_bounds_auto_emit_with_width() {
         use crate::style::{ComputedStyle, Length};
 
-        // When width is set, sizing_bounds should emit content-box (the CSS default)
-        // This matches Amazon's converter behavior
+        // A stated `width` emits `sizing_bounds: content-box`, the CSS initial
+        // value.
         let mut style = ComputedStyle::default();
         style.width = Length::Percent(75.0);
 
@@ -4222,7 +4212,6 @@ mod tests {
     fn test_sizing_bounds_border_box() {
         use crate::style::{BoxSizing, ComputedStyle, Length};
 
-        // Explicit border-box should emit border-box
         let mut style = ComputedStyle::default();
         style.box_sizing = BoxSizing::BorderBox;
         style.width = Length::Percent(100.0);
@@ -4437,11 +4426,9 @@ mod tests {
     fn test_border_spacing_multiple_rules() {
         let schema = StyleSchema::standard();
 
-        // border-spacing should have two rules (vertical and horizontal)
         let rules = schema.get("border-spacing").unwrap();
         assert_eq!(rules.len(), 2);
 
-        // Both rules should use PreserveUnit transform
         let symbols: Vec<_> = rules.iter().map(|r| r.kfx_symbol).collect();
         assert!(symbols.contains(&KfxSymbol::BorderSpacingVertical));
         assert!(symbols.contains(&KfxSymbol::BorderSpacingHorizontal));
@@ -4460,7 +4447,6 @@ mod tests {
     fn test_vertical_align_multiple_rules() {
         let schema = StyleSchema::standard();
 
-        // vertical-align should have two rules (baseline_style and yj.vertical_align)
         let rules = schema.get("vertical-align").unwrap();
         assert_eq!(rules.len(), 2);
 
@@ -4468,7 +4454,6 @@ mod tests {
         assert!(symbols.contains(&KfxSymbol::BaselineStyle));
         assert!(symbols.contains(&KfxSymbol::YjVerticalAlign));
 
-        // "super" should only match baseline_style rule
         let super_results: Vec<_> = rules
             .iter()
             .filter_map(|r| r.transform.apply("super"))
@@ -4479,7 +4464,6 @@ mod tests {
             KfxValue::Symbol(KfxSymbol::Superscript)
         ));
 
-        // "top" should only match yj.vertical_align rule
         let top_results: Vec<_> = rules
             .iter()
             .filter_map(|r| r.transform.apply("top"))
@@ -4579,8 +4563,6 @@ mod tests {
 
     #[test]
     fn test_schema_writing_mode_emits_kfx_symbol() {
-        // The schema rule for "writing-mode" should map the IR CSS value
-        // to KfxSymbol::WritingMode with the right enum-symbol value.
         let schema = StyleSchema::standard();
         let rules = schema.get("writing-mode").expect("writing-mode rule");
         assert_eq!(rules.len(), 1);

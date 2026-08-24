@@ -3057,7 +3057,7 @@ struct IonBuilder {
     /// to close the outer container.
     is_inner_wrapper_text: bool,
     /// For inner wrapper text elements, stores the outer container's ID.
-    /// Anchors inside wrapped elements should use this ID for correct TOC navigation.
+    /// An anchor inside a wrapped element targets this id.
     outer_container_id: Option<u64>,
     /// Completed inline-content runs in document order: bare text strings
     /// interleaved with `render: inline` image structs. Non-empty once an
@@ -3510,7 +3510,6 @@ mod tests {
             Some("Hello, world!".to_string())
         });
 
-        // Should have: root -> para -> [text("Hello, "), link("world"), text("!")]
         let para_id = chapter.children(chapter.root()).next().unwrap();
         let children: Vec<_> = chapter.children(para_id).collect();
         assert_eq!(children.len(), 3);
@@ -3785,7 +3784,6 @@ mod tests {
         let mut ctx = ExportContext::new();
         let tokens = ir_to_tokens(&chapter, &mut ctx);
 
-        // Should have tokens for the text node
         assert!(!tokens.is_empty());
     }
 
@@ -3807,7 +3805,6 @@ mod tests {
         let mut ctx = ExportContext::new();
         let ion = build_storyline_ion(&chapter, &mut ctx);
 
-        // Should produce some Ion structure
         assert!(!matches!(ion, IonValue::Null));
     }
 
@@ -4062,7 +4059,6 @@ mod tests {
         let mut ctx = ExportContext::new();
         let ion = tokens_to_ion(&tokens, &mut ctx);
 
-        // Empty tokens should produce an empty list or null
         assert!(
             matches!(ion, IonValue::List(_)) || matches!(ion, IonValue::Null),
             "expected List or Null, got {:?}",
@@ -4155,7 +4151,6 @@ mod tests {
 
     #[test]
     fn test_layout_hints_for_heading() {
-        // Headings should emit layout_hints: [treat_as_title]
         let mut chapter = Chapter::new();
         let text_range = chapter.append_text("Chapter 1");
         let mut text_node = Node::new(Role::Text);
@@ -4221,7 +4216,6 @@ mod tests {
 
     #[test]
     fn test_layout_hints_for_figure() {
-        // Figure elements should emit layout_hints: [figure]
         let mut chapter = Chapter::new();
 
         let figure = Node::new(Role::Figure);
@@ -4490,14 +4484,12 @@ mod tests {
         assert!(structure.is_some(), "Should find element structure");
         let (outer_type, inner_type) = structure.unwrap();
 
-        // Outer element should be type: container
         assert_eq!(
             outer_type,
             KfxSymbol::Container as u64,
             "Heading with border should have type: container (not text)"
         );
 
-        // Should have nested type: text child
         assert!(
             inner_type.is_some(),
             "Container should have nested content_list with inner element"
@@ -4742,7 +4734,6 @@ mod tests {
         let elem_type = find_first_element_type(&ion);
         assert!(elem_type.is_some(), "Should find element type");
 
-        // Element without border should be type: text (normal heading)
         assert_eq!(
             elem_type.unwrap(),
             KfxSymbol::Text as u64,
@@ -4775,7 +4766,7 @@ mod tests {
     #[test]
     fn test_needs_container_wrapper_border_style_none() {
         let mut style = ComputedStyle::default();
-        // Has width but no style - should NOT need wrapper
+        // A width with `BorderStyle::None` draws no border.
         style.border_style_top = BorderStyle::None;
         style.border_width_top = Length::Px(1.0);
         assert!(!needs_container_wrapper(&style));
@@ -4784,7 +4775,7 @@ mod tests {
     #[test]
     fn test_needs_container_wrapper_border_width_zero() {
         let mut style = ComputedStyle::default();
-        // Has style but zero width - should NOT need wrapper
+        // `BorderStyle::Solid` at zero width draws no border.
         style.border_style_top = BorderStyle::Solid;
         style.border_width_top = Length::Px(0.0);
         assert!(!needs_container_wrapper(&style));
@@ -4861,7 +4852,6 @@ mod tests {
         let para_id = chapter.children(chapter.root()).next().unwrap();
         let para_children: Vec<_> = chapter.children(para_id).collect();
 
-        // Should have exactly one child: the Link
         assert_eq!(
             para_children.len(),
             1,
@@ -4877,7 +4867,6 @@ mod tests {
             "Link should have href"
         );
 
-        // Link should have two children: Inline and Text
         let link_children: Vec<_> = chapter.children(link_id).collect();
         assert_eq!(
             link_children.len(),
@@ -4954,7 +4943,6 @@ mod tests {
         let mut segments = Vec::new();
         flatten_inline_content(&chapter, link_id, InlineState::default(), &mut segments);
 
-        // Should produce exactly 2 segments
         assert_eq!(segments.len(), 2, "Should have 2 non-overlapping segments");
 
         // First segment: "1." with Inline's style and Link's href
@@ -5096,14 +5084,12 @@ mod tests {
         // Get the node position for p6
         let anchor_pos = ctx.anchor_registry.get_node_position(target);
 
-        // The anchor position should exist and point to the outer container ID
         assert!(anchor_pos.is_some(), "Anchor for p6 should be created");
 
         let (fragment_id, _offset) = anchor_pos.unwrap();
 
         // Get the list of content IDs recorded for this chapter
         // Container wrapper creates 2 content IDs: outer container and inner text
-        // The first one (outer container) should be used for the anchor
         let content_ids = ctx.content_ids_by_chapter.get(&chapter_id);
         assert!(
             content_ids.is_some(),
@@ -5116,8 +5102,6 @@ mod tests {
             content_ids.len()
         );
 
-        // The anchor should point to the first content ID (the outer container)
-        // not the second ID (the inner text element)
         assert_eq!(
             fragment_id, content_ids[0],
             "Anchor should point to outer container ID ({}) not inner element ({})",
