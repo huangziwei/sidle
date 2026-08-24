@@ -16,10 +16,8 @@ use crate::style::{self as ir_style, ToCss};
 // Constants
 // ============================================================================
 
-/// Default base font size in pixels.
-///
-/// Used for converting CSS units (em, rem, %) to absolute values.
-/// 16px is the standard browser default.
+/// Default base font size in pixels, converting CSS `em`, `rem` and `%` to
+/// absolute values.
 pub const DEFAULT_BASE_FONT_SIZE: f64 = ir_style::ROOT_FONT_SIZE_PX as f64;
 
 /// KFX points per CSS pixel: `72 / 160`, both directions.
@@ -65,23 +63,13 @@ pub enum ValueTransform {
         default_value: Option<KfxValue>,
     },
 
-    /// Font-size conversion following Amazon's convention of root-relative
-    /// sizes: absolute CSS lengths (px/pt/in/…) are normalized to `rem`
-    /// against the 16px root default so the device font-size slider keeps
-    /// scaling them; relative units (em/rem/%) pass through unchanged.
-    /// Example: "24px" -> { value: 1.5, unit: rem }
+    /// Absolute CSS lengths normalized to `rem` against the 16px root
+    /// default; `em`, `rem` and `%` pass through. `24px` → `{1.5, rem}`.
     FontSize,
 
-    /// Convert CSS units and output as KFX dimensioned value.
-    ///
-    /// This is the proper transform for block layout properties:
-    /// 1. Parses CSS length (e.g., "20px", "1.5em", "10%")
-    /// 2. Converts to target unit using base_font_size
-    /// 3. Outputs as { value: N, unit: $symbol }
-    ///
-    /// Percentages are preserved as-is with the `percent` unit:
-    /// - "75%" → { value: 75., unit: percent }
-    /// - "20px" with base=16, target=Em → { value: 1.25, unit: em }
+    /// Parse a CSS length, convert it against `base_font_size`, and emit
+    /// `{value, unit}`. A percentage keeps the `percent` unit: `75%` →
+    /// `{75., percent}`, `20px` at base 16 with target `Em` → `{1.25, em}`.
     ConvertToDimensioned {
         /// Base font size in pixels (for em/rem conversion)
         base_pixels: f64,
@@ -222,10 +210,8 @@ pub enum IrField {
     PaddingRight,
     Color,
     BackgroundColor,
-    /// How a background image tiles. Only meaningful alongside
-    /// `background-image`, which the resource registry resolves separately
-    /// (a KFX `background_image` is a symbol naming an external resource, not
-    /// a string the schema's transforms can produce).
+    /// How a background image tiles. The resource registry resolves
+    /// `background-image`, whose KFX value is a symbol.
     BackgroundRepeat,
     BackgroundPositionX,
     BackgroundPositionY,
@@ -330,11 +316,8 @@ pub struct StylePropertyRule {
 
 /// The master schema for style property mappings.
 pub struct StyleSchema {
-    /// Lookup from IR key -> Rules (multiple rules per key supported).
-    /// Ordered map on purpose: `rules()` / `ir_mapped_rules()` walks feed
-    /// last-write-wins property application and the emitted field order of
-    /// every style struct — an unordered walk made the same book export
-    /// differently per process.
+    /// IR key → rules, several per key. The order feeds last-write-wins
+    /// property application and the emitted field order of every style struct.
     rules: BTreeMap<&'static str, Vec<StylePropertyRule>>,
 }
 
@@ -368,15 +351,14 @@ impl StyleSchema {
         self.rules.get(ir_key).and_then(|v| v.first())
     }
 
-    /// Get all rules (flattened), in `ir_key` order — several callers scan
-    /// for a first match, so the walk order is part of the contract.
+    /// Every rule flattened, in `ir_key` order. Several callers scan for a
+    /// first match, and the walk order is part of the contract.
     pub fn rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules.values().flatten()
     }
 
-    /// Get rules that have IR field mappings (for schema-driven IR
-    /// extraction), in the same stable `ir_key` order — application is
-    /// last-write-wins per KFX symbol, so the winner must not vary.
+    /// The rules carrying an IR field mapping, in `ir_key` order.
+    /// Application is last-write-wins per KFX symbol, and the winner is fixed.
     pub fn ir_mapped_rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules
             .values()
@@ -519,12 +501,7 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-        // Spacing Properties (Margins)
-        // ====================================================================
-        //
-        // Margins use PreserveUnit to keep the original CSS units (px, em, %).
-        // This matches the source CSS more closely.
+        // Margins take PreserveUnit, keeping the source CSS units (px, em, %).
 
         schema.register(StylePropertyRule {
             ir_key: "margin-top",
@@ -630,18 +607,11 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Background image placement
-        // ====================================================================
-        // `background_image` itself is not registered here: its KFX value is a
-        // symbol naming an `external_resource`, which only the export context
-        // can mint (see `ExportContext::build_ir_style`). These three describe
-        // how that picture is laid down.
+        // `ExportContext::build_ir_style` mints `background_image`, a symbol
+        // naming an `external_resource`. These three rules place that picture.
 
-        // KFX has no `repeat` symbol — the absent property means "tile both
-        // axes", which is also CSS's initial value, so only the narrowing
-        // values need a mapping. `space` and `round` have no KFX equivalent
-        // and fall through to the default tiling.
+        // An absent `background_repeat` tiles both axes, CSS's initial value;
+        // `space` and `round` map to that default.
         schema.register(StylePropertyRule {
             ir_key: "background-repeat",
             ir_field: Some(IrField::BackgroundRepeat),
@@ -703,8 +673,7 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // vertical-align → yj.vertical_align (for table cell alignment)
-        // Multiple rules per key are now supported.
+        // vertical-align → yj.vertical_align, for table cell alignment.
         schema.register(StylePropertyRule {
             ir_key: "vertical-align",
             ir_field: None, // Don't extract twice from IR
@@ -717,11 +686,8 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Writing mode (block-flow direction)
-        // ====================================================================
-        // CSS writing-mode → KFX writing_mode symbol. Block-level property:
-        // applies to the document/container, not inline text spans.
+        // CSS writing-mode → KFX writing_mode symbol, a block-level property
+        // on the document or container.
         schema.register(StylePropertyRule {
             ir_key: "writing-mode",
             ir_field: Some(IrField::WritingMode),
@@ -743,13 +709,9 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Text emphasis marks (圏点)
-        // ====================================================================
         // CSS text-emphasis-style → KFX text_emphasis_style symbol. The CSS
-        // value is a two-word `<fill> <shape>` pair, matched as one
-        // space-separated string against its KFX glyph symbol. Emphasis marks
-        // a run of text, and the rule is inline-safe.
+        // value is a `<fill> <shape>` pair matched as one space-separated
+        // string against its KFX glyph symbol; the rule is inline-safe.
         schema.register(StylePropertyRule {
             ir_key: "text-emphasis-style",
             ir_field: Some(IrField::TextEmphasisStyle),
@@ -1527,7 +1489,7 @@ impl ValueTransform {
                         Some(KfxValue::Integer(packed))
                     }
                     ColorFormat::RgbStruct => {
-                        // Would need a KfxValue variant for this
+                        // Alpha is packed at 0xFF.
                         let packed = (0xFF_i64 << 24)
                             | ((color.0 as i64) << 16)
                             | ((color.1 as i64) << 8)
@@ -1702,11 +1664,9 @@ fn convert_to_pixels(value: f64, unit: &str, base_font_size: f64) -> f64 {
 fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.trim().to_lowercase();
 
-    // `transparent` is a valid CSS color, but it has no useful packed-int
-    // representation: KFX's color packer hardcodes alpha=0xFF, so emitting
-    // anything here would render as opaque black. Returning None makes the
-    // calling transform drop the property entirely, which is what
-    // `background: transparent` actually means — no background.
+    // `transparent` has no packed-int representation: the color packer sets
+    // alpha to 0xFF. `None` drops the property, which is what
+    // `background: transparent` states.
     if s == "transparent" {
         return None;
     }
@@ -1815,13 +1775,9 @@ fn parse_color_component(s: &str) -> Option<u8> {
     }
 }
 
-/// Extract a value from a CSS shorthand property.
-///
-/// CSS shorthands expand in specific ways:
-/// - 1 value: applies to all sides (top, right, bottom, left)
-/// - 2 values: (top/bottom, left/right)
-/// - 3 values: (top, left/right, bottom)
-/// - 4 values: (top, right, bottom, left)
+/// Extract one side's value from a CSS shorthand: 1 value applies to all
+/// sides, 2 are (top/bottom, left/right), 3 are (top, left/right, bottom),
+/// 4 are (top, right, bottom, left).
 fn extract_shorthand_value(
     parts: &[&str],
     index: usize,
@@ -1837,10 +1793,7 @@ fn extract_shorthand_value(
         (2, 0) | (2, 2) => parts.first(),
         (2, 1) | (2, 3) => parts.get(1),
 
-        // 3 values: (top, horizontal, bottom)
-        // index 0 = top = parts[0]
-        // index 1,3 = left/right = parts[1]
-        // index 2 = bottom = parts[2]
+        // 3 values: index 0 = top, 1 and 3 = left/right, 2 = bottom.
         (3, 0) => parts.first(),
         (3, 1) | (3, 3) => parts.get(1),
         (3, 2) => parts.get(2),
@@ -1866,13 +1819,9 @@ fn extract_shorthand_value(
 /// emits this same constant.
 pub const DOCUMENT_LINE_HEIGHT_EM: f32 = 1.2;
 
-/// Treat `Length::Px(0.0)` as equivalent to the IR's `Auto` default when
-/// deciding whether to emit a box-model length (margin, padding, text-indent,
-/// letter/word-spacing). The CSS-spec default for these is `0`, so a computed
-/// value of `0px` carries no extra information — but emitting it locks the
-/// device into a literal `0px` and prevents Kindle's Layout > Spacing slider
-/// from injecting its own scaled inter-column / line-spacing values. Calibre
-/// omits zero margins entirely; matching that lets the slider work.
+/// True for a box-model length equal to `default` or `Px(0.0)`. An emitted
+/// `0px` pins the device to it and holds the Layout > Spacing slider's own
+/// scaled values out.
 fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool {
     value == default || matches!(value, ir_style::Length::Px(v) if v == 0.0)
 }
@@ -1892,22 +1841,9 @@ fn auto_centering_side_margin(ir_style: &ir_style::ComputedStyle) -> Option<Stri
     (width > 0.0 && width < 100.0).then(|| format!("{}%", (100.0 - width) / 2.0))
 }
 
-/// One axis of `background-size`, as KFX's `background_sizex` / `sizey` can
-/// state it. `vertical` picks the y axis.
-///
-/// KFX has no `cover` / `contain` keyword — only a length per axis — so the
-/// two keywords cannot be carried across faithfully:
-///
-/// * `cover` becomes `100%` on both axes. That fills the box as the author
-///   asked, at the cost of the aspect ratio `cover` would have preserved by
-///   cropping. Leaving it off instead paints the picture at its intrinsic
-///   size, which for the full-page textures that use `cover` is further from
-///   the intent than a stretch.
-/// * `contain` is left off. Its whole point is that nothing is cropped or
-///   distorted, and `100%` would distort; the intrinsic size at least keeps
-///   the ratio.
-///
-/// The IR keeps the keyword either way, so the EPUB side round-trips exactly.
+/// One axis of `background-size`, as KFX's `background_sizex` / `sizey`
+/// states it; `vertical` picks the y axis. `cover` becomes `100%` on both
+/// axes and `contain` is left off. The IR keeps the keyword either way.
 fn background_size_axis(ir_style: &ir_style::ComputedStyle, vertical: bool) -> Option<String> {
     ir_style.background_image.as_ref()?;
     match ir_style.background_size {
@@ -1920,20 +1856,9 @@ fn background_size_axis(ir_style: &ir_style::ComputedStyle, vertical: bool) -> O
     }
 }
 
-/// Extract a CSS string from an IR ComputedStyle field.
-///
-/// This is the centralized extraction logic for the bidirectional schema.
-/// The schema declares WHICH fields to extract (via `IrField` enum), and
-/// this function provides the HOW (accessing the struct field, checking defaults).
-///
-/// Returns `None` if the field has its default value (nothing to emit).
-///
-/// `doc_writing_mode` is the document-effective writing-mode (precomputed
-/// from the IR style pools before any ingest). For most fields this is
-/// ignored. For `IrField::WritingMode` specifically, it overrides the
-/// CSS-spec default — so an explicit `horizontal-tb` in a vertical book
-/// (i.e. a per-page override) is emitted, instead of getting silently
-/// dropped because it matches the static spec default.
+/// Extract a CSS string from an IR `ComputedStyle` field, `None` at the
+/// field's default. `IrField::WritingMode` compares against
+/// `doc_writing_mode` in place of the CSS-spec default.
 pub fn extract_ir_field(
     ir_style: &ir_style::ComputedStyle,
     field: IrField,
@@ -2344,22 +2269,14 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // BoxAlign: margin-left:auto + margin-right:auto centers a block — but
-        // only when it has a definite width. With width:auto (the default), CSS
-        // resolves the auto margins to 0 and the block is NOT centered; it
-        // shrinks to its content (this is how Apple Books renders an Aozora
-        // 罫囲み box — a content-width box, not a page-wide one). Without the
-        // width guard, every block that merely never set a horizontal margin got
-        // `box_align: center`, because `Length::default()` is `Auto` — which on
-        // Kindle forced bordered boxes to span the full page width (each line of
-        // a 罫囲み box landed on its own page).
+        // `margin-left: auto` + `margin-right: auto` centers a block carrying
+        // a definite width. At `width: auto` CSS resolves both margins to 0
+        // and the block shrinks to its content.
         IrField::BoxAlign => {
             let both_margins_auto = ir_style.margin_left == ir_style::Length::Auto
                 && ir_style.margin_right == ir_style::Length::Auto;
-            // A definite width OR a max-width gives the block a resolvable size
-            // for auto margins to center against. `max-width` covers centered
-            // images/covers (`img { max-width: …; margin: auto }`); a bare text
-            // block (the 罫囲み box, headings) has neither and so is not centered.
+            // A `width` or a `max-width` gives the block a size for the auto
+            // margins to center against.
             let has_definite_width = ir_style.width != ir_style::Length::Auto
                 || ir_style.max_width != ir_style::Length::Auto;
             if both_margins_auto && has_definite_width {
@@ -2373,7 +2290,7 @@ pub fn extract_ir_field(
             // If explicitly border-box, emit it
             if ir_style.box_sizing == ir_style::BoxSizing::BorderBox {
                 Some("border-box".to_string())
-            // Otherwise, if width or height is set, emit content-box (CSS default)
+            // A set width or height emits content-box, the CSS default.
             } else if ir_style.width != default.width || ir_style.height != default.height {
                 Some("content-box".to_string())
             } else {
@@ -2426,14 +2343,9 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Writing mode
-        //
-        // Compare against `doc_writing_mode`, not the CSS-spec default.
-        // For horizontal books these coincide and behavior is unchanged;
-        // for vertical books an explicit `horizontal-tb` resolved by the
-        // cascade is a real override that must be emitted, otherwise KFX
-        // inheritance from `document_data.writing_mode = vertical_rl`
-        // takes over and the page renders vertical.
+        // Compare against `doc_writing_mode`. In a vertical book an explicit
+        // `horizontal-tb` from the cascade is a real override, and KFX
+        // inheritance from `document_data.writing_mode` covers the rest.
         IrField::WritingMode => {
             if ir_style.writing_mode != doc_writing_mode {
                 Some(ir_style.writing_mode.to_css_string())
@@ -2471,11 +2383,9 @@ pub fn extract_ir_field(
 // ============================================================================
 
 impl StyleSchema {
-    /// Every schema rule carrying this KFX symbol, in stable `ir_key` order.
-    ///
-    /// A KFX property can back several CSS properties (e.g. `$underline`
-    /// feeds both `text-decoration` and `text-decoration-style`); the rules
-    /// map is ordered by `ir_key`, so the walk yields a stable winner.
+    /// Every schema rule carrying this KFX symbol, in `ir_key` order. One KFX
+    /// property backs several CSS properties: `$underline` feeds both
+    /// `text-decoration` and `text-decoration-style`.
     pub fn get_all_by_kfx_symbol(&self, kfx_symbol: u64) -> Vec<&StylePropertyRule> {
         self.rules
             .values()
@@ -2562,10 +2472,9 @@ impl ValueTransform {
                     id if id == KfxSymbol::Pt as u32 => {
                         (((num / KFX_PT_PER_CSS_PX) * 1e5).round() / 1e5, "px")
                     }
-                    // `lh` counts line heights, and one of those is
-                    // `DOCUMENT_LINE_HEIGHT_EM` em — the same baseline the
-                    // export direction divides by to reach `lh` again. The
-                    // factor is what keeps the two ends agreeing.
+                    // `lh` counts line heights, one of them
+                    // `DOCUMENT_LINE_HEIGHT_EM` em — the baseline the export
+                    // direction divides by to reach `lh`.
                     id if id == KfxSymbol::Lh as u32 => {
                         let em = num * DOCUMENT_LINE_HEIGHT_EM as f64;
                         ((em * 1e5).round() / 1e5, "em")
@@ -2612,9 +2521,8 @@ fn get_field_by_symbol(fields: &[(u64, IonValue)], sym: KfxSymbol) -> Option<&Io
         .map(|(_, v)| v)
 }
 
-/// Apply a CSS value to an IR ComputedStyle field.
-///
-/// This is the inverse of `extract_ir_field` - sets the field instead of reading it.
+/// Apply a CSS value to an IR `ComputedStyle` field, the inverse of
+/// `extract_ir_field`.
 pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, css_value: &str) {
     match field {
         IrField::FontWeight => {
@@ -2727,8 +2635,7 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.background_position_x = len;
             }
         }
-        // KFX states size per axis, so each arm fills its own half of the
-        // pair and leaves whatever the other arm already wrote.
+        // KFX states size per axis; each arm fills its own half of the pair.
         IrField::BackgroundSizeX => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 let y = match ir_style.background_size {
@@ -3109,12 +3016,8 @@ fn parse_css_length_to_ir(s: &str) -> Option<ir_style::Length> {
     })
 }
 
-/// Import KFX style properties to an IR ComputedStyle using the schema.
-///
-/// This is the inverse of the export direction:
-/// 1. For each KFX property, look up the schema rule by kfx_symbol
-/// 2. Apply inverse transform to get CSS value
-/// 3. Apply CSS value to IR field
+/// Import KFX style properties into an IR `ComputedStyle`: look up the schema
+/// rule by `kfx_symbol`, apply the inverse transform, set the IR field.
 pub fn import_kfx_style(
     schema: &StyleSchema,
     props: &[(u64, IonValue)],
@@ -3139,10 +3042,8 @@ pub fn import_kfx_style(
     style
 }
 
-/// Check if a style should be treated as block-like for KFX export.
-///
-/// KFX doesn't have native `display: inline-block`. Elements with this
-/// display type should be emitted as block containers instead of inline spans.
+/// True for a style KFX export emits as a block container. KFX has no
+/// `display: inline-block`.
 pub fn is_block_display(style: &ir_style::ComputedStyle) -> bool {
     matches!(
         style.display,
@@ -3506,7 +3407,7 @@ mod tests {
             precision: RoundingMode::Round,
         };
 
-        // Invalid input that would produce NaN
+        // Invalid input producing NaN.
         assert_eq!(transform.apply("not_a_number"), None);
         assert_eq!(transform.apply(""), None);
     }
@@ -4289,7 +4190,7 @@ mod tests {
     fn test_hyphens_default_is_manual() {
         use crate::style::{ComputedStyle, Hyphens};
 
-        // Default is Manual so explicit hyphens: auto is emitted in KFX output
+        // The default is Manual, and an explicit `hyphens: auto` is emitted.
         let default = ComputedStyle::default();
         assert_eq!(default.hyphens, Hyphens::Manual);
     }
@@ -4298,7 +4199,7 @@ mod tests {
     fn test_ir_mapped_rules_count() {
         let schema = StyleSchema::standard();
 
-        // Count rules with IR field mappings (should be ~50+ now with all phases)
+        // Rules carrying an IR field mapping.
         let mapped_count = schema.ir_mapped_rules().count();
         assert!(
             mapped_count >= 40,
@@ -4651,7 +4552,7 @@ mod tests {
         use crate::style::{ComputedStyle, WritingMode};
 
         let default = ComputedStyle::default();
-        // HorizontalTb is the default, so nothing to emit
+        // HorizontalTb is the default and emits nothing.
         assert_eq!(
             extract_ir_field(
                 &default,

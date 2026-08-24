@@ -5456,10 +5456,15 @@ fn report_content(data: &[u8]) -> IonResult<()> {
     Ok(())
 }
 
-/// Report entity dependencies from a KFX file
+/// Report the `container_entity_map` manifest against the index table: each
+/// listed name under the type its index row states, then the fragments the
+/// index holds and the manifest omits.
 fn report_dependencies(data: &[u8]) -> IonResult<()> {
-    use bokai::formats::kfx::ion::IonParser;
+    use bokai::formats::kfx::container::{get_field, parse_entity, parse_index_table, slice_at};
+    use bokai::formats::kfx::ion::IonValue;
+    use bokai::formats::kfx::resource_index::entity_fid;
     use bokai::formats::kfx::symbols::KfxSymbol;
+    use std::collections::{BTreeMap, BTreeSet};
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -5478,228 +5483,141 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
         eprintln!("Failed to read container info length");
         return Ok(());
     };
-
-    if container_info_offset + container_info_length > data.len() {
+    let Some(container_info_data) = slice_at(data, container_info_offset, container_info_length)
+    else {
         eprintln!("Container info out of bounds");
         return Ok(());
-    }
-
-    let container_info_data =
-        &data[container_info_offset..container_info_offset + container_info_length];
-
+    };
     let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
     else {
         eprintln!("Could not find index table");
         return Ok(());
     };
-
-    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
-        parse_container_info_for_doc_symbols(container_info_data)
-    {
-        if doc_sym_offset + doc_sym_length <= data.len() {
-            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
-        } else {
-            SymbolTable::from_fragment(None)
-        }
-    } else {
-        SymbolTable::from_fragment(None)
+    let Some(index) = slice_at(data, index_offset, index_length) else {
+        eprintln!("Index table out of bounds");
+        return Ok(());
     };
-    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let entry_size = 24;
-    let num_entries = index_length / entry_size;
-    let container_entity_map_type = KfxSymbol::ContainerEntityMap as u32;
+    let symtab = SymbolTable::from_fragment(
+        parse_container_info_for_doc_symbols(container_info_data)
+            .and_then(|(off, len)| slice_at(data, off, len)),
+    );
+    let entities = parse_index_table(index, header_len);
+
+    // `(type, name)` is a fragment key: one name covers a `section` and the
+    // `section_position_id_map` beside it. Every nameless fragment shares the
+    // reserved id `$348`.
+    let mut held: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut nameless: BTreeMap<String, usize> = BTreeMap::new();
+    for ent in &entities {
+        let ftype = symtab.resolve(ent.type_id as u64).to_string();
+        if ent.id as u64 == KfxSymbol::Null as u64 {
+            *nameless.entry(ftype).or_default() += 1;
+        } else {
+            held.entry(entity_fid(ent.id as u64, &symtab))
+                .or_default()
+                .insert(ftype);
+        }
+    }
 
     println!("=== Entity Dependencies ===\n");
 
-    for i in 0..num_entries {
-        let entry_offset = index_offset + i * entry_size;
-        if entry_offset + entry_size > data.len() {
-            break;
-        }
-
-        let Some(type_idnum) = read_u32_le(data, entry_offset + 4) else {
-            continue;
-        };
-        let Some(entity_offset) = read_u64_le(data, entry_offset + 8).map(|v| v as usize) else {
-            continue;
-        };
-        let Some(entity_len) = read_u32_le(data, entry_offset + 16).map(|v| v as usize) else {
-            continue;
-        };
-
-        if type_idnum != container_entity_map_type {
-            continue;
-        }
-
-        let abs_offset = header_len + entity_offset;
-        if abs_offset + entity_len > data.len() {
-            continue;
-        }
-
-        let entity_data = &data[abs_offset..abs_offset + entity_len];
-        if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
-            continue;
-        }
-
-        let Some(entity_header_len) = read_u32_le(entity_data, 6).map(|v| v as usize) else {
-            continue;
-        };
-        if entity_header_len >= entity_data.len() {
-            continue;
-        }
-
-        let ion_data = &entity_data[entity_header_len..];
-        let mut parser = IonParser::new(ion_data);
-
-        if let Ok(value) = parser.parse() {
-            let resolve_sym = |id: u64| -> String {
-                if id < base_symbol_count {
-                    KFX_SYMBOL_TABLE
-                        .get(id as usize)
-                        .copied()
-                        .unwrap_or("?")
-                        .to_string()
-                } else {
-                    let ext_idx = (id as usize) - (base_symbol_count as usize);
-                    extended_symbols
-                        .get(ext_idx)
-                        .cloned()
-                        .unwrap_or_else(|| "?".to_string())
-                }
-            };
-
-            // Unwrap annotations
-            let inner = match &value {
-                bokai::formats::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
-                _ => &value,
-            };
-
-            println!("Lists all entities in the KFX container.\n");
-
-            if let bokai::formats::kfx::ion::IonValue::Struct(fields) = inner {
-                for (field_id, field_value) in fields {
-                    let field_name = resolve_sym(*field_id);
-                    if field_name == "container_list"
-                        && let bokai::formats::kfx::ion::IonValue::List(containers) = field_value
-                    {
-                        let mut total_entities = 0usize;
-
-                        for container in containers {
-                            if let bokai::formats::kfx::ion::IonValue::Struct(c_fields) = container
-                            {
-                                let mut container_name = String::new();
-                                let mut entity_names: Vec<String> = Vec::new();
-
-                                for (cid, cval) in c_fields {
-                                    let cname = resolve_sym(*cid);
-                                    match cname.as_str() {
-                                        "id" => {
-                                            if let bokai::formats::kfx::ion::IonValue::String(s) =
-                                                cval
-                                            {
-                                                container_name = s.clone();
-                                            }
-                                        }
-                                        "contains" => {
-                                            if let bokai::formats::kfx::ion::IonValue::List(names) =
-                                                cval
-                                            {
-                                                for name in names {
-                                                    if let bokai::formats::kfx::ion::IonValue::Symbol(s) =
-                                                        name
-                                                    {
-                                                        entity_names.push(resolve_sym(*s));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                total_entities += entity_names.len();
-
-                                if !entity_names.is_empty() {
-                                    println!("Container: {}", container_name);
-                                    println!("Entities ({}):", entity_names.len());
-
-                                    // Group entities by type prefix
-                                    let mut by_type: std::collections::HashMap<
-                                        String,
-                                        Vec<String>,
-                                    > = std::collections::HashMap::new();
-                                    for name in &entity_names {
-                                        // Determine type from prefix
-                                        let type_prefix = if name.starts_with("content_") {
-                                            "content"
-                                        } else if name.starts_with("style_")
-                                            || name.starts_with('s')
-                                                && name
-                                                    .chars()
-                                                    .nth(1)
-                                                    .map(|c| c.is_ascii_digit())
-                                                    .unwrap_or(false)
-                                        {
-                                            "style"
-                                        } else if name.starts_with("anchor_")
-                                            || name.starts_with('a') && name.len() > 1
-                                        {
-                                            "anchor"
-                                        } else if name.starts_with('l') && name.len() > 1 {
-                                            "storyline"
-                                        } else if name.starts_with('c') && name.len() > 1 {
-                                            "section"
-                                        } else if name.starts_with('e') && name.len() > 1 {
-                                            "resource"
-                                        } else {
-                                            "other"
-                                        };
-                                        by_type
-                                            .entry(type_prefix.to_string())
-                                            .or_default()
-                                            .push(name.clone());
-                                    }
-
-                                    // Print by type
-                                    let mut types: Vec<_> = by_type.keys().collect();
-                                    types.sort();
-                                    for type_name in types {
-                                        let names = &by_type[type_name];
-                                        if names.len() <= 8 {
-                                            println!(
-                                                "  {} ({}): {}",
-                                                type_name,
-                                                names.len(),
-                                                names.join(", ")
-                                            );
-                                        } else {
-                                            println!(
-                                                "  {} ({}): {}, ... {}",
-                                                type_name,
-                                                names.len(),
-                                                names[..3].join(", "),
-                                                names[names.len() - 2..].join(", ")
-                                            );
-                                        }
-                                    }
-                                    println!();
-                                }
-                            }
-                        }
-
-                        println!("Total containers: {}", containers.len());
-                        println!("Total entity refs: {}", total_entities);
-                    }
-                }
-            }
-        }
-
+    let manifest = entities
+        .iter()
+        .find(|e| e.type_id == KfxSymbol::ContainerEntityMap as u32)
+        .and_then(|ent| parse_entity(data, ent));
+    let Some(manifest) = manifest else {
+        eprintln!("No container_entity_map found");
         return Ok(());
+    };
+    let Some(container_list) = manifest
+        .unwrap_annotated()
+        .as_struct()
+        .and_then(|fields| get_field(fields, KfxSymbol::ContainerList as u64))
+        .and_then(IonValue::as_list)
+    else {
+        eprintln!("container_entity_map holds no container_list");
+        return Ok(());
+    };
+
+    let mut listed: BTreeSet<String> = BTreeSet::new();
+    let mut refs = 0usize;
+    for container in container_list {
+        let Some(fields) = container.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let id = get_field(fields, KfxSymbol::Id as u64)
+            .and_then(IonValue::as_string)
+            .unwrap_or("<unnamed>");
+        let names: Vec<String> = get_field(fields, KfxSymbol::Contains as u64)
+            .and_then(IonValue::as_list)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| symtab.text_of_opt(item))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        refs += names.len();
+        if names.is_empty() {
+            continue;
+        }
+
+        println!("Container: {id}");
+        println!("Entities ({}):", names.len());
+        let mut by_type: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for name in &names {
+            let ftype = held.get(name).map_or_else(
+                || "<held by no index row>".to_string(),
+                |types| types.iter().cloned().collect::<Vec<_>>().join("+"),
+            );
+            by_type.entry(ftype).or_default().push(name);
+        }
+        for (ftype, members) in &by_type {
+            println!("  {ftype} ({}): {}", members.len(), elide(members));
+        }
+        println!();
+        listed.extend(names);
     }
 
-    eprintln!("No container_entity_map found");
+    let mut unlisted: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, types) in &held {
+        if !listed.contains(name) {
+            for ftype in types {
+                unlisted.entry(ftype.as_str()).or_default().push(name);
+            }
+        }
+    }
+
+    println!("Containers: {}", container_list.len());
+    println!("Entity refs: {refs}");
+    println!("Index rows: {}", entities.len());
+    if !unlisted.is_empty() {
+        println!("\nHeld by an index row, listed by no container:");
+        for (ftype, members) in &unlisted {
+            println!("  {ftype} ({}): {}", members.len(), elide(members));
+        }
+    }
+    if !nameless.is_empty() {
+        println!("\nNameless ($348), outside the manifest's vocabulary:");
+        for (ftype, count) in &nameless {
+            println!("  {ftype} ({count})");
+        }
+    }
     Ok(())
+}
+
+/// The first three and last two of a list over eight names, joined.
+fn elide(names: &[&str]) -> String {
+    if names.len() <= 8 {
+        return names.join(", ");
+    }
+    format!(
+        "{}, ... {}",
+        names[..3].join(", "),
+        names[names.len() - 2..].join(", ")
+    )
 }
 
 /// Deep Ion value formatter for ruby_content inspection. Unlike

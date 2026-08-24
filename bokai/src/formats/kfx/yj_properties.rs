@@ -1,15 +1,9 @@
-//! KFX style → CSS property translation.
+//! KFX style → CSS property translation: the property table, value
+//! translation, `writing-mode` emission, and the block-image wrapper
+//! partition. `KfxImporter` resolves named `$157` styles through it.
 //!
-//! Covers the property table, value translation, `writing-mode` emission, and
-//! the block-image wrapper partition. `KfxImporter` resolves named `$157`
-//! styles through it, so a KFX's own stylesheet and the IR's computed styles
-//! agree property-for-property.
-//!
-//! Identifiers track calibre as much as Rust syntax allows.
-//!
-//! This is the import direction (KFX→CSS); `style_schema.rs` holds the
-//! export-direction table. A property added to one needs its counterpart in
-//! the other or it round-trips lossily.
+//! `style_schema.rs` holds the export-direction table; a property here has a
+//! counterpart there.
 
 #![allow(non_snake_case)]
 
@@ -17,18 +11,16 @@ use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::style::CssDecl;
 
-/// One entry in the YJ → CSS property map. Mirrors calibre's `Prop` class.
+/// One entry in the YJ → CSS property map.
 #[derive(Debug, Clone)]
 pub struct Prop {
     pub name: &'static str,
     /// For enumerated properties, maps the YJ symbol id to its CSS value.
-    /// `None` means "drop the declaration entirely" (calibre uses Python
-    /// `None` for the same purpose).
+    /// `None` drops the declaration.
     pub values: Option<&'static [(&'static str, Option<&'static str>)]>,
 }
 
-/// Look up the YJ property mapping for a given symbol id, resolved to its
-/// text name. Returns `None` if we don't know how to map it.
+/// The YJ property mapping for a symbol id resolved to its text name.
 pub fn prop_for(name: &str) -> Option<&'static Prop> {
     YJ_PROPERTY_INFO
         .iter()
@@ -36,7 +28,7 @@ pub fn prop_for(name: &str) -> Option<&'static Prop> {
         .map(|(_, v)| v)
 }
 
-/// CSS length unit ↔ KFX symbol map. Calibre's `YJ_LENGTH_UNITS`.
+/// CSS length unit ↔ KFX symbol map.
 pub fn length_unit_for(symbol_name: &str) -> Option<&'static str> {
     match symbol_name {
         "ch" => Some("ch"),
@@ -69,11 +61,8 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
             continue;
         };
 
-        // Skip private kfx symbols when we have an explicit enum table that
-        // doesn't include this value; otherwise emit the converted value.
+        // `property_value` yields `None` for a symbol outside an enum table.
         if let Some(value_str) = property_value(prop, v, symbols) {
-            // Calibre maps Python None to "drop the property"; we map it to
-            // skip the declaration entirely.
             if !value_str.is_empty() {
                 let value_str = if prop.name == "font-family" {
                     normalize_font_family(&value_str)
@@ -94,26 +83,13 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
     out
 }
 
-/// Floor for a resolved `line-height`, matching calibre's
-/// `MINIMUM_LINE_HEIGHT`: a line box shorter than the text it holds overlaps
-/// its neighbours.
+/// Floor for a resolved `line-height`: a line box shorter than the text it
+/// holds overlaps its neighbours.
 const MINIMUM_LINE_HEIGHT: f64 = 1.0;
 
-/// Resolve the `lh` lengths in a declaration into units every reader has.
-///
-/// KFX states line-relative lengths as multiples of the line height. CSS has
-/// a `lh` unit of its own, but a late one, and a reader that predates it
-/// drops the whole declaration: the vertical rhythm a front-matter page is
-/// built out of — the drop before the author line, the gap above a publisher
-/// logo — collapses to nothing. So no `lh` may reach the stylesheet, the way
-/// calibre resolves it in `fix_styles`.
-///
-/// `line-height: 1lh` is KFX for "the default line height", which CSS spells
-/// `normal` — and which stays right as the element's font-size changes, where
-/// a resolved multiple of the *inherited* line height would leave a display
-/// heading's lines overlapping. Any other multiple becomes the unitless
-/// number CSS multiplies the font-size by; every other property takes the
-/// same multiple in `em`.
+/// Resolve a declaration's `lh` lengths into units every reader has.
+/// `line-height: 1lh` becomes `normal`; any other multiple becomes the
+/// unitless number, and every other property takes the multiple in `em`.
 fn resolve_line_height_units(decl: &mut CssDecl) {
     let scale = crate::formats::kfx::style_schema::DOCUMENT_LINE_HEIGHT_EM as f64;
     for (name, value) in decl.items.iter_mut() {
@@ -139,13 +115,8 @@ fn css_number(value: f64) -> String {
     format!("{}", (value * 1e5).round() / 1e5)
 }
 
-/// Fold a KFX per-axis pair into the CSS shorthand that carries both.
-///
-/// KFX states background position and size as `…x` / `…y` fields. CSS has no
-/// `background-size-x`, and while `background-position-x` does exist it is a
-/// later addition than the shorthand — so this output, which goes straight
-/// into a stylesheet, uses the two-value shorthand both renderers have always
-/// understood. `missing` is the value for an axis the style leaves unstated.
+/// Fold a KFX `…x` / `…y` pair into the CSS shorthand carrying both axes.
+/// `missing` is the value for an axis the style leaves unstated.
 fn merge_axis_pair(decl: &mut CssDecl, property: &str, missing: &str) {
     let x = decl.take(&format!("{property}-x"));
     let y = decl.take(&format!("{property}-y"));
@@ -158,14 +129,8 @@ fn merge_axis_pair(decl: &mut CssDecl, property: &str, missing: &str) {
 }
 
 /// The pseudo-class rules a KFX style carries for hyperlink states.
-///
-/// `link_unvisited_style` and `link_visited_style` hold a *nested* style
-/// struct that applies only while the styled element is a link in that state.
-/// A flat declaration list cannot express the condition, so each becomes its
-/// own rule — `.name:link { … }` — alongside the base rule.
-///
-/// Returns `(pseudo-class, declarations)` sorted by pseudo-class, so the
-/// output does not depend on the order the producer wrote the fields in.
+/// `link_unvisited_style` and `link_visited_style` each hold a nested style
+/// struct. Returns `(pseudo-class, declarations)` sorted by pseudo-class.
 pub fn convert_yj_link_states(
     fields: &[(u64, IonValue)],
     symbols: &SymbolTable,
@@ -194,28 +159,8 @@ pub fn convert_yj_link_states(
 const BOX_ALIGN: &str = "-kfx-box-align";
 
 /// Turn a `box_align` marker into the margins that position the box.
-///
-/// `box_align` says where the box sits inside its container; the KFX
-/// container's own `text_alignment` says where text sits inside the box.
-/// They are separate properties and a style may carry either, both, or
-/// neither, so this must not be spelled as `text-align`: that both stops
-/// centering the box and centers text the source left alone, on every page
-/// built out of a centered box — most Japanese front matter and chapter
-/// openers.
-///
-/// The margins are the same pair bokai's EPUB→KFX direction reads back as
-/// `box_align` (`formats::kfx::style_schema`), so a book that round-trips
-/// keeps the property instead of losing it to `text-align`. A block image is
-/// the one exception, and takes `text-align` on its wrapper instead — see
-/// [`take_box_align_margins`].
-///
-/// Unlike calibre — which sets the margins only when the style also carries
-/// a `width` — this sets them whichever way the box is sized. Auto margins
-/// on an auto-width block in normal flow compute to zero, so the gate buys
-/// nothing there; but a box in an orthogonal flow (a `vertical-rl` block on
-/// a `horizontal-tb` page, i.e. exactly the vertical chapter opener this
-/// property is used for) is shrink-to-fit sized and *does* center, with no
-/// `width` anywhere in the style.
+/// `box_align` places the box inside its container; `text_alignment` places
+/// text inside the box. A block image takes [`take_box_align_margins`].
 fn resolve_box_align(decl: &mut CssDecl) {
     let Some(align) = decl.take(BOX_ALIGN) else {
         return;
@@ -232,30 +177,14 @@ fn resolve_box_align(decl: &mut CssDecl) {
     }
 }
 
-/// Translate a single KFX property value to a CSS string. Handles the four
-/// cases calibre supports: enum (Prop.values), length (struct with unit/value),
-/// color, plain int/float, string/symbol.
-/// calibre's `DEFAULT_FONT_NAMES` (yj_to_epub_properties.py): font-family
-/// values meaning "the document default font". calibre replaces these with the
-/// real default family in its font pass (`font_name_replacements`,
-/// yj_to_epub_metadata.py); bokai defers that pass, so we emit no font-family
-/// (inherit the default) rather than the literal sentinel, which is invalid CSS.
+/// True for the font-family values meaning the document default font.
 fn is_default_font_name(s: &str) -> bool {
     s == "default" || s == "$amzn_fixup_default_font$"
 }
 
-/// Quote font-family names that aren't safe as unquoted CSS identifiers. KFX
-/// carries legacy vertical-writing font variants (`@ヒラギノ明朝`) and CJK family
-/// names; an unquoted token starting with `@` is parsed as a CSS at-keyword and
-/// rejected (epubcheck CSS-008 "Token … not allowed here"). Generic keywords
-/// and plain ASCII-identifier names stay unquoted (e.g. `times new roman`,
-/// `serif`); everything else is quoted.
-///
-/// The KFX families standing for "whatever font the reader has chosen" are
-/// dropped. CSS has no such name, so carrying one through would ask for a
-/// typeface called `default` and silently fall through to the next entry. CSS
-/// spells the same intent by leaving `font-family` unset, which is what a stack
-/// of nothing but those becomes: an empty value the caller skips.
+/// Quote font-family names unsafe as unquoted CSS identifiers: an unquoted
+/// token opening with `@` parses as an at-keyword. Names standing for the
+/// reader's own font choice are dropped, leaving an empty value.
 fn normalize_font_family(value: &str) -> String {
     value
         .split(',')
@@ -276,10 +205,8 @@ fn normalize_font_family(value: &str) -> String {
         .join(", ")
 }
 
-/// Does this family name stand for the reader's own font choice rather than a
-/// typeface? `default` is the ordinary spelling; `$amzn_fixup_default_font$`
-/// appears where a source stylesheet named no family at all and the producer
-/// substituted one.
+/// True for a family name standing for the reader's own font choice:
+/// `default` and `$amzn_fixup_default_font$`.
 fn is_kfx_reader_font(name: &str) -> bool {
     const READER_FONTS: &[&str] = &["default", "$amzn_fixup_default_font$"];
     READER_FONTS.iter().any(|f| name.eq_ignore_ascii_case(f))
@@ -308,10 +235,8 @@ fn is_generic_font_keyword(f: &str) -> bool {
     )
 }
 
-/// A font-family value is safe unquoted iff it's a run of CSS identifiers
-/// separated by single spaces: each word ASCII-alphanumeric-or-hyphen and not
-/// starting with a digit/hyphen/`@`. `times new roman` qualifies; `@ipaex明朝`
-/// (non-ASCII, `@`-prefixed) does not.
+/// True for a run of CSS identifiers separated by single spaces: each word
+/// ASCII-alphanumeric-or-hyphen, none opening with a digit, hyphen or `@`.
 fn is_safe_unquoted_font(f: &str) -> bool {
     f.split(' ').all(|word| {
         !word.is_empty()
@@ -323,14 +248,8 @@ fn is_safe_unquoted_font(f: &str) -> bool {
 fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     let inner = value.unwrap_annotated();
 
-    // Enum value lookup — for symbol/bool values ONLY. A property can carry
-    // both enum keywords and plain values: `line_height` is `auto` (→ enum
-    // table → `normal`) on some styles and a `{value: 0.6, unit: lh}` length
-    // struct on others. Calibre dispatches on the VALUE's type before ever
-    // consulting the enum map (`property_value`,
-    // yj_to_epub_properties.py — the IonStruct branch precedes the
-    // value_map lookup). Matching the table first and bailing on a miss would
-    // drop every numeric value of an enum-carrying property.
+    // Enum lookup for symbol and bool values only. `line_height` carries
+    // `auto` on some styles and a `{value, unit}` length struct on others.
     if let Some(table) = prop.values {
         // The lookup key can be a symbol id (most common) or a bool.
         match inner {
@@ -341,11 +260,7 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
                         return Some(mapped.unwrap_or("").to_string());
                     }
                 }
-                // Unknown enum value → drop the declaration (calibre maps an
-                // unmapped enum to Python `None`, i.e. skip it). Emitting a CSS
-                // comment as the value (`float: /* unknown center */`) leaves a
-                // dangling `prop:` with no value — invalid CSS, rejected by
-                // epubcheck as CSS-008 ("premature end of grammar").
+                // An unmapped enum value yields no declaration.
                 return None;
             }
             IonValue::Bool(b) => {
@@ -366,9 +281,8 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
         IonValue::Int(n) => Some(format_int_value(prop.name, *n)),
         IonValue::Float(f) => Some(format!("{}", f)),
         IonValue::Decimal(d) => Some(d.clone()),
-        // `font-family: $amzn_fixup_default_font$` / `default` mean "the
-        // document default font"; calibre substitutes the real family in its
-        // font pass (deferred here), so emit nothing rather than invalid CSS.
+        // A font-family naming the document default font yields no
+        // declaration.
         IonValue::String(s) if prop.name == "font-family" && is_default_font_name(s) => None,
         IonValue::String(s) => Some(s.clone()),
         IonValue::Symbol(id) => {
@@ -376,10 +290,8 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
             if prop.name == "font-family" && is_default_font_name(&s) {
                 None
             } else if prop.name == "background-image" {
-                // The symbol names an `external_resource`, the same reference
-                // an image element carries. Wrap it as a CSS url; the
-                // importer swaps the resource name for the exported filename
-                // afterwards, exactly as it does for an `<img src>`.
+                // The symbol names an `external_resource`, wrapped as a CSS
+                // url; the importer swaps it for the exported filename.
                 Some(format!("url({s})"))
             } else {
                 Some(s)
@@ -393,9 +305,8 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
     }
 }
 
-/// Format an integer property value. For color properties (background-color,
-/// color, border-color, etc.) the int is an ARGB packed value; otherwise
-/// it's treated as a unitless number (px implied for length-like props).
+/// Format an integer property value: a packed ARGB value for a color
+/// property, a unitless number for every other.
 fn format_int_value(prop_name: &str, n: i64) -> String {
     if is_color_prop(prop_name) {
         return color_str_argb(n);
@@ -503,9 +414,7 @@ fn format_length_struct(fields: &[(u64, IonValue)], symbols: &SymbolTable) -> Op
     }
 }
 
-/// Format an ARGB-packed color int as a CSS color string. Calibre emits
-/// `#RRGGBB` or `rgba(r,g,b,a)` depending on alpha. We start with the
-/// simple subset.
+/// Format an ARGB-packed color int as `#RRGGBB` or `rgba(r,g,b,a)`.
 fn color_str_argb(n: i64) -> String {
     let v = n as u32;
     let alpha = (v >> 24) & 0xff;
@@ -513,7 +422,6 @@ fn color_str_argb(n: i64) -> String {
     let g = (v >> 8) & 0xff;
     let b = v & 0xff;
     if alpha == 0xff || alpha == 0 {
-        // Calibre uses #000000-style; map known shortcuts later.
         let hex = format!("#{:02x}{:02x}{:02x}", r, g, b);
         if let Some(name) = COLOR_NAME
             .iter()
@@ -530,7 +438,7 @@ fn color_str_argb(n: i64) -> String {
     }
 }
 
-/// Calibre's short color-name table. Used to abbreviate common hex codes.
+/// Short color-name table, abbreviating common hex codes.
 static COLOR_NAME: &[(&str, &str)] = &[
     ("#000000", "black"),
     ("#000080", "navy"),
@@ -549,13 +457,9 @@ static COLOR_NAME: &[(&str, &str)] = &[
     ("#ffffff", "white"),
 ];
 
-// ---------------------------------------------------------------------------
-// YJ_PROPERTY_INFO — direct port of calibre's table.
-//
-// Keys are KFX symbol names (resolved via the symbol table). Values are
-// `Prop { name, values? }`. For enumerated properties, `values` lists
-// (kfx_symbol_name → css_value); `None` value means "drop the declaration".
-// ---------------------------------------------------------------------------
+// YJ_PROPERTY_INFO — keys are KFX symbol names resolved through the symbol
+// table; an enumerated property's `values` maps symbol name → CSS value, and
+// a `None` value drops the declaration.
 
 static BORDER_STYLES: &[(&str, Option<&str>)] = &[
     ("none", Some("none")),
@@ -596,12 +500,9 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
             ]),
         },
     ),
-    // Direct port of calibre's `Prop("font-weight", {...})`
-    // (yj_to_epub_properties.py), keyed by symbol: $350 normal, $355 thin→100,
-    // $356 ultra_light→200, $357 light→300, $359 medium→500, $360 semi_bold→600,
-    // $361 bold, $362 ultra_bold→800, $363 heavy→900. ($358 "book" is unmapped, as
-    // in calibre.) The keys have to be symbol names: a `font_weight_100…` key
-    // matches no real symbol and drops the whole family.
+    // Keyed by symbol name: $350 normal, $355 thin→100, $356 ultra_light→200,
+    // $357 light→300, $359 medium→500, $360 semi_bold→600, $361 bold,
+    // $362 ultra_bold→800, $363 heavy→900. $358 book is unmapped.
     (
         "font_weight",
         Prop {
@@ -723,13 +624,10 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
             values: Some(&[("auto", Some("normal"))]),
         },
     ),
-    // `language` is intentionally NOT mapped to CSS. Calibre's
-    // `-kfx-attrib-xml-lang` is a sentinel for "set xml:lang attribute",
-    // not real CSS, and is stripped by simplify_styles before serialization.
-    // Book-level `xml:lang` on every spine `<html>` (set in `process_section`)
-    // covers the same intent; per-element lang overrides are rare.
+    // `language` maps to no CSS declaration. Every spine `<html>` carries the
+    // book-level `xml:lang`.
 
-    // ---- writing-mode (THE big one for this port) ----
+    // ---- writing-mode ----
     (
         "writing_mode",
         Prop {
@@ -883,11 +781,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- borders ----
-    // Keys are the canonical YJ symbol names (per `symbols.rs`): `border_color_top`,
-    // `border_style_top`, `border_weight_top` — NOT the CSS-style `border_top_color`
-    // ordering. A key in the CSS ordering matches no KFX field, and every per-side
-    // border is then dropped on import — no box rendered in the reader. The CSS
-    // property name (`name:`) is the correct CSS spelling.
+    // Keys are the YJ symbol names `border_color_top`, `border_style_top`,
+    // `border_weight_top`; `name` carries the CSS spelling.
     (
         "border_color",
         Prop {
@@ -994,9 +889,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- text emphasis (圏点) ----
-    // Reverse of the export `ValueTransform::Map` in style_schema.rs. Common in
-    // Japanese, and with no entry here 圏点 is dropped on the reader path. The
-    // matching export shorthand parse lives in declaration.rs.
+    // Reverse of the export `ValueTransform::Map` in `style_schema.rs`; the
+    // matching export shorthand parse lives in `declaration.rs`.
     (
         "text_emphasis_style",
         Prop {
@@ -1175,9 +1069,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- alignment / decoration / variant / yj breaks ----
-    // `box_align` positions the BOX within its container — it is not the
-    // text alignment inside the box. Kept as a marker here and resolved to
-    // margins by [`resolve_box_align`]; see there for why.
+    // `box_align` positions the box within its container, and
+    // [`resolve_box_align`] turns the marker into margins.
     (
         "box_align",
         Prop {
@@ -1200,8 +1093,7 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
             ]),
         },
     ),
-    // `yj.float_clear` is `$628` → `clear` in calibre; the epub→kfx direction
-    // already maps `clear` back to it (`style_schema.rs`).
+    // `yj.float_clear` is `$628`; `style_schema.rs` maps `clear` back to it.
     (
         "yj.float_clear",
         Prop {
@@ -1356,13 +1248,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
             ]),
         },
     ),
-    // ---- direction (page progression) ----
-    // Intentionally NOT mapped to a CSS declaration: the `direction` (and
-    // `unicode-bidi`) CSS properties are forbidden in EPUB style sheets
-    // (epubcheck CSS-001). Page-progression / RTL direction is carried by the
-    // spine `page-progression-direction` (PPD) attribute + `writing-mode`
-    // instead. Per-element
-    // direction, if ever needed, belongs on the HTML `dir` attribute, not CSS.
+    // `direction` and `unicode-bidi` map to no CSS declaration; the spine's
+    // `page-progression-direction` and `writing-mode` carry the axis.
     // ---- visibility ----
     (
         "visibility",
@@ -1372,16 +1259,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- vertical alignment ----
-    // The export table (`style_schema`) has carried `vertical-align` both
-    // ways for a while; without the entries here the import direction dropped
-    // it, so a KFX's superscripts and subscripts — footnote markers, ordinals,
-    // formulae — arrived in the EPUB as ordinary text. `baseline_style` is set
-    // by roughly two thirds of shipped books.
-    //
-    // `normal` maps to nothing on purpose: `vertical-align` is not an
-    // inherited property, so an element that omits it already computes to
-    // `baseline`, and emitting the default on every style would only pad the
-    // stylesheet.
+    // `baseline_style` carries superscript and subscript. `normal` maps to
+    // nothing: `vertical-align` does not inherit and computes to `baseline`.
     (
         "baseline_style",
         Prop {
@@ -1412,9 +1291,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- line breaking ----
-    // `line-break` IS inherited, so unlike `vertical-align` above the initial
-    // value has to be emitted: a child resetting to `normal` under a `loose`
-    // ancestor means it.
+    // `line-break` inherits, and `normal` is emitted: a child resetting it
+    // under a `loose` ancestor means it.
     (
         "line_break",
         Prop {
@@ -1488,8 +1366,8 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- outline / decoration colours ----
-    // Colour-valued, so no enum table: the shared value converter turns the
-    // packed 32-bit ARGB integer into a CSS colour, as it does for `text_color`.
+    // Colour-valued, no enum table: the shared value converter turns the
+    // packed 32-bit ARGB integer into a CSS colour.
     (
         "underline_color",
         Prop {
@@ -1519,16 +1397,9 @@ pub fn all_property_names() -> impl Iterator<Item = &'static str> {
     YJ_PROPERTY_INFO.iter().map(|(k, _)| *k)
 }
 
-/// KFX layout-hint values used by the tag-promotion pass. Returns
-/// `(layout_hints, heading_level)` — both from a named `$style` entity's
-/// fields, not the content element itself. Calibre's
-/// `LAYOUT_HINT_ELEMENT_NAMES` maps the KFX symbols:
-///   `$453 caption` → `"caption"`,
-///   `$282 figure`  → `"figure"`,
-///   `$760 heading` → `"heading"`.
-///
-/// `layout_hints` is a list because a single style can declare multiple
-/// (e.g. `["heading", "figure"]`). `heading_level` is a string `"1"`..`"6"`.
+/// KFX layout-hint values from a named `$style` entity's fields. Returns
+/// `(layout_hints, heading_level)`: `$760` → `"heading"`, `$282` → `"figure"`,
+/// `$453` → `"caption"`, and a heading level `"1"`..`"6"`.
 pub fn style_fields_layout_hints(
     fields: &[(u64, IonValue)],
     symbols: &SymbolTable,
@@ -1540,14 +1411,8 @@ pub fn style_fields_layout_hints(
         let key = symbols.resolve(*k);
         match key {
             "layout_hints" => {
-                // List of symbols. Key by symbol ID — calibre's
-                // `LAYOUT_HINT_ELEMENT_NAMES` maps `$760`/`$282`/`$453`, and
-                // bokai's symbol table names `$760` "treat_as_title" (calibre
-                // leaves it nameless). Matching the resolved NAME "heading"
-                // instead drops every named-style heading, since no real symbol
-                // carries that name — and Amazon KFX whose heading-ness lives on
-                // a `$style` entity rather than inline then exports 0 `<hN>`.
-                // Mirror `layout_hints_from_element_fields`.
+                // List of symbols keyed by symbol id: `symbols.rs` names
+                // `$760` "treat_as_title".
                 if let IonValue::List(items) = v.unwrap_annotated() {
                     for item in items {
                         if let IonValue::Symbol(id) = item.unwrap_annotated() {
@@ -1573,13 +1438,8 @@ pub fn style_fields_layout_hints(
     (hints, heading_level)
 }
 
-/// Layout hints / heading level extracted from a content element's own
-/// outer fields (as opposed to its named `$style` entity). Mirrors
-/// `style_layout_hints_for` but reads from the inline `$761` /
-/// `$790` fields. Required because bokai's `export::kfx` writes the
-/// layout_hints and heading_level directly on the content element, not
-/// on the style entity — calibre's `LAYOUT_HINT_ELEMENT_NAMES` keys by
-/// the symbol id (`$760` / `$282` / `$453`) which is the same here.
+/// Layout hints and heading level from a content element's own `$761` /
+/// `$790` fields. `export::kfx` writes both on the content element.
 pub fn layout_hints_from_element_fields(
     fields: &[(u64, IonValue)],
 ) -> (Vec<String>, Option<String>) {
@@ -1593,9 +1453,7 @@ pub fn layout_hints_from_element_fields(
             let IonValue::Symbol(id) = item.unwrap_annotated() else {
                 continue;
             };
-            // Match calibre's `LAYOUT_HINT_ELEMENT_NAMES`: key by the
-            // symbol id, not its name (bokai's local symbol table calls
-            // `$760` "treat_as_title", calibre leaves it nameless).
+            // Keyed by symbol id: `symbols.rs` names `$760` "treat_as_title".
             let name = match *id {
                 x if x == KfxSymbol::TreatAsTitle as u64 => "heading",
                 x if x == KfxSymbol::Figure as u64 => "figure",
@@ -1616,14 +1474,8 @@ pub fn layout_hints_from_element_fields(
 }
 
 /// Merged-style properties that force a block-flow `<img>` into a wrapper
-/// `<div>` carrying them. KFX resolves a percentage `width` against the space
-/// left between the element's own margins — how CSS sizes a block wrapper's
-/// content box, not how it sizes a replaced element — and `float` / `clear` /
-/// `text-align` / the `break-*` family are dead or wrong on a replaced inline
-/// element. The bokai-emittable subset of calibre's
-/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py`), plus `clear`
-/// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
-/// where CSS does too).
+/// `<div>` carrying them: a percentage `width`, `float`, `clear`,
+/// `text-align` and the `break-*` family.
 pub fn img_wrapper_trigger(prop: &str) -> bool {
     matches!(
         prop,
@@ -1658,19 +1510,8 @@ pub fn img_wrapper_prop(prop: &str) -> bool {
 }
 
 /// Read back the `box_align` an image style's auto margins stand for,
-/// removing them. `None` when the pair isn't the one [`resolve_box_align`]
-/// writes, so a style that states its own margins keeps them.
-///
-/// Auto margins position a *sized block*, which a block image's wrapper is
-/// not: the `<img>` is a replaced element sitting in the wrapper's line box,
-/// and the wrapper itself is an auto-width block filling the column — so its
-/// auto margins compute to zero and align nothing, leaving the image against
-/// the start edge whatever `width` the source gave it. The alignment has to
-/// be `text-align` on the wrapper instead, which is also where calibre puts
-/// it; the margin form is only right for a genuinely block-sized box.
-///
-/// [`resolve_box_align`] runs first and has already spent the marker, so the
-/// alignment is recovered from the margins it became.
+/// removing them. `None` when the pair is not the one [`resolve_box_align`]
+/// writes.
 fn take_box_align_margins(decl: &mut CssDecl) -> Option<&'static str> {
     let align = match (decl.get("margin-left"), decl.get("margin-right")) {
         (Some("auto"), Some("auto")) => "center",
@@ -1683,19 +1524,9 @@ fn take_box_align_margins(decl: &mut CssDecl) -> Option<&'static str> {
     Some(align)
 }
 
-/// Partition a block-flow image's merged style (named `$style` + the content
-/// element's own inline properties) into `(wrapper, img)` halves, or `None`
-/// when nothing triggers a wrapper and the image stays bare.
-///
-/// Includes calibre's `fit_width` hoist: a float is shrink-to-fit, so a
-/// child's percentage width would resolve against the float's own
-/// content-derived width — circular; the author meant % of the column. The
-/// percentage moves onto the float and the image fills it.
-///
-/// A `box_align` becomes the wrapper's `text-align`, which places the image
-/// however the image is sized — see [`take_box_align_margins`]. A float
-/// already positions the box, so a `box_align` beside one is dropped rather
-/// than fought with.
+/// Partition a block-flow image's merged style into `(wrapper, img)` halves,
+/// `None` when no property triggers a wrapper. A percentage `width` moves
+/// onto the wrapper; a `box_align` beside a `float` is dropped.
 pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
     if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
         return None;
@@ -1818,8 +1649,8 @@ mod tests {
         assert_eq!(length("75", "percent"), Some("75%".to_string()));
     }
 
-    /// `vertical-align` does not inherit, so the initial value carries no
-    /// information and is not worth a declaration.
+    /// `vertical-align` does not inherit and carries no declaration at its
+    /// initial value.
     #[test]
     fn baseline_style_normal_emits_nothing() {
         assert!(css(&[("baseline_style", "normal")]).is_empty());
@@ -1891,17 +1722,15 @@ mod tests {
         ]
     }
 
-    /// The nested state styles are the *only* place a KFX book states its link
-    /// colours. Read as ordinary properties they would collapse into the base
-    /// rule and paint every element the link colour; skipped, the book loses
-    /// them entirely.
+    /// The nested state styles are the one place a KFX book states its link
+    /// colours, and each becomes its own pseudo-class rule.
     #[test]
     fn link_states_become_pseudo_class_rules() {
         let symbols = SymbolTable::from_fragment(None);
         let fields = link_state_style();
         let states = convert_yj_link_states(&fields, &symbols);
         let names: Vec<&str> = states.iter().map(|(p, _)| *p).collect();
-        // Sorted, so the Ion field order above does not reach the output.
+        // Sorted by pseudo-class, holding the Ion field order out of the output.
         assert_eq!(names, vec!["link", "visited"]);
         for (pseudo, decl) in &states {
             let (prop, value) = decl.items.first().expect("a declaration");
@@ -1925,11 +1754,8 @@ mod tests {
         );
     }
 
-    /// The style a title page's publisher logo carries: `box_align: center`
-    /// with a percentage width. The margins that state a centered *block* do
-    /// nothing for a replaced element in an auto-width wrapper, so the
-    /// wrapper has to say `text-align` instead — without it the logo sits
-    /// against the left margin on every reader.
+    /// A title page's publisher logo: `box_align: center` with a percentage
+    /// width, centered by the wrapper's `text-align`.
     #[test]
     fn a_centered_block_image_centers_from_its_wrapper() {
         let fields = vec![
@@ -1993,8 +1819,7 @@ mod tests {
         assert_eq!(wrapper.get("text-align"), None);
     }
 
-    /// A float already places the box; calibre reports `box_align` beside one
-    /// as a source error and drops it rather than fighting the float.
+    /// A `box_align` beside a `float` is dropped.
     #[test]
     fn a_floated_block_image_takes_no_box_alignment() {
         let fields = vec![
@@ -2010,14 +1835,12 @@ mod tests {
         ];
         let (wrapper, img) = partition_image_style(convert(&fields)).expect("a wrapper");
         assert_eq!(wrapper.get("text-align"), None);
-        // The float still takes the percentage width, and the image fills it.
+        // The float takes the percentage width, and the image fills it.
         assert_eq!(wrapper.get("width"), Some("40%"));
         assert_eq!(img.get("width"), Some("100%"));
     }
 
-    /// `lh` counts line heights. CSS has the unit but only lately, so a
-    /// reader without it drops the declaration and the page loses the gap
-    /// entirely — resolve the multiple to `em` the way calibre does.
+    /// `lh` counts line heights, resolved to a multiple in `em`.
     #[test]
     fn a_line_height_multiple_resolves_to_em() {
         let decl = convert(&[length("margin_top", "4.16667", "lh")]);
@@ -2026,18 +1849,16 @@ mod tests {
         assert_eq!(decl.get("margin-bottom"), Some("0.2em"));
     }
 
-    /// `line-height: 1lh` is KFX for "the default line height". Resolved to a
-    /// multiple of the *inherited* one it would crush a display heading's
-    /// lines together; `normal` keeps tracking the element's own font-size.
+    /// `line-height: 1lh` is KFX for the default line height, which CSS
+    /// spells `normal`.
     #[test]
     fn a_single_line_height_becomes_normal() {
         let decl = convert(&[length("line_height", "1", "lh")]);
         assert_eq!(decl.get("line-height"), Some("normal"));
     }
 
-    /// Any other multiple is a real instruction and survives as the unitless
-    /// number CSS multiplies the font-size by, floored where a line box would
-    /// otherwise come out shorter than its text.
+    /// Any other multiple survives as the unitless number CSS multiplies the
+    /// font-size by, floored at `MINIMUM_LINE_HEIGHT`.
     #[test]
     fn other_line_height_multiples_survive_as_numbers() {
         let decl = convert(&[length("line_height", "1.5", "lh")]);
