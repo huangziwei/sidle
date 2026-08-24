@@ -734,8 +734,6 @@ struct WalkDefects {
     missing_stories: BTreeSet<String>,
     /// `style` ($157) refs that don't resolve to a `style` entity.
     missing_styles: BTreeSet<String>,
-    /// `style` ($157) names an element or a style_event cites.
-    cited_styles: BTreeSet<String>,
     /// `content` ($145) `{name,index}` indirections that don't resolve to a
     /// `$145 content` string (rule 4).
     missing_content: BTreeSet<String>,
@@ -853,7 +851,7 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             ),
         ));
     }
-    for name in orphan_styles(book, &defects.cited_styles) {
+    for name in orphan_styles(book) {
         findings.push(info(
             "style-unreferenced",
             &name,
@@ -2001,12 +1999,9 @@ fn walk_refs(
             // name and walks below as an ordinary child.
             if let Some(style_name) =
                 get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))
+                && !style_exists(book, style_name)
             {
-                if style_exists(book, style_name) {
-                    out.cited_styles.insert(style_name.to_string());
-                } else {
-                    out.missing_styles.insert(style_name.to_string());
-                }
+                out.missing_styles.insert(style_name.to_string());
             }
 
             // Rule 4 — a `$145 content` value that's a `{name,index}`
@@ -2188,22 +2183,51 @@ fn check_ruby_selection(
     }
 }
 
-/// The `style` ($157) fragments no element cites, sorted. A book stating no
-/// reading order gives the walk nothing to cite from and answers with none.
-fn orphan_styles(book: &BookData, cited: &BTreeSet<String>) -> Vec<String> {
+/// The `style` ($157) fragments no fragment cites, sorted. The scan covers
+/// every fragment of the container: a `ruby_content` annotation cites a style
+/// as readily as a storyline does.
+fn orphan_styles(book: &BookData) -> Vec<String> {
     let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) else {
         return Vec::new();
     };
     if reading_order_sections(book).is_empty() {
         return Vec::new();
     }
+    let mut cited: HashSet<&str> = HashSet::new();
+    for entities in book.by_type.values() {
+        for value in entities.values() {
+            collect_cited_styles(value, book, &mut cited);
+        }
+    }
     let mut out: Vec<String> = styles
         .keys()
-        .filter(|name| !cited.contains(*name))
+        .filter(|name| !cited.contains(name.as_str()))
         .cloned()
         .collect();
     out.sort();
     out
+}
+
+/// Record every `style` ($157) name `value` cites, at any depth.
+fn collect_cited_styles<'b>(value: &'b IonValue, book: &'b BookData, out: &mut HashSet<&'b str>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(name) =
+                get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))
+            {
+                out.insert(name);
+            }
+            for (_, v) in fields {
+                collect_cited_styles(v, book, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_cited_styles(item, book, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// True when `name` is a defined `style` ($157) entity.

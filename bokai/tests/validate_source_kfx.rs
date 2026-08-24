@@ -1,9 +1,7 @@
-//! End-to-end check of the standalone KFX structural validator — job 2 — via
-//! the public `source::validate` entry on a real container.
+//! `source::validate` over a real container, end to end.
 //!
-//! The fixture is a well-formed published book, so it must validate with no KFX
-//! structural errors. This guards against the checker false-flagging legitimate
-//! KFX (the failure mode that makes a validator useless).
+//! The fixture is a well-formed published book and raises no KFX structural
+//! finding.
 
 use std::path::Path;
 
@@ -15,9 +13,9 @@ fn wellformed_kfx_fixture_has_no_structural_defects() {
 
     let report = bokai::validate::source::validate(&bytes);
 
-    // A well-formed book has zero error-level defects: its container loads, the
-    // required entities are present, every resource resolves and the cover is
-    // wired. (TOC audit findings, if any, are warnings and don't count here.)
+    // A well-formed book has zero error-level defects: its container loads,
+    // the required entities are present, every resource resolves and the
+    // cover is wired. A TOC audit finding is a warning.
     assert_eq!(
         report.count(bokai::validate::Severity::Error),
         0,
@@ -32,8 +30,8 @@ fn wellformed_kfx_fixture_has_no_structural_defects() {
 
 #[test]
 fn garbage_container_reports_unreadable() {
-    // A non-EPUB, non-KFX blob routes to the KFX branch and must surface a
-    // single `container-unreadable` error rather than panicking.
+    // A non-EPUB, non-KFX blob routes to the KFX branch and surfaces one
+    // `container-unreadable` error.
     let report = bokai::validate::source::validate(b"CONT not a real container");
     assert_eq!(report.count(bokai::validate::Severity::Error), 1);
     assert!(
@@ -66,9 +64,8 @@ fn kfx_zip_bundle_routes_through_kfx_checks_not_epub() {
 
     let report = bokai::validate::source::validate(&zip_buf);
 
-    // Had the bundle been mis-sniffed as an EPUB, `epub::validate` (no mimetype
-    // / container.xml) plus the TOC audit would emit errors. Zero errors + no
-    // `epub` findings proves it was unwrapped and validated as KFX instead.
+    // Zero errors and no `epub` finding: the bundle unwrapped and validated
+    // as KFX. `epub::validate` reports a missing mimetype and container.xml.
     assert_eq!(
         report.count(bokai::validate::Severity::Error),
         0,
