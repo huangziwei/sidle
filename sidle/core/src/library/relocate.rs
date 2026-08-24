@@ -1,4 +1,4 @@
-//! Relocate the library to a new root, or adopt one that already lives
+//! Relocate the library to a new root, or adopt one sitting
 //! elsewhere. The copy is a consistent DB snapshot (`VACUUM INTO`, so it's
 //! transactionally consistent and WAL-free even while the conversion queue /
 //! device monitor write concurrently) plus the `books/`
@@ -16,7 +16,7 @@ use rusqlite::Connection;
 
 /// Copy the library — a `VACUUM INTO` snapshot of `src_conn` plus the
 /// `src_books` tree — into `dest_root`. Returns the book count, verified equal
-/// in source and copy. `dest_root` should be empty/new (the caller checks).
+/// in source and copy. `dest_root` is an empty directory.
 pub fn copy_library(src_conn: &Connection, src_books: &Path, dest_root: &Path) -> Result<i64> {
     let dest_books = dest_root.join("books");
     std::fs::create_dir_all(&dest_books)
@@ -41,20 +41,10 @@ pub fn copy_library(src_conn: &Connection, src_books: &Path, dest_root: &Path) -
     Ok(expected)
 }
 
-/// Move the library to `dest_root` (must be empty/new): snapshot + verify the DB
-/// there, then relocate EVERY other root entry — `books/`, `notebooks/`, the
-/// staged `device-dist/`, `.server-token`, derived markers like `cover-thumb.fmt`,
-/// and anything added later — by `rename` (instant, same volume) or copy
-/// (cross-volume). Moving only `books/` used to strand notebooks (data loss) and
-/// leave `device-dist/`/`.server-token` behind as cruft that also blocked a clean
-/// re-move. Returns the source paths that were COPIED (cross-volume), for the
-/// caller to delete via [`finish_move`]; renamed entries are already gone.
-///
-/// The live `library.db*` is snapshotted (it's open — can't be renamed out from
-/// under the connection), not moved, and the old files are cleared by
-/// [`finish_move`]; `config.json` (the root pointer) is left in the state dir.
-/// Deferring the destructive cleanup to after the repoint means any failure here
-/// leaves the original library untouched.
+/// Move the library into the empty `dest_root`: snapshot and verify the DB
+/// there, then relocate every other root entry by `rename` on one volume or a
+/// copy across two. Returns the copied source paths for [`finish_move`], which
+/// runs after the repoint and leaves a failure here with the library intact.
 pub fn move_library(
     src_conn: &Connection,
     src_root: &Path,
@@ -99,9 +89,9 @@ pub fn move_library(
     Ok(copied)
 }
 
-/// Root entries the move handles specially instead of relocating: the live DB
-/// (snapshotted) and its WAL/SHM sidecars, plus `config.json` — the root pointer,
-/// which must stay in the state dir.
+/// The root entries [`move_library`] relocates by other means: the live DB and
+/// its WAL/SHM sidecars, which it snapshots, and `config.json`, the root
+/// pointer that stays in the state dir.
 fn is_db_or_pointer(name: &OsStr) -> bool {
     matches!(
         name.to_str(),
@@ -109,11 +99,9 @@ fn is_db_or_pointer(name: &OsStr) -> bool {
     )
 }
 
-/// Delete the moved-from library's remnants, AFTER the caller has repointed: the
-/// COPIED sources (the cross-volume path — renamed entries are already gone), the
-/// old `library.db*`, and the old root dir itself when it's now empty and isn't
-/// `state_dir` (which must keep `config.json`, the root pointer). Best-effort —
-/// the move has already committed, so a stubborn file logs rather than fails.
+/// Delete the moved-from library's remnants once the caller has repointed:
+/// `copied`, the old `library.db*`, and an emptied `src_root` that is not
+/// `state_dir`. A file that resists removal is logged.
 pub fn finish_move(src_root: &Path, state_dir: &Path, copied: &[PathBuf]) {
     for from in copied {
         let removed = if from.is_dir() {
@@ -141,9 +129,8 @@ pub fn finish_move(src_root: &Path, state_dir: &Path, copied: &[PathBuf]) {
     }
 }
 
-/// Validate that `dir` already holds a sidle library (a readable `library.db`
-/// with a `books` table); returns its book count. Used by "Use existing" before
-/// repointing, so an empty or foreign folder is rejected cleanly.
+/// The book count of the sidle library in `dir` — a readable `library.db`
+/// carrying a `books` table. An empty or foreign folder is refused.
 pub fn validate_existing(dir: &Path) -> Result<i64> {
     let db = dir.join("library.db");
     if !db.is_file() {
@@ -153,10 +140,8 @@ pub fn validate_existing(dir: &Path) -> Result<i64> {
     count_books(&conn).context("not a sidle library (no books table)")
 }
 
-/// `VACUUM INTO` — a transactionally-consistent, WAL-free single-file copy of
-/// the live DB. Tolerates concurrent writers (snapshots committed state; later
-/// commits simply aren't included). Shared with [`crate::library::backup`],
-/// which snapshots into a temp file before zipping it.
+/// `VACUUM INTO`: a transactionally consistent, WAL-free single-file copy of
+/// the live DB, taking committed state under a concurrent writer.
 pub(crate) fn snapshot_db(src: &Connection, dest_db: &Path) -> Result<()> {
     src.execute("VACUUM INTO ?1", [dest_db.to_string_lossy().as_ref()])
         .with_context(|| format!("VACUUM INTO {}", dest_db.display()))?;
@@ -253,6 +238,7 @@ mod tests {
                     tags: &[],
                     title_romaji: "",
                     author_romaji: "",
+                    source_format: None,
                 },
             )
             .unwrap();
@@ -315,6 +301,7 @@ mod tests {
                     tags: &[],
                     title_romaji: "",
                     author_romaji: "",
+                    source_format: None,
                 },
             )
             .unwrap();
@@ -378,9 +365,8 @@ mod tests {
 
     #[test]
     fn finish_move_keeps_state_dir_and_its_config() {
-        // When the moved-from root IS the state dir, finish_move drops the old
-        // library.db but never the dir or its config.json pointer. (books/ and
-        // the other contents were already renamed out by move_library.)
+        // A `src_root` equal to `state_dir`: `finish_move` drops the old
+        // library.db and keeps the dir and its config.json pointer.
         let state_dir = tempfile::tempdir().unwrap();
         std::fs::write(state_dir.path().join("library.db"), b"x").unwrap();
         std::fs::write(state_dir.path().join("config.json"), b"{}").unwrap();

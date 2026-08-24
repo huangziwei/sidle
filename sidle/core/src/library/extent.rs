@@ -7,17 +7,15 @@
 //! parsing the whole KFX, which is far too slow to do per lookup. Hence a cached
 //! column, filled here.
 //!
-//! Deliberately incremental rather than a migration step: a library of a couple
-//! of thousand books takes minutes to index, which is fine in the background and
-//! unacceptable while opening the app. Rows are filled once and then skipped, so
+//! Incremental, not a migration step: a library of a couple of thousand books
+//! takes minutes to index. Each row fills once and is skipped after, and
 //! steady state is only whatever was imported since the last pass.
 //!
 //! **A book is measured when its KFX is produced**, which is the only moment its
 //! axis can change and the only one early enough to matter: a book read the day
 //! it was added is attributable only if it was indexed before that day's reading
 //! was synced, and the everyday case is a device that reports its reading within
-//! hours. The app also sweeps whatever is still missing in the background at
-//! start, which covers rows written before anything filled the column.
+//! hours. A background sweep at start covers the rows nothing has filled.
 //!
 //! [`backfill`] is that same work with progress reporting, for the one path that
 //! wants it done *before* a bulk of history lands — the manual archive import.
@@ -27,8 +25,7 @@
 //!
 //! An extent that arrives late is not lost time. A session whose position
 //! matched nothing is kept, unattributed, and re-examined on every attribution
-//! pass, so indexing a book later retroactively claims the reading already
-//! recorded against it.
+//! pass: indexing a book later claims the reading recorded against it.
 
 use bokai::model::{Book, Format};
 use rusqlite::Connection;
@@ -43,42 +40,30 @@ pub struct Filled {
     /// Books whose file is missing, unreadable, or carries no position map.
     /// Recorded as 0 so they are not retried forever.
     pub skipped: usize,
-    /// True when the pass stopped early at the caller's request. What it had
-    /// already indexed is committed; the next pass resumes from there.
+    /// True when the pass stopped early at the caller's request. What it
+    /// indexed is committed, and the next pass resumes from there.
     pub cancelled: bool,
 }
 
-/// The exclusive end of `bytes`' position axis, or `None` when the container
-/// does not parse or has no position map.
-///
-/// Only the position map is taken; the source text a full index would also build
-/// is pure waste here.
+/// The exclusive end of `bytes`' position axis, or `None` for a container
+/// that does not parse or carries no position map. The position map alone is
+/// read; a full index's source text is left.
 pub fn of_kfx(bytes: &[u8]) -> Option<i64> {
     let mut book = Book::from_bytes(bytes, Format::Kfx).ok()?;
     let positions = book.position_map()?;
     Some(positions.max_position())
 }
 
-/// The extent of the KFX at `path`, or `None` when the file cannot be read or
-/// carries no position map.
-///
-/// The half of indexing that touches no database. Split out because it is the
-/// expensive half — a whole container parsed — and every caller but the
-/// user-driven [`backfill`] does it while something else holds the connection.
+/// The extent of the KFX at `path`, or `None` for a file that cannot be read
+/// or carries no position map. The half of indexing that touches no database,
+/// and parses a whole container.
 pub fn of_file(path: impl AsRef<std::path::Path>) -> Option<i64> {
     std::fs::read(path).ok().and_then(|bytes| of_kfx(&bytes))
 }
 
-/// Compute and store the extent for every book that lacks one.
-///
-/// Idempotent and resumable, which is what makes it safe to interrupt: each book
-/// is committed as it is computed, so cancelling — or crashing — keeps
-/// everything done so far and the next pass starts where this one stopped.
-/// Individual failures never abort the pass either; an unreadable file is one
-/// unattributable book, not a broken index.
-///
-/// Minutes across a large library on its first run, near-instant afterwards,
-/// so `watch` is not optional in practice: see [`job::Report`].
+/// Compute and store the extent for every book that lacks one. Each book
+/// commits as it is computed, and one unreadable file leaves that book
+/// unattributable. `watch` reports the pass — see [`job::Report`].
 pub fn backfill(conn: &Connection, watch: job::Watch<'_>) -> rusqlite::Result<Filled> {
     let mut out = Filled::default();
     let pending = db::books_missing_max_position(conn)?;
@@ -121,8 +106,8 @@ mod tests {
     #[test]
     fn the_extent_column_starts_empty_and_fills_once() {
         let c = conn();
-        // A book with no readable file still gets a value, so the pass that
-        // follows does not keep retrying it.
+        // A book with no readable file takes a value, which the next pass
+        // skips.
         let id = insert_stub(&c, "deadbeef", Some("/nonexistent/book.kfx"));
         assert_eq!(db::books_missing_max_position(&c).unwrap().len(), 1);
         let filled = backfill(&c, &mut job::ignore).unwrap();
@@ -155,8 +140,7 @@ mod tests {
         let b = insert_stub(&c, "bbb", None);
         db::set_max_position(&c, a, Some(174_897)).unwrap();
         db::set_max_position(&c, b, Some(174_897)).unwrap();
-        // Unrelated books do collide on length; the caller has to see both
-        // rather than be handed an arbitrary one.
+        // Unrelated books collide on length, and the caller sees both.
         assert_eq!(
             db::books_with_last_position(&c, 174_896).unwrap(),
             vec![a, b]
@@ -188,6 +172,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap()

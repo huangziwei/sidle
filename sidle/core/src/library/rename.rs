@@ -20,13 +20,9 @@ use crate::library::authors;
 use crate::library::db::{self, BookRow};
 use crate::library::paths::{LibraryPaths, format_basename};
 
-/// Rename `book_id`'s files so their basename is `[Author] Title (Year)` for the
-/// row's *current* metadata, updating the path columns to match.
-///
-/// Best-effort per file: a rename that can't happen (file already gone, target
-/// occupied, OS error) is logged and skipped — the others still move and the
-/// command that called this never fails over a cosmetic rename. Returns the
-/// refreshed row.
+/// Rename `book_id`'s files to `[Author] Title (Year)` for the row's current
+/// metadata, updating the path columns. A file that cannot move is logged and
+/// skipped. Returns the refreshed row.
 pub fn rename_book_files(
     conn: &Connection,
     paths: &LibraryPaths,
@@ -59,8 +55,8 @@ pub fn rename_book_files(
             continue;
         }
         if new_path.exists() {
-            // Same basename for every ext in one dir, so this only triggers if a
-            // stray file already squats the target — don't clobber it.
+            // One basename per ext in one dir: a `new_path` that exists is a
+            // stray file, left alone.
             eprintln!(
                 "[sidle/rename] book {book_id} {ext}: target {} occupied; skip",
                 new_path.display()
@@ -104,10 +100,9 @@ mod tests {
 
     use super::rename_book_files;
 
-    /// A book row with both sides on disk, built directly rather than through
-    /// `import_file`: renaming cares about names and hashes, not about what the
-    /// bytes decode to, so there is nothing to gain from parsing a real book
-    /// here. Returns `(book_id, sha, pdf_path, kfx_path)`.
+    /// A book row with both sides on disk, built without `import_file`:
+    /// `rename_book_files` reads names and hashes, never the bytes. Returns
+    /// `(book_id, sha, pdf_path, kfx_path)`.
     fn seed_book(
         conn: &rusqlite::Connection,
         paths: &LibraryPaths,
@@ -144,6 +139,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap();
@@ -202,10 +198,9 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        // Seeded with the basename its metadata already implies, so the rename
-        // has nothing to change. Read the path back out of the row rather than
-        // reusing the local one: storage round-trips it through the library
-        // root, which resolves symlinks (`/var` → `/private/var` on macOS).
+        // Seeded with the basename its metadata implies, leaving the rename
+        // nothing to change. The path comes back out of the row, which storage
+        // round-trips through a root that resolves symlinks.
         let (id, _sha, _pdf, _kfx) = seed_book(&conn, &paths, "[Old Author] Old Title");
         let before = db::get_book(&conn, id).unwrap().unwrap().pdf_path.unwrap();
 

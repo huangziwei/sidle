@@ -3,9 +3,8 @@
 //! A patch arrives as whatever the editor (or a script) typed; what lands in the
 //! row is canonical: authors split and re-joined on the display separator, a
 //! harmonized language code, a reading layout and a page direction that agree,
-//! romaji that regenerate rather than blank out, deduped lowercase tags. That is
-//! product truth, not presentation, so it lives here and every front end gets
-//! the same answer.
+//! romaji that regenerate from a blank, deduped lowercase tags. Product truth,
+//! not presentation: every front end reads the same answer here.
 
 use rusqlite::Connection;
 
@@ -13,11 +12,8 @@ use crate::library::db::{self, BookRow, BulkMetadataPatch, MetadataPatch};
 use crate::library::paths::LibraryPaths;
 use crate::library::{authors, lang, rename, romaji};
 
-/// Canonicalize and validate a full-replacement patch, in place.
-///
-/// The editor always submits every field (it starts from the current row and the
-/// user edits in place), so this is a full replacement — there is no "unchanged"
-/// to represent.
+/// Canonicalize and validate a full-replacement patch, in place. Every field
+/// arrives on each submit, and none carries an "unchanged" state.
 pub fn normalize(patch: &mut MetadataPatch) -> anyhow::Result<()> {
     patch.title = patch.title.trim().to_string();
     // Canonicalize authors: split the field on `&`/「、」 (never a plain comma —
@@ -30,19 +26,16 @@ pub fn normalize(patch: &mut MetadataPatch) -> anyhow::Result<()> {
     // Page progression direction: only "rtl"/"ltr" are meaningful; blank or
     // anything else clears it to None (Auto = device/source default).
     patch.ppd = normalize_ppd(patch.ppd.take());
-    // Reading layout / writing mode: canonicalize to one of the four
-    // primary-writing-mode values (or None = Auto). When set it's authoritative
-    // for the page direction — a `-rl` layout turns right-to-left — so derive
-    // `ppd` from it, keeping the two columns in agreement.
+    // `writing_mode` canonicalizes to one of the four primary-writing-mode
+    // values, or `None`. A stated one drives `ppd`, keeping both columns in
+    // agreement: a `-rl` layout turns right-to-left.
     patch.writing_mode = normalize_writing_mode(patch.writing_mode.take());
     if let Some(wm) = &patch.writing_mode {
         patch.ppd = Some(ppd_of_writing_mode(wm).to_string());
     }
-    // Romaji: trim + lowercase the editable search fields. A blank field
-    // self-heals by re-rendering from the (now-canonicalized) title/author via
-    // the engine — so clearing it regenerates a sensible value instead of wiping
-    // the book out of search. The yomi isn't available here (no source file), so
-    // a regenerate is engine-only; the user then hand-corrects an ambiguous name.
+    // The editable search fields trim and lowercase; a blank one re-renders
+    // from the canonicalized title or author. No source file is open here, and
+    // the render carries no yomi.
     patch.title_romaji = normalize_romaji(&patch.title_romaji, &patch.title, &patch.language);
     patch.author_romaji = normalize_romaji(&patch.author_romaji, &patch.author, &patch.language);
     trim_to_none(&mut patch.publisher);
@@ -111,11 +104,9 @@ pub fn normalize_bulk(patch: &mut BulkMetadataPatch) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Normalize, persist, and rename the book's files to match. Returns the
-/// refreshed row.
-///
-/// The file rename keeps the library folder — and a future force-reconvert's
-/// derived basename — in step with the metadata.
+/// Normalize, persist, and rename the book's files to match, keeping the
+/// library folder and a force-reconvert's derived basename in step with the
+/// metadata. Returns the refreshed row.
 pub fn apply(
     conn: &Connection,
     paths: &LibraryPaths,
@@ -146,19 +137,9 @@ pub fn apply_bulk(
     Ok(rows)
 }
 
-/// Record the Amazon catalogue id a user typed for a book, or clear it.
-///
-/// Kept apart from the metadata patch because it is a different kind of value.
-/// The patch describes the book; this names an item in Amazon's catalogue, and
-/// its one use is fetching the colour cover from `/images/P/<asin>` — so free
-/// text is a fetch that can only fail, and it is validated rather than stored as
-/// typed. It reaches no file: what a produced file carries is `books.asin`, the
-/// identity the export or the re-key stamps, which is not the user's to choose.
-///
-/// `None` (or blank) clears — the resting state for a book that has no catalogue
-/// entry, and the way out of a wrong paste. Two books may not share one: a
-/// catalogue id names an edition, and the cover it fetches would be the other
-/// book's.
+/// Record the Amazon catalogue id typed for a book, or clear it with `None`.
+/// The value is validated, fetches the colour cover from `/images/P/<asin>`,
+/// and reaches no file. Two books may not share one: it names an edition.
 pub fn set_amazon_asin(
     conn: &Connection,
     book_id: i64,
@@ -173,9 +154,9 @@ pub fn set_amazon_asin(
     db::get_book(conn, book_id)?.ok_or_else(|| anyhow::anyhow!("book {book_id} not found"))
 }
 
-/// What [`set_amazon_asin`] would store, or the reason it can't. Split out so a
-/// caller with other work to do — writing the edit into the source file, say —
-/// can refuse a bad value before doing it, rather than half-way through.
+/// What [`set_amazon_asin`] stores, or the reason it cannot. A caller with
+/// other work — writing the edit into the source file — refuses a bad value
+/// ahead of starting.
 pub fn check_amazon_asin(
     conn: &Connection,
     book_id: i64,
@@ -257,9 +238,8 @@ pub fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Normalize an edited romaji field: trim + lowercase, and self-heal a blank one
-/// by re-rendering from its source (title/author) via the engine — so clearing
-/// the field regenerates rather than blanking the book out of search.
+/// Normalize an edited romaji field: trim and lowercase, and re-render a blank
+/// one from `source` through the engine.
 pub fn normalize_romaji(value: &str, source: &str, language: &str) -> String {
     let trimmed = value.trim().to_lowercase();
     if trimmed.is_empty() {
@@ -336,6 +316,7 @@ mod tests {
                         tags: &[],
                         title_romaji: "",
                         author_romaji: "",
+                        source_format: None,
                     },
                 )
                 .unwrap()
@@ -357,7 +338,7 @@ mod tests {
         let row = set_amazon_asin(&conn, a, Some("  B07PXGQC1Q ")).unwrap();
         assert_eq!(row.amazon_asin.as_deref(), Some("B07PXGQC1Q"));
 
-        // One id names one edition — on a second book it would fetch A's cover.
+        // One id names one edition, and one cover.
         assert!(set_amazon_asin(&conn, b, Some("B07PXGQC1Q")).is_err());
 
         // Blank clears, which is the way out of a wrong paste.
@@ -430,7 +411,7 @@ mod tests {
 
     #[test]
     fn cjk_tags_pass_through_unchanged() {
-        // CJK has no case, so lowercase is a no-op; trim still applies, and the
+        // CJK has no case: lowercase is a no-op, trim applies, and the
         // trimmed duplicate collapses.
         let got = canonicalize_tags(vec![" 小説 ".into(), "ライトノベル".into(), "小説".into()]);
         assert_eq!(got, vec!["小説", "ライトノベル"]);

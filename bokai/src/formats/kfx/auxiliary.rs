@@ -46,7 +46,7 @@ pub fn build_ruby_content_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment>
         let entries: Vec<String> = ctx.ruby_registry.fragment_entries(frag_idx).to_vec();
         let kfx_id = format!("b_ruby_{}", frag_idx);
         let kfx_id_symbol = ctx.symbols.get_or_intern(&kfx_id);
-        let style_symbol = ctx.default_style_symbol;
+        let style_symbol = ctx.cite_default_style();
 
         let content_list: Vec<IonValue> = entries
             .iter()

@@ -92,6 +92,14 @@ enum Command {
         /// The 10-character Amazon id.
         asin: String,
     },
+    /// Record the format a book arrived in, for rows imported before the
+    /// library kept it.
+    SourceFormat {
+        #[command(flatten)]
+        select: Select,
+        /// `azw3`, `mobi`, `epub`, `kfx`, `kfx-zip`, `pdf`, `aozora`.
+        format: String,
+    },
     /// Give every KFX an identity of its own, so a copy of a store-bought book
     /// stops sharing the catalogue item's ASIN.
     Rekey {
@@ -128,7 +136,7 @@ enum Command {
     /// The connected Kindle.
     #[command(subcommand)]
     Device(cmd::device::DeviceCmd),
-    /// The apps that install to a Kindle's /mnt/us.
+    /// The apps that install to a Kindle.
     #[command(subcommand)]
     Apps(cmd::apps::AppsCmd),
     /// Handwritten notebooks.
@@ -168,6 +176,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Import(args) => cmd::library::import(&ctx, args),
         Command::Set(args) => cmd::library::set(&ctx, *args),
         Command::Asin { select, asin } => cmd::library::asin(&ctx, &select, &asin),
+        Command::SourceFormat { select, format } => {
+            cmd::library::source_format(&ctx, &select, &format)
+        }
         Command::Rekey { apply } => cmd::library::rekey(&ctx, apply),
         Command::Romanize { text, language } => {
             println!(

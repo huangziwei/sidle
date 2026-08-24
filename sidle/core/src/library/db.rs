@@ -88,6 +88,9 @@ pub struct BookRow {
     /// into a file we produce; see [`Self::asin`]. Editable in the metadata
     /// modal, which is how a book that arrived without one gets a cover.
     pub amazon_asin: Option<String>,
+    /// The format that arrived at import (`azw3`, `mobi`, `epub`, …).
+    /// `conversion_jobs.kind` names a reconvert's direction, not this.
+    pub source_format: Option<String>,
     /// Publisher imprint — pulled from EPUB `<dc:publisher>` or KFX
     /// metadata field `publisher` (symbol 232). Optional; many self-pub or
     /// indie books have no publisher. Editable via the metadata modal.
@@ -563,6 +566,27 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("ALTER TABLE books ADD COLUMN updated_at TEXT", [])?;
         conn.execute(
             "UPDATE books SET updated_at = imported_at WHERE updated_at IS NULL",
+            [],
+        )?;
+    }
+
+    // The file that came in. `conversion_jobs.kind` names the direction a
+    // reconvert runs, which for an `.azw3` or `.mobi` import is `epub_to_kfx`
+    // over the EPUB the import exported — the arriving format survives here.
+    if !has_column(conn, "books", "source_format")? {
+        conn.execute("ALTER TABLE books ADD COLUMN source_format TEXT", [])?;
+        // The two directions whose arriving format the job kind does state. An
+        // `epub_to_kfx` row stays NULL: its EPUB is either the file that
+        // arrived or one an `.azw3`/`.mobi`/`.zip` import exported, and the
+        // arriving file is not kept.
+        conn.execute(
+            "UPDATE books SET source_format = 'kfx' WHERE id IN
+               (SELECT book_id FROM conversion_jobs WHERE kind IN ('kfx_to_epub','kfx_to_pdf'))",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE books SET source_format = 'pdf' WHERE id IN
+               (SELECT book_id FROM conversion_jobs WHERE kind = 'pdf_to_kfx')",
             [],
         )?;
     }
@@ -1573,8 +1597,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
              series_name, series_index, tags, kfx_sha256, pdf_path, updated_at,
-             title_romaji, author_romaji, amazon_asin)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"#,
+             title_romaji, author_romaji, amazon_asin, source_format)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"#,
         params![
             book.sha256,
             book.title,
@@ -1600,6 +1624,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.title_romaji,
             book.author_romaji,
             book.amazon_asin,
+            book.source_format,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -3035,6 +3060,20 @@ pub fn set_amazon_asin(
     Ok(())
 }
 
+/// Record the format a book arrived in. Provenance, not metadata: it names no
+/// value a produced file carries, and a change reconverts nothing.
+pub fn set_source_format(
+    conn: &Connection,
+    book_id: i64,
+    format: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET source_format = ?1 WHERE id = ?2",
+        params![format, book_id],
+    )?;
+    Ok(())
+}
+
 /// Stamp a book's metadata `updated_at` (v7). Two callers: the ASIN-edit command
 /// (a user curation, but it routes through the mechanical-safe [`set_asin`],
 /// which bootstrap/worker also call, so the bump can't live *inside* `set_asin`);
@@ -3390,6 +3429,9 @@ pub struct NewBook<'a> {
     /// (see [`super::romaji`] and `import::extract_meta`). The picker searches it.
     pub title_romaji: &'a str,
     pub author_romaji: &'a str,
+    /// The format that arrived, as `SourceKind::as_str` names it. An `.azw3`
+    /// or `.mobi` import records its own extension, not the EPUB it exported.
+    pub source_format: Option<&'a str>,
 }
 
 pub fn now_iso() -> String {
@@ -3405,7 +3447,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -3420,7 +3462,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -3435,7 +3477,7 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -3454,7 +3496,7 @@ const SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.series_name = ?1 AND b.series_index = ?2
@@ -3471,7 +3513,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -3491,7 +3533,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin
+           b.writing_mode, b.amazon_asin, b.source_format
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1 ESCAPE '\'
@@ -3609,6 +3651,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         // Appended after the original column list rather than placed beside
         // `asin`: every reader here indexes positionally.
         amazon_asin: row.get(26)?,
+        source_format: row.get(27)?,
         status: row.get(12)?,
         error: row.get(13)?,
         kind: row.get(14)?,
@@ -4733,6 +4776,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .expect("insert")
@@ -4810,6 +4854,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .expect("insert")
@@ -5066,6 +5111,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .expect("insert");
@@ -5956,6 +6002,7 @@ mod tests {
                     tags: &[],
                     title_romaji: "",
                     author_romaji: "",
+                    source_format: None,
                 },
             )
             .expect("insert");
@@ -6617,6 +6664,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .expect("insert")

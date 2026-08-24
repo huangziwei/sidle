@@ -15,11 +15,11 @@
 //! Every cross-machine identity key is content-derived and stable; only the local
 //! autoincrement `id` collides and is remapped. Books key on `sha256`, annotations
 //! on `dedup_hash` (a content hash — union for free), ink on `(asin, container_id)`,
-//! notebooks on `uuid`. We iterate the source *per book*, so a book's annotations,
+//! notebooks on `uuid`. The source is walked per book: a book's annotations,
 //! `source='sidle'` reading position, and ink land directly on that book's local
 //! id — no separate id map. Source orphans (`book_id IS NULL` — a device-import
 //! inbox for books not in the source library) are intentionally skipped: they
-//! belong to no book that comes over, and would be orphans here too.
+//! belong to no book that comes over, and stay orphans here.
 //!
 //! ## Duplicate books — newest-metadata-wins
 //! A `sha256` collision means byte-identical content, so only metadata can differ.
@@ -29,8 +29,8 @@
 //!
 //! ## Notebooks — add-only
 //! Unlike books, a notebook's identity (`uuid`) is *not* its content (a notebook's
-//! bytes change as it's edited), so newest-wins would require re-syncing its files,
-//! not just a row. We keep it simple and correct: a *new* uuid is added (row +
+//! bytes change as it is edited), and newest-wins takes a re-sync of its files.
+//! A *new* uuid is added (row +
 //! files); an existing one is left entirely alone (row and files both untouched,
 //! so they never disagree).
 //!
@@ -70,7 +70,7 @@ pub struct MergeOutcome {
 }
 
 /// The source's per-book conversion state, carried so a merged book displays the
-/// right status instead of defaulting to `pending` (no job row → COALESCE).
+/// right status. No job row COALESCEs to `pending`.
 struct SourceJob {
     status: String,
     kind: String,
@@ -87,8 +87,8 @@ struct SourceBook {
     ink: Vec<db::BookInkRow>,
 }
 
-/// The lock-free product of [`prepare`]: the source inventory in memory and the
-/// new files already copied into the live root. [`commit`] turns it into rows.
+/// The lock-free product of [`prepare`]: the source inventory in memory, its
+/// new files copied into the live root. [`commit`] turns it into rows.
 pub struct Prepared {
     dest_root: PathBuf,
     books: Vec<SourceBook>,
@@ -103,21 +103,16 @@ impl Prepared {
     }
 }
 
-/// Validate + extract the `.sidlebak`, read its inventory, and copy any new
-/// `books/<sha>/` and `notebooks/<uuid>/` dirs into `dest_root` — all **without**
-/// the DB connection, so the command runs this off the async runtime and holds no
-/// lock during the (potentially large) file copy. Hand the result to [`commit`].
-///
-/// `app_user_version` is the running app's [`db::SCHEMA_VERSION`]; the manifest is
-/// gated against it (a forward-incompatible backup is refused before any copy).
+/// Extract the `.sidlebak` and copy each new `books/<sha>/` and
+/// `notebooks/<uuid>/` dir into `dest_root`, holding no DB connection.
+/// `app_user_version` gates the manifest; [`commit`] takes the result.
 pub fn prepare(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<Prepared> {
     prepare_with_progress(src_zip, dest_root, app_user_version, &|_, _| {})
 }
 
-/// Like [`prepare`], but ticks `on_progress(entries_done, entries_total)` over
-/// the archive extraction (the slow phase) — drives the footer "Merging …"
-/// counter. The subsequent new-dir copy isn't instrumented; it only touches
-/// books not already present, so it's typically a small tail.
+/// [`prepare`], ticking `on_progress(entries_done, entries_total)` over the
+/// archive extraction. The new-dir copy that follows reports nothing and
+/// touches the books the destination lacks.
 pub fn prepare_with_progress(
     src_zip: &Path,
     dest_root: &Path,
@@ -128,10 +123,9 @@ pub fn prepare_with_progress(
     let staging = backup::sibling(dest_root, "merging")?;
     let _manifest = backup::stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
-    // Read the source inventory from the staged DB, migrated up to the current
-    // schema so every column exists regardless of the backup's age (a pre-v7
-    // backup has no `books.updated_at`; migration adds + backfills it, so its
-    // books read as "older" and lose newest-wins ties to the local curated copy).
+    // The staged DB migrates to the current schema, giving every column
+    // whatever the backup's age. A backfilled `books.updated_at` reads as
+    // older and loses a newest-wins tie.
     let inventory = {
         let src_db = staging.join("library.db");
         let conn = db::open(&src_db)
@@ -142,10 +136,9 @@ pub fn prepare_with_progress(
     };
     let (books, notebooks) = inventory;
 
-    // Copy each NEW book / notebook dir into the live root. Content-addressed book
-    // dirs make "already present" mean "same bytes" → skip; notebooks are add-only
-    // (an existing uuid keeps its files). Files first, rows later (an orphaned dir
-    // on a later failure is benign; a row pointing at a missing file is not).
+    // Each new book or notebook dir copies into the live root. A
+    // content-addressed book dir present means the same bytes; an existing
+    // uuid keeps its files. Files land first, rows after.
     let books_root = dest_root.join("books");
     for b in &books {
         let dst = books_root.join(&b.row.sha256);
@@ -176,10 +169,9 @@ pub fn prepare_with_progress(
     })
 }
 
-/// Apply a [`Prepared`] to the live DB in one transaction (the only step needing
-/// the connection — fast, metadata-only, so the caller holds the lock just here).
-/// Atomic: a failure rolls back to the exact pre-merge rows. The files [`prepare`]
-/// copied stay (benign content-addressed dirs) even on rollback.
+/// Apply a [`Prepared`] to the live DB in one metadata-only transaction, the
+/// one step taking the connection. A failure rolls back to the pre-merge rows,
+/// and the content-addressed dirs [`prepare`] copied stay.
 pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
     let dest_root = prepared.dest_root.as_path();
     let mut out = MergeOutcome::default();
@@ -302,10 +294,9 @@ fn read_source_books(conn: &Connection) -> Result<Vec<SourceBook>> {
     Ok(out)
 }
 
-/// Insert a brand-new book, preserving the source's metadata. File paths are
-/// rebuilt under `dest_root` from each source path's basename + the sha, and set
-/// only if the file is actually present (a book whose dir wasn't archived gets
-/// NULL paths rather than a dangling one).
+/// Insert a brand-new book carrying the source's metadata. Each file path
+/// rebuilds under `dest_root` from its basename and the sha, and is set for a
+/// file present: a book whose dir the archive skipped takes NULL paths.
 fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) -> Result<i64> {
     let sha = row.sha256.as_str();
     let remap = |stored: &Option<String>| -> Option<String> {
@@ -351,17 +342,15 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
             tags: &row.tags,
             title_romaji: &row.title_romaji,
             author_romaji: &row.author_romaji,
+            source_format: row.source_format.as_deref(),
         },
     )
     .context("insert merged book")
 }
 
-/// Overwrite a duplicate book's metadata with the (newer) source's — but never
-/// its file paths (the dest's files are the ones on disk), and never its `asin`,
-/// which belongs to the dest's own KFX rather than to the metadata being
-/// merged. `amazon_asin` is prefer-non-empty: keep the dest's, else adopt the
-/// source's, never blank it. Sets `updated_at` to the source's so a later
-/// re-merge compares right.
+/// Overwrite a duplicate book's metadata with the newer source's, keeping its
+/// file paths and its `asin`. `amazon_asin` prefers a non-empty value from
+/// either side, and `updated_at` takes the source's.
 fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookRow) -> Result<()> {
     let amazon_asin = local
         .amazon_asin
@@ -397,7 +386,7 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
 }
 
 /// Insert one of a book's annotations under its local id; returns whether a new
-/// row landed (`false` = a `dedup_hash` we already had → unioned away).
+/// row landed. `false` names a `dedup_hash` the destination holds.
 fn insert_annotation_for(conn: &Connection, book_id: i64, a: &db::AnnotationRow) -> Result<bool> {
     // Don't resurrect an annotation the dest library deleted — its tombstone wins
     // over a merged-in copy, so a Sidle-side deletion survives the merge.
@@ -433,10 +422,9 @@ fn insert_annotation_for(conn: &Connection, book_id: i64, a: &db::AnnotationRow)
     .context("insert merged annotation")
 }
 
-/// Upsert a book's `source='sidle'` reading position, newest-wins on `updated_at`
-/// (the `WHERE` on the conflict clause keeps the dest's if it's newer or equal).
-/// Preserves the source's `updated_at` rather than stamping now, so it stays the
-/// true last-read time.
+/// Upsert a book's `source='sidle'` reading position, newest-wins on
+/// `updated_at`: the conflict clause's `WHERE` keeps a destination row of
+/// equal or greater age, and the source's last-read time carries over.
 fn upsert_sidle_position(conn: &Connection, book_id: i64, p: &db::ReadingPosition) -> Result<()> {
     conn.execute(
         r#"INSERT INTO reading_position
@@ -532,6 +520,7 @@ mod tests {
                     tags: &[],
                     title_romaji: "",
                     author_romaji: "",
+                    source_format: None,
                 },
             )
             .unwrap();
@@ -602,7 +591,7 @@ mod tests {
                 .is_empty()
         );
 
-        // Merge the source (which still has the annotation) — the deletion sticks.
+        // Merge the source, whose annotation the destination deleted.
         let outcome = merge_into(&dst_conn, &dst_root, &zip);
         assert_eq!(
             outcome.annotations_added, 0,

@@ -512,14 +512,22 @@ impl AnchorRegistry {
         self.chapter_positions.get(&chapter).copied()
     }
 
-    /// Node targets carrying a symbol that Pass 2 placed nowhere — an id on a
-    /// node the export flattens into its parent, whose `link_to` names an
-    /// anchor no fragment defines.
-    pub fn stranded_targets(&self) -> Vec<(GlobalNodeId, String)> {
-        self.node_to_symbol
+    /// Targets carrying a symbol that Pass 2 placed nowhere — an id on a node
+    /// the export flattens into its parent, whose `link_to` names an anchor no
+    /// fragment defines. Each is paired with the chapter it sits in.
+    pub fn stranded_targets(&self) -> Vec<(ChapterId, String)> {
+        let nodes = self
+            .node_to_symbol
             .iter()
+            .map(|(target, symbol)| (target.chapter, symbol));
+        let chapters = self
+            .chapter_to_symbol
+            .iter()
+            .map(|(c, symbol)| (*c, symbol));
+        nodes
+            .chain(chapters)
             .filter(|(_, symbol)| !self.resolved_symbols.contains(*symbol))
-            .map(|(target, symbol)| (*target, symbol.clone()))
+            .map(|(chapter, symbol)| (chapter, symbol.clone()))
             .collect()
     }
 

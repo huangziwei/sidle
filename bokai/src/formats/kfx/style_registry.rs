@@ -252,6 +252,7 @@ impl StyleRegistry {
         symbols: &mut crate::formats::kfx::context::SymbolTable,
     ) -> u64 {
         if style.is_empty() {
+            self.default_cited = true;
             return self.default_style_symbol;
         }
 

@@ -693,6 +693,7 @@ mod tests {
             kind: Some("epub_to_kfx".into()),
             asin: None,
             amazon_asin: None,
+            source_format: None,
             publisher: None,
             published_at: None,
             series_name: None,

@@ -738,6 +738,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap()
@@ -1179,6 +1180,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap();
@@ -1242,6 +1244,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap();
@@ -1316,6 +1319,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "",
                 author_romaji: "",
+                source_format: None,
             },
         )
         .unwrap();

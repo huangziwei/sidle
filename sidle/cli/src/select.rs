@@ -2,8 +2,8 @@
 //!
 //! One flag group, shared by every command that takes books, so `list` is how
 //! you check what a `convert` or a `remove` is about to touch. Filters are
-//! ANDed; a run that names none is refused rather than assumed — `--all` says
-//! the whole library out loud.
+//! ANDed; a run that names none is refused, and `--all` says the whole library
+//! out loud.
 
 use anyhow::Result;
 use clap::Args;
@@ -46,6 +46,11 @@ pub struct Select {
     /// `kfx_to_pdf`.
     #[arg(long, value_name = "KIND")]
     pub kind: Option<String>,
+
+    /// The format that arrived at import: `azw3`, `mobi`, `epub`, `kfx`,
+    /// `kfx-zip`, `pdf`, `aozora`.
+    #[arg(long = "source-format", value_name = "FMT")]
+    pub source_format: Option<String>,
     /// Only books that have this on disk: `kfx`, `epub`, `pdf`, `cover`.
     /// Repeatable.
     #[arg(long = "has", value_name = "WHAT")]
@@ -73,6 +78,7 @@ impl Select {
             && self.lang.is_none()
             && self.status.is_none()
             && self.kind.is_none()
+            && self.source_format.is_none()
             && self.has.is_empty()
             && self.missing.is_empty()
     }
@@ -95,7 +101,7 @@ impl Select {
             }
         }
         // The position axis is a column, not a file, and the query for "which
-        // books lack one" already exists — ask it once rather than per row.
+        // books lack one" exists — ask it once, not per row.
         let unmeasured: std::collections::HashSet<i64> =
             if self.has.iter().chain(&self.missing).any(|w| w == "extent") {
                 db::books_missing_max_position(conn)?
@@ -148,6 +154,10 @@ impl Select {
                 Some(k) => b.kind.as_deref() == Some(k.as_str()),
                 None => true,
             })
+            .filter(|b| match &self.source_format {
+                Some(f) => b.source_format.as_deref() == Some(f.as_str()),
+                None => true,
+            })
             .filter(|b| self.has.iter().all(|w| has(b, w, &unmeasured)))
             .filter(|b| self.missing.iter().all(|w| !has(b, w, &unmeasured)))
             .collect();
@@ -165,8 +175,8 @@ impl Select {
         Ok(out)
     }
 
-    /// Resolve, and refuse an empty result — for commands that would otherwise
-    /// report a successful no-op.
+    /// Resolve, and refuse an empty result — for a command whose empty run
+    /// reads as a successful no-op.
     pub fn resolve_nonempty(&self, conn: &Connection) -> Result<Vec<BookRow>> {
         let books = self.resolve(conn)?;
         if books.is_empty() {
@@ -176,11 +186,9 @@ impl Select {
     }
 }
 
-/// Whether a book has `what` — a file on disk, or a stored value.
-///
-/// A path recorded in the row is not the same as a file present, so the file
-/// kinds check the disk: a library restored from a partial copy, or one whose
-/// folder was pruned by hand, must not report a KFX it cannot send.
+/// Whether a book has `what` — a file on disk, or a stored value. A path
+/// recorded in the row is not a file present, and the file kinds check the
+/// disk: a library restored from a partial copy holds rows naming neither.
 fn has(book: &BookRow, what: &str, unmeasured: &std::collections::HashSet<i64>) -> bool {
     let on_disk = |p: &Option<String>| {
         p.as_deref()
@@ -239,6 +247,7 @@ mod tests {
                     tags: if sha == "ccc" { &[] } else { &tags },
                     title_romaji: "",
                     author_romaji: "",
+                    source_format: Some(if sha == "bbb" { "azw3" } else { "epub" }),
                 },
             )
             .unwrap()
@@ -247,6 +256,22 @@ mod tests {
         insert("bbb", "人間失格", "太宰 治", "ja", true);
         insert("ccc", "Shift", "Hugh Howey", "en", false);
         conn
+    }
+
+    #[test]
+    fn source_format_selects_by_the_file_that_arrived() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = library(tmp.path());
+        let mut select = Select::default();
+        select.source_format = Some("azw3".into());
+        assert_eq!(titles(&select, &conn).len(), 1);
+        select.source_format = Some("epub".into());
+        assert_eq!(titles(&select, &conn).len(), 2);
+        // `source_format` names the file that arrived, which
+        // `conversion_jobs.kind` does not: a `.azw3` import stores its EPUB and
+        // reconverts from that.
+        select.source_format = Some("mobi".into());
+        assert!(titles(&select, &conn).is_empty());
     }
 
     fn titles(select: &Select, conn: &Connection) -> Vec<String> {
@@ -265,7 +290,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = library(tmp.path());
         // Silence is the one answer a sweep must never get: `convert` with a
-        // typo'd flag would otherwise rebuild the whole library.
+        // typo'd flag rebuilds the whole library.
         assert!(Select::default().resolve(&conn).is_err());
     }
 
@@ -310,8 +335,7 @@ mod tests {
         };
         assert_eq!(titles(&with_kfx, &conn).len(), 2);
 
-        // Delete the file behind one of them: the row still names a KFX, but
-        // there is nothing to send.
+        // Delete the file behind one of them: the row names a KFX that is gone.
         std::fs::remove_file(tmp.path().join("present.kfx")).unwrap();
         assert!(titles(&with_kfx, &conn).is_empty());
     }

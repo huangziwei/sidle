@@ -119,6 +119,7 @@ fn one_field(book: &BookRow, field: &str) -> Result<String> {
         "author" => book.author.clone(),
         "asin" => book.asin.clone().unwrap_or_default(),
         "amazon-asin" => book.amazon_asin.clone().unwrap_or_default(),
+        "source-format" => book.source_format.clone().unwrap_or_default(),
         "kfx" => path(&book.kfx_path),
         "epub" => path(&book.epub_path),
         "pdf" => path(&book.pdf_path),
@@ -131,7 +132,7 @@ fn one_field(book: &BookRow, field: &str) -> Result<String> {
             .unwrap_or_default(),
         other => anyhow::bail!(
             "unknown field {other:?} \
-             (id, sha, title, author, asin, amazon-asin, kfx, epub, pdf, cover, path)"
+             (id, sha, title, author, asin, amazon-asin, source-format, kfx, epub, pdf, cover, path)"
         ),
     })
 }
@@ -179,6 +180,7 @@ pub fn show(ctx: &Ctx, select: &Select) -> Result<()> {
             line("cover", b.cover_path.as_deref().unwrap_or(""));
             line("imported", &b.imported_at);
             line("updated", &b.updated_at);
+            line("source format", b.source_format.as_deref().unwrap_or(""));
             line("conversion", &format!("{} ({})", b.status, kind(b)));
             if let Some(e) = &b.error {
                 line("error", e);
@@ -355,7 +357,7 @@ pub struct SetArgs {
     /// order and re-joined.
     #[arg(long)]
     author: Option<String>,
-    /// Language code; harmonized (`en-US` → `en`, `zh-TW` → `zh-Hant`).
+    /// Language code, harmonized: `en-US` → `en`, `zh-TW` → `zh-Hant`.
     #[arg(long)]
     language: Option<String>,
     /// Page direction: `rtl` or `ltr`.
@@ -441,7 +443,7 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
             };
             let ids: Vec<i64> = books.iter().map(|b| b.id).collect();
             let rows = metadata::apply_bulk(&conn, &ids, patch)?;
-            // A bulk patch writes the row; the files still carry the old
+            // A bulk patch writes the row; each file keeps the old
             // `[Author] Title (Year)` name until they are renamed to match.
             for id in &ids {
                 sidle_core::library::rename::rename_book_files(&conn, &ctx.paths, *id)?;
@@ -514,14 +516,35 @@ pub fn asin(ctx: &Ctx, select: &Select, asin: &str) -> Result<()> {
     })
 }
 
-/// Re-key every KFX whose baked identity is a catalogue ASIN.
-///
-/// `kfx_sha256` is deliberately left alone: it is the book's frozen identity,
-/// the `<sha8>` in its on-device filename, and the Kindle binds each `.sdr` to
-/// that exact name. Rewriting the file moves its mtime instead, which is the
-/// revision the picker's update pass watches — so a re-keyed book arrives on the
-/// next Update under the name it already had, keeping the reader's highlights
-/// and position.
+/// The formats an import can read, as `books.source_format` records them.
+const SOURCE_FORMATS: &[&str] = &["azw3", "mobi", "epub", "kfx", "kfx-zip", "pdf", "aozora"];
+
+/// Record what the selected books arrived as. Provenance, not metadata: a
+/// `.azw3` import stores the EPUB it exported, and `conversion_jobs.kind`
+/// names the direction a reconvert takes from there.
+pub fn source_format(ctx: &Ctx, select: &Select, format: &str) -> Result<()> {
+    if !SOURCE_FORMATS.contains(&format) {
+        anyhow::bail!(
+            "unknown source format {format:?} ({})",
+            SOURCE_FORMATS.join(", ")
+        );
+    }
+    let conn = ctx.conn();
+    let books = select.resolve_nonempty(&conn)?;
+    for b in &books {
+        db::set_source_format(&conn, b.id, Some(format))?;
+    }
+    ctx.report(&books, || {
+        for b in &books {
+            println!("{} → {format}", b.title);
+        }
+        println!("\n{} book(s)", books.len());
+    })
+}
+
+/// Re-key every KFX whose baked identity is a catalogue ASIN. `kfx_sha256`
+/// stays put — it is the `<sha8>` in the on-device filename each `.sdr` binds
+/// to — and the rewrite moves the mtime the picker's update pass watches.
 pub fn rekey(ctx: &Ctx, apply: bool) -> Result<()> {
     let conn = ctx.conn();
     let books = db::list_books(&conn).context("read the library")?;
@@ -610,11 +633,9 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     let kfx = bokai::Book::from_bytes(&bytes, bokai::Format::Kfx)
         .with_context(|| format!("parse {}", path.display()))?;
 
-    // A KFX Amazon produced names no publication identifier, so there is nothing
-    // for the export rule to derive from — and those are exactly the books that
-    // carry a catalogue ASIN and most need one of their own. The library's
-    // content hash stands in: it is per-book, already the name of the directory
-    // the file lives in, and stable for as long as the bytes are.
+    // A KFX Amazon produced names no publication identifier for the export
+    // rule to derive from. `sha256` stands in: per-book, the name of the
+    // directory the file lives in, and fixed for the life of the bytes.
     let new_key =
         resolve_export_asin(kfx.metadata()).unwrap_or_else(|| generate_content_id(&book.sha256));
     let old_key = book.asin.as_deref().unwrap_or_default().to_string();
@@ -623,7 +644,7 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     }
 
     // Both fields, to one value: they are written equal at export, and a device
-    // that keys on either then sees one identity rather than two.
+    // that keys on either sees one identity.
     let patched = metadata_edit::edit_metadata(
         &bytes,
         &MetadataPatch {
@@ -636,9 +657,8 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     import::write_bytes_atomic(&path, &patched)
         .with_context(|| format!("write {}", path.display()))?;
 
-    // The catalogue value the file used to carry is worth keeping — it is the
-    // only colour-cover key this book has. Never overwrite one already there:
-    // that one was curated.
+    // `old_key` is this book's only colour-cover key. A curated
+    // `amazon_asin` is left as it stands.
     if book.amazon_asin.is_none() && cover_fetch::looks_like_real_amazon_asin(&old_key) {
         db::set_amazon_asin(conn, book.id, Some(&old_key))?;
     }
@@ -766,7 +786,7 @@ pub fn remove(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
     let mut done = Vec::new();
     for book in &books {
         // Files first: a failure there leaves the row in place, so the book is
-        // still visible rather than becoming an orphan folder nobody lists.
+        // visible, not an orphan folder nothing lists.
         let error = ctx
             .paths
             .remove_sha(&book.sha256)
@@ -849,8 +869,8 @@ pub fn split(ctx: &Ctx, args: SplitArgs) -> Result<()> {
         })?
     };
     // Each fresh volume lands as an EPUB with a pending job; its KFX is this
-    // sweep's to produce, exactly as the desktop's queue would. A volume whose
-    // place in the series was already taken is left as it is.
+    // sweep's to produce, the same shape the desktop's queue takes. A
+    // volume whose place in the series is taken is left alone.
     let ids: Vec<i64> = outcomes
         .iter()
         .filter(|o| o.needs_enqueue)

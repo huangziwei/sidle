@@ -15,13 +15,8 @@ use crate::model::{Chapter, Role};
 /// Section name for the standalone cover (always index 0).
 pub const COVER_SECTION_NAME: &str = "c0";
 
-/// Check if a chapter contains only an image and no text content.
-///
-/// Returns true if the chapter has:
-/// - Exactly one Image node
-/// - No text content (or whitespace-only text)
-///
-/// A cover page takes the KFX cover formatting on this test.
+/// Whether a chapter holds exactly one `Role::Image` node and no text past
+/// whitespace. A cover page takes the KFX cover formatting on this test.
 pub fn is_image_only_chapter(chapter: &Chapter) -> bool {
     let mut image_count = 0;
     let mut has_text = false;
@@ -50,10 +45,8 @@ pub fn is_image_only_chapter(chapter: &Chapter) -> bool {
     image_count == 1 && !has_text
 }
 
-/// Get the image path from a chapter if it contains exactly one image.
-///
-/// Returns the src attribute of the single image node, or None if
-/// the chapter doesn't contain exactly one image.
+/// The `src` of a chapter's single image node, or `None` for a chapter
+/// holding any other number of them.
 pub fn get_chapter_image_path(chapter: &Chapter) -> Option<String> {
     let mut image_path = None;
     let mut image_count = 0;
@@ -72,16 +65,8 @@ pub fn get_chapter_image_path(chapter: &Chapter) -> Option<String> {
     if image_count == 1 { image_path } else { None }
 }
 
-/// Check if a standalone cover section is needed.
-///
-/// Returns true if the EPUB has a cover image in metadata that differs
-/// from the image displayed in the first chapter. This happens when:
-/// - The EPUB has a cover image defined in metadata
-/// - The first chapter displays a different image (e.g., titlepage.png vs cover.jpg)
-///
-/// # Arguments
-/// * `cover_image_path` - The cover image path from EPUB metadata
-/// * `first_chapter` - The first chapter in the spine
+/// Whether `cover_image_path` names an image `first_chapter` does not
+/// display, which takes a cover section of its own.
 pub fn needs_standalone_cover(cover_image_path: &str, first_chapter: &Chapter) -> bool {
     // Get the image from the first chapter (if it's image-only)
     let Some(first_image_path) = get_chapter_image_path(first_chapter) else {
@@ -104,24 +89,9 @@ pub fn needs_standalone_cover(cover_image_path: &str, first_chapter: &Chapter) -
     cover_filename != first_filename
 }
 
-/// Build a dedicated cover section and storyline.
-///
-/// Creates a c0 section with container type sized to the cover image's
-/// actual pixel dimensions, plus a storyline containing just the cover
-/// image. Matching `fixed_width` / `fixed_height` to the resource's
-/// dimensions is what Amazon's encoder does — any mismatch letterbox/
-/// pillarboxes the cover via `scale_fit` (kfx-zip-derived KFXs:
-/// 885×1260 cover → 885×1260 page_template, no margins). Cover dims
-/// are populated in Pass 1 via `ctx.cover_dimensions`; falls back to a
-/// generic book-cover aspect when the probe couldn't read them.
-///
-/// # Arguments
-/// * `cover_path` - Path to the cover image resource
-/// * `section_id` - Fragment ID for the section
-/// * `ctx` - Export context (carries `cover_dimensions` + resource registry)
-///
-/// # Returns
-/// A tuple of (section_fragment, storyline_fragment)
+/// A `c0` section and its storyline, holding the cover image alone. The
+/// container's `fixed_width`/`fixed_height` take `ctx.cover_dimensions`, which
+/// `scale_fit` letterboxes the cover against on any mismatch.
 pub fn build_cover_section(
     cover_path: &str,
     section_id: u64,
@@ -139,7 +109,7 @@ pub fn build_cover_section(
     ctx.record_section_image_ref(section_name, &resource_name);
 
     // Use default style for the cover image
-    let style_symbol = ctx.default_style_symbol;
+    let style_symbol = ctx.cite_default_style();
 
     // Assign a fragment ID for the cover image content
     let cover_content_id = ctx.next_fragment_id();
@@ -218,11 +188,8 @@ pub fn build_cover_section(
     (section_fragment, storyline_fragment)
 }
 
-/// Normalize cover path to match asset paths.
-///
-/// EPUB metadata may use a shorter path (e.g., "images/cover.jpg") while
-/// the asset list uses a full path (e.g., "epub/images/cover.jpg").
-/// This matches by filename to find the correct asset path.
+/// The asset path whose filename matches `cover_path`. EPUB metadata states
+/// a shorter path than the asset list carries.
 pub fn normalize_cover_path(cover_path: &str, asset_paths: &[PathBuf]) -> String {
     let cover_filename = Path::new(cover_path)
         .file_name()

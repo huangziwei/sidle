@@ -272,6 +272,20 @@ impl SourceKind {
         }
     }
 
+    /// The arriving format's name, stored as `books.source_format`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Epub => "epub",
+            Self::Kfx => "kfx",
+            Self::KfxZip => "kfx-zip",
+            Self::Azw3 => "azw3",
+            Self::Mobi => "mobi",
+            Self::Pdf => "pdf",
+            Self::AozoraZip => "aozora",
+            Self::Unknown => "unknown",
+        }
+    }
+
     fn canonical(self) -> Canonical {
         match self {
             Self::Epub | Self::AozoraZip | Self::Azw3 | Self::Mobi => Canonical::Epub,
@@ -520,6 +534,7 @@ fn stage(
         cover_path,
         kfx_path: has(Canonical::Kfx).then_some(dest_kfx),
         pdf_path: has(Canonical::Pdf).then_some(dest_pdf),
+        source_format: src_kind.as_str(),
         kfx_sha256: kfx_bytes_sha,
         job_kind: job_kind(canonical, partner),
         other_ready,
@@ -576,6 +591,8 @@ pub struct StagedImport {
     kfx_path: Option<PathBuf>,
     pdf_path: Option<PathBuf>,
     kfx_sha256: Option<String>,
+    /// The format that arrived, before any import-time conversion.
+    source_format: &'static str,
     /// The conversion that fills in the side this import didn't produce.
     job_kind: &'static str,
     /// Whether that side is on disk — a direct-derived sibling, or an idempotent
@@ -608,6 +625,7 @@ pub fn record(conn: &rusqlite::Connection, staged: StagedImport) -> Result<Impor
             pdf_path: staged.pdf_path.as_deref(),
             kfx_sha256: staged.kfx_sha256.as_deref(),
         },
+        staged.source_format,
     )?;
 
     let job_status = if staged.other_ready {
@@ -855,6 +873,7 @@ fn insert_row(
     meta: &BookMeta,
     file_size: i64,
     files: &Persisted<'_>,
+    source_format: &str,
 ) -> Result<i64> {
     let epub_path_str = files.epub_path.map(|p| p.to_string_lossy().to_string());
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
@@ -885,6 +904,7 @@ fn insert_row(
             language: &meta.language,
             title_romaji: &title_romaji,
             author_romaji: &author_romaji,
+            source_format: Some(source_format),
             ppd: meta.ppd.as_deref(),
             epub_path: epub_path_str.as_deref(),
             cover_path: cover_path_str.as_deref(),

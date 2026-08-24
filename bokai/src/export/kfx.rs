@@ -2682,13 +2682,13 @@ fn build_anchor_fragments(ctx: &mut ExportContext) -> (Vec<KfxFragment>, HashMap
     // §9.3 — every `link_to` names an anchor a fragment defines. A target id
     // sitting on a node the export flattens is placed at its chapter's start,
     // where the navigation fallback puts one.
-    for (target, symbol) in ctx.anchor_registry.stranded_targets() {
-        let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(target.chapter) else {
+    for (chapter, symbol) in ctx.anchor_registry.stranded_targets() {
+        let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(chapter) else {
             continue;
         };
         let section_id = ctx
             .chapter_fragments
-            .get(&target.chapter)
+            .get(&chapter)
             .copied()
             .unwrap_or(fragment_id);
         ctx.anchor_registry
