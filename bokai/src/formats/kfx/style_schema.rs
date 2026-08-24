@@ -2867,16 +2867,9 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
         }
         IrField::ListStyleType => {
             ir_style.list_style_type = match css_value {
-                "none" => ir_style::ListStyleType::None,
-                "disc" => ir_style::ListStyleType::Disc,
-                "circle" => ir_style::ListStyleType::Circle,
-                "square" => ir_style::ListStyleType::Square,
-                "decimal" => ir_style::ListStyleType::Decimal,
-                "lower-roman" => ir_style::ListStyleType::LowerRoman,
-                "upper-roman" => ir_style::ListStyleType::UpperRoman,
-                "lower-alpha" | "lower-latin" => ir_style::ListStyleType::LowerAlpha,
-                "upper-alpha" | "upper-latin" => ir_style::ListStyleType::UpperAlpha,
-                _ => ir_style::ListStyleType::Disc, // CSS default
+                "lower-latin" => ir_style::ListStyleType::LowerAlpha,
+                "upper-latin" => ir_style::ListStyleType::UpperAlpha,
+                other => ir_style::ListStyleType::from_css(other).unwrap_or_default(),
             };
         }
         // Font family

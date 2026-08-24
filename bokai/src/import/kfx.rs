@@ -41,11 +41,8 @@ macro_rules! sym {
     };
 }
 
-/// KFX format importer.
-///
-/// `.kfx-zip` bundles are pre-merged into a single in-memory KFX container
-/// before reaching this importer; see `Book::open_format` and `kfx::merge`.
-/// So this type only ever sees a single container.
+/// KFX format importer, over one container. `Book::open_format` merges a
+/// `.kfx-zip` bundle into a single in-memory container ahead of it.
 pub struct KfxImporter {
     /// Random-access byte source.
     source: Arc<dyn ByteSource>,
@@ -92,30 +89,23 @@ pub struct KfxImporter {
     /// Whether section→storyline mapping has been built
     section_storylines_indexed: bool,
 
-    /// Element ids declared on section entities themselves (page-template
-    /// containers) → owning section name. These eids never appear in chapter
-    /// content, so `element_id_map` can't resolve them; navigation targets
-    /// pointing at them (a common shape for cover/TOC landmarks) fall back
-    /// to the section's chapter start.
+    /// Element ids declared on section entities → owning section name. Chapter
+    /// content holds none of them, and a navigation target naming one falls
+    /// back to the section's chapter start.
     section_eids: HashMap<i64, String>,
 
-    /// Section name → the main (last) page template's own element id and
-    /// `$style` name. The template becomes the chapter's root container —
-    /// the same body-level `<div>` calibre emits — and anchors
-    /// at `(template_eid, offset)` stamp onto/inside it.
+    /// Section name → the last page template's element id and `$style` name.
+    /// The template is the chapter's root container, and an anchor at
+    /// `(template_eid, offset)` stamps onto it.
     section_templates: HashMap<String, SectionTemplate>,
 
-    /// Fixed-layout page records, parallel to `spine`/`section_names` when
-    /// the book is image-based fixed layout (empty for reflowable books).
-    /// Each spine entry is one page; `section` names its owning section
-    /// (chapter `<title>`, storyline lookup) and `ordinal` its leaf index in
-    /// the section's spread walk.
+    /// Fixed-layout page records parallel to `spine` and `section_names`, one
+    /// per page: `section` names the owning section and `ordinal` the leaf
+    /// index in its spread walk. Empty on a reflowable book.
     fxl_pages: Vec<FxlPage>,
-    /// Section name → its spread-walked leaf pages (container + the spread
-    /// half it occupies), from the section's FIRST page template
-    /// (fixed-layout sections split that template into per-page documents;
-    /// reflowable sections use the LAST). Walked once at spine expansion;
-    /// per-page loads index it by ordinal.
+    /// Section name → its spread-walked leaf pages, each a container and the
+    /// spread half it occupies, from the section's first page template.
+    /// Walked once at spine expansion; a per-page load indexes it by ordinal.
     fxl_leaves: HashMap<String, Vec<(IonValue, Option<PageSpread>)>>,
     /// story_name → storyline entity location, for resolving spread pages
     /// and container story references without a section hop.
@@ -123,11 +113,9 @@ pub struct KfxImporter {
     /// Structure ($608) entity name → location, for `page_templates` entries
     /// holding a symbol reference.
     structures_by_name: HashMap<String, EntityLoc>,
-    /// Content-walk page-progression direction: `document_data.direction`
-    /// plus the vertical-writing-mode → rtl override, WITHOUT the explicit
-    /// reading-order override `derive_writing_direction` applies last to the
-    /// OPF value. The spread pairing (`page-spread-left` first vs `-right`
-    /// first) alternates from this, matching calibre.
+    /// Content-walk page-progression direction: `document_data.direction` plus
+    /// the vertical-writing-mode → rtl override, without the reading-order
+    /// override `derive_writing_direction` applies to the OPF value.
     content_ppd: String,
 
     /// Resources: name -> EntityLoc (lazily populated)
@@ -171,11 +159,9 @@ pub struct KfxImporter {
     /// Whether ruby_content has been indexed
     ruby_indexed: bool,
 
-    // --- Link resolution ---
-    /// The shared KFX anchor table (real `$266` anchors + synthetic toc/page
-    /// anchors at nav target positions) — the rule set that stamps ids, so
-    /// content anchors are named the way calibre names them. Built by
-    /// `index_anchor_entities`; `load_chapter` stamps `semantics.id` from it.
+    /// The shared KFX anchor table: real `$266` anchors plus synthetic
+    /// toc/page anchors at nav target positions. `index_anchor_entities`
+    /// builds it and `load_chapter` stamps `semantics.id` from it.
     anchor_table: Arc<AnchorTable>,
 
     /// Maps element string ID -> GlobalNodeId (built during index_anchors).
@@ -183,16 +169,14 @@ pub struct KfxImporter {
     /// namespace the emitted XHTML carries.
     element_id_map: HashMap<String, GlobalNodeId>,
 
-    /// Element id (`$155`) → owning chapter, accumulated as chapters load
-    /// (every eid in the parsed storyline counts, whether or not its element
-    /// survives into the IR). The structural file-resolution map for nav
-    /// targets — calibre's `element_id_to_filename` analog.
+    /// Element id (`$155`) → owning chapter, accumulated as chapters load.
+    /// Every eid the parsed storyline holds counts, and a nav target
+    /// resolves its file here.
     eid_chapters: HashMap<i64, ChapterId>,
 
-    /// Doc-level CSS writing mode (`horizontal-tb` / `vertical-rl` / …),
-    /// resolved by `derive_writing_direction`. Feeds the normalized
-    /// stylesheet's `body { writing-mode: … }` header;
-    /// `metadata.primary_writing_mode` carries the OPF-vocabulary form.
+    /// Doc-level CSS writing mode from `derive_writing_direction`, feeding the
+    /// stylesheet's `body { writing-mode: … }` header.
+    /// `metadata.primary_writing_mode` holds the OPF-vocabulary form.
     css_writing_mode: String,
 
     /// Worker-thread cap for the parallel chapter build and image transcode,
@@ -258,8 +242,7 @@ impl Importer for KfxImporter {
     }
 
     fn chapter_title(&self, id: ChapterId) -> Option<&str> {
-        // A fixed-layout page is titled by its owning section — the
-        // calibre's `push_book_part(base, section_name)`.
+        // A fixed-layout page is titled by its owning section.
         if let Some(p) = self.fxl_pages.get(id.0 as usize) {
             return Some(&p.section);
         }
@@ -292,10 +275,8 @@ impl Importer for KfxImporter {
             }
         }
 
-        // Chapter builds are pure per chapter; eid registration is
-        // order-sensitive (first-wins in spine order), so it stays serial,
-        // applied in `ids` order after the parallel phase — the same map
-        // the one-at-a-time loads produce.
+        // Each chapter build is pure. Eid registration is first-wins in spine
+        // order and runs serially over `ids` after the parallel phase.
         let built = crate::util::parallel_map(ids, self.max_workers, |id| self.build_chapter(*id));
         built
             .into_iter()
@@ -378,8 +359,8 @@ impl Importer for KfxImporter {
     }
 
     fn asset_manifest(&mut self) -> Option<Vec<crate::import::AssetInfo>> {
-        // Dimensions come off the `external_resource` fragment, so describing
-        // the set costs nothing — no image is read, let alone transcoded.
+        // Dimensions come off the `external_resource` fragment: no image
+        // is read.
         Some(
             self.images
                 .iter()
@@ -394,9 +375,8 @@ impl Importer for KfxImporter {
     }
 
     fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<io::Result<Vec<u8>>> {
-        // Resolve raw bytes serially (cheap reads), then run the CPU-bound
-        // JPEG-XR→JPEG transcodes in parallel across cores, the same stage
-        // calibre parallelizes the same way.
+        // Resolve raw bytes serially, then run the JPEG-XR→JPEG transcodes
+        // in parallel across cores.
         let mut results: Vec<Option<io::Result<Vec<u8>>>> = Vec::with_capacity(paths.len());
         let mut jxr_jobs: Vec<(usize, usize, Vec<u8>)> = Vec::new(); // (slot, image idx, raw)
         for (slot, path) in paths.iter().enumerate() {
@@ -450,7 +430,7 @@ impl Importer for KfxImporter {
     }
 
     /// Every storyline's `eid → base text`, indexed against the position scale
-    /// so a highlight spanning several elements walks them in reading order.
+    /// a highlight spanning several elements walks.
     fn source_text(&mut self) -> Option<SourceText> {
         let positions = self.position_map().unwrap_or_default();
         let locs: Vec<EntityLoc> = self
@@ -516,10 +496,9 @@ impl Importer for KfxImporter {
             return Some(AnchorTarget::External(uri.clone()));
         }
 
-        // Internal anchor NAME (`link_to` targets): resolve through the
-        // anchor table to the node its stamped id landed on — precise even
-        // for content that emits outside the section that structurally owns
-        // its eid. An unstamped position falls through to eid resolution.
+        // An internal anchor name resolves through the anchor table to the
+        // node its stamped id landed on. An unstamped position falls through
+        // to eid resolution.
         if let Some(&(pos_id, offset)) = self.anchor_table.name_to_position.get(anchor_name) {
             if let Some(target) = self
                 .anchor_table
@@ -571,9 +550,8 @@ impl Importer for KfxImporter {
                 (name.clone(), decl)
             })
             .collect();
-        // `link_unvisited_style` / `link_visited_style` are nested styles that
-        // apply only in one link state, so they leave the flat rule above and
-        // become their own pseudo-class rules.
+        // `link_unvisited_style` and `link_visited_style` are nested styles
+        // for one link state each, and become their own pseudo-class rules.
         let pseudo = self
             .styles
             .iter()
@@ -619,10 +597,8 @@ impl KfxImporter {
             )
         })?;
 
-        // Read and parse document symbols (optional). `from_fragment` reads
-        // the container's declared import max_id as the doc-symbol base —
-        // never the static table's length. An older container declares a
-        // smaller base and mis-resolves every doc-local name against it.
+        // `from_fragment` seats the doc-symbol base at the container's declared
+        // import max_id (§5.4), never at the static table's length.
         let symbols = if let Some((offset, length)) = container_info.doc_symbols {
             if length > 0 {
                 let doc_sym_data = source.read_at(offset as u64, length)?;
@@ -707,19 +683,16 @@ impl KfxImporter {
         // Needs the explicit reading-order direction captured by
         // `parse_spine` (it is the strongest override).
         importer.derive_writing_direction();
-        // Image index: needs metadata (declared cover) and the spine /
-        // section→storyline maps (first-section cover fallback). Runs while
+        // `build_image_index` reads `metadata` and the spine, and runs while
         // `section_names` holds sections, ahead of the fixed-layout expansion
-        // that renames entries per page. Cheap — external_resource
-        // fragments are tiny and media bytes are only peeked (≤ 64 bytes
-        // each) for format sniffing.
+        // that renames entries per page.
         importer.build_image_index();
         // Fixed-layout books: split each section into per-page spine entries
         // (needs `content_ppd` from `derive_writing_direction` for the
         // spread pairing).
         importer.expand_fxl_spine()?;
-        // Content name → location, so per-token text lookups during chapter
-        // builds are direct reads.
+        // Content name → location, which a per-token text lookup reads
+        // directly.
         importer.index_content_entities();
 
         Ok(importer)
@@ -791,18 +764,14 @@ impl KfxImporter {
                                     .unwrap_or("");
 
                                 match key {
-                                    // First-wins / skip-empty guards, so a
-                                    // container that repeats a key resolves
-                                    // the way calibre resolves it.
+                                    // First-wins and skip-empty guards over
+                                    // a container repeating a key.
                                     "title" if self.metadata.title.is_empty() => {
                                         self.metadata.title = value.to_string()
                                     }
                                     // One entry per repeated `author` key,
-                                    // VERBATIM — no trim, no `&` split (a
-                                    // multi-author book repeats the key, and
-                                    // each value is pushed untouched, trailing
-                                    // spaces and all, so the OPF mirrors the
-                                    // source).
+                                    // each value pushed verbatim: no trim
+                                    // and no `&` split.
                                     "author" if !value.is_empty() => {
                                         self.metadata.authors.push(value.to_string())
                                     }
@@ -815,10 +784,9 @@ impl KfxImporter {
                                     }
                                     "book_id" => self.metadata.identifier = value.to_string(),
                                     "ASIN"
-                                        // Amazon catalogue id. Separate from
-                                        // `book_id`, which is a per-device
-                                        // internal UUID — both keys appear
-                                        // side-by-side in kindle_title_metadata.
+                                        // Amazon catalogue id, beside
+                                        // `book_id`'s per-device UUID in
+                                        // `kindle_title_metadata`.
                                         if !value.is_empty() && self.metadata.asin.is_none() => {
                                             self.metadata.asin = Some(value.to_string());
                                         }
@@ -974,12 +942,9 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Resolve one `book_navigation.nav_containers` entry to its nav_container
-    /// struct. Inline structs pass through; a bare symbol is the referenced form
-    /// (fixed-layout / PDOC books, which the device requires) — look up the
-    /// separate nav_container ($391) entity whose id matches and parse it. The
-    /// reference symbol id equals the target entity's id, so no text lookup is
-    /// needed. `None` when it can't be resolved.
+    /// Resolve one `book_navigation.nav_containers` entry to its
+    /// `nav_container` struct: an inline struct passes through, and a bare
+    /// symbol names the `$391` entity carrying that id. `None` for neither.
     fn resolve_nav_container(&self, container: &IonValue) -> Option<IonValue> {
         let inner = container.unwrap_annotated();
         if inner.as_struct().is_some() {
@@ -1028,11 +993,9 @@ impl KfxImporter {
                                     let nav_type = get_field(container_fields, sym!(NavType))
                                         .and_then(|v| self.get_symbol_text(v));
 
-                                    // Append: a book can carry several
-                                    // containers of one nav_type (one per
-                                    // reading order) — calibre and the
-                                    // calibre collect them all;
-                                    // last-wins would drop entries.
+                                    // A book carries one container of a
+                                    // `nav_type` per reading order, and
+                                    // each appends.
                                     match nav_type {
                                         Some("toc") => {
                                             let entries = self.parse_nav_entries(container_fields);
@@ -1081,9 +1044,8 @@ impl KfxImporter {
                         continue;
                     };
 
-                    // Get label from representation.label. "cover-nav-unit"
-                    // is a placeholder, not a display label (calibre's
-                    // `add_guide_entry` strips it too).
+                    // The label comes from `representation.label`.
+                    // "cover-nav-unit" is a placeholder.
                     let label = get_field(entry_fields, sym!(Representation))
                         .and_then(|v| v.as_struct())
                         .and_then(|s| get_field(s, sym!(Label)))
@@ -1128,13 +1090,9 @@ impl KfxImporter {
                 // Unwrap annotation if present (nav_unit::...)
                 let inner = entry.unwrap_annotated();
                 if let Some(entry_fields) = inner.as_struct() {
-                    // Get label (try representation.label first, then direct label).
-                    // A MISSING label falls back to "Untitled" and the entry is
-                    // kept — Amazon ships unlabeled nav_units (e.g. the page-list
-                    // book-start sentinel) and calibre keeps them in
-                    // the TOC; page-list consumers drop the sentinel at emission.
-                    // A PRESENT-but-empty label and the "heading-nav-unit"
-                    // placeholder are dropped, matching calibre.
+                    // The label comes from `representation.label`, then from `label`.
+                    // An absent one takes "Untitled" and the entry stays; a
+                    // present-but-empty one and "heading-nav-unit" are dropped.
                     let label = get_field(entry_fields, sym!(Representation))
                         .and_then(|v| v.as_struct())
                         .and_then(|s| get_field(s, sym!(Label)))
@@ -1179,12 +1137,9 @@ impl KfxImporter {
         entries
     }
 
-    /// Parse spine from reading_orders.
-    ///
-    /// Uses the section→storyline cache to get size estimates. Also captures
-    /// `page_progression_direction` from the selected reading order onto
-    /// `metadata.page_progression_direction` so the EPUB exporter can re-emit
-    /// it on `<spine>` (vertical-RTL Japanese books rely on this).
+    /// Parse the spine from `reading_orders`, sizing entries through the
+    /// section→storyline cache and carrying the selected order's
+    /// `page_progression_direction` onto `metadata`.
     fn parse_spine(&mut self) -> io::Result<()> {
         let (section_names, ppd) = self.get_reading_order_sections()?;
 
@@ -1213,10 +1168,9 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Read the book-level fixed-layout signals from both places that declare
-    /// them: `yj_*fixed_layout` switches spine construction to the per-page
-    /// expansion; `yj_double_page_spread` marks a spread comic (`book-type`
-    /// OPF hint).
+    /// Read the book-level fixed-layout signals from both declaration sites:
+    /// `yj_*fixed_layout` switches spine construction to the per-page
+    /// expansion, `yj_double_page_spread` marks a spread comic.
     fn detect_fxl(&mut self) {
         let features: Vec<EntityLoc> = self
             .entities
@@ -1247,15 +1201,9 @@ impl KfxImporter {
         }
     }
 
-    /// Fixed-layout spine expansion: replace the one-entry-per-section spine
-    /// with one entry per page. Each section's FIRST page template (the
-    /// reflowable path uses the LAST) is either a `page_spread`/`facing_page`
-    /// container — its storyline's content_list holds the per-page
-    /// containers, paired `page-spread-left`/`-right` alternating from
-    /// `content_ppd` (RTL books read the right page first) — or itself a
-    /// single leaf page (e.g. the cover). Page names follow calibre's
-    /// route: `{section}` for a spreadless page, `{section}-{left|right}`
-    /// for spread halves; export-side filename dedup adds `-N` on collision.
+    /// Replace the one-entry-per-section spine with one entry per page. A
+    /// section's first page template is a `page_spread` / `facing_page`
+    /// container or a single leaf page, named `{section}[-left|-right]`.
     fn expand_fxl_spine(&mut self) -> io::Result<()> {
         if !self.metadata.fixed_layout || self.section_names.is_empty() {
             return Ok(());
@@ -1374,12 +1322,9 @@ impl KfxImporter {
         (root_eid, items)
     }
 
-    /// Recursively inline `story_name` references: a struct that carries a
-    /// story but no inline content_list gets the story's content_list
-    /// spliced in (the tokenizer does not follow story references itself —
-    /// calibre's `process_content` resolves them at walk time).
-    /// The stack guards against reference cycles; a story legitimately
-    /// referenced from two siblings inlines twice, like the walk would.
+    /// Splice each `story_name` reference's `content_list` into the struct
+    /// carrying it. `stack` guards a reference cycle; a story two siblings
+    /// reference inlines twice.
     fn inline_story_refs(&self, value: IonValue, stack: &mut Vec<String>) -> IonValue {
         match value {
             IonValue::Annotated(ann, inner) => {
@@ -1423,12 +1368,9 @@ impl KfxImporter {
         }
     }
 
-    /// Build one chapter's IR without touching importer state — with the
-    /// one-time indexes in place, safe to call across threads over a shared
-    /// `&self`. Returns the chapter and every element id it declares, in
-    /// registration order; the caller stamps those into `eid_chapters`
-    /// (first-wins, spine order — calibre's structural
-    /// `element_id_to_filename` walk).
+    /// Build one chapter's IR over a shared `&self`, touching no importer
+    /// state. Returns the chapter and every element id it declares, in the
+    /// order the caller stamps them into `eid_chapters`.
     fn build_chapter(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
         // Fixed-layout books build per-page chapters.
         if !self.fxl_pages.is_empty() {
@@ -1447,9 +1389,8 @@ impl KfxImporter {
         // Parse storyline entity
         let storyline_ion = self.parse_entity_ion(storyline_loc)?;
 
-        // Every eid the storyline declares counts — whether or not the
-        // element survives into the IR — so nav targets resolve to the
-        // right file.
+        // Every eid the storyline declares counts, the elements the IR
+        // drops included: a nav target resolves its file here.
         let mut declared_eids = Vec::new();
         collect_declared_eids(&storyline_ion, &mut declared_eids);
 
@@ -1470,10 +1411,9 @@ impl KfxImporter {
             |name, index| self.lookup_content_text(name, index),
         );
 
-        // Re-root under the section's main page-template container — the
-        // calibre's body-level `<div>` — so anchors targeting the
-        // template or the storyline root (a common page-list/TOC shape)
-        // stamp onto a real element.
+        // Re-root under the section's main page-template container: an anchor
+        // targeting the template or the storyline root stamps onto a real
+        // element.
         let template = self
             .section_templates
             .get(&section_name)
@@ -1495,11 +1435,9 @@ impl KfxImporter {
             Some(anchor_table.as_ref()),
         );
 
-        // No generic `html::optimize` pass here: the KFX token→IR builder
-        // produces a tree that mirrors calibre's pre-consolidation DOM, and
-        // `export::epub::dom::consolidate_part` does the calibre-faithful
-        // cleanup. `optimize` serves the HTML-sourced importers via
-        // `compile_html`.
+        // `export::epub::dom::consolidate_part` cleans up the tree the KFX
+        // token→IR builder produces. `html::optimize` serves the HTML-sourced
+        // importers through `compile_html`.
 
         self.rewrite_image_srcs(&mut chapter);
 
@@ -1514,12 +1452,9 @@ impl KfxImporter {
         }
     }
 
-    /// Build one fixed-layout page as a chapter: take the page's leaf
-    /// container from the cached spread walk, synthesize a storyline from
-    /// the container's children (inline `content_list` wins over its story —
-    /// calibre's `process_content` order), and run the shared
-    /// token→IR build with the container itself as the chapter's root — the
-    /// same body-level `<div>` that route emits per page.
+    /// Build one fixed-layout page as a chapter: the page's leaf container
+    /// from the cached spread walk, a storyline synthesized from its children
+    /// (inline `content_list` over its story), the container as the root.
     fn build_fxl_page(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
         let page = self
             .fxl_pages
@@ -1564,10 +1499,9 @@ impl KfxImporter {
             .collect();
         let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
 
-        // Every eid the page subtree declares — and the container's own —
-        // counts for nav-target file resolution (calibre's
-        // per-page `collect_element_ids`); the caller registers them
-        // first-wins across pages, matching its emission order.
+        // Every eid the page subtree declares, the container's own included,
+        // counts for nav-target file resolution. The caller registers them
+        // first-wins across pages.
         let container_eid = get_field(cfields, sym!(Id)).and_then(|v| v.as_int());
         let mut declared = Vec::new();
         collect_declared_eids(&synthetic, &mut declared);
@@ -1596,10 +1530,9 @@ impl KfxImporter {
             |name, index| self.lookup_content_text(name, index),
         );
 
-        // Root the chapter at the page container — the reflowable
-        // template's role: class from its `$157` style, inline style from
-        // its converted outer fields, `(eid, 0)` anchors stamping onto the
-        // root.
+        // Root the chapter at the page container: class from its `$157` style,
+        // inline style from its converted outer fields, `(eid, 0)` anchors
+        // stamping onto the root.
         crate::formats::kfx::storyline::apply_section_template(
             &mut chapter,
             &SectionTemplate {
@@ -1618,11 +1551,8 @@ impl KfxImporter {
     }
 
     /// Point a converted rule's `background-image` at the exported file.
-    ///
-    /// `convert_yj_properties` renders the KFX symbol as `url(eF)`. The
-    /// sheet ships next to the extracted images, and the resource name
-    /// becomes the filename here — the counterpart of
-    /// [`Self::rewrite_image_srcs`].
+    /// `convert_yj_properties` renders the KFX symbol as `url(eF)`, and the
+    /// resource name becomes the filename here.
     fn rewrite_css_image_urls(&self, decl: &mut CssDecl) {
         let Some(value) = decl.get("background-image") else {
             return;
@@ -1641,12 +1571,9 @@ impl KfxImporter {
         decl.set("background-image", format!("url(\"{filename}\")"));
     }
 
-    /// Rewrite image references from KFX resource names ("eF") to the
-    /// exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the IR
-    /// speaks file paths, exactly like an EPUB-sourced book.
-    ///
-    /// Covers both places a picture can be named: an element's `src` and a
-    /// style's `background-image`.
+    /// Rewrite image references from KFX resource names (`eF`) to the exported
+    /// asset filenames (`image_rsrc7.jpg`), over both places a picture is
+    /// named: an element's `src` and a style's `background-image`.
     fn rewrite_image_srcs(&self, chapter: &mut Chapter) {
         let filename_of = |name: &str| {
             self.image_by_name
@@ -1667,18 +1594,9 @@ impl KfxImporter {
         });
     }
 
-    /// Derive the book-level writing mode and page-progression direction
-    /// onto `metadata.{primary_writing_mode, page_progression_direction}`.
-    ///
-    /// `document_data.writing_mode` states the book's axis and is taken as
-    /// written; the style pool (see `kfx::writing_mode`) only answers for the
-    /// containers that omit the field. Vertical passages inside a
-    /// horizontally-set book are styles within a horizontal document, not
-    /// evidence against the document. Any `-rl` writing mode forces
-    /// an RTL page turn — the common case for CJK vertical books, whose
-    /// `direction` field literally says `ltr` — while an explicit
-    /// `reading_orders[*].page_progression_direction` (captured by
-    /// `parse_spine`) outranks both.
+    /// Derive `metadata.primary_writing_mode` and
+    /// `metadata.page_progression_direction`. `document_data.writing_mode` is
+    /// taken as written, and a `-rl` mode turns the page RTL.
     fn derive_writing_direction(&mut self) {
         let mut writing_mode = None;
         let mut ppd = "ltr".to_string();
@@ -1717,9 +1635,8 @@ impl KfxImporter {
         if writing_mode.ends_with("-rl") {
             ppd = "rtl".to_string();
         }
-        // The content walk (spread pairing) alternates from the value BEFORE
-        // the explicit reading-order override — calibre's
-        // `extract_doc_data` chain ends here.
+        // The content walk alternates its spread pairing from the value ahead
+        // of the explicit reading-order override.
         self.content_ppd = ppd.clone();
         // `$default` defers to the reader, i.e. to the heuristics above —
         // only a concrete direction overrides them.
@@ -1738,10 +1655,8 @@ impl KfxImporter {
         self.css_writing_mode = writing_mode;
     }
 
-    /// Resolve an eid to its owning chapter's start: the structural
-    /// `eid_chapters` walk first (storyline-declared ids, accumulated as
-    /// chapters load), then the section-declared ids (page-template
-    /// containers, known from construction).
+    /// Resolve an eid to its owning chapter's start: `eid_chapters` first,
+    /// then `section_eids`.
     fn resolve_eid_chapter(&self, eid: i64) -> Option<AnchorTarget> {
         if let Some(&chapter) = self.eid_chapters.get(&eid) {
             return Some(AnchorTarget::Internal(GlobalNodeId::new(
@@ -1795,12 +1710,9 @@ impl KfxImporter {
             }
         }
 
-        // Then, map each section to its storyline, and record the element
-        // ids the section struct itself declares (page-template containers)
-        // so navigation targets pointing at them resolve to the section.
-        // The MAIN template is the LAST entry in `page_templates` (calibre's
-        // rule; earlier entries are conditional templates); its own id and
-        // style ride onto the chapter's root container.
+        // Map each section to its storyline and record the element ids the
+        // section struct declares. The main template is the last
+        // `page_templates` entry, whose id and style ride onto the root.
         let mut section_eids: Vec<(i64, String)> = Vec::new();
         let mut section_templates: Vec<(String, SectionTemplate)> = Vec::new();
         for loc in &self.entities {
@@ -1864,13 +1776,9 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Extract section names + `page_progression_direction` from
-    /// reading_orders in document_data or metadata. Prefers the "default"
-    /// reading order if multiple are present.
-    ///
-    /// Walks both `document_data` ($538) and `metadata` ($258) — bokai's own
-    /// exports put ppd only on the `metadata` fragment while sections are in
-    /// both, and the walk collects from each: a first hit ends nothing.
+    /// Section names and `page_progression_direction` from the reading orders
+    /// of both `document_data` ($538) and `metadata` ($258), preferring the
+    /// "default" order. The walk collects from each fragment.
     fn get_reading_order_sections(&self) -> io::Result<(Vec<String>, Option<String>)> {
         let candidate_types = [KfxSymbol::DocumentData as u32, KfxSymbol::Metadata as u32];
         let mut found_sections: Vec<String> = Vec::new();
@@ -1973,11 +1881,9 @@ impl KfxImporter {
         None
     }
 
-    /// Look up text content by name and index.
-    ///
-    /// Lazily loads and caches content entities as needed. `&self` so
-    /// parallel chapter builds can share the importer; a race on the same
-    /// name parses the entity twice and caches identical lists — harmless.
+    /// Text content by name and index, loading and caching the content entity
+    /// on first reach. `&self` is shared across parallel chapter builds, and
+    /// a race on one name caches identical lists.
     fn lookup_content_text(&self, name: &str, index: usize) -> Option<String> {
         // Check cache first
         {
@@ -2111,12 +2017,9 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Build the canonical image list via the shared external_resource walk
-    /// (`kfx::resource_index`) — the same code calibre runs,
-    /// so filenames, order, and format predictions match it byte-for-byte.
-    /// Resolves the cover (declared metadata name, falling back to the first
-    /// reading-order section's full-page image), renames it to `cover.<ext>`,
-    /// and rewrites `metadata.cover_image` to the exported filename.
+    /// Build the canonical image list through `kfx::resource_index`, resolve
+    /// the cover from `metadata` or the first section's full-page image,
+    /// rename it `cover.<ext>` and point `metadata.cover_image` at it.
     fn build_image_index(&mut self) {
         // bcRawMedia payloads keyed by their resolved entity symbol name —
         // the exact string `external_resource.location` carries.
@@ -2201,10 +2104,9 @@ impl KfxImporter {
         self.images = images;
     }
 
-    /// Cover fallback: the first `resource_name` laid out by the first
-    /// reading-order section's storyline, accepted only when it names a
-    /// raster image (a PDF-backed first section is not a cover). Read-only
-    /// core of calibre kfxlib's `check_cover_section_and_storyline`.
+    /// Cover fallback: the first `resource_name` the first reading-order
+    /// section's storyline lays out, taken only where it names a raster
+    /// image.
     fn first_section_cover_candidate(&self, images: &[ImageResource]) -> Option<String> {
         let first_section = self.section_names.first()?;
         let storyline_loc = *self.section_storylines.get(first_section)?;
@@ -2215,9 +2117,8 @@ impl KfxImporter {
         resource_index::is_raster_cover(images, &candidate).then_some(candidate)
     }
 
-    /// Bytes for `images[idx]` as exported: JPEG-XR sources are transcoded to
-    /// JPEG (decode failures pass through unchanged, same policy as the
-    /// calibre); every other format is copied verbatim.
+    /// Bytes for `images[idx]` as exported: a JPEG-XR source is transcoded to
+    /// JPEG, a decode failure and every other format copied verbatim.
     fn load_image_bytes(&self, idx: usize) -> io::Result<Vec<u8>> {
         let img = &self.images[idx];
         let raw = self.read_image_raw(idx)?;
@@ -2242,19 +2143,15 @@ impl KfxImporter {
         self.read_entity(*loc)
     }
 
-    /// Index anchor entities to build anchor_name → uri/position maps.
-    ///
-    /// The map resolves an external or internal link whose `link_to` names an
-    /// anchor.
+    /// Index anchor entities into the `anchor_name` → uri/position maps a
+    /// `link_to` resolves through.
     fn index_anchor_entities(&mut self) -> io::Result<()> {
         if self.anchors_indexed {
             return Ok(());
         }
 
-        // Real `$266` anchors, registered in sorted-name order — the same
-        // deterministic rule calibre uses, so a position carrying
-        // several anchors picks the same first (= stamped) name on both
-        // engines.
+        // Real `$266` anchors, registered in sorted-name order: a position
+        // carrying several anchors picks one first name per run.
         let locs: Vec<_> = self
             .entities
             .iter()
@@ -2281,11 +2178,9 @@ impl KfxImporter {
             }
         }
 
-        // Synthetic anchors at nav target positions: TOC first, then
-        // page-list (a page break on a TOC-claimed position reuses the TOC
-        // anchor), plus `$798` heading levels. Runs on the RAW nav entries —
-        // display filtering (empty labels, placeholder units) must not change
-        // the stamped-id set.
+        // Synthetic anchors at nav target positions: TOC first, then page-list,
+        // then `$798` heading levels. Runs over the raw nav entries, empty
+        // labels and placeholder units included.
         if let Some(loc) = self
             .entities
             .iter()
@@ -2327,10 +2222,8 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Index style entities to build style_name → properties map.
-    ///
-    /// The map resolves a storyline element's style reference. A style entity
-    /// ($157) carries font_weight, text_alignment, margins and the rest.
+    /// Index style entities into the `style_name` → properties map a storyline
+    /// element's `$157` reference resolves through.
     fn index_styles(&mut self) -> io::Result<()> {
         if self.styles_indexed {
             return Ok(());
@@ -2379,21 +2272,9 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Index `ruby_content` entities (type $756) into `ruby_index`.
-    ///
-    /// Each ruby_content entity has shape:
-    /// ```ion
-    /// {
-    ///   ruby_name: 'b_ruby_0',
-    ///   content_list: [
-    ///     { ruby_id: 1, content: "かな", ... },
-    ///     ...
-    ///   ]
-    /// }
-    /// ```
-    /// Each entry's `content` string lands in a vec at position `ruby_id - 1`
-    /// (KFX uses 1-indexed ruby_id); style_events read it as
-    /// `ruby_index[ruby_name][ruby_id - 1]`.
+    /// Index `ruby_content` ($756) entities into `ruby_index`: each
+    /// `content_list` entry's `content` lands at `ruby_id - 1`, which a
+    /// style_event reads as `ruby_index[ruby_name][ruby_id - 1]`.
     fn index_ruby_content(&mut self) -> io::Result<()> {
         if self.ruby_indexed {
             return Ok(());
@@ -2426,8 +2307,9 @@ impl KfxImporter {
                     continue;
                 };
 
-                // Collect (ruby_id, text). ruby_id is 1-indexed; build a dense
-                // vec by max id so direct subscript works in parse_style_events.
+                // Collect `(ruby_id, text)` into a dense vec sized by the
+                // maximum id, which `parse_style_events` subscripts.
+                // `ruby_id` counts from 1.
                 let mut pairs: Vec<(usize, String)> = Vec::with_capacity(content_list.len());
                 let mut max_id = 0usize;
                 for entry in content_list {

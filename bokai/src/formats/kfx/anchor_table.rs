@@ -2,17 +2,12 @@
 //! `book_navigation` target positions into HTML ids.
 //!
 //! The importer stamps `id="…"` attributes at anchored `(eid, offset)`
-//! positions and emits nav/NCX/guide fragments from the same names, so the
-//! table and every registration rule live together here rather than being
-//! rederived at each site.
+//! positions and emits nav/NCX/guide fragments from the same names.
 //!
-//! Registration order is part of the contract: real `$266` anchors first (in
-//! sorted-name order — the source container gives no meaningful order and a
-//! hash-map walk would make the co-located first-anchor choice differ run to
-//! run), then synthetic `toc-…` anchors at TOC target positions, then
-//! `page-…` at page-list positions. A position that already has an anchor is
-//! never re-registered, so real Amazon anchors and TOC-claimed positions keep
-//! their first name.
+//! Registration order is part of the contract: real `$266` anchors first, in
+//! sorted-name order, then synthetic `toc-…` anchors at TOC target positions,
+//! then `page-…` at page-list positions. A position holding an anchor is never
+//! re-registered.
 
 use std::collections::HashMap;
 
@@ -20,8 +15,7 @@ use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 
-/// Per-anchor data extracted from `$266 anchor` entities plus synthetic nav
-/// anchors. Mirrors calibre's `process_anchors` (yj_to_epub_navigation.py).
+/// Per-anchor data from `$266 anchor` entities and synthetic nav anchors.
 #[derive(Debug, Default, Clone)]
 pub struct AnchorTable {
     /// External-URI anchors: anchor_name → uri. Set when `$186 uri` is
@@ -29,63 +23,38 @@ pub struct AnchorTable {
     /// resolution.
     pub anchor_uri: HashMap<String, String>,
 
-    /// Internal-position anchors, keyed by `(location_id, offset)`. Each
-    /// position can have multiple anchor names (calibre stores a list).
-    /// Content emission looks up `(eid, offset)` here and, if found, sets the
-    /// HTML element's `id="..."` attribute to a unique id derived from the
-    /// first anchor name.
+    /// Internal-position anchors keyed by `(location_id, offset)`, several
+    /// names to a position. Content emission stamps `id` from the first.
     pub position_anchors: HashMap<i64, HashMap<i64, Vec<String>>>,
 
-    /// Reverse index `anchor_name → (location_id, offset)`, built alongside
-    /// `position_anchors`, so `resolve_uri` answers each
-    /// `<a href="anchor:…">` in O(1) instead of scanning the whole map —
-    /// quadratic in hrefs × anchors, hundreds of milliseconds on a link-dense
-    /// book. The OFFSET is retained (not just the eid) so `resolve_uri` can
-    /// resolve a link to ANY anchor at a position to the SAME element id the
-    /// *first* anchor there stamped (calibre's `get_anchor_uri` semantics —
-    /// `id_at` returns the first anchor's id, so a link naming a non-first
-    /// co-located anchor must still point at that id or it dangles). First
-    /// registration wins.
+    /// Reverse index `anchor_name → (location_id, offset)`, which answers each
+    /// `<a href="anchor:…">` in O(1). The offset carries a link naming any
+    /// anchor at a position to the id its first anchor stamped.
     pub name_to_position: HashMap<String, (i64, i64)>,
 
-    /// Heading level (1..=6) registered at a `(location_id, offset)` by the
-    /// `$798 headings` nav container. bokai's eager equivalent of calibre's
-    /// `anchor_heading_level` (name-keyed) + `position_anchors` lookup: since
-    /// these synthesized heading anchors are never link targets (only the
-    /// element's TAG matters), we key the level directly by position.
-    /// Content emission reads this and stamps `-kfx-heading-level` (here: the
-    /// element's `layout_hints` level), which `consolidate_html` promotes to
-    /// `<hN>` when the element also carries the `"heading"` layout hint.
+    /// Heading level 1..=6 registered at a `(location_id, offset)` by the
+    /// `$798 headings` nav container. Content emission stamps it as the
+    /// element's `layout_hints` level, which `consolidate_html` reads.
     pub heading_level: HashMap<(i64, i64), u8>,
 }
 
 impl AnchorTable {
-    /// Resolve an html id for the given anchor name. The id is unique
-    /// across the table; calibre's `make_unique_name` over a set —
-    /// here we just sanitize the anchor name with a `anchor-` prefix
-    /// fallback for purely numeric names (HTML ids can't start with a
-    /// digit in some validators).
+    /// The HTML id for `anchor_name`, unique across the table: the name
+    /// sanitized, under an `anchor-` prefix where it opens with a digit.
     pub fn anchor_id(&self, anchor_name: &str) -> String {
         fix_html_id(anchor_name)
     }
 
-    /// Look up the html id for `(eid, offset)`. Returns the id derived
-    /// from the FIRST anchor at that position (matches calibre's
-    /// `process_position` behavior).
+    /// The html id at `(eid, offset)`, derived from the first anchor there.
     pub fn id_at(&self, eid: i64, offset: i64) -> Option<String> {
         let names = self.position_anchors.get(&eid)?.get(&offset)?;
         let name = names.first()?;
         Some(self.anchor_id(name))
     }
 
-    /// Forget every anchor registered on `eid`, so [`Self::id_at`] reports
-    /// none there.
-    ///
-    /// For elements whose chapter is dropped from the package rather than
-    /// written: the ids went with the chapter, so a nav or guide entry still
-    /// carrying `#…` would point at a fragment nothing defines (epubcheck
-    /// RSC-012). Call only after content emission — during emission the table
-    /// is what tells the DOM which ids to stamp.
+    /// Forget every anchor registered on `eid`: [`Self::id_at`] reports none
+    /// there, and a nav or guide entry naming one is dropped. Call after
+    /// content emission, which reads the table to stamp its ids.
     pub fn forget_element(&mut self, eid: i64) {
         self.position_anchors.remove(&eid);
     }
@@ -96,10 +65,9 @@ impl AnchorTable {
         self.heading_level.get(&(eid, offset)).copied()
     }
 
-    /// The registered offsets > 0 at `eid`, ascending. These are the
-    /// positions content emission must locate inside the element's text and
-    /// stamp with a zero-length `<span id>` (offset 0 stamps the element
-    /// itself).
+    /// The registered offsets > 0 at `eid`, ascending: the positions content
+    /// emission locates inside the element's text and stamps with a
+    /// zero-length `<span id>`. Offset 0 stamps the element.
     pub fn offsets_beyond_zero(&self, eid: i64) -> Vec<i64> {
         let mut offsets: Vec<i64> = self
             .position_anchors
@@ -110,17 +78,9 @@ impl AnchorTable {
         offsets
     }
 
-    /// Resolve an anchor to its final `<a href>` using the AUTHORITATIVE
-    /// `html-id → file` map built from the emitted DOM, guaranteeing
-    /// referential integrity. Unlike a structural `eid → file` guess (wrong
-    /// for content that emits in a different section than the one that
-    /// structurally claims its eid — e.g. footnotes — and blind to positions
-    /// that never got stamped), this resolves an internal anchor ONLY when its
-    /// target id was actually stamped somewhere, and to the file it really
-    /// landed in. Returns `None` when the anchor is unresolvable (never
-    /// stamped, or a blank external URI); the caller drops the dangling link
-    /// so no `<a href="…#missing">` is emitted (epubcheck RSC-012). Matches
-    /// calibre's behavior of dropping anchors it can't place.
+    /// The `<a href>` for an anchor, read against the `html-id → file` map the
+    /// emitted DOM builds: an internal anchor resolves only where its target
+    /// id was stamped. `None` for an unstamped anchor or a blank URI.
     pub fn resolve_uri_stamped(
         &self,
         anchor_name: &str,
@@ -142,13 +102,9 @@ impl AnchorTable {
         Some(format!("{file}#{frag}"))
     }
 
-    /// Register one `$266 anchor` entity's fields under `name`.
-    ///
-    /// Each anchor has either:
-    ///   - `$186 uri` — external link target (kept as-is; calibre normalises
-    ///     bare `http://` / `https://` placeholders to empty string)
-    ///   - `$183 position` struct with `$155 id` (location_id) and
-    ///     `$143 offset` — registers the anchor against `(id, offset)`.
+    /// Register one `$266 anchor` entity's fields under `name`: a `$186 uri`
+    /// as an external target, or a `$183 position` holding `$155 id` and
+    /// `$143 offset`, registered against `(id, offset)`.
     pub fn register_anchor_fields(&mut self, name: &str, fields: &[(u64, IonValue)]) {
         // External URI anchor.
         if let Some(uri_val) = get_field(fields, KfxSymbol::Uri as u64)
@@ -189,13 +145,9 @@ impl AnchorTable {
         }
     }
 
-    /// Register one nav entry's target (if the position is not already
-    /// anchored) under the given name `prefix` (`toc` / `page`), then recurse
-    /// into its nested entries. The prefix only names the synthetic id;
-    /// positions already anchored (a real `$266` anchor or an earlier pass)
-    /// are left untouched and shared. Runs on EVERY entry — including ones the
-    /// displayed TOC drops (empty label / placeholder) — so the stamped-id set
-    /// in content does not depend on display filtering.
+    /// Register one nav entry's target under the name `prefix` (`toc` /
+    /// `page`), then recurse into its nested entries. An anchored position
+    /// keeps its name. Every entry registers, empty label included.
     pub fn register_nav_entry(&mut self, entry: &IonValue, prefix: &str) {
         if let Some((eid, offset)) = nav_target_position(entry) {
             let occupied = self
@@ -226,12 +178,9 @@ impl AnchorTable {
         }
     }
 
-    /// Register heading levels from one `$798 headings` level unit: the
-    /// unit's `landmark_type` (`$h2`..`$h6`) sets the level for its nested
-    /// entries, and every nested unit's `target_position` `(eid, offset)` is
-    /// recorded at that level. Mirrors the subset of calibre's
-    /// `process_nav_unit` (`yj_to_epub_navigation.py`) that derives
-    /// `anchor_heading_level`.
+    /// Register heading levels from one `$798 headings` level unit: its
+    /// `landmark_type` (`$h2`..`$h6`) is the level for every nested unit,
+    /// recorded at each `target_position` `(eid, offset)`.
     pub fn register_heading_level_unit(&mut self, value: &IonValue, symbols: &SymbolTable) {
         let inner = value.unwrap_annotated();
         let Some(fields) = inner.as_struct() else {
@@ -256,10 +205,8 @@ impl AnchorTable {
 }
 
 /// Walk `book_navigation` values and hand every `nav_container` of
-/// `wanted_type` to `f`, in source order. `nav_values` must iterate the
-/// `book_navigation` entities deterministically (sort by name when they come
-/// from a map); `resolve_container` handles the inline-struct vs referenced
-/// `$391` entity forms, both of which KFX uses.
+/// `wanted_type` to `f`, in source order. `nav_values` iterates the entities
+/// in a fixed order; `resolve_container` takes both §9.1 container forms.
 pub fn for_each_nav_container<'a, I, R, F>(
     nav_values: I,
     resolve_container: R,
@@ -350,7 +297,7 @@ pub fn register_heading_levels<'a, I, R>(
 
 /// Kindle headings `landmark_type` symbol → heading level. h1 is included for
 /// completeness even though Kindle omits it from the headings nav.
-fn level_of_landmark(name: &str) -> Option<u8> {
+pub fn level_of_landmark(name: &str) -> Option<u8> {
     match name {
         "h1" | "$h1" => Some(1),
         "h2" | "$h2" => Some(2),
@@ -378,9 +325,8 @@ pub fn nav_target_position(unit: &IonValue) -> Option<(i64, i64)> {
         })
 }
 
-/// Sanitise an anchor name into a valid HTML id (alphanumerics + `_` /
-/// `-` / `.`; prefix with `anchor-` if it would start with a digit). Matches
-/// the safe-name policy `fix_html_id` in calibre's misc helpers.
+/// Sanitise an anchor name into an HTML id: alphanumerics plus `_`, `-` and
+/// `.`, under an `anchor-` prefix where the name opens with a digit.
 pub fn fix_html_id(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 8);
     for c in name.chars() {

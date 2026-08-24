@@ -443,7 +443,9 @@ A converter to HTML **must** synthesise `<td>` boundaries from row-child positio
 
 A list is a `type: list` containing `type: listitem` children. Beyond the ordinary element fields, list elements carry only `$100` `list_style`, `$102` `list_indent`, `$104` `list_start_offset` and `$551` `list_style_position` — all direct CSS analogues.
 
-Ordering is not a separate element type. Whether a list is ordered is decided by `list_style`: the alphabetic, roman and decimal values make an ordered list, and everything else — including KFX's own `numeric`, whose numbering rides the style rather than the structure — is unordered.
+Ordering is not a separate element type. Whether a list is ordered is decided by `list_style`, which names the marker: `numeric`, `alpha_lower`, `alpha_upper`, `roman_lower` and `roman_upper` number their items and make an ordered list, while `none`, `disc`, `circle` and `square` do not. The names are KFX's own, not the CSS keywords they map to — `numeric` is CSS `decimal`, `alpha_lower` is `lower-alpha`. A `list_start_offset` is an ordinal and appears only on an ordered list.
+
+A converter **must** key the ordered/unordered decision on the KFX spelling. Matching the CSS keyword instead matches no real value, and every ordered list arrives unordered.
 
 ## 8. Style model
 
@@ -584,9 +586,9 @@ A nav container appears in two forms: inline, as above, or as a bare symbol nami
 | Value | Role |
 |---|---|
 | toc | Table of contents. Entries may nest to form a hierarchy. |
-| landmarks | Structural landmarks. Each entry carries `$238` `landmark_type` — `cover_page`, `toc`, `srl` (start reading location), and others. |
+| landmarks | Structural landmarks. Each entry carries `$238` `landmark_type`: `cover_page`, `srl` (start reading location) and `toc` are the three Amazon writes, alongside `titlepage`, `bodymatter`, `frontmatter`, `backmatter`, `acknowledgements`, `preface`, `bibliography`, `glossary`, `index`, `loi`, `lot` and a second start-reading marker `text`. |
 | page_list | Print-edition page numbers mapped to positions; the source of "page 214 of 300". |
-| headings | Heading positions with levels, letting a reader reconstruct heading rank that the content tree does not carry directly. |
+| headings | Heading positions with levels, letting a reader reconstruct heading rank that the content tree does not carry directly. Each unit's `landmark_type` is the level itself, `h1` through `h6`. |
 
 A `$393` `nav_unit` carries an optional `$241` `representation` holding the display `$244` `label`, and a `$246` `target_position`. A unit whose representation is empty is still meaningful — the `srl` landmark commonly has no label.
 

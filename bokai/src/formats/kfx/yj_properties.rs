@@ -28,6 +28,16 @@ pub fn prop_for(name: &str) -> Option<&'static Prop> {
         .map(|(_, v)| v)
 }
 
+/// True for a `list_style` ($100) symbol name whose marker numbers its items.
+pub fn list_style_numbers_items(symbol_name: &str) -> bool {
+    prop_for("list_style")
+        .and_then(|prop| prop.values)
+        .and_then(|table| table.iter().find(|(name, _)| *name == symbol_name))
+        .and_then(|(_, css)| *css)
+        .and_then(crate::style::ListStyleType::from_css)
+        .is_some_and(crate::style::ListStyleType::is_ordered)
+}
+
 /// CSS length unit ↔ KFX symbol map.
 pub fn length_unit_for(symbol_name: &str) -> Option<&'static str> {
     match symbol_name {
@@ -62,16 +72,16 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
         };
 
         // `property_value` yields `None` for a symbol outside an enum table.
-        if let Some(value_str) = property_value(prop, v, symbols) {
+        if let Some(value_str) = property_value(prop, v, symbols)
+            && !value_str.is_empty()
+        {
+            let value_str = if prop.name == "font-family" {
+                normalize_font_family(&value_str)
+            } else {
+                value_str
+            };
             if !value_str.is_empty() {
-                let value_str = if prop.name == "font-family" {
-                    normalize_font_family(&value_str)
-                } else {
-                    value_str
-                };
-                if !value_str.is_empty() {
-                    out.set(prop.name.to_string(), value_str);
-                }
+                out.set(prop.name.to_string(), value_str);
             }
         }
     }

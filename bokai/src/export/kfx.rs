@@ -825,7 +825,7 @@ fn build_book_metadata_fragment(
     // ASIN from `kfx::metadata::resolve_export_asin`
     let asin = crate::formats::kfx::metadata::resolve_export_asin(meta);
 
-    // content_id mirrors ASIN (calibre convention), the device `.sdr` state key
+    // `content_id` mirrors the ASIN, the device `.sdr` state key.
     let content_id = asin.clone();
 
     let meta_ctx = MetadataContext {
@@ -921,9 +921,8 @@ fn fixed_layout_capabilities(
     entries
 }
 
-/// Helper to create a metadata key-value struct. `value` may be a string or
-/// an Ion-native boolean (Amazon and calibre both emit `is_sample` and
-/// `override_kindle_font` as bool literals).
+/// A metadata key-value struct. `value` may be a string or an Ion boolean,
+/// which is what `is_sample` and `override_kindle_font` take.
 fn metadata_kv(key: &str, value: &crate::formats::kfx::metadata::MetadataValue) -> IonValue {
     let ion_value = match value {
         crate::formats::kfx::metadata::MetadataValue::Text(s) => IonValue::String(s.clone()),
@@ -1210,9 +1209,9 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
                 ),
             ]),
         ),
-        // No `spacing_percent_base` here. `width` pins percentage-spacing to
-        // the horizontal axis, which in a vertical-rl book aims the Layout >
-        // Spacing slider at page margins. Calibre-generated KFX omits it.
+        // `spacing_percent_base` is unstated: `width` pins percentage spacing
+        // to the horizontal axis, aiming a vertical-rl book's Layout >
+        // Spacing slider at its page margins.
         (
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),
@@ -3358,9 +3357,8 @@ fn image_fxl_to_kfx(
             .cloned()
     };
 
-    // Drop calibre's dual cover: its synthetic title page (spine[0]) reuses the
-    // image of the first content page (spine[1]), detected by identical resolved
-    // paths. The real first page becomes the solo cover.
+    // A synthetic title page at `spine[0]` drawing the same image as
+    // `spine[1]` is dropped, leaving one cover.
     if spine_ids.len() >= 2
         && let (Some(a), Some(b)) = (resolve(&hrefs[0]), resolve(&hrefs[1]))
         && a == b

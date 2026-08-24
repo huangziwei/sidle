@@ -28,10 +28,11 @@
 //! 3. **Bidirectional**: Every import rule has export metadata
 //! 4. **Transformers**: Complex value conversions are encapsulated in traits
 
-use crate::formats::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::symbols::{KfxSymbol, symbol_name};
 use crate::formats::kfx::transforms::{
     AttributeTransform, IdentityTransform, KfxLinkTransform, ResourceTransform,
 };
+use crate::formats::kfx::yj_properties::list_style_numbers_items;
 use crate::model::{LandmarkType, Role};
 use crate::style::{ComputedStyle, FontStyle, FontWeight};
 use std::collections::HashMap;
@@ -101,11 +102,9 @@ pub enum Strategy {
         kfx_type: KfxSymbol,
     },
 
-    /// Structure with semantic type annotation for bidirectional mapping.
-    ///
-    /// Usage: BlockQuote, which needs `yj.semantics.type: block_quote` for
-    /// round-trip fidelity. On import, the semantic_type value triggers
-    /// the role mapping; on export, it's emitted as a local symbol.
+    /// Structure carrying a `yj.semantics.type` annotation, as `BlockQuote`
+    /// takes `block_quote`: import keys the role on the value, export emits
+    /// it as a local symbol.
     StructureWithSemanticType {
         /// The IR Role to assign.
         role: Role,
@@ -262,11 +261,9 @@ pub struct SpanRule {
     pub conditional_export_rules: Vec<ConditionalExportRule>,
 }
 
-/// Rule for conditional attribute emission during export.
-///
-/// When the source semantic contains the trigger value, emit the target
-/// KFX field with the specified symbol value. Used for mappings like
-/// `epub:type="noteref"` → `YjDisplay: YjNote`.
+/// Conditional attribute emission for export: a source semantic holding the
+/// trigger value emits the target KFX field, as `epub:type="noteref"` emits
+/// `YjDisplay: YjNote`.
 #[derive(Clone, Debug)]
 pub struct ConditionalExportRule {
     /// Semantic target to check (e.g., EpubType).
@@ -298,10 +295,8 @@ impl KfxSchema {
         schema
     }
 
-    /// Register layout_hint → Role mappings for import.
-    ///
-    /// When importing KFX, elements with `layout_hints: [figure]` etc.
-    /// are recognized and mapped back to their IR Role.
+    /// Register the `layout_hints` → `Role` mappings, which carry an element
+    /// stating `layout_hints: [figure]` to `Role::Figure`.
     fn register_layout_hint_rules(&mut self) {
         // layout_hints: [figure] → Role::Figure
         self.layout_hint_mapping
@@ -353,10 +348,8 @@ impl KfxSchema {
             },
         );
 
-        // Container - maps to type: text (not type: container)
-        // In KFX, type: container is only for special layout containers with
-        // layout/fixed_width/fit_width attributes. Regular structural elements
-        // with children use type: text.
+        // `Container` maps to `type: text`. `type: container` carries the
+        // layout attributes `layout`, `fixed_width` and `fit_width`.
         self.register_element(
             KfxSymbol::Container,
             Strategy::Structure {
@@ -383,7 +376,8 @@ impl KfxSchema {
             ],
         );
 
-        // List: UnorderedList by default, OrderedList if list_style: numeric
+        // List: UnorderedList by default, OrderedList when `list_style` names a
+        // marker that numbers its items.
         self.register_element(
             KfxSymbol::List,
             Strategy::StructureWithModifier {
@@ -395,7 +389,7 @@ impl KfxSchema {
             vec![],
         );
 
-        // Also register OrderedList for export (same KFX type, but with list_style)
+        // Role::OrderedList exports to the same KFX type, carrying `list_style`.
         self.export_strategy_table.insert(
             Role::OrderedList,
             Strategy::StructureWithModifier {
@@ -480,11 +474,8 @@ impl KfxSchema {
             vec![],
         );
 
-        // Line break (<br/>)
-        // Note: KFX forced line breaks are primarily encoded as \n within text
-        // content (the export-side EOL passes turn those into `<br/>`), but
-        // register the element type too in case some books use a discrete
-        // line_break element.
+        // A KFX forced line break is `\n` inside text content; `line_break` is
+        // registered as an element type beside it.
         self.register_element(
             KfxSymbol::LineBreak,
             Strategy::Structure {
@@ -672,10 +663,9 @@ impl KfxSchema {
             .unwrap_or(&[])
     }
 
-    /// Look up the IR Role for a given semantic type annotation value.
-    ///
-    /// Searches the export strategy table for StructureWithSemanticType entries
-    /// that match the given semantic type string (e.g., "block_quote" → BlockQuote).
+    /// The IR `Role` for a `yj.semantics.type` value, from the
+    /// `StructureWithSemanticType` entries of the export strategy table:
+    /// `"block_quote"` → `Role::BlockQuote`.
     pub fn role_for_semantic_type(&self, semantic_type: &str) -> Option<Role> {
         for (role, strategy) in &self.export_strategy_table {
             if let Strategy::StructureWithSemanticType {
@@ -689,19 +679,13 @@ impl KfxSchema {
         None
     }
 
-    /// Look up the IR Role for a given layout_hints symbol.
-    ///
-    /// Used during import to recognize elements like `layout_hints: [figure]`
-    /// and map them back to their IR Role (e.g., Role::Figure).
+    /// The IR `Role` for a `layout_hints` symbol: `figure` → `Role::Figure`.
     pub fn role_for_layout_hint(&self, hint_symbol: u32) -> Option<Role> {
         self.layout_hint_mapping.get(&hint_symbol).copied()
     }
 
-    /// Resolve a KFX element to IR Role.
-    ///
-    /// # Arguments
-    /// * `kfx_type_id` - The KFX type symbol ID.
-    /// * `get_attr` - Closure to look up attribute values.
+    /// The IR `Role` for the KFX type `kfx_type_id`, reading the attributes a
+    /// strategy keys on through `get_attr`.
     pub fn resolve_element_role<F>(&self, kfx_type_id: u32, get_attr: F) -> Role
     where
         F: Fn(KfxSymbol) -> Option<i64>,
@@ -714,11 +698,9 @@ impl KfxSchema {
         self.execute_strategy_for_role(strategy, get_attr)
     }
 
-    /// Check if any span indicator is present on an element and return the override role.
-    ///
-    /// This enables elements with span-like attributes (e.g., link_to) to be recognized
-    /// as the appropriate role (e.g., Link). Used after resolve_element_role to handle
-    /// cases like standalone Link elements that have type: text but also link_to.
+    /// The `Role` a span indicator on an element overrides to: a `type: text`
+    /// carrying `link_to` takes `Role::Link`. Runs after
+    /// [`Self::resolve_element_role`].
     pub fn check_span_role_override<F>(&self, has_field: F) -> Option<Role>
     where
         F: Fn(KfxSymbol) -> bool,
@@ -735,10 +717,8 @@ impl KfxSchema {
         None
     }
 
-    /// Find the matching span rule for a style_event.
-    ///
-    /// # Arguments
-    /// * `has_field` - Closure that returns true if the span has a given field.
+    /// The span rule matching a style_event, whose fields `has_field` answers
+    /// for.
     pub fn span_rule<F>(&self, has_field: F) -> Option<&SpanRule>
     where
         F: Fn(KfxSymbol) -> bool,
@@ -794,8 +774,9 @@ impl KfxSchema {
                     match modifier_effect {
                         ModifierEffect::HeadingLevel => Role::Heading(value as u8),
                         ModifierEffect::ListOrdered => {
-                            // list_style is a symbol; check for numeric (343)
-                            if value == KfxSymbol::Numeric as i64 {
+                            // `list_style` is a symbol naming the marker.
+                            let marker = symbol_name(value as u64).unwrap_or("");
+                            if list_style_numbers_items(marker) {
                                 Role::OrderedList
                             } else {
                                 *default_role
@@ -907,10 +888,8 @@ impl KfxSchema {
         attrs
     }
 
-    /// Check if a role should be treated as an inline span during export.
-    ///
-    /// Inline spans are rendered as style_events in KFX, not as nested containers.
-    /// This includes: Link, Inline (for bold/italic spans).
+    /// True for a role export writes as a style_event: `Link` and `Inline`.
+    /// Every other role takes a nested container.
     pub fn is_inline_role(&self, role: Role) -> bool {
         matches!(role, Role::Link | Role::Inline)
     }

@@ -91,9 +91,8 @@ impl Report {
             .any(|f| matches!(f.severity, Severity::Error | Severity::Warning))
     }
 
-    /// Any error-level finding — the epubcheck-rejection gate, which
-    /// [`is_clean`](Self::is_clean) is not: epubcheck exits 0 on warnings, and
-    /// a warning-only EPUB passes it. A warning reports and never blocks.
+    /// True for any error-level finding. [`is_clean`](Self::is_clean) counts
+    /// warnings too.
     pub fn has_errors(&self) -> bool {
         self.findings.iter().any(|f| f.severity == Severity::Error)
     }

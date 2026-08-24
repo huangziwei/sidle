@@ -14,9 +14,14 @@
 //!   payload outside the media types that is not Ion, and a name a second
 //!   fragment of the same type repeats over different bytes are errors, one
 //!   per lost fragment. The generator trailer's `kfxgen_payload_sha1` is read
-//!   against the payload region it digests (§3.5, warning).
-//! - **Rule 2, required entities** — `document_data`, ≥1 `section`, ≥1
-//!   `storyline` (errors); `book_navigation` (warning: no chapter list).
+//!   against the payload region it digests (§3.5, warning), and every name
+//!   `container_entity_map` ($419) lists names a fragment an index row holds
+//!   (§6.2, warning). Every symbol id a fragment uses resolves through the
+//!   container's own table (§5.4, warning), and an id past the shared table's
+//!   entries names a newer revision of it (info).
+//! - **Rule 2, required entities** — `document_data` holding a reading order of
+//!   ≥1 section, ≥1 `section`, ≥1 `storyline` (errors); `book_navigation`
+//!   (warning: no chapter list).
 //! - **Rule 3, reading order resolves** — every reading-order section names a
 //!   real `section` ($260), and every `story_name` ($176) reachable from a
 //!   section names a real `storyline` ($259). A dangling ref is a missing
@@ -33,12 +38,19 @@
 //!   `target_position` offset against the target's base text (§9.4). A
 //!   `nav_containers` entry naming a separate `nav_container` ($391) fragment
 //!   resolves to one (error: the whole list is gone), every `link_to` ($179)
-//!   names an anchor, and every anchor's `position` names an element the walk
-//!   reached.
+//!   names an anchor, every anchor states a `position` or a `$186` uri (§9.3),
+//!   and every `position` names an element the walk reached. A `nav_type`
+//!   ($235) and a `landmark_type` ($238) each name a value the import schema
+//!   knows (§9.2, info).
 //! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
 //!   names a real `style` entity (warning: unstyled render), and a
 //!   style_event's `ruby_name` ($757) names a `ruby_content` ($756) declaring
-//!   every `ruby_id` ($758) it selects (§8.7).
+//!   every `ruby_id` ($758) it selects (§8.7). Each of `link_unvisited_style`
+//!   ($577) and `link_visited_style` ($576) holds a nested style struct (§8.1),
+//!   and a `list_style` ($100) names one of the markers the import property
+//!   table maps (§7.7, info). A `style` fragment no element cites and a
+//!   `font_family` ($11) stack pinning a face no `font` fragment embeds are
+//!   each reported as shipped weight nothing reads (info).
 //! - **Rule 7, resource refs resolve** — every `external_resource` and every
 //!   `font` ($262) that names a `location` has its bytes embedded, a font's
 //!   under `bcRawFont` ($418); every `resource_name` ($175) an element cites
@@ -144,7 +156,9 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings.extend(check_payload_digest(bytes));
     findings.extend(check_container_inventory(bytes));
     findings.extend(check_entity_index(bytes));
-    findings.extend(check_required_entities(&book.by_type));
+    findings.extend(check_entity_manifest(bytes));
+    findings.extend(check_symbol_resolution(&book));
+    findings.extend(check_required_entities(&book));
     findings.extend(check_references(&book));
     findings.extend(check_resource_bytes(&book));
     findings.extend(check_font_bytes(&book));
@@ -484,6 +498,161 @@ fn check_entity_index(bytes: &[u8]) -> Vec<Finding> {
     out
 }
 
+/// Rule 1's symbol half (§5.4). Every symbol id a fragment uses — as a struct
+/// field key or as a value — resolves through the container's own table, and
+/// an id the shared table stops short of names a newer table revision.
+fn check_symbol_resolution(book: &BookData) -> Vec<Finding> {
+    let base = book.symbols.base_len();
+    let mut local: BTreeSet<u64> = BTreeSet::new();
+    let mut shared: BTreeSet<u64> = BTreeSet::new();
+    for entities in book.by_type.values() {
+        for value in entities.values() {
+            collect_unresolved(value, book, base, &mut local, &mut shared);
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(first) = local.first() {
+        out.push(warning(
+            "symbol-unresolved",
+            "<symbols>",
+            format!(
+                "{} symbol ids from ${first} up name no entry in the container's own table — \
+                 every field key and value carrying one reaches a reader as nothing",
+                local.len()
+            ),
+            None,
+        ));
+    }
+    if let Some(first) = shared.first() {
+        out.push(info(
+            "symbol-past-shared-table",
+            "<symbols>",
+            format!(
+                "{} symbol ids from ${first} up sit inside the declared import and past the \
+                 shared table's {} entries — the container names a newer revision of it",
+                shared.len(),
+                crate::formats::kfx::symbols::KFX_SYMBOL_TABLE_SIZE
+            ),
+        ));
+    }
+    out
+}
+
+/// Record every symbol id in `value` — field keys and symbol values alike —
+/// that resolves to nothing, split by which half of the id space it sits in.
+fn collect_unresolved(
+    value: &IonValue,
+    book: &BookData,
+    base: u64,
+    local: &mut BTreeSet<u64>,
+    shared: &mut BTreeSet<u64>,
+) {
+    fn record(
+        id: u64,
+        book: &BookData,
+        base: u64,
+        local: &mut BTreeSet<u64>,
+        shared: &mut BTreeSet<u64>,
+    ) {
+        if book.symbols.resolve_opt(id).is_none() {
+            if id < base { shared } else { local }.insert(id);
+        }
+    }
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            for (key, v) in fields {
+                record(*key, book, base, local, shared);
+                collect_unresolved(v, book, base, local, shared);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_unresolved(item, book, base, local, shared);
+            }
+        }
+        IonValue::Symbol(id) => record(*id, book, base, local, shared),
+        _ => {}
+    }
+}
+
+/// Rule 1's manifest half (§6.2). Every name `container_entity_map` ($419)
+/// lists names a fragment an index row holds; a nameless fragment (`$348`)
+/// sits outside the manifest's vocabulary.
+fn check_entity_manifest(bytes: &[u8]) -> Vec<Finding> {
+    use crate::formats::kfx::container::{
+        SymbolTable, parse_container_header, parse_entity, parse_index_table, slice_at,
+    };
+    use crate::formats::kfx::resource_index::entity_fid;
+
+    let Ok(header) = parse_container_header(bytes) else {
+        return Vec::new();
+    };
+    let Some(info) = container_info(bytes, &header) else {
+        return Vec::new();
+    };
+    let Some(index) = info.index.and_then(|(off, len)| slice_at(bytes, off, len)) else {
+        return Vec::new();
+    };
+    let symbols = SymbolTable::from_fragment(
+        info.doc_symbols
+            .and_then(|(off, len)| slice_at(bytes, off, len)),
+    );
+
+    let entities = parse_index_table(index, header.header_len);
+    let held: HashSet<String> = entities
+        .iter()
+        .filter(|ent| ent.id as u64 != KfxSymbol::Null as u64)
+        .map(|ent| entity_fid(ent.id as u64, &symbols))
+        .collect();
+
+    let manifest = entities
+        .iter()
+        .find(|ent| ent.type_id as u64 == KfxSymbol::ContainerEntityMap as u64)
+        .and_then(|ent| parse_entity(bytes, ent));
+    let Some(containers) = manifest.as_ref().and_then(|value| {
+        value
+            .unwrap_annotated()
+            .as_struct()
+            .and_then(|fields| get_field(fields, KfxSymbol::ContainerList as u64))
+            .and_then(|v| v.as_list())
+    }) else {
+        return Vec::new();
+    };
+
+    let mut unheld: BTreeSet<String> = BTreeSet::new();
+    for container in containers {
+        let Some(fields) = container.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(names) = get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
+        else {
+            continue;
+        };
+        for name in names.iter().filter_map(|v| symbols.text_of_opt(v)) {
+            if !held.contains(name) {
+                unheld.insert(name.to_string());
+            }
+        }
+    }
+
+    unheld
+        .into_iter()
+        .map(|name| {
+            warning(
+                "manifest-name-unheld",
+                &name,
+                format!(
+                    "container_entity_map lists {name:?} and no index row holds a fragment of \
+                     that name — a reader keying on the manifest looks for a fragment the \
+                     container does not carry"
+                ),
+                None,
+            )
+        })
+        .collect()
+}
+
 /// True for `CR!` followed by exactly 28 uppercase alphanumerics.
 fn is_container_id(id: &str) -> bool {
     let Some(suffix) = id.strip_prefix("CR!") else {
@@ -499,9 +668,9 @@ fn is_container_id(id: &str) -> bool {
 // Rule 2 — required entities present
 // ============================================================================
 
-fn check_required_entities(by_type: &HashMap<u64, HashMap<String, IonValue>>) -> Vec<Finding> {
+fn check_required_entities(book: &BookData) -> Vec<Finding> {
     let present = |sym: KfxSymbol| {
-        by_type
+        book.by_type
             .get(&(sym as u64))
             .is_some_and(|entities| !entities.is_empty())
     };
@@ -539,6 +708,14 @@ fn check_required_entities(by_type: &HashMap<u64, HashMap<String, IonValue>>) ->
             )),
         ));
     }
+    if present(KfxSymbol::DocumentData) && reading_order_sections(book).is_empty() {
+        out.push(error(
+            "reading-order-empty",
+            "<document_data>",
+            "document_data ($538) lists no reading-order section — a reader opening the book \
+             reaches no page",
+        ));
+    }
     out
 }
 
@@ -557,6 +734,8 @@ struct WalkDefects {
     missing_stories: BTreeSet<String>,
     /// `style` ($157) refs that don't resolve to a `style` entity.
     missing_styles: BTreeSet<String>,
+    /// `style` ($157) names an element or a style_event cites.
+    cited_styles: BTreeSet<String>,
     /// `content` ($145) `{name,index}` indirections that don't resolve to a
     /// `$145 content` string (rule 4).
     missing_content: BTreeSet<String>,
@@ -564,6 +743,9 @@ struct WalkDefects {
     missing_resources: BTreeSet<String>,
     /// `background_image` ($479) refs that name no `external_resource`.
     missing_backgrounds: BTreeSet<String>,
+    /// `link_unvisited_style` ($577) / `link_visited_style` ($576) fields
+    /// holding no nested style struct (§8.1).
+    link_states_not_structs: BTreeSet<String>,
     /// `link_to` ($179) refs that name no `anchor` ($266).
     missing_link_targets: BTreeSet<String>,
     /// `ruby_name` ($757) refs that name no `ruby_content` ($756).
@@ -575,6 +757,10 @@ struct WalkDefects {
     unknown_types: BTreeSet<String>,
     /// `writing_mode` ($560) values outside [`WRITING_MODES`].
     unknown_writing_modes: BTreeSet<String>,
+    /// `list_style` ($100) values [`known_list_style`] does not name.
+    unknown_list_styles: BTreeSet<String>,
+    /// `font_family` ($11) stacks headed by a face the book embeds none of.
+    unembedded_families: BTreeSet<String>,
     /// `listitem` ($277) elements whose parent is no `list` ($276).
     orphan_list_items: usize,
     /// Reading-order sections carrying no `page_templates` ($141) entry.
@@ -667,6 +853,16 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             ),
         ));
     }
+    for name in orphan_styles(book, &defects.cited_styles) {
+        findings.push(info(
+            "style-unreferenced",
+            &name,
+            format!(
+                "style {name:?} is cited by no element — the fragment ships declarations \
+                 nothing reads"
+            ),
+        ));
+    }
     for name in &defects.missing_styles {
         findings.push(warning(
             "style-unresolved",
@@ -704,6 +900,17 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             format!(
                 "a style names background_image {name:?} ($479) but no external_resource \
                  declares it — the background does not draw"
+            ),
+            None,
+        ));
+    }
+    for field in &defects.link_states_not_structs {
+        findings.push(warning(
+            "link-state-not-a-style",
+            field,
+            format!(
+                "a style states {field} as something other than a nested style struct — the \
+                 colour and decoration it holds for that link state are dropped"
             ),
             None,
         ));
@@ -757,6 +964,26 @@ fn check_references(book: &BookData) -> Vec<Finding> {
             name,
             format!("a writing_mode of {name:?} is outside {WRITING_MODES:?}"),
             None,
+        ));
+    }
+    for name in &defects.unknown_list_styles {
+        findings.push(info(
+            "list-style-unknown",
+            name,
+            format!(
+                "a list_style of {name:?} names no list marker — the list draws the reader's \
+                 default"
+            ),
+        ));
+    }
+    for name in &defects.unembedded_families {
+        findings.push(info(
+            "font-family-unembedded",
+            name,
+            format!(
+                "a style pins font_family {name:?}, which no font fragment embeds — the device \
+                 substitutes a face of its own"
+            ),
         ));
     }
     if defects.orphan_list_items > 0 {
@@ -1092,6 +1319,8 @@ struct RefIndex {
     fixed_layout: bool,
     /// The book default `writing_mode` ($560), the axis an element inherits.
     document_writing_mode: &'static str,
+    /// The `font_family` ($11) each `font` ($262) fragment describes.
+    embedded_faces: HashSet<String>,
 }
 
 impl RefIndex {
@@ -1133,11 +1362,23 @@ impl RefIndex {
                 }
             }
         }
+        let mut embedded_faces = HashSet::new();
+        if let Some(entities) = book.by_type.get(&(KfxSymbol::Font as u64)) {
+            for value in entities.values() {
+                if let Some(fields) = value.unwrap_annotated().as_struct()
+                    && let Some(family) = get_field(fields, KfxSymbol::FontFamily as u64)
+                        .and_then(|v| book.symbols.text_of(v))
+                {
+                    embedded_faces.insert(family.to_string());
+                }
+            }
+        }
         Self {
             anchors,
             ruby,
             fixed_layout: fxl::book_signals(book).fixed_layout,
             document_writing_mode: document_writing_mode(book),
+            embedded_faces,
         }
     }
 }
@@ -1298,7 +1539,20 @@ fn check_anchor_targets(book: &BookData, seen_eids: &HashSet<i64>) -> Vec<Findin
         let Some(fields) = anchors[name].unwrap_annotated().as_struct() else {
             continue;
         };
-        let Some(eid) = get_field(fields, KfxSymbol::Position as u64)
+        let position = get_field(fields, KfxSymbol::Position as u64);
+        if position.is_none() && get_field(fields, KfxSymbol::Uri as u64).is_none() {
+            out.push(warning(
+                "anchor-without-target",
+                name,
+                format!(
+                    "anchor {name:?} states neither a position ($183) nor a uri ($186) — every \
+                     link_to naming it lands nowhere"
+                ),
+                None,
+            ));
+            continue;
+        }
+        let Some(eid) = position
             .and_then(|v| v.unwrap_annotated().as_struct())
             .and_then(|pos| get_field(pos, KfxSymbol::Id as u64))
             .and_then(|v| v.as_int())
@@ -1325,6 +1579,13 @@ fn check_anchor_targets(book: &BookData, seen_eids: &HashSet<i64>) -> Vec<Findin
 
 /// The `writing_mode` ($560) values, matching CSS.
 const WRITING_MODES: [&str; 3] = ["horizontal_tb", "vertical_rl", "vertical_lr"];
+
+/// True for a `list_style` ($100) value the import property table names.
+fn known_list_style(value: &str) -> bool {
+    crate::formats::kfx::yj_properties::prop_for("list_style")
+        .and_then(|prop| prop.values)
+        .is_some_and(|table| table.iter().any(|(name, _)| *name == value))
+}
 
 /// True when `section` lists at least one `page_templates` ($141) entry, the
 /// only content a section contributes.
@@ -1466,6 +1727,36 @@ fn check_style_fields(
         && resource_named(book, name).is_none()
     {
         out.missing_backgrounds.insert(name.to_string());
+    }
+
+    // §7.7 — `list_style` decides whether a list numbers its items, and
+    // `yj_properties` maps each value the importer knows to its CSS name.
+    if let Some(value) =
+        get_field(fields, KfxSymbol::ListStyle as u64).and_then(|v| book.symbols.text_of(v))
+        && !known_list_style(value)
+    {
+        out.unknown_list_styles.insert(value.to_string());
+    }
+
+    // §11.4 — a `font_family` stack headed by `default` defers to the
+    // reader's face; a named head pins one.
+    if let Some(stack) =
+        get_field(fields, KfxSymbol::FontFamily as u64).and_then(|v| book.symbols.text_of(v))
+        && let Some(head) = stack.split(',').next().map(|f| f.trim().trim_matches('"'))
+        && !head.eq_ignore_ascii_case("default")
+        && !index.embedded_faces.contains(head)
+    {
+        out.unembedded_families.insert(head.to_string());
+    }
+
+    // §8.1 — each link state holds a nested style struct of its own.
+    for state in [KfxSymbol::LinkUnvisitedStyle, KfxSymbol::LinkVisitedStyle] {
+        if let Some(value) = get_field(fields, state as u64)
+            && value.unwrap_annotated().as_struct().is_none()
+        {
+            out.link_states_not_structs
+                .insert(book.symbols.resolve(state as u64).to_string());
+        }
     }
 }
 
@@ -1710,9 +2001,12 @@ fn walk_refs(
             // name and walks below as an ordinary child.
             if let Some(style_name) =
                 get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))
-                && !style_exists(book, style_name)
             {
-                out.missing_styles.insert(style_name.to_string());
+                if style_exists(book, style_name) {
+                    out.cited_styles.insert(style_name.to_string());
+                } else {
+                    out.missing_styles.insert(style_name.to_string());
+                }
             }
 
             // Rule 4 — a `$145 content` value that's a `{name,index}`
@@ -1892,6 +2186,24 @@ fn check_ruby_selection(
             out.out_of_range_ruby.insert(format!("{name}#{id}"));
         }
     }
+}
+
+/// The `style` ($157) fragments no element cites, sorted. A book stating no
+/// reading order gives the walk nothing to cite from and answers with none.
+fn orphan_styles(book: &BookData, cited: &BTreeSet<String>) -> Vec<String> {
+    let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) else {
+        return Vec::new();
+    };
+    if reading_order_sections(book).is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = styles
+        .keys()
+        .filter(|name| !cited.contains(*name))
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// True when `name` is a defined `style` ($157) entity.
@@ -2355,29 +2667,47 @@ fn is_language_tag(tag: &str) -> bool {
 /// The `nav_type` ($235) values a `nav_container` states.
 const NAV_TYPES: [&str; 4] = ["toc", "landmarks", "page_list", "headings"];
 
-/// Every `nav_type` a `book_navigation` ($389) or `nav_container` ($391)
-/// states outside [`NAV_TYPES`]. An unrecognised `nav_type` contributes
-/// nothing to the chapter list.
+/// True for a `landmark_type` ($238) symbol the import schema names, either
+/// as a landmark of its own or as one of the `$h1`..`$h6` heading levels.
+fn known_landmark(symbol_id: u64, name: &str) -> bool {
+    crate::formats::kfx::schema::schema()
+        .landmark_from_kfx(symbol_id)
+        .is_some()
+        || crate::formats::kfx::anchor_table::level_of_landmark(name).is_some()
+}
+
+/// Every `nav_type` ($235) and `landmark_type` ($238) a `book_navigation`
+/// ($389) or `nav_container` ($391) states outside its vocabulary. Neither
+/// contributes to the chapter list or the landmark set.
 fn check_nav_vocabulary(book: &BookData) -> Vec<Finding> {
-    let mut unknown: BTreeSet<String> = BTreeSet::new();
+    let mut unknown_nav: BTreeSet<String> = BTreeSet::new();
+    let mut unknown_landmarks: BTreeSet<String> = BTreeSet::new();
     for ftype in [KfxSymbol::BookNavigation, KfxSymbol::NavContainer] {
         let Some(entities) = book.by_type.get(&(ftype as u64)) else {
             continue;
         };
         for value in entities.values() {
-            collect_nav_types(value, book, &mut unknown);
+            collect_nav_vocabulary(value, book, &mut unknown_nav, &mut unknown_landmarks);
         }
     }
-    unknown
-        .into_iter()
-        .map(|name| {
-            info(
-                "nav-type-unknown",
-                &name,
-                format!("a nav_container states nav_type {name:?}, outside {NAV_TYPES:?}"),
-            )
-        })
-        .collect()
+    let navs = unknown_nav.into_iter().map(|name| {
+        info(
+            "nav-type-unknown",
+            &name,
+            format!("a nav_container states nav_type {name:?}, outside {NAV_TYPES:?}"),
+        )
+    });
+    let landmarks = unknown_landmarks.into_iter().map(|name| {
+        info(
+            "landmark-type-unknown",
+            &name,
+            format!(
+                "a nav_unit states landmark_type {name:?}, which names no landmark and no \
+                 heading level — the entry reaches the landmark set as nothing"
+            ),
+        )
+    });
+    navs.chain(landmarks).collect()
 }
 
 /// Rule 5's container half (§9.1). A `book_navigation` ($389) lists its
@@ -2435,23 +2765,36 @@ fn check_nav_containers(book: &BookData) -> Vec<Finding> {
         .collect()
 }
 
-/// Record every `nav_type` ($235) in `value` that is outside [`NAV_TYPES`].
-fn collect_nav_types(value: &IonValue, book: &BookData, out: &mut BTreeSet<String>) {
+/// Record every `nav_type` ($235) outside [`NAV_TYPES`] and every
+/// `landmark_type` ($238) outside [`known_landmark`] that `value` states.
+fn collect_nav_vocabulary(
+    value: &IonValue,
+    book: &BookData,
+    navs: &mut BTreeSet<String>,
+    landmarks: &mut BTreeSet<String>,
+) {
     match value.unwrap_annotated() {
         IonValue::Struct(fields) => {
             if let Some(nav_type) =
                 get_field(fields, KfxSymbol::NavType as u64).and_then(|v| book.symbols.text_of(v))
                 && !NAV_TYPES.contains(&nav_type)
             {
-                out.insert(nav_type.to_string());
+                navs.insert(nav_type.to_string());
+            }
+            if let Some(value) = get_field(fields, KfxSymbol::LandmarkType as u64)
+                && let Some(name) = book.symbols.text_of(value)
+                && let IonValue::Symbol(id) = value.unwrap_annotated()
+                && !known_landmark(*id, name)
+            {
+                landmarks.insert(name.to_string());
             }
             for (_, v) in fields {
-                collect_nav_types(v, book, out);
+                collect_nav_vocabulary(v, book, navs, landmarks);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                collect_nav_types(item, book, out);
+                collect_nav_vocabulary(item, book, navs, landmarks);
             }
         }
         _ => {}
@@ -3859,7 +4202,7 @@ mod tests {
 
     #[test]
     fn required_entities_flags_all_missing() {
-        let out = check_required_entities(&HashMap::new());
+        let out = check_required_entities(&loader::empty_book_for_test());
         let rules: Vec<&str> = out.iter().map(|f| f.rule.as_str()).collect();
         assert!(rules.contains(&"no-document-data"));
         assert!(rules.contains(&"no-sections"));
@@ -3877,7 +4220,27 @@ mod tests {
 
     #[test]
     fn required_entities_clean_when_all_present() {
-        let by_type = entities(vec![
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
+            (KfxSymbol::Section as u64, "s1", IonValue::Struct(vec![])),
+            (KfxSymbol::Storyline as u64, "st1", IonValue::Struct(vec![])),
+            (
+                KfxSymbol::BookNavigation as u64,
+                "n",
+                IonValue::Struct(vec![]),
+            ),
+        ]);
+        book.by_type
+            .insert(KfxSymbol::DocumentData as u64, doc_data(&["s1"]));
+        assert!(check_required_entities(&book).is_empty());
+    }
+
+    /// A document_data listing no reading order leaves rules 3 and 8 nothing
+    /// to walk.
+    #[test]
+    fn a_document_data_with_no_reading_order_is_flagged() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
             (
                 KfxSymbol::DocumentData as u64,
                 "d",
@@ -3891,7 +4254,10 @@ mod tests {
                 IonValue::Struct(vec![]),
             ),
         ]);
-        assert!(check_required_entities(&by_type).is_empty());
+        let out = check_required_entities(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "reading-order-empty");
+        assert_eq!(out[0].severity, Severity::Error);
     }
 
     #[test]
@@ -6522,5 +6888,271 @@ mod tests {
         let (declared, _) = declared_features(&book);
         assert!(declared.contains_key("yj_fixed_layout"), "{declared:?}");
         assert!(fxl::book_signals(&book).fixed_layout);
+    }
+
+    /// §6.2 — a manifest name no index row holds sends a reader looking for a
+    /// fragment the container does not carry.
+    #[test]
+    fn a_manifest_name_no_index_row_holds_is_flagged() {
+        use crate::formats::kfx::ion::IonWriter;
+
+        let manifest = |names: Vec<KfxSymbol>| {
+            let mut writer = IonWriter::new();
+            writer.write_bvm();
+            writer.write_value(&IonValue::Struct(vec![(
+                KfxSymbol::ContainerList as u64,
+                IonValue::List(vec![IonValue::Struct(vec![(
+                    KfxSymbol::Contains as u64,
+                    IonValue::List(
+                        names
+                            .into_iter()
+                            .map(|s| IonValue::Symbol(s as u64))
+                            .collect(),
+                    ),
+                )])]),
+            )]));
+            writer.into_bytes()
+        };
+        let container = |names: Vec<KfxSymbol>| {
+            Container {
+                entities: vec![
+                    row(KfxSymbol::Storyline, KfxSymbol::Storyline as u32),
+                    row(KfxSymbol::ContainerEntityMap, KfxSymbol::Null as u32)
+                        .holding(manifest(names)),
+                ],
+                ..Container::default()
+            }
+            .build()
+        };
+
+        let out = check_entity_manifest(&container(vec![KfxSymbol::Style]));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "manifest-name-unheld");
+        assert_eq!(out[0].location, "style");
+
+        assert!(check_entity_manifest(&container(vec![KfxSymbol::Storyline])).is_empty());
+    }
+
+    /// §9.3 — an anchor states a `position` or a `uri`; one stating neither
+    /// is a target every `link_to` naming it resolves to nothing.
+    #[test]
+    fn an_anchor_stating_neither_position_nor_uri_is_flagged() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type = entities(vec![
+            (KfxSymbol::Anchor as u64, "bare", IonValue::Struct(vec![])),
+            (
+                KfxSymbol::Anchor as u64,
+                "external",
+                IonValue::Struct(vec![(
+                    KfxSymbol::Uri as u64,
+                    IonValue::String("https://example.org/".to_string()),
+                )]),
+            ),
+        ]);
+        let out = check_anchor_targets(&book, &HashSet::new());
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "anchor-without-target");
+        assert_eq!(out[0].location, "bare");
+    }
+
+    /// §8.1 — each link state holds a nested style struct; a symbol in its
+    /// place drops the state's declarations.
+    #[test]
+    fn a_link_state_that_is_no_style_struct_is_flagged() {
+        let styled = |value: IonValue| {
+            let mut book = loader::empty_book_for_test();
+            book.by_type.insert(
+                KfxSymbol::Style as u64,
+                HashMap::from([(
+                    "s1".to_string(),
+                    IonValue::Struct(vec![(KfxSymbol::LinkVisitedStyle as u64, value)]),
+                )]),
+            );
+            book
+        };
+
+        let book = styled(IonValue::Symbol(KfxSymbol::Style as u64));
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "link-state-not-a-style");
+        assert_eq!(out[0].location, "link_visited_style");
+
+        let nested = IonValue::Struct(vec![(
+            KfxSymbol::TextColor as u64,
+            IonValue::Int(0x00_00_00_FF),
+        )]);
+        assert!(check_references(&styled(nested)).is_empty());
+    }
+
+    /// §7.7 — `list_style` decides a list's marker; a value the import
+    /// property table does not name leaves the reader's own default.
+    #[test]
+    fn a_list_style_outside_the_property_table_is_flagged() {
+        let styled = |marker: KfxSymbol| {
+            let mut book = loader::empty_book_for_test();
+            book.by_type.insert(
+                KfxSymbol::Style as u64,
+                HashMap::from([(
+                    "s1".to_string(),
+                    IonValue::Struct(vec![(
+                        KfxSymbol::ListStyle as u64,
+                        IonValue::Symbol(marker as u64),
+                    )]),
+                )]),
+            );
+            book
+        };
+
+        let out = check_references(&styled(KfxSymbol::Toc));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "list-style-unknown");
+        assert_eq!(out[0].location, "toc");
+
+        assert!(check_references(&styled(KfxSymbol::Disc)).is_empty());
+        assert!(check_references(&styled(KfxSymbol::Numeric)).is_empty());
+    }
+
+    /// §9.1 — a `landmark_type` names a landmark or one of the `$h1`..`$h6`
+    /// heading levels; anything else reaches the landmark set as nothing.
+    #[test]
+    fn a_landmark_type_outside_the_schema_is_flagged() {
+        let nav = |landmark: KfxSymbol| {
+            let mut book = loader::empty_book_for_test();
+            book.by_type.insert(
+                KfxSymbol::BookNavigation as u64,
+                HashMap::from([(
+                    "nav".to_string(),
+                    IonValue::Struct(vec![(
+                        KfxSymbol::NavContainers as u64,
+                        IonValue::List(vec![IonValue::Struct(vec![(
+                            KfxSymbol::LandmarkType as u64,
+                            IonValue::Symbol(landmark as u64),
+                        )])]),
+                    )]),
+                )]),
+            );
+            book
+        };
+
+        let out = check_nav_vocabulary(&nav(KfxSymbol::Disc));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "landmark-type-unknown");
+        assert_eq!(out[0].location, "disc");
+
+        assert!(check_nav_vocabulary(&nav(KfxSymbol::CoverPage)).is_empty());
+        assert!(check_nav_vocabulary(&nav(KfxSymbol::H2)).is_empty());
+    }
+
+    /// §5.4 — a symbol id past the container's own table names nothing, and
+    /// one inside the declared import but past the shared table names a
+    /// revision this build does not carry.
+    #[test]
+    fn a_symbol_id_that_resolves_to_nothing_is_flagged() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([(
+                "s1".to_string(),
+                IonValue::Struct(vec![(9000, IonValue::Symbol(9001))]),
+            )]),
+        );
+        let out = check_symbol_resolution(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "symbol-unresolved");
+        assert!(out[0].message.contains("$9000"), "{}", out[0].message);
+
+        let mut newer = loader::empty_book_for_test();
+        newer.symbols = loader::SymbolTable::new(900, Vec::new());
+        newer.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([(
+                "s1".to_string(),
+                IonValue::Struct(vec![(KfxSymbol::Style as u64, IonValue::Symbol(860))]),
+            )]),
+        );
+        let out = check_symbol_resolution(&newer);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "symbol-past-shared-table");
+        assert_eq!(out[0].severity, Severity::Info);
+    }
+
+    /// §6.1 — a `style` fragment no element cites ships declarations nothing
+    /// reads.
+    #[test]
+    fn a_style_no_element_cites_is_flagged() {
+        let mut book = book_with_element(IonValue::Struct(vec![
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Text as u64),
+            ),
+            (
+                KfxSymbol::Style as u64,
+                IonValue::Symbol(KfxSymbol::Style as u64),
+            ),
+        ]));
+        book.by_type.insert(
+            KfxSymbol::Style as u64,
+            HashMap::from([
+                ("style".to_string(), IonValue::Struct(vec![])),
+                ("spare".to_string(), IonValue::Struct(vec![])),
+            ]),
+        );
+        let out = check_references(&book);
+        let orphans: Vec<&Finding> = out
+            .iter()
+            .filter(|f| f.rule == "style-unreferenced")
+            .collect();
+        assert_eq!(orphans.len(), 1, "{out:?}");
+        assert_eq!(orphans[0].location, "spare");
+    }
+
+    /// §11.4 — a `font_family` stack headed by a face the book embeds none of
+    /// leaves the device to substitute; a `default`-headed stack asks it to.
+    #[test]
+    fn a_font_family_no_font_fragment_embeds_is_flagged() {
+        let styled = |stack: &str, embedded: Option<&str>| {
+            let mut book = loader::empty_book_for_test();
+            book.by_type.insert(
+                KfxSymbol::Style as u64,
+                HashMap::from([(
+                    "s1".to_string(),
+                    IonValue::Struct(vec![(
+                        KfxSymbol::FontFamily as u64,
+                        IonValue::String(stack.to_string()),
+                    )]),
+                )]),
+            );
+            if let Some(family) = embedded {
+                book.by_type.insert(
+                    KfxSymbol::Font as u64,
+                    HashMap::from([(
+                        "f1".to_string(),
+                        IonValue::Struct(vec![
+                            (
+                                KfxSymbol::FontFamily as u64,
+                                IonValue::String(family.to_string()),
+                            ),
+                            (
+                                KfxSymbol::Location as u64,
+                                IonValue::String("font/f1".to_string()),
+                            ),
+                        ]),
+                    )]),
+                );
+                book.raw_media.insert("font/f1".to_string(), vec![0u8; 4]);
+                book.font_locations.insert("font/f1".to_string());
+            }
+            check_references(&book)
+                .into_iter()
+                .filter(|f| f.rule == "font-family-unembedded")
+                .collect::<Vec<_>>()
+        };
+
+        let out = styled("cover-Charis, serif", None);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].location, "cover-Charis");
+
+        assert!(styled("cover-Charis, serif", Some("cover-Charis")).is_empty());
+        assert!(styled("default, serif", None).is_empty());
     }
 }

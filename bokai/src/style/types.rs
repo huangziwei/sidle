@@ -16,10 +16,9 @@ impl StyleId {
 pub struct ComputedStyle {
     // Font properties
     pub font_family: Option<String>,
-    /// Computed font size. The cascade resolves declarations to absolute
-    /// `Px` (em/% against the parent, rem against the root); `Auto` means
-    /// no declaration applied and the root default is in effect. Styles
-    /// built outside the cascade (e.g. KFX import) may hold relative units.
+    /// Computed font size: absolute `Px` from the cascade, `Auto` where no
+    /// declaration applied. A style built outside the cascade may hold a
+    /// relative unit.
     pub font_size: Length,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
@@ -28,12 +27,8 @@ pub struct ComputedStyle {
     pub color: Option<Color>,
     pub background_color: Option<Color>,
 
-    // Background image. `background_image` holds an archive-relative asset
-    // path in the same string space as `Semantics::src` — importers resolve
-    // the CSS `url()` against the stylesheet's own location, so consumers
-    // never have to know where the rule was written. Publishers paint
-    // section-break ornaments this way (`hr { background: url(x.jpg)
-    // no-repeat center }`), so dropping it loses a picture, not a flourish.
+    // `background_image` holds an archive-relative asset path in the same
+    // string space as `Semantics::src`.
     pub background_image: Option<String>,
     pub background_repeat: BackgroundRepeat,
     pub background_size: BackgroundSize,
@@ -219,14 +214,7 @@ impl ComputedStyle {
 
     /// Check if the list style is ordered (numbered).
     pub fn is_ordered_list(&self) -> bool {
-        matches!(
-            self.list_style_type,
-            ListStyleType::Decimal
-                | ListStyleType::LowerAlpha
-                | ListStyleType::UpperAlpha
-                | ListStyleType::LowerRoman
-                | ListStyleType::UpperRoman
-        )
+        self.list_style_type.is_ordered()
     }
 
     /// Check if the style uses small-caps font variant.

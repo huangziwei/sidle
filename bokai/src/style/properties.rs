@@ -8,24 +8,8 @@ use std::hash::{Hash, Hasher};
 
 use super::ToCss;
 
-/// Macro for defining CSS keyword enums with automatic ToCss implementation.
-///
-/// Inspired by lightningcss's `enum_property!` macro, this reduces boilerplate
-/// for enums that map directly to CSS keywords.
-///
-/// # Example
-///
-/// ```ignore
-/// enum_property! {
-///     /// Font style (normal, italic, oblique).
-///     pub enum FontStyle {
-///         #[default]
-///         Normal => "normal",
-///         Italic => "italic",
-///         Oblique => "oblique",
-///     }
-/// }
-/// ```
+/// Define a CSS keyword enum: each variant paired with its keyword, with
+/// `as_str`, `from_css` and a `ToCss` implementation generated from the pairs.
 macro_rules! enum_property {
     (
         $(#[$meta:meta])*
@@ -125,8 +109,8 @@ enum_property! {
 }
 
 enum_property! {
-    /// Hyphenation mode.
-    /// Default is `Manual` so that explicit `hyphens: auto` is emitted in KFX output.
+    /// Hyphenation mode. `Manual` is the default, which leaves an explicit
+    /// `hyphens: auto` to be emitted.
     pub enum Hyphens {
         Auto => "auto",
         #[default]
@@ -182,11 +166,8 @@ enum_property! {
 }
 
 /// How a background image is scaled into its box (`background-size`).
-///
-/// `Cover` and `Contain` are keywords, not lengths: they depend on the box's
-/// measured aspect ratio, which no stylesheet-time value can stand in for. A
-/// consumer that cannot express them says so at the point of export rather
-/// than having the distinction quietly flattened here.
+/// `Cover` and `Contain` are keywords, not lengths: each depends on the box's
+/// measured aspect ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BackgroundSize {
     /// Not declared — the picture is drawn at its intrinsic size.
@@ -217,15 +198,9 @@ impl ToCss for BackgroundSize {
 }
 
 enum_property! {
-    /// Border style values.
-    ///
-    /// `Unset` — not `None` — is the default, because "the source declared
-    /// no border" and "the source declared `border: none`" are different
-    /// facts wherever the consumer's user-agent stylesheet draws a border by
-    /// itself. `<hr>` is the case that matters: every renderer rules a line
-    /// across an `<hr>` unless told not to, so collapsing an explicit
-    /// `border: none` into the default meant the line came back on the other
-    /// side of the conversion. Only `Unset` is skipped by the exporters.
+    /// Border style values. `Unset` is the default and states that the source
+    /// declared no border; `None` states that it declared `border: none`. The
+    /// exporters skip `Unset` alone.
     pub enum BorderStyle {
         #[default]
         Unset => "unset",
@@ -242,10 +217,8 @@ enum_property! {
 }
 
 impl BorderStyle {
-    /// Whether this style paints a line. Both "no border declared"
-    /// (`Unset`) and "explicitly no border" (`None`) paint nothing — they
-    /// differ only in what they mean to a consumer that has a default of
-    /// its own.
+    /// True for a style that paints a line. `Unset` and `None` both paint
+    /// nothing.
     #[inline]
     pub fn draws(&self) -> bool {
         !matches!(self, BorderStyle::Unset | BorderStyle::None)
@@ -358,10 +331,9 @@ enum_property! {
 }
 
 enum_property! {
-    /// CSS text-orientation values. Controls glyph orientation in vertical
-    /// writing modes. `mixed` is the spec initial value (CJK upright, Latin
-    /// sideways); `upright` forces everything upright; `sideways` lays the
-    /// entire line on its side. EPUBs commonly use vendor-prefixed forms.
+    /// CSS text-orientation values, the glyph orientation of a vertical
+    /// writing mode: `mixed` (CJK upright, Latin sideways) is the initial
+    /// value, `upright` uprights every glyph, `sideways` lays the line down.
     pub enum TextOrientation {
         #[default]
         Mixed => "mixed",
@@ -396,10 +368,8 @@ enum_property! {
     }
 }
 
-/// CSS text-emphasis-position — over/under plus optional left/right.
-/// The CSS shorthand allows the two idents in any order, e.g.
-/// `over right` == `right over`. Splits into horizontal + vertical for KFX,
-/// matching the two-symbol KFX representation.
+/// CSS text-emphasis-position: over/under plus optional left/right, in either
+/// order. Splits into the horizontal and vertical halves KFX states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TextEmphasisPosition {
     /// Vertical axis (over/under) — maps to KFX text_emphasis_position_horizontal.
@@ -545,6 +515,20 @@ enum_property! {
         LowerRoman => "lower-roman",
         /// Uppercase roman numerals
         UpperRoman => "upper-roman",
+    }
+}
+
+impl ListStyleType {
+    /// True for a marker that numbers its items.
+    pub fn is_ordered(self) -> bool {
+        matches!(
+            self,
+            Self::Decimal
+                | Self::LowerAlpha
+                | Self::UpperAlpha
+                | Self::LowerRoman
+                | Self::UpperRoman
+        )
     }
 }
 
