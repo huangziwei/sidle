@@ -66,9 +66,17 @@
 //!   table's grid, and a `column_format` ($152) states one entry per column of
 //!   the widest row, counting both spans of §7.6. Gathered by rule 3's walk
 //!   and a sweep of the `style` entities.
-//! - **Rule 14, position arithmetic** — the `position_id_map` span shape
-//!   partitions the pid axis from 0 with no gap or overlap, and
-//!   `yj.location_pid_map` boundaries never go backwards.
+//! - **Rule 14, the reading-position chain** — the `position_id_map` ($265)
+//!   span shape partitions the pid axis from 0 with no gap or overlap, and
+//!   `yj.location_pid_map` ($621) boundaries never go backwards. Along the
+//!   chain of §10: every element a storyline holds carries a position and
+//!   every positioned id belongs to a content fragment, each
+//!   `section_position_id_map` ($609) walk ends at the length its span
+//!   declares, every `location_map` ($550) coordinate resolves through the pid
+//!   map, the two location fragments state one axis where both are present,
+//!   and a fixed-layout book opens one Location per page and repeats the first
+//!   (§14.2). A book carrying positions and no location map is reported as
+//!   left to the device's 110-pid spacing (info).
 //! - **Rule 15, layout traps** — two §8 shapes that render wrong and raise
 //!   no error: a `px` length on a book declaring no fixed layout, read as a
 //!   device dot (§8.2); and `box_align` ($580) on a `type: text`, which places
@@ -84,6 +92,7 @@ use crate::formats::kfx::container::{ContainerHeader, ContainerInfo, get_field};
 use crate::formats::kfx::fxl;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, BookData};
+use crate::formats::kfx::position;
 use crate::formats::kfx::symbols::KfxSymbol;
 
 use crate::validate::{Finding, FixHint, Severity};
@@ -525,6 +534,9 @@ struct WalkDefects {
     rowless_tables: usize,
     /// Every element id ($155) the walk has met.
     seen_eids: HashSet<i64>,
+    /// The element ids ($155) met inside a `storyline` ($259), which §10.2
+    /// gives a reading position each.
+    story_eids: HashSet<i64>,
     /// Element ids ($155) carried by more than one element.
     duplicate_eids: BTreeSet<i64>,
     /// Elements whose `style_events` ($142) reach past their base text.
@@ -858,6 +870,7 @@ fn check_references(book: &BookData) -> Vec<Finding> {
     }
     findings.extend(check_anchor_targets(book, &defects.seen_eids));
     findings.extend(check_nav_positions(book, &defects));
+    findings.extend(check_position_chain(book, &defects));
     findings
 }
 
@@ -1596,6 +1609,8 @@ struct Frame<'a> {
     section: &'a str,
     /// The enclosing element's resolved `writing_mode` ($560) (§8.6).
     writing_mode: &'static str,
+    /// Whether the walk has descended into a `storyline` ($259).
+    in_storyline: bool,
 }
 
 impl<'a> Frame<'a> {
@@ -1605,6 +1620,7 @@ impl<'a> Frame<'a> {
             parent_type: None,
             section,
             writing_mode: index.document_writing_mode,
+            in_storyline: false,
         }
     }
 
@@ -1613,6 +1629,7 @@ impl<'a> Frame<'a> {
     fn nested(self) -> Self {
         Self {
             parent_type: None,
+            in_storyline: true,
             ..self
         }
     }
@@ -1731,10 +1748,13 @@ fn walk_refs(
 
             // §7.4 — one element per id, book-wide.
             let eid = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int());
-            if let Some(eid) = eid
-                && !out.seen_eids.insert(eid)
-            {
-                out.duplicate_eids.insert(eid);
+            if let Some(eid) = eid {
+                if !out.seen_eids.insert(eid) {
+                    out.duplicate_eids.insert(eid);
+                }
+                if frame.in_storyline {
+                    out.story_eids.insert(eid);
+                }
             }
 
             // §8.2 / §11.1 — the element's own inline style properties.
@@ -2401,18 +2421,36 @@ fn check_position_arithmetic(book: &BookData) -> Vec<Finding> {
         }
     }
 
-    for (index, pid, prev) in descending_locations(book) {
-        out.push(warning(
-            "location-boundaries-unordered",
-            &index.to_string(),
-            format!(
-                "yj.location_pid_map boundary {index} is pid {pid}, below the {prev} before it — \
-                 the Location numbers it feeds don't advance"
-            ),
-            None,
-        ));
-    }
+    out.extend(unordered_locations(
+        "yj.location_pid_map ($621)",
+        &position::PositionFragments::from_book(book).location_pids(),
+    ));
 
+    out
+}
+
+/// Rule 14. Every boundary in `pids` that sits below its predecessor, as one
+/// finding each. Amazon repeats a pid where two Locations fall in one place;
+/// equality is not a defect.
+fn unordered_locations(source: &str, pids: &[i64]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut previous: Option<i64> = None;
+    for (index, pid) in pids.iter().copied().enumerate() {
+        if let Some(prev) = previous
+            && pid < prev
+        {
+            out.push(warning(
+                "location-boundaries-unordered",
+                &index.to_string(),
+                format!(
+                    "{source} boundary {index} is pid {pid}, below the {prev} before it — the \
+                     Location numbers it feeds don't advance"
+                ),
+                None,
+            ));
+        }
+        previous = Some(pid);
+    }
     out
 }
 
@@ -2451,42 +2489,234 @@ fn position_spans(book: &BookData) -> Vec<(String, i64, i64)> {
     spans
 }
 
-/// Every `yj.location_pid_map` ($621) boundary that sits below its
-/// predecessor, as `(index, pid, predecessor)`. Amazon repeats a pid where two
-/// Locations fall in one place; equality is not a defect.
-fn descending_locations(book: &BookData) -> Vec<(usize, i64, i64)> {
+/// Rule 14. The `eid → pid → Location` chain of §10 read end to end: every
+/// element a storyline holds carries a position, every positioned id belongs to
+/// a content fragment, each `section_position_id_map` ($609) walk ends at the
+/// length its span declares, every `location_map` ($550) coordinate resolves
+/// through the pid map, `yj.location_pid_map` ($621) states the same
+/// boundaries where both are present, and a fixed-layout book names one
+/// Location per page (§14.2).
+fn check_position_chain(book: &BookData, defects: &WalkDefects) -> Vec<Finding> {
+    let fragments = position::PositionFragments::from_book(book);
+    let axis = fragments.pid_axis();
+    let pid_of = axis.positions();
+    if pid_of.is_empty() {
+        return Vec::new(); // No positions at all: §14.2's SHOULD, and rule 8's ground.
+    }
     let mut out = Vec::new();
-    let Some(maps) = book.by_type.get(&(KfxSymbol::YjLocationPidMap as u64)) else {
-        return out;
-    };
-    for value in maps.values() {
-        let Some(groups) = value.unwrap_annotated().as_list() else {
+
+    // §10.2 — every element a storyline holds is addressable.
+    let unpositioned = defects
+        .story_eids
+        .iter()
+        .filter(|eid| !pid_of.contains_key(eid))
+        .count();
+    if unpositioned > 0 {
+        out.push(warning(
+            "element-unpositioned",
+            "<storyline>",
+            format!(
+                "{unpositioned} storyline elements carry no position_id_map ($265) entry — page \
+                 turning reaches them at no position"
+            ),
+            Some(FixHint::new(
+                "rebuild-position-map",
+                "give every storyline element a position id",
+            )),
+        ));
+    }
+
+    // §10.2 — the ids the position map addresses that no storyline holds are
+    // the section page templates.
+    let content = content_element_ids(book);
+    let stray: BTreeSet<i64> = pid_of
+        .keys()
+        .copied()
+        .filter(|eid| !content.contains(eid))
+        .collect();
+    for eid in &stray {
+        out.push(warning(
+            "position-id-unknown",
+            &eid.to_string(),
+            format!(
+                "the position_id_map ($265) positions element {eid}, which no storyline, section \
+                 or structure carries — the Location it feeds opens on nothing"
+            ),
+            None,
+        ));
+    }
+
+    // §10.2 — a section's walk ends on eid 0 at the length its span declares.
+    for walk in fragments.section_walks() {
+        let name = book.symbols.resolve(walk.section).to_string();
+        let Some(end) = walk.terminator_pid else {
+            out.push(warning(
+                "section-walk-unterminated",
+                &name,
+                format!(
+                    "section {name:?}'s section_position_id_map ($609) holds no [advance, 0] \
+                     entry — its last element states no length"
+                ),
+                None,
+            ));
             continue;
         };
-        for group in groups {
-            let Some(pids) = group
-                .unwrap_annotated()
-                .as_struct()
-                .and_then(|fields| get_field(fields, KfxSymbol::Locations as u64))
-                .and_then(|v| v.unwrap_annotated().as_list())
-            else {
-                continue;
+        if let Some(length) = walk.declared_length
+            && end != length
+        {
+            out.push(warning(
+                "section-walk-length-mismatch",
+                &name,
+                format!(
+                    "section {name:?}'s section_position_id_map ($609) ends at pid {end} and its \
+                     position_id_map span declares length {length} — the section ends in two places"
+                ),
+                None,
+            ));
+        }
+    }
+
+    // §10.3 — a location_map coordinate resolves through the pid map.
+    let anchors = fragments.location_anchors();
+    let unresolved: BTreeSet<i64> = anchors
+        .iter()
+        .map(|(eid, _)| *eid)
+        .filter(|eid| !pid_of.contains_key(eid))
+        .collect();
+    for eid in &unresolved {
+        out.push(warning(
+            "location-target-unresolved",
+            &eid.to_string(),
+            format!(
+                "a location_map ($550) boundary names element {eid}, which the position_id_map \
+                 gives no pid — the Location it opens has no place on the axis"
+            ),
+            None,
+        ));
+    }
+
+    // §10.3 — the boundaries a location_map states run forward on the pid axis
+    // it resolves against.
+    let resolved: Vec<i64> = anchors
+        .iter()
+        .filter_map(|(eid, offset)| axis.position(*eid, *offset))
+        .collect();
+    if unresolved.is_empty() {
+        out.extend(unordered_locations("location_map ($550)", &resolved));
+    }
+
+    // §10.3 — where both maps are present they divide one axis.
+    let pids = fragments.location_pids();
+    if !anchors.is_empty() && !pids.is_empty() && unresolved.is_empty() {
+        let differs = resolved.iter().zip(&pids).position(|(a, b)| a != b);
+        if differs.is_some() || resolved.len() != pids.len() {
+            let detail = match differs {
+                Some(index) => format!(
+                    "boundary {index} is pid {} against {}",
+                    resolved[index], pids[index]
+                ),
+                None => format!("{} boundaries against {}", resolved.len(), pids.len()),
             };
-            let mut previous: Option<i64> = None;
-            for (index, entry) in pids.iter().enumerate() {
-                let Some(pid) = entry.as_int() else {
-                    continue;
-                };
-                if let Some(prev) = previous
-                    && pid < prev
-                {
-                    out.push((index, pid, prev));
-                }
-                previous = Some(pid);
-            }
+            out.push(warning(
+                "location-maps-disagree",
+                "<location_map>",
+                format!(
+                    "location_map ($550) and yj.location_pid_map ($621) disagree — {detail}, so \
+                     the Location numbers follow whichever map a reader takes"
+                ),
+                None,
+            ));
+        }
+    }
+
+    // §14.2 — a fixed-layout book names one Location per page and repeats the
+    // first, putting Location 1 at the book's start.
+    let pages: usize = fixed_layout_pages(book)
+        .iter()
+        .map(|(_, leaves)| leaves.len())
+        .sum();
+    let places = if anchors.is_empty() {
+        pids.iter().collect::<BTreeSet<_>>().len()
+    } else {
+        anchors.iter().collect::<BTreeSet<_>>().len()
+    };
+    if pages > 0 && places > 0 {
+        if places != pages {
+            out.push(warning(
+                "fixed-layout-location-count",
+                "<location_map>",
+                format!(
+                    "the location map opens on {places} places over {pages} pages — a \
+                     fixed-layout book names one Location per page"
+                ),
+                None,
+            ));
+        }
+        if anchors.len() > 1 && anchors[0] != anchors[1] {
+            out.push(warning(
+                "fixed-layout-location-start",
+                "<location_map>",
+                format!(
+                    "the location_map ($550) opens on elements {} and {} — a fixed-layout book \
+                     repeats its first boundary, putting Location 1 at the book's start",
+                    anchors[0].0, anchors[1].0
+                ),
+                None,
+            ));
+        }
+    }
+
+    // §10.3 — with no location map the device spaces Locations itself.
+    if anchors.is_empty() && pids.is_empty() {
+        out.push(info(
+            "location-map-absent",
+            "<container>",
+            "the book carries positions and neither location_map ($550) nor yj.location_pid_map \
+             ($621) — the device spaces Locations every 110 pids, restarting at each section",
+        ));
+    }
+
+    out
+}
+
+/// Every element id ($155) a content fragment carries: the `storyline` ($259)
+/// bodies, the page templates of the `section` ($260) fragments, and the
+/// `structure` ($608) fragments a page template stands in for.
+fn content_element_ids(book: &BookData) -> HashSet<i64> {
+    let mut out = HashSet::new();
+    for ftype in [
+        KfxSymbol::Storyline,
+        KfxSymbol::Section,
+        KfxSymbol::Structure,
+    ] {
+        let Some(frags) = book.by_type.get(&(ftype as u64)) else {
+            continue;
+        };
+        for frag in frags.values() {
+            collect_element_ids(frag, &mut out);
         }
     }
     out
+}
+
+/// Add every `$155 id` at any depth of `value` to `out`.
+fn collect_element_ids(value: &IonValue, out: &mut HashSet<i64>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(eid) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int()) {
+                out.insert(eid);
+            }
+            for (_, v) in fields {
+                collect_element_ids(v, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_element_ids(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ============================================================================
@@ -2727,17 +2957,15 @@ impl fxl::PageContext for LoadedPages<'_> {
     }
 }
 
-/// §12.3. Each page of a fixed-layout book carries the viewport it is drawn
-/// into: `fixed_width` ($66) and `fixed_height` ($67) on the leaf container
-/// the page template resolves to, directly or through the per-page containers
-/// of a `page_spread` / `facing_page` storyline. A page declaring neither
-/// states no canvas for its content to be fitted to.
-fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
-    let mut out = Vec::new();
+/// Each reading-order section's pages, resolved through its page template
+/// (§12.3). Empty for a book declaring no fixed layout, whose sections
+/// paginate by reflow.
+fn fixed_layout_pages(book: &BookData) -> Vec<(String, Vec<IonValue>)> {
     if !fxl::book_signals(book).fixed_layout {
-        return out;
+        return Vec::new();
     }
-    let pages = LoadedPages(book);
+    let context = LoadedPages(book);
+    let mut out = Vec::new();
     for section_name in reading_order_sections(book) {
         let Some(template) = lookup(book, KfxSymbol::Section, &section_name)
             .and_then(|v| v.unwrap_annotated().as_struct())
@@ -2747,10 +2975,26 @@ fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
         else {
             continue;
         };
-        let leaves = fxl::page_leaves(template, &book.symbols, "ltr", &pages);
+        let leaves = fxl::page_leaves(template, &book.symbols, "ltr", &context)
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect();
+        out.push((section_name, leaves));
+    }
+    out
+}
+
+/// §12.3. Each page of a fixed-layout book carries the viewport it is drawn
+/// into: `fixed_width` ($66) and `fixed_height` ($67) on the leaf container
+/// the page template resolves to, directly or through the per-page containers
+/// of a `page_spread` / `facing_page` storyline. A page declaring neither
+/// states no canvas for its content to be fitted to.
+fn check_fixed_layout_pages(book: &BookData) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (section_name, leaves) in fixed_layout_pages(book) {
         let unsized_pages = leaves
             .iter()
-            .filter(|(leaf, _)| {
+            .filter(|leaf| {
                 let Some(fields) = leaf.unwrap_annotated().as_struct() else {
                     return true;
                 };
@@ -4205,6 +4449,277 @@ mod tests {
         assert!(check_position_arithmetic(&repeated).is_empty());
     }
 
+    /// A `position_id_map` in the `{eid, pid}` shape, closed by the `{eid: 0}`
+    /// entry stating where the axis ends.
+    fn pid_pairs(pairs: &[(i64, i64)], end: i64) -> HashMap<String, IonValue> {
+        let entry = |eid: i64, pid: i64| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Eid as u64, IonValue::Int(eid)),
+                (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+            ])
+        };
+        let mut entries: Vec<IonValue> = pairs.iter().map(|(eid, pid)| entry(*eid, *pid)).collect();
+        entries.push(entry(0, end));
+        HashMap::from([("pidmap".to_string(), IonValue::List(entries))])
+    }
+
+    /// A `location_map` ($550) listing `(element id, offset)` boundaries.
+    fn location_map(bounds: &[(i64, i64)]) -> HashMap<String, IonValue> {
+        let entries = bounds
+            .iter()
+            .map(|(eid, offset)| {
+                IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(*eid)),
+                    (KfxSymbol::Offset as u64, IonValue::Int(*offset)),
+                ])
+            })
+            .collect();
+        HashMap::from([(
+            "locmap".to_string(),
+            IonValue::List(vec![IonValue::Struct(vec![(
+                KfxSymbol::Locations as u64,
+                IonValue::List(entries),
+            )])]),
+        )])
+    }
+
+    /// A `yj.location_pid_map` ($621) listing boundary pids.
+    fn location_pid_map(pids: &[i64]) -> HashMap<String, IonValue> {
+        HashMap::from([(
+            "locpidmap".to_string(),
+            IonValue::List(vec![IonValue::Struct(vec![(
+                KfxSymbol::Locations as u64,
+                IonValue::List(pids.iter().copied().map(IonValue::Int).collect()),
+            )])]),
+        )])
+    }
+
+    /// An element carrying nothing but its id ($155).
+    fn element(eid: i64) -> IonValue {
+        IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(eid))])
+    }
+
+    /// A book whose one section's page template carries `template_eid` and
+    /// names a storyline holding `elements`, with a location_map opening on
+    /// the template.
+    fn book_with_storyline(template_eid: i64, elements: Vec<IonValue>) -> BookData {
+        let mut book = loader::empty_book_for_test();
+        book.by_type
+            .insert(KfxSymbol::DocumentData as u64, doc_data(&["sec1"]));
+        let template = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(template_eid)),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::String("story1".to_string()),
+            ),
+        ]);
+        book.by_type.insert(
+            KfxSymbol::Section as u64,
+            HashMap::from([(
+                "sec1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::PageTemplates as u64,
+                    IonValue::List(vec![template]),
+                )]),
+            )]),
+        );
+        book.by_type.insert(
+            KfxSymbol::Storyline as u64,
+            HashMap::from([(
+                "story1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::ContentList as u64,
+                    IonValue::List(elements),
+                )]),
+            )]),
+        );
+        book.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(template_eid, 0)]),
+        );
+        book
+    }
+
+    /// §10.2. Every element a storyline holds carries a position; page turning
+    /// reaches one that does not at no coordinate.
+    #[test]
+    fn a_storyline_element_without_a_position_is_flagged() {
+        let mut book = book_with_storyline(1, vec![element(2), element(3)]);
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1)], 2),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "element-unpositioned");
+        assert_eq!(out[0].severity, Severity::Warning);
+
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1), (3, 2)], 3),
+        );
+        assert!(check_references(&book).is_empty());
+    }
+
+    /// §10.2. The positioned ids no storyline holds are the page templates;
+    /// any other is a Location opening on nothing.
+    #[test]
+    fn a_position_no_content_fragment_carries_is_flagged() {
+        let mut book = book_with_storyline(1, vec![element(2)]);
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1), (9, 2)], 3),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "position-id-unknown");
+        assert_eq!(out[0].location, "9");
+    }
+
+    /// §9.4. A `location_map` boundary names an element the pid map places.
+    #[test]
+    fn a_location_boundary_naming_an_unpositioned_element_is_flagged() {
+        let mut book = book_with_storyline(1, vec![element(2)]);
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1)], 2),
+        );
+        book.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(1, 0), (7, 0)]),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "location-target-unresolved");
+        assert_eq!(out[0].location, "7");
+    }
+
+    /// §10.3. Where a book carries both location fragments they divide one
+    /// axis, `location_map`'s coordinates resolving to the pids `$621` lists.
+    #[test]
+    fn the_two_location_maps_must_state_one_axis() {
+        let mut book = book_with_storyline(1, vec![element(2)]);
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 4)], 8),
+        );
+        book.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(1, 0), (2, 2)]),
+        );
+        book.by_type.insert(
+            KfxSymbol::YjLocationPidMap as u64,
+            location_pid_map(&[0, 6]),
+        );
+        assert!(check_references(&book).is_empty());
+
+        book.by_type.insert(
+            KfxSymbol::YjLocationPidMap as u64,
+            location_pid_map(&[0, 5]),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "location-maps-disagree");
+        assert!(out[0].message.contains("boundary 1 is pid 6 against 5"));
+    }
+
+    /// §10.2. A section's walk ends on the `[advance, 0]` entry, at the length
+    /// its `position_id_map` span declares.
+    #[test]
+    fn a_section_walk_ends_at_the_length_its_span_declares() {
+        let section = KfxSymbol::Sections as u64;
+        let span = |length: i64| {
+            HashMap::from([(
+                "pidmap".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::Contains as u64,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (KfxSymbol::SectionName as u64, IonValue::Symbol(section)),
+                        (KfxSymbol::Pid as u64, IonValue::Int(0)),
+                        (KfxSymbol::Length as u64, IonValue::Int(length)),
+                    ])]),
+                )]),
+            )])
+        };
+        let walk = |entries: Vec<IonValue>| {
+            HashMap::from([(
+                "walk".to_string(),
+                IonValue::Struct(vec![
+                    (KfxSymbol::SectionName as u64, IonValue::Symbol(section)),
+                    (KfxSymbol::Contains as u64, IonValue::List(entries)),
+                ]),
+            )])
+        };
+        let step = |advance: i64, eid: i64| {
+            IonValue::List(vec![IonValue::Int(advance), IonValue::Int(eid)])
+        };
+
+        let mut book = book_with_storyline(1, vec![element(2)]);
+        book.by_type
+            .insert(KfxSymbol::PositionIdMap as u64, span(4));
+        book.by_type.insert(
+            KfxSymbol::SectionPositionIdMap as u64,
+            walk(vec![step(0, 1), step(1, 2), step(3, 0)]),
+        );
+        let fired = |book: &BookData, rule: &str| {
+            check_position_chain(book, &WalkDefects::default())
+                .iter()
+                .any(|f| f.rule == rule)
+        };
+        assert!(!fired(&book, "section-walk-length-mismatch"));
+
+        book.by_type
+            .insert(KfxSymbol::PositionIdMap as u64, span(5));
+        assert!(fired(&book, "section-walk-length-mismatch"));
+
+        book.by_type
+            .insert(KfxSymbol::PositionIdMap as u64, span(4));
+        book.by_type.insert(
+            KfxSymbol::SectionPositionIdMap as u64,
+            walk(vec![step(0, 1), step(1, 2)]),
+        );
+        assert!(fired(&book, "section-walk-unterminated"));
+    }
+
+    /// §10.3. A `location_map` boundary is ordered on the pid axis its
+    /// coordinates resolve against, the same demand `yj.location_pid_map`
+    /// meets on the pids it states outright.
+    #[test]
+    fn location_map_boundaries_never_go_backwards() {
+        let mut book = book_with_storyline(1, vec![element(2), element(3)]);
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 4), (3, 2)], 8),
+        );
+        book.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(1, 0), (2, 0), (3, 0)]),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "location-boundaries-unordered");
+        assert!(
+            out[0].message.starts_with("location_map ($550) boundary 2"),
+            "{out:?}"
+        );
+    }
+
+    /// §10.3. A book with positions and neither location fragment is left to
+    /// the device's own 110-pid spacing.
+    #[test]
+    fn positions_without_a_location_map_are_reported() {
+        let mut book = book_with_storyline(1, vec![element(2)]);
+        book.by_type.remove(&(KfxSymbol::LocationMap as u64));
+        book.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1)], 2),
+        );
+        let out = check_references(&book);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "location-map-absent");
+        assert_eq!(out[0].severity, Severity::Info);
+    }
+
     // --- Rule 5 & 7: the resolution family -------------------------------
 
     /// A one-entry `external_resource` ($164) map, named by its entity id.
@@ -4607,7 +5122,7 @@ mod tests {
     }
 
     /// §8.3. `box_align` places a picture. On a text element it is
-    /// inert — the block lays out flush to the inline start — so it reports as
+    /// inert — the block lays out flush to the inline start — and it reports as
     /// info, not as a break.
     #[test]
     fn box_align_on_a_text_element_is_info() {
@@ -5108,7 +5623,7 @@ mod tests {
     fn a_referenced_nav_container_is_read_for_its_targets() {
         let element = IonValue::Struct(vec![(KfxSymbol::Id as u64, IonValue::Int(849))]);
         let mut book = book_with_element(element);
-        // One local symbol, so the container name resolves to a symbol id.
+        // One local symbol, under which the container name resolves.
         let base = book.symbols.base_len();
         book.symbols =
             crate::formats::kfx::container::SymbolTable::new(base, vec!["n19W".to_string()]);
@@ -5254,6 +5769,88 @@ mod tests {
             storyline(vec![page(Some((1307, 1920))), page(Some((1307, 1920)))]),
         );
         assert!(check_fixed_layout_pages(&both).is_empty());
+    }
+
+    /// §14.2. A fixed-layout book names one Location per page and repeats the
+    /// first, putting Location 1 at the book's start.
+    #[test]
+    fn a_fixed_layout_book_names_one_location_per_page() {
+        // A page container carrying the element id a position addresses it by.
+        let page_at = |eid: i64| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(eid)),
+                (
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Container as u64),
+                ),
+                (
+                    KfxSymbol::Layout as u64,
+                    IonValue::Symbol(KfxSymbol::ScaleFit as u64),
+                ),
+                (KfxSymbol::FixedWidth as u64, IonValue::Int(1307)),
+                (KfxSymbol::FixedHeight as u64, IonValue::Int(1920)),
+            ])
+        };
+        let chain = |book: &BookData| check_position_chain(book, &WalkDefects::default());
+
+        let mut solo = with_feature(book_with_element(page_at(1)), "yj_fixed_layout");
+        solo.by_type
+            .insert(KfxSymbol::PositionIdMap as u64, pid_pairs(&[(1, 0)], 1));
+        solo.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(1, 0), (1, 0)]),
+        );
+        assert!(chain(&solo).is_empty(), "{:?}", chain(&solo));
+
+        let spread = IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(1)),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::PageSpread as u64),
+            ),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::String("story1".to_string()),
+            ),
+        ]);
+        let mut facing = with_feature(book_with_element(spread), "yj_fixed_layout");
+        facing.by_type.insert(
+            KfxSymbol::Storyline as u64,
+            HashMap::from([(
+                "story1".to_string(),
+                IonValue::Struct(vec![(
+                    KfxSymbol::ContentList as u64,
+                    IonValue::List(vec![page_at(2), page_at(3)]),
+                )]),
+            )]),
+        );
+        facing.by_type.insert(
+            KfxSymbol::PositionIdMap as u64,
+            pid_pairs(&[(1, 0), (2, 1), (3, 2)], 3),
+        );
+        facing.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(2, 0), (2, 0), (3, 0)]),
+        );
+        assert!(chain(&facing).is_empty(), "{:?}", chain(&facing));
+
+        // One page of the spread never opens a Location.
+        facing.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(2, 0), (2, 0)]),
+        );
+        let out = chain(&facing);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "fixed-layout-location-count");
+
+        // One Location per page, the first not repeated.
+        facing.by_type.insert(
+            KfxSymbol::LocationMap as u64,
+            location_map(&[(2, 0), (3, 0), (3, 0)]),
+        );
+        let out = chain(&facing);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].rule, "fixed-layout-location-start");
     }
 
     /// §12.1. The fixed-layout capability is declared in two places, and

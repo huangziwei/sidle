@@ -612,11 +612,13 @@ The "Location 1,247" a Kindle displays is the end of a three-stage chain: elemen
 
 ### 10.1. Element id to position id
 
-`$265` `position_id_map` maps element ids to *position ids* (pids), a monotonic fine-grained scale over the whole book. In reflowable books it is a direct list of `{eid, pid}` pairs.
+`$265` `position_id_map` maps element ids to *position ids* (pids), a monotonic fine-grained scale over the whole book. It ships in two shapes, and neither belongs to one kind of book — reflowable and fixed-layout titles both appear in each. One shape is a direct list of `{eid, pid}` pairs; the other partitions the book into per-section spans (§10.2).
+
+The pair list closes with an entry whose `eid` is `0`. Its pid is where the axis ends, one past the last addressable position, and it names no element of the book. An entry may also carry an `offset` ($143), which re-enters an element listed earlier at that character of its base text instead of naming a new one; §10.2 says what those anchors are for.
 
 ### 10.2. Section position maps
 
-In fixed-layout books the same fragment instead partitions the book into per-section spans:
+The same fragment can instead partition the book into per-section spans:
 
 ```
 { contains: [ { section_name: c0,  pid: 0,    length: 2 },
@@ -625,18 +627,21 @@ In fixed-layout books the same fragment instead partitions the book into per-sec
               { section_name: c16, pid: 53,   length: 1898 } ] }
 ```
 
-and each section carries a `$609` `section_position_id_map` holding a compact delta-encoded walk. Its `contains` list mixes two element shapes:
+and each section carries a `$609` `section_position_id_map` holding a compact delta-encoded walk. Its `contains` list mixes three entry shapes:
 
 - `[advance, eid]` — advance the running pid, then assign it to `eid`. An entry whose `eid` is `0` terminates the walk, and the pid then equals the section's length.
 - `advance` alone — the element id is the previous one plus one. This is the compression: consecutive element ids, which are the common case, cost one integer each.
+- `[advance, eid, offset]` — advance, then land on character `offset` of `eid`, an element the walk has already placed.
 
-A reader replays each section's walk starting from that section's base pid to rebuild the same `eid → pid` mapping the reflowable form gives directly.
+A reader replays each section's walk starting from that section's base pid to rebuild the same `eid → pid` mapping the pair shape gives directly.
 
-Every content element a storyline holds is assigned a position. Across Amazon's own fixed-layout books the two sets differ in exactly one direction: the only ids in the position map that no storyline holds are the page templates, one per section. An element that renders but carries no position is unreachable to page turning, and a device that shows one page at a time can find no position to turn to inside a section holding two.
+The third shape is how a text run interrupted by a nested element resumes: the walk enters the nested element and then re-enters the outer one at the character it left off at. The pids the nested element occupies fall between two of the outer element's characters, so a `{id, offset}` coordinate (§9.4) is not `pid + offset`. It is measured from the nearest anchor at or before `offset`, and an offset past an interruption sits further from its element's start than its character count. The `{eid, pid}` shape states the same anchors with an `offset` field (§10.1).
+
+Every content element a storyline holds is assigned a position. Across Amazon's own books, reflowable and fixed-layout alike, the two sets differ in exactly one direction: the only ids in the position map that no storyline holds are the page templates, one per section. An element that renders but carries no position is unreachable to page turning, and a device that shows one page at a time can find no position to turn to inside a section holding two.
 
 ### 10.3. Locations
 
-Pids are too fine to show a reader. `$550` `location_map` divides the book into displayed Locations by listing boundary positions as `{id, offset}` pairs, resolved through the pid map. `$621` `yj.location_pid_map` is the newer alternative, listing boundary pids directly and needing no resolution. Where both are present, `$550` takes precedence.
+Pids are too fine to show a reader. `$550` `location_map` divides the book into displayed Locations by listing boundary positions as `{id, offset}` pairs, resolved through the pid map as §10.2 describes. `$621` `yj.location_pid_map` is the newer alternative, listing boundary pids directly and needing no resolution. Where both are present, `$550` takes precedence, and the two divide the same axis: resolving every `$550` coordinate reproduces the `$621` list entry for entry.
 
 > **Note**
 >
@@ -833,7 +838,7 @@ A reader carrying its own `YJ_symbols` **should** carry the newest revision it c
 
 A conforming producer **must** emit a symbol table whose declared import `max_id` matches the shared-table revision actually used, **must** assign every content element a unique element id, and **must** emit a genuine SHA-1 in the generator trailer (§3.5).
 
-A producer **must** give every content element a position (§10.2). A producer **should** emit a position map: a book without one has no addressable reading positions — no Locations, no syncing, no highlights.
+A producer **must** give every content element a position (§10.2), and **must** close the position map it emits: the `{eid, pid}` list with its `{eid: 0}` entry, each section walk with its `[advance, 0]` entry at the length the section's span declares. Nothing else states where the last element ends. A producer **should** emit a position map at all: a book without one has no addressable reading positions — no Locations, no syncing, no highlights.
 
 A producer of a fixed-layout book **should** emit a `location_map` naming one Location per page — the first element id that page occupies, and the first entry repeated so Location 1 falls at the book's start. Every Amazon fixed-layout book carries one. Left to the 110-pid fallback (§10.3), which restarts at each section, a two-page spread section contains no boundary between its pages.
 

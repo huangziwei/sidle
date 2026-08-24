@@ -408,8 +408,7 @@ fn count_toc_entries<T>(entries: &[T], children: fn(&T) -> &Vec<T>) -> usize {
         .sum()
 }
 
-/// Print a proposed EPUB TOC as the tree it is, indenting one level per depth —
-/// a nested proposal printed flat reads as a much shorter one.
+/// Print a proposed EPUB TOC as the tree it is, indenting one level per depth.
 fn print_epub_toc(entries: &[bokai::model::TocEntry], depth: usize, n: &mut usize) {
     for entry in entries {
         *n += 1;
@@ -1459,7 +1458,7 @@ fn validate_epub_diff(
             "{}",
             serde_json::to_string(&payload).map_err(|e| e.to_string())?
         );
-        // Batch tools read the verdict from stdout; don't double-signal.
+        // The verdict prints to stdout; the exit status stays 0.
         return Ok(());
     }
 

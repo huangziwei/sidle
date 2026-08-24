@@ -389,9 +389,8 @@ fn build_kfx_container(
             }
 
             // The image resources this section depends on, for the
-            // container_entity_map dependency graph. Only a path the book
-            // holds an asset for was named in pass 1; a source that points at
-            // a file its container never carried names nothing.
+            // container_entity_map dependency graph. Pass 1 names a path the
+            // book holds an asset for, and no other.
             for node_id in chapter.iter_dfs() {
                 let Some(node) = chapter.node(node_id) else {
                     continue;
@@ -973,7 +972,7 @@ fn content_feature(namespace: &str, key: &str, major: i64) -> IonValue {
 
 /// The `content_features` entries every route owes for the media it actually
 /// ships. A book whose plates a reader cannot decode without the declaration
-/// is the defect these close, so each route appends them to its own list.
+/// is the defect these close, and every route appends them to its own list.
 fn media_feature_entries(facts: ContentFacts) -> Vec<IonValue> {
     const YJ: &str = "com.amazon.yjconversion";
     let mut entries = Vec::new();
@@ -2153,6 +2152,11 @@ fn build_illustration_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> I
 
         let wrapper_id = ctx.fragment_ids.next_id();
         let image_id = ctx.fragment_ids.next_id();
+        // Both elements the storyline holds take a reading position, in
+        // document order: §10.2 gives every content element one, and the
+        // chapter-start anchor lands on the wrapper.
+        ctx.record_content_id(wrapper_id);
+        ctx.record_content_length(wrapper_id, 1);
         ctx.record_content_id(image_id);
         ctx.record_content_length(image_id, 1);
         ctx.resolve_pending_chapter_anchor(wrapper_id);
@@ -3590,7 +3594,7 @@ fn image_fxl_to_kfx(
     // ---- Synthesis (reference entity order) ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
     // 1. content_features ($585). Its media entries describe plates encoded
-    //    further down, so this holds the slot and is rebuilt from the finished
+    //    further down: this holds the slot and is rebuilt from the finished
     //    fragments; the entity order is part of the format.
     let content_features_index = fragments.len();
     fragments.push(build_manga_content_features_fragment(
@@ -4889,7 +4893,7 @@ pub fn pdf_to_kfx(
     // ---- Synthesis: build fragments in reference entity order ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
     // 1. content_features ($585). Its media entries describe resources built
-    //    further down, so this holds the slot and is rebuilt from the finished
+    //    further down: this holds the slot and is rebuilt from the finished
     //    fragments; the entity order is part of the format.
     let content_features_index = fragments.len();
     fragments.push(build_pdf_content_features_fragment(

@@ -3,9 +3,9 @@
 //! A Kindle addresses text by element id and displays progress as "Loc N of
 //! M". Both halves of that chain — the element→coordinate map and the location
 //! boundaries — come out of the container, and a device writes the element ids
-//! into every annotation it syncs. So the numbers this test pins are not
-//! cosmetic: a highlight made on hardware only lands on the right words if the
-//! scale read here matches the one the device used.
+//! into every annotation it syncs. The numbers pinned here are stored user
+//! data: a highlight made on hardware lands on the right words only while this
+//! scale matches the one the device used.
 
 mod common;
 
@@ -40,7 +40,7 @@ fn reflowable_kfx_positions_are_pinned() {
     };
     let (elements, locations, digest) = chain(&kfx);
     assert_eq!((elements, locations), (1918, 8117), "scale shape");
-    assert_eq!(digest, 0xc9a7_9b52_4a0d_b8e0, "eid → pid → Location moved");
+    assert_eq!(digest, 0xbaab_3895_4479_563d, "eid → pid → Location moved");
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn short_kfx_positions_are_pinned() {
     };
     let (elements, locations, digest) = chain(&kfx);
     assert_eq!((elements, locations), (881, 1703), "scale shape");
-    assert_eq!(digest, 0x8e79_38a3_8a9e_e15f, "eid → pid → Location moved");
+    assert_eq!(digest, 0x2dd1_34da_d597_4e68, "eid → pid → Location moved");
 }
 
 /// Offsets ride on top of an element's coordinate — this is what turns an
@@ -78,8 +78,8 @@ fn an_offset_advances_from_the_elements_coordinate() {
 }
 
 /// The scale is reported, not invented. EPUB addresses text structurally and
-/// defines no linear coordinate, so its importer reports none rather than
-/// synthesizing one — how a reader shows progress for such a book is the
+/// defines no linear coordinate, and its importer reports none, synthesizing
+/// nothing — how a reader shows progress for such a book is the
 /// consumer's policy.
 #[test]
 fn epub_defines_no_reading_position_scale() {

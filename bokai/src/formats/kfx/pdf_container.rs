@@ -4,9 +4,9 @@
 //! A PDF-backed KFX (Amazon "Send to Kindle" PDF, or bokai's `pdf_to_kfx`
 //! output) embeds the source PDF verbatim as a single `bcRawMedia` and points
 //! at it from per-page `external_resource` fragments with `format: pdf`. Such a
-//! KFX must round-trip through **PDF**, not EPUB — converting one to EPUB
-//! would mangle a PDF into reflowed text. Because the bytes are embedded
-//! verbatim, extraction is exact: `pdf → kfx → pdf` reproduces the original.
+//! KFX round-trips through **PDF**, not EPUB: an EPUB conversion reflows a
+//! page image into text. The embedded bytes are verbatim, and extraction is
+//! exact: `pdf → kfx → pdf` reproduces the original.
 
 use super::container::{
     EntityLoc, entity_media, parse_container_header, parse_container_info, parse_entity,
@@ -307,10 +307,9 @@ mod tests {
         };
         let storyline = KfxSymbol::Storyline as u32;
         let aux = KfxSymbol::AuxiliaryData as u32;
-        // Every page carries the image storyline plus an invisible "text"
-        // storyline beside it — the run-less page's holding one empty
-        // page-sized container, so the overlay EID exists on every page. This
-        // is the pair Amazon emits (352 pages → 704 storylines).
+        // Every page carries an image storyline and an invisible text
+        // storyline, the run-less page's holding one empty page-sized
+        // container. Amazon emits the same pair.
         assert_eq!(
             count(&without, storyline),
             2,
@@ -424,10 +423,9 @@ mod tests {
             .iter()
             .map(|s| int(&field(s, KfxSymbol::Pid).expect("pid")))
             .collect();
-        // Page 0 span = anchor+container+image+textref+anchor_end (5) + 5 + 7.
-        // Page 1 has no text and spans 6: the same 5, plus the one empty
-        // page-sized container its text storyline holds. Every page carries the
-        // overlay, so no page is the odd one out of the position axis.
+        // Page 0 spans anchor+container+image+textref+anchor_end (5) + 5 + 7.
+        // Page 1 carries no text and spans 6: the same 5, plus the one empty
+        // page-sized container its text storyline holds.
         assert_eq!(lengths, vec![5 + 5 + 7, 5 + 1]);
         assert_eq!(pids[0], 0, "first section starts at pid 0");
         assert_eq!(pids[1], lengths[0], "pids are cumulative");
@@ -506,10 +504,9 @@ mod tests {
 
     #[test]
     fn outline_becomes_nested_toc_in_kfx() {
-        // A 2-page book with a one-level-nested outline → a book_navigation TOC
-        // whose labels are embedded verbatim. This case covers the labels
-        // landing and the TOC not disturbing the byte-identical PDF round-trip;
-        // target resolution is covered separately.
+        // A 2-page book with a one-level-nested outline gives a
+        // book_navigation TOC whose labels are embedded verbatim, over a
+        // byte-identical PDF round-trip.
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes: bytes.clone(),
@@ -721,7 +718,7 @@ mod tests {
 
     #[test]
     fn reflowable_kfx_is_not_pdf_backed() {
-        // A real EPUB→KFX (reflowable) must NOT be flagged as PDF-backed, so
+        // A reflowable EPUB→KFX is no PDF-backed container, and
         // callers keep routing it through the normal EPUB path.
         use crate::Book;
         use crate::export::{Exporter, KfxExporter};

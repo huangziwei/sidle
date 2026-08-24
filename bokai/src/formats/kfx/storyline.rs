@@ -171,10 +171,9 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         .filter(|n| *n > 0)
         .map(|n| n as u32);
 
-    // List tag parity with calibre's LIST_STYLE_TYPES:
-    // only the five alpha/roman/decimal styles make an `<ol>`; everything
-    // else — including KFX's own `numeric`, whose numbering rides the CSS
-    // `list-style-type` — stays a `<ul>`.
+    // List tag parity with calibre's LIST_STYLE_TYPES: the five alpha/roman/
+    // decimal styles make an `<ol>`, and every other style — KFX's own
+    // `numeric` included — makes a `<ul>`.
     if matches!(role, Role::OrderedList | Role::UnorderedList) {
         let style = get_field(fields, sym!(ListStyle))
             .and_then(|v| ctx.symbols.text_of(v))
@@ -248,7 +247,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let (layout_hints, heading_level) =
         crate::formats::kfx::yj_properties::layout_hints_from_element_fields(fields);
 
-    // Cell spans. A span of 1 is the absent case, so it carries nothing.
+    // Cell spans. A span of 1 is the absent case and carries nothing.
     let span_of = |field: u64| {
         get_field(fields, field)
             .and_then(|v| v.as_int())
@@ -302,7 +301,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
 ///
 /// This is the only statement a KFX table makes about its proportions. Each
 /// entry describes one column — or `column_span` of them — and carries the
-/// width as an ordinary length property, so it converts through the same
+/// width as an ordinary length property, converting through the same
 /// property table every other style uses. A list of bare `{is_empty: false}`
 /// placeholders says nothing and produces nothing.
 fn tokenize_column_format(
@@ -313,9 +312,9 @@ fn tokenize_column_format(
     let Some(entries) = get_field(fields, sym!(ColumnFormat)).and_then(|v| v.as_list()) else {
         return;
     };
-    // Every entry becomes a `<col>`, including the ones that say nothing:
-    // columns are positional, so skipping a bare `{is_empty: false}` in the
-    // middle would slide every stated width one column to the left.
+    // Every entry becomes a `<col>`, the ones saying nothing included:
+    // columns are positional, and skipping a bare `{is_empty: false}` in the
+    // middle slides every stated width one column to the left.
     let columns: Vec<ElementStart> = entries
         .iter()
         .map(|entry| {
@@ -354,7 +353,7 @@ fn tokenize_column_format(
 ///
 /// `$615 yj.classification` marks a note's body, which is what lets a reader
 /// show it in a popup when its reference is tapped. The three note kinds are
-/// distinct — a single book uses all of them — so each keeps its own token,
+/// distinct — a single book uses all of them — and each keeps its own token,
 /// and the mapping is the inverse of the one export applies.
 fn note_epub_type(classification: u64) -> Option<&'static str> {
     match classification {
@@ -482,10 +481,8 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                     .and_then(|v| v.as_int())
                     .map(|n| n as usize)
                     .unwrap_or(0);
-                // Annotation lookups always resolve to `Some`: a miss
-                // emits an empty `<rt>` (calibre's
-                // `lookup_ruby_annotation` returns "" and appends the rt
-                // unconditionally).
+                // An annotation lookup always resolves to `Some`: a miss
+                // yields "" and an empty `<rt>`.
                 let annotation_for = |id_1: usize| -> String {
                     ctx.ruby_index
                         .and_then(|idx| idx.get(&ruby_name))
@@ -668,10 +665,9 @@ where
     F: FnMut(&str, usize) -> Option<String>,
 {
     let mut chapter = Chapter::new();
-    // (node, pending render-inline demotion, pending interleave events) —
-    // the demotion check runs when the element closes and its subtree is
-    // complete; interleave events apply to each bare-string run as it
-    // arrives (see `InterleaveEvents`).
+    // (node, pending render-inline demotion, pending interleave events). The
+    // demotion check runs at element close, over the finished subtree;
+    // interleave events apply to each bare-string run as it arrives.
     let mut stack: Vec<(NodeId, bool, Option<InterleaveEvents>)> =
         vec![(chapter.root(), false, None)];
     // Every element's declared eid, in document order — the offset-anchor
@@ -722,12 +718,9 @@ where
                     None => parent,
                 };
 
-                // Block images get calibre's wrapper partition: the named
-                // `$style` and the element's own properties merge, the
-                // block-level half moves onto a wrapper `<div>`, and neither
-                // half keeps the named class — both are inline styles from
-                // here on. Everything else keeps the named class as its
-                // source identity plus its own properties inline.
+                // A block image takes calibre's wrapper partition: `$style`
+                // and the element's own properties merge, the block-level half
+                // moves onto a wrapper `<div>`, and both halves go inline.
                 let mut wrap: Option<(CssDecl, CssDecl)> = None;
                 if elem.is_image && !elem.render_inline {
                     let mut merged = CssDecl::new();
@@ -749,11 +742,9 @@ where
                 // (calibre's `move_anchor`).
                 let anchor_node;
                 if let Some((wrapper_decl, img_decl)) = wrap {
-                    // The wrapper carries the image element's layout hints
-                    // (calibre's `attach_layout_hints(wrapper, …)`), so a
+                    // The wrapper carries the image element's layout hints: a
                     // heading/figure/caption-hinted block image promotes the
-                    // wrapper `<div>` to `<hN>` / `<figure>` / `<figcaption>`
-                    // in consolidation.
+                    // wrapper `<div>` to `<hN>` / `<figure>` / `<figcaption>`.
                     let wrapper_role = hinted_wrapper_role(elem, styles, symbols, anchor_table)
                         .unwrap_or(Role::Container);
                     let wrapper = chapter.alloc_node(Node::new(wrapper_role));
@@ -770,10 +761,9 @@ where
                     anchor_node = wrapper;
                 } else {
                     chapter.append_child(attach_parent, node_id);
-                    // Apply style from the styles map (if present). The raw
-                    // KFX style name is kept as the node's source class
-                    // identity — normalized export names its stylesheet
-                    // rules after it.
+                    // Apply the style the styles map holds. The raw KFX style
+                    // name stays as the node's source class identity, which
+                    // normalized export names its stylesheet rules after.
                     if let Some(style_name) = &elem.style_name {
                         chapter.semantics.set_class(node_id, style_name);
                         if let Some(styles_map) = styles
@@ -796,9 +786,9 @@ where
                     anchor_node = node_id;
                 }
 
-                // Apply ALL semantic attributes from the generic map — minus
-                // the href a linked image's `<a>` wrapper consumed
-                // (an `<img href>` would be invalid).
+                // Apply every semantic attribute from the generic map, minus
+                // the href a linked image's `<a>` wrapper consumed: an
+                // `<img href>` is invalid.
                 if linked_image_href.is_some() {
                     let mut rest = elem.semantics.clone();
                     rest.remove(&SemanticTarget::Href);
@@ -807,10 +797,9 @@ where
                     apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
                 }
 
-                // Cell spans belong to the cell element, not to a link
-                // wrapper standing in front of it. Amazon states them in the
-                // cell's named style; accept the element field too, since
-                // nothing in the format forbids it there.
+                // Cell spans belong to the cell element, not to a link wrapper
+                // standing in front of it. Amazon states them in the cell's
+                // named style, and the element field is read too.
                 let (style_cols, style_rows) = elem
                     .style_name
                     .as_ref()
@@ -866,11 +855,9 @@ where
                     }
                 }
 
-                // No content ref: the element's text arrives as bare-string
-                // runs in content_list (interleaved with child elements —
-                // inline images, tate-chu-yoko runs). Its style_events offset
-                // into that joined space, so hold them here and apply to each
-                // run as it arrives.
+                // With no content ref the element's text arrives as bare-string
+                // runs in content_list, interleaved with child elements. Its
+                // style_events offset into that joined space.
                 let interleave = (elem.content_ref.is_none() && !elem.style_events.is_empty())
                     .then(|| InterleaveEvents {
                         events: elem.style_events.clone(),
@@ -887,11 +874,9 @@ where
                 if let Some((node_id, demote, _)) = stack.pop()
                     && demote
                 {
-                    // `render: inline` block containers demote to a span when
-                    // every descendant is inline-only (calibre's
-                    // calibre `$601 = $283` demotion). A block child — or a
-                    // forced line break, which calibre's DOM materializes
-                    // as a `<br>` — keeps the block box.
+                    // A `render: inline` block container demotes to a span when
+                    // every descendant is inline-only. A block child, or a
+                    // forced line break, keeps the block box.
                     let all_inline = chapter
                         .children(node_id)
                         .collect::<Vec<_>>()
@@ -912,10 +897,9 @@ where
             }
 
             KfxToken::Text(text) => {
-                // A bare run inside an interleave element: apply the slice
-                // of the parent's style_events that overlaps this run (ruby,
-                // links, styled spans), then advance the cursor. Plain
-                // append with no events.
+                // A bare run inside an interleave element takes the slice of
+                // the parent's style_events overlapping it (ruby, links,
+                // styled spans), then advances the cursor.
                 let mut run_events: Option<Vec<SpanStart>> = None;
                 let parent = match stack.last_mut() {
                     Some((n, _, Some(iv))) => {
@@ -950,8 +934,8 @@ where
     }
 
     // Offset anchors (`(eid, offset > 0)`): locate each offset inside the
-    // element's finished subtree and stamp a zero-length span there, so
-    // mid-paragraph nav targets (`…#page-911-2`) land on the exact position.
+    // element's finished subtree and stamp a zero-length span there, which
+    // lands a mid-paragraph nav target (`…#page-911-2`) on its exact position.
     if let Some(table) = anchor_table {
         stamp_offset_anchors(&mut chapter, &eid_nodes, table, &interleave_roots);
     }
@@ -979,19 +963,16 @@ fn is_inline_only_ir(chapter: &Chapter, node: NodeId) -> bool {
     }
 }
 
-/// Settle a block element's role from the merged `$761 layout_hints` /
-/// `$790 heading_level` channels — calibre's
-/// `attach_layout_hints` precedence: the named style's hints/level first,
-/// the element's own fields merged after (level fills only when unset),
-/// then the anchor table's nav-registered heading level as the last level
-/// fallback (calibre `process_position`), default level 1.
+/// Settle a block element's role from the merged `$761 layout_hints` and
+/// `$790 heading_level` channels, in calibre's `attach_layout_hints`
+/// precedence: the named style's hints and level, the element's own fields
+/// merged after with the level filling only when unset, and the anchor table's
+/// nav-registered heading level as the last fallback. Default level 1.
 ///
-/// Promotion to a heading requires the "heading" hint — a bare `$790`
-/// level never promotes (so a schema-assigned `Heading` role without any
-/// heading hint demotes back to `Paragraph`, exactly like calibre,
-/// whose `<hN>` rename fires only off the hint). Figure / caption
-/// hints settle the role the same way; the EPUB emitter keeps them as
-/// `<div>` (EPUB-2.0 gate) but their presence blocks the bare-div collapse.
+/// Promotion to a heading takes the "heading" hint. A bare `$790` level
+/// promotes nothing, and a schema-assigned `Heading` role with no heading hint
+/// settles back to `Paragraph`. Figure and caption hints settle the role the
+/// same way, and their presence blocks the bare-div collapse.
 fn resolve_hinted_role(
     elem: &ElementStart,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
@@ -1081,7 +1062,7 @@ fn resolve_heading_level(
 /// the hints to the wrapper (`wrap_block_image` → `attach_layout_hints`),
 /// which `consolidate_html` then promotes (a heading whose content is a
 /// single block image becomes `<hN>`; an `<img>` is not a block descendant,
-/// so the promotion fires). `None` keeps the plain `Container`.
+/// and the promotion fires). `None` keeps the plain `Container`.
 fn hinted_wrapper_role(
     elem: &ElementStart,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
@@ -1176,7 +1157,7 @@ pub fn apply_section_template(
     chapter.append_child(root, wrapper);
 
     // The template container is itself an addressable element: it carries a
-    // `$155 id`, so device handles and the position map can name it, and it
+    // `$155 id` for device handles and the position map to name, and it
     // leads the chapter's element order.
     if let Some(eid) = template_eid {
         chapter.semantics.set_source_element(wrapper, eid);
@@ -1201,7 +1182,7 @@ pub fn apply_section_template(
 
 /// Stamp every registered `(eid, offset > 0)` anchor into the built chapter.
 /// Offsets ascend per element; earlier stamps insert only zero-length nodes,
-/// so later locates count the same character stream.
+/// and later locates count the same character stream.
 fn stamp_offset_anchors(
     chapter: &mut Chapter,
     eid_nodes: &[(i64, NodeId)],
@@ -1261,12 +1242,11 @@ fn locate_offset_ir(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<
 }
 
 /// [`locate_offset_ir`] for interleave-built elements, counting in the
-/// element's own KFX event offset space, not calibre's
-/// DOM-walk space. The two differ because calibre never
-/// reconstructs marks over interleave content: in event space every bare-run
+/// element's own KFX event offset space, not calibre's DOM-walk space, which
+/// reconstructs no mark over interleave content. In event space every bare-run
 /// code point counts (`\n` included), each content_list child element counts
-/// exactly ONE position, ruby BASE text counts while annotation text does
-/// not, and event-span wrappers are transparent.
+/// exactly one position, ruby base text counts while annotation text does not,
+/// and event-span wrappers are transparent.
 fn locate_offset_event_space(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<NodeId> {
     let children: Vec<NodeId> = chapter.children(root).collect();
     let mut remaining = offset;
@@ -1327,10 +1307,9 @@ fn locate_offset_in_event_space(chapter: &mut Chapter, node: NodeId, offset: i64
                         .is_some_and(|f| f.role == Role::Text && !chapter.text(f.text).is_empty())
                 })
             {
-                // An event span whose text starts exactly at the offset
-                // carries the id itself — same rule as calibre's walk
-                // arm above, minus its `\n` invisibility (event space counts
-                // every code point).
+                // An event span whose text starts exactly at the offset carries
+                // the id itself, on calibre's rule minus its `\n` invisibility:
+                // event space counts every code point.
                 Located::Found(node)
             } else {
                 descend_event_space(chapter, node, offset)
@@ -1374,12 +1353,9 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
     let role = n.role;
     match role {
         Role::Text => {
-            // Calibre splits a text run at `\n` into span text
-            // plus `<br>` tail text at emission, and its offset walk counts
-            // only span text — the newline and everything after it in the
-            // run are invisible to anchor location (the br contributes
-            // nothing and tail text is never visited). Mirror that: count
-            // only the chars before the first newline.
+            // Calibre splits a text run at `\n` into span text plus `<br>`
+            // tail text, and its offset walk counts span text alone. Count the
+            // chars before the first newline to match.
             let countable = chapter
                 .text(n.text)
                 .chars()
@@ -1387,11 +1363,9 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
                 .count() as i64;
             if countable > 0 {
                 if offset == 0 {
-                    // The run starts exactly at the offset: calibre
-                    // stamps the id on the run's own `<span>` (which
-                    // then survives `strip_empty_spans` with its full text).
-                    // Mirror that shape by wrapping the run in a span that
-                    // carries the id — NOT a zero-length span before it.
+                    // The run starts exactly at the offset: calibre stamps the
+                    // id on the run's own `<span>`. Wrap the run in a span
+                    // carrying the id, never a zero-length span before it.
                     return Located::Found(wrap_text_run_in_span(chapter, node));
                 }
                 if offset < countable {
@@ -1411,11 +1385,8 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
         // `<br>` contributes nothing (see the text-run rule above).
         Role::Break => Located::Remaining(offset),
         // A styled/event span whose own text starts exactly at the offset
-        // carries the id itself — calibre's `locate_offset`
-        // returns the span (its `text` attribute is the run), with no
-        // wrapping or nesting. Only real event spans qualify: a demoted
-        // `render: inline` block has no own text in calibre's DOM
-        // (children spans hold it), so it descends like any container.
+        // carries the id itself, with no wrapping or nesting. A demoted
+        // `render: inline` block holds no own text and descends as a container.
         Role::Inline
             if offset == 0
                 && !chapter.semantics.render_inline(node)
@@ -1433,12 +1404,9 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
         {
             Located::Found(node)
         }
-        // Opaque subtrees. Ruby contributes NOTHING: calibre emits
-        // `<ruby><rb>base</rb><rt>anno</rt></ruby>` and its offset walk counts
-        // only `<span>` direct text — rb text is skipped, rt never descended —
-        // so an offset past a ruby run fails to locate there; mirroring that
-        // keeps the stamped-id sets (and page-list fragments) matched to
-        // calibre's. Table and list containers are likewise never descended.
+        // Opaque subtrees. Ruby contributes nothing: calibre's offset walk
+        // counts `<span>` direct text, skipping rb and never descending rt.
+        // Table and list containers are never descended either.
         Role::Ruby
         | Role::RubyText
         | Role::Table
@@ -1544,7 +1512,7 @@ fn split_text_run(chapter: &mut Chapter, node: NodeId, char_offset: i64) -> Node
 /// `$148 table_column_span` / `$149 table_row_span`, a table's `$152
 /// column_format` list, and a list's `$104 list_start_offset`.
 ///
-/// KFX gives a cell no element type of its own, so the span sits on whatever
+/// KFX gives a cell no element type of its own, and the span sits on whatever
 /// element occupies the row's content list. A span of 1 is the default and is
 /// left unwritten.
 fn push_structural_fields(fields: &mut Vec<(u64, IonValue)>, elem: &ElementStart) {
@@ -1616,10 +1584,9 @@ fn kfx_style_to_ir(
 
     let schema = StyleSchema::standard();
     let mut style = import_kfx_style(schema, props);
-    // `background_image` names an `external_resource` by symbol, which the
-    // schema's value transforms cannot resolve — they never see the table.
-    // The IR keeps the resource name until the importer swaps in the
-    // exported filename, the same two steps an `<img src>` goes through.
+    // `background_image` names an `external_resource` by symbol, past the
+    // reach of the schema's value transforms. The IR keeps the resource name
+    // until the importer swaps in the exported filename.
     if let Some(name) = get_field(props, sym!(BackgroundImage))
         .and_then(|v| v.as_symbol())
         .and_then(|id| symbols.resolve_opt(id))
@@ -1642,20 +1609,13 @@ fn build_text_with_spans(
     symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
 ) {
-    // KFX can express a link and a ruby/styled run over the SAME text with
-    // independent, partially overlapping events — e.g. a TOC line whose
-    // per-slice links are pre-cut at ruby-base boundaries while one grouped
-    // ruby spans across them. Calibre resolves overlap by
-    // walking links as the outer partition (links never nest) and emitting
-    // other marks only where they fit entirely inside one link's range or
-    // one inter-link gap; a mark crossing a segment boundary is dropped
-    // (`try_emit_ruby_text` / `emit_marks`). Reproduce that resolution up
-    // front; fully nested or disjoint layouts — the common case — pass
-    // through unchanged.
+    // KFX expresses a link and a ruby/styled run over one text as independent,
+    // partly overlapping events. Links partition the outside and never nest; a
+    // mark survives inside one link's range or gap, and is dropped across both.
     let total_chars = text.chars().count();
-    // Links calibre's walk keeps: offset order (stable → event order
-    // on ties), each skipped when it starts inside the previous kept
-    // link's range; out-of-bounds events are dropped, not clamped.
+    // The links calibre's walk keeps: offset order, event order on ties, each
+    // skipped when it starts inside the previous kept link's range.
+    // Out-of-bounds events are dropped, never clamped.
     let mut kept_links: Vec<usize> = Vec::new();
     {
         let mut idx: Vec<usize> = (0..spans.len())
@@ -1708,11 +1668,9 @@ fn build_text_with_spans(
         .map(|(_, s)| s)
         .collect();
 
-    // A ruby's interior is opaque in that walk: its `<rb>` slices come
-    // straight from the text, and `emit_marks` consumes the ruby and jumps
-    // the cursor past it, skipping a mark that starts inside the ruby's
-    // range. A mark CONTAINING the ruby nests it. `ruby_bounds` drops the
-    // interior marks ahead of the tree build.
+    // A ruby's interior is opaque: its `<rb>` slices come straight from the
+    // text and a mark starting inside its range is skipped, while a mark
+    // containing the ruby nests it. `ruby_bounds` drops the interior marks.
     let ruby_bounds: Vec<(usize, usize)> = spans
         .iter()
         .filter(|s| s.role == Role::Ruby)
@@ -1731,7 +1689,7 @@ fn build_text_with_spans(
         .collect();
 
     // Build a nested span tree: sort by offset, then length DESCENDING
-    // (enclosing spans first) so containment nests below; a link ties ahead
+    // (enclosing spans first), which nests containment below; a link ties ahead
     // of an equal-range mark (the mark renders inside the `<a>`).
     let mut sorted_spans: Vec<_> = spans;
     sorted_spans.sort_by(|a, b| {
@@ -1835,9 +1793,8 @@ fn build_text_with_spans(
         }
 
         // Grouped ruby (`ruby_id_list`): one `<ruby>` holding interleaved
-        // base-slice / `<rt>` pairs. Built whole here — nothing nests inside
-        // a ruby (calibre slices rb text straight off the
-        // id_list too) — and the cursor jumps past the event's range.
+        // base-slice / `<rt>` pairs, built whole with nothing nested inside,
+        // and the cursor jumps past the event's range.
         if span.role == Role::Ruby && !span.ruby_pairs.is_empty() && span_end > span_start {
             let ruby_node = create_span_node(chapter, span);
             let (current_parent, _, _) = span_stack.last().unwrap();
@@ -2010,10 +1967,9 @@ fn walk_node_for_export(
         None => return,
     };
 
-    // Root node: walk children, wrapping any loose inline-ish child in a
-    // synthetic Paragraph. Loose inline content directly under <body> emits
-    // Text/StartSpan/EndSpan tokens onto the root IonBuilder, whose build()
-    // drops accumulated_text for want of fields.
+    // Root node: walk children, wrapping a loose inline-ish child in a
+    // synthetic Paragraph. Loose inline content under <body> emits
+    // Text/StartSpan/EndSpan onto the root IonBuilder, which drops it.
     if node.role == Role::Root {
         for child_id in chapter.children(node_id) {
             let Some(child) = chapter.node(child_id) else {
@@ -2023,8 +1979,8 @@ fn walk_node_for_export(
                 child.role,
                 Role::Text | Role::Break | Role::Inline | Role::Link | Role::Ruby
             ) {
-                // Wrap in synthetic Paragraph so the inline emit machinery has
-                // a real element to anchor style_events to.
+                // Wrap in a synthetic Paragraph, a real element for the inline
+                // emit machinery to anchor style_events to.
                 let mut wrapper = ElementStart::new(Role::Paragraph);
                 wrapper.style_symbol = Some(ctx.default_style_symbol);
                 stream.push(KfxToken::StartElement(wrapper));
@@ -2044,13 +2000,9 @@ fn walk_node_for_export(
             let text = chapter.text(node.text);
             if !text.is_empty() {
                 if ctx.is_vertical_document() && is_short_ascii_digit_run(text) {
-                    // Tate-chu-yoko (縦中横): a standalone short digit run (a
-                    // chapter-number heading `<h3>1</h3>`, a short count) is
-                    // wrapped in an inline `text_combine` span, laying the
-                    // digits upright in one cell. `register_tatechuyoko_style`
-                    // supplies the horizontal_tb + character_width, and
-                    // `render: inline` (via StartSpan/EndSpan) matches
-                    // how Amazon's own vertical KFX applies it.
+                    // Tate-chu-yoko (縦中横): a standalone short digit run goes
+                    // upright in one cell, in the inline `text_combine` span
+                    // `register_tatechuyoko_style` registers.
                     let combine = ctx.register_tatechuyoko_style();
                     let mut span = SpanStart::new(Role::Inline, 0, 0);
                     span.style_symbol = Some(combine);
@@ -2087,10 +2039,9 @@ fn walk_node_for_export(
         return;
     }
 
-    // RubyText is consumed by its parent Ruby during inline flattening and
-    // must not be emitted as inline text. If <rt> appears outside a <ruby>
-    // (malformed input), it is dropped silently: no annotation
-    // chars reach the base text stream.
+    // RubyText is consumed by its parent Ruby during inline flattening. An
+    // `<rt>` outside a `<ruby>` is dropped, and its annotation characters
+    // reach no base text stream.
     if node.role == Role::RubyText {
         return;
     }
@@ -2102,11 +2053,9 @@ fn walk_node_for_export(
     let mut elem = ElementStart::new(node.role);
     elem.node_id = Some(node_id);
 
-    // Register the node's style and get a KFX style symbol
-    // This converts IR ComputedStyle → KFX style and deduplicates.
-    // Pass the source class attribute as a name hint so single-class
-    // identifiers like "bold" / "vrtl" survive into the KFX style symbol
-    // table, not opaque `s<N>` names.
+    // Register the node's style: IR ComputedStyle → a deduplicated KFX style
+    // symbol. The source class attribute is a name hint, carrying an
+    // identifier like "bold" / "vrtl" into the symbol table over an `s<N>`.
     let class_hint = chapter.semantics.class(node_id);
     // A cell's span joins its style, not its element — that is where
     // Amazon writes it, and it is the only place the corpus attests.
@@ -2115,11 +2064,9 @@ fn walk_node_for_export(
         ctx.register_style_id_with_extras(node.style, &chapter.styles, class_hint, &spans);
     elem.style_symbol = Some(style_symbol);
 
-    // Check if this element needs container wrapping for borders to render
-    // KFX requires type: container with nested type: text for borders.
-    // A horizontal rule is exempt: the border *is* the rule, drawn from the
-    // dedicated `type: horizontal_rule` element that Amazon emits bare
-    // (`{style: linear, type: horizontal_rule}`).
+    // A border renders on a `type: container` holding a nested `type: text`.
+    // A horizontal rule is exempt: its border *is* the rule, drawn from the
+    // bare `{style: linear, type: horizontal_rule}` element Amazon emits.
     elem.needs_container_wrapper = node.role != Role::Rule
         && chapter
             .styles
@@ -2136,13 +2083,9 @@ fn walk_node_for_export(
             .is_some_and(|n| !is_inline_like_role(n.role))
     });
 
-    // A `type: container`'s `layout` is the block-progression axis of its
-    // children, which follows the box's own (inheritance-resolved) writing
-    // mode: horizontal for vertical text (縦書き), vertical for horizontal-tb.
-    // Emitting `vertical` unconditionally put a 縦書き box in the wrong axis —
-    // it filled the block (an oversized, full-width box) with content pinned to
-    // the left edge. Keying off the box's *computed* mode (not the document's)
-    // keeps a horizontally-typeset box inside a vertical book at `vertical`.
+    // A `type: container`'s `layout` is its children's block-progression axis,
+    // keyed to the box's own resolved writing mode: `horizontal` for vertical
+    // text (縦書き), `vertical` for horizontal-tb.
     if elem.needs_container_wrapper {
         use crate::style::WritingMode;
         let wm = chapter
@@ -2212,7 +2155,7 @@ fn walk_node_for_export(
         elem.set_semantic(SemanticTarget::EpubType, epub_type.to_string());
     }
 
-    // A table states its column geometry on itself, so its `<colgroup>`
+    // A table states its column geometry on itself, and its `<colgroup>`
     // collapses into a `column_format` field, with no element of its own.
     if node.role == Role::Table {
         elem.column_format = collect_column_format(chapter, node_id, ctx);
@@ -2231,7 +2174,7 @@ fn walk_node_for_export(
     }
 
     // Walk children. A column group is consumed by its table's
-    // `column_format`; walking it too would put stray empty elements in the
+    // `column_format`; walking it too puts stray empty elements in the
     // content list, where a renderer reads them as rows.
     for child in chapter.children(node_id) {
         if chapter
@@ -2275,8 +2218,8 @@ fn cell_span_properties(
 }
 
 /// Find a table's column group. HTML puts it before the row sections, but a
-/// parser that infers a `<tbody>` can end up nesting it one level down, so
-/// look through the section wrappers too.
+/// parser that infers a `<tbody>` can nest it one level down, and the walk
+/// looks through the section wrappers too.
 fn find_column_group(chapter: &Chapter, table: NodeId) -> Option<NodeId> {
     let is_group = |id: NodeId| {
         chapter
@@ -2298,7 +2241,7 @@ fn find_column_group(chapter: &Chapter, table: NodeId) -> Option<NodeId> {
 
 /// Collect a table's `<col>` entries into KFX `column_format` entries.
 ///
-/// A column's width is ordinary styling, so it arrives as the node's computed
+/// A column's width is ordinary styling, arriving as the node's computed
 /// style and converts through the same export schema every other style uses;
 /// only the geometry properties belong in the entry, since a `<col>` inherits
 /// the rest from the table.
@@ -2336,18 +2279,12 @@ fn collect_column_format(
 }
 
 // ============================================================================
-// Inline Content Flattening ("Push Down, Emit at Bottom")
+// Inline content flattening
 // ============================================================================
-//
-// This implements the correct algorithm for converting nested inline elements
-// (Link, Inline, Text) into flat, non-overlapping KFX style_events.
-//
-// Problem: HTML has nested inline elements like <a><span>1.</span>Easy...</a>
-// KFX needs flat style_events where each event covers a disjoint text range
-// and carries ALL applicable attributes from ancestors.
-//
-// Solution: Depth-first traversal with a context stack. Events are emitted
-// at TEXT LEAVES, carrying the accumulated state from all ancestors.
+
+// Nested inline elements (Link, Inline, Text) become flat KFX style_events,
+// each over a disjoint text range, carrying every attribute its ancestors
+// declare. A depth-first walk emits one event per text leaf.
 
 /// Active state during inline flattening - accumulated from ancestors.
 #[derive(Clone, Default)]
@@ -2363,7 +2300,7 @@ struct InlineState {
     /// Active node ID (for anchor creation with GlobalNodeId)
     node_id: Option<NodeId>,
     /// Source `class` attribute of the inline node owning the active style.
-    /// Tracked alongside `style` (innermost-wins) so the KFX style registry
+    /// Tracked alongside `style` (innermost-wins) for the KFX style registry
     /// keeps names like `bold`, `tcy`, `upright` in place of
     /// synthesized `s<N>` symbols.
     class_hint: Option<String>,
@@ -2375,16 +2312,14 @@ struct InlineState {
 
 /// A flattened segment with its computed state. Most segments carry text,
 /// but an inline `<img>` (e.g. a gaiji glyph used as the base of a `<ruby>`)
-/// emits as an Image variant so the image element survives — without this,
-/// images that aren't direct children of a block-level element get dropped
-/// because `flatten_inline_content` only knows how to emit text leaves.
+/// emits as an Image variant, which carries the image element through:
+/// `flatten_inline_content` emits text leaves alone, and an image that is no
+/// direct child of a block-level element has no other way out.
 enum FlatSegment {
     Text { text: String, state: InlineState },
-    // Image segments don't carry inline state: the surrounding ruby
-    // annotation / link_to / inline style can't transfer to a KFX image
-    // element, and the image emits standalone via
-    // `walk_node_for_export`. Track only the node so the walker can refetch
-    // src/alt/style for the element.
+    // An image segment carries no inline state: the surrounding ruby
+    // annotation / link_to / inline style reaches no KFX image element. The
+    // node alone is tracked, and `walk_node_for_export` refetches src/alt/style.
     Image { node_id: NodeId },
 }
 
@@ -2483,16 +2418,13 @@ fn flatten_inline_content(
                 state: effective_state,
             });
         }
-        // IMAGE: leaf, emit as Image segment. Without this arm an `<img>`
-        // inside `<ruby>`/`<a>`/`<span>` falls through the catch-all below,
-        // which recurses into the (empty) children and emits nothing — the
-        // image silently vanishes. Common in Japanese EPUBs that use a
-        // gaiji glyph image as the base of a ruby pair.
+        // A leaf image, emitted as an Image segment. The catch-all below
+        // recurses into the empty children of an `<img>` inside
+        // `<ruby>`/`<a>`/`<span>` and emits nothing.
         Role::Image => {
-            // A KFX image element carries no anchor. When an ancestor inline
-            // element bears an id — `<a id="map1"><img/></a>` as a TOC/nav
-            // target — a zero-width-space span goes first, recording the id's
-            // content position just before the image.
+            // A KFX image element carries no anchor. An ancestor inline element
+            // bearing an id (`<a id="map1"><img/></a>`) takes a zero-width-space
+            // span first, holding the id's position just before the image.
             if effective_state.element_id.is_some() {
                 segments.push(FlatSegment::Text {
                     text: "\u{200B}".to_string(), // Zero-width space
@@ -2505,11 +2437,9 @@ fn flatten_inline_content(
         // arm below — its text becomes the annotation, not inline content.
         // If <rt> appears outside <ruby> (malformed input), drop it silently.
         Role::RubyText => {}
-        // RUBY: pair base content with rt annotations. Handles compound rubies
-        // like <ruby><rb>漢</rb><rt>かん</rt><rb>字</rb><rt>じ</rt></ruby> by
-        // splitting children into (base_run, rt_run) pairs — each base segment
-        // gets the matching rt's text as its ruby_annotation. Mirrors how a <b>
-        // pushes font-weight into descendant Text leaves, but pair-aware.
+        // Ruby: pair base content with rt annotations, splitting children into
+        // (base_run, rt_run) pairs. Each base segment takes the matching rt's
+        // text as its ruby_annotation, a compound ruby included.
         Role::Ruby => {
             let children: Vec<NodeId> = chapter.children(node_id).collect();
             let mut i = 0;
@@ -2579,12 +2509,9 @@ fn emit_flattened_segments(
     for segment in segments {
         match segment {
             FlatSegment::Image { node_id } => {
-                // Inline image leaf (e.g. gaiji inside <ruby>). Re-enter
-                // walk_node_for_export so the image element gets its src/
-                // alt/style/resource registration the same way a block-level
-                // image would. Surrounding inline state (link_to, ruby
-                // annotation) does not transfer to the image element; the
-                // image renders standalone with no annotation.
+                // Inline image leaf (e.g. gaiji inside <ruby>). Re-entering
+                // walk_node_for_export gives the image element the src/alt/
+                // style/resource registration a block-level image takes.
                 walk_node_for_export(chapter, node_id, sch, ctx, stream);
             }
             FlatSegment::Text { text, state } => {
@@ -2604,14 +2531,9 @@ fn emit_flattened_segments(
                         0,
                     );
 
-                    // Set style (innermost). The class hint carried in the segment
-                    // state mirrors the innermost-wins style, so the KFX style
-                    // registry sees the same source class name that styled this
-                    // text segment.
-                    //
-                    // A segment inside a Link takes the link-aware
-                    // registration, whose KFX style carries an explicit
-                    // `underline` field over Kindle's built-in `<a>` rule.
+                    // The innermost style wins, on the source class name the
+                    // segment state's hint carries. A segment inside a Link
+                    // takes the link-aware registration and an `underline`.
                     if let Some(style_id) = state.style {
                         let style_symbol = if state.link_to.is_some() {
                             ctx.register_link_style_id_with_hint(
@@ -2804,7 +2726,7 @@ fn emit_definition_list(
 /// Emit inline content (Link, Inline, Text) using the flattening algorithm.
 ///
 /// "Push Down, Emit at Bottom": styles are pushed to the innermost run and
-/// emitted there, so the resulting style_events never overlap.
+/// emitted there, and the resulting style_events never overlap.
 fn emit_inline_content_flat(
     chapter: &Chapter,
     node_id: NodeId,
@@ -2820,19 +2742,14 @@ fn emit_inline_content_flat(
     emit_flattened_segments(segments, chapter, sch, ctx, stream);
 }
 
-/// Convert a TokenStream to KFX Ion structure (Storyline content_list).
+/// Convert a `TokenStream` into the KFX Ion a storyline's `content_list`
+/// holds, splitting structure from text: containers come back as Ion for the
+/// storyline entity, and text strings go to `ctx.text_accumulator` for the
+/// content entity. A text container takes a `content: {name, index}` reference
+/// over inline text, one content entry per element.
 ///
-/// This is the second stage of export: building the Ion tree from tokens.
-///
-/// **Critical**: This function SPLITS data between Structure and Text:
-/// - **Structure** (containers) → returned as Ion (for Storyline Entity)
-/// - **Text strings** → pushed to `ctx.text_accumulator` (for Content Entity)
-///
-/// A text container gets a `content: {name, index}` reference, not inline text.
-/// **All text within an element is concatenated into ONE content entry.**
-///
-/// **Inline Spans**: StartSpan/EndSpan tokens are converted to style_events arrays.
-/// The span stack tracks (start_offset, span_info) and calculates length on EndSpan.
+/// StartSpan/EndSpan become `style_events`: the span stack holds
+/// `(start_offset, span_info)` and takes the length at EndSpan.
 pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue {
     let mut stack: Vec<IonBuilder> = vec![IonBuilder::new()];
 
@@ -2843,18 +2760,13 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
     for token in tokens {
         match token {
             KfxToken::StartElement(elem) => {
-                // Check if this element needs container wrapping for borders to render
-                // KFX requires type: container with nested type: text for borders.
-                // Only bordered *leaf* elements (inline content) take this path; a
-                // bordered element with block children goes through the normal path
-                // below, where its type is forced to `container` and its children
-                // form the content list directly (no inner-text wrapper).
+                // A border renders on a `type: container` holding a nested
+                // `type: text`. A bordered leaf takes that wrapper; a bordered
+                // element with block children takes the path below.
                 if elem.needs_container_wrapper && !elem.has_block_children {
-                    // === CONTAINER WRAPPER PATH ===
-                    // Create outer container with type: container + a writing-mode
-                    // keyed layout and all the semantic/style fields, then create
-                    // inner text element
-
+                    // The outer container carries a writing-mode keyed layout
+                    // and the semantic/style fields; the inner text element
+                    // carries the content.
                     let mut outer_fields = Vec::new();
 
                     // Unique container ID for outer wrapper
@@ -2953,7 +2865,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         ));
                     }
 
-                    // Add yj.classification for footnote/endnote popup support
+                    // `yj.classification` marks a footnote/endnote body, which Kindle
                     if let Some(classification) = elem
                         .get_semantic(SemanticTarget::EpubType)
                         .and_then(note_classification)
@@ -3001,8 +2913,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Type: text - inner element holds the actual content
                     inner_fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Text as u64)));
 
-                    // Push inner text builder and mark it as inner wrapper
-                    // Store outer_id so anchors inside use the top-level container for navigation
+                    // The inner text builder carries `outer_id`, under which an
+                    // anchor inside it navigates to the top-level container.
                     let mut inner_builder = IonBuilder::with_fields(inner_fields, inner_id);
                     inner_builder.is_inner_wrapper_text = true;
                     inner_builder.outer_container_id = Some(outer_id);
@@ -3015,7 +2927,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     let container_id = ctx.fragment_ids.next_id();
                     fields.push((sym!(Id), IonValue::Int(container_id as i64)));
 
-                    // Record this content ID for position_map (so navigation targets are resolvable)
+                    // The content id a position_map entry resolves a nav target through.
                     ctx.record_content_id(container_id);
 
                     // Create chapter-start anchor with first content fragment ID (if pending)
@@ -3037,12 +2949,9 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     let style_sym = elem.style_symbol.unwrap_or(ctx.default_style_symbol);
                     fields.push((sym!(Style), IonValue::Symbol(style_sym)));
 
-                    // Type field (as symbol ID). A bordered element with block
-                    // children (e.g. a 罫囲み `<div>` of `<p>` lines) must be
-                    // `type: container` for the border to render on Kindle — the
-                    // role's default `type: text` would drop it — and a container
-                    // requires an explicit `layout`. Its `<p>` children become the
-                    // content list directly.
+                    // A bordered element with block children (a 罫囲み `<div>` of
+                    // `<p>` lines) takes `type: container` with an explicit
+                    // `layout`; its `<p>` children become the content list.
                     if elem.needs_container_wrapper {
                         fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
                         let layout = elem
@@ -3124,8 +3033,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         ));
                     }
 
-                    // Add yj.classification for footnote/endnote popup support
-                    // This marks the element so Kindle can show its content in a popup
+                    // `yj.classification` marks a footnote/endnote body, which Kindle
+                    // shows in a popup at a tap on its noteref link.
                     // when a noteref link is tapped
                     if let Some(classification) = elem
                         .get_semantic(SemanticTarget::EpubType)
@@ -3137,11 +3046,9 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Add schema-driven attributes from kfx_attrs
                     // The schema handles Image src→resource_name, Link href→link_to, etc.
                     for (field_id, value_str) in &elem.kfx_attrs {
-                        // Determine if this field should be a symbol or string
-                        // - ResourceName: always symbol (e.g., e0, e1)
-                        // - LinkTo: always symbol (anchor references)
-                        // - References with # or /: symbol
-                        // - Alt text, other strings: string
+                        // ResourceName and LinkTo are symbols, as is any value
+                        // starting `#` or holding `/`. Alt text and the rest
+                        // stay strings.
                         let is_symbol_field = *field_id == sym!(ResourceName)
                             || *field_id == sym!(LinkTo)
                             || value_str.starts_with('#')
@@ -3169,11 +3076,9 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     if let Some(parent) = stack.last_mut() {
                         let built = completed.build(ctx);
                         if inline_image && parent.has_real_text_so_far() {
-                            // An image closing inside a text-bearing element
-                            // is an IN-RUN image (`（河出<img/>文庫）`):
-                            // interleave it into the parent's content_list at
-                            // its true position — Amazon's shape — with no
-                            // append after the text.
+                            // An image closing inside a text-bearing element is
+                            // in-run (`（河出<img/>文庫）`): it interleaves into
+                            // the parent's content_list at its own position.
                             parent.absorb_inline_image(built);
                         } else {
                             parent.add_child(built);
@@ -3340,10 +3245,9 @@ impl IonBuilder {
     /// Returns the character offset where this text starts (for span tracking).
     /// KFX style events use character offsets, not byte offsets.
     fn append_text(&mut self, text: &str) -> usize {
-        // Real text arriving after image-only children means those images
-        // sit IN-RUN before this text (`<p><img/>text…`): migrate them into
-        // the inline interleave so their position survives. A block image
-        // (image-only element, no surrounding text) never sees this.
+        // Text arriving after image-only children puts those images in-run
+        // before it (`<p><img/>text…`): they migrate into the inline
+        // interleave, which keeps their position.
         if !self.children.is_empty()
             && !text.chars().all(|c| c == '\u{200B}')
             && self.children.iter().all(is_image_struct)
@@ -3446,10 +3350,9 @@ impl IonBuilder {
         // KFX storylines are flat lists of elements, not nested structs
         // Each element is a struct with type, content reference, and possibly nested content_list
         if !self.fields.is_empty() {
-            // Record text length for this content ID (used by location_map)
-            // Must use char count, not byte count, since location_map divides by characters.
-            // Inline images occupy offset-space slots but carry their own eids in the
-            // position maps, so the element's recorded length covers only its text.
+            // The content id's text length in characters, which is what
+            // location_map divides by. An inline image occupies an offset-space
+            // slot under its own eid, outside this element's recorded length.
             if let Some(container_id) = self.container_id {
                 ctx.record_content_length(
                     container_id,
@@ -3459,9 +3362,8 @@ impl IonBuilder {
 
             if !self.inline_runs.is_empty() {
                 // Interleave shape (in-run images): bare strings and
-                // `render: inline` image structs mixed in `content_list`;
-                // the text stays inline, with no content entity. Each
-                // image counts as one character in style_event offsets.
+                // `render: inline` image structs mixed in `content_list`, no
+                // content entity, each image one character of offset space.
                 if !self.accumulated_text.is_empty() {
                     self.inline_runs
                         .push(IonValue::String(std::mem::take(&mut self.accumulated_text)));
@@ -3491,8 +3393,8 @@ impl IonBuilder {
                 self.fields.push((sym!(Content), content_ref));
             }
 
-            // Add style_events if any inline spans were collected AND there's real text
-            // (style_events reference character offsets in the content, so skip if no content)
+            // style_events go in beside real text: they carry character offsets
+            // into the content.
             if !self.style_events.is_empty() && has_real_text {
                 self.fields
                     .push((sym!(StyleEvents), IonValue::List(self.style_events)));
@@ -3945,9 +3847,9 @@ mod tests {
                 Some("!!".to_string())
             });
 
-        // The anchor must split the tail run between "い" and "です" —
-        // NOT fail to locate (calibre's walk would stop at the
-        // ruby and never reach offset 8).
+        // The anchor splits the tail run between "い" and "です" and
+        // locates: calibre's own walk stops at the ruby and never
+        // reaches offset 8.
         let stamped = table.id_at(50, 8).unwrap();
         let para_id = chapter.children(chapter.root()).next().unwrap();
         let mut found_between = false;
@@ -3972,12 +3874,8 @@ mod tests {
         assert_eq!(char_to_byte_offset(text, 0), 0); // 'H'
         assert_eq!(char_to_byte_offset(text, 5), 5); // ' '
 
-        // Greek chars start at char 6, byte 6
-        // Each Greek char is 3 bytes (extended Greek), so:
-        // char 6 = byte 6 (ὑ)
-        // char 7 = byte 9 (π)
-        // char 13 = byte 21 (ς)
-        // char 14 = byte 23 (' ')
+        // The Greek run starts at char 6, byte 6, three bytes to the
+        // character: char 7 is byte 9, char 14 the space at byte 23.
         assert_eq!(char_to_byte_offset(text, 6), 6); // 'ὑ'
         assert_eq!(char_to_byte_offset(text, 7), 9); // 'π'
         assert_eq!(char_to_byte_offset(text, 14), 23); // ' ' after Greek
@@ -4128,7 +4026,7 @@ mod tests {
     #[test]
     fn test_inline_image_counts_one_position_in_style_events() {
         // `<p>pre<a href>link<img/>tail</a>post</p>` — the image occupies ONE
-        // character in the offset space, so the link span AFTER it starts one
+        // character of offset space, and the link span after it starts one
         // position later ("pre"=3, "link"=4, image=1 → tail at offset 8).
         let mut chapter = Chapter::new();
 
@@ -4236,15 +4134,9 @@ mod tests {
 
     #[test]
     fn test_captioned_figure_migrates_image_into_content_list() {
-        // `<div class="pic"><img/>caption</div>` — image FIRST, caption text
-        // AFTER, no text before. Externalizing the caption to a `content`
-        // entity while the image stays in `content_list` gives the node BOTH
-        // fields, and renderers (Kindle + the KFX→IR importer) honor `content`
-        // and drop `content_list` — which loses the image. It must migrate
-        // into the interleave: content_list = [image(render: inline),
-        // "caption"], and no `content` field. Kobo-processed CJK books hit
-        // this, their figures carrying an inline caption in the same
-        // `<div class="pic">`.
+        // `<div class="pic"><img/>caption</div>`: image first, caption after.
+        // The image migrates into the interleave, giving `content_list =
+        // [image(render: inline), "caption"]` and no `content` field.
         let mut chapter = Chapter::new();
 
         let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
@@ -4376,7 +4268,7 @@ mod tests {
     #[test]
     fn test_style_event_offsets_use_char_count() {
         // KFX style events use character offsets, not byte offsets.
-        // Greek characters are multi-byte in UTF-8, so this verifies
+        // Greek characters are multi-byte in UTF-8, and this verifies
         // characters count, not bytes.
         let mut builder = IonBuilder::new();
 
@@ -4590,7 +4482,7 @@ mod tests {
 
     #[test]
     fn each_kind_of_note_keeps_its_own_classification() {
-        // Books use all three side by side, so neither direction may collapse
+        // Books use all three side by side, and neither direction may collapse
         // them into one.
         for (epub_type, classification) in [
             ("footnote", KfxSymbol::Footnote),
@@ -4637,8 +4529,8 @@ mod tests {
     #[test]
     fn a_list_that_resumes_counting_stays_ordered() {
         // A numbered list broken by prose arrives as one list per item, each
-        // stating where it resumes; without the offset every fragment would
-        // restart at one, and a `numeric` list alone would not even be ordered.
+        // stating where it resumes. An offset-less fragment restarts at one,
+        // and a `numeric` list on its own carries no order at all.
         let symbols = no_symbols();
         let storyline = IonValue::Struct(vec![(
             sym!(ContentList),
@@ -4753,12 +4645,9 @@ mod tests {
 
     #[test]
     fn test_horizontal_rule_keeps_its_element_type() {
-        // An `<hr>` is drawn from a border, so the bordered-box path can
-        // claim it and emit `type: container` around an empty `type: text`,
-        // which re-imports as a `Container` + empty `Paragraph`. Amazon emits
-        // the bare element (`{style: linear, type: horizontal_rule}`), which
-        // is also the shape this crate's own importer reads back as
-        // `Role::Rule`.
+        // An `<hr>` draws its line from a border, within reach of the
+        // bordered-box path. It emits as the bare `{style: linear, type:
+        // horizontal_rule}` this crate's importer reads back as `Role::Rule`.
         use crate::style::{BorderStyle, ComputedStyle, Length};
 
         let mut chapter = Chapter::new();
@@ -4808,7 +4697,7 @@ mod tests {
     /// to reach the KFX style: the picture as a `background_image` symbol
     /// naming the resource, and the explicit `border_style: none` — a KFX
     /// `horizontal_rule` draws its line from the border properties (Amazon's
-    /// own rule styles carry `border_style` + `border_weight`), so a style
+    /// own rule styles carry `border_style` + `border_weight`). A style
     /// that says nothing gets the device's default line drawn across it.
     #[test]
     fn ornament_hr_exports_its_background_and_suppressed_rule() {
@@ -4868,11 +4757,9 @@ mod tests {
 
     #[test]
     fn test_bordered_container_layout_follows_writing_mode() {
-        // A bordered `type: container`'s `layout` is the block-progression axis
-        // of its children, keyed to the box's own writing mode: `horizontal`
-        // for vertical text (縦書き — matches Amazon's KFXGEN), `vertical` for
-        // horizontal-tb. Emitting `vertical` unconditionally oversized a
-        // vertical-book box and pinned its content to the left edge.
+        // A bordered `type: container`'s `layout` is its children's
+        // block-progression axis, keyed to the box's own writing mode:
+        // `horizontal` for vertical text (縦書き), `vertical` for horizontal-tb.
         use crate::style::{BorderStyle, ComputedStyle, Length, WritingMode};
 
         fn container_layout_for(wm: WritingMode) -> Option<u64> {
@@ -5107,12 +4994,8 @@ mod tests {
             Some("1. Easy Concurrency".to_string())
         });
 
-        // Expected structure:
-        // Paragraph
-        //   Link [href="#chapter1"]
-        //     Inline
-        //       Text: "1."
-        //     Text: " Easy Concurrency"
+        // Paragraph → Link [href="#chapter1"] → Inline → Text "1.", then
+        // Text " Easy Concurrency" as the Link's second child.
         let para_id = chapter.children(chapter.root()).next().unwrap();
         let para_children: Vec<_> = chapter.children(para_id).collect();
 
@@ -5247,10 +5130,9 @@ mod tests {
 
     #[test]
     fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
-        // `<a id="map1"><img/></a>` used as a TOC/nav target. A KFX
-        // image element can't hold the anchor, so the flattener must emit a
-        // zero-width-space segment carrying the id + node_id just before the
-        // image, recording the id's content position for the TOC entry.
+        // `<a id="map1"><img/></a>` as a TOC/nav target. A KFX image element
+        // holds no anchor: the flattener emits a zero-width-space segment
+        // carrying the id and node_id just before the image.
         let mut chapter = Chapter::new();
 
         let img_id = chapter.alloc_node(Node::new(Role::Image));
@@ -5284,7 +5166,7 @@ mod tests {
     #[test]
     fn test_flatten_plain_linked_image_emits_no_anchor_carrier() {
         // Counterpart: an `<a href><img/></a>` with NO id is not an anchor
-        // target, so no zero-width carrier is emitted — just the image.
+        // target, and no zero-width carrier is emitted — just the image.
         let mut chapter = Chapter::new();
 
         let img_id = chapter.alloc_node(Node::new(Role::Image));

@@ -22,7 +22,7 @@ desktop = ["cli"]
 # compile out with their help text.
 native = ["bin"]
 
-# --- capabilities: named by a library consumer, bundled by the targets above -
+# --- capabilities: bundled by the install targets above --------------------
 # `cli`: every subcommand over every format.
 cli = ["bin", "aozora", "pdf", "validate"]
 # `bin` is what a `bokai` binary needs before any format capability: a command
@@ -33,14 +33,14 @@ bin = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs"]
 aozora = ["dep:regex", "svg"]
 # PDF as a source format: `import::pdf` probes one, `formats::pdf` reads and
 # edits one, and the PDF→KFX route embeds one. `formats::pdf::structure` sits
-# outside the gate; a PDF-backed KFX carries those facts in its own fragments.
+# outside the gate, reached from a PDF-backed KFX's own fragments.
 pdf = ["dep:lopdf", "svg"]
 # `validate`: the EPUB conformance suite (embedded RELAX NG / Schematron
 # schemas, whose XPath assertions call `regex`) and the KFX and TOC checks
 # beside it.
 validate = ["dep:regex"]
-# `svg`: SVG rasterization. KFX bundles no vector resource format and PDF page
-# assembly draws from SVG; a build without `svg` refuses such a conversion.
+# `svg`: SVG rasterization, for KFX asset plates and PDF page assembly. A build
+# without it refuses either conversion.
 svg = ["dep:resvg"]
 # `nbk`: Kindle Scribe handwritten-notebook (.nbk) decode → SVG, through
 # `rusqlite` (bundled C SQLite). Off by default.
@@ -89,7 +89,7 @@ jxr = { path = "../jxr" }
 
 # Pure-Rust multi-format image decoder. The EPUB→KFX path transcodes every
 # non-JPEG image (GIF, PNG, WebP, BMP) to JPEG through it before bundling.
-# Decoders only: JPEG encode stays on `jpeg-encoder`.
+# Decoders only: JPEG encode is `jpeg-encoder`.
 image = { version = "0.25", default-features = false, features = [
     "gif",
     "png",
@@ -145,8 +145,8 @@ name = "kfx-dump"
 path = "src/bin/kfx-dump.rs"
 required-features = ["bin"]
 
-# Integration tests that exercise an optional capability. A subset build skips
-# each one it lacks the feature for.
+# Integration tests that exercise an optional capability, each gated on its
+# feature.
 [[test]]
 name = "azw3_epub_export"
 required-features = ["validate"]
