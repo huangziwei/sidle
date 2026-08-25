@@ -184,8 +184,9 @@ fn build_kfx_container(
         );
     }
 
-    // 1a. Resolve links: forward/reverse maps and TOC targets
+    // 1a. Resolve links: forward/reverse maps, TOC targets, note roles
     let resolved = book.resolve_links()?;
+    ctx.set_note_roles(resolved.note_roles().clone());
 
     // 1b. Register link targets: href → target, for storyline `link_to`
     register_link_targets(book, &spine_info, &resolved, &mut ctx)?;

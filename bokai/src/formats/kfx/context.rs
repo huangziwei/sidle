@@ -3,19 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::model::ChapterId;
-use crate::model::{GlobalNodeId, LandmarkType, NodeId, TocEntry};
+use crate::model::{GlobalNodeId, LandmarkType, NodeId, NoteRole, TocEntry};
 use crate::style::StyleId;
 
 use super::style_registry::StyleRegistry;
 use super::symbols::{KFX_SYMBOL_TABLE_SIZE, KfxSymbol};
 use super::transforms::encode_base32;
 
-/// KFX font family naming the reader's chosen font; any other value pins one.
+/// The `font_family` value deferring to the device font; any other value pins one.
 const READER_DEFAULT_FONT: &str = "default";
 
-/// Put the reader's font at the head of a stack, the source's own faces behind
-/// it: `booksming, serif` becomes `default,booksming,serif`, Amazon's shape. A
-/// stack headed by `default` is returned unchanged.
+/// `READER_DEFAULT_FONT` at the head of `stack`: `booksming, serif` becomes
+/// `default,booksming,serif`. A stack headed by `default` returns unchanged.
 fn with_reader_font_first(stack: &str) -> String {
     let compact = crate::style::compact_font_stack(stack);
     if crate::style::preferred_font_face(&compact).eq_ignore_ascii_case(READER_DEFAULT_FONT) {
@@ -696,6 +695,9 @@ pub struct ExportContext {
 
     /// Content language stamped on every reflowable `$style` (`zh-tw`)
     pub content_language: String,
+
+    /// `NoteRole` per node, read through [`Self::note_role`].
+    note_roles: HashMap<GlobalNodeId, NoteRole>,
 }
 
 /// Ruby annotation string → `(ruby_name, ruby_id)`. Annotations group into
@@ -828,6 +830,7 @@ impl ExportContext {
             reader_font_family: None,
             document_direction: KfxSymbol::Ltr,
             content_language: String::new(),
+            note_roles: HashMap::new(),
         }
     }
 
@@ -955,9 +958,8 @@ impl ExportContext {
         std::borrow::Cow::Owned(s)
     }
 
-    /// The IR style as the KFX writer sees it: box model transposed for the
-    /// document's axis, body font handed back to the reader. See
-    /// [`Self::reader_font_family`].
+    /// `ir_style` with the box model transposed for the document axis and the
+    /// body font from [`Self::reader_font_family`].
     fn prepared_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
@@ -1407,6 +1409,19 @@ impl ExportContext {
     /// Get the current chapter ID.
     pub fn current_chapter(&self) -> Option<ChapterId> {
         self.current_chapter
+    }
+
+    /// Set the `NoteRole` map for this export.
+    pub fn set_note_roles(&mut self, roles: HashMap<GlobalNodeId, NoteRole>) {
+        self.note_roles = roles;
+    }
+
+    /// The `NoteRole` of `node_id` within `current_chapter`.
+    pub fn note_role(&self, node_id: NodeId) -> Option<NoteRole> {
+        let chapter_id = self.current_chapter?;
+        self.note_roles
+            .get(&GlobalNodeId::new(chapter_id, node_id))
+            .copied()
     }
 
     /// Check if a node is a registered link/TOC target.

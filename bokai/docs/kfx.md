@@ -447,6 +447,21 @@ Ordering is not a separate element type. Whether a list is ordered is decided by
 
 A converter **must** key the ordered/unordered decision on the KFX spelling. Matching the CSS keyword instead matches no real value, and every ordered list arrives unordered.
 
+### 7.8. Notes and popups
+
+A note whose marker the reader taps opens over the page instead of navigating to it. Two element-level markers say so, and both are needed — a book carrying one alone is not a shape the format produces:
+
+- **$615 `yj.classification`**, on the block element holding the note's text, naming the kind of note: `footnote` ($281), `yj.chapternote`, `yj.endnote` or `yj.sidenote`. Every value presents as a popup.
+- **$616 `yj.display`: `yj.note`** ($617), on the `style_events` entry that carries the reference's `link_to` (§8.4). The link is otherwise an ordinary hyperlink, and without this field the tap navigates.
+
+A `footnote` additionally carries **$183 `position`: `footer`** ($455) on the same element, saying the note belongs at the foot of the page its reference sits on. The other three classifications carry no `position`.
+
+The note body is a normal storyline element that lives wherever the source put it — commonly a back-of-book notes section, not beside its reference — and renders there in reading order as well as in the popup. It usually opens with its own link back to the reference, an ordinary `link_to` style_event over the ordinal.
+
+The four classifications are genuinely distinct and co-occur within single books, so a converter **must not** collapse them. Nothing at book level participates: `content_features` (§13) carries no key for popup notes, and `yj_has_text_popups` is a layout-engine key that popup-note books do not declare.
+
+A source format that names its notes — EPUB 3 `epub:type` — maps straight onto the classification vocabulary. One that does not still marks them structurally, as a reciprocal pair of links: the reference points into the note body, and the note body points back into the block the reference sits in. That pair is what a converter has to recognise, since a one-way link is a cross-reference and gets no popup.
+
 ## 8. Style model
 
 ### 8.1. Style fragments

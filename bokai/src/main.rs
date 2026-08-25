@@ -2273,12 +2273,12 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     if !opts.no_styles && node.style.0 != 0 {
         line.push_str(&format!(" [s{}]", node.style.0));
 
-        if opts.styles {
-            if let Some(style) = chapter.styles.get(node.style) {
-                let css = style.to_css_string();
-                if !css.is_empty() {
-                    line.push_str(&format!(" {{ {} }}", css.trim()));
-                }
+        if opts.styles
+            && let Some(style) = chapter.styles.get(node.style)
+        {
+            let css = style.to_css_string();
+            if !css.is_empty() {
+                line.push_str(&format!(" {{ {} }}", css.trim()));
             }
         }
     }

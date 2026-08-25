@@ -257,23 +257,6 @@ pub struct SpanRule {
     pub strategy: Strategy,
     /// Attribute rules for this span.
     pub attr_rules: Vec<AttrRule>,
-    /// Conditional export rules (export-only, based on semantic values).
-    pub conditional_export_rules: Vec<ConditionalExportRule>,
-}
-
-/// Conditional attribute emission for export: a source semantic holding the
-/// trigger value emits the target KFX field, as `epub:type="noteref"` emits
-/// `YjDisplay: YjNote`.
-#[derive(Clone, Debug)]
-pub struct ConditionalExportRule {
-    /// Semantic target to check (e.g., EpubType).
-    pub source: SemanticTarget,
-    /// Value that triggers this rule (uses `contains` matching).
-    pub trigger_value: &'static str,
-    /// KFX field to emit when triggered.
-    pub kfx_field: KfxSymbol,
-    /// KFX symbol value to emit.
-    pub kfx_value: KfxSymbol,
 }
 
 impl KfxSchema {
@@ -579,13 +562,6 @@ impl KfxSchema {
                 SemanticTarget::Href,
                 Box::new(KfxLinkTransform),
             )],
-            // Conditional export: noteref links get YjDisplay: YjNote for popup behavior
-            conditional_export_rules: vec![ConditionalExportRule {
-                source: SemanticTarget::EpubType,
-                trigger_value: "noteref",
-                kfx_field: KfxSymbol::YjDisplay,
-                kfx_value: KfxSymbol::YjNote,
-            }],
         });
 
         // A span carrying no `link_to` is Inline.
@@ -910,63 +886,6 @@ impl KfxSchema {
     /// Every other role takes a nested container.
     pub fn is_inline_role(&self, role: Role) -> bool {
         matches!(role, Role::Link | Role::Inline)
-    }
-
-    /// [`Self::export_attributes`] over the span rules, for the style_events
-    /// an inline role generates.
-    pub fn export_span_attributes<F>(
-        &self,
-        role: Role,
-        get_semantic: F,
-        export_ctx: &crate::formats::kfx::transforms::ExportContext,
-    ) -> Vec<(u64, String)>
-    where
-        F: Fn(SemanticTarget) -> Option<String>,
-    {
-        let mut attrs = Vec::new();
-
-        // The span rule matching this role, by its strategy's trigger_role or role.
-        for span_rule in &self.span_rules {
-            let rule_matches = match &span_rule.strategy {
-                Strategy::Dynamic { trigger_role, .. } => *trigger_role == role,
-                Strategy::Structure { role: r, .. } => *r == role,
-                Strategy::StructureWithModifier { default_role, .. } => *default_role == role,
-                Strategy::StructureWithSemanticType { role: r, .. } => *r == role,
-                Strategy::Style { .. } => role == Role::Inline,
-                Strategy::Transparent { .. } => false,
-            };
-
-            if rule_matches {
-                // Apply attribute rules for this span type
-                for attr_rule in &span_rule.attr_rules {
-                    if let Some(value) = get_semantic(attr_rule.target) {
-                        let parsed =
-                            crate::formats::kfx::transforms::ParsedAttribute::String(value);
-                        let kfx_value = attr_rule.transform.export(&parsed, export_ctx);
-                        if !kfx_value.is_empty() {
-                            attrs.push((attr_rule.kfx_field as u64, kfx_value));
-                        }
-                    }
-                }
-
-                // Apply conditional export rules (e.g., noteref → YjDisplay)
-                for cond_rule in &span_rule.conditional_export_rules {
-                    if let Some(value) = get_semantic(cond_rule.source)
-                        && value.contains(cond_rule.trigger_value)
-                    {
-                        // Emit KFX symbol ID as string (will be parsed in tokens_to_ion)
-                        attrs.push((
-                            cond_rule.kfx_field as u64,
-                            (cond_rule.kfx_value as u64).to_string(),
-                        ));
-                    }
-                }
-
-                break;
-            }
-        }
-
-        attrs
     }
 
     // =========================================================================

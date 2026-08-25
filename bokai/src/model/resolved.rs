@@ -3,11 +3,12 @@
 //! This module provides [`ResolvedLinks`], which resolves all internal `href` attributes
 //! in a book to their targets and builds reverse mappings for efficient lookup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::import::ChapterId;
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Role};
+use crate::model::notes::detect_notes;
+use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NoteRole, Role};
 
 /// Book-level link resolution result with forward and reverse mappings.
 ///
@@ -48,6 +49,9 @@ pub struct ResolvedLinks {
 
     /// Broken links: (source node, unresolved href)
     broken: Vec<(GlobalNodeId, String)>,
+
+    /// `NoteRole` per node. See [`crate::model::notes`].
+    notes: HashMap<GlobalNodeId, NoteRole>,
 }
 
 impl ResolvedLinks {
@@ -96,6 +100,16 @@ impl ResolvedLinks {
     /// Returns tuples of (source node, unresolved href).
     pub fn broken_links(&self) -> &[(GlobalNodeId, String)] {
         &self.broken
+    }
+
+    /// The `NoteRole` of `node`. See [`crate::model::notes`].
+    pub fn note_role(&self, node: GlobalNodeId) -> Option<NoteRole> {
+        self.notes.get(&node).copied()
+    }
+
+    /// Every node carrying a `NoteRole`.
+    pub fn note_roles(&self) -> &HashMap<GlobalNodeId, NoteRole> {
+        &self.notes
     }
 
     /// Iterate all resolved links.
@@ -175,6 +189,7 @@ impl ResolvedLinksBuilder {
 /// 2. Calls importer's index_anchors() to build format-specific anchor maps
 /// 3. Walks all chapters, finds Link nodes, resolves via importer
 /// 4. Builds reverse maps for efficient lookup
+/// 5. Fills the `NoteRole` map from the resolved topology
 pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Result<ResolvedLinks> {
     let mut builder = ResolvedLinksBuilder::new();
 
@@ -238,7 +253,38 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
         }
     }
 
-    Ok(builder.build())
+    // Step 6: `NoteRole` per node, from the resolved topology.
+    let nav_targets = nav_targets(book);
+    let mut resolved = builder.build();
+    resolved.notes = detect_notes(&chapters, &resolved, &nav_targets);
+
+    Ok(resolved)
+}
+
+/// The `AnchorTarget::Internal` blocks named by `toc`, `page_list` and
+/// `landmarks`. Valid after `resolve_toc_targets` and
+/// `resolve_page_list_targets`.
+fn nav_targets(book: &crate::model::Book) -> HashSet<GlobalNodeId> {
+    fn walk(entries: &[crate::model::TocEntry], out: &mut HashSet<GlobalNodeId>) {
+        for entry in entries {
+            if let Some(AnchorTarget::Internal(target)) = entry.target {
+                out.insert(target);
+            }
+            walk(&entry.children, out);
+        }
+    }
+
+    let mut out = HashSet::new();
+    walk(book.toc(), &mut out);
+    walk(book.page_list(), &mut out);
+    for landmark in book.landmarks() {
+        if let Some(AnchorTarget::Internal(target)) =
+            book.resolve_toc_href(ChapterId(0), &landmark.href)
+        {
+            out.insert(target);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

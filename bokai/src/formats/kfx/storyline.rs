@@ -29,7 +29,7 @@ use crate::formats::kfx::transforms::ImportContext;
 use crate::formats::kfx::yj_properties::{
     convert_yj_properties, list_style_numbers_items, partition_image_style,
 };
-use crate::model::{Chapter, Node, NodeId, Role};
+use crate::model::{Chapter, Node, NodeId, NoteRole, Role};
 use crate::style::CssDecl;
 use std::collections::HashMap;
 
@@ -346,6 +346,36 @@ fn note_epub_type(classification: u64) -> Option<&'static str> {
     }
 }
 
+/// The note classification of `elem`, from its `epub:type` or its `NoteRole`.
+fn element_note_classification(elem: &ElementStart, ctx: &ExportContext) -> Option<u64> {
+    if let Some(classification) = elem
+        .get_semantic(SemanticTarget::EpubType)
+        .and_then(note_classification)
+    {
+        return Some(classification);
+    }
+    let node_id = elem.node_id?;
+    (ctx.note_role(node_id) == Some(NoteRole::Body))
+        .then(|| note_classification(NoteRole::Body.epub_type()))
+        .flatten()
+}
+
+/// Push `$615 yj.classification` for a note body, and `$183 position` =
+/// `footer` when that classification is `footnote`.
+fn push_note_classification(
+    elem: &ElementStart,
+    ctx: &ExportContext,
+    fields: &mut Vec<(u64, IonValue)>,
+) {
+    let Some(classification) = element_note_classification(elem, ctx) else {
+        return;
+    };
+    fields.push((sym!(YjClassification), IonValue::Symbol(classification)));
+    if classification == KfxSymbol::Footnote as u64 {
+        fields.push((sym!(Position), IonValue::Symbol(KfxSymbol::Footer as u64)));
+    }
+}
+
 /// The KFX note classification for an `epub:type`, the inverse of
 /// [`note_epub_type`]. Over several tokens the most specific note kind wins,
 /// and an `epub:type` naming none stays unclassified.
@@ -502,7 +532,16 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
             let role = schema().resolve_span_role(has_field);
 
             // Extract ALL semantic attributes using schema rules (GENERIC!)
-            let semantics = extract_all_span_attrs(fields, has_field, ctx);
+            let mut semantics = extract_all_span_attrs(fields, has_field, ctx);
+
+            // `yj.display: yj.note` marks a note reference.
+            if get_field(fields, sym!(YjDisplay)).and_then(|v| v.as_symbol())
+                == Some(KfxSymbol::YjNote as u64)
+            {
+                semantics
+                    .entry(SemanticTarget::EpubType)
+                    .or_insert_with(|| NoteRole::Reference.epub_type().to_string());
+            }
 
             Some(SpanStart {
                 role,
@@ -2187,6 +2226,8 @@ fn collect_column_format(
 struct InlineState {
     /// Active link target (from Link ancestor), as anchor symbol string
     link_to: Option<String>,
+    /// The node `link_to` came from, keying `ExportContext::note_role`.
+    link_node: Option<NodeId>,
     /// Active style (innermost wins)
     style: Option<crate::style::StyleId>,
     /// Active epub:type for noteref detection
@@ -2203,6 +2244,19 @@ struct InlineState {
     /// When set, the base text segments get a ruby_name + ruby_id style_event
     /// pointing at an entry in a ruby_content fragment.
     ruby_annotation: Option<String>,
+}
+
+/// True when `state` names a `noteref` `epub:type` or a `NoteRole::Reference`.
+fn is_note_reference(state: &InlineState, ctx: &ExportContext) -> bool {
+    if let Some(epub_type) = &state.epub_type
+        && epub_type.split_whitespace().any(|t| t == "noteref")
+    {
+        return true;
+    }
+    state
+        .link_node
+        .and_then(|node_id| ctx.note_role(node_id))
+        .is_some_and(|role| role == NoteRole::Reference)
 }
 
 /// A flattened segment with its computed state. A segment carries text, or
@@ -2254,6 +2308,11 @@ fn flatten_inline_content(
             .href(node_id)
             .map(|s| s.to_string())
             .or(state.link_to),
+        link_node: if chapter.semantics.href(node_id).is_some() {
+            Some(node_id)
+        } else {
+            state.link_node
+        },
         // Styles: innermost wins (child overrides parent)
         style: if node.role == Role::Inline || node.role == Role::Link {
             Some(node.style)
@@ -2449,12 +2508,9 @@ fn emit_flattened_segments(
                         kfx_attrs.push((sym!(LinkTo), anchor_symbol));
                     }
 
-                    // Add yj.display for noterefs
-                    if let Some(ref epub_type) = state.epub_type
-                        && epub_type.split_whitespace().any(|t| t == "noteref")
-                    {
-                        // YjNote = 617
-                        kfx_attrs.push((sym!(YjDisplay), "617".to_string()));
+                    // `yj.display: yj.note` marks a note reference.
+                    if is_note_reference(&state, ctx) {
+                        kfx_attrs.push((sym!(YjDisplay), (KfxSymbol::YjNote as u64).to_string()));
                     }
 
                     // Add ruby_name + ruby_id if this segment is base text under a <ruby>.
@@ -2742,14 +2798,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         ));
                     }
 
-                    // `yj.classification` marks a footnote/endnote body, which Kindle
-                    if let Some(classification) = elem
-                        .get_semantic(SemanticTarget::EpubType)
-                        .and_then(note_classification)
-                    {
-                        outer_fields
-                            .push((sym!(YjClassification), IonValue::Symbol(classification)));
-                    }
+                    push_note_classification(elem, ctx, &mut outer_fields);
 
                     // Add schema-driven attributes from kfx_attrs
                     for (field_id, value_str) in &elem.kfx_attrs {
@@ -2920,15 +2969,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         ));
                     }
 
-                    // `yj.classification` marks a footnote/endnote body, which Kindle
-                    // shows in a popup at a tap on its noteref link.
-                    // when a noteref link is tapped
-                    if let Some(classification) = elem
-                        .get_semantic(SemanticTarget::EpubType)
-                        .and_then(note_classification)
-                    {
-                        fields.push((sym!(YjClassification), IonValue::Symbol(classification)));
-                    }
+                    push_note_classification(elem, ctx, &mut fields);
 
                     // Add schema-driven attributes from kfx_attrs
                     // The schema handles Image src→resource_name, Link href→link_to, etc.
@@ -3332,7 +3373,7 @@ mod tests {
             Vec::new(),
         )
     }
-    use crate::model::{GlobalNodeId, Role};
+    use crate::model::{ChapterId, GlobalNodeId, Role};
     use crate::style::BorderStyle;
 
     #[test]
@@ -4414,6 +4455,174 @@ mod tests {
             panic!("expected an element");
         };
         assert_eq!(elem.get_semantic(SemanticTarget::EpubType), Some("endnote"));
+    }
+
+    /// [`has_symbol_field`] over the whole tree, not the root struct alone.
+    fn carries_symbol_field(ion: &IonValue, id: KfxSymbol, value: KfxSymbol) -> bool {
+        if has_symbol_field(ion, id, value) {
+            return true;
+        }
+        match ion {
+            IonValue::Struct(fields) => fields
+                .iter()
+                .any(|(_, v)| carries_symbol_field(v, id, value)),
+            IonValue::List(items) => items
+                .iter()
+                .any(|item| carries_symbol_field(item, id, value)),
+            _ => false,
+        }
+    }
+
+    /// One `Role::Paragraph` of text, wrapped in a `Role::Link` with href
+    /// `link` when given, with the ids of each.
+    fn note_chapter(link: Option<&str>) -> (Chapter, NodeId, Option<NodeId>) {
+        let mut chapter = Chapter::new();
+        let para = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), para);
+
+        let range = chapter.append_text("1. Virginia Woolf, On Being Ill.");
+        let mut text = Node::new(Role::Text);
+        text.text = range;
+        let text_id = chapter.alloc_node(text);
+
+        let link_id = link.map(|href| {
+            let link_id = chapter.alloc_node(Node::new(Role::Link));
+            chapter.append_child(para, link_id);
+            chapter.semantics.set_href(link_id, href);
+            chapter.append_child(link_id, text_id);
+            link_id
+        });
+        if link_id.is_none() {
+            chapter.append_child(para, text_id);
+        }
+        (chapter, para, link_id)
+    }
+
+    fn export_ctx_for_chapter() -> ExportContext {
+        let mut ctx = ExportContext::new();
+        ctx.register_section("test_section");
+        ctx.begin_chapter_export(ChapterId(0));
+        ctx
+    }
+
+    #[test]
+    fn a_footnote_body_states_the_page_foot_it_belongs_at() {
+        // `footnote` pairs with `position: footer`; other kinds carry none.
+        for (epub_type, classification, wants_footer) in [
+            ("footnote", KfxSymbol::Footnote, true),
+            ("endnote", KfxSymbol::YjChapternote, false),
+        ] {
+            let (mut chapter, para, _) = note_chapter(None);
+            chapter.semantics.set_epub_type(para, epub_type);
+
+            let mut ctx = export_ctx_for_chapter();
+            let ion = build_storyline_ion(&chapter, &mut ctx);
+
+            assert!(
+                carries_symbol_field(&ion, KfxSymbol::YjClassification, classification),
+                "{epub_type} body should carry its classification"
+            );
+            assert_eq!(
+                carries_symbol_field(&ion, KfxSymbol::Position, KfxSymbol::Footer),
+                wants_footer,
+                "{epub_type} body position: footer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_note_the_source_only_links_is_still_marked() {
+        // No `epub:type` on the node: the `NoteRole` is the only source.
+        let (chapter, para, _) = note_chapter(None);
+
+        let mut ctx = export_ctx_for_chapter();
+        ctx.set_note_roles(HashMap::from([(
+            GlobalNodeId::new(ChapterId(0), para),
+            NoteRole::Body,
+        )]));
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        assert!(
+            carries_symbol_field(&ion, KfxSymbol::YjClassification, KfxSymbol::Footnote),
+            "an inferred note body is a footnote"
+        );
+        assert!(carries_symbol_field(
+            &ion,
+            KfxSymbol::Position,
+            KfxSymbol::Footer
+        ));
+    }
+
+    #[test]
+    fn a_note_reference_opens_the_note_over_the_page() {
+        // Declared `epub:type` and `NoteRole` both reach `yj.display`.
+        let (mut chapter, _, link) = note_chapter(Some("#note-1"));
+        let link = link.expect("chapter built with a link");
+        chapter.semantics.set_epub_type(link, "noteref");
+
+        let mut ctx = export_ctx_for_chapter();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+        assert!(
+            carries_symbol_field(&ion, KfxSymbol::YjDisplay, KfxSymbol::YjNote),
+            "a declared noteref opens its note over the page"
+        );
+
+        let (chapter, _, link) = note_chapter(Some("#note-1"));
+        let link = link.expect("chapter built with a link");
+        let mut ctx = export_ctx_for_chapter();
+        ctx.set_note_roles(HashMap::from([(
+            GlobalNodeId::new(ChapterId(0), link),
+            NoteRole::Reference,
+        )]));
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+        assert!(
+            carries_symbol_field(&ion, KfxSymbol::YjDisplay, KfxSymbol::YjNote),
+            "an inferred noteref opens its note over the page"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_link_navigates() {
+        let (chapter, _, _) = note_chapter(Some("#chapter-3"));
+        let mut ctx = export_ctx_for_chapter();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+        assert!(!carries_symbol_field(
+            &ion,
+            KfxSymbol::YjDisplay,
+            KfxSymbol::YjNote
+        ));
+    }
+
+    #[test]
+    fn a_note_reference_arrives_as_a_noteref() {
+        // `yj.display` imports as an `epub:type` of `noteref`.
+        let symbols = shared_symbols();
+        let storyline = IonValue::Struct(vec![(
+            sym!(ContentList),
+            IonValue::List(vec![IonValue::Struct(vec![
+                (sym!(Type), IonValue::Symbol(KfxSymbol::Text as u64)),
+                (sym!(Content), IonValue::String("text".to_string())),
+                (
+                    sym!(StyleEvents),
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (sym!(Offset), IonValue::Int(0)),
+                        (sym!(Length), IonValue::Int(1)),
+                        (sym!(LinkTo), IonValue::Symbol(sym!(Anchor))),
+                        (sym!(YjDisplay), IonValue::Symbol(KfxSymbol::YjNote as u64)),
+                    ])]),
+                ),
+            ])]),
+        )]);
+
+        let stream = tokenize_storyline(&storyline, &symbols, None, None, None);
+        let Some(KfxToken::StartElement(elem)) = stream.iter().next() else {
+            panic!("expected an element");
+        };
+        let span = elem.style_events.first().expect("expected a style event");
+        assert_eq!(
+            span.semantics.get(&SemanticTarget::EpubType).map(|s| &**s),
+            Some("noteref")
+        );
     }
 
     #[test]

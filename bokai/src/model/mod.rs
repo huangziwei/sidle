@@ -1,5 +1,5 @@
 //! Core data model for ebook processing: `book` (metadata and the runtime
-//! handle), `chapter` and `node` (the IR tree), `semantic`, `links`,
+//! handle), `chapter` and `node` (the IR tree), `semantic`, `links`, `notes`,
 //! `position`, `text`, `font`, `section_tree` and `toc_shape`.
 
 mod book;
@@ -7,6 +7,7 @@ mod chapter;
 mod font;
 mod links;
 mod node;
+mod notes;
 mod position;
 mod resolved;
 pub mod role_map;
@@ -31,6 +32,7 @@ pub use links::{AnchorTarget, GlobalNodeId, InternalLocation, Link, LinkTarget};
 pub use position::PositionMap;
 pub use text::SourceText;
 
+pub use notes::NoteRole;
 pub use resolved::ResolvedLinks;
 
 pub use font::FontFace;
