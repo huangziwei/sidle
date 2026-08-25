@@ -165,7 +165,7 @@ enum Command {
     /// volume into that directory.
     Split {
         /// Input book. EPUB is split directly; an AZW3/MOBI/KFX is converted
-        /// to EPUB first, the same route the split's own design takes.
+        /// to EPUB first.
         input: String,
 
         /// Directory to write the volume EPUBs into. Omit for a dry run.
@@ -261,8 +261,7 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     );
 
     // The proposed order, one column, with each moved document's old position
-    // beside it. Every fixed-width field sits on the left of the title: a CJK
-    // title measures twice its column count.
+    // beside it. Every fixed-width field sits on the left of the title.
     let current = spine::current_spine(&bytes).map_err(|e| e.to_string())?;
     let proposed = spine::propose_spine(&bytes).map_err(|e| e.to_string())?;
     let was: std::collections::HashMap<&str, usize> = current
@@ -360,8 +359,7 @@ fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(),
 }
 
 /// Read a book as EPUB bytes, converting first from another importable
-/// format. Splitting is defined over the EPUB container, whose spine,
-/// manifest and nav are explicit.
+/// format.
 fn as_epub(input: &str) -> Result<Vec<u8>, String> {
     use bokai::Exporter as _;
 
@@ -602,8 +600,6 @@ fn main() -> ExitCode {
             no_validate,
             max_workers,
         } => {
-            // A build without the capability has no flag to read, and takes
-            // the absent flag's default value.
             #[cfg(feature = "pdf")]
             let ppd = ppd.as_deref();
             #[cfg(not(feature = "pdf"))]
@@ -708,7 +704,6 @@ fn main() -> ExitCode {
     }
 }
 
-// JSON output structures
 #[derive(Serialize)]
 struct BookInfo {
     file: String,
@@ -754,6 +749,26 @@ struct MetadataInfo {
     author_sorts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     collection: Option<CollectionInfoJson>,
+    /// Amazon catalogue id, beside the generic `identifier`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_progression_direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_writing_mode: Option<String>,
+    /// `cde_content_type` for an issue of a periodical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    periodical: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    fixed_layout: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    book_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendition_spread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orientation_lock: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_viewport: Option<(u32, u32)>,
 }
 
 #[derive(Serialize)]
@@ -1242,9 +1257,6 @@ fn validate_all(
         "  HTML tags:    {:.2}% semantic",
         tags.semantic_ratio() * 100.0
     );
-    // External URLs: the denominator is the source side's external count.
-    // KFX tracks none separately, and the EPUB count stands in both
-    // directions, one EPUB anchor per preserved KFX uri anchor.
     let url_source_count = if dir.epub_is_source() {
         links.epub_external_count
     } else {
@@ -1522,6 +1534,15 @@ fn print_json(book: &mut Book, path: &str) -> Result<(), String> {
                 collection_type: c.collection_type.clone(),
                 position: c.position,
             }),
+            asin: meta.asin.clone(),
+            page_progression_direction: meta.page_progression_direction.clone(),
+            primary_writing_mode: meta.primary_writing_mode.clone(),
+            periodical: meta.periodical.map(|k| k.cde_type()),
+            fixed_layout: meta.fixed_layout,
+            book_type: meta.book_type.clone(),
+            rendition_spread: meta.rendition_spread.clone(),
+            orientation_lock: meta.orientation_lock.map(|l| l.kindle_value()),
+            default_viewport: meta.default_viewport,
         },
         spine: book
             .spine()
@@ -1571,6 +1592,9 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     if !meta.identifier.is_empty() {
         println!("Identifier: {}", meta.identifier);
     }
+    if let Some(ref asin) = meta.asin {
+        println!("ASIN: {asin}");
+    }
     if let Some(ref publisher) = meta.publisher {
         println!("Publisher: {publisher}");
     }
@@ -1591,10 +1615,9 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     }
     if let Some(ref desc) = meta.description {
         let desc = desc.trim();
-        if desc.len() > 200 {
-            println!("Description: {}...", &desc[..200]);
-        } else {
-            println!("Description: {desc}");
+        match desc.char_indices().nth(200) {
+            Some((cut, _)) => println!("Description: {}...", &desc[..cut]),
+            None => println!("Description: {desc}"),
         }
     }
     if let Some(ref modified) = meta.modified_date {
@@ -1629,8 +1652,26 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
             println!("Collection: {} ({})", coll.name, coll_type);
         }
     }
+    if let Some(ref ppd) = meta.page_progression_direction {
+        println!("Page progression: {ppd}");
+    }
+    if let Some(ref wm) = meta.primary_writing_mode {
+        println!("Writing mode: {wm}");
+    }
+    if meta.fixed_layout {
+        let book_type = meta.book_type.as_deref().unwrap_or("-");
+        println!("Fixed layout: yes (book-type {book_type})");
+        if let Some(ref spread) = meta.rendition_spread {
+            println!("Spread: {spread}");
+        }
+        if let Some((w, h)) = meta.default_viewport {
+            println!("Viewport: {w}x{h}");
+        }
+    }
+    if let Some(lock) = meta.orientation_lock {
+        println!("Orientation lock: {}", lock.kindle_value());
+    }
 
-    // Spine (chapters)
     println!("\nSpine ({} chapters):", book.spine().len());
     for entry in book.spine() {
         let source = book.source_id(entry.id).unwrap_or("?");
@@ -1640,11 +1681,9 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
         );
     }
 
-    // Table of contents
     println!("\nTable of Contents ({} entries):", book.toc().len());
     print_toc_human(book.toc(), 1);
 
-    // Landmarks
     let landmarks = book.landmarks();
     if !landmarks.is_empty() {
         println!("\nLandmarks ({}):", landmarks.len());
@@ -1656,7 +1695,6 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
         }
     }
 
-    // Assets
     let assets: Vec<_> = book.list_assets().to_vec();
     println!("\nAssets ({}):", assets.len());
     for asset in &assets {
@@ -1788,7 +1826,6 @@ fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
     }
 }
 
-// A CLI command entry point: each argument mirrors a distinct flag.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "pdf"), allow(unused_variables))]
 fn convert(
@@ -1803,7 +1840,6 @@ fn convert(
     validate: bool,
     max_workers: usize,
 ) -> Result<(), String> {
-    // Check if reading from stdin
     let from_stdin = input == "-";
 
     // KFX → PDF (the return leg of the PDF↔KFX dual format): extract the
@@ -1822,7 +1858,6 @@ fn convert(
         return convert_kfx_to_pdf(input, out, quiet);
     }
 
-    // Determine input format
     let input_format = if let Some(fmt) = from_format {
         Some(parse_format(fmt)?)
     } else if from_stdin {
@@ -1834,7 +1869,6 @@ fn convert(
         Format::from_path(input)
     };
 
-    // Validate input format
     if let Some(fmt) = input_format
         && !fmt.can_import()
     {
@@ -1869,7 +1903,6 @@ fn convert(
         ));
     }
 
-    // Check if writing to stdout
     let to_stdout = output == Some("-");
 
     if !quiet && !to_stdout {
@@ -1881,8 +1914,7 @@ fn convert(
         );
     }
 
-    // KFX -> EPUB, through the IR. Refuses a PDF-backed container — that must
-    // round-trip through PDF, not EPUB.
+    // KFX -> EPUB, through the IR. Refuses a PDF-backed container.
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)
@@ -1957,9 +1989,8 @@ fn convert(
         return Ok(());
     }
 
-    // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The PDF
-    // is embedded and the *device* renders each page (which lets the Scribe
-    // pen draw over it). Not a content conversion.
+    // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The
+    // device renders each embedded page.
     #[cfg(feature = "pdf")]
     if !from_stdin
         && output_format == Format::Kfx
@@ -1970,7 +2001,6 @@ fn convert(
         return convert_pdf_to_kfx(input, output, to_stdout, quiet, ppd);
     }
 
-    // Open the book (from file or stdin)
     let mut book = if from_stdin {
         use std::io::Read;
         let mut data = Vec::new();
@@ -2000,8 +2030,6 @@ fn convert(
         book.set_metadata_override(meta);
     }
 
-    // Validate only EPUB output; a `→ kfx`/`→ md`/`→ txt` conversion is out of
-    // this validator's scope.
     let validate_epub = validate && output_format == Format::Epub;
     write_export(book, output_format, output, to_stdout, validate_epub, quiet)?;
 
@@ -2036,7 +2064,6 @@ fn dump_ir(path: &str, opts: DumpOptions) -> Result<(), String> {
     }
 }
 
-// JSON output structures for dump command
 #[derive(Serialize)]
 struct DumpInfo {
     file: String,
@@ -2088,7 +2115,6 @@ fn dump_ir_json(book: &mut Book, path: &str, opts: &DumpOptions) -> Result<(), S
         chapters: Vec::new(),
     };
 
-    // If styles_only, just dump the style pool from the first chapter
     if opts.styles_only {
         let chapter_id = opts.chapter.unwrap_or(0);
         let chapter = book
@@ -2100,7 +2126,6 @@ fn dump_ir_json(book: &mut Book, path: &str, opts: &DumpOptions) -> Result<(), S
         return Ok(());
     }
 
-    // Collect chapters to dump
     let chapter_ids: Vec<(ChapterId, String)> = if let Some(id) = opts.chapter {
         let source = book.source_id(ChapterId(id)).unwrap_or("").to_string();
         vec![(ChapterId(id), source)]
@@ -2140,7 +2165,7 @@ fn dump_node_json(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     let node = chapter.node(id).unwrap();
 
     let text = if !opts.structure && node.role == Role::Text && !node.text.is_empty() {
-        // JSON output stays verbatim; the serializer escapes it.
+        // JSON output stays verbatim.
         let content = chapter.text(node.text);
         Some(clip_text(content, 100))
     } else {
@@ -2153,7 +2178,6 @@ fn dump_node_json(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
         None
     };
 
-    // Collect children
     let children: Vec<NodeDump> = if opts.depth.is_none() || depth < opts.depth.unwrap() {
         chapter
             .children(id)
@@ -2180,7 +2204,6 @@ fn dump_ir_tree(book: &mut Book, path: &str, opts: &DumpOptions) -> Result<(), S
     println!("File: {path}");
     println!();
 
-    // If styles_only, just dump the style pool
     if opts.styles_only {
         let chapter_id = opts.chapter.unwrap_or(0);
         let chapter = book
@@ -2198,7 +2221,6 @@ fn dump_ir_tree(book: &mut Book, path: &str, opts: &DumpOptions) -> Result<(), S
         return Ok(());
     }
 
-    // Collect chapters to dump
     let chapter_ids: Vec<(ChapterId, String)> = if let Some(id) = opts.chapter {
         let source = book.source_id(ChapterId(id)).unwrap_or("").to_string();
         vec![(ChapterId(id), source)]
@@ -2237,7 +2259,6 @@ fn dump_ir_tree(book: &mut Book, path: &str, opts: &DumpOptions) -> Result<(), S
 }
 
 fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usize) {
-    // Check depth limit
     if let Some(max_depth) = opts.depth
         && depth > max_depth
     {
@@ -2247,16 +2268,12 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     let node = chapter.node(id).unwrap();
     let indent = "  ".repeat(depth);
 
-    // Build the node display line
     let mut line = format!("{}{}", indent, role_to_string(node.role));
 
-    // Add style if not hidden and not default
     if !opts.no_styles && node.style.0 != 0 {
-        // Always show style ID
         line.push_str(&format!(" [s{}]", node.style.0));
 
         if opts.styles {
-            // Also expand styles to show CSS properties
             if let Some(style) = chapter.styles.get(node.style) {
                 let css = style.to_css_string();
                 if !css.is_empty() {
@@ -2266,7 +2283,6 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
         }
     }
 
-    // Add semantic attributes
     if let Some(href) = chapter.semantics.href(id) {
         line.push_str(&format!(" href=\"{}\"", truncate_text(href, 40)));
     }
@@ -2283,7 +2299,6 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
         line.push_str(&format!(" class=\"{}\"", class));
     }
 
-    // Add text content for text nodes
     if !opts.structure && node.role == Role::Text && !node.text.is_empty() {
         let text = chapter.text(node.text);
         line.push_str(&format!(": \"{}\"", truncate_text(text, 60)));
@@ -2291,7 +2306,6 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
 
     println!("{line}");
 
-    // Recurse into children
     for child_id in chapter.children(id) {
         dump_node_tree(chapter, child_id, opts, depth + 1);
     }
@@ -2411,8 +2425,6 @@ fn convert_pdf_to_kfx(
         title: title.clone(),
         author: author.clone(),
         language: "en".to_string(),
-        // The CLI carries no edited library metadata; leave date/publisher
-        // unset (an embedding caller fills them from its own catalog).
         date: None,
         publisher: None,
         page_progression_direction: ppd.clone(),
