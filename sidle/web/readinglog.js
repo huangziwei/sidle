@@ -21,6 +21,12 @@
     overview: null,
     loaded: false,
     year: null, // heatmap year, as a number; resolved on first render
+    calView: "year", // which calendar is drawn: year | month
+    calMonth: null, // Date anchoring the month calendar
+    calRows: new Map(), // "YYYY-MM" → that month's per-day book rows
+    calPending: 0, // guards the month fetch against a stale reply
+    calShapes: new Map(), // "YYYY-MM" → that month's per-day hour shapes
+    tlPending: 0, // guards the timeline fetch against a stale reply
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
     bucket: "year", // how finely the grid cuts the year up: year | month | day
@@ -136,9 +142,32 @@
     );
   }
 
+  // ── A book's own colour ────────────────────────────────────────────────────
+
+  // Degrees of hue between one book id and the next: the golden angle.
+  const GOLDEN_ANGLE_DEG = 137.508;
+
+  // `book_id` → a hue in [0, 360).
+  function bookHue(id) {
+    return ((Number(id) || 0) * GOLDEN_ANGLE_DEG) % 360;
+  }
+
+  // `--rl-span-*` set the lightness and chroma; `bookHue` sets the hue.
+  function bookFill(id) {
+    return `oklch(var(--rl-span-l) var(--rl-span-c) ${bookHue(id).toFixed(1)})`;
+  }
+
+  function bookInk(id) {
+    return `oklch(var(--rl-span-ink-l) var(--rl-span-ink-c) ${bookHue(id).toFixed(1)})`;
+  }
+
   // ── Public surface ─────────────────────────────────────────────────────────
 
   async function refresh() {
+    // `doImport`, `doPurge` and `nameBook` all reach `refresh`; `calRows` is
+    // dropped for every one of them.
+    state.calRows.clear();
+    state.calShapes.clear();
     try {
       // Two halves of the same picture: what the library could name on its own,
       // and the ties it would not guess at. The second is reading the page
@@ -198,10 +227,30 @@
       state.day = null;
     }
     renderStats(o);
+    renderRecent(o);
     renderYearNav(o, years);
-    renderHeatmap(o);
+    renderCalendar(o);
     renderClock(o);
+    renderTimeline();
     renderScope();
+  }
+
+  // Draws `#rl-heatmap` or `#rl-monthcal` per `state.calView`, and hides the
+  // other with the controls belonging to it.
+  function renderCalendar(o) {
+    if (!o) return;
+    const month = state.calView === "month";
+    q("#rl-heatmap").hidden = month;
+    q("#rl-legend").hidden = month;
+    q("#rl-monthcal").hidden = !month;
+    q("#rl-cal-nav").hidden = !month;
+    for (const b of q("#rl-cal-seg").querySelectorAll(".seg-btn")) {
+      const on = (b.dataset.cal === "month") === month;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+    if (month) renderMonthCal(o);
+    else renderHeatmap(o);
   }
 
   function yearsWithData(o) {
@@ -218,15 +267,19 @@
     return `<div class="rl-stat"${t}><b>${value}</b><span>${label}</span></div>`;
   }
 
+  // The first three tiles cover `state.year`, matching the calendar and the
+  // grid. The last three are all-time and say so.
   function renderStats(o) {
-    const perDay = o.days_read ? Math.round(o.total_seconds / o.days_read) : 0;
+    const days = daysOfYear(o, state.year);
+    const secs = days.reduce((a, d) => a + d.seconds, 0);
+    const perDay = days.length ? Math.round(secs / days.length) : 0;
     const tiles = [
-      statTile(fmtDuration(o.total_seconds), "total"),
-      statTile(o.days_read, "days read"),
-      statTile(fmtDuration(perDay), "per reading day"),
-      statTile(`${o.current_streak}d`, "streak", "Consecutive days up to today"),
-      statTile(`${o.longest_streak}d`, "longest streak"),
-      statTile(o.books_total, "books"),
+      statTile(fmtDuration(secs), `in ${state.year}`, `${fmtDuration(o.total_seconds)} all time`),
+      statTile(days.length, "days read", `${o.days_read} all time`),
+      statTile(fmtDuration(perDay), "per reading day", `In ${state.year}`),
+      statTile(`${o.current_streak}d`, "streak", "Consecutive days up to today, all time"),
+      statTile(`${o.longest_streak}d`, "longest streak", "All time"),
+      statTile(o.books_total, "books", "Distinct books ever read"),
     ];
     q("#rl-stats").innerHTML = tiles.join("");
   }
@@ -319,6 +372,367 @@
       `<div class="rl-dows"><span></span><span>Mon</span><span></span><span>Wed</span>` +
       `<span></span><span>Fri</span><span></span></div>` +
       `<div class="rl-weeks">${cols.join("")}</div></div>`;
+  }
+
+  // ── The month calendar ─────────────────────────────────────────────────────
+  // One bar per book per run of consecutive days. Rows come from
+  // `reading_log_books` at `bucket: "day"`.
+
+  // Lanes of bars per day. Also set on `.rl-monthcal` as `--rl-lanes`.
+  const SPAN_LANES = 4;
+
+  // `YYYY-MM` for a Date.
+  function monthKey(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  // `days`: 7 entries of `[{ book_id, title, seconds }]`, `seconds` descending,
+  // empty outside the month. Returns 7 columns of `SPAN_LANES` lanes, where a
+  // book on consecutive days holds one lane and carries `start` and `span`.
+  function layoutWeek(days) {
+    const lanes = [];
+    for (let col = 0; col < days.length; col++) {
+      const here = [];
+      for (let lane = 0; lane < SPAN_LANES; lane++) {
+        const book = days[col][lane];
+        here[lane] = book ? { ...book, start: col, span: 1 } : null;
+      }
+      const prev = col > 0 ? lanes[col - 1] : null;
+      if (prev) {
+        for (let pn = 0; pn < prev.length; pn++) {
+          const before = prev[pn];
+          if (!before) continue;
+          const tn = here.findIndex((b) => b && b.book_id === before.book_id);
+          if (tn < 0) continue;
+          // `before.span` is read before the loop below writes to `before`.
+          const spanBefore = before.span;
+          here[tn].start = before.start;
+          here[tn].span = spanBefore + 1;
+          for (let back = 1; back <= spanBefore; back++) {
+            const cell = lanes[col - back][pn];
+            if (cell) cell.span = here[tn].span;
+          }
+          if (tn !== pn) [here[tn], here[pn]] = [here[pn], here[tn]];
+        }
+      }
+      lanes[col] = here;
+    }
+    return lanes;
+  }
+
+  // The books of each day of one month, keyed `YYYY-MM-DD`, busiest first.
+  function booksByDay(rows) {
+    const out = new Map();
+    for (const r of rows) {
+      if (!out.has(r.bucket)) out.set(r.bucket, []);
+      out.get(r.bucket).push({ book_id: r.book_id, title: r.title, seconds: r.seconds });
+    }
+    for (const list of out.values()) list.sort((a, b) => b.seconds - a.seconds);
+    return out;
+  }
+
+  // One month's per-day book rows and hour shapes, memoised in `state.calRows`
+  // and `state.calShapes`.
+  async function loadMonth(anchor) {
+    const key = monthKey(anchor);
+    const last = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
+    const from = `${key}-01`;
+    const to = `${key}-${String(last).padStart(2, "0")}`;
+    if (!state.calRows.has(key)) {
+      const [rows, shapes] = await Promise.all([
+        api.invoke("reading_log_books", { from, to, sort: "seconds", asc: false, bucket: "day" }),
+        api.invoke("reading_log_day_hours", { from, to }),
+      ]);
+      state.calRows.set(key, rows);
+      state.calShapes.set(key, new Map(shapes.map((s) => [s.day, s])));
+    }
+    return state.calRows.get(key);
+  }
+
+  // Seconds of a day placed whole on one hour, past which `hours` carries one
+  // saturated bar and 23 empty ones. Such a shape is left undrawn.
+  function shapeIsEvidence(shape) {
+    if (!shape) return false;
+    const total = shape.hours.reduce((a, h) => a + h, 0);
+    return total > 0 && shape.unplaced_seconds * 2 <= total;
+  }
+
+  // 24 bars, scaled to the day's own busiest hour.
+  function shapeHtml(shape) {
+    if (!shapeIsEvidence(shape)) return "";
+    const peak = Math.max(...shape.hours, 1);
+    const bars = shape.hours
+      .map((s) => `<i style="--v:${((s / peak) * 100).toFixed(1)}%"></i>`)
+      .join("");
+    return bars;
+  }
+
+  // `YYYY-MM` of every month in `state.year` with reading, ascending.
+  function monthsWithData(o) {
+    const p = `${state.year}-`;
+    return [...new Set(o.days.filter((d) => d.day.startsWith(p)).map((d) => d.day.slice(0, 7)))]
+      .sort();
+  }
+
+  async function renderMonthCal(o) {
+    const months = monthsWithData(o);
+    if (!months.length) {
+      q("#rl-monthcal").innerHTML = "";
+      return;
+    }
+    // `state.calMonth` outside `state.year` is reset to a month in `months`.
+    if (!state.calMonth || monthKey(state.calMonth).slice(0, 4) !== String(state.year)) {
+      const pick = months.includes(monthKey(new Date()))
+        ? monthKey(new Date())
+        : months[months.length - 1];
+      state.calMonth = new Date(+pick.slice(0, 4), +pick.slice(5, 7) - 1, 1);
+    }
+    const anchor = state.calMonth;
+    const key = monthKey(anchor);
+    const i = months.indexOf(key);
+    q("#rl-cal-label").textContent = anchor.toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+    const label = (k) =>
+      new Date(+k.slice(0, 4), +k.slice(5, 7) - 1, 1).toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      });
+    setStep("#rl-cal-prev", i > 0 ? months[i - 1] : null, (k) => `Go to ${label(k)}`);
+    setStep("#rl-cal-next", i >= 0 && i < months.length - 1 ? months[i + 1] : null, (k) =>
+      `Go to ${label(k)}`,
+    );
+
+    const token = ++state.calPending;
+    let rows = [];
+    try {
+      rows = await loadMonth(anchor);
+    } catch (e) {
+      toast(`failed to load ${key}: ${e}`, true);
+    }
+    if (token !== state.calPending) return;
+    const shapes = state.calShapes.get(key) || new Map();
+    q("#rl-monthcal").innerHTML = monthCalHtml(o, anchor, booksByDay(rows), shapes);
+  }
+
+  function monthCalHtml(o, anchor, byDay, shapes) {
+    const totals = new Map(o.days.map((d) => [d.day, d.seconds]));
+    const year = anchor.getFullYear();
+    const month = anchor.getMonth();
+    const len = new Date(year, month + 1, 0).getDate();
+    const lead = new Date(year, month, 1).getDay();
+    const level = levelScale(daysOfYear(o, state.year));
+    const today = dayKey(new Date());
+
+    // Whole weeks, Sunday first, padded at both ends with null.
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push(null);
+    for (let d = 1; d <= len; d++) cells.push(new Date(year, month, d));
+    while (cells.length % 7) cells.push(null);
+
+    const out = [
+      `<div class="rl-cal-dows">` +
+        DOW.map((d) => `<span>${d}</span>`).join("") +
+        `</div>`,
+    ];
+    q("#rl-monthcal").style.setProperty("--rl-lanes", String(SPAN_LANES));
+    for (let w = 0; w < cells.length; w += 7) {
+      const week = cells.slice(w, w + 7);
+      const days = week.map((c) => (c ? byDay.get(dayKey(c)) || [] : []));
+      const lanes = layoutWeek(days);
+      const parts = [];
+
+      week.forEach((cur, col) => {
+        if (!cur) {
+          parts.push(
+            `<div class="rl-cal-pad" style="grid-column:${col + 1}; grid-row:1/-1"></div>`,
+          );
+          return;
+        }
+        const key = dayKey(cur);
+        const secs = totals.get(key) || 0;
+        const hit = secs ? ` data-day="${key}" role="button" tabindex="0"` : "";
+        const sel = key === state.day ? " rl-cal-sel" : "";
+        const now = key === today ? " rl-cal-today" : "";
+        // `grid-row:1/-1` puts the background under the date row and the lanes.
+        parts.push(
+          `<div class="rl-cal-cell${sel}${now}" style="grid-column:${col + 1}; grid-row:1/-1"${hit} ` +
+            `title="${fmtDay(key)} — ${secs ? fmtDuration(secs) : "nothing"}"></div>`,
+        );
+        const bars = shapeHtml(shapes.get(key));
+        if (bars) {
+          parts.push(
+            `<div class="rl-cal-shape" style="grid-column:${col + 1}; grid-row:-2">${bars}</div>`,
+          );
+        }
+        const extra = days[col].length - SPAN_LANES;
+        parts.push(
+          `<div class="rl-cal-num" style="grid-column:${col + 1}; grid-row:1">` +
+            `<b>${cur.getDate()}</b>` +
+            (secs ? `<em class="rl-l${level(secs)} rl-cal-dot"></em>` : "") +
+            (secs ? `<span>${fmtDuration(secs)}</span>` : "") +
+            (extra > 0 ? `<i class="rl-cal-more">+${extra}</i>` : "") +
+            `</div>`,
+        );
+      });
+
+      // A run is emitted once, at `book.start`.
+      lanes.forEach((lane, col) => {
+        lane.forEach((book, row) => {
+          if (!book || book.start !== col) return;
+          parts.push(
+            `<span class="rl-cal-span" data-book="${book.book_id}" role="button" tabindex="0" ` +
+              `style="grid-column:${col + 1} / span ${book.span}; grid-row:${row + 2}; ` +
+              `--fill:${bookFill(book.book_id)}; --ink:${bookInk(book.book_id)}" ` +
+              `title="${esc(book.title)}">${esc(book.title)}</span>`,
+          );
+        });
+      });
+
+      out.push(`<div class="rl-cal-week">${parts.join("")}</div>`);
+    }
+    return out.join("");
+  }
+
+  // ── The day timeline ───────────────────────────────────────────────────────
+  // The sittings of `state.day` on one 24-hour axis. A block spans
+  // `[started_at, ended_at]`; the fill inside it is `seconds`.
+
+  const DAY_SECS = 86400;
+
+  // Seconds into the day, from a `YYYY-MM-DDTHH:MM:SS` stamp.
+  function clockSecs(iso) {
+    if (!iso || iso.length < 19) return null;
+    return +iso.slice(11, 13) * 3600 + +iso.slice(14, 16) * 60 + +iso.slice(17, 19);
+  }
+
+  // `[start, end]` of one sitting in seconds of `day`, clipped to it. An end
+  // before its start ran past midnight and stops at the day's edge.
+  function sessionSpan(s, day) {
+    const from = clockSecs(s.started_at);
+    if (from == null) return null;
+    let to = clockSecs(s.ended_at);
+    if (to == null || s.ended_at.slice(0, 10) !== day || to < from) to = DAY_SECS;
+    return [from, Math.max(to, from + 60)];
+  }
+
+  // Packs sittings into rows where no two overlap, earliest first.
+  function packLanes(spans) {
+    const lanes = [];
+    for (const item of spans) {
+      let lane = lanes.find((l) => l[l.length - 1].span[1] <= item.span[0]);
+      if (!lane) {
+        lane = [];
+        lanes.push(lane);
+      }
+      lane.push(item);
+    }
+    return lanes;
+  }
+
+  async function renderTimeline() {
+    const day = state.day;
+    const box = q("#rl-timeline");
+    box.hidden = !day;
+    if (!day) return;
+    q("#rl-timeline-title").textContent = fmtDay(day);
+
+    const token = ++state.tlPending;
+    let rows = [];
+    try {
+      rows = await api.invoke("reading_log_sessions", { from: day, to: day });
+    } catch (e) {
+      toast(`failed to load sittings for ${day}: ${e}`, true);
+    }
+    if (token !== state.tlPending) return;
+
+    const spans = rows
+      .map((s) => ({ s, span: sessionSpan(s, day) }))
+      .filter((x) => x.span)
+      .sort((a, b) => a.span[0] - b.span[0]);
+    const counted = rows.reduce((a, s) => a + s.seconds, 0);
+    q("#rl-timeline-note").textContent = spans.length
+      ? `${spans.length} sitting${spans.length === 1 ? "" : "s"} · ${fmtDuration(counted)}`
+      : "";
+    q("#rl-timeline-body").innerHTML = spans.length ? timelineHtml(spans, day) : "";
+  }
+
+  function timelineHtml(spans, day) {
+    const pct = (v) => `${((v / DAY_SECS) * 100).toFixed(3)}%`;
+    const lanes = packLanes(spans)
+      .map((lane) => {
+        const blocks = lane.map(({ s, span }) => {
+          const width = span[1] - span[0];
+          // `seconds` is counted reading and never exceeds the window it is
+          // drawn in.
+          const fill = Math.min(1, s.seconds / width);
+          return (
+            `<span class="rl-tl-block" data-book="${s.book_id}" role="button" tabindex="0" ` +
+            `style="left:${pct(span[0])}; width:${pct(width)}; ` +
+            `--fill:${bookFill(s.book_id)}; --ink:${bookInk(s.book_id)}; ` +
+            `--read:${(fill * 100).toFixed(1)}%" ` +
+            `title="${esc(s.title)}\n${s.started_at.slice(11, 16)}–${s.ended_at.slice(11, 16)}` +
+            ` · ${fmtDuration(s.seconds)} read">` +
+            `<i class="rl-tl-read"></i><b>${esc(s.title)}</b></span>`
+          );
+        });
+        return `<div class="rl-tl-lane">${blocks.join("")}</div>`;
+      })
+      .join("");
+
+    const ticks = [0, 3, 6, 9, 12, 15, 18, 21]
+      .map(
+        (h) =>
+          `<span class="rl-tl-tick" style="left:${pct(h * 3600)}">` +
+          `${String(h).padStart(2, "0")}</span>`,
+      )
+      .join("");
+    // A marker for the current time, on today only.
+    const now = new Date();
+    const isToday = dayKey(now) === day;
+    const marker = isToday
+      ? `<i class="rl-tl-now" style="left:${pct(
+          now.getHours() * 3600 + now.getMinutes() * 60,
+        )}"></i>`
+      : "";
+    return `<div class="rl-tl-plot">${lanes}${marker}</div><div class="rl-tl-axis">${ticks}</div>`;
+  }
+
+  // ── Recently ───────────────────────────────────────────────────────────────
+
+  // Days drawn in the band above the calendar.
+  const RECENT_DAYS = 14;
+
+  function renderRecent(o) {
+    const totals = new Map(o.days.map((d) => [d.day, d.seconds]));
+    const today = new Date();
+    const bars = [];
+    let peak = 1;
+    const window = [];
+    for (let i = RECENT_DAYS - 1; i >= 0; i--) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+      const key = dayKey(d);
+      const secs = totals.get(key) || 0;
+      peak = Math.max(peak, secs);
+      window.push({ key, d, secs });
+    }
+    for (const { key, d, secs } of window) {
+      const hit = secs ? ` data-day="${key}" role="button" tabindex="0"` : "";
+      bars.push(
+        `<span class="rl-recent-bar${key === state.day ? " rl-recent-sel" : ""}"${hit} ` +
+          `style="--v:${((secs / peak) * 100).toFixed(1)}%" ` +
+          `title="${fmtDay(key)} — ${secs ? fmtDuration(secs) : "nothing"}">` +
+          `<i></i><em>${d.getDate()}</em></span>`,
+      );
+    }
+    const sum = window.reduce((a, w) => a + w.secs, 0);
+    const todaySecs = totals.get(dayKey(today)) || 0;
+    q("#rl-recent-note").textContent =
+      `${fmtDuration(sum)} in ${RECENT_DAYS} days` +
+      (todaySecs ? ` · ${fmtDuration(todaySecs)} today` : "");
+    q("#rl-recent-bars").innerHTML = bars.join("");
+    q("#rl-recent").hidden = sum === 0;
   }
 
   // ── When you read ──────────────────────────────────────────────────────────
@@ -849,6 +1263,7 @@
         ),
         fact("First read", shortDay(entry.first_at)),
         fact("Last read", shortDay(entry.last_at)),
+        ...paceFacts(entry, days),
         // Blank for sessions imported before Sidle was told which Kindle wrote
         // them; a row saying nothing beats a row inventing a device.
         entry.devices.length ? fact("Read on", entry.devices.join(", ")) : "",
@@ -857,8 +1272,58 @@
       for (const a of ["role", "tabindex", "aria-label", "title"]) box.removeAttribute(a);
       q("#rl-book-stats").innerHTML = "";
     }
+    renderProgress();
     renderMonth();
     renderNotes();
+  }
+
+  // The fraction of the axis read, or null where either half is unstored.
+  // `linear_pos` past `max_position` comes of a stored file differing from the
+  // build the device read, and clamps.
+  function readFraction() {
+    const p = state.book?.progress;
+    if (!p || !p.max_position) return null;
+    return Math.min(1, Math.max(0, p.linear_pos / p.max_position));
+  }
+
+  function renderProgress() {
+    const frac = readFraction();
+    const box = q("#rl-book-progress");
+    box.hidden = frac === null;
+    if (frac === null) return;
+    const pct = Math.round(frac * 100);
+    q("#rl-book-progress-fill").style.width = `${(frac * 100).toFixed(1)}%`;
+    q("#rl-book-progress-label").textContent =
+      frac >= 1 ? "At the end" : `${pct}% of the way in`;
+    q("#rl-book-progress-label").title =
+      `Position ${state.book.progress.linear_pos} of ${state.book.progress.max_position}` +
+      ` (${state.book.progress.source})`;
+  }
+
+  // Time left and a finish date, at this book's own measured pace. Both are
+  // absent without a position, and at the end of the book.
+  function paceFacts(entry, days) {
+    const frac = readFraction();
+    if (frac === null || frac <= 0 || frac >= 1 || !entry.seconds || !days.length) return [];
+    // The seconds behind `frac` of the axis, scaled to what is left of it.
+    const left = Math.round((entry.seconds * (1 - frac)) / frac);
+    const perDay = entry.seconds / days.length;
+    const daysLeft = perDay > 0 ? Math.ceil(left / perDay) : 0;
+    const out = [
+      fact("Time left", fmtDuration(left), `At ${fmtDuration(Math.round(perDay))} a reading day`),
+    ];
+    if (daysLeft > 0) {
+      const end = new Date();
+      end.setDate(end.getDate() + daysLeft);
+      out.push(
+        fact(
+          "Finish by",
+          shortDay(dayKey(end)),
+          `${daysLeft} reading day${daysLeft === 1 ? "" : "s"} at the current pace`,
+        ),
+      );
+    }
+    return out;
   }
 
   // One figure as a label/value row. A vertical list beside the calendar reads
@@ -1205,6 +1670,23 @@
       render();
     });
 
+    // Sets `state.calView`. `state.year` and `state.day` are left as they are.
+    q("#rl-cal-seg").addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn[data-cal]");
+      if (!btn || btn.dataset.cal === state.calView) return;
+      state.calView = btn.dataset.cal;
+      renderCalendar(state.overview);
+    });
+
+    for (const sel of ["#rl-cal-prev", "#rl-cal-next"]) {
+      q(sel).addEventListener("click", (e) => {
+        const target = e.currentTarget.dataset.target;
+        if (!target) return;
+        state.calMonth = new Date(+target.slice(0, 4), +target.slice(5, 7) - 1, 1);
+        renderCalendar(state.overview);
+      });
+    }
+
     // Year / Month / Day. The window does not change — only how finely the
     // query cuts it — so the heatmap and the totals above stay put.
     q("#rl-bucket-seg").addEventListener("click", (e) => {
@@ -1274,7 +1756,15 @@
     // One delegated handler for the whole page: the heatmap and both lists are
     // re-rendered wholesale, so per-element listeners would leak on every draw.
     q("#reading-log").addEventListener("click", (e) => {
-      const cell = e.target.closest(".rl-cell[data-day]");
+      // Matched before `.rl-cal-cell`, which a bar overlaps.
+      const span = e.target.closest(".rl-cal-span[data-book], .rl-tl-block[data-book]");
+      if (span) {
+        openBook(Number(span.dataset.book));
+        return;
+      }
+      const cell = e.target.closest(
+        ".rl-cell[data-day], .rl-cal-cell[data-day], .rl-recent-bar[data-day]",
+      );
       if (cell) {
         state.day = state.day === cell.dataset.day ? null : cell.dataset.day;
         render();
@@ -1302,7 +1792,9 @@
     q("#reading-log").addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       const hit = e.target.closest(
-        ".rl-cell[data-day], .rl-card[data-book], #rl-book-cover[role]",
+        ".rl-cell[data-day], .rl-cal-cell[data-day], .rl-recent-bar[data-day], " +
+          ".rl-cal-span[data-book], .rl-tl-block[data-book], " +
+          ".rl-card[data-book], #rl-book-cover[role]",
       );
       if (!hit) return;
       e.preventDefault();

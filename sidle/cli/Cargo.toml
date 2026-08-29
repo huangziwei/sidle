@@ -16,8 +16,8 @@ path = "src/main.rs"
 sidle-core = { path = "../core" }
 # The LAN daemon's own crate, for the bearer token it and the picker share.
 sidle-server = { path = "../server" }
-# Reads and rewrites the KFX metadata a re-key changes.
-bokai = { path = "../../bokai" }
+# `formats::kfx::metadata` and `metadata_edit`, at sidle-desktop's feature set.
+bokai = { path = "../../bokai", default-features = false, features = ["pdf", "validate"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -2518,16 +2518,25 @@ const SPREADABLE_SPAN_SECS: i64 = 6 * 3600;
 /// session's own day throughout, so these totals sum to exactly what
 /// [`reading_days`] reports for the same window rather than drifting from it by
 /// whatever crossed midnight.
-pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
-    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
-    let cell = |day: &str, hour: u8| -> Option<(String, u8, u8)> {
-        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-        Some((
-            day[..7].to_string(),
-            chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
-            hour,
-        ))
-    };
+/// Which of the three regimes placed a session's seconds on a clock hour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Booked {
+    /// `reading_session_hours` stated the interval.
+    Measured,
+    /// Shared across the window in proportion to each hour's overlap.
+    Spread,
+    /// Placed whole on the starting hour, past [`SPREADABLE_SPAN_SECS`].
+    Whole,
+}
+
+/// Every attributed session's seconds, on the true clock hours of its own day,
+/// past midnight included. `f` takes the day, the hour, the seconds, and the
+/// [`Booked`] regime. [`reading_clock`] and [`reading_day_hours`] consume it.
+fn walk_clock_hours(
+    conn: &Connection,
+    mut f: impl FnMut(&str, u8, i64, Booked),
+) -> rusqlite::Result<()> {
+    let parses = |day: &str| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok();
 
     let mut measured = conn.prepare(
         "SELECT s.day, h.hour, h.seconds
@@ -2543,8 +2552,8 @@ pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
         ))
     })? {
         let (day, hour, seconds) = row?;
-        if let Some(key) = cell(&day, hour.min(23)) {
-            *cells.entry(key).or_default() += seconds;
+        if parses(&day) {
+            f(&day, hour.min(23), seconds, Booked::Measured);
         }
     }
 
@@ -2564,27 +2573,24 @@ pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
 
     for row in rows {
         let (day, started_at, ended_at, seconds) = row?;
-        if cell(&day, 0).is_none() {
+        if !parses(&day) {
             continue;
         }
-        let key = |hour: u8| cell(&day, hour).expect("day parsed above");
         let (Some(from), Some(to)) = (clock_secs(&started_at), clock_secs(&ended_at)) else {
             continue;
         };
-        // The end is past the start on the clock unless the session ran over
-        // midnight, in which case it is a day further on.
+        // `to` below `from` places the end past midnight.
         let span = if to >= from {
             to - from
         } else {
             to + 86400 - from
         };
         if span == 0 || span > SPREADABLE_SPAN_SECS {
-            *cells.entry(key((from / 3600) as u8)).or_default() += seconds;
+            f(&day, (from / 3600) as u8, seconds, Booked::Whole);
             continue;
         }
-        // Whole seconds per hour, then the division's remainder to the hour the
-        // session began: a rounding loss would quietly shrink the year's total
-        // below what the heatmap beside it reports.
+        // The division's remainder goes to the starting hour; the shares sum
+        // to `seconds`.
         let mut placed = 0;
         for h in (from / 3600)..=((from + span) / 3600) {
             let (lo, hi) = (h * 3600, (h + 1) * 3600);
@@ -2594,10 +2600,24 @@ pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
             }
             let share = seconds * overlap / span;
             placed += share;
-            *cells.entry(key(((h % 24) as u8).min(23))).or_default() += share;
+            f(&day, ((h % 24) as u8).min(23), share, Booked::Spread);
         }
-        *cells.entry(key((from / 3600) as u8)).or_default() += seconds - placed;
+        f(&day, (from / 3600) as u8, seconds - placed, Booked::Spread);
     }
+    Ok(())
+}
+
+pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
+    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
+    walk_clock_hours(conn, |day, hour, seconds, _| {
+        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("walk parses the day");
+        let key = (
+            day[..7].to_string(),
+            chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
+            hour,
+        );
+        *cells.entry(key).or_default() += seconds;
+    })?;
 
     Ok(cells
         .into_iter()
@@ -2611,6 +2631,50 @@ pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
         .collect())
 }
 
+/// The shape of one day: how its seconds fall across the 24 clock hours.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DayShape {
+    /// `YYYY-MM-DD`, device-local.
+    pub day: String,
+    /// 24 entries, seconds per clock hour, summing to the day's total.
+    pub hours: Vec<i64>,
+    /// Seconds placed whole on one hour ([`Booked::Whole`]). `hours` built from
+    /// such a row carries one saturated hour and 23 empty ones, and is drawn or
+    /// suppressed on this figure.
+    pub unplaced_seconds: i64,
+}
+
+/// The hours of each day over `[from, to]` (inclusive, `YYYY-MM-DD`). A
+/// marginal of [`walk_clock_hours`] keyed by day, matching [`reading_days`]
+/// over the same window.
+pub fn reading_day_hours(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<DayShape>> {
+    let mut days: BTreeMap<String, (Vec<i64>, i64)> = BTreeMap::new();
+    walk_clock_hours(conn, |day, hour, seconds, how| {
+        if day < from || day > to {
+            return;
+        }
+        let entry = days
+            .entry(day.to_string())
+            .or_insert_with(|| (vec![0; 24], 0));
+        entry.0[hour as usize] += seconds;
+        if how == Booked::Whole {
+            entry.1 += seconds;
+        }
+    })?;
+    Ok(days
+        .into_iter()
+        .map(|(day, (hours, unplaced_seconds))| DayShape {
+            day,
+            hours,
+            unplaced_seconds,
+        })
+        .collect())
+}
+
 /// Seconds into the day of a `YYYY-MM-DDTHH:MM:SS` stamp.
 fn clock_secs(iso: &str) -> Option<i64> {
     if iso.len() < 19 {
@@ -2620,6 +2684,103 @@ fn clock_secs(iso: &str) -> Option<i64> {
     let m: i64 = iso[14..16].parse().ok()?;
     let s: i64 = iso[17..19].parse().ok()?;
     Some(h * 3600 + m * 60 + s)
+}
+
+/// One stored sitting, with the book it is attributed to.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionRow {
+    pub id: i64,
+    pub day: String,
+    /// Device-local wall clock, `YYYY-MM-DDTHH:MM:SS`.
+    pub started_at: String,
+    pub ended_at: String,
+    /// Counted reading, which differs from the width of
+    /// `[started_at, ended_at]`.
+    pub seconds: i64,
+    pub book_id: i64,
+    pub title: String,
+    pub page_turns: i64,
+    pub words: i64,
+    /// `counted` | `dwell` | `awake` — see [`super::reading_log::Measure`].
+    pub measure: String,
+    pub device_serial: String,
+}
+
+/// The sittings over `[from, to]` (inclusive, `YYYY-MM-DD`), earliest first.
+///
+/// Rows carrying a `book_id`, matching every other query here.
+pub fn reading_sessions_on(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<SessionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.day, s.started_at, s.ended_at, s.seconds, s.book_id, b.title,
+                s.page_turns, s.words, s.measure, s.device_serial
+           FROM reading_sessions s JOIN books b ON b.id = s.book_id
+          WHERE s.day BETWEEN ?1 AND ?2
+          ORDER BY s.started_at",
+    )?;
+    let rows = stmt.query_map(params![from, to], |r| {
+        Ok(SessionRow {
+            id: r.get(0)?,
+            day: r.get(1)?,
+            started_at: r.get(2)?,
+            ended_at: r.get(3)?,
+            seconds: r.get(4)?,
+            book_id: r.get(5)?,
+            title: r.get(6)?,
+            page_turns: r.get(7)?,
+            words: r.get(8)?,
+            measure: r.get(9)?,
+            device_serial: r.get(10)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// How far into a book its last-read position sits.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BookProgress {
+    /// The newest `reading_position.linear_pos` across every source.
+    pub linear_pos: i64,
+    /// `books.max_position` — the exclusive end of the same axis.
+    pub max_position: i64,
+    /// The `reading_position.source` that supplied `linear_pos`.
+    pub source: String,
+    pub updated_at: String,
+}
+
+/// One book's place on its own position axis. `None` where `max_position` or
+/// `reading_position` is absent. `linear_pos` can exceed `max_position` where
+/// the stored KFX differs from the build read on the device, and clamps.
+pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookProgress>> {
+    let max: Option<i64> = conn.query_row(
+        "SELECT max_position FROM books WHERE id = ?1",
+        params![book_id],
+        |r| r.get(0),
+    )?;
+    let Some(max_position) = max.filter(|m| *m > 0) else {
+        return Ok(None);
+    };
+    conn.query_row(
+        r#"SELECT linear_pos, source, updated_at FROM reading_position
+            WHERE book_id = ?1 AND linear_pos IS NOT NULL
+            ORDER BY updated_at DESC LIMIT 1"#,
+        params![book_id],
+        |r| {
+            Ok(Some(BookProgress {
+                linear_pos: r.get(0)?,
+                max_position,
+                source: r.get(1)?,
+                updated_at: r.get(2)?,
+            }))
+        },
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
 }
 
 /// Per-day totals for one book, oldest first — the book page's calendar.
@@ -7248,6 +7409,120 @@ mod tests {
         // exactly what `reading_days` gives for that day and nothing lands in
         // a day the heatmap would draw as empty.
         assert!(cells.iter().all(|c| c.month == "2026-08" && c.dow == 2));
+    }
+
+    #[test]
+    fn a_day_shape_sums_to_what_the_calendar_reports_for_that_day() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-shape", "A book");
+        // One session with `reading_session_hours`, one without, same `day`.
+        let kept = ReadingSession {
+            started_at: "2026-08-11T20:00:00".into(),
+            ended_at: "2026-08-11T22:00:00".into(),
+            book_id: Some(book),
+            ..session("2026-08-11", 1, 3000)
+        };
+        insert_reading_session(&conn, &kept).unwrap();
+        record_session_hours(&conn, &kept, &[(20, 2900), (21, 100)]).unwrap();
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-11", "08:30:00", "09:30:00", 1800, book),
+        )
+        .unwrap();
+
+        let shapes = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(shapes.len(), 1);
+        let day = &shapes[0];
+        assert_eq!(day.day, "2026-08-11");
+        assert_eq!(day.hours.len(), 24);
+        assert_eq!((day.hours[20], day.hours[21]), (2900, 100));
+        assert_eq!(day.hours[8] + day.hours[9], 1800);
+        // `hours` sums to what `reading_days` reports for the same day.
+        let total: i64 = day.hours.iter().sum();
+        assert_eq!(
+            total,
+            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap()[0].1
+        );
+        assert_eq!(day.unplaced_seconds, 0);
+    }
+
+    #[test]
+    fn a_row_too_wide_to_be_a_sitting_reports_its_seconds_as_unplaced() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-wide", "A book");
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-11T23:38:00".into(),
+                ended_at: "2026-08-12T23:16:28".into(),
+                book_id: Some(book),
+                ..session("2026-08-11", 1, 3600)
+            },
+        )
+        .unwrap();
+        let shapes = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
+        // `seconds` lands on one hour, and `unplaced_seconds` states it.
+        assert_eq!(shapes[0].hours[23], 3600);
+        assert_eq!(shapes[0].unplaced_seconds, 3600);
+    }
+
+    #[test]
+    fn progress_needs_both_an_extent_and_a_position() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-prog", "A book");
+        // No `max_position`, no `reading_position`.
+        assert!(book_progress(&conn, book).unwrap().is_none());
+        // `max_position` without `reading_position`.
+        set_max_position(&conn, book, Some(1000)).unwrap();
+        assert!(book_progress(&conn, book).unwrap().is_none());
+        set_reading_position(&conn, book, Some(2), Some(0), Some(250), "sidle", "").unwrap();
+        let p = book_progress(&conn, book).unwrap().unwrap();
+        assert_eq!((p.linear_pos, p.max_position), (250, 1000));
+    }
+
+    #[test]
+    fn a_position_past_the_axis_is_reported_as_stored() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-drift", "A book");
+        // `linear_pos` past `max_position`, as a differing build stores it.
+        set_max_position(&conn, book, Some(146_732)).unwrap();
+        set_reading_position(
+            &conn,
+            book,
+            Some(9),
+            Some(0),
+            Some(146_736),
+            "device",
+            "GN43",
+        )
+        .unwrap();
+        let p = book_progress(&conn, book).unwrap().unwrap();
+        assert!(p.linear_pos > p.max_position);
+        assert_eq!(p.source, "device");
+    }
+
+    #[test]
+    fn sittings_come_back_earliest_first_with_their_book() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-sit", "A book");
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-11", "21:00:00", "21:30:00", 1800, book),
+        )
+        .unwrap();
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-11", "08:00:00", "08:20:00", 1200, book),
+        )
+        .unwrap();
+        // A session with no `book_id` is absent from the result.
+        insert_reading_session(&conn, &session("2026-08-11", 99, 600)).unwrap();
+
+        let rows = reading_sessions_on(&conn, "2026-08-11", "2026-08-11").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].started_at, "2026-08-11T08:00:00");
+        assert_eq!(rows[0].title, "A book");
+        assert_eq!(rows[1].seconds, 1800);
     }
 
     /// Every session in the library, oldest first, as

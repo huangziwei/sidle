@@ -62,6 +62,30 @@ pub struct ReadingOverview {
 pub struct ReadingBook {
     pub days: Vec<ReadingDay>,
     pub entry: Option<db::ReadingEntry>,
+    /// The book's place on its own axis, absent where either half is unstored.
+    pub progress: Option<db::BookProgress>,
+}
+
+/// The sittings over `[from, to]`, earliest first.
+#[tauri::command]
+pub async fn reading_log_sessions(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<db::SessionRow>, String> {
+    let conn = state.db.lock().await;
+    db::reading_sessions_on(&conn, &from, &to).map_err(|e| e.to_string())
+}
+
+/// The clock hours of each day over `[from, to]`.
+#[tauri::command]
+pub async fn reading_log_day_hours(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<db::DayShape>, String> {
+    let conn = state.db.lock().await;
+    db::reading_day_hours(&conn, &from, &to).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -139,12 +163,14 @@ pub async fn reading_log_book(
     .map_err(|e| e.to_string())?
     .into_iter()
     .find(|b| b.book_id == book_id);
+    let progress = db::book_progress(&conn, book_id).map_err(|e| e.to_string())?;
     Ok(ReadingBook {
         days: days
             .into_iter()
             .map(|(day, seconds)| ReadingDay { day, seconds })
             .collect(),
         entry,
+        progress,
     })
 }
 

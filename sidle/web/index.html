@@ -289,6 +289,15 @@
           </div>
 
           <div id="rl-body" hidden>
+            <!-- One bar per day for the fortnight up to today. -->
+            <section id="rl-recent" class="rl-recent" hidden>
+              <header class="rl-recent-head">
+                <strong>Recently</strong>
+                <span id="rl-recent-note" class="rl-muted"></span>
+              </header>
+              <div id="rl-recent-bars" class="rl-recent-bars"></div>
+            </section>
+
             <!-- Which days, beside which hours of them. The calendar is a fixed
                  53 weeks wide and left half the window empty on its own; the
                  clock takes that half and answers the question the calendar
@@ -305,10 +314,27 @@
                   <button id="rl-year-next" class="btn btn-quiet"
                           aria-label="Next year">›</button>
                   <span id="rl-year-total" class="rl-muted"></span>
+                  <!-- Selects #rl-heatmap or #rl-monthcal. -->
+                  <div class="seg rl-cal-seg" id="rl-cal-seg" role="tablist"
+                       aria-label="Calendar view">
+                    <button class="seg-btn active" data-cal="year" role="tab" aria-selected="true"
+                            title="Every day of the year, shaded by how long you read">Year</button>
+                    <button class="seg-btn" data-cal="month" role="tab" aria-selected="false"
+                            title="One month, with a bar per book across the days you read it">Month</button>
+                  </div>
+                </header>
+                <!-- Steps between the months of the year that have reading. -->
+                <header id="rl-cal-nav" class="rl-nav rl-cal-nav" hidden>
+                  <button id="rl-cal-prev" class="btn btn-quiet"
+                          aria-label="Previous month">‹</button>
+                  <strong id="rl-cal-label"></strong>
+                  <button id="rl-cal-next" class="btn btn-quiet"
+                          aria-label="Next month">›</button>
                 </header>
                 <div id="rl-heatmap" class="rl-heatmap" role="img"
                      aria-label="Reading time per day"></div>
-                <div class="rl-legend">
+                <div id="rl-monthcal" class="rl-monthcal" hidden></div>
+                <div class="rl-legend" id="rl-legend">
                   <span>Less</span>
                   <i class="rl-cell rl-l0"></i><i class="rl-cell rl-l1"></i>
                   <i class="rl-cell rl-l2"></i><i class="rl-cell rl-l3"></i>
@@ -339,6 +365,15 @@
                      aria-label="Reading time by hour of the day"></div>
               </section>
             </div>
+
+            <!-- The sittings of the selected day, on a 24-hour axis. -->
+            <section id="rl-timeline" class="rl-timeline" hidden>
+              <header class="rl-group-head">
+                <strong id="rl-timeline-title"></strong>
+                <span id="rl-timeline-note" class="rl-muted"></span>
+              </header>
+              <div id="rl-timeline-body" class="rl-tl"></div>
+            </section>
 
             <!-- The books of whatever the heatmap is showing: the whole year,
                  or one day once a square is clicked. -->
@@ -412,6 +447,11 @@
               <div id="rl-book-cover" class="cover rl-book-cover"></div>
               <strong id="rl-book-title" class="rl-book-name"></strong>
               <span id="rl-book-author" class="rl-muted"></span>
+              <!-- Shown where books.max_position and reading_position both exist. -->
+              <div id="rl-book-progress" class="rl-progress-block" hidden>
+                <div class="rl-bar-track"><i id="rl-book-progress-fill"></i></div>
+                <span id="rl-book-progress-label" class="rl-muted"></span>
+              </div>
               <dl id="rl-book-stats" class="rl-facts"></dl>
             </aside>
             <!-- When it was read, then what was marked while reading it: both

@@ -1,14 +1,14 @@
 #!/bin/sh
 # Build sidle desktop app + on-Kindle native picker, install to /Applications.
 #
-# Three cargo invocations, run sequentially from the workspace root:
+# Two cargo invocations, run sequentially from the workspace root:
 #   1. Cross-compile sidle-native for the Kindle (armv7 musl static).
-#   2. Build sidle-server (the LAN daemon the release app spawns as a detached
-#      child). The release app loads that sidecar from inside its own bundle;
-#      the debug build is the one that builds it on demand.
-#   3. Build the Tauri desktop app for the host Mac.
-# Two things are staged under sidle/desktop between 2 and 3, which `cargo tauri
-# build` folds into the bundle. The installed .app then reaches back into this
+#   2. Build every host package: sidle-server, sidle-cli, sidle. The release app
+#      loads sidle-server from inside its own bundle; the debug build is the one
+#      that builds it on demand.
+# The bundling step then wraps the sidle binary from 2 into the .app.
+# Two things are staged under sidle/desktop before the bundling step, which
+# folds them into the bundle. The installed .app then reaches back into this
 # checkout for nothing at runtime:
 #   - the sidle-server binary as a Tauri sidecar (-> Contents/MacOS/sidle-server)
 #   - the device/ mount mirror + armv7 picker as resources (-> Contents/Resources)
@@ -56,11 +56,11 @@ cp "target/$DEVICE_TARGET/release/sidle-native" device/extensions/sidle/bin/sidl
 cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
     device/extensions/sidle/bin/sidle.build-ts
 
-echo "==> Building sidle-server (LAN daemon: app spawns it; the Kindle reaches it)"
-cargo build --release -p sidle-server
-
-echo "==> Building sidle-cli (the library from a script; bundled, then symlinked)"
-cargo build --release -p sidle-cli
+# One invocation for every host package: cargo resolves features once per
+# invocation, and a dependency resolved two ways is a separate unit with its own
+# hash. sidle-server is the LAN daemon; sidle-cli is bundled and symlinked.
+echo "==> Building sidle-server, sidle-cli and the desktop binary"
+cargo build --release -p sidle-server -p sidle-cli -p sidle
 
 # Tauri names a sidecar `<path>-$HOST_TRIPLE` and strips the suffix copying it
 # into Contents/MacOS. $RES_DEVICE mirrors `device/` under

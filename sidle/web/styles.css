@@ -4831,6 +4831,23 @@ kbd {
 .rl-l3 { background: var(--rl-3); }
 .rl-l4 { background: var(--rl-4); }
 
+/* Lightness and chroma for .rl-cal-span; bookFill and bookInk supply the hue. */
+:root {
+  --rl-span-l: 90%;
+  --rl-span-c: 0.05;
+  --rl-span-ink-l: 34%;
+  --rl-span-ink-c: 0.07;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rl-span-l: 36%;
+    --rl-span-c: 0.055;
+    --rl-span-ink-l: 93%;
+    --rl-span-ink-c: 0.03;
+  }
+}
+
 /* Keeps to the bottom edge: when the clock beside it is the taller panel, the
    slack belongs between the calendar and the legend — a key hanging directly
    under the calendar with empty panel below it reads as a layout accident. */
@@ -4846,6 +4863,313 @@ kbd {
 }
 
 .rl-legend .rl-cell { cursor: default; }
+
+/* ── The month calendar ──────────────────────────────────────────────────────
+   .rl-cal-week is a grid of seven columns: a date row, then --rl-lanes rows.
+   .rl-cal-cell spans every row; .rl-cal-span spans its run of columns. */
+.rl-monthcal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 520px;
+}
+
+/* Restores [hidden] against the display:flex above. */
+.rl-monthcal[hidden] { display: none; }
+
+.rl-cal-seg { margin-left: auto; background: var(--bg); }
+.rl-cal-seg .seg-btn { padding: 3px 10px; font-size: 12px; color: var(--fg); }
+.rl-cal-seg .seg-btn:hover { background: var(--surface); }
+.rl-cal-seg .seg-btn.active { background: var(--accent); color: #fff; }
+
+/* Sits under #rl-year-nav. */
+.rl-cal-nav { margin-top: 8px; }
+.rl-cal-nav[hidden] { display: none; }
+
+.rl-cal-dows {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rl-cal-dows span { text-align: center; }
+
+.rl-cal-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  /* A fixed 15px per lane holds every week to one height, then a row for
+     .rl-cal-shape. --rl-lanes is set on .rl-monthcal. */
+  grid-template-rows: auto repeat(var(--rl-lanes, 4), 15px) 12px;
+  gap: 4px 4px;
+  align-items: start;
+}
+
+.rl-cal-cell {
+  border-radius: 6px;
+  background: var(--rl-0);
+  min-height: 74px;
+}
+
+.rl-cal-cell[data-day] { cursor: pointer; }
+.rl-cal-cell[data-day]:hover { outline: 1px solid var(--border-strong); }
+.rl-cal-sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Marks today on the frame; .rl-l0-.rl-l4 own the fill. */
+.rl-cal-today { box-shadow: inset 0 0 0 1px var(--border-strong); }
+
+.rl-cal-pad { background: none; }
+
+/* Drawn over .rl-cal-cell, on the date row. */
+.rl-cal-num {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.rl-cal-num b { font-size: 12px; font-weight: 600; color: var(--fg); }
+
+/* Carries the .rl-l0-.rl-l4 shade as a dot beside the date. */
+.rl-cal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 6px;
+}
+
+.rl-cal-num span { margin-left: auto; opacity: 0.9; }
+
+.rl-cal-more {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+/* --fill and --ink are set per book on the element. */
+.rl-cal-span {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--fill);
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  /* Insets the bar within the 4px column gap. */
+  margin: 0 1px;
+}
+
+.rl-cal-span:hover { filter: brightness(0.94); }
+
+@media (prefers-color-scheme: dark) {
+  .rl-cal-span:hover { filter: brightness(1.18); }
+}
+
+/* 24 bars on the cell's last row, scaled to the day's own busiest hour. */
+.rl-cal-shape {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 12px;
+  padding: 0 4px;
+  pointer-events: none;
+}
+
+.rl-cal-shape i {
+  flex: 1;
+  min-width: 0;
+  height: var(--v);
+  background: var(--border-strong);
+  border-radius: 1px 1px 0 0;
+}
+
+/* ── The day timeline ────────────────────────────────────────────────────────
+   .rl-tl-plot is the 24-hour width; a block is placed on it by left and width
+   as a percentage of the day. */
+.rl-timeline {
+  margin-top: 22px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rl-timeline[hidden] { display: none; }
+
+.rl-tl-plot {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 0;
+  /* Six bands an hour apart, under the blocks. */
+  background:
+    repeating-linear-gradient(
+      to right,
+      var(--border) 0 1px,
+      transparent 1px calc(100% / 8)
+    );
+}
+
+.rl-tl-lane {
+  position: relative;
+  height: 20px;
+}
+
+.rl-tl-block {
+  position: absolute;
+  top: 0;
+  height: 20px;
+  min-width: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--fill);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* The counted seconds inside the window the sitting spanned. */
+.rl-tl-read {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--read);
+  background: var(--ink);
+  opacity: 0.16;
+}
+
+.rl-tl-block b {
+  position: relative;
+  display: block;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.rl-tl-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+
+.rl-tl-axis {
+  position: relative;
+  height: 14px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-tl-tick {
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+/* ── Recently ────────────────────────────────────────────────────────────────
+   The fortnight up to today, above the year calendar. */
+.rl-recent {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rl-recent[hidden] { display: none; }
+
+.rl-recent-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.rl-recent-head .rl-muted { font-size: 12px; }
+
+.rl-recent-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 46px;
+}
+
+.rl-recent-bar {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 3px;
+}
+
+.rl-recent-bar[data-day] { cursor: pointer; }
+
+.rl-recent-bar i {
+  display: block;
+  height: var(--v);
+  min-height: 2px;
+  background: var(--rl-2);
+  border-radius: 2px;
+}
+
+.rl-recent-bar[data-day]:hover i { background: var(--rl-4); }
+.rl-recent-sel i { background: var(--accent); }
+
+.rl-recent-bar em {
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── How far into a book ─────────────────────────────────────────────────────
+   Shown on the book page where books.max_position and reading_position both
+   exist. */
+.rl-progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 2px;
+}
+
+.rl-progress-block[hidden] { display: none; }
+
+.rl-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--rl-0);
+  overflow: hidden;
+}
+
+.rl-bar-track i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.rl-progress-block .rl-muted { font-size: 11px; }
 
 /* ── The books of whatever the heatmap is showing ────────────────────────── */
 
