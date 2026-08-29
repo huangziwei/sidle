@@ -1,12 +1,15 @@
 #!/bin/sh
 # Build sidle desktop app + on-Kindle native picker, install to /Applications.
 #
-# Two cargo invocations, run sequentially from the workspace root:
-#   1. Cross-compile sidle-native for the Kindle (armv7 musl static).
-#   2. Build every host package: sidle-server, sidle-cli, sidle. The release app
-#      loads sidle-server from inside its own bundle; the debug build is the one
-#      that builds it on demand.
-# The bundling step then wraps the sidle binary from 2 into the .app.
+# Two cargo invocations, run sequentially from the workspace root, each with its
+# own target directory so neither invalidates the other, leaving target/ to the
+# bundling step alone:
+#   1. Cross-compile sidle-native for the Kindle into target/kindle
+#      (armv7 musl static).
+#   2. Build sidle-server and sidle-cli into target/aux. The release app loads
+#      sidle-server from inside its own bundle; the debug build is the one that
+#      builds it on demand.
+# The bundling step then builds the app itself in target/ and wraps both.
 # Two things are staged under sidle/desktop before the bundling step, which
 # folds them into the bundle. The installed .app then reaches back into this
 # checkout for nothing at runtime:
@@ -39,28 +42,48 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\
 echo "==> Stamping config.xml version ($VERSION)"
 sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" device/extensions/sidle/config.xml
 
-# One $BUILD_TS per run reaches the picker through SIDLE_BUILD_TS and the
-# server through the sidle.build-ts sidecar, which the LAN-update manifest
-# carries as `built_at` — the value a device self-update compares against.
-BUILD_TS="$(date +%s)"
+# $BUILD_TS reaches the picker through SIDLE_BUILD_TS and the server through the
+# sidle.build-ts sidecar, which the LAN-update manifest carries as `built_at` —
+# the value a device self-update compares against.
+#
+# The newest mtime among the picker's inputs, not the clock: sidle-native has no
+# path dependencies, so these files are the whole of what its binary is built
+# from. An unchanged tree yields the same stamp, and build.rs's
+# rerun-if-env-changed leaves the crate cached; any edit yields a larger one and
+# a device sees a newer build.
+BUILD_TS="$(find sidle/native/src sidle/native/Cargo.toml sidle/native/build.rs \
+    Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml \
+    -type f -exec stat -f '%m' {} + 2>/dev/null | sort -rn | head -1)"
+case "$BUILD_TS" in
+    ''|*[!0-9]*) BUILD_TS="$(date +%s)" ;;
+esac
 echo "==> Cross-compiling sidle-native for Kindle ($DEVICE_TARGET)  [build_ts=$BUILD_TS]"
-SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$DEVICE_TARGET" -p sidle-native
+KINDLE_TARGET="target/kindle"
+SIDLE_BUILD_TS="$BUILD_TS" CARGO_TARGET_DIR="$KINDLE_TARGET" \
+    cargo build --release --target "$DEVICE_TARGET" -p sidle-native
 # The build time next to the binary DeploySource points at on the dev path.
 # build.rs bakes the same value into the binary.
-printf '%s' "$BUILD_TS" > "target/$DEVICE_TARGET/release/sidle-native.build-ts"
+printf '%s' "$BUILD_TS" > "$KINDLE_TARGET/$DEVICE_TARGET/release/sidle-native.build-ts"
 
 # The cross-built picker at the path it installs to, completing the `device/`
 # mount mirror. Both files are gitignored build products.
 mkdir -p device/extensions/sidle/bin
-cp "target/$DEVICE_TARGET/release/sidle-native" device/extensions/sidle/bin/sidle
-cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
+cp "$KINDLE_TARGET/$DEVICE_TARGET/release/sidle-native" device/extensions/sidle/bin/sidle
+cp "$KINDLE_TARGET/$DEVICE_TARGET/release/sidle-native.build-ts" \
     device/extensions/sidle/bin/sidle.build-ts
 
-# One invocation for every host package: cargo resolves features once per
-# invocation, and a dependency resolved two ways is a separate unit with its own
-# hash. sidle-server is the LAN daemon; sidle-cli is bundled and symlinked.
-echo "==> Building sidle-server, sidle-cli and the desktop binary"
-cargo build --release -p sidle-server -p sidle-cli -p sidle
+# $AUX_TARGET, not the shared target/: cargo resolves features once per
+# invocation over the packages it selects, and selecting these two alongside the
+# app resolves sha2, digest, rustls, subtle and chacha20 differently from the app
+# alone. A dependency resolved two ways is a separate unit with its own hash, so
+# a shared directory made each step rebuild what the last one had just built.
+# Apart, each directory holds one resolution and an unchanged tree rebuilds
+# nothing.
+#   sidle-server  the LAN daemon the app spawns; the Kindle reaches it
+#   sidle-cli     the library from a script; bundled, then symlinked
+AUX_TARGET="target/aux"
+echo "==> Building sidle-server and sidle-cli ($AUX_TARGET)"
+CARGO_TARGET_DIR="$AUX_TARGET" cargo build --release -p sidle-server -p sidle-cli
 
 # Tauri names a sidecar `<path>-$HOST_TRIPLE` and strips the suffix copying it
 # into Contents/MacOS. $RES_DEVICE mirrors `device/` under
@@ -84,7 +107,7 @@ mkdir -p "$SIDECAR_DIR" "$RES_DEVICE/extensions/sidle/bin" "$RES_DEVICE/document
 # sidle-cli is spawned by nobody and rides in so `cargo tauri build` signs it
 # with everything else — the symlink at the end is what puts it on a PATH.
 for host_bin in sidle-server sidle-cli; do
-    cp "target/release/$host_bin" "$SIDECAR_DIR/$host_bin-$HOST_TRIPLE"
+    cp "$AUX_TARGET/release/$host_bin" "$SIDECAR_DIR/$host_bin-$HOST_TRIPLE"
 done
 cp device/extensions/sidle/config.xml   "$RES_DEVICE/extensions/sidle/config.xml"
 cp device/extensions/sidle/menu.json    "$RES_DEVICE/extensions/sidle/menu.json"
@@ -92,9 +115,9 @@ cp device/extensions/sidle/bin/sidle.sh "$RES_DEVICE/extensions/sidle/bin/sidle.
 cp device/documents/Sidle.sh            "$RES_DEVICE/documents/Sidle.sh"
 # The picker at the path it installs to, not off to one side: the packaged app
 # walks this tree, and a binary anywhere else is a binary the walk cannot find.
-cp "target/$DEVICE_TARGET/release/sidle-native" \
+cp "$KINDLE_TARGET/$DEVICE_TARGET/release/sidle-native" \
     "$RES_DEVICE/extensions/sidle/bin/sidle"
-cp "target/$DEVICE_TARGET/release/sidle-native.build-ts" \
+cp "$KINDLE_TARGET/$DEVICE_TARGET/release/sidle-native.build-ts" \
     "$RES_DEVICE/extensions/sidle/bin/sidle.build-ts"
 
 # build-bokai.sh builds $BOKAI_BIN, the hardfloat binary, on its own line.
