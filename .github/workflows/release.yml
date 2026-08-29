@@ -1,125 +1,59 @@
-# Publish a release on GitHub, get the Kindle install tree for bokai attached to
-# it.
-#
-#   Releases -> Draft a new release -> tag -> Publish
-#
-# **Publishing is what starts this, not the tag.** The release is written by
-# hand and this only ever adds files to one that already exists, so a tag pushed
-# on its own builds nothing and a draft waits until it is published. Assets are
-# replaced rather than added to, which is what makes a failed run safe to re-run
-# from the Actions tab without touching the release.
-#
-# **The tag decides which product is being released**, and there are two, on
-# separate version lines:
-#
-#   v0.1.9        a sidle release. Gated on [workspace.package] in Cargo.toml.
-#                 bokai rides along at whatever version it is currently on —
-#                 that is the normal case, and it needs no bokai bump.
-#
-#   bokai-v0.1.2  a bokai release, on its own. Gated on bokai/Cargo.toml.
-#                 sidle's version is never read and never has to move, so the
-#                 engine can take the spotlight on its own release page.
-#
-# Both build the identical artifact from the identical script, and both name it
-# after **bokai's** version rather than the tag, so one archive carries one name
-# wherever it is attached. What tells two same-named builds apart is inside:
-# BOKAI_BUILD stamps the release tag into `bokai --version`.
-#
-# The zip holds extensions/bokai with bokai and bokai-armsf in it, one binary
-# per ABI.
-#
-# GitHub generates "Source code (zip/tar.gz)" for whatever tag exists and that
-# cannot be turned off, so a bokai-only release still shows sidle's tree behind
-# it. The title, the notes and every asset here are bokai's; only that pair of
-# generated links is shared.
-#
-# Nothing about the build is CI-specific — build-bokai.sh assembles the same
-# device/extensions/bokai a workstation does, with the same compiler:
-# rust-toolchain.toml pins it, and rustup honours that file here exactly as it
-# does on a workstation. A runner that took "whatever stable is newest" would
-# fail the lint gate below on the day Rust adds a lint, for code that passed
-# locally an hour earlier. The zip is not part of that tree and is made here
-# alone: locally the tree is what gets dragged to the Kindle, and an archive of
-# it would be a build product nobody opens.
-#
-# One consequence of `release`: the workflow that runs is the one on the
-# **tagged commit**. Tag a commit made before this file existed and nothing
-# happens.
+# Release attaches the assets a tag names. release-check.sh parses the tag;
+# README.md documents the grammar.
 
 name: Release
 
 on:
     release:
         types: [published]
-    # For a dry run on a branch: builds, and attaches nothing to anything.
+    # workflow_dispatch builds bokai and attaches nothing.
     workflow_dispatch:
 
 permissions:
     contents: write
 
 jobs:
-    bokai-native:
+    release:
         runs-on: ubuntu-latest
 
         steps:
             - uses: actions/checkout@v4
+              with:
+                  # release-check.sh reads every tag and the history behind it.
+                  fetch-depth: 0
 
-            # One step reads both version lines, decides from the tag which of
-            # them the release claims, and stops if the claim is false. The
-            # version is compiled into the binary, and a release whose name
-            # disagrees with what `--version` reports is unreadable from a
-            # device.
-            - name: Read the versions, check the tag against the one it names
-              id: v
+            # release-check.sh names the products the tag claims, exits nonzero
+            # on a false claim, and writes bokai_build and bokai_check for the
+            # steps below.
+            - name: What this release covers
+              id: scope
               env:
                   TAG: ${{ github.event.release.tag_name }}
               run: |
-                  set -eu
-                  # bokai's [package] version — the first `version =` in its manifest.
-                  bokai=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' bokai/Cargo.toml | head -1)
-                  # sidle's [workspace.package] version. Section-aware, because the
-                  # root manifest holds other tables that could grow a `version`.
-                  sidle=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0}
-                               f && /^version *=/{gsub(/[" ]/,""); sub(/^version=/,""); print; exit}' Cargo.toml)
-                  [ -n "$bokai" ] || { echo "error: no version in bokai/Cargo.toml [package]" >&2; exit 1; }
-                  [ -n "$sidle" ] || { echo "error: no version in Cargo.toml [workspace.package]" >&2; exit 1; }
+                  rc=0
+                  ./release-check.sh ${TAG:+"$TAG"} >"$RUNNER_TEMP/scope.txt" 2>&1 || rc=$?
+                  {
+                      echo '### Release scope'
+                      echo
+                      echo '```'
+                      cat "$RUNNER_TEMP/scope.txt"
+                      echo '```'
+                  } >>"$GITHUB_STEP_SUMMARY"
+                  cat "$RUNNER_TEMP/scope.txt"
+                  exit $rc
 
-                  case "${TAG:-}" in
-                      "")            product="dry run"; want=""; claim="" ;;
-                      bokai-v*)      product="bokai";   want="$bokai"; claim="${TAG#bokai-v}" ;;
-                      v*)            product="sidle";   want="$sidle"; claim="${TAG#v}" ;;
-                      *)
-                          echo "error: tag '$TAG' names no product." >&2
-                          echo "       expected 'vX.Y.Z' (sidle) or 'bokai-vX.Y.Z' (bokai)." >&2
-                          exit 1 ;;
-                  esac
-                  if [ -n "$want" ] && [ "$claim" != "$want" ]; then
-                      echo "error: release $TAG does not match the $product version $want" >&2
-                      exit 1
-                  fi
-
-                  echo "$product release — sidle $sidle, bokai $bokai"
-                  echo "name=bokai-v$bokai-kindle" >> "$GITHUB_OUTPUT"
-
-            # Materializes the pinned toolchain, its components and its cross
-            # target before anything builds, so a toolchain problem fails here
-            # with the version printed rather than deep inside a build.
+            # rust-toolchain.toml pins the compiler this job runs.
             - name: Show the pinned toolchain
               run: |
                   rustup show active-toolchain
                   rustc -vV
                   cargo clippy --version
 
-            # .cargo/config.toml names `rust-lld` as the linker for that target
-            # and rustup keeps it inside the toolchain rather than on PATH. The
-            # host triple differs between runners, so resolve it rather than
-            # hardcode it — the same symlink the config file documents.
-            - name: Put rust-lld on PATH
-              run: |
-                  ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
-                      ~/.cargo/bin/rust-lld
+            - name: Format
+              run: cargo fmt --all --check
 
             - uses: actions/cache@v4
+              if: steps.scope.outputs.bokai_check == 'true'
               with:
                   path: |
                       ~/.cargo/registry
@@ -127,52 +61,54 @@ jobs:
                       target
                   key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
-            # Gated on what actually ships. `--features native` is the Kindle
-            # build's exact feature set, so this is the code in the artifact and
-            # not a superset of it; the desktop half of the workspace is a macOS
-            # + Tauri build this runner cannot make, and is checked where it is
-            # built. `cargo fmt` costs nothing and covers the whole tree.
-            - name: Format, lint, test
+            # `--features native` is build-bokai.sh's feature set, gating the
+            # code that ships in the zip.
+            - name: Lint and test bokai
+              if: steps.scope.outputs.bokai_check == 'true'
               run: |
-                  cargo fmt --all --check
                   cargo clippy -p bokai --no-default-features --features native --all-targets -- -D warnings
                   cargo test -p bokai --no-default-features --features native
 
+            # .cargo/config.toml names rust-lld as the cross linker, and rustup
+            # keeps it inside the toolchain. The host triple differs between
+            # runners.
+            - name: Put rust-lld on PATH
+              if: steps.scope.outputs.bokai_build == 'true'
+              run: |
+                  ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
+                      ~/.cargo/bin/rust-lld
+
             - name: Build the install tree
+              if: steps.scope.outputs.bokai_build == 'true'
               env:
-                  # Stamped into the binary, so `bokai --version` names the
-                  # release someone installed rather than a crate version that
-                  # several releases share. The branch name stands in on a dry
-                  # run, where there is no tag.
+                  # BOKAI_BUILD reaches `bokai --version`. github.ref_name
+                  # stands in on a dry run.
                   BOKAI_BUILD: ${{ github.event.release.tag_name || github.ref_name }}
-              # Two runs, one per ABI, into the same extension.
+              # build-bokai.sh writes both ABIs into device/extensions/bokai.
               run: |
                   ./build-bokai.sh armhf
                   ./build-bokai.sh armsf
 
             - name: Package
+              if: steps.scope.outputs.bokai_build == 'true'
               env:
-                  NAME: ${{ steps.v.outputs.name }}
+                  NAME: ${{ steps.scope.outputs.asset }}
               run: |
                   set -eu
                   mkdir -p dist
-                  # Zipped from inside device/ and naming only bokai's extension,
-                  # so the archive opens onto extensions/bokai — what gets dragged
-                  # to /mnt/us — and carries none of sidle's tree with it.
+                  # `cd device` puts extensions/bokai at the archive root.
                   (cd device && zip -qr "../dist/$NAME.zip" extensions/bokai)
                   (cd dist && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
                   ls -lh "dist/$NAME.zip"
                   unzip -l "dist/$NAME.zip"
 
-            # `--clobber` replaces an asset of the same name instead of refusing
-            # it, so re-running after a failure lands the same two files rather
-            # than needing the release taken apart first.
             - name: Attach to the release
-              if: github.event_name == 'release'
+              if: github.event_name == 'release' && steps.scope.outputs.bokai_build == 'true'
               env:
                   GH_TOKEN: ${{ github.token }}
                   TAG: ${{ github.event.release.tag_name }}
-                  NAME: ${{ steps.v.outputs.name }}
+                  NAME: ${{ steps.scope.outputs.asset }}
+              # `--clobber` replaces an asset of the same name.
               run: |
                   gh release upload "$TAG" \
                     "dist/$NAME.zip" \
@@ -180,8 +116,8 @@ jobs:
                     --clobber
 
             - name: Keep the tree from a manual run
-              if: github.event_name != 'release'
+              if: github.event_name != 'release' && steps.scope.outputs.bokai_build == 'true'
               uses: actions/upload-artifact@v4
               with:
-                  name: ${{ steps.v.outputs.name }}
+                  name: ${{ steps.scope.outputs.asset }}
                   path: device/extensions/bokai
