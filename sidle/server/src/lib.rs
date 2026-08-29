@@ -1843,6 +1843,7 @@ mod tests {
                 tags: &[],
                 title_romaji: "shiori no aru hon",
                 author_romaji: "Author",
+                source_format: None,
             },
         )
         .unwrap();

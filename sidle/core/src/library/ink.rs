@@ -1,23 +1,16 @@
-//! Handwritten-ink ingest: decode a sideloaded doc's ink notebook (`nbk`) and
-//! store its per-page renders against the host book.
+//! Handwritten-ink ingest: `bokai::formats::nbk` decodes an `nbk` to per-page
+//! SVG, and [`import_ink`] stores the renders against the host book.
 //!
-//! `yjr`/`anchor` supplies the host-page anchor and the per-page link;
-//! `bokai::formats::nbk` decodes the strokes to SVG.
+//! One `handwritten_note` per drawn page sits in the host book's `.yjr`. Its
+//! anchor handle resolves to a host PDF page through the `eid → page` map, and
+//! its inline body is the page-container `kfx_id`.
 //!
-//! The host book's `.yjr` carries one `handwritten_note` per drawn page. Each
-//! record's anchor handle resolves to a host PDF page through the `eid → page`
-//! map, and its inline body is the ink notebook's page-container `kfx_id`.
+//! The `nbk` is `.notebooks/<asin>!!PDOC!!notebook/nbk`, `asin` being the baked
+//! content_id. An ink page joins its `handwritten_note` by
+//! `page.container_id == note body`, and display-sorts by the note's `linear`.
 //!
-//! The ink notebook is `.notebooks/<asin>!!PDOC!!notebook/nbk`, where `asin` is
-//! the book's baked content_id. `bokai::formats::nbk::open` decodes every page,
-//! deltas included, each carrying its `container_id`.
-//!
-//! An ink page joins its host anchor by `page.container_id == note body`, and
-//! the pages display-sort by the note's `linear`, not the nbk's page order.
-//!
-//! This module owns the join and the caching, and pulls nothing off a device:
-//! the caller hands it `nbk` bytes and parsed `handwritten_note` records, the
-//! shape `import_yjr` takes on the text path.
+//! [`import_ink`] takes `nbk` bytes and parsed `handwritten_note` records from
+//! its caller, the shape `import_yjr` takes.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,9 +30,8 @@ use crate::library::{LibraryPaths, import};
 pub struct InkImportStats {
     /// Ink pages written or refreshed (one per drawn page in the nbk).
     pub pages: usize,
-    /// Of those, pages whose host anchor resolved to a PDF page (the rest are
-    /// stored page-unanchored — gallery-only — until a KFX / matching `.yjr`
-    /// note appears).
+    /// Of `pages`, those whose anchor resolved to a PDF page. The remainder are
+    /// stored page-unanchored.
     pub anchored: usize,
 }
 
@@ -62,9 +54,7 @@ pub fn import_ink(
 ) -> Result<InkImportStats> {
     let nbk_sha = sha256_hex(nbk_bytes);
 
-    // The nbk must be on disk to decode (a KDF notebook IS a SQLite file). Write
-    // the backup first — it's required regardless (the ink must outlive a device
-    // wipe) — then decode from it.
+    // `bokai::formats::nbk::open` takes a path: a KDF notebook is a SQLite file.
     paths
         .ensure_book_ink(book_sha, asin)
         .context("create ink dir")?;
@@ -75,9 +65,8 @@ pub fn import_ink(
     let nb = bokai::formats::nbk::open(&nbk_path)
         .map_err(|e| anyhow::anyhow!("decode ink notebook for {asin}: {e:?}"))?;
 
-    // The host KFX's eid → host-page map and each page's box size, which
-    // align the ink overlay to its page. The geometry sidecar serves both,
-    // keyed by `kfx_sha`; an unreadable KFX leaves pages page-unanchored.
+    // The `eid → page` map and each page box, keyed by `kfx_sha`. An unreadable
+    // `kfx_path` leaves `geom` empty.
     let geom: Vec<PageGeom> = match (kfx_path, kfx_sha) {
         (Some(p), Some(sha)) => pdf_geom::ensure(paths, book_sha, Path::new(p), sha),
         (Some(p), None) => pdf_geom::compute_from_file(Path::new(p)),
@@ -97,8 +86,7 @@ pub fn import_ink(
     for (i, page) in nb.pages.iter().enumerate() {
         let cid = page.container_id.as_str();
         current_containers.push(cid.to_string());
-        // A deletion record blocks the re-add of an ink page removed here.
-        // The presence write above records that the device holds it.
+        // `DELETION_INK` blocks the re-add of a removed page.
         if db::is_deleted(conn, db::DELETION_INK, &db::ink_deletion_key(asin, cid))
             .context("check ink deletion record")?
         {
@@ -111,12 +99,10 @@ pub fn import_ink(
             .and_then(|e| eid_page.get(&e).copied())
             .map(|p| p as i64);
 
-        // Cache both renders: the transparent overlay (reader) and the white-bg
-        // plain page (gallery / standalone view).
+        // Both renders: the transparent overlay, and the white-background page.
         if let Some(svg) = nb.page_overlay_svg(i) {
-            // A Scribe shows the page fit-to-screen and centred, a
-            // sub-rectangle of the ink canvas. The overlay's viewBox crops to
-            // that sub-rect, which a flat canvas→page stretch squishes.
+            // A Scribe fits the page to the screen and centres it, filling a
+            // sub-rectangle of the ink canvas. `crop_overlay_to_page` takes it.
             let svg = match host_page.and_then(|hp| geom.get(hp as usize)) {
                 Some(pg) if pg.box_w > 0.0 && pg.box_h > 0.0 => crop_overlay_to_page(
                     &svg,
@@ -156,8 +142,7 @@ pub fn import_ink(
         }
     }
 
-    // Record this device's asserted set (provenance only — never deletes a backup
-    // page; Sidle is the durable backup). A deviceless import carries no identity.
+    // `device_serial`'s asserted set, provenance only. `None` carries no identity.
     if let Some(serial) = device_serial {
         db::record_ink_device_presence(conn, serial, asin, book_id, &current_containers, now)
             .context("record ink device presence")?;
@@ -166,9 +151,8 @@ pub fn import_ink(
     Ok(stats)
 }
 
-/// One ink notebook pulled off a device: the host book's content_id
-/// (`== books.asin`) and the raw `nbk` bytes. An MTP walk and an on-device
-/// `std::fs` read reach this same shape.
+/// One pulled ink notebook: the host book's content_id (`== books.asin`) and
+/// the raw `nbk` bytes.
 pub struct CollectedInk {
     pub asin: String,
     pub nbk_bytes: Vec<u8>,
@@ -176,7 +160,7 @@ pub struct CollectedInk {
 
 /// Every handwritten-ink record across the collected `.yjr`s, each naming an
 /// ink page by `container_id` and carrying its host-page position.
-/// [`import_ink`]'s container-id join selects the notes belonging to one nbk.
+/// [`import_ink`] selects the records belonging to one `nbk`.
 pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
     collected
         .iter()
@@ -189,9 +173,6 @@ pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
 /// Import a sync's worth of pulled ink, folding the counts into `report`.
 /// Each notebook joins its host book by `asin == books.asin`, and an `nbk`
 /// matching the `ink_sync` checkpoint skips the decode. Call under a held lock.
-
-// Eight distinct inputs: db handle, paths, device id, timestamp, the two
-// pulled collections, the report sink, the progress callback.
 #[allow(clippy::too_many_arguments)]
 pub fn import_collected_ink(
     conn: &Connection,
@@ -238,8 +219,8 @@ pub fn import_collected_ink(
 }
 
 /// Re-link orphan ink (`book_id IS NULL`) whose `asin` matches a library book,
-/// returning the rows linked. Runs after a book is added or edited, alongside
-/// [`crate::library::ingest::relink_unmatched`].
+/// returning the rows linked. Pairs with
+/// [`crate::library::ingest::relink_unmatched`] on a book add or edit.
 pub fn relink_ink(conn: &Connection) -> rusqlite::Result<usize> {
     let orphans = db::list_unlinked_book_ink(conn)?;
     let mut linked = 0;
@@ -254,7 +235,7 @@ pub fn relink_ink(conn: &Connection) -> rusqlite::Result<usize> {
 
 /// Delete one ink page: its `book_ink` row, device presence and deletion
 /// record through [`db::delete_book_ink`], and the cached SVGs under the sha
-/// its `book_id` names. An absent id is a no-op.
+/// its `book_id` names. An absent id makes no change.
 pub fn delete_ink_page(conn: &Connection, paths: &LibraryPaths, id: i64) -> Result<()> {
     let Some(row) = db::get_book_ink(conn, id).context("read ink row")? else {
         return Ok(());
@@ -278,8 +259,7 @@ pub fn delete_ink_page(conn: &Connection, paths: &LibraryPaths, id: i64) -> Resu
 }
 
 /// eid → 0-based host page. [`PageGeom::eids`] unions each page's text-run and
-/// structural eids, the set `buildPdfEidIndex` registers, and the first page
-/// listing an eid wins.
+/// structural eids, and the first page listing an eid wins.
 fn eid_page_map(geom: &[PageGeom]) -> HashMap<i64, usize> {
     let mut map = HashMap::new();
     for (page_index, pg) in geom.iter().enumerate() {
@@ -292,7 +272,7 @@ fn eid_page_map(geom: &[PageGeom]) -> HashMap<i64, usize> {
 
 /// Crop an overlay SVG's viewBox from the ink canvas to the sub-rectangle the
 /// host page occupies on a Scribe screen. The band's aspect equals the page
-/// box's, and ink in the letterbox margins falls outside the viewBox.
+/// box's; ink in the letterbox margins falls outside the viewBox.
 fn crop_overlay_to_page(svg: &str, canvas_w: i64, canvas_h: i64, box_w: f32, box_h: f32) -> String {
     if canvas_w <= 0 || canvas_h <= 0 || box_w <= 0.0 || box_h <= 0.0 {
         return svg.to_string();
@@ -322,9 +302,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    // `import_ink` itself decodes a real KDF `nbk` (a SQLite file) + a real KFX,
-    // neither of which these fixtures carry. What is covered here is the
-    // DB-side logic alone: orphan-then-relink by asin.
+    // These fixtures carry no `nbk` and no KFX, the two `import_ink` decodes.
+    // Covered here: `relink_orphan_ink` by asin, and `crop_overlay_to_page`.
     use super::*;
     use crate::library::db::{self, NewBook, NewBookInk};
     use std::path::Path;
@@ -364,8 +343,8 @@ mod tests {
         .unwrap()
     }
 
-    /// A `.yjr` carrying one handwritten-ink record naming `container`, plus a
-    /// bookmark that must not be mistaken for one.
+    /// A `.yjr` carrying one handwritten-ink record naming `container`, beside
+    /// a bookmark.
     fn yjr_with_ink_note(container: &str) -> Vec<u8> {
         use crate::library::yjr::{Anchor, Kind, Store};
         let mut store = Store::empty();
@@ -390,9 +369,8 @@ mod tests {
         store.encode()
     }
 
-    /// The anchors the ink import joins on are pulled out of the sidecars the
-    /// same sync carried: every `.yjr` in the collection, ink records only, one
-    /// flat union across books.
+    /// `collect_ink_notes` unions the ink records of every `.yjr` in the
+    /// collection into one flat list across books.
     #[test]
     fn handwritten_notes_unions_the_ink_records_and_drops_the_rest() {
         let collected = vec![
@@ -410,7 +388,7 @@ mod tests {
                 yjr_name: None,
                 yjf_name: None,
             },
-            // A book read but never annotated — no `.yjr` at all.
+            // A book with no `.yjr`.
             CollectedYjr {
                 sdr_name: "c.12345678.sdr".into(),
                 yjr_bytes: None,
@@ -431,9 +409,8 @@ mod tests {
         );
     }
 
-    /// The join keys on container id, across whichever book a note came from.
-    /// A notebook the library lacks is never invented, and one whose host book
-    /// is absent is skipped.
+    /// The join keys on `container_id`, across whichever book a note came from.
+    /// A notebook whose host book is absent from `books` is skipped.
     #[test]
     fn import_collected_ink_skips_an_asin_with_no_host_book() {
         let conn = mem_db();
@@ -457,8 +434,7 @@ mod tests {
         .expect("an unmatched asin is a skip, not an error");
         assert_eq!(report.ink_books, 0);
         assert_eq!(report.ink_pages, 0);
-        // `get_ink_sync_sha` holds nothing either: the next sync offers the
-        // notebook again once its host book lands.
+        // `get_ink_sync_sha` holds nothing, leaving the notebook on offer.
         assert_eq!(
             db::get_ink_sync_sha(&conn, "G000TESTSERIAL", "NOSUCHASIN").unwrap(),
             None
@@ -467,9 +443,8 @@ mod tests {
 
     #[test]
     fn crop_overlay_letterboxes_a_narrower_page() {
-        // The real Linear numbers: canvas 15624×20832 (0.75), page box 442×663
-        // (0.667). The page is narrower → fit by height → a centered horizontal
-        // band x0=868, width=13888 (= 20832·442/663), full height.
+        // canvas 15624×20832 (0.75), page box 442×663 (0.667): narrower page,
+        // fit by height, band x0=868, width=13888 (= 20832·442/663).
         let svg = "<svg xmlns=\"x\" viewBox=\"0 0 15624 20832\"><image/></svg>";
         let out = crop_overlay_to_page(svg, 15624, 20832, 442.0, 663.0);
         assert!(out.contains("viewBox=\"868 0 13888 20832\""), "got: {out}");
@@ -478,7 +453,7 @@ mod tests {
 
     #[test]
     fn crop_overlay_is_noop_when_aspects_match() {
-        // Page aspect == canvas aspect → the page fills the canvas; no crop.
+        // Page aspect == canvas aspect: the page fills the canvas, no crop.
         let svg = "<svg viewBox=\"0 0 1000 2000\"/>";
         let out = crop_overlay_to_page(svg, 1000, 2000, 500.0, 1000.0);
         assert!(out.contains("viewBox=\"0 0 1000 2000\""), "got: {out}");
@@ -486,9 +461,8 @@ mod tests {
 
     #[test]
     fn crop_overlay_letterboxes_a_wider_page() {
-        // A page WIDER than the screen → fit by width → vertical letterbox.
-        // canvas 2000×2000 (1.0), page 1000×500 (2.0): ph = 2000/2 = 1000,
-        // y0 = (2000-1000)/2 = 500.
+        // canvas 2000×2000 (1.0), page 1000×500 (2.0): wider page, fit by
+        // width, ph = 2000/2 = 1000, y0 = (2000-1000)/2 = 500.
         let svg = "<svg viewBox=\"0 0 2000 2000\"/>";
         let out = crop_overlay_to_page(svg, 2000, 2000, 1000.0, 500.0);
         assert!(out.contains("viewBox=\"0 500 2000 1000\""), "got: {out}");
@@ -497,7 +471,7 @@ mod tests {
     #[test]
     fn relink_ink_links_orphans_to_their_book_by_asin() {
         let conn = mem_db();
-        // Ink imported as an orphan (host book not in the library yet).
+        // Ink with no matching row in `books`.
         db::upsert_book_ink(
             &conn,
             &NewBookInk {
@@ -512,11 +486,11 @@ mod tests {
             },
         )
         .unwrap();
-        // No book yet → relink is a no-op.
+        // With no matching book, `relink_orphan_ink` links 0 rows.
         assert_eq!(relink_ink(&conn).unwrap(), 0);
         assert_eq!(db::list_unlinked_book_ink(&conn).unwrap().len(), 1);
 
-        // Book appears with that asin → relink attaches the ink.
+        // A book with that asin: `relink_orphan_ink` attaches the ink.
         let book = add_book(&conn, "sha", "AS1");
         assert_eq!(relink_ink(&conn).unwrap(), 1);
         assert!(db::list_unlinked_book_ink(&conn).unwrap().is_empty());

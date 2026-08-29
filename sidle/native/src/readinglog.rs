@@ -1,42 +1,20 @@
-//! Reading-session events the Kindle logs about itself, collected for sync.
+//! Reading-session event lines selected out of the Kindle's own logs for sync.
 //!
-//! The firmware writes `/var/log/messages` continuously and, at most once a
-//! day, gzips a snapshot of it into `system/logbackup/`. Under the `cvm` tag
-//! those lines carry `ReadingTimerController` events — a dated record of every
-//! page turn — which the desktop turns into a per-day reading log.
+//! `LIVE_LOG` is appended to continuously, `tinyrot` gzips it into `LOG_DIR` on
+//! a size cap, and `log_backup.sh` gzips a daily snapshot into `DUMP_DIR`.
+//! [`MARKERS`] names the lines worth sending out of all three.
 //!
-//! **This module does no parsing.** It selects lines and sends them; the session
-//! rules (running counters, gap splitting, the two end-of-book constants) live
-//! in one place on the desktop, and a second implementation here would be the
-//! one that drifts.
+//! [`collect`] parses nothing. The session rules — running counters, gap
+//! splitting, the two end-of-book constants — have one implementation, on the
+//! desktop.
 //!
-//! The whole design is about *not* reading things. A full archive is ~90 MB of
-//! gzip; re-reading it every Sync to discover there is nothing new costs seconds
-//! on a Mac and far worse here. So the desktop states a watermark — the newest
-//! event it already holds from this device — and:
+//! `watermark` is the newest event the desktop holds from this device, and it
+//! keeps a pass off the disk: a dump whose filename timestamp is at or before it
+//! holds nothing newer, and [`take_events`] keeps only the lines past it.
 //!
-//! - a dump whose **filename** timestamp is at or before it is skipped unopened,
-//!   because a snapshot taken at time T contains nothing after T;
-//! - only the recent tail of the syslog is read in the steady state, and only
-//!   its lines newer than the watermark are kept.
-//!
-//! With nothing new since the last sync that is two directory listings and a
-//! scan of the newest syslog chunks, and an empty push that never leaves the
-//! device.
-//!
-//! **The live file alone is nowhere near enough.** `tinyrot` rotates
-//! `/var/log/messages` on a size cap, and on a busy device that is roughly every
-//! ten minutes — one measured dump spanned 230 rotations in 38 hours. What it
-//! rotates away is not lost: it is gzipped into
-//! `/var/local/log/messages_<seq>_<YYYYMMDDHHMMSS>.gz`. Reading only the live
-//! file would therefore see about ten minutes of history and leave the rest to
-//! arrive a day later in the next dump — or not at all, since `tinyrot` prunes
-//! chunks and the dumps demonstrably skip content when it does (a real archive
-//! lost 20 h of one day between two consecutive daily dumps).
-//!
-//! So the chunks are read too, filtered by the same watermark. That is not an
-//! invention: it is what the firmware's own `showlog` does, and a dump is
-//! nothing more than its output gzipped —
+//! `LIVE_LOG` holds minutes, `tinyrot` having rotated the rest into `LOG_DIR`
+//! and pruned the oldest. [`chunks`] reads those, filtered by the same
+//! watermark. The firmware's own `showlog` reads the same two paths:
 //!
 //! ```text
 //! ALLFILES=`ls -1 $ARCHIVE_DIR/${LOG}_*.gz | xargs`
@@ -44,87 +22,120 @@
 //! cat /var/log/$LOG >> "$OUTFILE"
 //! ```
 //!
-//! **The two paths in that script are two filesystems, and confusing them costs
-//! exactly the reading done between two syncs.** `/var/log` is a real directory
-//! on the tmpfs; `/var/local` is a symlink to the `/var/base-local` flash mount,
-//! and `ARCHIVE_DIR` is `/var/local/log` under it. So the live file is
-//! `/var/log/messages` and nothing of that name exists beside the chunks — a
-//! sync that looks for it there reads no live log at all, sees only what has
-//! already been rotated to flash, and reports it as a quiet device.
-//!
-//! Reading the same set directly is what removes the wait for a daily snapshot,
-//! and the dumps then matter only for history older than the chunks still on
-//! disk — which is also all a host can reach, both log directories being on the
-//! root filesystem.
+//! Those two paths are two filesystems. `/var/log` is a directory on the tmpfs;
+//! `/var/local` is a symlink to the `/var/base-local` flash mount, and
+//! `ARCHIVE_DIR` is `/var/local/log` under it. `LIVE_LOG` is `/var/log/messages`
+//! and no file of that name sits beside the chunks.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 
-/// The tags a line must carry one of to be worth sending; the cheap prefilter
-/// before anything else.
+/// The tags on a line that states reading.
 ///
-/// The reading events, and the device's own power-state records. The second
-/// family carries no reading and names no book — what it carries is whether the
-/// device was awake, which is the only measure left for a book the reading
-/// timer refuses to count. The Kindle's timer is words-and-WPM driven, so
-/// content it can count no words in (manga, a fixed-layout magazine) is never
-/// timed at all, and the desktop falls back to how long the device was awake
-/// with the book open.
+/// `ReadingTimerController` counts words and a WPM, and times only a book it
+/// can count words in. The `fastmetrics` records beside it come from the reader
+/// shell: `ereader_book_consume_content` spans a page with its `words_count`,
+/// `ereader_book_page_turn` and `ereader_book_linear_page_actions` name a turn,
+/// `ereader_open_book` and `ereader_close_book` bracket a book with its
+/// `book_category`, and `ereader_reader_latency_ops` and
+/// `ereader_reader_page_turn_latency_ops` carry a `cde_key`.
 ///
-/// Cheap to carry: about a hundred power records a day against a reading day's
-/// several hundred events.
-const MARKERS: [&str; 2] = ["ReadingTimerController", "ereader_powerd_state_change"];
+/// Bracketed: `ereader_open_book` is a prefix of
+/// `ereader_open_book_failure_backup`.
+///
+/// Measured against one device-day: 186 records / 45 KB, beside 43
+/// `ReadingTimerController` lines / 31 KB.
+const READING_MARKERS: [&str; 9] = [
+    "ReadingTimerController",
+    "SchemaName[ereader_open_book]",
+    "SchemaName[ereader_close_book]",
+    "SchemaName[ereader_book_consume_content]",
+    "SchemaName[ereader_book_page_turn]",
+    "SchemaName[ereader_book_linear_page_actions]",
+    "SchemaName[ereader_content_point]",
+    "SchemaName[ereader_reader_latency_ops]",
+    "SchemaName[ereader_reader_page_turn_latency_ops]",
+];
 
-/// The live syslog the firmware appends to, and the source every dump is a
-/// snapshot of. Absolute: it is on the root filesystem, not under `/mnt/us`.
+/// The tags on a line that states whether the device was awake, the measure
+/// left for a book `ReadingTimerController` never times.
 ///
-/// On the tmpfs, and **not** in [`LOG_DIR`] beside the chunks that were rotated
-/// out of it — that is the path the firmware's own `showlog` cats.
+/// `powerd` states its transitions two ways, and a Kindle writes one shape or
+/// both. `ereader_powerd_state_change` names the state moved from and the state
+/// moved to; `outOfScreenSaver` and `goingToScreenSaver` bracket the same
+/// `ACTIVE`, and `suspending` closes a span that skips the screensaver.
+///
+/// About a hundred lines a day. A device states them whether or not it was read
+/// on, which is what [`has_reading`] keeps them out of.
+const POWER_MARKERS: [&str; 4] = [
+    "ereader_powerd_state_change",
+    "lipc:evts:name=outOfScreenSaver, origin=com.lab126.powerd",
+    "lipc:evts:name=goingToScreenSaver, origin=com.lab126.powerd",
+    "lipc:evts:name=suspending, origin=com.lab126.powerd",
+];
+
+/// The tag on a [`take_catalog`] line, marking it this collector's statement
+/// and not the firmware's.
+///
+/// Out of [`READING_MARKERS`]: a catalog line names a book on the device and
+/// states no sitting.
+const CATALOG_TAG: &str = "SidleCatalog";
+
+/// Every tag [`take_events`] selects on; the prefilter ahead of everything
+/// else. The desktop's own set names the same tags, the two crates building
+/// apart.
+const MARKERS: [&str; 14] = {
+    let (r, p) = (READING_MARKERS, POWER_MARKERS);
+    [
+        r[0],
+        r[1],
+        r[2],
+        r[3],
+        r[4],
+        r[5],
+        r[6],
+        r[7],
+        r[8],
+        p[0],
+        p[1],
+        p[2],
+        p[3],
+        CATALOG_TAG,
+    ]
+};
+
+/// The live syslog, on the root filesystem's tmpfs and not under `/mnt/us`.
+/// Every file in [`DUMP_DIR`] is a snapshot of it. No file of this name sits in
+/// [`LOG_DIR`] beside the chunks rotated out of it.
 const LIVE_LOG: &str = "/var/log/messages";
 
 /// The directory `tinyrot` gzips [`LIVE_LOG`]'s rotated chunks into, on flash.
 const LOG_DIR: &str = "/var/local/log";
 
-/// What a rotated chunk's name begins with: `messages_00000807_20260807101501.gz`.
-/// The trailing `_` is what separates it from `messages` itself.
+/// What a rotated chunk's name begins with:
+/// `messages_00000807_20260807101501.gz`. The trailing `_` separates it from
+/// `messages`.
 const CHUNK_PREFIX: &str = "messages_";
 
 /// Where the firmware keeps its daily snapshots, relative to `/mnt/us`.
 const DUMP_DIR: &str = "system/logbackup";
 
-/// Our own archive of reading events, relative to `/mnt/us`.
-///
-/// The firmware keeps 30 daily dumps — about a month — and prunes the oldest, so
-/// a trip longer than that loses its start before any sync can collect it. This
-/// directory is the answer: the same event lines, filtered to the marker, kept
-/// indefinitely because they are ~80x smaller than the dumps they come from (a
-/// measured month was 1.1 MB gzipped against 92 MB of dumps).
+/// An archive of [`MARKERS`] lines, relative to `/mnt/us`, kept past the 30
+/// daily dumps [`DUMP_DIR`] holds. A measured month is 1.1 MB gzipped against
+/// 92 MB of dumps.
 const ARCHIVE_DIR: &str = "extensions/sidle/readinglog";
 
 /// What an archive file is called: `rl_<YYMMDDHHMMSS>.txt.gz`, stamped with the
-/// newest line it holds.
-///
-/// Deliberately the same shape as the firmware's dumps, so what a file holds is
-/// readable from the directory listing alone, with nothing to decompress. Which
-/// file to open is decided on the name; how far the archiver has read is
-/// [`ARCHIVE_MARK`]'s to say, the files being deleted once the library has them.
+/// newest line it holds — the shape [`DUMP_DIR`]'s names take. [`archive_files`]
+/// picks a file on the name alone; [`ARCHIVE_MARK`] states how far
+/// [`archive`] has read.
 const ARCHIVE_PREFIX: &str = "rl_";
 
-/// Where the archiver records the newest line it has ever archived, beside the
-/// archive itself.
-///
-/// The filenames state the same thing while the files exist, and a sync deletes
-/// them the moment the library confirms it holds them — so on their own they
-/// answer "how far did I get?" with "nowhere" every time a sync succeeds. The
-/// next pass then re-reads every dump on the device, ~90 MB of gzip, to
-/// rediscover a month of lines it has already sent, and writes them all back as
-/// a fresh archive for the following sync to delete again.
-///
-/// This file is what the archiver actually reads its position from. It is never
-/// purged: a stamp costs 13 bytes and is the only thing that makes "nothing new"
-/// cheap. Named against [`ARCHIVE_DIR`], and deliberately not `rl_`-prefixed —
-/// that prefix is what marks a file as archive content to read and to delete.
+/// The newest line [`archive`] has written, in [`ARCHIVE_DIR`] beside the
+/// files. [`purge_archive`] deletes every [`ARCHIVE_PREFIX`] file the library
+/// confirms and leaves this 13-byte stamp, which is what [`archive_watermark`]
+/// reads.
 const ARCHIVE_MARK: &str = "mark";
 
 /// What one collection pass looked at, for the sync log.
@@ -132,24 +143,15 @@ const ARCHIVE_MARK: &str = "mark";
 pub struct Collected {
     /// Distinct event lines newer than the watermark.
     pub lines: Vec<String>,
-    /// Names of the dumps read **in full**, sent alongside the lines so the
-    /// desktop can record them and skip them next time. A dump that decoded only
-    /// partway is deliberately absent, so the next sync reads it again.
+    /// Names of the dumps that decoded to the end, for the desktop to record
+    /// and skip next time. A dump counted in `truncated` is absent from this.
     pub read: Vec<String>,
-    /// Dumps skipped without being opened — the work this avoids is the entire
-    /// point.
+    /// Dumps skipped on their name, without being opened.
     pub skipped: usize,
-    /// Dumps that decoded only partway, usually because the firmware was still
-    /// writing one. Their prefix was taken; they are not reported as read.
+    /// Dumps that decoded partway. Their prefix went into `lines`.
     pub truncated: usize,
-    /// Event lines each source offered, before de-duplication across them:
-    /// dumps, the live syslog, the rotated chunks, our own archive.
-    ///
-    /// The sources overlap heavily, so these do not add up to `lines` and are not
-    /// meant to. What they answer is which of the four a sync actually reached —
-    /// the live log and the chunks are the only ones that hold the minutes since
-    /// the last rotation, and a Sync that reports no reading is either a Sync
-    /// with nothing to report or one that never saw them.
+    /// Event lines each source offered, ahead of the de-duplication across them.
+    /// The sources overlap, and these do not add up to `lines`.
     pub from: Sources,
 }
 
@@ -158,17 +160,14 @@ pub struct Collected {
 pub struct Sources {
     pub dumps: usize,
     pub live: usize,
-    /// Whether the live syslog was there to be read at all.
-    ///
-    /// Reported separately because the count cannot say it: a file that is not
-    /// where this looked and a file with nothing new in it both offer zero
-    /// lines. The live file is the only source holding the minutes since the
-    /// last rotation, so an unread one silently costs every sync exactly the
-    /// reading done since the one before it — and a `live=0` that means
-    /// "absent" reads as a quiet device.
+    /// Whether `LIVE_LOG` opened. An absent file and a file with nothing past
+    /// the watermark both leave `live` at 0.
     pub live_read: bool,
     pub chunks: usize,
     pub archive: usize,
+    /// Catalog rows named, from [`take_catalog`]. Not a log source: these lines
+    /// are this collector's own statement about the books on the device.
+    pub catalog: usize,
 }
 
 /// The `YYMMDD:HHMMSS` a dump's name encodes, matching the prefix its lines
@@ -197,35 +196,24 @@ fn line_stamp(line: &str) -> Option<&str> {
         .then_some(s)
 }
 
-/// Every reading event newer than `watermark`, from four sources: the dumps the
-/// desktop has not already read, the live log, the rotated syslog chunks, and
-/// our own archive.
+/// Every [`MARKERS`] line newer than `watermark`, across four sources:
+/// [`DUMP_DIR`], `LIVE_LOG`, [`LOG_DIR`]'s chunks, and [`ARCHIVE_DIR`].
 ///
-/// Each covers what the others cannot. The live log and chunks are the present,
-/// with no wait for a daily snapshot. The dumps are the firmware's month of
-/// history, and the only thing available on a device that has never run this.
-/// The archive is everything older than the firmware keeps.
+/// `LIVE_LOG` and the chunks hold the present; [`DUMP_DIR`] holds a month, and
+/// is all a device running this for the first time offers; [`ARCHIVE_DIR`]
+/// holds what predates both.
 ///
-/// `seen` names snapshots the desktop has read in full — including ones imported
-/// from a copy of this folder on the desktop, so a host-side backfill primes the
-/// device sync. `watermark` is `YYMMDD:HHMMSS` and filters the other three,
-/// which have no stable names worth recording. Both empty means a Kindle the
-/// desktop has never seen, so everything is read once.
+/// `seen` names dumps the desktop holds in full, `watermark` is `YYMMDD:HHMMSS`
+/// and filters the other three. Two empty arguments read everything once.
 ///
-/// The sources overlap heavily and that is intended — the desktop de-duplicates.
-/// What matters is that between them nothing is skipped, which the dumps alone
-/// demonstrably do not achieve.
+/// The four overlap, and the desktop de-duplicates.
 pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     let mut out = Collected::default();
-    // Deliberately a plain Vec plus a sort: the desktop de-duplicates anyway
-    // (dumps overlap heavily by design), and a set of every line would hold the
-    // whole selection in memory twice on a device with 512 MB shared with the
-    // framework.
+    // A plain Vec plus a sort. The desktop de-duplicates, and a set of every
+    // line holds the selection twice on a device with 512 MB.
     for (name, path) in dumps(us_root, watermark, seen, &mut out) {
         if let Some(dump) = read_maybe_gzip(&path) {
-            // Its lines go either way; only a dump decoded to the end is
-            // reported as read, so a half-written one is picked up again next
-            // sync instead of being skipped on its name forever.
+            // Both cases give up their lines; `read` takes the complete ones.
             if dump.complete {
                 out.read.push(name);
             } else {
@@ -234,54 +222,107 @@ pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
             out.from.dumps += take_events(&dump.text, watermark, &mut out.lines);
         }
     }
-    // The live file, then the rotated chunks — the same set the firmware's own
-    // `showlog` concatenates, which is what makes a sync independent of whether a
-    // dump was ever written for the period.
-    //
-    // Deliberately the reverse of `showlog`'s order, because `showlog` holds
-    // tinyrot's lock for the duration and this does not. Read the chunks first
-    // and a rotation in the gap moves the live file's contents into a chunk
-    // listed a moment too early, and those lines are in neither read. Live
-    // first, and the same rotation merely delivers them twice — which costs
-    // nothing, since the whole selection is de-duplicated below.
+    // `LIVE_LOG` ahead of `LOG_DIR`, without tinyrot's lock: a rotation between
+    // the two reads then duplicates lines into a de-duplicated selection.
     take_live(Path::new(LIVE_LOG), watermark, &mut out);
     for path in chunks(Path::new(LOG_DIR), watermark, &mut out) {
-        // A chunk pruned between the listing and the read simply yields nothing;
-        // one caught mid-rotation yields its intact prefix. Neither needs the
-        // lock, which is why not taking it is acceptable here.
+        // A chunk pruned between the listing and the read yields nothing, and
+        // one caught mid-rotation yields its intact prefix.
         if let Some(chunk) = read_maybe_gzip(&path) {
             out.from.chunks += take_events(&chunk.text, watermark, &mut out.lines);
         }
     }
-    // Our own archive last. This is what makes a long trip survivable: the
-    // firmware's dumps and chunks are both gone within about a month, so after
-    // that the archive is the *only* place the older events still exist, and a
-    // sync that ignored it would silently push a truncated history.
+    // `ARCHIVE_DIR` last: the one copy of events past `DUMP_DIR`'s month and
+    // `LOG_DIR`'s pruning.
     for path in archive_files(us_root, watermark, &mut out) {
         if let Some(old) = read_maybe_gzip(&path) {
             out.from.archive += take_events(&old.text, watermark, &mut out.lines);
         }
     }
+    // Last: `take_catalog` stamps its rows at the newest line in `out.lines`.
+    out.from.catalog = take_catalog(&catalog_paths(), &mut out.lines);
     out.lines.sort();
     out.lines.dedup();
     out
 }
 
-/// Take the live syslog's new events, and record that there was one to take.
+/// The content catalog, newest firmware first. `/var/local` is a symlink to
+/// `/var/base-local`, and one device answers to more than one of these;
+/// [`take_catalog`] takes the first that exists.
+fn catalog_paths() -> Vec<PathBuf> {
+    [
+        "/var/base-local/metadata/cc.db",
+        "/var/local/metadata/cc.db",
+        "/var/local/cc.db",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// Append one [`CATALOG_TAG`] line per book on the device to `lines`, and
+/// answer with how many.
 ///
-/// The only source holding the minutes since the last rotation, and therefore
-/// the only one that can carry a sitting still in progress. Everything else on
-/// the device is at best one rotation behind, so a sync that misses this one
-/// reports the reading done since the last sync as nothing at all — and reports
-/// it identically to a device that was simply not read on.
+/// `p_contentSize` equals the log's `BookEndPosition.FromBook` to the digit,
+/// and `p_cdeKey` beside it is `books.asin` for a sideload and
+/// `books.amazon_asin` for a store book.
 ///
-/// Which is why the *reading* of the file is recorded and not only its yield: a
-/// count of zero is the answer for both, and the difference is the whole
-/// feature.
+/// Each line carries the stamp of the newest in `lines`, putting it on the same
+/// watermark as the rest. An empty `lines` takes no catalog.
+fn take_catalog(paths: &[PathBuf], lines: &mut Vec<String>) -> usize {
+    let Some(stamp) = lines.iter().filter_map(|l| line_stamp(l)).max() else {
+        return 0;
+    };
+    let stamp = stamp.to_string();
+    let Some(db) = paths.iter().find(|p| p.exists()) else {
+        return 0;
+    };
+    // Plain, never `mode=ro` or `immutable=1`: on a WAL `cc.db` the first fails
+    // for want of a -shm file and the second reads pre-WAL state. A SELECT
+    // writes nothing.
+    let Ok(sql) = std::process::Command::new("sqlite3")
+        .arg("-separator")
+        .arg("\u{1}")
+        .arg(db)
+        .arg(CATALOG_QUERY)
+        .output()
+    else {
+        return 0;
+    };
+    let mut n = 0;
+    for row in String::from_utf8_lossy(&sql.stdout).lines() {
+        let mut f = row.split('\u{1}');
+        let (Some(extent), Some(key)) = (f.next(), f.next()) else {
+            continue;
+        };
+        if extent.is_empty() || key.is_empty() {
+            continue;
+        }
+        let cde_type = f.next().unwrap_or_default();
+        lines.push(format!(
+            "{stamp} sidle-native: I {CATALOG_TAG}:extent={extent},cde_key={key},cde_type={cde_type};"
+        ));
+        n += 1;
+    }
+    n
+}
+
+/// `p_contentState` 1 is downloaded, 0 a cloud row. A `*`-prefixed `p_cdeKey`
+/// is the catalog's hash for a loose file — a scriptlet, `My Clippings.txt` —
+/// and matches no book.
+const CATALOG_QUERY: &str = "select p_contentSize, p_cdeKey, p_cdeType from Entries \
+     where p_contentState = 1 and p_contentSize is not null \
+       and p_cdeKey is not null and p_cdeKey not like '*%' \
+       and p_cdeType in ('EBOK', 'PDOC')";
+
+/// Take `LIVE_LOG`'s new events into `out.lines`, and set `out.from.live_read`.
 ///
-/// Not `read_to_string`: the syslog carries bytes that are not valid UTF-8, and
-/// that returns `Err` for the whole file rather than for the offending line —
-/// which would drop every event since the last rotation.
+/// `LIVE_LOG` holds the minutes since the last rotation, the only source
+/// carrying a sitting in progress. [`Sources::live_read`] separates an
+/// unopened file from one with nothing past the watermark.
+///
+/// [`read_maybe_gzip`] and not `read_to_string`: the syslog carries bytes that
+/// are not valid UTF-8, on which `read_to_string` fails for the whole file.
 fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
     let Some(live) = read_maybe_gzip(path) else {
         return;
@@ -290,24 +331,22 @@ fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
     out.from.live += take_events(&live.text, watermark, &mut out.lines);
 }
 
-/// Whether a collection holds any reading at all.
+/// Whether `lines` holds any reading.
 ///
-/// The power records ride along to bound a sitting the reading timer refused to
-/// count, and on their own they measure nothing — a device states them whether
-/// it was read on or merely woken. Without this the steady state would push on
-/// every Sync forever: a Kindle sleeps and wakes dozens of times a day, so the
-/// batch is never empty again once those lines are collected.
+/// [`READING_MARKERS`] only. A Kindle sleeps and wakes dozens of times a day,
+/// and [`POWER_MARKERS`] land in a batch whether or not it was read on.
 pub fn has_reading(lines: &[String]) -> bool {
-    lines.iter().any(|l| l.contains(MARKERS[0]))
+    lines
+        .iter()
+        .any(|l| READING_MARKERS.iter().any(|m| l.contains(m)))
 }
 
-/// The newest event this device has already archived, as the `YYMMDD:HHMMSS` a
-/// log line carries, or empty if nothing has ever been archived.
+/// The newest archived event as the `YYMMDD:HHMMSS` a log line carries, empty
+/// for an untouched [`ARCHIVE_DIR`].
 ///
-/// The greater of what the files say and what [`ARCHIVE_MARK`] says — the files
-/// because an archive written by an older build has no mark, the mark because
-/// the files are deleted at every successful sync and would otherwise reset this
-/// to "read everything again".
+/// The greater of the [`ARCHIVE_PREFIX`] filenames and [`ARCHIVE_MARK`]: an
+/// archive from an older build carries no mark, and [`purge_archive`] deletes
+/// the files.
 pub fn archive_watermark(us_root: &Path) -> String {
     let marked =
         std::fs::read_to_string(us_root.join(ARCHIVE_DIR).join(ARCHIVE_MARK)).unwrap_or_default();
@@ -323,55 +362,43 @@ pub fn archive_watermark(us_root: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// How often the archiver runs, matching stock `tinyrot`'s own cadence — it is
-/// what rotates the syslog we read, so running at the same rate means never
-/// being more than one rotation behind. The cost is set by how much log there
-/// is, not by how often we look, so a shorter interval buys coverage for nothing.
+/// How often the archiver runs, matching stock `tinyrot`'s cadence: `tinyrot`
+/// rotates `LIVE_LOG`, and this rate stays within one rotation of it.
 pub const ARCHIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Where the running archiver records its pid and the build it came from, so a
-/// second one is never started and an obsolete one never survives an update. On
-/// the user partition, because that is the only thing we can write.
+/// The running archiver's pid and build stamp, read by [`archiver`]. On the
+/// user partition, the writable one.
 const DAEMON_PID: &str = "/mnt/us/extensions/sidle/archive.pid";
 
-/// The flag that turns this binary into the archiver. Also how a process in
-/// `/proc` is recognised as one.
+/// The flag that turns this binary into the archiver, and what [`classify`]
+/// matches a `/proc` cmdline against.
 pub const DAEMON_FLAG: &str = "--archive-daemon";
 
-/// Where the archiver runs from: its own copy of this binary, under a name that
-/// shares no text with the picker's.
+/// The archiver's own copy of this binary, named to share no text with the
+/// picker's `bin/sidle`.
 ///
-/// The home-screen tile will not open a picker while `pidof sidle` matches
-/// anything, and that check reaches the executable behind a process, not only
-/// the name the process reports for itself — so an archiver running out of the
-/// picker's own `bin/sidle` is a tile that silently does nothing for as long as
-/// the archiver lives, which is indefinitely. A separate file is what settles
-/// it, and a copy rather than a link because the user partition is FAT, which
-/// has neither kind.
+/// The home-screen tile opens no picker while `pidof sidle` matches, and that
+/// check reaches the executable behind a process. A copy and not a link: the
+/// user partition is FAT.
 const DAEMON_BIN: &str = "/mnt/us/extensions/sidle/bin/readinglogd";
 
 /// What the pidfile and `/proc` together say about the archiver.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Archiver {
-    /// None is running: start one.
+    /// No archiver is running.
     Absent,
-    /// This build's archiver is running: leave it alone.
+    /// This build's archiver is running.
     Running,
-    /// An archiver from a different build is running, carrying its pid.
-    ///
-    /// It has to be replaced rather than left: a self-update swaps `bin/sidle`
-    /// underneath it, and nothing would ever start a current one, because the
-    /// pidfile it holds is the very thing that says one is already up.
+    /// An archiver from a different build is running, carrying its pid. Its
+    /// [`DAEMON_PID`] is what reports an archiver as up, and a self-update
+    /// swaps `bin/sidle` underneath it.
     Outdated(u32),
 }
 
-/// What the archiver situation is right now.
+/// [`DAEMON_PID`] read against `/proc`.
 ///
-/// Checked against `/proc` rather than trusting the file: a pidfile survives a
-/// crash and a reboot, and a stale one treated as live would silently end the
-/// archiving this whole feature exists for. The cmdline test guards the other
-/// direction, where the kernel has since reissued that pid to something
-/// unrelated.
+/// A pidfile survives a crash and a reboot, and the kernel reissues a pid, so
+/// [`classify`] tests the cmdline behind it.
 pub fn archiver() -> Archiver {
     let Ok(text) = std::fs::read_to_string(DAEMON_PID) else {
         return Archiver::Absent;
@@ -384,11 +411,8 @@ pub fn archiver() -> Archiver {
     classify(pid, fields.next(), &cmdline)
 }
 
-/// The judgement itself, given a pid from the pidfile, the build stamp recorded
-/// beside it, and what `/proc` reports that pid is running.
-///
-/// A pidfile with no stamp is from a build that did not record one, so it is by
-/// definition not this one.
+/// A pid from [`DAEMON_PID`], the build stamp beside it, and the cmdline
+/// `/proc` reports for that pid. A `None` stamp matches no build.
 fn classify(pid: u32, stamp: Option<&str>, cmdline: &[u8]) -> Archiver {
     if !String::from_utf8_lossy(cmdline).contains(DAEMON_FLAG) {
         return Archiver::Absent;
@@ -401,15 +425,11 @@ fn classify(pid: u32, stamp: Option<&str>, cmdline: &[u8]) -> Archiver {
     }
 }
 
-/// Stop an archiver and drop its pidfile, so a fresh one can be started without
-/// waiting for this one to notice the signal.
-///
-/// `pid` must have come from [`archiver`], which confirms against `/proc` that
-/// it really is an archiver before naming it.
+/// Signal an archiver and delete [`DAEMON_PID`]. `pid` comes from
+/// [`archiver`], which confirms it against `/proc`.
 pub fn stop_archiver(pid: u32) {
     // SAFETY: `kill` sends a signal to a pid and touches nothing in this
-    // process. SIGTERM, not SIGKILL — the archiver holds no lock, but a default
-    // termination is still the polite one.
+    // process. SIGTERM: the archiver holds no lock.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
@@ -418,26 +438,19 @@ pub fn stop_archiver(pid: u32) {
 
 /// Start an archiver and answer with its pid.
 ///
-/// Runs [`DAEMON_BIN`], not this binary, having first put a current copy of
-/// this one there. The copy is rewritten on every start rather than compared:
-/// a start only happens when no current archiver is running — after an install,
-/// a reboot, or an update — and reading it to decide would cost what writing it
-/// costs.
+/// Runs [`DAEMON_BIN`], with [`stage_binary`] putting a current copy there
+/// first. [`archiver`] gates the call to [`Archiver::Absent`] and
+/// [`Archiver::Outdated`], where the copy is unconditionally rewritten.
 pub fn start_archiver() -> std::io::Result<u32> {
     let bin = Path::new(DAEMON_BIN);
     stage_binary(&std::env::current_exe()?, bin)?;
     let mut cmd = std::process::Command::new(bin);
     cmd.arg(DAEMON_FLAG);
-    // Its own session, so it does not depend on the launcher's for its life.
-    // The archiver is meant to outlive the picker by weeks, and a process left
-    // in the launcher's session goes when the framework closes that session —
-    // which is every time the picker is exited from the tile.
+    // `setsid`, for a life independent of the launcher's session.
     //
     // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe calls are allowed. `setsid` is one, and it neither
-    // allocates nor touches this process. A failure is left alone: it means the
-    // child already leads a group, and a daemon in the wrong session still
-    // archives, while returning `Err` here would abort the spawn entirely.
+    // async-signal-safe calls are allowed. `setsid` is one, and an `Err` here
+    // aborts the spawn.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -447,11 +460,8 @@ pub fn start_archiver() -> std::io::Result<u32> {
     Ok(cmd.spawn()?.id())
 }
 
-/// Copy `src` over `dst`, through a scratch name beside it.
-///
-/// Never a write straight to `dst`: that is a file something may be executing,
-/// and one cut short would be a binary a later launch tries to run. The rename
-/// is within the one FAT mount, so it stays a rename.
+/// Copy `src` over `dst` through a `.new` scratch name beside it. `dst` is a
+/// file a process may be executing, and the rename stays within one FAT mount.
 fn stage_binary(src: &Path, dst: &Path) -> std::io::Result<()> {
     let bytes = std::fs::read(src)?;
     if let Some(dir) = dst.parent() {
@@ -477,19 +487,13 @@ pub fn claim_archiver() {
     );
 }
 
-/// Delete archive files the library has confirmed it holds, and report how many
-/// went.
+/// Delete [`ARCHIVE_DIR`] files stamped at or before `watermark`, and report
+/// how many went.
 ///
-/// `watermark` must be what the desktop said it stored, not what this device
-/// believes it sent — a line that formed no storable session does not advance
-/// it, and deleting past that point would throw away the only remaining copy.
-/// A file stamped at or before it holds nothing the library lacks, and the
-/// filename is exact about that, because [`archive`] names each file for its
-/// newest line.
-///
-/// The archive exists to survive a gap between syncs. Once the gap closes there
-/// is nothing to survive, and a Kindle is not where reading history should
-/// accumulate — so it goes, the same archive-then-purge the misc sync uses.
+/// `watermark` is what the desktop stored, not what this device sent: a line
+/// forming no storable session leaves it where it was, and this device holds
+/// the only remaining copy. [`archive`] names each file for its newest line,
+/// making the filename test exact.
 pub fn purge_archive(us_root: &Path, watermark: &str) -> usize {
     if watermark.is_empty() {
         return 0;
@@ -510,11 +514,9 @@ pub fn purge_archive(us_root: &Path, watermark: &str) -> usize {
     gone
 }
 
-/// The archive files worth opening: those whose newest line is past the
-/// watermark. A file stamped at or before it holds nothing the desktop lacks.
-///
-/// Exact rather than loose, unlike the syslog chunks: this name means "the
-/// newest line inside", because [`archive`] wrote it that way.
+/// The [`ARCHIVE_DIR`] files whose stamp is past `watermark`. [`archive`]
+/// stamps a name with the newest line inside, making the test exact where
+/// [`chunks`]'s is loose.
 fn archive_files(us_root: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(us_root.join(ARCHIVE_DIR)) else {
         return Vec::new();
@@ -522,8 +524,7 @@ fn archive_files(us_root: &Path, watermark: &str, out: &mut Collected) -> Vec<Pa
     let mut keep = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // A `.part` is a write that did not finish; ignore it entirely rather
-        // than read a fragment whose stamp promises more than it holds.
+        // A `.part` is an unfinished write, stamped for more than it holds.
         if name.ends_with(".part") {
             continue;
         }
@@ -548,20 +549,17 @@ fn archive_stamp(name: &str) -> Option<String> {
     (digits.len() == 12).then(|| format!("{}:{}", &digits[..6], &digits[6..]))
 }
 
-/// Add `lines` to the archive, folding them into the day's existing file.
-/// Returns the resulting file's name, or `None` when there was nothing to add.
+/// Add `lines` to [`ARCHIVE_DIR`], merged into the day's file, and answer with
+/// that file's name. `None` for lines carrying no stamp.
 ///
-/// **One file per day, not per run.** This runs every half hour, so a file per
-/// run would be ~17,500 files a year, each burning a whole FAT cluster to hold a
-/// few KB. Instead the day's file is read back, merged, and rewritten under a
-/// name carrying the new newest line — a day's events are ~40 KB gzipped, so the
-/// read-merge-write is cheaper than the directory it would otherwise create.
+/// One file per day against [`ARCHIVE_INTERVAL`]'s ~17,500 runs a year, each
+/// burning a FAT cluster. A day's events are ~40 KB gzipped, and the day's file
+/// is read back, merged and rewritten under a name carrying the new newest
+/// line.
 ///
-/// Never an append to the existing file: a torn append corrupts history that was
-/// already safe. The new file is written under `.part`, renamed into place, and
-/// only then is the old one removed — so a crash at any point leaves either the
-/// old file, or both (harmlessly overlapping, since the desktop de-duplicates
-/// and the next run merges them again).
+/// A `.part` write renamed into place, ahead of removing the old file: a torn
+/// append corrupts a whole file, and a crash here leaves the old file or both
+/// of them, overlapping into a selection the desktop de-duplicates.
 pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<String>> {
     let Some(newest) = lines.iter().filter_map(|l| line_stamp(l)).max() else {
         return Ok(None);
@@ -598,12 +596,8 @@ pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<Strin
     }
     let bytes = gz.finish()?;
 
-    // The scratch name carries the pid: cron fires every half hour and the first
-    // run on a fresh device reads a month of dumps, so two runs can overlap. A
-    // shared scratch path would have them interleave writes into one file. With
-    // distinct paths the worst case is that the later rename wins and the other
-    // run's newest lines are missed — which the next run collects again, since
-    // the watermark it reads back did not advance past them.
+    // The scratch name carries the pid: two overlapping runs interleave their
+    // writes into one shared path.
     let tmp = dir.join(format!("{name}.{}.part", std::process::id()));
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, dir.join(&name))?;
@@ -612,9 +606,8 @@ pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<Strin
     {
         let _ = std::fs::remove_file(old);
     }
-    // Written after the archive it describes, and only ever forwards: a mark
-    // ahead of what is on disk would skip lines the next pass is the last chance
-    // to collect, and two runs can overlap on a fresh device.
+    // Written after the file it describes, and forwards only: a mark ahead of
+    // the disk skips lines this pass is the last to see.
     let mark = us_root.join(ARCHIVE_DIR).join(ARCHIVE_MARK);
     if std::fs::read_to_string(&mark).unwrap_or_default().trim() < newest {
         let _ = std::fs::write(&mark, newest);
@@ -639,15 +632,12 @@ fn chunk_stamp(name: &str) -> Option<String> {
     (digits.len() == 14).then(|| format!("{}:{}", &digits[2..8], &digits[8..]))
 }
 
-/// The rotated syslog chunks worth opening, oldest first.
+/// The [`LOG_DIR`] chunks worth opening, oldest first.
 ///
-/// The stamp in a chunk's name is the rotation instant, and it is not documented
-/// which side of the content that is — the chunk closed then, or the next one
-/// opened then. So the filter is deliberately loose: everything stamped after the
-/// watermark, **plus the newest chunk stamped at or before it**, which is the one
-/// that can straddle. Correct under either reading, at the cost of one extra
-/// chunk. Line-level filtering in [`take_events`] is what actually guarantees
-/// nothing already held is sent, so a chunk read needlessly costs time only.
+/// A chunk's stamp is the rotation instant, on either side of its content, so
+/// the filter takes everything past `watermark` plus the newest chunk at or
+/// before it — the one that straddles. [`take_events`] filters by line, and an
+/// extra chunk costs a gunzip.
 fn chunks(dir: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -655,8 +645,7 @@ fn chunks(dir: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
     let mut dated: Vec<(String, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // An unparseable name is read rather than skipped, on the same principle
-        // as the dumps: spend the gunzip instead of silently dropping a period.
+        // An unparseable name is read, at the cost of a gunzip.
         match chunk_stamp(&name) {
             Some(stamp) => dated.push((stamp, entry.path())),
             None if name.starts_with(CHUNK_PREFIX) => dated.push((String::new(), entry.path())),
@@ -676,10 +665,9 @@ fn chunks(dir: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
     dated.split_off(first).into_iter().map(|(_, p)| p).collect()
 }
 
-/// The dumps worth opening. Two independent reasons to skip one, both decided
-/// from its name alone and neither needing the file to be touched: the desktop
-/// has already read it, or it was written before the newest event the desktop
-/// holds — a snapshot taken at time T contains nothing after T.
+/// The [`DUMP_DIR`] files worth opening. Two tests on the name alone: `seen`
+/// holds it, or [`dump_stamp`] is at or before `watermark` — a snapshot taken
+/// at T holds nothing after T.
 fn dumps(
     us_root: &Path,
     watermark: &str,
@@ -688,9 +676,7 @@ fn dumps(
 ) -> Vec<(String, PathBuf)> {
     let dir = us_root.join(DUMP_DIR);
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        // No logbackup directory (or no permission): the live log alone still
-        // carries everything since the last rotation, which in the steady state
-        // is all there is.
+        // An unreadable `DUMP_DIR` leaves `LIVE_LOG` and `LOG_DIR`.
         return Vec::new();
     };
     let mut keep = Vec::new();
@@ -700,9 +686,7 @@ fn dumps(
             out.skipped += 1;
             continue;
         }
-        // An unparseable name is read rather than skipped: better to spend the
-        // gunzip than to silently drop a day because the firmware renamed
-        // something.
+        // An unparseable name is read, at the cost of a gunzip.
         match dump_stamp(&name) {
             Some(stamp) if !watermark.is_empty() && stamp.as_str() <= watermark => out.skipped += 1,
             _ => keep.push((name, entry.path())),
@@ -720,9 +704,7 @@ fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) -> usize {
         if !MARKERS.iter().any(|m| line.contains(m)) {
             continue;
         }
-        // A line the desktop already holds is not worth a byte on the wire. A
-        // line with no timestamp is kept: it is cheaper to send than to reason
-        // about, and the desktop's parser ignores what it cannot place.
+        // A line with no [`line_stamp`] is kept; the desktop's parser drops it.
         match line_stamp(line) {
             Some(stamp) if !watermark.is_empty() && stamp <= watermark => continue,
             _ => out.push(line.to_string()),
@@ -731,26 +713,23 @@ fn take_events(text: &str, watermark: &str, out: &mut Vec<String>) -> usize {
     out.len() - before
 }
 
-/// A decoded dump, and whether it decoded all the way to the end.
+/// A decoded log file, and whether it decoded to the end.
 struct Decoded {
     text: String,
-    /// False when the archive was truncated, so `text` is a valid prefix rather
-    /// than the whole file. Such a dump must not be reported as read.
+    /// False on a truncated decode, leaving `text` a prefix. Such a file goes
+    /// to [`Collected::truncated`] and not to [`Collected::read`].
     complete: bool,
 }
 
-/// Decode a log file, gunzipping it when it is gzipped. A truncated dump yields
-/// its intact prefix — the firmware rotates while writing, and the newest dump
-/// is routinely cut short, but its prefix is perfectly good data.
+/// Decode a log file, gunzipping a gzipped one, and keep a truncated decode's
+/// intact prefix.
 ///
-/// The decode error is kept rather than discarded: on this side the likeliest
-/// truncation is a live one — `log_backup.sh` gzipping a dump at the very moment
-/// a sync reads it — and that file will be complete a minute later. Reporting it
-/// as read would make the desktop skip it forever on a name that never changes.
+/// `complete` travels with the text: `log_backup.sh` gzips a dump while a pass
+/// reads it, and that file decodes to the end a minute later under the same
+/// name.
 fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
-    // An empty file is a dump the firmware has created but not yet written, not
-    // a log with nothing in it — so it is not read, and not reported as read.
+    // An empty file is a created-and-unwritten dump.
     if bytes.is_empty() {
         return None;
     }
@@ -794,7 +773,7 @@ mod tests {
         let dir = tempdir();
         let backup = dir.join(DUMP_DIR);
         std::fs::create_dir_all(&backup).unwrap();
-        // Two dumps: one from before the desktop's watermark, one from after.
+        // Two dumps, one stamped before the watermark and one after.
         for name in [
             "log_backup_260701000000.txt.gz",
             "log_backup_260809000000.txt.gz",
@@ -820,8 +799,7 @@ mod tests {
         std::fs::create_dir_all(&backup).unwrap();
         std::fs::write(backup.join("log_backup_260701000000.txt.gz"), b"x").unwrap();
         let mut out = Collected::default();
-        // A Kindle the desktop has never seen has no watermark, and must not
-        // read that as "everything is already known".
+        // An empty watermark skips nothing.
         assert_eq!(dumps(&dir, "", &[], &mut out).len(), 1);
         assert_eq!(out.skipped, 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -837,8 +815,8 @@ mod tests {
         .join("\n");
         let mut lines = Vec::new();
         take_events(&text, "260808:120000", &mut lines);
-        // The line *at* the watermark is already held; the later one is new; the
-        // non-event line is not ours whatever its timestamp.
+        // The line at the watermark, the line past it, and a line carrying no
+        // MARKERS tag.
         assert_eq!(lines, vec![event("260809:120000")]);
     }
 
@@ -850,13 +828,93 @@ mod tests {
         assert!(lines.is_empty());
     }
 
-    /// A dump caught mid-write yields its prefix but is not reported as read, so
-    /// the next sync picks it up complete.
-    ///
-    /// This is the likeliest truncation on the device: `log_backup.sh` gzips a
-    /// snapshot at whatever moment the firmware decides, which can be during a
-    /// sync. Names never change, so reporting a half-decoded dump as read would
-    /// have the desktop skip it unopened for good.
+    /// Records copied unedited from a device log, one per [`READING_MARKERS`]
+    /// entry past `ReadingTimerController`.
+    const METRICS: &[&str] = &[
+        r#"260816:141126.136 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6562.272921]: Emitting a new record. SchemaName[ereader_open_book], Fields[{ 	"book_category" : "MAGZ", 	"book_format" : "mobi7", 	"is_downloaded" : 0, 	"is_opened_by_kpp_reader" : "Yes", 	"language" : "en", 	"load_method" : "catalog", 	"start_reading_position" : 184 } ]. :"#,
+        r#"260816:141151.131 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6587.267540]: Emitting a new record. SchemaName[ereader_close_book], Fields[{ 	"close_method" : "Navigation", 	"close_position" : 5070, 	"close_timestamp" : 1786882311101, 	"is_opened_by_kpp_reader" : "Yes" } ]. :"#,
+        r#"260816:181520 fastmetrics[4576]: D fastmetrics:KindleFastMetricsPublisher:[9788.019459]: Emitting a new record. SchemaName[ereader_book_consume_content], Fields[{ 	"context" : "Book:Reading:MainContent", 	"end_position" : 4133, 	"span_type" : "Text", 	"start_position" : 3227, 	"words_count" : 147 } ]. :"#,
+        r#"260816:141128.481 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6564.618216]: Emitting a new record. SchemaName[ereader_book_page_turn], Fields[{ 	"action_id" : "NextPageTurnWithGESTURE_TAP_SWIPES", 	"action_start_time" : 1786882288349, 	"book_category" : "MAGZ", 	"book_format" : "mobi7", 	"failure_key" : "NextPageTurn.SUCCESS", 	"is_opened_by_kpp_reader" : "Yes", 	"is_virtual_focus_location_used" : "No" } ]. :"#,
+        r#"260816:181520 fastmetrics[4576]: D fastmetrics:KindleFastMetricsPublisher:[9788.000965]: Emitting a new record. SchemaName[ereader_book_linear_page_actions], Fields[{ 	"action_id" : "NextPageWithSwipe", 	"context" : "Book:Reading:MainContent" } ]. :"#,
+        r#"260816:141139.179 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6575.315703]: Emitting a new record. SchemaName[ereader_content_point], Fields[{ 	"context" : "Book:Reading:MainContent", 	"point_type" : "ChapterStart", 	"position" : 184 } ]. :"#,
+        r#"260816:141341.957 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6778.093472]: Emitting a new record. SchemaName[ereader_reader_latency_ops], Fields[{ 	"action" : "OpenBookTotalTime", 	"book_category" : "MAGZ", 	"book_format" : "mobi7", 	"cde_key" : "B00QPFC59S", 	"is_kpp_open_book_cache_hit" : "No", 	"is_opened_by_kpp_reader" : "Yes", 	"latency" : 851 } ]. :"#,
+        r#"260816:141128.482 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6564.619104]: Emitting a new record. SchemaName[ereader_reader_page_turn_latency_ops], Fields[{ 	"action" : "PageTurnTotalTime", 	"book_category" : "MAGZ", 	"book_format" : "mobi7", 	"cde_key" : "B00QPFC59S", 	"is_opened_by_kpp_reader" : "Yes", 	"latency" : 132 } ]. :"#,
+    ];
+
+    /// A record `log_backup.sh` writes whose schema no marker names.
+    const UNWANTED: &str = r#"260816:141126.000 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6562.000000]: Emitting a new record. SchemaName[ereader_open_book_failure_backup], Fields[{ 	"book_category" : "MAGZ", 	"cde_key" : "B00QPFC59S" } ]. :"#;
+
+    /// Every reader-shell record is selected, and a schema outside the set is
+    /// left behind. `ereader_open_book_failure_backup` shares a prefix with
+    /// `ereader_open_book`.
+    #[test]
+    fn the_reader_shell_records_are_selected_and_their_lookalikes_are_not() {
+        let mut text = METRICS.join("\n");
+        text.push('\n');
+        text.push_str(UNWANTED);
+
+        let mut lines = Vec::new();
+        take_events(&text, "", &mut lines);
+        assert_eq!(lines.len(), METRICS.len());
+        assert!(lines.iter().all(|l| !l.contains("failure_backup")));
+    }
+
+    /// `METRICS` alone, with no `ReadingTimerController` line, is reading.
+    #[test]
+    fn a_batch_of_reader_shell_records_alone_is_reading() {
+        let lines: Vec<String> = METRICS.iter().map(|l| l.to_string()).collect();
+        assert!(has_reading(&lines));
+    }
+
+    /// `take_catalog` finds no path here, and `lines` is left as it was.
+    #[test]
+    fn a_catalog_row_is_stamped_at_the_batch_it_names() {
+        let mut lines = vec![event("260814:112035"), event("260814:113240")];
+        let missing = [PathBuf::from("/nonexistent/cc.db")];
+        assert_eq!(take_catalog(&missing, &mut lines), 0);
+        assert_eq!(lines.len(), 2, "a missing catalog adds nothing");
+    }
+
+    /// An empty `lines` has no stamp to give a catalog row, and takes none.
+    #[test]
+    fn a_quiet_batch_names_no_books() {
+        let mut lines: Vec<String> = Vec::new();
+        assert_eq!(
+            take_catalog(&[PathBuf::from("/nonexistent")], &mut lines),
+            0
+        );
+        assert!(lines.is_empty());
+    }
+
+    /// A `SidleCatalog` line passes `take_events` and fails `has_reading`.
+    #[test]
+    fn a_catalog_row_is_carried_but_is_not_a_sitting() {
+        let row = "260814:112035 sidle-native: I SidleCatalog:extent=416436,\
+                   cde_key=L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ,cde_type=PDOC;"
+            .to_string();
+        let mut taken = Vec::new();
+        take_events(&row, "", &mut taken);
+        assert_eq!(taken.len(), 1, "carried");
+        assert!(!has_reading(&taken), "and not a sitting");
+    }
+
+    /// Power lines alone are not reading: a Kindle sleeps and wakes dozens of
+    /// times a day.
+    #[test]
+    fn power_lines_alone_are_not_reading() {
+        let lines = vec![
+            "260814:111900 powerd[4213]: I lipc:evts:name=outOfScreenSaver, origin=com.lab126.powerd, fparam=2:Event sent".to_string(),
+            r#"260814:113500.549 fastmetrics[9842]: D fastmetrics:KindleFastMetricsPublisher:[26548.733985]: Emitting a new record. SchemaName[ereader_powerd_state_change], Fields[{ 	"curr_state" : "SCREEN SAVER", 	"prev_state" : "ACTIVE" } ]. :"#.to_string(),
+        ];
+        assert!(!has_reading(&lines));
+        let mut taken = Vec::new();
+        take_events(&lines.join("\n"), "", &mut taken);
+        assert_eq!(taken.len(), 2, "collected, and not counted as reading");
+    }
+
+    /// A dump caught mid-write lands in `truncated` with its prefix in `lines`,
+    /// and stays out of `read`. `log_backup.sh` gzips a snapshot under a name
+    /// that never changes.
     #[test]
     fn a_half_written_dump_is_taken_but_not_reported_as_read() {
         use std::io::Write;
@@ -887,14 +945,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The live syslog is not in the directory its own rotated chunks land in.
-    ///
-    /// `tinyrot` rotates `/var/log/messages` — a real directory on the tmpfs —
-    /// and gzips what it takes into `/var/local/log`, which is on flash under
-    /// the `/var/base-local` mount. Nothing named `messages` exists there, so
-    /// deriving the live path from [`LOG_DIR`] yields a file that is never
-    /// found, and the sync then sees only what has already been rotated: every
-    /// sitting arrives one rotation late, and the last one never arrives at all.
+    /// `LIVE_LOG` sits outside [`LOG_DIR`]. `tinyrot` rotates
+    /// `/var/log/messages`, on the tmpfs, into `/var/local/log`, on flash under
+    /// `/var/base-local`, and no `messages` exists there.
     #[test]
     fn the_live_log_is_not_looked_for_beside_its_own_chunks() {
         assert!(
@@ -903,9 +956,8 @@ mod tests {
         );
     }
 
-    /// A live log that is not there must be distinguishable from one with
-    /// nothing new in it. Both yield no lines; only one of them is a device
-    /// that was not read on.
+    /// `live_read` separates an absent `LIVE_LOG` from one with nothing past
+    /// the watermark. Both leave `live` at 0.
     #[test]
     fn an_unread_live_log_is_not_reported_as_a_quiet_one() {
         let dir = tempdir();
@@ -916,15 +968,14 @@ mod tests {
         assert!(!missing.from.live_read, "there was no file to read");
         assert_eq!(missing.from.live, 0);
 
-        // Present, and holding only events the desktop already has.
+        // Present, holding only lines at or before the watermark.
         std::fs::write(&live, format!("{}\n", event("260809:100000"))).unwrap();
         let mut quiet = Collected::default();
         take_live(&live, "260809:120000", &mut quiet);
         assert!(quiet.from.live_read, "the file was read");
         assert_eq!(quiet.from.live, 0, "and had nothing past the watermark");
 
-        // Present, and holding the minutes since the last sync — the case the
-        // whole source exists for.
+        // Present, holding a line past the watermark.
         let mut reading = Collected::default();
         take_live(&live, "260809:090000", &mut reading);
         assert!(reading.from.live_read);
@@ -943,13 +994,8 @@ mod tests {
         assert_eq!(chunk_stamp("messages_00000807_2026080710.gz"), None);
     }
 
-    /// The rotated chunks carry everything between the last dump and the last few
-    /// minutes, so the watermark filter must keep the chunk that straddles it.
-    ///
-    /// Whether a chunk's stamp marks the start or the end of its content is not
-    /// known, so dropping every chunk stamped at or before the watermark could
-    /// discard events the desktop has never seen. One extra chunk is the price of
-    /// not having to know.
+    /// [`chunks`] keeps the newest chunk stamped at or before the watermark,
+    /// the one whose content straddles it.
     #[test]
     fn chunk_selection_keeps_the_one_that_straddles_the_watermark() {
         let dir = tempdir();
@@ -981,15 +1027,15 @@ mod tests {
         );
         assert_eq!(out.skipped, 1, "only the 08:00 chunk is wholly behind");
 
-        // A Kindle the desktop has never seen reads every chunk it still has.
+        // An empty watermark keeps every chunk.
         let mut fresh = Collected::default();
         assert_eq!(chunks(&dir, "", &mut fresh).len(), 4);
         assert_eq!(fresh.skipped, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The archive is named for the newest line it holds, so the watermark is a
-    /// directory listing — no marker file to lose, nothing to decompress.
+    /// [`archive`] names a file for the newest line it holds, and
+    /// [`archive_watermark`] reads that name.
     #[test]
     fn the_archive_states_its_own_newest_event_in_its_name() {
         let dir = tempdir();
@@ -1000,15 +1046,14 @@ mod tests {
         assert_eq!(name, "rl_260809120000.txt.gz", "named for the newest line");
         assert_eq!(archive_watermark(&dir), "260809:120000");
 
-        // Nothing to add is not an error, and writes no file.
+        // An empty slice writes no file.
         assert_eq!(archive(&dir, &[]).unwrap(), None);
         assert_eq!(archive_watermark(&dir), "260809:120000");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Running every half hour must not leave a file per run: the day's events
-    /// are folded into one file, renamed forward as it grows, and the previous
-    /// name removed. Otherwise a year is ~17,500 FAT clusters.
+    /// Each [`ARCHIVE_INTERVAL`] run folds into the day's one file, renamed
+    /// forward as it grows, with the previous name removed.
     #[test]
     fn a_days_runs_fold_into_a_single_file() {
         let dir = tempdir();
@@ -1019,8 +1064,7 @@ mod tests {
 
         assert_eq!(archived(&dir), vec!["rl_260809110000.txt.gz".to_string()]);
 
-        // Every run's events survive the folding — this is history, and losing an
-        // earlier run's lines to a later one would be the whole point defeated.
+        // Both runs' lines survive the fold.
         let found = collect(&dir, "", &[]);
         assert_eq!(
             found.lines,
@@ -1031,7 +1075,7 @@ mod tests {
             ]
         );
 
-        // A new day starts its own file rather than growing yesterday's.
+        // A new `YYMMDD` starts its own file.
         archive(&dir, &[event("260810:090000")]).unwrap();
         assert_eq!(
             archived(&dir),
@@ -1043,28 +1087,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The archive is a *source*, not just a destination. After a long trip the
-    /// firmware's dumps and syslog chunks have both been pruned, so the archive
-    /// is the only remaining copy — a sync that did not read it would push a
-    /// history missing everything older than about a month.
+    /// [`collect`] reads [`ARCHIVE_DIR`], the only copy left once [`DUMP_DIR`]
+    /// and [`LOG_DIR`] have both been pruned.
     #[test]
     fn a_sync_after_a_long_gap_gets_its_history_from_the_archive() {
         let dir = tempdir();
         let old = vec![event("260701:090000"), event("260715:093000")];
         archive(&dir, &old).unwrap();
 
-        // A desktop that has seen nothing gets the archived history back, even
-        // though no dump or chunk still holds it.
+        // An empty watermark takes the archived lines, with no dump or chunk.
         let found = collect(&dir, "", &[]);
         assert_eq!(found.lines, old);
 
-        // A desktop already past it opens nothing: the filename alone settles it.
+        // A watermark past the stamp opens nothing, on the filename alone.
         let mut caught_up = collect(&dir, "260715:093000", &[]);
         assert!(caught_up.lines.is_empty());
         assert_eq!(caught_up.skipped, 1);
 
-        // And a half-written archive file is ignored outright rather than read
-        // as a whole one — its stamp promises a tail it does not have.
+        // A `.part` file is skipped: its stamp promises a tail it lacks.
         std::fs::write(
             dir.join(ARCHIVE_DIR).join("rl_260801000000.txt.gz.part"),
             b"junk",
@@ -1075,8 +1115,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The archive is insurance, so it goes once the library confirms it holds
-    /// the events — but only up to what the library actually stored.
+    /// [`purge_archive`] deletes up to what the library stored, and no further.
     #[test]
     fn a_confirmed_sync_clears_the_archive_it_covers() {
         let dir = tempdir();
@@ -1084,14 +1123,12 @@ mod tests {
         archive(&dir, &[event("260715:093000")]).unwrap();
         archive(&dir, &[event("260809:120000")]).unwrap();
 
-        // The library got as far as 260715. The later file is the only remaining
-        // copy of events it has not stored, so it must survive.
+        // A watermark of 260715 leaves the file stamped past it.
         assert_eq!(purge_archive(&dir, "260715:093000"), 2);
         assert_eq!(archive_watermark(&dir), "260809:120000");
         assert_eq!(collect(&dir, "", &[]).lines, vec![event("260809:120000")]);
 
-        // An empty watermark means the library confirmed nothing — a server that
-        // answered oddly, say. Deleting on that would be deleting on silence.
+        // An empty watermark confirms nothing and deletes nothing.
         assert_eq!(purge_archive(&dir, ""), 0);
         assert_eq!(archive_watermark(&dir), "260809:120000");
 
@@ -1100,20 +1137,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A purge must not send the archiver back to the beginning of time.
-    ///
-    /// The archive's own filenames were the only record of how far it had got,
-    /// and a successful sync deletes them all. The next pass then read every
-    /// dump on the device — ~90 MB of gzip — to rediscover a month of lines the
-    /// library already held, and wrote them back for the next sync to delete
-    /// again. The mark is what makes "nothing new" cost a directory listing.
+    /// [`ARCHIVE_MARK`] survives a [`purge_archive`] that deletes every
+    /// [`ARCHIVE_PREFIX`] file, holding [`archive_watermark`] where it was.
     #[test]
     fn a_purge_does_not_reset_how_far_the_archiver_has_read() {
         let dir = tempdir();
         archive(&dir, &[event("260809:100000"), event("260809:120000")]).unwrap();
         assert_eq!(archive_watermark(&dir), "260809:120000");
 
-        // The library confirms it holds everything, so the files go.
+        // A watermark past every stamp takes every file.
         assert_eq!(purge_archive(&dir, "260809:120000"), 1);
         assert!(
             collect(&dir, "", &[]).lines.is_empty(),
@@ -1125,8 +1157,7 @@ mod tests {
             "but the archiver still knows where it got to"
         );
 
-        // An archive written by a build that kept no mark is still read from its
-        // filenames, so the mark can only ever move the watermark forward.
+        // Filenames alone answer for an archive with no ARCHIVE_MARK.
         std::fs::remove_file(dir.join(ARCHIVE_DIR).join(ARCHIVE_MARK)).unwrap();
         archive(&dir, &[event("260810:090000")]).unwrap();
         std::fs::write(dir.join(ARCHIVE_DIR).join(ARCHIVE_MARK), "260701:000000").unwrap();
@@ -1134,29 +1165,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The daemon guard must fail *open* on anything it cannot verify.
-    ///
-    /// A pidfile outlives the process that wrote it — every reboot leaves one —
-    /// so treating its mere existence as "already running" would silently end
-    /// the archiving after the first restart, which is the one failure this
-    /// feature cannot afford.
+    /// [`classify`] answers [`Archiver::Absent`] for a cmdline carrying no
+    /// [`DAEMON_FLAG`]. A [`DAEMON_PID`] outlives the process that wrote it.
     #[test]
     fn a_pid_that_is_no_longer_an_archiver_never_blocks_one_from_starting() {
-        // The kernel reissued that pid to something else entirely.
+        // A pid the kernel reissued to another command.
         assert_eq!(
             classify(999, Some("0"), b"/usr/bin/something\0--else\0"),
             Archiver::Absent
         );
-        // Nothing is running under it at all, so there is no command line.
+        // An empty cmdline: no process under that pid.
         assert_eq!(classify(999, Some("0"), b""), Archiver::Absent);
     }
 
-    /// The archiver's executable may not be named anything `pidof sidle` could
-    /// match, by any rule such a check might use.
-    ///
-    /// The tile that opens the picker refuses to while that name is taken, and
-    /// the check reaches the executable behind a process rather than only the
-    /// name the process reports — so the file itself has to be unmistakable.
+    /// [`DAEMON_BIN`]'s name shares no text with `sidle`, which `pidof sidle`
+    /// matches against the executable behind a process.
     #[test]
     fn the_archivers_binary_is_named_nothing_like_the_pickers() {
         let name = Path::new(DAEMON_BIN)
@@ -1169,8 +1192,7 @@ mod tests {
         );
     }
 
-    /// Staging must leave either the old binary or the whole new one, and no
-    /// scratch file for a later launch to trip over.
+    /// [`stage_binary`] leaves the old file or the whole new one, and no `.new`.
     #[test]
     fn staging_the_archivers_binary_replaces_it_whole() {
         let dir = tempdir();
@@ -1181,7 +1203,7 @@ mod tests {
         stage_binary(&src, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"v1");
 
-        // The update case: a copy is already there and is replaced in full.
+        // A copy at `dst` is replaced in full.
         std::fs::write(&src, b"v2-and-longer").unwrap();
         stage_binary(&src, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"v2-and-longer");
@@ -1190,16 +1212,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An archiver that predates the running binary is replaced, not kept.
-    ///
-    /// A self-update leaves it executing code that has been swapped out from
-    /// under it, and the pidfile it holds is the one thing that would stop a
-    /// current one from starting — so believing it would freeze the archiver at
-    /// whatever version first happened to run.
+    /// A build stamp other than this one's gives [`Archiver::Outdated`], which
+    /// [`stop_archiver`] takes. Its [`DAEMON_PID`] is what reports one as up.
     #[test]
     fn an_archiver_from_another_build_is_replaced() {
         let cmdline = b"sidle-archive\0--archive-daemon\0";
-        // Written before the pidfile recorded a build at all.
+        // A pidfile carrying no build stamp.
         assert_eq!(classify(42, None, cmdline), Archiver::Outdated(42));
         assert_eq!(classify(42, Some("1"), cmdline), Archiver::Outdated(42));
 
@@ -1207,8 +1225,8 @@ mod tests {
         assert_eq!(classify(42, Some(&mine), cmdline), Archiver::Running);
     }
 
-    /// The archive files under `us_root`, sorted — the mark that sits beside
-    /// them is state, not archive, and is never one of them.
+    /// The [`ARCHIVE_PREFIX`] files under `us_root`, sorted. [`ARCHIVE_MARK`]
+    /// sits beside them and is none of them.
     fn archived(us_root: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(us_root.join(ARCHIVE_DIR))
             .into_iter()
@@ -1221,8 +1239,8 @@ mod tests {
         names
     }
 
-    /// A unique scratch dir. The picker's tests run on the host, and the crate
-    /// deliberately has no dev-dependency on a tempfile crate.
+    /// A unique scratch dir. These tests run on the host, and the crate carries
+    /// no tempfile dev-dependency.
     fn tempdir() -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(

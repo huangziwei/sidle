@@ -60,22 +60,29 @@
     return `${m}m`;
   }
 
-  // A "~" on a figure the Kindle did not count itself.
+  // A "~" on a figure the Kindle's own reading timer did not produce.
   //
-  // Its reading timer runs on words and reading speed, so a book it can count
-  // no words in — manga, a fixed-layout magazine — is never timed: the device's
-  // own book info reads zero however long it was read. What Sidle shows instead
-  // is how long the device was awake with the book open, which answers a
-  // slightly different question and is marked as such. Mixed entries take the
-  // mark too: part of the figure is still inferred.
+  // That timer runs on words and reading speed, so a book it can count no words
+  // in — manga, a fixed-layout magazine — is never timed: the device's own book
+  // info reads zero however long it was read. Two things stand in, and they are
+  // not equally good. `dwell_seconds` is the reader's page records, timed page
+  // by page — a measurement. `awake_seconds` is how long the device was awake
+  // with the book open — a bound. The mark names whichever carries more of the
+  // figure, and an entry with any of either takes it.
   function estimateMark(e) {
-    if (!e.estimated_seconds) return "";
-    const all = e.estimated_seconds >= e.seconds;
+    const dwell = e.dwell_seconds || 0;
+    const awake = e.awake_seconds || 0;
+    if (!dwell && !awake) return "";
+    const part = dwell + awake;
+    const all = part >= e.seconds;
+    const how =
+      awake > dwell
+        ? "measured as time awake with the book open"
+        : "timed page by page from the reader's own page records";
     const title = all
-      ? "Estimated — this book has no word count, so the Kindle never timed it. " +
-        "Measured as time awake with the book open."
-      : `Estimated in part — ${fmtDuration(e.estimated_seconds)} of this was not ` +
-        "counted by the Kindle but measured as time awake with the book open.";
+      ? `Not counted by the Kindle — this book has no word count, so its reading ` +
+        `timer never ran. Instead ${how}.`
+      : `${fmtDuration(part)} of this was not counted by the Kindle — ${how}.`;
     return `<span class="rl-estimate" title="${esc(title)}">~</span>`;
   }
 

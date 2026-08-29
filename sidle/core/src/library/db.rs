@@ -205,7 +205,17 @@ pub struct BookRow {
 /// machine. Rows hold a location and nothing else; name, version and file list
 /// are read off disk on every query, because the source is a working copy that
 /// a build changes without telling anyone.
-pub const SCHEMA_VERSION: i64 = 23;
+/// v24: added `reading_log_asins` — the catalog key the reader shell states for
+/// a logged book, on the firmware that states one. The reading-timer lines
+/// redact the book on every line, and a key names it outright, which settles a
+/// fingerprint the position axis cannot: a library holding a different build of
+/// a title ends it at a different position and the axis join correctly refuses.
+/// v24: `reading_sessions.estimated` → `measure`, naming which of three regimes
+/// produced `seconds`. A third arrived between the two the boolean could tell
+/// apart: the page dwell the reader shell's own records support, which measures
+/// a book the reading timer refuses rather than bounding it. An `estimated` row
+/// becomes `awake` and every other becomes `counted`.
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// A borrowable handle to the library database.
 ///
@@ -819,7 +829,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             end_counter_ms   INTEGER,
             start_words      INTEGER,
             end_words        INTEGER,
-            estimated        INTEGER NOT NULL DEFAULT 0
+            measure          TEXT NOT NULL DEFAULT 'counted',
+            tz_offset_s      INTEGER
         )"#,
         [],
     )?;
@@ -849,18 +860,36 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             )?;
         }
     }
-    // v22: whether the row's `seconds` was counted by the device or inferred
-    // from how long it was awake with the book open. The Kindle's reading timer
-    // is words-and-WPM driven, so a book it can count no words in — manga,
-    // magazines, fixed layout — is never timed at all, and the only alternative
-    // is a bounded estimate. The two must not be added together silently, so
-    // the row says which it is. Existing rows are counted: nothing before this
-    // could produce an estimate.
-    if !has_column(conn, "reading_sessions", "estimated")? {
+    // v24: which of three regimes produced `seconds` — `counted` from the
+    // device's own `TotalTime`, `dwell` from the reader shell's page records,
+    // `awake` from the power records. The Kindle's reading timer is
+    // words-and-WPM driven, so a book it can count no words in — manga,
+    // magazines, fixed layout — is never timed at all, and the two below
+    // `counted` answer for exactly that content. They must not be summed
+    // silently, so the row says which it is.
+    if !has_column(conn, "reading_sessions", "measure")? {
         conn.execute(
-            "ALTER TABLE reading_sessions ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE reading_sessions ADD COLUMN measure TEXT NOT NULL DEFAULT 'counted'",
             [],
         )?;
+    }
+    // v24: seconds the reader's clock stood ahead of UTC, where a reader-shell
+    // record stated an instant the syslog prefix also stated. Null on every row
+    // from a firmware writing no such record, and on every row stored before.
+    if !has_column(conn, "reading_sessions", "tz_offset_s")? {
+        conn.execute(
+            "ALTER TABLE reading_sessions ADD COLUMN tz_offset_s INTEGER",
+            [],
+        )?;
+    }
+    // The v22 boolean this replaces. An estimate was the awake bound; every
+    // other row was the counter, which is the column's default.
+    if has_column(conn, "reading_sessions", "estimated")? {
+        conn.execute(
+            "UPDATE reading_sessions SET measure = 'awake' WHERE estimated = 1",
+            [],
+        )?;
+        conn.execute("ALTER TABLE reading_sessions DROP COLUMN estimated", [])?;
     }
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
@@ -941,6 +970,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         r#"CREATE TABLE IF NOT EXISTS reading_log_book_ends (
             last_word_position INTEGER PRIMARY KEY,
             from_book          INTEGER NOT NULL
+        )"#,
+        [],
+    )?;
+
+    // The catalog key a log fingerprint was named by, where the reader shell
+    // stated one.
+    //
+    // Evidence, like `reading_log_points` below, and for the same reason: a
+    // device sends only what is newer than the newest session stored, so the
+    // line carrying the key is never offered twice. Kept per fingerprint
+    // because that is the unit of attribution — every session at one
+    // fingerprint is the same book.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_log_asins (
+            end_position INTEGER NOT NULL,
+            asin         TEXT NOT NULL,
+            PRIMARY KEY (end_position, asin)
         )"#,
         [],
     )?;
@@ -1735,15 +1781,15 @@ pub struct ReadingSession {
     pub end_counter_ms: Option<i64>,
     pub start_words: Option<i64>,
     pub end_words: Option<i64>,
-    /// True when `seconds` is how long the device was awake with the book open
-    /// rather than what its own reading timer counted.
-    ///
-    /// The timer is words-and-WPM driven, so content it can count no words in
-    /// earns no time from it — a fixed-layout magazine reads as zero on the
-    /// Kindle's own book info too. An estimate is then the only figure there
-    /// is, and it answers a different question from a counted one, so the two
-    /// are kept apart rather than summed as if they were the same measurement.
-    pub estimated: bool,
+    /// Which regime produced `seconds`. The timer is words-and-WPM driven, so
+    /// content it can count no words in earns no time from it — a fixed-layout
+    /// magazine reads as zero on the Kindle's own book info too — and the two
+    /// regimes below `counted` answer for that content. They are kept apart
+    /// rather than summed as one measurement.
+    pub measure: super::reading_log::Measure,
+    /// Seconds the reader's own clock stood ahead of UTC. `started_at` and
+    /// `ended_at` stay local wall clock; this is what places them.
+    pub tz_offset_s: Option<i64>,
 }
 
 /// What storing one session did to the table.
@@ -1788,8 +1834,9 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
         r#"INSERT OR IGNORE INTO reading_sessions
             (device_serial, started_at, ended_at, day, end_position, book_id,
              seconds, page_turns, words,
-             start_counter_ms, end_counter_ms, start_words, end_words, estimated)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+             start_counter_ms, end_counter_ms, start_words, end_words, measure,
+             tz_offset_s)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"#,
         params![
             s.device_serial,
             s.started_at,
@@ -1804,26 +1851,29 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_counter_ms,
             s.start_words,
             s.end_words,
-            s.estimated,
+            s.measure.as_str(),
+            s.tz_offset_s,
         ],
     )?;
     if n > 0 {
         return Ok(Stored::Added);
     }
-    // A counted measurement replaces an estimate whatever the two say, because
-    // it answers the question the estimate was standing in for: the device
-    // finally credited the sitting. The reverse never happens — an estimate
-    // must not overwrite a figure the device itself counted, however much
-    // longer the reader was awake with the book open.
+    // A better-ranked measure replaces a worse one whatever the two say: it
+    // answers the question the worse one was standing in for. The reverse never
+    // happens — an awake bound must not overwrite a figure the device itself
+    // counted, however much longer the reader was awake with the book open. At
+    // equal rank the longer, later reading wins.
     let extended = conn.execute(
         r#"UPDATE reading_sessions
               SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
                   start_counter_ms = ?8, end_counter_ms = ?9,
-                  start_words = ?10, end_words = ?11, estimated = ?12
+                  start_words = ?10, end_words = ?11, measure = ?12,
+                  tz_offset_s = COALESCE(?14, tz_offset_s)
             WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3
               AND (
-                    (estimated = 1 AND ?12 = 0)
-                 OR (estimated = ?12
+                    (CASE measure WHEN 'counted' THEN 0 WHEN 'dwell' THEN 1
+                                  ELSE 2 END) > ?13
+                 OR (measure = ?12
                      AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4))
               )"#,
         params![
@@ -1838,7 +1888,9 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_counter_ms,
             s.start_words,
             s.end_words,
-            s.estimated,
+            s.measure.as_str(),
+            s.measure.rank(),
+            s.tz_offset_s,
         ],
     )?;
     Ok(if extended > 0 {
@@ -1926,7 +1978,8 @@ pub fn newest_reading_session(
     conn.query_row(
         r#"SELECT device_serial, started_at, ended_at, day, end_position, book_id,
                   seconds, page_turns, words,
-                  start_counter_ms, end_counter_ms, start_words, end_words, estimated
+                  start_counter_ms, end_counter_ms, start_words, end_words, measure,
+                  tz_offset_s
              FROM reading_sessions
             WHERE device_serial = ?1
             ORDER BY started_at DESC LIMIT 1"#,
@@ -1946,7 +1999,8 @@ pub fn newest_reading_session(
                 end_counter_ms: r.get(10)?,
                 start_words: r.get(11)?,
                 end_words: r.get(12)?,
-                estimated: r.get(13)?,
+                measure: super::reading_log::Measure::from_stored(&r.get::<_, String>(13)?),
+                tz_offset_s: r.get(14)?,
             })
         },
     )
@@ -2256,6 +2310,42 @@ pub fn record_book_ends(conn: &Connection, pairs: &[(i64, i64)]) -> rusqlite::Re
         )?;
     }
     Ok(())
+}
+
+/// Record that a fingerprint was named by a catalog key.
+///
+/// Every key seen, not one: a fingerprint naming two keys is a question a later
+/// pass answers by which of them the library holds, and dropping the second
+/// would freeze the wrong answer.
+pub fn record_log_asin(conn: &Connection, end_position: i64, asin: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO reading_log_asins (end_position, asin) VALUES (?1, ?2)",
+        params![end_position, asin],
+    )?;
+    Ok(())
+}
+
+/// The book a fingerprint's catalog keys name, where exactly one of them is a
+/// book the library holds.
+///
+/// A key joins `books.asin` — the content id Sidle bakes into a sideload, which
+/// the device's own catalog then carries — or `books.amazon_asin` for a store
+/// book. Several books answering to one key is a tie left for a person, on the
+/// same rule the position axis follows.
+fn book_named_by_log_asin(conn: &Connection, end_position: i64) -> rusqlite::Result<Option<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT b.id
+           FROM reading_log_asins a
+           JOIN books b ON b.asin = a.asin OR b.amazon_asin = a.asin
+          WHERE a.end_position = ?1",
+    )?;
+    let ids: Vec<i64> = stmt
+        .query_map(params![end_position], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(match ids[..] {
+        [only] => Some(only),
+        _ => None,
+    })
 }
 
 /// Every pairing learned so far.
@@ -2649,7 +2739,8 @@ pub fn reading_books(
                   SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at),
                   GROUP_CONCAT(DISTINCT s.device_serial), {bucket},
-                  SUM(CASE WHEN s.estimated THEN s.seconds ELSE 0 END)
+                  SUM(CASE WHEN s.measure = 'dwell' THEN s.seconds ELSE 0 END),
+                  SUM(CASE WHEN s.measure = 'awake' THEN s.seconds ELSE 0 END)
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY {bucket}, s.book_id
@@ -2689,15 +2780,18 @@ pub struct ReadingEntry {
     pub cover_thumb_path: Option<String>,
     pub cover_rev: i64,
     pub seconds: i64,
-    /// How much of [`Self::seconds`] the device did not count but was inferred
-    /// from its awake time — see [`ReadingSession::estimated`].
+    /// How much of [`Self::seconds`] came from the page dwell rather than the
+    /// device's own counter — see [`super::reading_log::Measure::Dwell`]. A
+    /// measurement of the same kind, over content the counter refuses.
+    pub dwell_seconds: i64,
+    /// How much of [`Self::seconds`] is the awake bound — see
+    /// [`super::reading_log::Measure::Awake`]. A bound, not a measurement.
     ///
-    /// Reported beside the total rather than folded into it or split out of it.
-    /// A reader wants one figure for how long they spent in a book, and a book
-    /// the Kindle cannot time would otherwise read as never opened; but the two
-    /// halves answer different questions, so which part is which stays visible.
-    /// Zero for everything the device counted, which is most reading.
-    pub estimated_seconds: i64,
+    /// Both are reported beside the total rather than folded into it or split
+    /// out of it. A reader wants one figure for how long they spent in a book,
+    /// and a book the Kindle cannot time would otherwise read as never opened;
+    /// the parts answer different questions, so which is which stays visible.
+    pub awake_seconds: i64,
     /// See [`ReadingSession::page_turns`] — device page events, not pagination.
     pub page_turns: i64,
     pub words: i64,
@@ -2724,7 +2818,8 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
         cover_thumb_path,
         cover_rev,
         seconds: r.get(5)?,
-        estimated_seconds: r.get(13)?,
+        dwell_seconds: r.get(13)?,
+        awake_seconds: r.get(14)?,
         page_turns: r.get(6)?,
         words: r.get(7)?,
         sessions: r.get(8)?,
@@ -2791,14 +2886,18 @@ pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
 
     let mut resolved = 0;
     for position in pending {
-        let candidates = books_with_last_position(conn, position)?;
-        let book_id = match candidates[..] {
-            [only] => Some(only),
-            // The axis decided nothing — either no book ends there, or several
-            // do. Ask where the reader was instead: that is a different
-            // question, and it answers some the axis cannot, including a book
-            // the library holds in a different build than the device read.
-            _ => sole_book_at(points.get(&position).map_or(&[], Vec::as_slice), &anchors),
+        // The catalog key first. It is a name, where the two below are
+        // inferences from geometry, and it holds when the library's build of a
+        // title ends at a different position than the device's.
+        let book_id = match book_named_by_log_asin(conn, position)? {
+            Some(named) => Some(named),
+            None => match books_with_last_position(conn, position)?[..] {
+                [only] => Some(only),
+                // The axis decided nothing — either no book ends there, or
+                // several do. Ask where the reader was instead: that is a
+                // different question, and it answers some the axis cannot.
+                _ => sole_book_at(points.get(&position).map_or(&[], Vec::as_slice), &anchors),
+            },
         };
         if let Some(book_id) = book_id {
             resolved += conn.execute(
@@ -7028,7 +7127,8 @@ mod tests {
             end_counter_ms: Some(seconds * 1000),
             start_words: Some(0),
             end_words: Some(9000),
-            estimated: false,
+            measure: Default::default(),
+            tz_offset_s: None,
         }
     }
 

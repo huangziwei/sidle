@@ -70,7 +70,7 @@ fn the_reader_books_shape_is_pinned() {
     assert_eq!(book.sections.len(), 9, "section count");
     assert_eq!(
         digest(&lines.join("\n")),
-        0xb77c_ffc6_bed2_b123,
+        0x22cd_ce7f_ef9c_de62,
         "the reader book's shape moved"
     );
 }

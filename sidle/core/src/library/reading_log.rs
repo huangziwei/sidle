@@ -29,13 +29,13 @@
 //!
 //! Times are device-local wall clock, taken from the syslog line prefix, which
 //! is the only clock a `ReadingTimerController` line carries — its payload holds
-//! counters and no absolute stamp. Other lines in the same log embed *UTC*
-//! stamps, and the two differ by exactly the device's offset (measured +02:00 to
-//! the second on two devices, 2026-08-11): local is the one this wants, since
-//! reading at 23:00 means 23:00 where the reader was, not 21:00 in Greenwich.
-//! The offset itself is recorded nowhere, so a device carried across timezones
-//! stamps each day in whatever local time it was on and nothing afterwards can
-//! reconcile them.
+//! counters and no absolute stamp. Local is the one this wants: reading at 23:00
+//! means 23:00 where the reader was, not 21:00 in Greenwich.
+//!
+//! The zone that clock is in comes from the `fastmetrics` records, whose
+//! `close_timestamp` and `action_start_time` are epoch milliseconds under the
+//! same local prefix — see [`utc_offset`]. A session records it, so a device
+//! carried across zones states which one each sitting was stamped in.
 //!
 //! So the day a session counts to, and the midnight a run is cut at, are the
 //! reader's own — never the host's, and never UTC, which west of Greenwich would
@@ -51,16 +51,51 @@ use rusqlite::Connection;
 use super::db::{self, ReadingSession};
 use super::job;
 
-/// The tag every event line carries; the cheap prefilter before any parsing.
+/// The tag every reading-timer line carries; the cheap prefilter before any
+/// parsing.
 const MARKER: &str = "ReadingTimerController";
 
-/// The tag on the device's own power-state records, the second family of line
-/// this reads.
+/// The `fastmetrics` records the reader shell emits beside [`MARKER`].
+///
+/// [`MARKER`] counts words and a WPM, and times only a book it can count words
+/// in. These come from the reader shell:
+/// `ereader_book_consume_content` spans a page with its `words_count`,
+/// `ereader_book_page_turn` and `ereader_book_linear_page_actions` name a turn,
+/// `ereader_open_book` and `ereader_close_book` bracket a book with its
+/// `book_category`, and `ereader_reader_latency_ops` and
+/// `ereader_reader_page_turn_latency_ops` carry a `cde_key`.
+///
+/// Bracketed: `ereader_open_book` is a prefix of
+/// `ereader_open_book_failure_backup`.
+pub const METRIC_MARKERS: [&str; 8] = [
+    "SchemaName[ereader_open_book]",
+    "SchemaName[ereader_close_book]",
+    "SchemaName[ereader_book_consume_content]",
+    "SchemaName[ereader_book_page_turn]",
+    "SchemaName[ereader_book_linear_page_actions]",
+    "SchemaName[ereader_content_point]",
+    "SchemaName[ereader_reader_latency_ops]",
+    "SchemaName[ereader_reader_page_turn_latency_ops]",
+];
+
+/// The tags on the lines that say whether the device was awake, the second
+/// family this reads.
 ///
 /// They carry no reading and name no book. What they carry is whether the
 /// device was awake, which is the only bound available on a sitting the reading
 /// timer refused to count — see [`Awake`].
-pub const POWER_MARKER: &str = "ereader_powerd_state_change";
+///
+/// Two shapes, because one is not written everywhere. The metrics record is the
+/// `powerd` state machine transcribed whole, and a Kindle old enough not to emit
+/// it still fires the same transitions on LIPC — where `outOfScreenSaver` and
+/// `goingToScreenSaver` bracket exactly the `ACTIVE` state the record names.
+/// `suspending` closes a span the screensaver never got to.
+pub const POWER_MARKERS: [&str; 4] = [
+    "ereader_powerd_state_change",
+    "lipc:evts:name=outOfScreenSaver, origin=com.lab126.powerd",
+    "lipc:evts:name=goingToScreenSaver, origin=com.lab126.powerd",
+    "lipc:evts:name=suspending, origin=com.lab126.powerd",
+];
 
 /// A page event long enough to be idle rather than reading is still counted —
 /// the device's own counter is the authority — but a session is cut when two
@@ -151,9 +186,76 @@ pub struct Session {
     /// The same two readings of the device's own word counter.
     pub start_words: Option<i64>,
     pub end_words: Option<i64>,
-    /// True when [`Self::seconds`] came from [`Awake`] rather than from the
-    /// device's counter, because this book is one the device never times.
-    pub estimated: bool,
+    /// Where [`Self::seconds`] came from.
+    pub measure: Measure,
+    /// The book's catalog key, where a reader-shell record named it during the
+    /// run. See [`cde_key`]. `None` on every firmware that writes no such
+    /// record, which leaves `end_position` the only identity.
+    pub asin: Option<String>,
+    /// Seconds the reader's own clock stood ahead of UTC. See [`utc_offset`].
+    ///
+    /// `started_at` and `ended_at` are local wall clock and stay that way: a
+    /// reader who read at 23:00 read at 23:00 where they were. This is what
+    /// places that instant, for a reader who crossed a zone between sittings.
+    pub tz_offset_s: Option<i64>,
+}
+
+/// How a session's seconds were arrived at, ranked best first.
+///
+/// Three regimes, and a reader is told which. A book `ReadingTimerController`
+/// declines to time yields no counter at all, and the two below it answer for
+/// exactly that content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Measure {
+    /// The span of the device's own `TotalTime` counter. Its accounting,
+    /// excluding the pauses an awake reader takes.
+    #[default]
+    Counted,
+    /// The dwell of each `ereader_book_consume_content` page, through
+    /// [`dwell_ms`]. Measured against `TotalTime` on a device writing both, the
+    /// spacing of those records reproduces `IntervalTime` to the second.
+    Dwell,
+    /// [`Awake`]'s bound on a run with neither of the above — how long the
+    /// device was `ACTIVE` with the book open.
+    Awake,
+}
+
+impl Measure {
+    /// The word a stored row carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Counted => "counted",
+            Self::Dwell => "dwell",
+            Self::Awake => "awake",
+        }
+    }
+
+    /// Read a stored row's word. An unknown one reads as [`Self::Counted`],
+    /// the value every row written before the column existed carries.
+    pub fn from_stored(s: &str) -> Self {
+        match s {
+            "dwell" => Self::Dwell,
+            "awake" => Self::Awake,
+            _ => Self::Counted,
+        }
+    }
+
+    /// Whether the seconds are a measurement of reading rather than a bound on
+    /// it.
+    pub fn is_measured(self) -> bool {
+        matches!(self, Self::Counted | Self::Dwell)
+    }
+
+    /// Where this sits in the order the variants are declared in, 0 best. A
+    /// stored row is replaced by any measure ranking below its own.
+    pub fn rank(self) -> i64 {
+        match self {
+            Self::Counted => 0,
+            Self::Dwell => 1,
+            Self::Awake => 2,
+        }
+    }
 }
 
 /// A sitting a device left open, handed back to the parser so the next batch of
@@ -190,13 +292,12 @@ pub struct Resume {
     /// The hours already booked against the run, so a continued session rebuilds
     /// the whole distribution rather than an incremental slice of one.
     pub hours: Vec<(u8, i64)>,
-    /// What the run has been credited so far, and how it was arrived at. An
-    /// estimated run has no counter to carry forward, so this is the only thing
-    /// that says how far it had got — the next batch adds the awake time since
-    /// [`Self::ended_at`] to it rather than remeasuring a window whose power
-    /// records have already been consumed.
+    /// What the run has been credited so far, and how. A run with no counter
+    /// carries its length here alone, and the next batch adds to it — the power
+    /// records and page records covering the earlier stretch went with the
+    /// batch that measured them.
     pub seconds: i64,
-    pub estimated: bool,
+    pub measure: Measure,
 }
 
 impl Resume {
@@ -211,12 +312,11 @@ impl Resume {
         let Some(row) = db::newest_reading_session(conn, device_serial)? else {
             return Ok(None);
         };
-        // A counted row stored before sessions carried their counters cannot be
-        // continued — its length is known but not where on the counter it sits,
-        // so a later event states no measurable advance from it. An estimated
-        // row never had counters and is continued from its own total instead.
+        // A [`Measure::Counted`] row with no counters states its length and not
+        // where on the counter it sits. The other two regimes carry none and
+        // continue from `seconds`.
         let counters = row.start_counter_ms.zip(row.end_counter_ms);
-        if counters.is_none() && !row.estimated {
+        if counters.is_none() && row.measure == Measure::Counted {
             return Ok(None);
         }
         let hours = db::session_hours(conn, &row)?;
@@ -231,7 +331,7 @@ impl Resume {
             page_turns: row.page_turns,
             hours,
             seconds: row.seconds,
-            estimated: row.estimated,
+            measure: row.measure,
         }))
     }
 }
@@ -347,11 +447,9 @@ pub fn collect_events(
         }
         if let Some(file) = read_maybe_gzip(&file) {
             out.files += 1;
-            // Only a file decoded to its end is recorded as read. A truncated
-            // one still contributes its prefix, but claiming it was read would
-            // make the skip permanent: the names are immutable, so a complete
-            // copy pulled later carries the same name and would be skipped
-            // unopened, losing the tail for good.
+            // `read` takes a file decoded to its end. A truncated one gives up
+            // its prefix under a name a complete copy also carries, and
+            // `mark_dump_read` on it makes the skip permanent.
             if file.complete {
                 out.read.push(name);
             } else {
@@ -365,11 +463,12 @@ pub fn collect_events(
                     .find(|s| file.text.contains(s.as_str()))
                     .cloned();
             }
-            for line in file
-                .text
-                .lines()
-                .filter(|l| l.contains(MARKER) || l.contains(POWER_MARKER))
-            {
+            for line in file.text.lines().filter(|l| {
+                l.contains(MARKER)
+                    || l.contains(CATALOG_MARKER)
+                    || METRIC_MARKERS.iter().any(|m| l.contains(m))
+                    || POWER_MARKERS.iter().any(|m| l.contains(m))
+            }) {
                 out.events.insert(line.to_string());
             }
         }
@@ -402,20 +501,17 @@ struct Decoded {
 /// decoded, including the valid prefix of a truncated archive.
 fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
-    // An empty file is a backup that produced nothing, not a log with nothing in
-    // it. Two of a real archive's 31 files were 0 bytes, both on dates where the
-    // device's own backup script started and never finished. Reading it as valid
-    // empty text would count it as a file and record its name as read.
+    // An empty file is a backup that produced nothing. Two of a real archive's
+    // 31 were 0 bytes, on dates where `log_backup.sh` started and never
+    // finished.
     if bytes.is_empty() {
         return None;
     }
     if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut out = Vec::new();
-        // A truncated member yields Err *after* writing what it decoded, so the
-        // buffer is kept either way; only a header-level failure yields nothing.
-        // The error is not discarded: it is the sole evidence that what came out
-        // is a prefix, and reading a prefix must not count as having read the
-        // file.
+        // A truncated member yields Err *after* writing what it decoded; a
+        // header-level failure yields nothing. `complete` carries the
+        // difference to [`Collected::read`].
         let complete = flate2::read::GzDecoder::new(&bytes[..])
             .read_to_end(&mut out)
             .is_ok();
@@ -640,12 +736,9 @@ fn observation(line: &str) -> Option<Observation> {
                 .then(|| payloads(line).find(|p| end_position(p).is_some()))
                 .flatten()
         })
-        // A payload that places the reader inside a book — its own end position
-        // and where they stood in it — with no counter and no name to it. On a
-        // book the device times this states nothing the counter has not already
-        // said, and contributes no counter of its own, so it moves no total.
-        // On a book the device refuses to time it is the entire record that the
-        // sitting happened, and without it such a book forms no run at all.
+        // A payload carrying `CurrentPos` and an end position, with no
+        // `TotalTime` and no name. On a book the device refuses to time it is
+        // the whole record of the sitting.
         .or_else(|| {
             payloads(line)
                 .find(|p| end_position(p).is_some() && p.contains("CurrentPos:YJPosition: "))
@@ -788,6 +881,13 @@ fn moment(iso: &str) -> Option<Moment> {
 /// contributes nothing; one abandoned awake overcounts by the idle timeout and
 /// no more.
 ///
+/// That state machine reaches the log two ways — as a metrics record naming both
+/// states, and as the LIPC events `powerd` fires at the same instants — and a
+/// Kindle writes one, the other, or both. Reading only the record loses the
+/// bound entirely on firmware that does not emit it, which is not a quieter
+/// answer but a missing one: every sitting the timer refused there is dropped
+/// for measuring zero. See [`power_change`].
+///
 /// Checked against 154 sittings whose counter *is* known, the bound reads 1.13×
 /// the counted time at the median (p10 1.03), against 1.18× for unbounded wall
 /// clock. Deliberately without a per-interval cap: a 120 s cap scores better on
@@ -800,30 +900,41 @@ pub struct Awake {
 }
 
 impl Awake {
-    /// Read the power records out of an event stream.
+    /// Read the power lines out of an event stream.
     ///
-    /// A span opens at the record that enters `ACTIVE` and closes at the next
-    /// one that leaves it. One still open at the end of the batch is dropped
-    /// rather than run to infinity: the device is awake *now*, the sitting it
-    /// would bound is still in progress, and a later batch carries its own
-    /// close.
+    /// A span opens where the device enters `ACTIVE` and closes at the next line
+    /// that leaves it. One still open at the end of the batch is dropped rather
+    /// than run to infinity: the device is awake *now*, the sitting it would
+    /// bound is still in progress, and a later batch carries its own close.
+    ///
+    /// One family of line at a time, the record preferred. A Kindle that writes
+    /// both writes them at the same second, and folding the two together lets a
+    /// leave arriving after its own enter within that second close a span before
+    /// it began — costing not the second but everything up to the next enter.
     pub fn from_events<'a>(events: impl IntoIterator<Item = &'a str>) -> Self {
+        let changes: Vec<(Power, i64, Woke)> = events
+            .into_iter()
+            .filter_map(|line| {
+                let (family, woke) = power_change(line)?;
+                Some((family, stamp(line)?.abs, woke))
+            })
+            .collect();
+        let family = if changes.iter().any(|(f, ..)| *f == Power::Record) {
+            Power::Record
+        } else {
+            Power::Event
+        };
+
         let mut spans = Vec::new();
         let mut open: Option<i64> = None;
-        for line in events {
-            if !line.contains(POWER_MARKER) {
-                continue;
-            }
-            let Some(now) = stamp(line) else { continue };
-            let entering = field_text(line, "curr_state").is_some_and(|s| s == "ACTIVE");
-            let leaving = field_text(line, "prev_state").is_some_and(|s| s == "ACTIVE");
-            match (entering, leaving, open) {
-                (true, _, None) => open = Some(now.abs),
-                (_, true, Some(from)) if now.abs > from => {
-                    spans.push((from, now.abs));
+        for (_, at, woke) in changes.iter().filter(|(f, ..)| *f == family) {
+            match (woke, open) {
+                (Woke::Active, None) => open = Some(*at),
+                (Woke::Idle, Some(from)) if *at > from => {
+                    spans.push((from, *at));
                     open = None;
                 }
-                (_, true, Some(_)) => open = None,
+                (Woke::Idle, Some(_)) => open = None,
                 _ => {}
             }
         }
@@ -839,13 +950,102 @@ impl Awake {
             .sum()
     }
 
-    /// Whether any power record was seen at all. With none, a sitting the
-    /// device declined to count stays unmeasured rather than being credited the
-    /// whole wall clock — an unbounded guess is worse than the honest zero the
-    /// device itself reports.
+    /// Whether any power line was seen at all. With none, a sitting the device
+    /// declined to count stays unmeasured rather than being credited the whole
+    /// wall clock — an unbounded guess is worse than the honest zero the device
+    /// itself reports.
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
+}
+
+/// The widest a page's dwell may run past what its words justify, and the
+/// narrowest it may fall short. Below the floor the page was skipped past;
+/// above the ceiling the reader was idle on it, and the ceiling is what counts.
+const DWELL_FLOOR: f64 = 0.5;
+const DWELL_CEILING: f64 = 1.5;
+
+/// The WPM band inside which a rate is usable, and the words a page is assumed
+/// to carry where it states none.
+const WPM_MIN: f64 = 0.0;
+const WPM_MAX: f64 = 500.0;
+
+/// What a page with no usable rate may count, in seconds. A fixed-layout page
+/// states no words, so no rate applies to it and only the dwell itself remains.
+const WORDLESS_FLOOR: f64 = 3.0;
+const WORDLESS_CEILING: f64 = 120.0;
+
+/// How much of a page's dwell counts as reading, in milliseconds.
+///
+/// The device's own rule, from `PageHeuristicsImpl` in
+/// `ReadingDataAggregatorService.jar`, defaults from `KFTResources`. Applied
+/// verbatim: it has a defined answer for a page carrying no words, which is
+/// exactly the content `ReadingTimerController` refuses, and matching it keeps
+/// these figures comparable with the ones the device shows for itself.
+fn dwell_ms(wpm: Option<f64>, words: i64, dwell_ms: i64) -> i64 {
+    let secs = dwell_ms as f64 / 1000.0;
+    match wpm {
+        Some(wpm) if wpm > WPM_MIN && wpm < WPM_MAX && words > 0 => {
+            let expected = words as f64 / (wpm / 60.0);
+            if secs < DWELL_FLOOR * expected {
+                0
+            } else {
+                (secs.min(DWELL_CEILING * expected) * 1000.0) as i64
+            }
+        }
+        _ if secs < WORDLESS_FLOOR => 0,
+        _ => (secs.min(WORDLESS_CEILING) * 1000.0) as i64,
+    }
+}
+
+/// Which family of line stated a power change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Power {
+    /// The metrics record, naming the state moved from and the state moved to.
+    Record,
+    /// The LIPC event `powerd` fires as it makes the same move.
+    Event,
+}
+
+/// Whether a power change left the device awake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Woke {
+    Active,
+    Idle,
+}
+
+/// Read a line as a change into or out of `ACTIVE`.
+///
+/// The record states both ends of the move, so it is read on both: entering
+/// `ACTIVE` opens a span and leaving it closes one. The LIPC event states only
+/// the move it is named for, and the pair that brackets `ACTIVE` is
+/// `outOfScreenSaver` / `goingToScreenSaver` — verified against a device that
+/// writes both, where every record naming `ACTIVE` on either side has its event
+/// in the same second and neither family has a transition the other lacks.
+/// `suspending` closes a span too, for a device that reaches sleep without
+/// passing the screensaver.
+///
+/// Not every wake is a wake to a reader: a Kindle rises from suspend on its own
+/// to sync, and says so with `wakeupFromSuspend` and `resuming` while staying in
+/// the screensaver. Neither opens a span.
+fn power_change(line: &str) -> Option<(Power, Woke)> {
+    if line.contains(POWER_MARKERS[0]) {
+        return match (
+            field_text(line, "curr_state").is_some_and(|s| s == "ACTIVE"),
+            field_text(line, "prev_state").is_some_and(|s| s == "ACTIVE"),
+        ) {
+            (true, _) => Some((Power::Record, Woke::Active)),
+            (_, true) => Some((Power::Record, Woke::Idle)),
+            _ => None,
+        };
+    }
+    if line.contains(POWER_MARKERS[1]) {
+        return Some((Power::Event, Woke::Active));
+    }
+    if POWER_MARKERS[2..].iter().any(|m| line.contains(m)) {
+        return Some((Power::Event, Woke::Idle));
+    }
+    None
 }
 
 /// Read `"<name>" : "<value>"` out of a metrics record's JSON-ish body.
@@ -855,6 +1055,131 @@ fn field_text<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     let open = rest.find('"')?;
     let tail = &rest[open + 1..];
     Some(&tail[..tail.find('"')?])
+}
+
+/// Read `"<name>" : <number>` out of the same body. Distinct from
+/// [`field_text`], which reads past an unquoted value into the next field.
+fn field_num(line: &str, name: &str) -> Option<i64> {
+    let at = line.find(&format!("\"{name}\" : "))? + name.len() + 5;
+    let rest = &line[at..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// What one `fastmetrics` record contributes to the run open around it.
+///
+/// The records name no book. They state a page and a turn for whatever the
+/// reader had open, which is the run [`parse_sessions`] is already tracking off
+/// the `ReadingTimerController` lines — and those lines still open and position
+/// a book the timer declines to count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Metric {
+    /// `ereader_book_consume_content`: a page, with the words on it.
+    Page { words: i64 },
+    /// A forward turn, from `ereader_book_page_turn` or
+    /// `ereader_book_linear_page_actions`.
+    Forward,
+    /// A backward turn, which advances no reading.
+    Back,
+    /// `ereader_close_book`.
+    Close,
+}
+
+/// What tags a line the collector wrote about the device's own catalog, rather
+/// than one the firmware logged. See [`catalog_row`].
+pub const CATALOG_MARKER: &str = "SidleCatalog:";
+
+/// A book the device's content catalog names, as `(extent, key)`.
+///
+/// `extent` is `p_contentSize`, which equals `BookEndPosition.FromBook` to the
+/// digit and is therefore the same number a session is keyed by. `key` is
+/// `p_cdeKey` — `books.asin` for a Sidle sideload, `books.amazon_asin` for a
+/// store book.
+///
+/// This is what the two `cvm` firmwares have instead of [`cde_key`]: they
+/// redact the book on every reading line, and the reader shell that names it
+/// outright arrives with 5.19.
+fn catalog_row(line: &str) -> Option<(i64, &str)> {
+    let rest = line.split_once(CATALOG_MARKER)?.1;
+    let extent = rest.split_once("extent=")?.1;
+    let extent: i64 = extent[..extent.find(',')?].parse().ok()?;
+    let key = rest.split_once("cde_key=")?.1;
+    let end = key.find([',', ';'])?;
+    (end > 0).then_some((extent, &key[..end]))
+}
+
+/// The `cde_key` a reader-shell record states for the book it is about.
+///
+/// The reading-timer lines redact the book on every one of them
+/// (`Title:<private>,Asin:<private>`), and these do not: the latency records
+/// name it outright, one per open, per close and per page turn. It is the
+/// catalog's own key — an Amazon ASIN for a store book, and for a sideload the
+/// content id Sidle bakes in, so it joins `books.amazon_asin` and `books.asin`
+/// respectively.
+///
+/// `N/A` is the reader shell's own filler for a book it has no key for.
+fn cde_key(line: &str) -> Option<&str> {
+    if !METRIC_MARKERS.iter().any(|m| line.contains(m)) {
+        return None;
+    }
+    match field_text(line, "cde_key") {
+        Some(k) if !k.is_empty() && k != "N/A" => Some(k),
+        _ => None,
+    }
+}
+
+/// Days from the Common Era to 1970-01-01, the origin [`Moment::abs`] counts
+/// from and an epoch stamp does not.
+const CE_DAYS_TO_EPOCH: i64 = 719_163;
+
+/// Timezones are whole minutes from UTC, and a record is logged a moment after
+/// the instant it states.
+const OFFSET_STEP: i64 = 60;
+
+/// Seconds the device's local clock stands ahead of UTC, from a record stating
+/// an instant the line's own prefix also states.
+///
+/// The prefix is local wall clock and carries no zone; `close_timestamp` and
+/// `action_start_time` are epoch milliseconds. Their difference is the offset,
+/// exact to the second before rounding — a Colorsoft logging `close_timestamp`
+/// 1786882311101 under the prefix `260816:141151` is +02:00 on the nose.
+///
+/// The reading-timer lines state no absolute instant at all, so before these
+/// records nothing in a reading log said which zone its days were counted in.
+fn utc_offset(now: &Moment, line: &str) -> Option<i64> {
+    if !METRIC_MARKERS.iter().any(|m| line.contains(m)) {
+        return None;
+    }
+    let epoch_ms =
+        field_num(line, "close_timestamp").or_else(|| field_num(line, "action_start_time"))?;
+    let naive = now.abs - CE_DAYS_TO_EPOCH * 86_400;
+    let raw = naive - epoch_ms.div_euclid(1000);
+    // A device whose clock is simply wrong states no zone worth recording.
+    (raw.abs() < 24 * 3600).then(|| (raw as f64 / OFFSET_STEP as f64).round() as i64 * OFFSET_STEP)
+}
+
+/// Read a line as a `fastmetrics` record.
+fn metric(line: &str) -> Option<Metric> {
+    if line.contains(METRIC_MARKERS[2]) {
+        return Some(Metric::Page {
+            words: field_num(line, "words_count").unwrap_or(0),
+        });
+    }
+    if line.contains(METRIC_MARKERS[1]) {
+        return Some(Metric::Close);
+    }
+    if line.contains(METRIC_MARKERS[4]) || line.contains(METRIC_MARKERS[5]) {
+        // `NextPageTurnWithGESTURE_TAP_SWIPES` on one stack,
+        // `NextPageWithSwipe` on the other.
+        return match field_text(line, "action_id") {
+            Some(a) if a.starts_with("Next") => Some(Metric::Forward),
+            Some(a) if a.starts_with("Prev") => Some(Metric::Back),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Turn an ordered, de-duplicated event stream into sessions.
@@ -879,10 +1204,9 @@ pub fn parse_sessions<'a>(
     events: impl IntoIterator<Item = &'a str>,
     resume: Option<&Resume>,
 ) -> Vec<Session> {
-    // Collected because the stream is read twice: the power records have to be
-    // whole before the first sitting is closed against them, and they are
-    // interleaved with the reading events rather than preceding them. The batch
-    // is already a set held in memory, so this is one pointer per line.
+    // Collected: [`Awake`] reads the whole stream before the first sitting
+    // closes against it, and the power lines interleave with the reading ones.
+    // One pointer per line, over a batch held in memory.
     let lines: Vec<&str> = events.into_iter().collect();
     let awake = Awake::from_events(lines.iter().copied());
 
@@ -893,32 +1217,33 @@ pub fn parse_sessions<'a>(
     // A break, once noticed, waits here until an observation can act on it.
     let mut gapped = false;
     let mut first = true;
+    // The catalog key most recently named, for the run it belongs to. Cleared
+    // at a break: the key names the book the reader shell had open, and past a
+    // break that is a different book until its own record says otherwise.
+    let mut named: Option<String> = None;
+    // The zone most recently stated. Unlike `named` this survives a break: a
+    // device does not change zone between two sittings of one batch, and a
+    // sitting whose own records state none is still in the zone the batch did.
+    let mut zone: Option<i64> = None;
+    // `fastmetrics` records seen before any run is open. On a book the timer
+    // refuses, the first `ReadingTimerController` line carrying a position can
+    // lag the open by minutes. Drained into the run; dropped at a break.
+    let mut pending: Vec<(Moment, Metric)> = Vec::new();
 
     for line in lines.iter().copied() {
         let Some(now) = stamp(line) else {
             continue;
         };
         if std::mem::take(&mut first) && open.as_ref().is_some_and(|cur| now.abs < cur.last.abs) {
-            // Events from before the run they were offered against — a whole
-            // archive replayed host-side, say, which already includes the run.
-            // Folding them into it would count them a second time, so the run is
-            // dropped rather than continued; it stays stored exactly as it is.
+            // Events predating the run they were offered against — a whole
+            // archive replayed host-side, which holds the run itself. The run
+            // is dropped and its stored row left as it is.
             open = None;
             prev_abs = None;
         }
-        // The gap is measured against the previous *event of any kind*, so a
-        // stretch of non-page activity still breaks a session.
-        //
-        // It is *held* rather than read on the spot, because the line that
-        // notices a break is usually not one that can end a session: a third of
-        // the marker lines carry no counter and no position — `OpenBook`,
-        // `Reading_Resumed`, `TapOnFooter` — and the reader coming back after a
-        // night's sleep produces exactly such a line first. Read locally, that
-        // line consumed the break and re-anchored the clock, so the observation
-        // behind it saw no gap at all and the two sittings merged. Measured on
-        // one device's archive: 6 breaks taken, 116 swallowed, sessions running
-        // to 48 h of wall clock and booking a whole night's reading to the day
-        // before it.
+        // Measured against the previous event of any kind, held for an
+        // observation to act on: `OpenBook`, `Reading_Resumed` and
+        // `TapOnFooter` carry neither counter nor position.
         gapped |= prev_abs.is_some_and(|prev| now.abs - prev > SESSION_GAP_SECS);
         prev_abs = Some(now.abs);
 
@@ -929,20 +1254,37 @@ pub fn parse_sessions<'a>(
             });
         }
 
+        if let Some(key) = cde_key(line) {
+            named = Some(key.to_string());
+            if let Some(cur) = open.as_mut() {
+                cur.asin = named.clone();
+            }
+        }
+        if let Some(offset) = utc_offset(&now, line) {
+            zone = Some(offset);
+            if let Some(cur) = open.as_mut() {
+                cur.tz_offset_s = zone;
+            }
+        }
         let Some(obs) = observation(line) else {
+            // A `fastmetrics` record measures the run the
+            // `ReadingTimerController` lines have open. It names no book, so
+            // one arriving ahead of a run waits in `pending`.
+            if let Some(m) = metric(line) {
+                match open.as_mut() {
+                    Some(cur) => cur.observe_metric(&now, &m, &awake),
+                    None => pending.push((now.clone(), m)),
+                }
+            }
             continue;
         };
         // Consumed here and only here: whatever happened between two
         // observations is decided at the second of them.
         let gapped = std::mem::take(&mut gapped);
 
-        // Consumed at the first observation after the open, whether or not it
-        // is used: an open belongs to the session it precedes and to no later
-        // one. An observation carrying no counter is the exception — an open is
-        // vouched for by the counter it resumes from, and such a line cannot
-        // judge it, so it stays pending for one that can. Where none ever does,
-        // the open is still where the sitting began, and that is all a book the
-        // device never counts can be measured from.
+        // Consumed at the first observation after the open, used or not: an
+        // open belongs to the session it precedes. An observation with no
+        // counter cannot vouch for one, and leaves it pending.
         let mut seed = match obs.total_ms {
             Some(_) => opened.take().and_then(|o| o.vouch(&now, obs.total_ms)),
             None => opened.as_ref().and_then(|o| o.opened_run(&now)),
@@ -953,7 +1295,11 @@ pub fn parse_sessions<'a>(
             .and_then(|cur| cur.broken_by(&now, &obs, gapped))
         {
             None => {}
-            Some(Break::Left) => out.extend(open.take().and_then(|cur| cur.emit(&awake))),
+            Some(Break::Left) => {
+                out.extend(open.take().and_then(|cur| cur.emit(&awake)));
+                named = None;
+                pending.clear();
+            }
             Some(Break::Midnight(boundary)) => {
                 out.extend(open.take().map(|cur| cur.finish_at(&boundary)));
                 // The run was already under way, so nothing that happened after
@@ -962,13 +1308,25 @@ pub fn parse_sessions<'a>(
                 seed = Some(boundary);
             }
         }
+        let fresh = open.is_none();
         let cur = open.get_or_insert_with(|| Open::new(obs.position, &now, seed.take()));
-        // A run that began before any counter was known adopts one the moment
-        // an open vouches for it. The sitting starts where the book was opened
-        // — which a position-only line establishes without saying how long the
-        // book had been read — and the counter that arrives later is what makes
-        // its length measurable at all. Left unadopted, the first counter seen
-        // becomes both ends of the span and the sitting measures nothing.
+        if fresh {
+            cur.asin = named.clone();
+            cur.tz_offset_s = zone;
+        }
+        // The page records that arrived before this run existed, in order, from
+        // where the run itself began. Anything older belongs to no sitting.
+        if fresh {
+            let from = cur.began.abs;
+            for (at, m) in std::mem::take(&mut pending) {
+                if at.abs >= from {
+                    cur.observe_metric(&at, &m, &awake);
+                }
+            }
+        }
+        // A run opened by a position-only line adopts the first counter an
+        // open vouches for. Unadopted, that counter becomes both ends of the
+        // span and the sitting measures nothing.
         if let Some(counter) = seed.take().and_then(|s| s.counter_ms)
             && cur.time_lo.is_none()
         {
@@ -1099,10 +1457,24 @@ struct Open {
     /// intervals exist: a stored session has only its window and its total.
     hours_ms: [i64; 24],
     /// The first instant this run was seen at, and seconds it was credited
-    /// before this batch — the two an estimate is rebuilt from when the device
-    /// never counted the book. See [`Awake`].
+    /// before this batch — the two a run with no counter is rebuilt from. See
+    /// [`Awake`].
     began: Moment,
     carried_secs: i64,
+    /// Forward turns from the `fastmetrics` records, counted apart from
+    /// `page_turns`. One stack names every turn on its
+    /// `ReadingTimerController` lines and the other names none, while both
+    /// write these — so adding the two together doubles a turn on the first.
+    metric_turns: i64,
+    /// Milliseconds of page dwell through [`dwell_ms`], and the page open at
+    /// the far end of the interval each new page closes.
+    dwell_total_ms: i64,
+    dwell_hours_ms: [i64; 24],
+    open_page: Option<(Moment, i64)>,
+    /// The catalog key a reader-shell record named for this run. See [`cde_key`].
+    asin: Option<String>,
+    /// The offset most recently stated during the run. See [`utc_offset`].
+    tz_offset_s: Option<i64>,
     /// Whether any event of this batch has joined the run. False only for a
     /// resumed run no event continued, which is a stored session this batch has
     /// nothing new to say about.
@@ -1141,6 +1513,12 @@ impl Open {
             hours_ms: [0; 24],
             began: from_moment,
             carried_secs: 0,
+            metric_turns: 0,
+            dwell_total_ms: 0,
+            dwell_hours_ms: [0; 24],
+            open_page: None,
+            asin: None,
+            tz_offset_s: None,
             touched: false,
         }
     }
@@ -1182,17 +1560,24 @@ impl Open {
             words_lo,
             words_hi,
             page_turns: r.page_turns,
-            // An estimated run resumes from where it was last seen, not from
-            // where it began: the power records covering the earlier stretch
-            // were consumed by the batch that measured it, and re-measuring the
-            // whole window against a batch that no longer holds them would
-            // shrink the sitting on every sync.
+            // A run with no counter resumes from where it was last seen. The
+            // records covering the earlier stretch went with the batch that
+            // measured it.
             began: last.clone(),
-            carried_secs: if r.estimated { r.seconds } else { 0 },
+            carried_secs: match r.measure {
+                Measure::Counted => 0,
+                _ => r.seconds,
+            },
             last,
             last_time: r.end_counter_ms,
             last_words: r.end_words,
             hours_ms,
+            metric_turns: 0,
+            dwell_total_ms: 0,
+            dwell_hours_ms: [0; 24],
+            open_page: None,
+            asin: None,
+            tz_offset_s: None,
             touched: false,
         })
     }
@@ -1212,14 +1597,14 @@ impl Open {
     /// about where inside it the reading fell. An interval is a page turn wide,
     /// so that assumption spans minutes — where spreading a *session* spans
     /// hours, and is the guess this exists to avoid.
-    fn credit(&mut self, from: i64, to: i64, advance_ms: i64) {
+    fn credit(hours_ms: &mut [i64; 24], from: i64, to: i64, advance_ms: i64) {
         if advance_ms <= 0 {
             return;
         }
         let hour = |secs: i64| ((secs / 3600) as usize).min(23);
         let span = to - from;
         if span <= 0 {
-            self.hours_ms[hour(from)] += advance_ms;
+            hours_ms[hour(from)] += advance_ms;
             return;
         }
         let mut placed = 0;
@@ -1230,17 +1615,17 @@ impl Open {
             }
             let share = advance_ms * overlap / span;
             placed += share;
-            self.hours_ms[hour(h * 3600)] += share;
+            hours_ms[hour(h * 3600)] += share;
         }
         // The division's remainder to the hour the interval began in, so the
         // hours of a session add back up to the session.
-        self.hours_ms[hour(from)] += advance_ms - placed;
+        hours_ms[hour(from)] += advance_ms - placed;
     }
 
     fn observe(&mut self, now: &Moment, obs: &Observation) {
         self.touched = true;
         if let (Some(from), Some(to)) = (self.last_time, obs.total_ms) {
-            self.credit(self.last.secs, now.secs, to - from);
+            Self::credit(&mut self.hours_ms, self.last.secs, now.secs, to - from);
         }
         self.ended_at = now.at.clone();
         self.last = now.clone();
@@ -1261,6 +1646,46 @@ impl Open {
         // already banked because a fresh `Open` is made per run.
     }
 
+    /// Fold one `fastmetrics` record into the run.
+    ///
+    /// A page closes the interval the page before it opened, and [`dwell_ms`]
+    /// says how much of that interval counts. The run's end and its break rules
+    /// are the `ReadingTimerController` lines' to decide, so this moves neither
+    /// `last` nor `ended_at` and does not mark the run touched — a batch of
+    /// nothing but these records describes a book no line here has opened.
+    fn observe_metric(&mut self, now: &Moment, m: &Metric, awake: &Awake) {
+        match m {
+            Metric::Forward => self.metric_turns += 1,
+            Metric::Back => {}
+            Metric::Close => self.open_page = None,
+            Metric::Page { words } => {
+                if let Some((from, from_words)) = self.open_page.take() {
+                    let elapsed = (now.abs - from.abs) * 1000;
+                    // A page turned while the device slept spans the sleep. The
+                    // awake bound cuts it back where power records exist, and
+                    // [`dwell_ms`]'s own ceiling holds where they do not.
+                    let elapsed = match awake.is_empty() {
+                        true => elapsed,
+                        false => awake.between(from.abs, now.abs) * 1000,
+                    };
+                    let counts = dwell_ms(self.wpm(), from_words, elapsed);
+                    self.dwell_total_ms += counts;
+                    Self::credit(&mut self.dwell_hours_ms, from.secs, now.secs, counts);
+                }
+                self.open_page = Some((now.clone(), *words));
+            }
+        }
+    }
+
+    /// The rate the device states for this book, from the word and time
+    /// counters it has moved so far. `None` leaves [`dwell_ms`] on its wordless
+    /// branch, which is the answer for a book stating no words at all.
+    fn wpm(&self) -> Option<f64> {
+        let secs = (self.time_hi - self.time_lo?) as f64 / 1000.0;
+        let words = (self.words_hi - self.words_lo?) as f64;
+        (secs > 0.0 && words > 0.0).then(|| words / (secs / 60.0))
+    }
+
     /// Whether this observation ends the run, and how. See [`Break`].
     fn broken_by(&self, now: &Moment, obs: &Observation, gapped: bool) -> Option<Break> {
         if self.end_position != obs.position || gapped {
@@ -1269,10 +1694,9 @@ impl Open {
         if self.last.day == now.day {
             return None;
         }
-        // Mid-run, over midnight. Both counters are read at the boundary by
-        // straight-line interpolation between the observations either side of
-        // it; without a counter on both sides there is nothing to divide, and
-        // the day change is then no better than an ordinary break.
+        // Mid-run, over midnight: both counters are interpolated at the
+        // boundary from the observations either side. With a counter missing on
+        // either side the day change is [`Break::Left`].
         let (Some(from), Some(to)) = (self.last_time, obs.total_ms) else {
             return Some(Break::Left);
         };
@@ -1305,7 +1729,12 @@ impl Open {
         if let Some(from) = self.last_time {
             // Midnight is 86400 seconds into *this* day; the same instant is
             // second zero of the next, where the run resumes.
-            self.credit(self.last.secs, 86_400, at_boundary - from);
+            Self::credit(
+                &mut self.hours_ms,
+                self.last.secs,
+                86_400,
+                at_boundary - from,
+            );
         }
         self.time_hi = self.time_hi.max(at_boundary);
         if let Some(w) = boundary.words {
@@ -1315,39 +1744,45 @@ impl Open {
         self.finish(&Awake::default())
     }
 
-    /// The run as a session, measured by the device's counter where it moved
-    /// and by [`Awake`] where it did not.
+    /// The run as a session, under the best [`Measure`] its records support.
     ///
-    /// The counter is always preferred: it is the device's own accounting, and
-    /// it excludes the pauses an awake reader takes. The bound stands in only
-    /// when the counter never advanced across the whole run — which is not a
-    /// gap in the log but the device declining to time a book it can count no
-    /// words in, and its own answer for such a book is zero.
+    /// [`Measure::Counted`] first: the device's own accounting, excluding the
+    /// pauses an awake reader takes. Where the counter never moved across the
+    /// whole run — the device declining to time a book it can count no words in
+    /// — [`Measure::Dwell`] measures the same run off the page records, and
+    /// [`Measure::Awake`] bounds it where those are absent too.
     ///
-    /// With no power records in the batch the estimate is not attempted. An
-    /// unbounded wall clock would credit a book left open overnight with the
-    /// night, and a wrong number is worse than the device's honest zero.
+    /// A run with none of the three keeps the counter's zero. An unbounded wall
+    /// clock credits a book left open overnight with the night.
     fn finish(self, awake: &Awake) -> Session {
         let counted = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
-        let (seconds, estimated) = if counted > 0 || awake.is_empty() {
-            (counted, false)
-        } else {
-            (
+        let dwell = self.dwell_total_ms / 1000;
+        let (seconds, measure) = match (counted, dwell) {
+            (c, _) if c > 0 => (c, Measure::Counted),
+            (_, d) if d > 0 => (self.carried_secs + d, Measure::Dwell),
+            _ if awake.is_empty() => (0, Measure::Counted),
+            _ => (
                 self.carried_secs + awake.between(self.began.abs, self.last.abs),
-                true,
-            )
+                Measure::Awake,
+            ),
         };
         Session {
-            hours: if estimated {
-                spread(&self.began, &self.last, seconds)
-            } else {
-                hours_in_seconds(&self.hours_ms, seconds)
+            hours: match measure {
+                Measure::Counted => hours_in_seconds(&self.hours_ms, seconds),
+                Measure::Dwell => hours_in_seconds(&self.dwell_hours_ms, seconds),
+                Measure::Awake => spread(&self.began, &self.last, seconds),
             },
             started_at: self.started_at,
             ended_at: self.ended_at,
             end_position: self.end_position,
             seconds,
-            page_turns: self.page_turns,
+            // `page_turns` where that stack names any, `metric_turns` where it
+            // names none. One stack names every turn and the other names none,
+            // while both write the records; a sum doubles the first.
+            page_turns: match self.page_turns {
+                0 => self.metric_turns,
+                named => named,
+            },
             words: self.words_hi - self.words_lo.unwrap_or(self.words_hi),
             // Both ends of the counter, not just their difference: a later batch
             // of events continues this run from where it stopped counting, and
@@ -1356,7 +1791,9 @@ impl Open {
             end_counter_ms: self.time_lo.map(|_| self.time_hi),
             start_words: self.words_lo,
             end_words: self.words_lo.map(|_| self.words_hi),
-            estimated,
+            measure,
+            asin: self.asin,
+            tz_offset_s: self.tz_offset_s,
         }
     }
 }
@@ -1644,35 +2081,25 @@ pub fn store_events(
     resume: Option<&Resume>,
     watch: job::Watch<'_>,
 ) -> rusqlite::Result<Imported> {
-    // Sessions are grouped by the fingerprint every page event carries, then
-    // rekeyed to the one the library can actually be joined against.
-    //
-    // What this archive reveals is remembered, and what earlier ones revealed is
-    // applied: a book states its last position only occasionally, so the archive
-    // holding a sitting often is not the one that can name it.
+    // Grouped by the fingerprint every page event carries, then rekeyed to the
+    // one [`db::books_with_last_position`] joins on. `record_book_ends` carries
+    // the pairing across archives.
     let mut identity = frombook_map(events.iter().map(String::as_str));
     let learned: Vec<(i64, i64)> = identity.iter().map(|(k, v)| (*k, *v)).collect();
     db::record_book_ends(conn, &learned)?;
     for (last_word, from_book) in db::known_book_ends(conn)? {
         identity.entry(last_word).or_insert(from_book);
     }
-    // Where the reader was seen standing, before a single session is looked at.
-    //
-    // First, and unconditionally, because this is the evidence that names a book
-    // and these lines are never offered again: the device sends only what is
-    // newer than the newest session stored. Anything downstream may decide a
-    // sitting is not worth a row — a book opened and shut is not reading — but
-    // that decision must not reach back and discard what its events witnessed.
-    // The `.yjr` sidecar that names the book may not arrive for another sync.
+    // Where the reader was seen standing, ahead of any session. A device sends
+    // only what is newer than the newest session stored, and the `.yjr` sidecar
+    // that names the book may arrive a sync later.
     for (fingerprint, at) in positions_seen(events.iter().map(String::as_str)) {
         let key = identity.get(&fingerprint).copied().unwrap_or(fingerprint);
         db::record_log_points(conn, key, &[(at.eid, at.offset, at.linear_pos)])?;
     }
-    // A stored row may be keyed by either of the book's two end constants: the
-    // log line states the last-word position, and [`db::resolve_reading_sessions`]
-    // re-keys the row to the last position once the pairing is known. The run is
-    // therefore offered under the name the *events* use, so the parser sees the
-    // continuation as the same book and not as a switch to another one.
+    // A stored row is keyed by either of the book's two end constants. The run
+    // is offered under the one the events use, which [`parse_sessions`] reads
+    // as the same book.
     let resume = resume.map(|r| Resume {
         end_position: identity
             .iter()
@@ -1681,6 +2108,23 @@ pub fn store_events(
         ..r.clone()
     });
     let sessions = parse_sessions(events.iter().map(String::as_str), resume.as_ref());
+    // The books the device's catalog names, keyed by the number a session is.
+    // A row states what the device holds, whatever this batch read.
+    for (extent, key) in events.iter().filter_map(|l| catalog_row(l)) {
+        db::record_log_asin(conn, extent, key)?;
+    }
+    // The keys the reader shell named these books by, against the fingerprints
+    // the rows are stored under. Recorded ahead of the seconds test below: a
+    // book opened and shut gets no row and is named all the same.
+    for s in &sessions {
+        if let Some(asin) = &s.asin {
+            let key = identity
+                .get(&s.end_position)
+                .copied()
+                .unwrap_or(s.end_position);
+            db::record_log_asin(conn, key, asin)?;
+        }
+    }
 
     let mut out = Imported {
         files,
@@ -1701,14 +2145,9 @@ pub fn store_events(
             out.cancelled = true;
             break;
         }
-        // A session with no measurable duration is a book being opened and shut,
-        // not reading; a row for it would litter the calendar with empty days.
-        //
-        // A judgement about the row and about nothing else. Everything those
-        // events witnessed was recorded above, before this decided the sitting
-        // was not worth keeping — a book opened and shut is exactly when the
-        // device states where the reader stood in it, and that is the evidence
-        // that names the book later.
+        // A session of no measurable duration is a book opened and shut. A
+        // judgement about the row alone: what its events witnessed is recorded
+        // above.
         if s.seconds <= 0 {
             continue;
         }
@@ -1732,16 +2171,12 @@ pub fn store_events(
             end_counter_ms: s.end_counter_ms,
             start_words: s.start_words,
             end_words: s.end_words,
-            estimated: s.estimated,
+            measure: s.measure,
+            tz_offset_s: s.tz_offset_s,
         };
-        // The hours the sitting's reading actually fell in — from the log's own
-        // intervals, which exist nowhere else and are never sent twice.
-        //
-        // Written with the row and only with the row. The two are one
-        // measurement: hours from a second, longer parse against totals from the
-        // first would have the clock report a day the calendar beside it does
-        // not. A continued run rebuilds its whole distribution, so the hours are
-        // replaced rather than added to.
+        // The hours the sitting's reading fell in, from the log's own intervals.
+        // Written with the row: the two are one measurement. A continued run
+        // rebuilds its whole distribution, and the hours are replaced.
         match db::insert_reading_session(conn, &row)? {
             db::Stored::Added => out.added += 1,
             db::Stored::Extended => out.extended += 1,
@@ -1756,6 +2191,25 @@ pub fn store_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`collect_events`] takes every [`METRIC_MARKERS`] schema out of a file,
+    /// and leaves `ereader_open_book_failure_backup`, whose name carries
+    /// `ereader_open_book` as a prefix.
+    #[test]
+    fn a_reader_shell_record_is_collected_and_its_lookalike_is_not() {
+        let dir = std::env::temp_dir().join(format!("rl-metrics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log_backup_260816181520.txt");
+        let wanted = r#"260816:181520 fastmetrics[4576]: D fastmetrics:KindleFastMetricsPublisher:[9788.019459]: Emitting a new record. SchemaName[ereader_book_consume_content], Fields[{ "end_position" : 4133, "start_position" : 3227, "words_count" : 147 } ]. :"#;
+        let lookalike = r#"260816:181521 fastmetrics[4576]: D fastmetrics:KindleFastMetricsPublisher:[9789.0]: Emitting a new record. SchemaName[ereader_open_book_failure_backup], Fields[{ "cde_key" : "B00QPFC59S" } ]. :"#;
+        std::fs::write(&path, format!("{wanted}\n{lookalike}\n")).unwrap();
+
+        let found = collect_events(&[&path], &Default::default(), &[], &mut super::job::ignore);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(found.events.len(), 1);
+        assert!(found.events.iter().next().unwrap().contains("words_count"));
+    }
 
     /// The lines a device pushed survive whether or not the library could make
     /// a session of them, and come back through the ordinary import.
@@ -1922,7 +2376,7 @@ mod tests {
             page_turns: stored[0].page_turns,
             hours: stored[0].hours.clone(),
             seconds: stored[0].seconds,
-            estimated: stored[0].estimated,
+            measure: stored[0].measure,
         };
 
         // What the device logs after the Sync, and only that.
@@ -1964,7 +2418,7 @@ mod tests {
             page_turns: 1,
             hours: vec![(10, 60)],
             seconds: 60,
-            estimated: false,
+            measure: Default::default(),
         };
 
         // Nothing at all since.
@@ -2015,7 +2469,7 @@ mod tests {
             page_turns: stored[0].page_turns,
             hours: stored[0].hours.clone(),
             seconds: stored[0].seconds,
-            estimated: stored[0].estimated,
+            measure: stored[0].measure,
         };
         // The last line of the run, sent a second time.
         let again = [all[1].clone()];
@@ -2101,10 +2555,8 @@ mod tests {
 
     #[test]
     fn a_line_inside_the_gap_does_not_bridge_it() {
-        // The reader comes back at night and the device says so before it says
-        // anything about a book. That line carries no counter and no position,
-        // so it can end no session — but it must not stand in for the silence
-        // either, or the evening's reading joins the morning's.
+        // A `nameless` line inside the gap carries no counter and no position.
+        // It ends no session and bridges none.
         let lines = [
             page("260803:080000", "NextPage", 148_207, 60_000, 100),
             page("260803:080100", "NextPage", 148_207, 120_000, 200),
@@ -2119,10 +2571,8 @@ mod tests {
 
     #[test]
     fn a_session_does_not_run_past_midnight() {
-        // Every figure on the page is grouped by the day a session began, so a
-        // session that spans two days books the second day's reading to the
-        // first. The day change is noticed on whichever line crosses it — here
-        // one that observes nothing.
+        // A session is grouped by the day it began. The day change is noticed
+        // on whichever line crosses it — here one that observes nothing.
         let lines = [
             page("260803:234500", "NextPage", 148_207, 60_000, 100),
             nameless("260804:000100"),
@@ -2132,11 +2582,9 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(&out[0].started_at[..10], "2026-08-03");
         assert_eq!(&out[1].started_at[..10], "2026-08-04");
-        // The clock the cut is made on is the device's own local one, the only
-        // clock the syslog prefix carries: `260804:000200` is two minutes past
-        // the reader's midnight whatever the offset to UTC happens to be. The
-        // same line under UTC would be the 3rd still, and a night's reading
-        // would land a day early.
+        // Cut on the device's own local clock, the one the syslog prefix
+        // carries: `260804:000200` is two minutes past the reader's midnight at
+        // any offset to UTC.
         assert_eq!(out[1].started_at, "2026-08-04T00:00:00");
     }
 
@@ -2189,10 +2637,9 @@ mod tests {
         let out = parse_sessions(lines.iter().map(String::as_str), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seconds, 1810);
-        // Half an hour of solid reading in the 20:00 hour and four seconds in
-        // the 21:00 hour. Spreading the session's total across its 80-minute
-        // window instead — all a stored row can support — would report 452 s of
-        // reading at 21:00, and the difference is not recoverable later.
+        // Half an hour of reading in the 20:00 hour and four seconds in the
+        // 21:00 hour. Spread evenly across the 80-minute window — all a stored
+        // row supports — 21:00 reports 452 s.
         assert_eq!(out[0].hours, vec![(20, 1806), (21, 4)]);
         assert_eq!(
             out[0].hours.iter().map(|(_, s)| s).sum::<i64>(),
@@ -2203,10 +2650,8 @@ mod tests {
 
     #[test]
     fn a_night_asleep_over_midnight_is_still_a_break_and_bridges_nothing() {
-        // The same day change, but the reader left. Splitting at the boundary
-        // would credit both days with a share of eight hours the device counted
-        // while nobody was reading, so this break is taken where it happened and
-        // the interval across it belongs to neither day.
+        // The same day change, across an eight-hour absence. The break is taken
+        // where it happened and the interval across it belongs to neither day.
         let lines = [
             page("260803:225000", "NextPage", 148_207, 3_000_000, 1000),
             page("260803:225500", "NextPage", 148_207, 3_300_000, 1200),
@@ -2313,20 +2758,16 @@ mod tests {
             vec![(148_207, stood)],
         );
 
-        // The evidence is gathered from the lines, not from the sittings the
-        // parser makes of them — so it survives a line no session covers.
-        // `BookEndPosition` is no observation, and a book opened and shut has no
-        // measurable duration and gets no row at all; both state a point, and the
-        // log states each of them exactly once.
+        // Gathered from the lines, not the sittings made of them.
+        // `BookEndPosition` is no observation and a book opened and shut gets no
+        // row; both state a point, once each.
         let opened_and_shut = ["260803:095956 cvm[6144]: I ReadingTimerController:\
              Information::BookEndPosition.FromBook:YJPosition: AR4GAAAAAAAA:148213,\
              BookEndPosition.LastWordPos.override:YJPosition: AR4GAAAAAAAA:148207,\
              CurrentPos:YJPosition: AR4GAAAAAAAA:524,\
              EndPos:YJPosition: AR4GAAAAAAAA:148207;"];
-        // A run does form — the line states where the reader stood, which is
-        // what a book the device never times has in place of a counter — but
-        // with one observation there is no span to measure and nothing bounding
-        // it, so the sitting is zero and [`store_events`] keeps no row for it.
+        // A run forms on the line stating where the reader stood. One
+        // observation spans nothing, and [`store_events`] keeps no row.
         assert!(
             parse_sessions(opened_and_shut.iter().copied(), None)
                 .iter()
@@ -2522,6 +2963,156 @@ mod tests {
             )
             .expect("the point survives the session that was not stored");
         assert_eq!(point, (148_213, 1566, 524));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A latency record naming `cde_key`, in the shape the reader shell writes.
+    fn named(stamp: &str, key: &str) -> String {
+        format!(
+            r#"{stamp} fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[1.0]: Emitting a new record. SchemaName[ereader_reader_page_turn_latency_ops], Fields[{{ 	"action" : "PageTurnTotalTime", 	"book_category" : "MAGZ", 	"cde_key" : "{key}", 	"latency" : 132 }} ]. :"#
+        )
+    }
+
+    /// A catalog key names a book the position axis cannot.
+    ///
+    /// The library holds this title at `max_position` 999999, so no session
+    /// ending at 148213 joins it — a different build of the same book, which is
+    /// what the axis is right to refuse. The key settles it outright.
+    #[test]
+    fn a_catalog_key_names_a_book_whose_axis_does_not_match() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-asin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+        conn.execute(
+            "INSERT INTO books (sha256, title, author, language, file_size, imported_at,
+                                amazon_asin, max_position)
+             VALUES ('sha', 'A Magazine', 'Author', 'en', 0, 't0', 'B00QPFC59S', 999999)",
+            [],
+        )
+        .unwrap();
+
+        let events: BTreeSet<String> = [
+            book_end_position("260803:095900", 148_213, 148_207),
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            named("260803:100001", "B00QPFC59S"),
+            page("260803:100500", "NextPage", 148_207, 120_000, 220),
+        ]
+        .into_iter()
+        .collect();
+        let out = store_events(&conn, &events, 1, "DEV", None, &mut job::ignore).unwrap();
+
+        assert_eq!(out.added, 1);
+        assert_eq!(out.attributed, 1, "the key named it; the axis could not");
+        let (position, book): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT end_position, book_id FROM reading_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(position, 148_213);
+        assert!(book.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog row names a book on a firmware that logs no key.
+    ///
+    /// The extent and key are a real pair off a KOA2's own `/var/local/cc.db`:
+    /// `p_contentSize` 416436 against `p_cdeKey`
+    /// `L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ`, the content id Sidle baked into that
+    /// book. The library here ends the title at a different position, which is
+    /// the case the axis is right to refuse.
+    #[test]
+    fn a_catalog_row_names_a_book_the_reading_lines_never_do() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-cat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+        conn.execute(
+            "INSERT INTO books (sha256, title, author, language, file_size, imported_at,
+                                asin, max_position)
+             VALUES ('sha', 'The Hangman''s Handyman', 'Author', 'en', 0, 't0',
+                     'L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ', 999999)",
+            [],
+        )
+        .unwrap();
+
+        let events: BTreeSet<String> = [
+            book_end_position("260803:095900", 416_436, 416_430),
+            page("260803:100000", "NextPage", 416_430, 60_000, 100),
+            page("260803:100500", "NextPage", 416_430, 120_000, 220),
+            "260803:100600 sidle-native: I SidleCatalog:extent=416436,\
+             cde_key=L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ,cde_type=PDOC;"
+                .to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let out = store_events(&conn, &events, 1, "DEV", None, &mut job::ignore).unwrap();
+
+        assert_eq!(out.added, 1);
+        assert_eq!(
+            out.attributed, 1,
+            "the catalog named it; the axis could not"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog row for a book this batch holds no reading for is still kept:
+    /// the sitting it answers may already be stored.
+    #[test]
+    fn a_catalog_row_is_kept_without_a_sitting_beside_it() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-catonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+
+        let events: BTreeSet<String> =
+            ["260803:100600 sidle-native: I SidleCatalog:extent=416436,\
+             cde_key=L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ,cde_type=PDOC;"
+                .to_string()]
+            .into_iter()
+            .collect();
+        store_events(&conn, &events, 1, "DEV", None, &mut job::ignore).unwrap();
+
+        let (pos, key): (i64, String) = conn
+            .query_row(
+                "SELECT end_position, asin FROM reading_log_asins",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pos, 416_436);
+        assert_eq!(key, "L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key the library holds no book for names nothing, and the axis is left
+    /// to answer.
+    #[test]
+    fn a_catalog_key_for_a_book_the_library_lacks_settles_nothing() {
+        let dir = std::env::temp_dir().join(format!("sidle-rl-asin-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("library.db")).unwrap();
+
+        let events: BTreeSet<String> = [
+            book_end_position("260803:095900", 148_213, 148_207),
+            page("260803:100000", "NextPage", 148_207, 60_000, 100),
+            named("260803:100001", "B0NOTHELD0"),
+            page("260803:100500", "NextPage", 148_207, 120_000, 220),
+        ]
+        .into_iter()
+        .collect();
+        let out = store_events(&conn, &events, 1, "DEV", None, &mut job::ignore).unwrap();
+
+        assert_eq!(out.added, 1);
+        assert_eq!(out.attributed, 0);
+        // Kept as evidence: the book may arrive next month.
+        let held: String = conn
+            .query_row("SELECT asin FROM reading_log_asins", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(held, "B0NOTHELD0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

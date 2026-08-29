@@ -262,8 +262,10 @@ mod tests {
     fn source_format_selects_by_the_file_that_arrived() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = library(tmp.path());
-        let mut select = Select::default();
-        select.source_format = Some("azw3".into());
+        let mut select = Select {
+            source_format: Some("azw3".into()),
+            ..Default::default()
+        };
         assert_eq!(titles(&select, &conn).len(), 1);
         select.source_format = Some("epub".into());
         assert_eq!(titles(&select, &conn).len(), 2);
