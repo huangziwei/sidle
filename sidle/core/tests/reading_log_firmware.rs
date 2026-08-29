@@ -123,6 +123,21 @@ fn turn(stamp: &str) -> String {
     )
 }
 
+/// The same, in the shape the Corretto/KPP stack writes it — a different
+/// schema, and the one that carries `action_start_time`.
+fn turn_kpp(stamp: &str) -> String {
+    format!(
+        r#"{stamp} fastmetrics[9690]: D fastmetrics:KindleFastMetricsPublisher:[4966.3]: Emitting a new record. SchemaName[ereader_book_page_turn], Fields[{{ 	"action_id" : "NextPageTurnWithSWIPE", 	"action_start_time" : 1786395841010, 	"book_category" : "PDOC", 	"book_format" : "YJOP", 	"failure_key" : "NextPageTurn.SUCCESS" }} ]. :"#
+    )
+}
+
+/// A chapter boundary, which sits among the turn records and is not one.
+fn content_point(stamp: &str) -> String {
+    format!(
+        r#"{stamp} fastmetrics[9690]: D fastmetrics:KindleFastMetricsPublisher:[4937.8]: Emitting a new record. SchemaName[ereader_content_point], Fields[{{ 	"context" : "Book:Reading:MainContent", 	"point_type" : "ChapterStart", 	"position" : 4205 }} ]. :"#
+    )
+}
+
 /// A book `ReadingTimerController` never times is measured page by page, not
 /// bounded by the awake span.
 ///
@@ -230,6 +245,50 @@ fn turns_are_taken_from_the_page_records_where_no_event_names_one() {
 
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].page_turns, 2);
+}
+
+/// The other stack's turn record is read too.
+///
+/// `ereader_book_page_turn` is what the Corretto/KPP firmware writes, and it is
+/// the only turn record on a device that writes no
+/// `ereader_book_linear_page_actions` at all.
+#[test]
+fn turns_are_taken_from_either_stacks_turn_record() {
+    let turns = [turn_kpp("260814:112500"), turn_kpp("260814:112600")];
+    let mut all: Vec<&str> = WORDLESS
+        .iter()
+        .chain(POWER)
+        .copied()
+        .chain(turns.iter().map(String::as_str))
+        .collect();
+    all.sort();
+    let out = parse_sessions(all, None);
+
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].page_turns, 2);
+}
+
+/// A chapter boundary is not a page turn.
+///
+/// `ereader_content_point` carries a `point_type` and no `action_id`, and sits
+/// among the turn records on both stacks.
+#[test]
+fn a_chapter_boundary_is_not_counted_as_a_turn() {
+    let points = [
+        content_point("260814:112500"),
+        content_point("260814:112600"),
+    ];
+    let mut all: Vec<&str> = WORDLESS
+        .iter()
+        .chain(POWER)
+        .copied()
+        .chain(points.iter().map(String::as_str))
+        .collect();
+    all.sort();
+    let out = parse_sessions(all, None);
+
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].page_turns, 0);
 }
 
 /// The zone comes off a record stating an instant the prefix also states.

@@ -1170,9 +1170,12 @@ fn metric(line: &str) -> Option<Metric> {
     if line.contains(METRIC_MARKERS[1]) {
         return Some(Metric::Close);
     }
-    if line.contains(METRIC_MARKERS[4]) || line.contains(METRIC_MARKERS[5]) {
-        // `NextPageTurnWithGESTURE_TAP_SWIPES` on one stack,
-        // `NextPageWithSwipe` on the other.
+    if line.contains(METRIC_MARKERS[3]) || line.contains(METRIC_MARKERS[4]) {
+        // The two records that carry an `action_id`: `ereader_book_page_turn`
+        // on one stack, naming `PrevPageTurnWithSWIPE`, and
+        // `ereader_book_linear_page_actions` on the other, naming
+        // `NextPageWithTap`. `ereader_content_point` beside them carries a
+        // `point_type` and no action.
         return match field_text(line, "action_id") {
             Some(a) if a.starts_with("Next") => Some(Metric::Forward),
             Some(a) if a.starts_with("Prev") => Some(Metric::Back),

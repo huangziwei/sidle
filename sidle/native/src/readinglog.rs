@@ -307,13 +307,14 @@ fn take_catalog(paths: &[PathBuf], lines: &mut Vec<String>) -> usize {
     n
 }
 
-/// `p_contentState` 1 is downloaded, 0 a cloud row. A `*`-prefixed `p_cdeKey`
-/// is the catalog's hash for a loose file — a scriptlet, `My Clippings.txt` —
-/// and matches no book.
+/// `p_location` is non-empty on a book the device holds, empty on a cloud row.
+/// `p_contentState` is 1 on a store book and 0 on a sideload.
+/// `p_cdeKey` beginning `*` is a loose file: a scriptlet, `My Clippings.txt`.
 const CATALOG_QUERY: &str = "select p_contentSize, p_cdeKey, p_cdeType from Entries \
-     where p_contentState = 1 and p_contentSize is not null \
+     where p_location is not null and p_location <> '' \
+       and p_contentSize is not null \
        and p_cdeKey is not null and p_cdeKey not like '*%' \
-       and p_cdeType in ('EBOK', 'PDOC')";
+       and p_cdeType in ('EBOK', 'PDOC', 'MAGZ')";
 
 /// Take `LIVE_LOG`'s new events into `out.lines`, and set `out.from.live_read`.
 ///
