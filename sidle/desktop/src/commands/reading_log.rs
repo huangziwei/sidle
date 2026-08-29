@@ -64,6 +64,22 @@ pub struct ReadingBook {
     pub entry: Option<db::ReadingEntry>,
     /// The book's place on its own axis, absent where either half is unstored.
     pub progress: Option<db::BookProgress>,
+    /// [`db::is_finished`] for this book.
+    pub finished: bool,
+    /// `books.finished_at`, set only by [`reading_log_set_finished`].
+    pub finished_at: Option<String>,
+}
+
+/// Mark a book read, or take the mark off. `books.finished_at` outranks the
+/// position, which an index or an afterword leaves short of the axis end.
+#[tauri::command]
+pub async fn reading_log_set_finished(
+    state: State<'_, AppState>,
+    book_id: i64,
+    finished: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::set_book_finished(&conn, book_id, finished).map_err(|e| e.to_string())
 }
 
 /// The sittings over `[from, to]`, earliest first.
@@ -164,6 +180,11 @@ pub async fn reading_log_book(
     .into_iter()
     .find(|b| b.book_id == book_id);
     let progress = db::book_progress(&conn, book_id).map_err(|e| e.to_string())?;
+    let finished_at = db::book_finished_at(&conn, book_id).map_err(|e| e.to_string())?;
+    let finished = db::is_finished(
+        progress.as_ref().map(|p| p.fraction),
+        finished_at.as_deref(),
+    );
     Ok(ReadingBook {
         days: days
             .into_iter()
@@ -171,6 +192,8 @@ pub async fn reading_log_book(
             .collect(),
         entry,
         progress,
+        finished,
+        finished_at,
     })
 }
 

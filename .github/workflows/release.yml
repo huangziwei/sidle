@@ -1,5 +1,5 @@
-# Release attaches the assets a tag names. release-check.sh parses the tag;
-# README.md documents the grammar.
+# Release attaches the assets a tag names. release-check.sh parses the tag and
+# prints the grammar on a tag it rejects.
 
 name: Release
 

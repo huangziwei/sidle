@@ -262,6 +262,8 @@
             <div class="rl-head-actions">
               <!-- No device picker. Which Kindle an archive came from is decided
                    from the archive itself, or from the one that is plugged in. -->
+              <button id="rl-refresh" class="btn btn-quiet"
+                      title="Re-read the reading log from the library">Refresh</button>
               <button id="rl-import" class="btn"
                       title="Read logbackup files copied off a Kindle">Import…</button>
             </div>
@@ -382,6 +384,11 @@
                 <strong id="rl-books-title"></strong>
                 <span id="rl-books-total" class="rl-muted"></span>
                 <div class="rl-group-actions">
+                  <!-- `db::is_finished`: the axis reached its end, or the book
+                       page's mark says so. A `.pill` like the library's facet
+                       filters, squared to this row's controls. -->
+                  <button type="button" id="rl-finished" class="pill" aria-pressed="false"
+                          title="Only books read to the end or marked finished">Finished</button>
                   <!-- How finely the year is cut up. Always the same books —
                        only the bands they sit in change, and each band's figures
                        are that band's own. Hidden while a single day is
@@ -452,6 +459,10 @@
                 <div class="rl-bar-track"><i id="rl-book-progress-fill"></i></div>
                 <span id="rl-book-progress-label" class="rl-muted"></span>
               </div>
+              <!-- Outside #rl-book-progress: a book with no axis stored is
+                   markable, and that block hides without one. -->
+              <button type="button" id="rl-book-finished" class="pill rl-finish" hidden
+                      aria-pressed="false">Mark finished</button>
               <dl id="rl-book-stats" class="rl-facts"></dl>
             </aside>
             <!-- When it was read, then what was marked while reading it: both

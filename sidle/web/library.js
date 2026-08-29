@@ -2769,6 +2769,13 @@ function subscribeAnnotationSync() {
     window.sidleReader?.reloadAnnotations?.();
     // New files may have landed — refresh the Files tab if it's open.
     window.Misc?.invalidate();
+    // A USB sync carries reading sessions too.
+    window.ReadingLog?.invalidate?.();
+  });
+  // `POST /sync/reading-log` over the LAN, reaching the app through
+  // `sync_pulse`. The Kindle pushes reading with no annotation attached to it.
+  window.api.listen("reading-log:changed", () => {
+    window.ReadingLog?.invalidate?.();
   });
   window.api.listen("annotations:sync-error", (e) => {
     state.annotationSync = false;

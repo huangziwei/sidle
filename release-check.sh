@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# Which products a release covers, and whether a tag's claim holds. README.md
-# documents the grammar; $GITHUB_OUTPUT, when set, takes the scope.
-#   ./release-check.sh [<tag>]
+# Which products a release covers, and whether a tag's claim holds.
+#   ./release-check.sh [<tag>]   sidle-vX.Y.Z | bokai-vX.Y.Z | the two joined
+#   by '+'; a bare vX.Y.Z is sidle. $GITHUB_OUTPUT, when set, takes the scope.
 set -eu
 
 cd "$(dirname "$0")"
@@ -105,9 +105,9 @@ verdict() {
     0) echo "$product has no change since $last_name — no release needed" ;;
     *)
         if [ "$version" = "$last_version" ]; then
-            echo "$product has $n changed files since $last_name and is still at $version — bump it, then tag"
+            echo "$product has $n changed $(plural "$n") since $last_name and is still at $version — bump it, then tag"
         else
-            echo "$product has $n changed files since $last_name — release it as $product-v$version"
+            echo "$product has $n changed $(plural "$n") since $last_name — release it as $product-v$version"
         fi
         ;;
     esac
@@ -117,6 +117,11 @@ verdict() {
 uncommitted() {
     # shellcheck disable=SC2046
     git status --porcelain -- $(paths_of "$1") 2>/dev/null | wc -l | tr -d ' '
+}
+
+# `file` for one, `files` for any other count.
+plural() {
+    [ "$1" = 1 ] && echo file || echo files
 }
 
 # Prints $1's table line: manifest version, last tag, distance from it.
@@ -132,6 +137,7 @@ row() {
     case "$n" in
     0) since="unchanged" ;;
     '?') since="unknown" ;;
+    1) since="1 file" ;;
     *) since="$n files" ;;
     esac
     dirty="$(uncommitted "$product")"

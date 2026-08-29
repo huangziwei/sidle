@@ -1372,6 +1372,11 @@ async fn sync_reading_log(
                 String::new()
             }
         };
+        // Rows the Reading Log page draws from. A push that stored nothing
+        // writes none.
+        if stored.added > 0 || stored.extended > 0 || stored.attributed > 0 {
+            write_reading_pulse(&paths, &req.device_serial, &stored);
+        }
         Ok(ReadingLogResult {
             sessions: stored.sessions,
             added: stored.added,
@@ -1443,6 +1448,32 @@ fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceIm
     }
     if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
         tracing::warn!(?err, "sync pulse: rename failed");
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
+
+/// Atomically write `<root>/.reading-pulse.json` — the reading-log twin of
+/// [`write_sync_pulse`]. `POST /sync/reading-log` lands sessions the desktop's
+/// Reading Log page holds in memory, and this is what tells it to refetch.
+fn write_reading_pulse(paths: &LibraryPaths, device_serial: &str, stored: &reading_log::Imported) {
+    let pulse = serde_json::json!({
+        "ts": db::now_iso(),
+        "device_serial": device_serial,
+        "added": stored.added,
+        "extended": stored.extended,
+        "attributed": stored.attributed,
+    });
+    let Ok(bytes) = serde_json::to_vec(&pulse) else {
+        return;
+    };
+    let final_path = paths.root.join(".reading-pulse.json");
+    let tmp_path = paths.root.join(".reading-pulse.json.tmp");
+    if let Err(err) = std::fs::write(&tmp_path, &bytes) {
+        tracing::warn!(?err, "reading pulse: write tmp failed");
+        return;
+    }
+    if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
+        tracing::warn!(?err, "reading pulse: rename failed");
         let _ = std::fs::remove_file(&tmp_path);
     }
 }

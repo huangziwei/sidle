@@ -5171,6 +5171,19 @@ kbd {
 
 .rl-progress-block .rl-muted { font-size: 11px; }
 
+/* The finished mark, in the identity column beside the cover. A `.pill` like
+   the grid's filter, sized down to the sidebar and set on its own line. */
+.rl-finish {
+  align-self: flex-start;
+  margin: 6px 0 2px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.rl-finish[hidden] {
+  display: none;
+}
+
 /* ── The books of whatever the heatmap is showing ────────────────────────── */
 
 .rl-books { margin-top: 22px; }
@@ -5189,6 +5202,12 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* `.rl-group-actions .pill` takes the 6px chamber of the `.seg` and
+   `.sort-button` beside it. */
+.rl-group-actions .pill {
+  border-radius: 6px;
 }
 
 /* Year / Month / Day, sitting beside the sort button and matched to it: same

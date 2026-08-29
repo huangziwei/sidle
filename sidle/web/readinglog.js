@@ -30,6 +30,7 @@
     day: null, // selected YYYY-MM-DD within that year, or null
     books: [], // the grid: books of the selected day, else of the year
     bucket: "year", // how finely the grid cuts the year up: year | month | day
+    finishedOnly: false, // the grid keeps only books read to the end
     clockView: "hour", // which cut of the clock cube is drawn: hour | week | month
     sort: { key: "last", asc: false }, // most recently read first
     scope: 0, // guards the async grid fetch against a stale reply
@@ -107,6 +108,14 @@
   function shortDay(iso) {
     const d = parseDay((iso || "").slice(0, 10));
     return d ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  }
+
+  // `shortDay` carrying the year, for a date outside the current one.
+  function shortDayYear(iso) {
+    const d = parseDay((iso || "").slice(0, 10));
+    return d
+      ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+      : "";
   }
 
   function fmtDay(iso) {
@@ -198,6 +207,7 @@
 
   function invalidate() {
     state.loaded = false;
+    if (!q("#reading-log").hidden) refresh();
   }
 
   // ── Overview ───────────────────────────────────────────────────────────────
@@ -979,9 +989,16 @@
     }
     if (token !== state.scope) return;
 
+    if (state.finishedOnly) rows = rows.filter((r) => r.finished);
     state.books = rows;
     const total = rows.reduce((a, r) => a + r.seconds, 0);
-    q("#rl-books-total").textContent = rows.length ? fmtDuration(total) : "nothing read";
+    q("#rl-finished").setAttribute("aria-pressed", String(state.finishedOnly));
+    q("#rl-finished").classList.toggle("active", state.finishedOnly);
+    q("#rl-books-total").textContent = rows.length
+      ? fmtDuration(total)
+      : state.finishedOnly
+        ? "nothing finished"
+        : "nothing read";
     // A band per day means every card already sits under its own date, so the
     // cards say the time of day instead of repeating it — the same thing they
     // do when a single day is selected.
@@ -1273,17 +1290,21 @@
       q("#rl-book-stats").innerHTML = "";
     }
     renderProgress();
+    renderFinishMark();
     renderMonth();
     renderNotes();
   }
 
-  // The fraction of the axis read, or null where either half is unstored.
-  // `linear_pos` past `max_position` comes of a stored file differing from the
-  // build the device read, and clamps.
+  // A fraction rounding to 100%, the rounding `renderProgress` prints.
+  function isFinished(frac) {
+    return frac != null && Math.round(frac * 100) >= 100;
+  }
+
+  // `db::progress_fraction` of the open book, or null where either half is
+  // unstored.
   function readFraction() {
     const p = state.book?.progress;
-    if (!p || !p.max_position) return null;
-    return Math.min(1, Math.max(0, p.linear_pos / p.max_position));
+    return p ? p.fraction : null;
   }
 
   function renderProgress() {
@@ -1294,17 +1315,53 @@
     const pct = Math.round(frac * 100);
     q("#rl-book-progress-fill").style.width = `${(frac * 100).toFixed(1)}%`;
     q("#rl-book-progress-label").textContent =
-      frac >= 1 ? "At the end" : `${pct}% of the way in`;
+      isFinished(frac) ? "At the end" : `${pct}% of the way in`;
     q("#rl-book-progress-label").title =
       `Position ${state.book.progress.linear_pos} of ${state.book.progress.max_position}` +
       ` (${state.book.progress.source})`;
   }
 
+  // `#rl-book-finished` shows where `readFraction` is short of the end.
+  function renderFinishMark() {
+    const btn = q("#rl-book-finished");
+    const b = state.book;
+    const atEnd = isFinished(readFraction());
+    btn.hidden = !b || atEnd;
+    if (btn.hidden) return;
+    const marked = !!b.finished_at;
+    btn.classList.toggle("active", marked);
+    btn.setAttribute("aria-pressed", String(marked));
+    btn.textContent = marked ? "Finished" : "Mark finished";
+    btn.title = marked
+      ? `Marked on ${shortDay(b.finished_at)} — click to unmark`
+      : "Count this book as read, whatever the last position says";
+  }
+
+  async function toggleFinishMark() {
+    const b = state.book;
+    if (!b) return;
+    const want = !b.finished_at;
+    try {
+      await api.invoke("reading_log_set_finished", { bookId: b.id, finished: want });
+    } catch (e) {
+      return toast(`could not mark the book: ${e}`, true);
+    }
+    b.finished_at = want ? new Date().toISOString() : null;
+    b.finished = want || isFinished(readFraction());
+    renderFinishMark();
+  }
+
   // Time left and a finish date, at this book's own measured pace. Both are
   // absent without a position, and at the end of the book.
+  // `paceFacts` scales by `(1 - frac) / frac`, which runs away as `frac`
+  // approaches zero. PACE_FLOOR is the fraction its projection needs.
+  const PACE_FLOOR = 0.05;
+
   function paceFacts(entry, days) {
     const frac = readFraction();
-    if (frac === null || frac <= 0 || frac >= 1 || !entry.seconds || !days.length) return [];
+    if (frac === null || frac < PACE_FLOOR || frac >= 1 || !entry.seconds || !days.length) {
+      return [];
+    }
     // The seconds behind `frac` of the axis, scaled to what is left of it.
     const left = Math.round((entry.seconds * (1 - frac)) / frac);
     const perDay = entry.seconds / days.length;
@@ -1318,7 +1375,9 @@
       out.push(
         fact(
           "Finish by",
-          shortDay(dayKey(end)),
+          end.getFullYear() === new Date().getFullYear()
+            ? shortDay(dayKey(end))
+            : shortDayYear(dayKey(end)),
           `${daysLeft} reading day${daysLeft === 1 ? "" : "s"} at the current pace`,
         ),
       );
@@ -1636,6 +1695,12 @@
   // ── Wiring ─────────────────────────────────────────────────────────────────
 
   function init() {
+    q("#rl-refresh").addEventListener("click", refresh);
+    q("#rl-book-finished").addEventListener("click", toggleFinishMark);
+    q("#rl-finished").addEventListener("click", () => {
+      state.finishedOnly = !state.finishedOnly;
+      renderScope();
+    });
     q("#rl-import").addEventListener("click", doImport);
     q("#rl-purge").addEventListener("click", doPurge);
     q("#rl-cancel").addEventListener("click", async () => {

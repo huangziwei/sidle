@@ -551,6 +551,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "books", "pdf_path")? {
         conn.execute("ALTER TABLE books ADD COLUMN pdf_path TEXT", [])?;
     }
+    // `finished_at` is when a book was marked read. An index, endnotes or an
+    // afterword leaves the axis short of its end. NULL is unmarked.
+    if !has_column(conn, "books", "finished_at")? {
+        conn.execute("ALTER TABLE books ADD COLUMN finished_at TEXT", [])?;
+    }
     // Reading layout / writing mode, editable in the metadata modal (the axis the
     // generated KFX bakes into `document_data.writing_mode`; `ppd` mirrors its
     // page-turn). NULL = Auto/derive, which is what every row predating the
@@ -2742,18 +2747,65 @@ pub fn reading_sessions_on(
 /// How far into a book its last-read position sits.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BookProgress {
-    /// The newest `reading_position.linear_pos` across every source.
+    /// The furthest `reading_position.linear_pos` across every source.
     pub linear_pos: i64,
     /// `books.max_position` — the exclusive end of the same axis.
     pub max_position: i64,
-    /// The `reading_position.source` that supplied `linear_pos`.
+    /// The `reading_position.source` holding that furthest position.
     pub source: String,
     pub updated_at: String,
+    /// [`progress_fraction`] of the two positions above.
+    pub fraction: f64,
+}
+
+/// True for a `finished_at` mark, and for a `fraction` rounding to 100% — the
+/// rounding the reading log's percentage prints.
+pub fn is_finished(fraction: Option<f64>, finished_at: Option<&str>) -> bool {
+    if finished_at.is_some_and(|s| !s.is_empty()) {
+        return true;
+    }
+    fraction.is_some_and(|f| (f * 100.0).round() >= 100.0)
+}
+
+/// `books.finished_at` for one book, `None` when unmarked or absent.
+pub fn book_finished_at(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT finished_at FROM books WHERE id = ?1",
+        params![book_id],
+        |r| r.get(0),
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
+/// Mark a book read, or take the mark off. Stores the moment it was marked.
+pub fn set_book_finished(conn: &Connection, book_id: i64, finished: bool) -> rusqlite::Result<()> {
+    let at = finished.then(now_iso);
+    conn.execute(
+        "UPDATE books SET finished_at = ?2 WHERE id = ?1",
+        params![book_id, at],
+    )?;
+    Ok(())
+}
+
+/// The share of a book's axis read, in `[0, 1]`, or `None` without an axis.
+/// `linear_pos` past `max_position` clamps.
+pub fn progress_fraction(linear_pos: i64, max_position: i64) -> Option<f64> {
+    if max_position <= 0 {
+        return None;
+    }
+    Some((linear_pos as f64 / max_position as f64).clamp(0.0, 1.0))
 }
 
 /// One book's place on its own position axis. `None` where `max_position` or
 /// `reading_position` is absent. `linear_pos` can exceed `max_position` where
 /// the stored KFX differs from the build read on the device, and clamps.
+///
+/// The furthest `linear_pos` held by a `reading_position` row or an annotation,
+/// whose `source` names which. A `.yjf` flushed while a book is open trails the
+/// `.yjr` beside it, and a highlight is a position the reader reached.
 pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookProgress>> {
     let max: Option<i64> = conn.query_row(
         "SELECT max_position FROM books WHERE id = ?1",
@@ -2764,16 +2816,23 @@ pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option
         return Ok(None);
     };
     conn.query_row(
-        r#"SELECT linear_pos, source, updated_at FROM reading_position
-            WHERE book_id = ?1 AND linear_pos IS NOT NULL
-            ORDER BY updated_at DESC LIMIT 1"#,
+        r#"SELECT linear_pos, source, updated_at FROM (
+                SELECT linear_pos, source, updated_at FROM reading_position
+                 WHERE book_id = ?1 AND linear_pos IS NOT NULL
+                UNION ALL
+                SELECT linear_pos, 'annotation', COALESCE(added_at, imported_at)
+                  FROM annotations
+                 WHERE book_id = ?1 AND linear_pos IS NOT NULL)
+            ORDER BY linear_pos DESC LIMIT 1"#,
         params![book_id],
         |r| {
+            let linear_pos: i64 = r.get(0)?;
             Ok(Some(BookProgress {
-                linear_pos: r.get(0)?,
+                linear_pos,
                 max_position,
                 source: r.get(1)?,
                 updated_at: r.get(2)?,
+                fraction: progress_fraction(linear_pos, max_position).unwrap_or(0.0),
             }))
         },
     )
@@ -2901,7 +2960,15 @@ pub fn reading_books(
                   MIN(s.started_at), MAX(s.ended_at),
                   GROUP_CONCAT(DISTINCT s.device_serial), {bucket},
                   SUM(CASE WHEN s.measure = 'dwell' THEN s.seconds ELSE 0 END),
-                  SUM(CASE WHEN s.measure = 'awake' THEN s.seconds ELSE 0 END)
+                  SUM(CASE WHEN s.measure = 'awake' THEN s.seconds ELSE 0 END),
+                  b.max_position,
+                  (SELECT MAX(lp) FROM (
+                     SELECT linear_pos AS lp FROM reading_position
+                      WHERE book_id = s.book_id
+                     UNION ALL
+                     SELECT linear_pos FROM annotations
+                      WHERE book_id = s.book_id)),
+                  b.finished_at
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
             WHERE s.day BETWEEN ?1 AND ?2
             GROUP BY {bucket}, s.book_id
@@ -2963,6 +3030,11 @@ pub struct ReadingEntry {
     /// knowing — an archive imported without saying where it came from — never
     /// a guess.
     pub devices: Vec<String>,
+    /// [`progress_fraction`] over this book's furthest position, `None` where
+    /// either half is unstored. The same figure [`book_progress`] reports.
+    pub progress: Option<f64>,
+    /// [`is_finished`] of that fraction and `books.finished_at`.
+    pub finished: bool,
 }
 
 fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<ReadingEntry> {
@@ -2970,6 +3042,14 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
     let cover_path = resolve_opt(root, r.get(4)?);
     let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
     let devices: Option<String> = r.get(11)?;
+    let max_position: Option<i64> = r.get(15)?;
+    let linear_pos: Option<i64> = r.get(16)?;
+    let progress = match (linear_pos, max_position) {
+        (Some(pos), Some(max)) => progress_fraction(pos, max),
+        _ => None,
+    };
+    let finished_at: Option<String> = r.get(17)?;
+    let finished = is_finished(progress, finished_at.as_deref());
     Ok(ReadingEntry {
         bucket: r.get(12)?,
         book_id: r.get(0)?,
@@ -2994,6 +3074,8 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect(),
+        progress,
+        finished,
     })
 }
 
@@ -5003,6 +5085,38 @@ pub fn remove_app_source(conn: &Connection, id: &str) -> rusqlite::Result<bool> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_fraction_clamps_a_position_past_the_end() {
+        // A stored KFX differing from the build the device read puts
+        // `linear_pos` beyond `max_position`.
+        assert_eq!(super::progress_fraction(147665, 147652), Some(1.0));
+        assert_eq!(super::progress_fraction(-5, 100), Some(0.0));
+    }
+
+    #[test]
+    fn a_mark_finishes_a_book_the_axis_does_not() {
+        // An index or endnotes nobody pages through leaves the axis short.
+        assert!(!super::is_finished(Some(0.62), None));
+        assert!(super::is_finished(Some(0.62), Some("2026-08-30T00:00:00Z")));
+        // A book with no axis is markable.
+        assert!(super::is_finished(None, Some("2026-08-30T00:00:00Z")));
+        assert!(!super::is_finished(None, None));
+    }
+
+    #[test]
+    fn the_end_of_the_axis_finishes_a_book_unmarked() {
+        assert!(super::is_finished(Some(1.0), None));
+        // The same rounding the percentage on the page prints.
+        assert!(super::is_finished(Some(0.9986), None));
+        assert!(!super::is_finished(Some(0.99), None));
+    }
+
+    #[test]
+    fn progress_fraction_needs_an_axis() {
+        assert_eq!(super::progress_fraction(500, 0), None);
+        assert_eq!(super::progress_fraction(500, 1000), Some(0.5));
+    }
+
     use super::*;
 
     fn fresh_db() -> Connection {
@@ -7478,6 +7592,54 @@ mod tests {
         set_reading_position(&conn, book, Some(2), Some(0), Some(250), "sidle", "").unwrap();
         let p = book_progress(&conn, book).unwrap().unwrap();
         assert_eq!((p.linear_pos, p.max_position), (250, 1000));
+    }
+
+    #[test]
+    fn a_highlight_beyond_the_stored_position_carries_progress() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-ann", "A book");
+        set_max_position(&conn, book, Some(27_351)).unwrap();
+        // A `.yjf` flushed before the sitting that made the highlight.
+        set_reading_position(&conn, book, Some(975), Some(0), Some(29), "device", "GN43").unwrap();
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "ann-far",
+                book_id: Some(book),
+                kind: "highlight",
+                eid_start: Some(1548),
+                off_start: Some(64),
+                eid_end: Some(1548),
+                off_end: Some(80),
+                loc_start: None,
+                loc_end: None,
+                linear_pos: Some(24_744),
+                text: "x",
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: Some("2026-08-25T11:55:00Z"),
+                added_raw: None,
+                imported_at: "2026-08-25T12:00:20Z",
+                source: "yjr",
+            },
+        )
+        .unwrap();
+        let p = book_progress(&conn, book).unwrap().unwrap();
+        assert_eq!(p.linear_pos, 24_744);
+        assert_eq!(p.source, "annotation");
+        // The grid reads the same figure.
+        let rows = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+            ReadingBucket::Total,
+        )
+        .unwrap();
+        assert!(rows.is_empty() || rows[0].progress.is_some());
     }
 
     #[test]

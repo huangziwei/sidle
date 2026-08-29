@@ -170,6 +170,7 @@ pub fn run() {
             commands::reading_log::reading_log_attribute,
             commands::reading_log::reading_log_sessions,
             commands::reading_log::reading_log_day_hours,
+            commands::reading_log::reading_log_set_finished,
         ])
         .on_window_event(|window, event| {
             // `prevent_close` keeps the process alive with its window hidden.
