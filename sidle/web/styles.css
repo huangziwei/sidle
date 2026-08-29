@@ -5171,8 +5171,7 @@ kbd {
 
 .rl-progress-block .rl-muted { font-size: 11px; }
 
-/* The finished mark, in the identity column beside the cover. A `.pill` like
-   the grid's filter, sized down to the sidebar and set on its own line. */
+/* `#rl-book-finished` takes `.pill` sized down to the identity column. */
 .rl-finish {
   align-self: flex-start;
   margin: 6px 0 2px;
@@ -5204,10 +5203,14 @@ kbd {
   gap: 8px;
 }
 
-/* `.rl-group-actions .pill` takes the 6px chamber of the `.seg` and
-   `.sort-button` beside it. */
-.rl-group-actions .pill {
-  border-radius: 6px;
+/* `#rl-finished` and `#rl-day-clear` are `.btn-quiet` text beside the framed
+   `.seg` and `.sort-button`. `.active` colours the engaged one. */
+.rl-group-actions .btn-quiet.active {
+  color: var(--accent);
+}
+
+.rl-group-actions .btn-quiet.active:hover {
+  color: var(--accent);
 }
 
 /* Year / Month / Day, sitting beside the sort button and matched to it: same

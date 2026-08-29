@@ -384,10 +384,10 @@
                 <strong id="rl-books-title"></strong>
                 <span id="rl-books-total" class="rl-muted"></span>
                 <div class="rl-group-actions">
-                  <!-- `db::is_finished`: the axis reached its end, or the book
-                       page's mark says so. A `.pill` like the library's facet
-                       filters, squared to this row's controls. -->
-                  <button type="button" id="rl-finished" class="pill" aria-pressed="false"
+                  <!-- `db::is_finished`: the axis reached its end, or the
+                       book page mark says so. `.btn-quiet` like
+                       #rl-day-clear beside it. -->
+                  <button type="button" id="rl-finished" class="btn btn-quiet" aria-pressed="false"
                           title="Only books read to the end or marked finished">Finished</button>
                   <!-- How finely the year is cut up. Always the same books —
                        only the bands they sit in change, and each band's figures
@@ -459,8 +459,7 @@
                 <div class="rl-bar-track"><i id="rl-book-progress-fill"></i></div>
                 <span id="rl-book-progress-label" class="rl-muted"></span>
               </div>
-              <!-- Outside #rl-book-progress: a book with no axis stored is
-                   markable, and that block hides without one. -->
+              <!-- Outside #rl-book-progress, which hides without a stored axis. -->
               <button type="button" id="rl-book-finished" class="pill rl-finish" hidden
                       aria-pressed="false">Mark finished</button>
               <dl id="rl-book-stats" class="rl-facts"></dl>
