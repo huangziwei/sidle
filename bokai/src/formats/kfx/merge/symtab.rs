@@ -1,17 +1,4 @@
 //! Local Ion symbol table (mirrors `ion_symbol_table.py::LocalSymbolTable`).
-//!
-//! Tracks the shared-table imports (always `$ion` + `YJ_symbols` for KFX) plus
-//! a list of locally-declared symbol strings. Symbol IDs are assigned in
-//! insertion order starting at 1 (SYSTEM), continuing with YJ shared symbols,
-//! then locals.
-//!
-//! Canonical names:
-//!  - IDs 1..=9 → `SYSTEM_SYMBOLS[id-1]` (e.g. `"$ion"`, `"imports"`).
-//!  - IDs 10..=`local_min_id-1` → `"$<id>"` (calibre's catalog form).
-//!  - IDs ≥ `local_min_id` → `local_symbols[id - local_min_id]`.
-//!
-//! Lookup-by-name (`get_id`) accepts either canonical form: `"$258"` returns
-//! 258 by regex, everything else hits a name → id `HashMap`.
 
 use std::collections::HashMap;
 
@@ -114,10 +101,6 @@ impl LocalSymbolTable {
     /// Calibre's `LocalSymbolTable.create`: when a `$ion_symbol_table`
     /// fragment is encountered, reset the symtab and re-import per its
     /// `imports` field, then append its `symbols`.
-    ///
-    /// `imports` is the list of `(name, version, max_id)` (max_id already
-    /// adjusted by `-= SYSTEM_SYMBOLS.len()` per calibre's
-    /// `KfxContainer.deserialize`). `symbols` is the local symbols list.
     pub fn create(&mut self, imports: &[SymbolTableImport], symbols: &[String]) {
         self.clear();
         for imp in imports {

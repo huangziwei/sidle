@@ -1,16 +1,5 @@
 //! Variable-density (pencil) stroke → feathered raster PNG, embedded as a
 //! data-URI `<image>`.
-//!
-//! Port of the `variable_density` branch of `scribe_notebook_stroke`
-//! (kfxlib's `yj_to_epub_notebook.py`). A pencil stroke is not
-//! a crisp path but a soft, grainy band whose darkness varies with pen
-//! pressure, so kfxlib rasterizes a per-stroke density map — feathered discs
-//! stamped along the centreline, gamma-shaped, then dithered to a transparent
-//! stipple — and embeds it under the stroke's bounding box. We reproduce that
-//! algorithm. The stipple PRNG is a deterministic SplitMix64 seeded by the
-//! stroke's `random_seed`: the device's exact Mersenne-Twister pattern isn't
-//! reproduced (it isn't observable in the output anyway), only an equivalent
-//! grain, so a given notebook always renders identically.
 
 use std::fmt::Write as _;
 

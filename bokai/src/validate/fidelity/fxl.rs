@@ -1,21 +1,5 @@
 //! Fixed-layout (manga / comic) validation — verify that an image-based
 //! fixed-layout source KFX produced a conformant pre-paginated EPUB.
-//!
-//! KFX side: read the book's fixed-layout signals. `yj_*fixed_layout` ⇒ the
-//! book is image-based fixed layout; `yj_double_page_spread` ⇒ a spread comic.
-//!
-//! EPUB side (mirrors what the EPUB export must emit, calibre
-//! `epub_output.py` + `yj_to_epub_content.py`):
-//!
-//! - `<meta property="rendition:layout">pre-paginated` in the OPF metadata.
-//! - A `<meta name="viewport">` in **every** spine document.
-//! - `page-spread-left`/`page-spread-right` itemref properties for a spread
-//!   comic (so readers pair facing pages).
-//! - No orphan images: every manifest image is referenced by a page (manga
-//!   ships a full page-thumbnail set the reading order never uses).
-//!
-//! Gates fire only when the KFX is fixed layout; a reflowable book passes
-//! trivially.
 
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
@@ -53,9 +37,6 @@ pub struct Report {
 
 impl Report {
     /// Clean iff the EPUB matches the KFX's fixed-layout shape. A reflowable
-    /// source passes trivially. A fixed-layout source asks for pre-paginated
-    /// layout, a viewport on every page, no orphan images, and — for a spread
-    /// comic — at least one page-spread property.
     pub fn is_clean(&self) -> bool {
         if !self.kfx_fixed_layout {
             return true;

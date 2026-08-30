@@ -3,15 +3,6 @@ use std::path::Path;
 
 fn main() {
     // `generate_context!` embeds the frontend (`frontendDist = ../web`) into the
-    // binary at compile time. Cargo doesn't reliably treat those files as inputs
-    // to this crate, so a frontend-only edit would leave `cargo run` serving the
-    // stale assets embedded by the last compile.
-    //
-    // Fingerprint the whole web tree into a rustc env var: when any file's bytes
-    // change, the fingerprint changes, which is a crate compilation input, so the
-    // crate recompiles and `generate_context!` re-reads + re-embeds. The
-    // per-file rerun-if-changed makes this build script itself rerun to recompute
-    // the fingerprint.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     fingerprint_dir(Path::new("../web"), &mut hasher);
     println!(

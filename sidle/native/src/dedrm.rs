@@ -1,25 +1,4 @@
 //! DRM-books source — the on-device scan + decrypt-engine probe.
-//!
-//! [`scan`] lists the purchased Amazon books the stock reader downloaded to
-//! [`ITEMS_DIR`], the picker's second library source; a tap decrypts one in
-//! place through the **kfxdedrm** engine, a separate KUAL extension whose
-//! binary [`probe_exe`] locates and `main.rs` spawns. This module is the
-//! **pure** half — filesystem scan, filename parsing, the DRM gates, the
-//! executable probe — and builds and unit-tests on the host, alongside
-//! [`crate::device_state`]. The device half (spawn + toast streaming) is
-//! `main.rs`'s `decrypt_flow`, the sibling of `download_flow`.
-//!
-//! The engine decrypts two families and [`scan`] lists both (see [`Format`]):
-//! - **KFX** — `<Title>_<ASIN>.kfx` plus a sibling `<Title>_<ASIN>.sdr/` whose
-//!   `assets/voucher` is the decrypt key. Output is `<stem>.kfx-zip`.
-//! - **MOBI family** — [`MOBI_EXTENSIONS`], gated on the PalmDOC
-//!   `encryption_type` in the book's own header. Output keeps the input's
-//!   filename; the engine copies the file and patches it in place.
-//!
-//! `title_from_stem` and `parse_asin` read the filename; `cover_for` reads the
-//! ASIN-keyed thumbnail cache under [`THUMBS_DIR`], which the device fills
-//! asynchronously — a just-downloaded book may have no cover yet. No book is
-//! opened or parsed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -76,10 +55,6 @@ impl Format {
 }
 
 /// A purchased DRM book found on the device — the app-layer view-model that
-/// carries the local paths/cover alongside the pipeline [`Book`], so `api::Book`
-/// (the server DTO) stays clean. The synthesized `book.id` is this entry's index
-/// in [`scan`]'s returned `Vec`; the cover + tap seams recover the local data by
-/// `book.id` (see `main.rs`).
 #[derive(Debug, Clone)]
 pub struct DrmBook {
     pub book: Book,
@@ -95,9 +70,6 @@ pub struct DrmBook {
 }
 
 /// Is the kfxdedrm engine installed? A cheap dir check gating entry to the DRM
-/// source; `main.rs` toasts on false. The per-ABI `<exe> test` probe
-/// ([`probe_exe`]) runs at decrypt time and catches a present-but-non-working
-/// install.
 pub fn available() -> bool {
     Path::new(BIN_DIR).is_dir()
 }
@@ -134,8 +106,6 @@ pub fn out_path(path: &Path) -> Option<PathBuf> {
 
 /// [`out_path`] with the output dir and the family injected; [`scan_in`] judges
 /// a temp tree with it. [`Format::Kfx`] takes the `.kfx-zip` extension;
-/// [`Format::Mobi`] keeps its own filename, the engine copying the file into
-/// the output dir and patching it there.
 fn out_in(dir: &Path, path: &Path, format: Format) -> Option<PathBuf> {
     match format {
         Format::Kfx => Some(dir.join(format!("{}.kfx-zip", path.file_stem()?.to_str()?))),
@@ -144,9 +114,6 @@ fn out_in(dir: &Path, path: &Path, format: Format) -> Option<PathBuf> {
 }
 
 /// The inverse of [`out_path`]: the encrypted book under [`ITEMS_DIR`] that
-/// produced a given output. The DRM Sync path works from the [`OUT_DIR`] files
-/// (see [`decrypted_books`]) and needs the original back to clean it up after a
-/// confirmed push. `None` if `out` is not an engine output.
 pub fn source_book(out: &Path) -> Option<PathBuf> {
     let items = Path::new(ITEMS_DIR);
     let name = out.file_name()?.to_str()?;
@@ -157,9 +124,6 @@ pub fn source_book(out: &Path) -> Option<PathBuf> {
 }
 
 /// A purchased book's sidecar dir: the `<stem>.sdr/` sitting beside it (for a
-/// KFX it holds `assets/voucher`, the decrypt key). Derived from the book path's
-/// own parent + stem, resolving both on-device (under [`ITEMS_DIR`]) and against
-/// a test's temp tree.
 fn sdr_dir(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -168,8 +132,6 @@ fn sdr_dir(path: &Path) -> PathBuf {
 
 /// Every decrypted book currently in [`OUT_DIR`] — the DRM-mode Sync button
 /// re-pushes all of these to the server, which dedupes a repeat push to a no-op.
-/// `is_output` recognises them by extension, leaving the engine's own
-/// `keyfile.txt` out. Empty (never errors) when the dir is absent.
 pub fn decrypted_books() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(OUT_DIR) else {
         return Vec::new();
@@ -197,17 +159,6 @@ fn is_output(path: &Path) -> bool {
 }
 
 /// Remove one purchased book's entire on-device footprint once it's confirmed on
-/// the desktop: the encrypted input, its `<stem>.sdr/` sidecar, and the
-/// decrypted output. Every target is derived from `path`'s own name — the
-/// sidecar beside it, the output under [`OUT_DIR`] — and it touches only the
-/// paths belonging to this one book, never scanning or globbing a directory. An
-/// absent target is a success: cleanup is idempotent. Returns each
-/// `(path, error)` it failed to remove, for the caller to log. Nothing aborts on
-/// a leftover; the desktop has the book.
-///
-/// Call this **only** after [`crate::api::push_book`] returns
-/// `Imported`/`Duplicate` for this book — never on a failed push, whose sole
-/// decrypted copy is the output the DRM Sync button will retry.
 pub fn cleanup_synced(path: &Path) -> Vec<(PathBuf, std::io::Error)> {
     cleanup_paths(path, &sdr_dir(path), out_path(path).as_deref())
 }
@@ -242,17 +193,6 @@ fn remove_lenient(path: &Path, is_dir: bool, failures: &mut Vec<(PathBuf, std::i
 }
 
 /// Scan [`ITEMS_DIR`] for decryptable purchased books, newest download first.
-///
-/// A candidate is a top-level file — non-recursive, skipping the `updates/`
-/// staging dir and the `.sdr` subtrees — that:
-/// - isn't a macOS `._*` AppleDouble shadow (they persist on the FAT partition);
-/// - carries an extension of one of the two [`Format`] families;
-/// - passes that family's DRM gate — which for a KFX is also the
-///   "download complete enough to decrypt" test, dropping mid-download books;
-/// - has no output yet.
-///
-/// Returns `[]` (never errors) when the dir is absent/unreadable; the caller
-/// shows an empty DRM view.
 pub fn scan() -> Vec<DrmBook> {
     scan_in(
         Path::new(ITEMS_DIR),
@@ -325,11 +265,6 @@ fn scan_in(items: &Path, thumbs: &Path, out_dir: &Path) -> Vec<DrmBook> {
 }
 
 /// Whether the book at `path` carries DRM the engine can strip.
-///
-/// [`Format::Kfx`] takes the voucher sidecar beside it. [`Format::Mobi`] takes
-/// its own PalmDOC header: types 1 and 2 are the pair the engine decodes, and
-/// it refuses everything else with "Cannot decode unknown Mobipocket encryption
-/// type".
 fn is_encrypted(path: &Path, format: Format) -> bool {
     match format {
         Format::Kfx => sdr_dir(path).join("assets").join("voucher").is_file(),
@@ -348,9 +283,6 @@ const RECORD_LIST_OFF: usize = 78;
 const ENCRYPTION_OFF: usize = 12;
 
 /// The `encryption_type` field of a MOBI-family book, as two short reads — the
-/// book is never opened as a book. `None` on an I/O error, a file cut short of
-/// the field, or a database that is not Mobipocket (a Topaz `.azw`, a
-/// half-copied download), none of which may read as DRM-free.
 fn palmdoc_encryption(path: &Path) -> Option<u16> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -415,7 +347,6 @@ fn format_mtime(t: SystemTime) -> String {
 /// A [`Book`] carrying only what a DRM book knows: id (its scan index), the
 /// filename title, byte size, and a sortable download time. Everything else is
 /// blank — DRM books have no series/author/tags, and render as standalone tiles.
-/// An empty `search_key` makes `search` fall back to the title.
 fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_at: String) -> Book {
     Book {
         id,
@@ -428,9 +359,6 @@ fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_a
         series_name: None,
         series_index: None,
         // The conversion kind this book's library row carries once imported: a
-        // KFX converts to EPUB, a MOBI-family book imports through its EPUB
-        // side. The Format facet buckets the tile the way the desktop buckets
-        // the book.
         kind: Some(
             match format {
                 Format::Kfx => "kfx_to_epub",
@@ -592,9 +520,6 @@ mod tests {
     #[test]
     fn scan_in_applies_the_recon_rules() {
         // A fake Items01 exercising every scan rule across both families: a
-        // good+covered KFX, an incomplete one (no voucher), a macOS shadow, a
-        // no-ASIN sideload, a decrypted one, a DRM'd azw3, a DRM-free mobi, a
-        // Topaz `.azw`, and the `updates/` staging dir.
         let base = scratch("scan");
         let items = base.join("Items01");
         let thumbs = base.join("thumbnails");

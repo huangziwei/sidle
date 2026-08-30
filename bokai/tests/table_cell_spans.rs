@@ -1,12 +1,4 @@
 //! A table cell's `colspan` / `rowspan` survives EPUB → KFX → EPUB.
-//!
-//! A cell has no element type of its own in KFX — it is whatever `type` its
-//! content wants, sitting in a `table_row`'s content list — so its span rides
-//! on the element as `$148 table_column_span` / `$149 table_row_span`. Neither
-//! direction read or wrote those fields, and the loss is not cosmetic: every
-//! cell after a dropped span shifts into the wrong column, so a two-column
-//! header over a four-column table comes back as a four-column header and the
-//! whole grid slides.
 
 use std::io::{Cursor, Write};
 
@@ -152,9 +144,6 @@ fn cell_spans_survive_the_epub_kfx_epub_round_trip() {
 }
 
 /// A table's `column_format` is the only place KFX states column proportions.
-/// Losing it does not merely drop a style: the grid re-sizes itself to its
-/// content, so a deliberately narrow label column widens to fit its longest
-/// entry and the layout the source specified is gone.
 #[test]
 fn column_widths_survive_the_epub_kfx_epub_round_trip() {
     let (doc, css) = round_trip();

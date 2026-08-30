@@ -3,27 +3,6 @@
 use crate::model::{Chapter, Node, NodeId, Role};
 
 /// Ensure tables have proper thead/tbody structure for KFX export.
-///
-/// KFX requires tables to have explicit `type: header` and `type: body` wrappers
-/// around table rows. This pass ensures all tables have this structure:
-///
-/// Before:
-/// ```text
-/// Table
-///   TableRow (with th cells)
-///   TableRow (with td cells)
-/// ```
-///
-/// After:
-/// ```text
-/// Table
-///   TableHead
-///     TableRow (with th cells)
-///   TableBody
-///     TableRow (with td cells)
-/// ```
-///
-/// Tables that already have TableHead/TableBody are left unchanged.
 pub fn normalize_table_structure(chapter: &mut Chapter) {
     // Collect all table nodes first to avoid borrow issues
     let tables: Vec<NodeId> = (0..chapter.node_count())
@@ -46,11 +25,6 @@ pub fn normalize_table_structure(chapter: &mut Chapter) {
 }
 
 /// Move a table's column group to be its first child.
-///
-/// `<colgroup>` belongs to the table and must precede the row sections, but an
-/// HTML parser inferring a `<tbody>` around a table's contents can sweep the
-/// colgroup in with the rows. Left there it exports as `<tbody><colgroup>`,
-/// which is invalid, and the row-section walk below would treat it as a row.
 fn hoist_column_group(chapter: &mut Chapter, table_id: NodeId) {
     let mut found = None;
     for section in chapter.children(table_id).collect::<Vec<_>>() {
@@ -122,8 +96,6 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
 
     // Collect all table rows, separating header rows from body rows
     // A row is a "header row" if ALL its cells are header cells (th)
-    // The column group is not a row and belongs to the table, not to a
-    // section — it is set aside here and re-attached in front below.
     let mut column_group: Option<NodeId> = None;
     let mut header_rows: Vec<NodeId> = Vec::new();
     let mut body_rows: Vec<NodeId> = Vec::new();
@@ -142,8 +114,6 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
     }
 
     // If we found header rows, wrap them in TableHead
-    // If we have body rows (or any rows at all), wrap them in TableBody
-    // We process body first, then header, so header ends up first in the child list
 
     // Clear table's children - we'll re-add them under wrappers
     if let Some(table) = chapter.node_mut(table_id) {
@@ -246,9 +216,6 @@ mod tests {
     use crate::model::NodeId;
 
     /// An HTML parser that infers a `<tbody>` around a table's contents can
-    /// sweep the `<colgroup>` in with the rows. Exported from there it is
-    /// `<tbody><colgroup>`, which no reader accepts, and the row-section walk
-    /// would count it as a row.
     #[test]
     fn a_column_group_swept_into_a_section_returns_to_the_table() {
         let mut chapter = Chapter::new();

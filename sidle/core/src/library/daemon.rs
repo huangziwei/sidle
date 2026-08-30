@@ -1,14 +1,5 @@
 //! The LAN server as a process: is one serving, which one, and how to start or
 //! stop it.
-//!
-//! `sidle-server` is a detached daemon, not a task inside anything: it outlives
-//! the desktop app so a Kindle can still reach the library with the window
-//! closed, and it is equally the CLI's to start. What both need is the same
-//! handful of observations and syscalls, which live here; the policy on top —
-//! when to replace a running daemon, how long to let it drain — belongs to the
-//! caller that has a reason for it.
-//!
-//! Every function here is blocking and sub-second.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -31,12 +22,6 @@ pub fn pid_path(paths: &LibraryPaths) -> PathBuf {
 }
 
 /// The daemon's PID, if the file names a plausible one.
-///
-/// **Only strictly positive values.** `kill(2)` reads non-positive PIDs as
-/// broadcasts: `0` signals every process in the caller's own process group and
-/// `-1` every process the user may signal. A truncated or corrupt PID file must
-/// never turn a routine stop into that — so anything that isn't a real process
-/// id is treated as no PID at all.
 pub fn read_pid(paths: &LibraryPaths) -> Option<i32> {
     std::fs::read_to_string(pid_path(paths))
         .ok()
@@ -46,13 +31,6 @@ pub fn read_pid(paths: &LibraryPaths) -> Option<i32> {
 
 /// Is *anything* listening on `port`? A bare TCP connect, so it is deliberately
 /// blind to what protocol the listener speaks.
-///
-/// That blindness is the point. Port contention is a question about the socket,
-/// not about the daemon, and answering it over HTTPS would make a listener we
-/// cannot speak to look like a free port — after which a spawn fails to bind for
-/// reasons the logs would not explain. The case is real rather than theoretical:
-/// a daemon left over from a pre-TLS build serves plaintext and answers no HTTPS
-/// probe at all, and it is exactly the one a launch most needs to displace.
 pub fn port_open(port: u16) -> bool {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
@@ -72,11 +50,6 @@ pub fn wait_for_port_free(port: u16, timeout: Duration) -> bool {
 
 /// "Up" = the liveness page answers over TLS, with the leaf verified against our
 /// own CA. Any HTTP status counts; what must succeed is the handshake.
-///
-/// Stricter than a plaintext probe on purpose: it answers "our daemon is
-/// serving, and its certificate is one our devices will accept", which is the
-/// property a sync actually depends on. A listener we cannot verify reads as
-/// down here — see [`port_open`] for the places that need the weaker question.
 pub fn probe(paths: &LibraryPaths, port: u16) -> bool {
     let Some(client) = probe_client(paths) else {
         return false;
@@ -89,15 +62,6 @@ pub fn probe(paths: &LibraryPaths, port: u16) -> bool {
 
 /// Shared HTTPS client for liveness probes, trusting our own CA and nothing
 /// else added on top of the system roots.
-///
-/// Built once (client construction is non-trivial; a start loop probes
-/// repeatedly) but **cached only on success**: on a first run the CA does not
-/// exist until [`ensure_tls_material`] has run, and caching a client without it
-/// would leave every later probe unable to verify the daemon it just started.
-///
-/// A CA regenerated after this point needs a restart to take effect. That costs
-/// nothing in practice — regenerating orphans every device carrying the old
-/// root, so it is already a redeploy-everything event.
 fn probe_client(paths: &LibraryPaths) -> Option<&'static reqwest::blocking::Client> {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
@@ -116,17 +80,6 @@ fn probe_client(paths: &LibraryPaths) -> Option<&'static reqwest::blocking::Clie
 
 /// Issue the TLS material the daemon refuses to start without, covering the
 /// addresses clients actually dial.
-///
-/// Loopback is for a local probe; the LAN address is what the Kindle uses, and
-/// it is re-issued on every start because DHCP can move it. The CA underneath is
-/// created once and never regenerated (see [`crate::library::tls`]), so this is
-/// cheap and idempotent in the way that matters — devices keep trusting the same
-/// root across every re-issue.
-///
-/// The leaf covers the LAN address **as of server start**. If the Mac's address
-/// changes while the daemon runs, the running leaf goes stale and the device
-/// fails to verify it until the next start — the same trip that already has to
-/// rewrite `HOST=` in the device's `server.conf`.
 pub fn ensure_tls_material(paths: &LibraryPaths) -> Result<()> {
     let mut sans = vec!["127.0.0.1".to_string(), "localhost".to_string()];
     if let Some(ip) = crate::library::device::deploy::detect_lan_ipv4() {
@@ -136,10 +89,6 @@ pub fn ensure_tls_material(paths: &LibraryPaths) -> Result<()> {
 }
 
 /// Ask the running daemon to stop, if one is both serving and nameable.
-///
-/// Signalling is gated on the port being open so a stale `server.pid` — the
-/// daemon removes it on graceful exit, but a crash could leave one — cannot
-/// deliver a SIGTERM to whatever process later reused that id.
 pub fn signal_stop(paths: &LibraryPaths, port: u16) -> bool {
     if !port_open(port) {
         return false;
@@ -156,16 +105,6 @@ pub fn signal_stop(paths: &LibraryPaths, port: u16) -> bool {
 }
 
 /// Resolve the `sidle-server` binary.
-///
-/// **Dev** (`debug_assertions`): `<workspace>/target/debug/sidle-server`,
-/// **rebuilt unconditionally before every spawn**. A `cargo run` of a consumer
-/// recompiles the `sidle_server` *lib* but not this *binary*, so without an
-/// unconditional rebuild the spawn gets stale server code. cargo is incremental,
-/// so this is a fast freshness check when nothing changed.
-///
-/// **Packaged** (release): the daemon rides along as a sidecar next to the
-/// calling executable, so the bundle is self-contained — no reach-back into a
-/// dev checkout's `target/`.
 pub fn binary() -> Result<PathBuf> {
     if cfg!(debug_assertions) {
         let root = workspace_root().context("locate workspace root for the sidle-server binary")?;
@@ -219,10 +158,6 @@ fn workspace_root() -> Result<PathBuf> {
 }
 
 /// Spawn the daemon fully detached so it outlives its launcher: a new session
-/// (`setsid`) drops the controlling terminal and puts it in its own process
-/// group, and stdio goes to `<root>/server.log`. No `--data-dir`: the daemon
-/// resolves the same root via `LibraryPaths::resolve()`, so it shares
-/// `library.db` and `.server-token` with whoever started it.
 pub fn spawn_detached(bin: &Path, paths: &LibraryPaths, port: u16) -> Result<Child> {
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -256,9 +191,6 @@ pub fn spawn_detached(bin: &Path, paths: &LibraryPaths, port: u16) -> Result<Chi
 
 /// Start a daemon on `port` and wait until it is answering, returning the child
 /// so the caller can reap it.
-///
-/// The caller decides what to do about anything already on the port; this only
-/// starts one.
 pub fn start(paths: &LibraryPaths, port: u16) -> Result<Child> {
     // The daemon hard-errors rather than falling back to plaintext when TLS
     // material is missing, so issue it before the spawn rather than letting the
@@ -294,9 +226,6 @@ mod tests {
         assert_eq!(read_pid(&paths), None);
 
         // `kill(2)` treats these as broadcasts — 0 hits our own process group,
-        // -1 every process the user owns. A corrupt PID file must not be able to
-        // turn a stop into that, so they are not PIDs as far as this is
-        // concerned.
         for broadcast in ["0", "-1", "-4321"] {
             std::fs::write(pid_path(&paths), broadcast).unwrap();
             assert_eq!(

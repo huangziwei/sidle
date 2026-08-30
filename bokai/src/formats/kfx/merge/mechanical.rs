@@ -1,13 +1,4 @@
 //! Mechanical port of calibre's `YJ_Book.convert_to_single_kfx`.
-//!
-//! Every fragment is fully deserialized into [`IonNode`] form, all of
-//! calibre's structure-rebuild + symtab-GC passes run, and every entity is
-//! re-encoded from scratch. This path is the correctness ground truth — it's
-//! what we measured "30/30 EPUB content match" against. The [`fast`] path
-//! short-circuits most of this.
-//!
-//! [`IonNode`]: super::node::IonNode
-//! [`fast`]: super::fast
 
 use std::io::{self, Read, Seek};
 use std::path::Path;

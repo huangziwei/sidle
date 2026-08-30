@@ -1,19 +1,5 @@
 //! Page-progression-direction validation — verify the OPF spine attribute
 //! `page-progression-direction` matches the source KFX `document_data`.
-//!
-//! KFX side (mirrors calibre's `yj_to_epub_metadata.py`):
-//!
-//! 1. Start from `document_data.direction` (symbol field, defaults to `ltr`).
-//! 2. A `document_data.writing_mode` ending in `-rl` (`vertical_rl`) overrides
-//!    to `rtl`. A vertical-RTL Japanese book carries `direction: ltr` and its
-//!    `rtl` flag comes from this override alone.
-//!
-//! EPUB side: the `<spine page-progression-direction="...">` attribute of the
-//! OPF. An omitted attribute is the EPUB 3 value `default`, compared here as
-//! `ltr`.
-//!
-//! `metadata.rs` flags PPD only where the EPUB side declares one; a missing
-//! attribute passes there and is caught here.
 
 use std::io::Cursor;
 
@@ -148,8 +134,6 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 }
 
 // ============================================================================
-// EPUB side
-// ============================================================================
 
 fn extract_epub_ppd(epub_bytes: &[u8]) -> Result<(Direction, bool), String> {
     let cursor = Cursor::new(epub_bytes);
@@ -181,8 +165,6 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
     Ok(buf)
 }
 
-// ============================================================================
-// KFX side
 // ============================================================================
 
 /// Returns `(resolved_ppd, raw_direction, raw_writing_mode)`.

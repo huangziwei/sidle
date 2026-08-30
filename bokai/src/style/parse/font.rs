@@ -9,9 +9,6 @@ use crate::style::properties::{FontStyle, FontVariant, FontWeight, Length};
 use super::keywords::{parse_font_style, parse_font_variant};
 
 /// Parse font-size value (handles lengths, percentages, and keywords).
-///
-/// Supports absolute keywords: xx-small, x-small, small, medium, large, x-large, xx-large
-/// Supports relative keywords: smaller, larger
 pub(crate) fn parse_font_size(input: &mut Parser<'_, '_>) -> Option<Length> {
     match input.next().ok()? {
         Token::Dimension { value, unit, .. } => {
@@ -34,7 +31,6 @@ pub(crate) fn parse_font_size(input: &mut Parser<'_, '_>) -> Option<Length> {
         Token::Number { value, .. } if *value == 0.0 => Some(Length::Px(0.0)),
         Token::Ident(ident) => match ident.as_ref() {
             // Absolute size keywords (based on 16px default)
-            // Values from CSS spec: https://www.w3.org/TR/css-fonts-3/#absolute-size-value
             "xx-small" => Some(Length::Rem(0.5625)), // 9px / 16px
             "x-small" => Some(Length::Rem(0.625)),   // 10px / 16px
             "small" => Some(Length::Rem(0.8125)),    // 13px / 16px
@@ -115,12 +111,6 @@ fn try_opt<'i, T>(
 }
 
 /// Parse the `font` shorthand:
-/// `[ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>#`
-///
-/// Omitted prefix components and line-height reset to their initial values
-/// per CSS shorthand semantics. Font-stretch keywords are accepted but
-/// dropped (the IR has no stretch field). System-font keywords (`menu`,
-/// `caption`, …) fail the size parse and invalidate the whole declaration.
 pub(crate) fn parse_font_shorthand(input: &mut Parser<'_, '_>) -> Vec<Declaration> {
     let mut style: Option<FontStyle> = None;
     let mut variant: Option<FontVariant> = None;
@@ -233,20 +223,10 @@ fn parse_one_family_name(input: &mut Parser<'_, '_>) -> Option<String> {
 }
 
 // ============================================================================
-// @font-face Parsing
-// ============================================================================
 
 /// Parse a @font-face block and return a FontFace if successful.
 ///
 /// @font-face rules have the form:
-/// ```css
-/// @font-face {
-///     font-family: "Ubuntu";
-///     font-weight: bold;
-///     font-style: normal;
-///     src: url(../fonts/Ubuntu-B.ttf);
-/// }
-/// ```
 pub(crate) fn parse_font_face_block(input: &mut Parser<'_, '_>) -> Option<FontFace> {
     let mut font_family: Option<String> = None;
     let mut font_weight = FontWeight::NORMAL;

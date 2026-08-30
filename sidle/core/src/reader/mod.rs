@@ -1,18 +1,4 @@
 //! The reader's view of a book.
-//!
-//! Sidle renders books itself rather than handing them to a foreign EPUB
-//! reader, so it needs a book in a shape no container defines: documents in
-//! reading order that a webview can inject, per-document facts a paginator
-//! needs before it paints, images fetched on demand rather than up front, and
-//! the element ids that let a stored `(element, offset)` handle become a DOM
-//! range.
-//!
-//! Every one of those comes out of bokai's IR — [`ReaderBook::open`] is
-//! assembly, not derivation. Nothing here re-parses markup bokai just
-//! produced; where an earlier implementation scanned serialized XHTML for
-//! character counts, image lists, and element ids, the IR now answers each
-//! structurally ([`bokai::model::ChapterSummary`],
-//! [`bokai::model::Chapter::source_elements`]).
 
 mod images;
 
@@ -89,17 +75,10 @@ pub struct ReaderBook {
     /// e.g. `"rtl"` / `"ltr"`.
     pub page_progression_direction: String,
     /// `(element, position)` for every placed element — the progress readout.
-    /// Read it against [`Self::max_location`]; see [`Self::real_locations`] for
-    /// whether the numbers are a device's Loc or a synthesized axis. Cosmetic
-    /// either way: the `(element, offset)` anchors annotations use are
-    /// independent of it.
     pub locations: Vec<(i64, i64)>,
     /// Denominator for whole-book percentage and "N of M".
     pub max_location: i64,
     /// Whether [`Self::locations`] are the device's own Location numbers (the
-    /// source shipped a location scale) or characters along a synthesized axis
-    /// (it didn't). The percentage is faithful either way; only a label reading
-    /// "Loc 407" would be a lie in the second case.
     pub real_locations: bool,
     /// Image-based fixed layout (manga / comic): pre-paginated rendering, one
     /// page per section, two-up spreads.
@@ -108,10 +87,6 @@ pub struct ReaderBook {
 
 impl ReaderBook {
     /// Prepare a KFX book for rendering, deferring image bytes.
-    ///
-    /// Opening a large illustrated book costs structure work, not a full-book
-    /// image decode — the returned [`ImageStore`] produces each image when the
-    /// reader asks for it.
     pub fn open(kfx: &[u8]) -> Result<(Self, ImageStore), String> {
         let mut book =
             Book::from_bytes(kfx, Format::Kfx).map_err(|e| format!("could not read KFX: {e}"))?;
@@ -141,12 +116,6 @@ impl ReaderBook {
             ));
         }
         // Every document the source produced is rendered, including the cover
-        // page a container would drop (`EpubPackage::redundant_cover`). That
-        // page carries the source elements; the synthesized SVG titlepage a
-        // container ships in its place carries none, so it has no reading
-        // position — rendering it would put a coverless, unaddressable page
-        // ahead of the real cover at location 0. The titlepage is a separate
-        // field and simply goes unused here.
         let sections: Vec<ReaderSection> = package
             .documents
             .into_iter()
@@ -186,10 +155,6 @@ impl ReaderBook {
 
         let writing_mode = package.writing_mode.clone();
         // A source that ships a position scale is measured on it. One that
-        // doesn't (a KFX converted from an EPUB carries none) gets an axis
-        // synthesized from its own text, so the reader still has a progress
-        // readout — built from the element order and per-element text the walk
-        // above already collected, not from a second pass over the book.
         let positions = if positions.is_empty() {
             let text = book.source_text();
             let order: Vec<i64> = sections

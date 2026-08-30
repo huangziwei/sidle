@@ -1,10 +1,5 @@
 //! Declarative style schema for KFX export: one rule per IR style property,
 //! mapping it to a KFX Ion field.
-//!
-//! [`StylePropertyRule`] states the mapping for a single property,
-//! [`ValueTransform`] the conversion its value takes, [`StyleSchema`] the
-//! registry over all of them, and [`StyleContext`] whether a property rides an
-//! inline span or asks for a block container.
 
 use std::collections::BTreeMap;
 
@@ -12,8 +7,6 @@ use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::style::{self as ir_style, ToCss};
 
-// ============================================================================
-// Constants
 // ============================================================================
 
 /// Default base font size in pixels, converting CSS `em`, `rem` and `%` to
@@ -24,14 +17,11 @@ pub const DEFAULT_BASE_FONT_SIZE: f64 = ir_style::ROOT_FONT_SIZE_PX as f64;
 pub const KFX_PT_PER_CSS_PX: f64 = 72.0 / 160.0;
 
 // ============================================================================
-// Value Transform System
-// ============================================================================
 
 /// Defines how a raw value from IR is converted into a KFX-native Ion Value.
 #[derive(Debug, Clone)]
 pub enum ValueTransform {
     /// Pass-through: value is identical in both formats.
-    /// Example: "center" -> "center"
     Identity,
 
     /// Dictionary lookup: maps specific strings to KFX values.
@@ -57,7 +47,6 @@ pub enum ValueTransform {
     ParseColor { output_format: ColorFormat },
 
     /// Shorthand extraction: extracts Nth component from CSS shorthand.
-    /// Example: "margin: 10px 20px" with index=1 extracts "20px"
     ExtractShorthand {
         index: usize,
         default_value: Option<KfxValue>,
@@ -81,7 +70,6 @@ pub enum ValueTransform {
     ToSymbol,
 
     /// Wrap integer in a struct with a single field.
-    /// Used for orphans/widows: `3` -> `{ first: 3 }` or `{ last: 3 }`
     WrapInStruct {
         /// Field name symbol (e.g., First or Last)
         field: KfxSymbol,
@@ -90,7 +78,6 @@ pub enum ValueTransform {
     },
 
     /// Preserve the original CSS unit as a KFX dimensioned value.
-    /// Example: "10px" → { value: 10, unit: px }, "1.5em" → { value: 1.5, unit: em }
     PreserveUnit,
 }
 
@@ -110,7 +97,6 @@ pub enum KfxValue {
         unit: KfxSymbol,
     },
     /// Single-field struct: { field: value }
-    /// Used for orphans/widows: { first: N } or { last: N }
     StructField {
         field: KfxSymbol,
         value: i64,
@@ -172,8 +158,6 @@ pub enum ColorFormat {
 }
 
 // ============================================================================
-// Style Context
-// ============================================================================
 
 /// Defines where a style property can be applied in KFX.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -186,8 +170,6 @@ pub enum StyleContext {
     Any,
 }
 
-// ============================================================================
-// Style Property Rule
 // ============================================================================
 
 /// Identifies which IR struct field a property comes from.
@@ -311,8 +293,6 @@ pub struct StylePropertyRule {
 }
 
 // ============================================================================
-// Style Schema
-// ============================================================================
 
 /// The master schema for style property mappings.
 pub struct StyleSchema {
@@ -378,8 +358,6 @@ impl StyleSchema {
         let mut schema = Self::new();
 
         // ====================================================================
-        // Font Properties
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "font-weight",
@@ -437,8 +415,6 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-        // Text Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -537,7 +513,6 @@ impl StyleSchema {
 
         // ====================================================================
         // Spacing Properties (Padding)
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "padding-top",
@@ -571,8 +546,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Color Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -658,7 +631,6 @@ impl StyleSchema {
 
         // ====================================================================
         // Vertical Alignment (for superscript/subscript)
-        // ====================================================================
 
         // baseline_style: for inline super/sub positioning (text baseline shift)
         schema.register(StylePropertyRule {
@@ -780,8 +752,6 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // High-Priority Text Properties
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "letter-spacing",
@@ -836,11 +806,8 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Text Decoration Extensions
-        // ====================================================================
 
         // Underline style (solid/dotted/dashed/double)
-        // Note: This extends the existing underline property with style info
         schema.register(StylePropertyRule {
             ir_key: "text-decoration-style",
             ir_field: Some(IrField::UnderlineStyle),
@@ -878,8 +845,6 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-        // Layout Properties
         // ====================================================================
 
         schema.register(StylePropertyRule {
@@ -955,8 +920,6 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Page Break Properties
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "break-before",
@@ -999,7 +962,6 @@ impl StyleSchema {
         });
 
         // Kindle-specific break properties (yj_break_before/after)
-        // These use the same IR fields but different KFX symbols
         schema.register(StylePropertyRule {
             ir_key: "yj-break-before",
             ir_field: Some(IrField::BreakBefore),
@@ -1024,8 +986,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Border Properties
         // ====================================================================
 
         // Border style transform (shared by all sides)
@@ -1181,8 +1141,6 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // List Properties
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "list-style-position",
@@ -1237,7 +1195,6 @@ impl StyleSchema {
 
         // ====================================================================
         // Font Family (string value, not symbol)
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "font-family",
@@ -1247,8 +1204,6 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-        // Amazon Properties
         // ====================================================================
 
         // Language (maps to HTML lang attribute in CSS, stored as string in KFX)
@@ -1274,7 +1229,6 @@ impl StyleSchema {
         });
 
         // Box-sizing → sizing_bounds
-        // Amazon auto-adds content-box when width/height is present
         schema.register(StylePropertyRule {
             ir_key: "box-sizing",
             ir_field: Some(IrField::SizingBounds),
@@ -1293,8 +1247,6 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Additional Layout Properties
-        // ====================================================================
 
         // clear → yj.float_clear
         schema.register(StylePropertyRule {
@@ -1312,7 +1264,6 @@ impl StyleSchema {
 
         // ====================================================================
         // Pagination Control (orphans/widows)
-        // ====================================================================
 
         // orphans → keep_lines_together: { first: N }
         schema.register(StylePropertyRule {
@@ -1339,8 +1290,6 @@ impl StyleSchema {
         });
 
         // ====================================================================
-        // Text Wrapping
-        // ====================================================================
 
         // word-break → word_break
         // Note: Only normal and break-all are supported by KFX.
@@ -1356,8 +1305,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Table Properties
         // ====================================================================
 
         // border-collapse → table_border_collapse (boolean: true=collapse, false=separate)
@@ -1394,8 +1341,6 @@ impl StyleSchema {
     }
 }
 
-// ============================================================================
-// Transform Execution
 // ============================================================================
 
 impl ValueTransform {
@@ -1547,7 +1492,6 @@ impl ValueTransform {
                 let pixels = convert_to_pixels(num, &css_unit, *base_pixels);
 
                 // Then convert pixels to target unit
-                // KFX uses Em for most relative dimensions
                 let result = match target_unit {
                     // Em/Rem: relative to base font size (most common for KFX)
                     KfxSymbol::Em | KfxSymbol::Rem => pixels / base_pixels,
@@ -1607,8 +1551,6 @@ impl ValueTransform {
     }
 }
 
-// ============================================================================
-// CSS Parsing Helpers
 // ============================================================================
 
 /// Parse a number from a string.
@@ -1812,7 +1754,6 @@ fn extract_shorthand_value(
 
 // ============================================================================
 // IR Field Extraction (Bidirectional Schema Bridge)
-// ============================================================================
 
 /// The em-multiple `document_data` states as its `line_height`, and the
 /// baseline a per-paragraph `lh` value multiplies. `build_document_data_fragment`
@@ -2380,7 +2321,6 @@ pub fn extract_ir_field(
 
 // ============================================================================
 // KFX Import (Inverse Direction)
-// ============================================================================
 
 impl StyleSchema {
     /// Every schema rule carrying this KFX symbol, in `ir_key` order. One KFX
@@ -3045,8 +2985,6 @@ pub fn is_block_display(style: &ir_style::ComputedStyle) -> bool {
 }
 
 // ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
@@ -3277,8 +3215,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Additional Edge Case Tests
-    // ========================================================================
 
     #[test]
     fn test_extract_shorthand_three_values() {
@@ -3475,8 +3411,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Amazon KFX Compatibility Tests
-    // ========================================================================
 
     #[test]
     fn test_font_weight_full_range_symbols() {
@@ -3594,7 +3528,6 @@ mod tests {
 
     // ========================================================================
     // Inverse Transform Tests (KFX → IR Import Direction)
-    // ========================================================================
 
     #[test]
     fn test_inverse_font_weight_symbol_to_css() {
@@ -3850,8 +3783,6 @@ mod tests {
         assert_eq!(css, "3em");
     }
 
-    // ========================================================================
-    // Style property tests
     // ========================================================================
 
     #[test]
@@ -4401,8 +4332,6 @@ mod tests {
         assert_eq!(back, "1px");
     }
 
-    // ========================================================================
-    // Table Properties
     // ========================================================================
 
     #[test]

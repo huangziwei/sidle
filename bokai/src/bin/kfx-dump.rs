@@ -34,8 +34,6 @@ struct Args {
     stat: bool,
 
     /// Print a detailed report for one field/fragment; repeatable. One of: anchors, container,
-    /// content, dependencies, document, features, locations, metadata, navigation, positions,
-    /// raw_storylines, reading_orders, resources, ruby, ruby_pairs, sections, storylines, symbols, writing_mode
     #[arg(short = 'f', long = "field")]
     field: Vec<String>,
 }
@@ -545,7 +543,6 @@ fn extract_singleton_details(entity_data: &[u8], type_name: &str) -> Option<Stri
         }
         "book_navigation" => {
             // book_navigation is a list containing a struct
-            // First unwrap the list to get the struct
             let nav_struct = match inner {
                 IonValue::List(items) if !items.is_empty() => match &items[0] {
                     IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -1936,7 +1933,6 @@ fn parse_container_info_for_index(data: &[u8]) -> Option<(usize, usize)> {
     let mut reader = reader.unwrap();
 
     // Read the struct and extract key fields
-    // $413 = bcIndexTabOffset, $414 = bcIndexTabLength
     let mut index_offset: Option<usize> = None;
     let mut index_length: Option<usize> = None;
 
@@ -2025,7 +2021,6 @@ fn parse_container_info_for_doc_symbols(data: &[u8]) -> Option<(usize, usize)> {
 
 /// Build entity map for resolving entity ID references.
 /// First pass through all entities to extract type and name info.
-/// Maps for resolving references in KFX files
 struct ResolutionMaps {
     /// Entity symbol ID → EntityInfo (for entity header display)
     entity_map: HashMap<u64, EntityInfo>,
@@ -2263,7 +2258,6 @@ fn dump_entity(
     eprintln!("  ENTY header length: {}", entity_header_len);
 
     // The entity info (compression, drm) is between offset 10 and entity_header_len
-    // The actual Ion data starts at entity_header_len
 
     if entity_header_len < data.len() {
         let ion_data = &data[entity_header_len..];
@@ -2407,7 +2401,6 @@ fn element_to_ion_text(elem: &ion_rs::Element, maps: &ResolutionMaps, resolve: b
 }
 
 /// Check if this is an integer entity reference field (for reading_order bounds)
-/// Note: story_name/section_name are typically symbols, not integers
 fn is_int_entity_ref_field(field_name: &str) -> bool {
     matches!(field_name, "reading_order_start" | "reading_order_end")
 }
@@ -4478,7 +4471,6 @@ fn collect_content_stats<F>(
 }
 
 /// Report location map from a KFX file
-/// Content info for a position ID
 #[derive(Debug, Clone)]
 struct ContentInfo {
     content_type: String,
@@ -4561,8 +4553,6 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
     let content_type_id = KfxSymbol::Content as u32;
 
     // First pass: build position_id → section_name map from position_map
-    // position_id → content_info map from storylines
-    // and content_name → [text strings] from content entities
     let mut position_to_section: HashMap<i64, String> = HashMap::new();
     let mut position_to_content: HashMap<i64, ContentInfo> = HashMap::new();
     let mut content_texts: HashMap<String, Vec<String>> = HashMap::new();
@@ -4838,7 +4828,6 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
             println!("Maps Kindle locations (indices) to position IDs in the content.\n");
 
             // location_map is a list containing structs with "locations" field
-            // Each entry has: id (position ID) and offset
             #[derive(Debug)]
             struct LocationEntry {
                 index: usize,
@@ -6163,7 +6152,6 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
     }
 
     // Pass 2: walk storylines, find every style_event with ruby_name+ruby_id,
-    // print base<TAB>annotation
     let mut total_pairs: usize = 0;
     for &storyline_id in &storyline_ids {
         // Find storyline entity again

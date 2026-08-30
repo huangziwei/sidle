@@ -1,22 +1,4 @@
 //! Pull the declared cover image out of a KFX container, in memory.
-//!
-//! Every KFX bokai or Amazon produces declares its cover the same way, whether
-//! the book is reflowable (EPUB→KFX) or PDF-backed (PDF→KFX): `book_metadata`'s
-//! `cover_image` names a `resource_name`, an `external_resource` ($164) with
-//! that name carries the image `format` + `location`, and a `bcRawMedia` ($417)
-//! at that location holds the bytes. So one extractor — resolving through the
-//! same [`crate::formats::kfx::loader`] that [`super::cover_replace`] and the EPUB
-//! conversion use (which gets the *dynamic* doc-symbol `base_len` right) —
-//! recovers the built-in cover for either kind, including a cover the user set
-//! via "Change cover…".
-//!
-//! This is the counterpart to [`super::pdf_container::kfx_extract_pdf`]: where
-//! that recovers the embedded PDF, this recovers the embedded cover. It lets a
-//! re-imported PDF-backed KFX get a cover without rendering page 1 — preserving
-//! a custom cover the page render would discard.
-//!
-//! JPEG-XR covers are transcoded to JPEG (mirroring the EPUB resource pass);
-//! every other image format passes through verbatim.
 
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::error::KfxError;
@@ -26,11 +8,6 @@ use crate::formats::kfx::loader;
 use crate::formats::kfx::symbols::KfxSymbol;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.
-///
-/// Returns `Ok(None)` when the KFX is a valid container but declares no cover,
-/// its cover resource can't be matched to backing bytes, or a JPEG-XR cover
-/// fails to decode — a cover-less outcome, not an error. Returns `Err` only when
-/// the bytes don't parse as a KFX container at all.
 pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static str)>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let Some(cover_name) = book.metadata.cover_resource_name.clone() else {
@@ -41,9 +18,6 @@ pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static s
     };
 
     // Find the external_resource whose resource_name matches the declared cover,
-    // and read its `location` (the bcRawMedia key) + declared `format`. `by_type`
-    // is keyed by resolved fid, which need not equal resource_name — match on the
-    // field, exactly as `cover_replace` does.
     let mut location: Option<String> = None;
     let mut format: Option<String> = None;
     for v in resources.values() {

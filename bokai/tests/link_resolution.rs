@@ -8,9 +8,6 @@ fn sha1_hex(bytes: &[u8]) -> String {
     Sha1::from(bytes).hexdigest()
 }
 // The 人間失格.azw3 fixture has a *file-level* TOC — 第三の手記 and 一/二 all point
-// into the same part, with no '#' anchors — so the unique-href invariant has no
-// analog here and is covered by the EPUB/MOBI/KFX tests below instead. AZW3
-// import + HUFF decode is covered by tests/azw3_huffcdic.rs.
 #[test]
 fn test_azw3_toc_resolves_with_titles() {
     let path = "tests/fixtures/[太宰 治] 人間失格.azw3";

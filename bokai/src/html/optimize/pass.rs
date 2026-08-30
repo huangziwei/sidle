@@ -3,10 +3,6 @@
 use crate::model::{Chapter, NodeId};
 
 /// Walk the tree bottom-up and call visitor at each parent.
-///
-/// This allows optimization passes to process children before parents,
-/// enabling cascading effects (e.g., prune empty containers after
-/// children are removed).
 pub fn walk_bottom_up<F>(chapter: &mut Chapter, mut visitor: F)
 where
     F: FnMut(&mut Chapter, NodeId),

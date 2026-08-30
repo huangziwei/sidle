@@ -1,9 +1,4 @@
 //! KFX-native TOC evidence for [`super::validate`].
-//!
-//! Reads a loaded KFX's own structures: the `nav_container` toc (declared TOC),
-//! internal `link_to` ($179) anchors clustered on the 目次/Contents page, styled
-//! headings, and storylines opening with a bare chapter marker. Never a derived
-//! copy.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,18 +30,11 @@ pub(super) fn evidence(book: &BookData) -> TocEvidence {
         // volume grouping, so a KFX 合本版 reads as unflattened.
         flattened: Default::default(),
         // Reading-order drift is EPUB-only too, and for a harder reason:
-        // reordering a KFX reading order moves every position with it, so the
-        // repair isn't a permutation of a list but a rebuild of the position,
-        // location and auxiliary maps — nothing this extractor can offer.
         misordered: Default::default(),
     }
 }
 
 /// The in-book Contents page's chapter links: distinct internal `link_to`
-/// destinations in the storyline that carries the most of them. When a `toc`
-/// landmark names a page, the storyline containing that page's eid wins even if
-/// another storyline has more links (e.g. a footnote-dense chapter). Returns the
-/// count and a few source-text samples for the report.
 fn in_book_contents(book: &BookData, anchors: &AnchorTable) -> (usize, Vec<String>) {
     let landmark_eid = toc_landmark_eid(book);
     let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) else {
@@ -142,10 +130,6 @@ fn count_headings_in(
 }
 
 /// Count storylines whose first text block is a bare chapter marker. Some editions
-/// (e.g. Hayakawa mysteries) split each chapter into its own storyline and open it
-/// with just the chapter number — no anchor, no heading style — so this is the
-/// only machine-readable trace of the chapter list. A continuous novella opens
-/// each storyline with prose, so this stays ~0.
 fn count_section_heads(book: &BookData) -> usize {
     let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) else {
         return 0;

@@ -1,11 +1,4 @@
 //! Repair flat EPUB TOCs that dropped their `#fragment`.
-//!
-//! calibre (and some retail) EPUBs pack several chapters into one `partNNNN.html`
-//! but emit a fragment-less TOC href for each, so every entry in that file jumps
-//! to the file's top. The fragments the hrefs *should* carry still exist as
-//! element ids in the content. The EPUB importer recovers them by matching each
-//! fragment-less TOC label to a unique id-bearing element in the target file, so
-//! the converted KFX gets one distinct nav target per chapter.
 
 use std::io::Write;
 
@@ -13,9 +6,6 @@ use bokai::Book;
 use bokai::model::AnchorTarget;
 
 /// Build a 3-entry EPUB whose NCX points two chapters at the same file (no
-/// fragments) and a third at a single-chapter file. The bodies carry the ids
-/// the TOC omitted; the second heading uses a full-width space (U+3000) the TOC
-/// label lacks, exercising whitespace-insensitive matching.
 fn build_flat_toc_epub() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
     let file = std::fs::File::create(dir.path().join("book.epub")).expect("create epub");

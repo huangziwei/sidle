@@ -1,31 +1,4 @@
 //! Cache each book's position-axis extent in `books.max_position`.
-//!
-//! A Kindle's reading-session log redacts every title (`Title:<private>`) but
-//! states the book's last valid position on each event. That integer is the only
-//! identity on offer, so attributing reading time means comparing it against the
-//! same axis computed from the book Sidle holds — and computing that axis means
-//! parsing the whole KFX, which is far too slow to do per lookup. Hence a cached
-//! column, filled here.
-//!
-//! Incremental, not a migration step: a library of a couple of thousand books
-//! takes minutes to index. Each row fills once and is skipped after, and
-//! steady state is only whatever was imported since the last pass.
-//!
-//! **A book is measured when its KFX is produced**, which is the only moment its
-//! axis can change and the only one early enough to matter: a book read the day
-//! it was added is attributable only if it was indexed before that day's reading
-//! was synced, and the everyday case is a device that reports its reading within
-//! hours. A background sweep at start covers the rows nothing has filled.
-//!
-//! [`backfill`] is that same work with progress reporting, for the one path that
-//! wants it done *before* a bulk of history lands — the manual archive import.
-//! That import is a warm-start and testing route that most libraries never take,
-//! so **nothing may depend on it having run**: a column filled only there is a
-//! column that is empty on a normal install.
-//!
-//! An extent that arrives late is not lost time. A session whose position
-//! matched nothing is kept, unattributed, and re-examined on every attribution
-//! pass: indexing a book later claims the reading recorded against it.
 
 use bokai::model::{Book, Format};
 use rusqlite::Connection;

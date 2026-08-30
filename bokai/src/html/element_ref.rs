@@ -14,8 +14,6 @@ use selectors::{OpaqueElement, SelectorImpl};
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 
 // ============================================================================
-// Selector crate type definitions
-// ============================================================================
 
 /// Our selector implementation for the selectors crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,8 +195,6 @@ impl SelectorImpl for BokoSelectors {
 }
 
 // ============================================================================
-// ElementRef implementation
-// ============================================================================
 
 /// Reference to an element in the ArenaDom for selector matching.
 #[derive(Clone, Copy)]
@@ -227,10 +223,6 @@ impl<'a> selectors::Element for ElementRef<'a> {
 
     fn opaque(&self) -> OpaqueElement {
         // Key on the arena node, not on this transient ElementRef: the selector
-        // matching caches are shared across elements (see `CascadeScratch`), and
-        // successive ElementRefs occupy the same stack slot, which would alias
-        // distinct elements to one cache key (the selectors crate's `invalid
-        // cache` debug assertion catches this).
         match self.dom.get(self.id) {
             Some(node) => OpaqueElement::new(node),
             None => OpaqueElement::new(self),

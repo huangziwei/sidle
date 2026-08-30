@@ -1,17 +1,4 @@
 //! Replace the cover image inside an existing EPUB.
-//!
-//! The cover-fetch flow calls this: `cover_fetch::fetch_color_cover` returns
-//! the color JPG from amazon.<region>, the sidecar is written for the gallery,
-//! and the cover entry inside the EPUB is swapped here. An external reader
-//! then shows the color cover in place of the grayscale one a monochrome
-//! Kindle build bakes in.
-//!
-//! Approach: rewrite the EPUB zip entry-by-entry. The cover entry is
-//! replaced with the new bytes (renamed if the extension changes, e.g.
-//! `cover.png` → `cover.jpg`); the OPF gets a targeted edit to the matching
-//! `<item>` `href` and `media-type` attributes; every other entry is
-//! `raw_copy_file`d through verbatim, preserving compression methods and
-//! — critically — the EPUB-required uncompressed first `mimetype` entry.
 
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
@@ -22,15 +9,6 @@ use crate::library::import::write_bytes_atomic;
 
 /// Replace the cover image inside `epub_path` with `new_bytes`. `new_ext` is
 /// the lowercased extension matching the format of those bytes (e.g. `"jpg"`)
-/// — used to compute the new `media-type` for the OPF manifest entry. The
-/// in-zip filename is **kept** (the overwrite lands at the original path); only the
-/// media-type attribute is updated. Renaming would orphan internal
-/// references like `<image xlink:href="cover.jpeg"/>` inside
-/// `titlepage.xhtml` and break the cover render in Apple Books.
-///
-/// Returns `Ok(true)` when the cover was swapped, `Ok(false)` when the EPUB
-/// declares no cover entry (nothing to overwrite — see [`ensure_cover`], which
-/// handles that case by regenerating from the KFX).
 pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<bool> {
     let epub_bytes =
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
@@ -72,26 +50,6 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
 
 /// Ensure the EPUB at `epub_path` shows `new_bytes` as its cover, healing EPUBs
 /// that carry no cover slot to overwrite. Three cases, in order:
-///
-/// 1. The EPUB already declares a cover → fast in-place [`replace_cover`] swap.
-/// 2. The EPUB is cover-less *and is the derived side* of a KFX that has a cover
-///    (a KFX import whose EPUB predates the `$258`/loc-0 cover fixes) →
-///    regenerate the EPUB from `kfx_path`, then swap.
-/// 3. Otherwise → [`insert_cover`] a fresh cover designation into the EPUB.
-///
-/// `epub_is_derived` enforces the one-way source→target conversion invariant:
-/// case 2 regenerates the EPUB, so it may run **only** when the EPUB is derived
-/// (the book's source is its KFX). For an EPUB-sourced book the EPUB *is* the
-/// source and must never be overwritten by a regeneration — those fall to the
-/// non-destructive insert of case 3. `kfx_path` is the KFX to regenerate from.
-/// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
-///
-/// Injecting an EPUB-3-only `properties="cover-image"` into an EPUB 2 package
-/// once made a valid book invalid here, so [`insert_cover`] is version-aware and
-/// `a_cover_edit_introduces_no_validator_finding` holds the edit to the
-/// validator's verdict. That obligation is checked there and not in this call
-/// path: it is a claim about the code, provable once, where running it per cover
-/// write would validate the whole book twice to produce a finding no user sees.
 pub fn ensure_cover(
     epub_path: &Path,
     kfx_path: Option<&Path>,
@@ -134,16 +92,6 @@ fn kfx_declares_cover(kfx_path: &Path) -> bool {
 }
 
 /// Insert a cover into an EPUB that declares none: write the image next to the
-/// OPF and add a manifest item for it plus a `<meta name="cover">` pointing at
-/// that item. In an EPUB 3 package the item also carries
-/// `properties="cover-image"` (bokai's top-priority cover signal); see
-/// [`inject_cover_into_opf`] for why an EPUB 2 package must not. Unlike
-/// [`replace_cover`], this *adds* the designation rather than overwriting an
-/// existing one — used by [`ensure_cover`] for books whose source had no cover.
-///
-/// The designation is enough for readers to show the cover and for bokai's
-/// EPUB→KFX exporter to build a real cover section, so a subsequent reconvert
-/// carries the cover into the KFX too.
 pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
     let epub_bytes =
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
@@ -196,16 +144,6 @@ pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result
 }
 
 /// Add a cover manifest item (+ legacy `<meta name="cover">`) to an OPF that
-/// declares no cover. `cover_basename` is the cover file's name relative to the
-/// OPF. If the expected `</manifest>`/`</metadata>` closers are missing the
-/// corresponding insert is skipped; the `<meta>` alone is enough for bokai to
-/// resolve the cover.
-///
-/// The `properties="cover-image"` designation is EPUB 3 only — the EPUB 2
-/// manifest grammar has no `properties` attribute, so writing it into a 2.0
-/// package turns a valid book invalid (epubcheck RSC-005). There the legacy
-/// `<meta name="cover">` is the designation, which bokai's parser reads for
-/// either version.
 fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> String {
     let properties = if package_is_epub3(opf) {
         " properties=\"cover-image\""
@@ -250,8 +188,6 @@ fn package_is_epub3(opf: &str) -> bool {
 /// Walks the source EPUB and writes a fresh zip to `out`. The cover entry's
 /// bytes get replaced in place (filename unchanged); when `opf_rewrite` is
 /// `Some` (media-type changed), the OPF entry also gets a targeted edit.
-/// Everything else is `raw_copy_file`'d, preserving the original compression
-/// (and the EPUB-spec-required uncompressed `mimetype` at offset 0).
 fn rewrite_zip(
     epub_bytes: &[u8],
     out: &mut Vec<u8>,
@@ -341,12 +277,6 @@ fn media_type_for_ext(ext: &str) -> &'static str {
 }
 
 /// Rewrite the OPF so the manifest `<item>` whose `href` ends with
-/// `cover_basename` carries the new `media-type`. The href is unchanged: the
-/// cover file stays at its original path, leaving internal references like
-/// `<image xlink:href="cover.jpeg"/>` inside `titlepage.xhtml` intact. The OPF references files relative to its own
-/// directory, so a basename match is correct for the same-directory case
-/// (which is what bokai's KFX→EPUB conversion emits — `OEBPS/content.opf`
-/// plus `OEBPS/cover.<ext>` next to it).
 fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) -> String {
     let mut out = String::with_capacity(opf.len() + 16);
     let href_needle = format!("href=\"{cover_basename}\"");
@@ -361,9 +291,6 @@ fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) 
 }
 
 /// Replace the value of `attr="..."` on a single line. Returns the line
-/// unchanged if the attribute isn't found. Matches the leading-space form
-/// (`" attr=\""`), which excludes a longer attribute name ending in `attr`
-/// (e.g. `mime-media-type=`).
 fn replace_attr_value(line: &str, attr: &str, new_value: &str) -> String {
     let needle = format!(" {attr}=\"");
     let Some(start) = line.find(&needle) else {
@@ -437,22 +364,9 @@ mod tests {
     }
 
     /// Editing a book must not make it *less* valid than it was — the one
-    /// obligation a cover write owes the file it rewrites. An EPUB-3-only
-    /// `properties="cover-image"` injected into an EPUB 2 manifest broke exactly
-    /// this, and the sibling unit test above pins the OPF text; this one asks
-    /// the validator, which is the question that actually matters and the only
-    /// way a *new* defect in any other part of the archive would be caught.
-    ///
-    /// It lives here rather than in the product: sidle runs no validator (a
-    /// finding on a user's machine reaches a stderr nobody reads, having cost a
-    /// full validation pass to produce), so the differential belongs where a
-    /// failure is read — a test.
     #[test]
     fn a_cover_edit_introduces_no_validator_finding() {
         // A real 1×1 PNG: the validator decodes every declared raster resource
-        // (PKG-021), so a hand-waved header would fail the assertion on the
-        // fixture rather than on the edit — as it did when this test was
-        // written with a stub JPEG.
         let png: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
             0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,

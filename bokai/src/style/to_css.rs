@@ -353,9 +353,6 @@ const GENERIC_FAMILIES: &[&str] = &[
 ];
 
 /// A background-position axis for serialization. `Auto` in either axis means
-/// the source declared only the other one, so the undeclared axis falls back
-/// to the CSS initial value rather than serializing as `auto` — which
-/// `background-position` does not accept.
 fn position_or_zero(len: super::properties::Length) -> super::properties::Length {
     match len {
         super::properties::Length::Auto => super::properties::Length::Percent(0.0),
@@ -364,10 +361,6 @@ fn position_or_zero(len: super::properties::Length) -> super::properties::Length
 }
 
 /// Quote font-family names that need quoting in CSS.
-///
-/// A comma-separated font stack like `din next lt pro,sans-serif` becomes
-/// `"din next lt pro",sans-serif` — generic families are left unquoted,
-/// custom names with spaces or leading digits are quoted.
 fn quote_font_family(buf: &mut String, family: &str) {
     for (i, part) in family.split(',').enumerate() {
         if i > 0 {

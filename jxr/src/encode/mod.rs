@@ -1,13 +1,5 @@
 //! JPEG-XR encoder: the decoder's forward mirror, covering every format
 //! the decoder reads (the full T.832 envelope — see the crate README).
-//!
-//! Built bottom-up against [`crate::decode`] as a round-trip oracle.
-//! Entry points:
-//! [`encode`] / [`encode_with_alpha_qp`] (classic 8-bit),
-//! [`encode_with_options`] (the full 8-bit option surface), and
-//! [`encode_typed`] (deep/HDR/exotic [`SamplePlanes`]).
-//! `QpSet::LOSSLESS` round-trips bit-exact wherever the format family is
-//! exact (see the per-family notes on [`encode_typed`]); `QP > 0` is lossy.
 
 // Encoder machinery: crate-visible only. The public encode surface is the
 // re-exports below plus the `encode*` functions — narrowed deliberately so the
@@ -37,19 +29,10 @@ pub enum ColorMode {
     /// dropped from the device copy and is recoverable by reconverting.
     Grayscale,
     /// Full color via the internal YUV 4:4:4 transform + chroma planes
-    /// (`24bppRGB`). For desktop/Sidle-reader color; the device is still B&W so
-    /// grayscale stays the pipeline default. A 1-plane input encodes as
-    /// grayscale even in this mode (no chroma to synthesize).
     Color,
     /// Four ink planes C,M,Y,K (`32bppCMYK`/`64bppCMYK`; a 5th plane is the
-    /// alpha image plane, `40/80bppCMYKAlpha`) coded through the internal
-    /// YUVK transform. 8/16-bit unsigned families only; chroma stays 4:4:4
-    /// (T.832 has no subsampled YUVK).
     Cmyk,
     /// [`ColorMode::Cmyk`] without the ink→YUVK lifting (`OUT_CMYKDIRECT`):
-    /// the four channels code directly (a channel reorder is the only
-    /// conversion). Same container formats; the reference toolchain cannot
-    /// mint it, so its gates are readback/self-loop strength.
     CmykDirect,
     /// `n` independent channels (3–8, matching the container GUID family;
     /// 8/16-bit unsigned), coded per-component
@@ -58,20 +41,9 @@ pub enum ColorMode {
 }
 
 /// Errors from the encoder. The split is by WHO can fix the call:
-///
-/// - [`Invalid`](EncodeError::Invalid) — the input is internally inconsistent
-///   or outside what the JPEG XR format can express at all. No encoder could
-///   satisfy it; fix the call site.
-/// - [`Unsupported`](EncodeError::Unsupported) — a format-expressible request
-///   this encoder deliberately does not implement (a capability stance,
-///   usually mirroring the reference encoder's own refusal). The message says
-///   which.
 #[derive(Debug)]
 pub enum EncodeError {
     /// Caller-contract violation: plane count/length mismatches, out-of-range
-    /// knobs, a malformed [`QpPlan`], or a request the format itself cannot
-    /// express (e.g. grayscale-with-alpha — no such container pixel format
-    /// exists).
     Invalid(String),
     /// A format-expressible request this encoder takes a stance against
     /// implementing (e.g. chroma-subsampled float input, which the reference
@@ -106,9 +78,6 @@ pub enum ChromaSampling {
 }
 
 /// Overlap pre-filtering (T.832 `overlap_mode`, the JxrEncApp `-l` knob):
-/// smooths block boundaries before the forward transform; decoders undo it
-/// exactly, so lossless stays lossless. Reduces blocking at low bitrates at
-/// some high-frequency cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overlap {
     /// No overlap filtering (`overlap_mode = 0`) — the byte-stable default.
@@ -180,60 +149,25 @@ pub struct EncodeOptions {
     pub trim_flexbits: u8,
     /// Scaled arithmetic (`scaled_flag = 1`): 3 extra fraction bits through
     /// the transforms; chroma DC-LP coded at half amplitude (floor — lossy);
-    /// the mode libjxr uses for everything lossy. Exactly invertible for
-    /// gray/zero-chroma content; NOT bit-lossless for color at q1.
     pub scaled: bool,
     /// Explicit top window margin (0–63): the coded image gets `window_top`
-    /// extra rows above the content (edge-replicated) and the header carries
-    /// explicit T.832 window margins (`windowing_flag = 1`) so decoders crop
-    /// them. With both 0 (default) the classic derived windowing is used.
-    /// Margins are a coded-domain placement knob (e.g. aligning content to
-    /// the MB grid); pixels are unaffected.
     pub window_top: u8,
     /// Explicit left window margin (0–63). See [`Self::window_top`].
     pub window_left: u8,
     /// Uniform tile columns (the JxrEncApp `-U` analog): the MB grid splits
     /// into this many near-equal tile columns, each independently entropy-
     /// coded (random access / error resilience; mildly worse compression).
-    /// 0 or 1 = single column. More than one tile in either dimension adds
-    /// the T.832 index table.
     pub tile_cols: u16,
     /// Uniform tile rows. See [`Self::tile_cols`].
     pub tile_rows: u16,
     /// Overlap pre-filtering level ([`Overlap`]; the JxrEncApp `-l` knob).
     pub overlap: Overlap,
     /// Frequency order (T.832 `frequency_mode`, libjxr's DEFAULT order — its
-    /// `-f` turns it off): each tile's bands go into separate byte-aligned
-    /// packets (DC/LP/HP/flexbits) addressed by the index table, enabling
-    /// progressive/partial decode. Same coefficients, re-segmented stream.
     pub frequency: bool,
     /// Chroma per-band quantizers distinct from the luma `qp` (T.832
-    /// `COMP_SEPARATE` component mode — the classic quantize-chroma-harder
-    /// rate trick). Applies to the chroma-carrying plane: 3-plane color and
-    /// the 4-plane (alpha) path's primary; ignored for grayscale (no chroma
-    /// to quantize). `None` = same as `qp` (`COMP_UNIFORM`, byte-stable).
-    /// Mutually exclusive with [`qp_plan`](Self::qp_plan).
     pub chroma_qp: Option<QpSet>,
     /// The full T.832 quantization syntax for the primary plane: per-tile
     /// [QP sets](TileQps) and per-MB LP/HP DQUANT index maps ([`QpPlan`]).
-    /// `None` (the default) derives the classic single-set plan from
-    /// `qp`/`chroma_qp`. `Some` becomes THE quantizer source — `qp` is
-    /// unused and `chroma_qp` must stay `None`
-    /// ([`Invalid`](EncodeError::Invalid) otherwise).
-    ///
-    /// Honored on the color-coded paths: 3-plane RGB at any sample depth,
-    /// packed RGB, and RGBE, at 4:4:4/4:2:2/4:2:0 chroma. Grayscale,
-    /// `YOnly`, alpha-plane, CMYK/N-component and bi-level paths reject it
-    /// ([`Unsupported`](EncodeError::Unsupported)) — their QP generality is
-    /// the uniform `qp`/`chroma_qp`/`alpha_qp` surface. A plan also
-    /// suppresses the auto-gray collapse (identical R==G==B channels encode
-    /// as the declared color format rather than silently dropping the
-    /// plan's chroma bytes and tile structure).
-    ///
-    /// Component mode (`COMP_UNIFORM`/`SEPARATE`/`INDEPENDENT`) is derived
-    /// per band from each [`BandQp`]'s bytes on emission. More than one
-    /// LP/HP set makes that band per-MB DQUANT: each macroblock picks its
-    /// set by the index map (empty map = all set 0).
     pub qp_plan: Option<QpPlan>,
 }
 
@@ -267,14 +201,6 @@ fn uniform_tiles(mb: usize, n: usize) -> Vec<usize> {
 }
 
 /// Interleaved 8-bit channel orders accepted by [`deinterleave`] — the common
-/// memory layouts (`24bppBGR`, `32bppBGRA`, …) normalized to the planar
-/// R,G,B(,A) layout [`ImageInput`] takes. Premultiplied variants
-/// (PRGBA/PBGRA) are an [`Rgba`](ChannelOrder::Rgba)/[`Bgra`](ChannelOrder::Bgra)
-/// byte order plus `ImageInput::premultiplied_alpha = true` — premultiplication
-/// is a property flag, not a different layout. The emitted file always uses
-/// the canonical GUID for its channel count (`24bppRGB`, `32bppBGRA`/
-/// `32bppPBGRA`): byte-order-only GUID variants would change nothing but the
-/// order a conformant decoder interleaves its output in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelOrder {
     /// One byte per pixel (`8bppGray`).
@@ -337,12 +263,6 @@ pub fn deinterleave(
 }
 
 /// 8-bit pixel input. One plane per component, each row-major with
-/// `len == width * height`: **1** plane = grayscale, **3** = RGB, **4** =
-/// RGB + alpha (encoded as a T.832 alpha image plane). **2** planes
-/// (gray+alpha) is rejected: JPEG XR has no grayscale-with-alpha container
-/// pixel format (the channels+alpha GUID family starts at 3 channels), so
-/// such a file would be unrepresentable — expand to RGBA. Interleaved
-/// buffers in common memory orders normalize via [`deinterleave`].
 pub struct ImageInput<'a> {
     /// Width in pixels.
     pub width: u32,
@@ -358,11 +278,6 @@ pub struct ImageInput<'a> {
 }
 
 /// Encode 8-bit grayscale/RGB(A) pixels into a JPEG-XR file (TIFF container +
-/// WMPHOTO codestream) at the given per-band quantizers. `QpSet::LOSSLESS` is
-/// bit-exact; higher QP trades fidelity for size (ship mode). An alpha plane
-/// (4-plane input) is quantized with the same `qp` — use
-/// [`encode_with_alpha_qp`] to quantize it independently. Output is decodable
-/// by `decode` and structurally clones a real Amazon JXR.
 pub fn encode(input: &ImageInput<'_>, mode: ColorMode, qp: QpSet) -> Result<Vec<u8>, EncodeError> {
     encode_with_alpha_qp(input, mode, qp, qp)
 }
@@ -390,8 +305,6 @@ pub fn encode_with_alpha_qp(
 /// [`encode`] over the full option surface ([`EncodeOptions`]): chroma
 /// sampling (4:4:4 / 4:2:2 / 4:2:0 / luma-only), independent alpha QPs, and
 /// scaled arithmetic.
-/// The geometry every encode path validates the same way: window margins,
-/// padded MB grid, uniform tile split, size caps.
 struct Geometry {
     window: (u32, u32),
     tile_cols_mb: Vec<usize>,
@@ -538,11 +451,6 @@ fn resolve_qp_plan(opts: &EncodeOptions, geom: &Geometry) -> Result<Option<QpPla
 }
 
 /// The full-surface 8-bit encode: [`encode`] plus everything in
-/// [`EncodeOptions`] (chroma sampling, band truncation, windowing, tiling,
-/// overlap pre-filtering, frequency order, scaled arithmetic, the complete
-/// QP syntax). `Default::default()` options reproduce `encode(…)`
-/// byte-for-byte. CMYK/N-component [`ColorMode`]s route the planes through
-/// the per-component path ([`encode_typed`] accepts them at 16-bit too).
 pub fn encode_with_options(
     input: &ImageInput<'_>,
     mode: ColorMode,
@@ -680,9 +588,6 @@ pub fn encode_with_options(
     check(&input.planes[2])?;
     // Auto-gray: a "color" image whose channels are identical everywhere carries
     // no chroma — emit `8bppGray` (smaller; the chroma planes would be all-zero;
-    // the chroma-sampling choice is moot on a gray image). An explicit qp_plan
-    // suppresses the collapse: the gray path can't honor a plan, and silently
-    // dropping it would be worse than the few bytes of zero chroma.
     if opts.qp_plan.is_none()
         && input.planes[0] == input.planes[1]
         && input.planes[1] == input.planes[2]
@@ -791,9 +696,6 @@ pub fn encode_with_options(
 }
 
 /// Packed-RGB dispatch (`Packed555`/`Packed565`/`Packed101010`): one plane
-/// of packed words → three pre-bias channels → the standard color path with
-/// the packed depth + GUID. Chroma subsampling and YOnly apply as for any
-/// RGB input; lossless QP round-trips the packed words exactly.
 fn encode_packed(
     samples: &SamplePlanes<'_>,
     w: u32,
@@ -1073,9 +975,6 @@ fn encode_multi_typed(
 }
 
 /// Typed (any-depth) pixel input for [`encode_typed`]: the deep-format
-/// counterpart of [`ImageInput`]. Plane count carries the color shape exactly
-/// as in the 8-bit API (**1** = grayscale, **3** = RGB; **4** = RGB + alpha,
-/// 8-bit only); the [`SamplePlanes`] variant carries the depth.
 pub struct TypedInput<'a> {
     /// Width in pixels.
     pub width: u32,
@@ -1088,15 +987,6 @@ pub struct TypedInput<'a> {
 }
 
 /// [`encode_with_options`] over typed planes ([`TypedInput`]): encode 8-bit
-/// **or deep** pixels. `U8` routes through the classic 8-bit path
-/// byte-for-byte; `U16`/`I16` (BD16/BD16S) add `16bppGray` / `48bppRGB` /
-/// `…Fixed` and are bit-exact at `QpSet::LOSSLESS`; `I32` (BD32S,
-/// `32bppGrayFixed` / `96bppRGBFixed`) sheds its 10 low bits on input
-/// (`shift_bits` — reference-encoder behavior; q1 round-trips
-/// `(x >> 10) << 10`) and rejects scaled arithmetic (`i32` transform
-/// headroom; libjxr forces unscaled there too). Everything structural in
-/// [`EncodeOptions`] — chroma sampling, bands/trim, windowing, tiles,
-/// overlap, frequency order, `chroma_qp` — applies at any depth.
 pub fn encode_typed(
     input: &TypedInput<'_>,
     mode: ColorMode,
@@ -1140,10 +1030,6 @@ pub fn encode_typed(
         ));
     }
     // Float and RGBE inputs code through the pseudo-integer folds, where
-    // chroma decimation has no sensible semantics (and RGBE's shared
-    // exponent couples the channels per pixel) — the reference encoder
-    // refuses the combination too (strenc.c: "Float or RGBE images must be
-    // encoded with YUV 444!").
     if matches!(
         samples,
         SamplePlanes::F16(_) | SamplePlanes::F32(_) | SamplePlanes::Rgbe(_)
@@ -1316,10 +1202,6 @@ pub fn encode_typed(
     let gp = samples.prebias_plane(1, opts.scaled);
     let bp = samples.prebias_plane(2, opts.scaled);
     // Auto-gray, in the pre-bias domain: channels the emitted codestream
-    // could not distinguish (identical after conversion — for BD32S that is
-    // equality of the surviving high bits) carry no chroma → emit the
-    // family's gray format, mirroring the 8-bit auto-gray (and like it,
-    // suppressed by an explicit qp_plan).
     if opts.qp_plan.is_none() && rp == gp && gp == bp {
         return Ok(gray::encode_gray_prebias(
             &rp,
@@ -1601,14 +1483,6 @@ mod tests {
     #[test]
     fn lossy_roundtrip_is_a_fixpoint() {
         // Lossy correctness without an external oracle: a decoded image already
-        // sits on the quantization grid, so re-encoding it must yield a
-        // byte-identical JXR (encode∘decode∘encode is a fixpoint). This holds
-        // iff our forward quantizer is the exact inverse of the decoder's
-        // dequant for every band. Mid-range pixels keep the reconstruction in
-        // [0,255] so no clamping perturbs the second generation. Aligned sizes
-        // only: windowing regenerates edge-padding from the (now lossy) edge, so
-        // boundary MBs of a padded image aren't a fixpoint — a property of the
-        // padding, not the quantizer.
         let mut r = Lcg(0x1357_9bdf);
         let qps = [
             QpSet {
@@ -1660,9 +1534,6 @@ mod tests {
     fn lossy_error_grows_with_qp() {
         // Clean synthetic original with energy in every band: coarser quant ⇒
         // strictly more error. The fixpoint test only proves self-consistency;
-        // this rules out a deadzone/rounding bug that would still round-trip but
-        // quantize badly. (Monotonic on a clean master — unlike PSNR vs Amazon's
-        // own already-quantized pixels.)
         let (w, h) = (64usize, 64usize);
         let pixels: Vec<u8> = (0..w * h)
             .map(|i| {
@@ -1941,9 +1812,6 @@ mod tests {
     #[test]
     fn rgba_lossy_fixpoint_with_alpha() {
         // encode∘decode∘encode is byte-identical with lossy QPs on both planes
-        // (alpha QP ≠ primary QP) — the quantizer-inversion discipline extended
-        // to the alpha plane. Mid-range pixels + aligned dims, as in the
-        // gray/color fixpoint tests.
         let mut r = Lcg(0x0ddc_0ffe_e123_4567);
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
@@ -2276,10 +2144,6 @@ mod tests {
     }
 
     /// 4c: explicit window margins (`windowing_flag = 1`). The image sits at
-    /// `(top, left)` inside the coded grid; decoders crop the margins away, so
-    /// every lossless-exact path must stay exact — including odd margins over
-    /// subsampled chroma (gray content) and the alpha plane (which shares the
-    /// placement).
     #[test]
     fn explicit_window_margins_roundtrip() {
         use crate::decode::container::parse;
@@ -2404,11 +2268,6 @@ mod tests {
     }
 
     /// 4c: tiling. Multi-tile files (index table, per-tile packets, per-tile
-    /// entropy resets, tile-relative prediction edges) round-trip exactly at
-    /// lossless across grids, content kinds, and tiles×window combos; and
-    /// because tiling only re-segments the entropy stream — coefficients are
-    /// untouched — a tiled lossy decode must equal the untiled one
-    /// pixel-for-pixel.
     #[test]
     fn tiled_roundtrip_and_equivalence() {
         use crate::decode::container::parse;
@@ -2608,11 +2467,6 @@ mod tests {
     }
 
     /// 4c: overlap modes 1/2. The pre-filters are exact inverses of the
-    /// decoder's post-filters over the same (disjoint) windows, so LOSSLESS
-    /// stays bit-exact through overlap — across content kinds, subsampling,
-    /// tiles (soft-tile continuations), window margins, and the alpha plane.
-    /// Lossy overlap must still decode to the right shape, and overlapped
-    /// lossy bytes must differ from non-overlapped (the filter is real).
     #[test]
     fn overlap_roundtrip_lossless() {
         use crate::decode::container::parse;
@@ -2804,11 +2658,6 @@ mod tests {
     }
 
     /// Scaled-mode LOSSY quantization: the QP→scaling-factor map is
-    /// mode-dependent (decoder `quant_map` scaled branch; chroma DC/LP one
-    /// order below luma), so a scaled lossy encode must land in the same
-    /// quality regime as the unscaled one at the same QP — not garbage. The
-    /// other scaled tests gate lossless exactness or decoder agreement, and
-    /// neither of those sees lossy fidelity.
     #[test]
     fn scaled_lossy_quantizes_with_scaled_factors() {
         use crate::decode::container::parse;
@@ -2864,9 +2713,6 @@ mod tests {
             "scaled q16 must match unscaled quality: {ps:.2} vs {pu:.2} dB"
         );
         // And the same holds with overlap + 420 in the mix. (On independent
-        // RGB noise, 4:2:0 PSNR vs source is dominated by the subsampling
-        // loss itself — so the baseline is the UNSCALED 4:2:0 encode, not an
-        // absolute figure.)
         let opts420 = EncodeOptions {
             qp,
             chroma: ChromaSampling::Yuv420,
@@ -2891,10 +2737,6 @@ mod tests {
     }
 
     /// 4d: frequency mode. Same per-MB band sections routed into per-band
-    /// tile packets (index table addressing) — so LOSSLESS stays exact across
-    /// the whole envelope, and a frequency-mode lossy decode must be
-    /// PIXEL-IDENTICAL to the spatial one (same coefficients, re-segmented
-    /// stream).
     #[test]
     fn frequency_mode_roundtrip_and_equivalence() {
         use crate::decode::container::parse;
@@ -3064,13 +2906,6 @@ mod tests {
     /// 4e: QP generality. (a) `chroma_qp` (COMP_SEPARATE at the uniform
     /// level): equal bytes stay byte-identical to the plain path; zero-chroma
     /// content is exact under any chroma QP; (b) COMP_INDEPENDENT (U ≠ V);
-    /// (c) per-tile QP sets — an all-lossless-tiles plan is exact, and in a
-    /// mixed plan the lossless tiles' pixels stay EXACT while lossy tiles
-    /// deviate; (d) per-MB DQUANT (LP+HP set lists + index maps): lossless-
-    /// set MBs stay exact, lossy-set MBs deviate, and the same plan in
-    /// frequency mode reconstructs identically (index bits route per band).
-    /// Any emission/prediction mismatch would desync the entropy decode
-    /// entirely, so exactness is a sharp gate.
     #[test]
     fn qp_generality_separate_pertile_dquant() {
         use crate::decode::container::parse;
@@ -3374,10 +3209,6 @@ mod tests {
     }
 
     /// The public `qp_plan` contract: shape validation (every malformed plan
-    /// is `Invalid` BEFORE any coding state is built), the path rejections
-    /// (`Unsupported` on gray/YOnly/alpha/multi/bi-level), the
-    /// `chroma_qp` mutual exclusion, auto-gray suppression at both entry
-    /// points, and plan support on the typed (deep + packed) color paths.
     #[test]
     fn qp_plan_public_surface() {
         use crate::decode::container::parse;
@@ -3587,7 +3418,6 @@ mod tests {
         );
 
         // -- Typed paths: U16 RGB with per-MB DQUANT (lossless set-0 exact), --
-        // -- packed 565 with an all-lossless per-tile plan (words exact).    --
         let deep: Vec<Vec<u16>> = (0..3)
             .map(|_| (0..n).map(|_| (r.next() >> 24) as u16).collect())
             .collect();
@@ -3663,8 +3493,6 @@ mod tests {
     /// `chroma_qp` applies to the 4-plane (alpha) path's PRIMARY plane, and the
     /// alpha drivers must honour it.
     /// Zero-chroma content stays exact under a harsh chroma quantizer;
-    /// colored content shrinks; equal bytes derive `COMP_UNIFORM`
-    /// byte-stably.
     #[test]
     fn alpha_chroma_qp_applies() {
         use crate::decode::container::parse;
@@ -4790,8 +4618,6 @@ mod tests {
         };
         // Each structural option singly, then the full unscaled combination —
         // a failure names its option. (Scaled is checked separately below:
-        // the component>0 half-step floor makes scaled q1 near-exact, not
-        // bit-exact — the same caveat as scaled color.)
         let variants: [(&str, EncodeOptions); 5] = [
             (
                 "tiles",

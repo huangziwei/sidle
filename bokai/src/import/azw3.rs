@@ -1,9 +1,6 @@
 //! AZW3/KF8 format importer - handles all IO with lazy loading.
 //!
 //! AZW3 files use the KF8 (Kindle Format 8) structure with:
-//! - Skeleton files for HTML structure
-//! - Div elements for content fragments
-//! - NCX index for table of contents
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -38,11 +35,6 @@ pub struct Azw3Importer {
     record_offset: usize,
 
     /// PDB record index of the first image record. For pure KF8 this equals
-    /// `mobi.first_image_index`; for KF8+MOBI6 combo files the images live
-    /// in the MOBI6 section and the KF8 record0's `first_image_index` is
-    /// past the image run, so this is saved from the MOBI6 record0 before
-    /// the KF8 re-parse. `load_image_record` and `discover_assets` use this
-    /// instead of recomputing from `mobi.first_image_index + record_offset`.
     image_record_base: usize,
 
     /// File length.
@@ -75,9 +67,6 @@ pub struct Azw3Importer {
     reassembled: Option<ReassembledFlow>,
 
     /// `aid` attribute values that are link targets (some `kindle:pos:fid`
-    /// link or NCX position resolves to them). Computed once from the full
-    /// text; `build_chapter` keeps these as `id="aid-{value}"` instead of
-    /// stripping them, so the resolved `#aid-…` hrefs land somewhere.
     linked_aids: Option<HashSet<String>>,
 
     /// Cached chapter content.
@@ -87,9 +76,6 @@ pub struct Azw3Importer {
     assets: Vec<PathBuf>,
 
     /// Resource index → extracted asset path, built from `assets` once the
-    /// discovery/prune pass has settled. Both `kindle:embed:` rewrites (HTML
-    /// and CSS) resolve through it so a reference always names the file that
-    /// was actually written.
     embed_paths: HashMap<usize, String>,
 
     /// Cached parsed stylesheets.
@@ -182,11 +168,6 @@ impl Importer for Azw3Importer {
         let key = path.to_string_lossy().replace('\\', "/");
 
         // Stylesheet: styles/styleNNNN.css → bytes from flow_table[idx+1].
-        // KF8 packs CSS in flows 1..N (flow 0 is the HTML body); the
-        // `kindle:flow:N` → `styles/style{N-1}.css` rewrite happens in
-        // `transform_kindle_refs`, so the source HTML references stylesheets
-        // by this naming. Serving the source bytes verbatim here is what
-        // makes those links resolve in the emitted EPUB.
         if let Some(stem) = key
             .strip_prefix("styles/style")
             .and_then(|s| s.strip_suffix(".css"))
@@ -210,14 +191,6 @@ impl Importer for Azw3Importer {
             })?;
             let end = end.min(text.len());
             // Native Amazon stylesheets often chain-load each other via
-            // `@import url(kindle:flow:0001?mime=text/css);`. Rewriting those
-            // URLs to sibling-relative `styleNNNN.css` paths lets Apple Books
-            // resolve the import chain (otherwise the writing-mode / class
-            // rules in the imported sheet never load). Calibre-converted
-            // AZW3s don't carry such imports — the pass is a no-op for them.
-            // `kindle:embed:` URLs (embedded fonts, background images) are
-            // rewritten to the extracted assets; any `@font-face` rule whose
-            // ref did NOT resolve is dropped so it can't dangle.
             let css = transform::rewrite_kindle_flow_in_css(&text[start..end]);
             let css = transform::rewrite_kindle_embed_in_css(&css, &self.embed_paths);
             return Ok(transform::strip_kindle_embed_font_faces(&css));
@@ -437,8 +410,6 @@ impl Azw3Importer {
         // For combo files the MOBI6 record0 carries the actual image-record
         // base — kindlegen 2.x leaves images in the MOBI6 section and the
         // KF8 record0's `first_image_index` field is past the image run.
-        // Capture MOBI6's value before the `mobi` variable gets reassigned
-        // to the KF8 header below.
         let mobi6_first_image_index = mobi.first_image_index as usize;
 
         // For combo files, re-parse KF8 header
@@ -520,14 +491,6 @@ impl Azw3Importer {
         };
 
         // Build spine from skeleton files.
-        //
-        // A KF8 skeleton is only the `<html><head>…<body>` shell; the chapter's
-        // actual content lives in the div-index chunks that get spliced into
-        // it. So the skeleton's own `length` is roughly constant (~700 bytes)
-        // no matter how long the chapter is, and using it as the size estimate
-        // makes every chapter look the same weight — useless for the progress
-        // indication the field exists for. The reassembled size is the shell
-        // plus the chunks that belong to it.
         let mut chunk_bytes: HashMap<u32, usize> = HashMap::new();
         for e in &elems {
             *chunk_bytes.entry(e.file_number).or_default() += e.length as usize;
@@ -555,11 +518,6 @@ impl Azw3Importer {
         let toc = {
             let nodes = build_toc_from_ncx(&ncx, |entry| {
                 // KF8 entries carry a pos_fid (frag_idx, offset). The absolute
-                // byte position resolves against the *reassembled* flow, which
-                // isn't materialized until the text is decompressed. Stores the
-                // pos_fid for `resolve_toc` / `ensure_linked_aids` to resolve.
-                // The file number comes from the pos_fid element, else from
-                // `find_file_for_position`.
                 let (file_num, frag) = if let Some((frag_idx, offset)) = entry.pos_fid {
                     let fnum = elems
                         .get(frag_idx as usize)
@@ -635,19 +593,10 @@ impl Azw3Importer {
         importer.fill_fixed_layout_spine();
         importer.assets = importer.discover_assets();
         // Filter out flows that are actually SVG illustration content —
-        // those get inlined into chapter HTML by `inline_svg_flows` and
-        // are dead weight (plus they leak `kindle:embed:` URLs) when
-        // emitted as `.css` assets.
         importer.prune_svg_flow_assets();
         importer.embed_paths = importer.embed_asset_paths();
 
         // Cover fallback: older Japanese-Amazon kindlegen output omits
-        // EXTH 201 and only carries the cover ref in EXTH 129's KF8
-        // `kindle:embed:NNNN` form, whose 1-based resource-index scheme
-        // doesn't map cleanly to the image-only subset (decoded indices
-        // overshoot by 1–2 vs the actual cover). Kindlegen always emits
-        // the cover as the first image record, so when 201 is absent
-        // fall back to the first `images/` asset.
         if importer.metadata.cover_image.is_none()
             && let Some(first_image) = importer.assets.iter().find(|p| p.starts_with("images"))
         {
@@ -753,9 +702,6 @@ impl Azw3Importer {
     }
 
     /// Reassemble flow 0 (materialize each chapter, chunks spliced into their
-    /// skeletons) and record every element's offset in the concatenated result,
-    /// writing it onto `DivElement::reassembled_pos` so anchor resolution walks
-    /// the reassembled coordinate space. Loads the text if needed; idempotent.
     fn ensure_reassembled(&mut self) -> io::Result<()> {
         if self.reassembled.is_some() {
             return Ok(());
@@ -848,10 +794,6 @@ impl Azw3Importer {
             })?;
 
         // Inline SVG flow content where the body uses
-        // `<img src="kindle:flow:NNNN..."/>` to reference a full-page
-        // illustration wrapper. Must precede `transform_kindle_refs` so the
-        // raster-image `kindle:embed:NNNN` refs inside the inlined SVG get
-        // rewritten in the same pass below.
         let inlined = transform::inline_svg_flows(&content, &self.kf8.flow_table, text);
 
         // Transform kindle: references to standard EPUB-style paths
@@ -870,10 +812,6 @@ impl Azw3Importer {
         let transformed = transform::unlink_image_anchors(&transformed);
 
         // Drop dangling `<link>`s that escape the package root (e.g. the
-        // Aozora `../styles/aNNNNN_h.css` horizontal alternate stylesheet that
-        // was never embedded as a flow). transform_kindle_refs only rewrites
-        // `kindle:flow:` hrefs, so this verbatim `..` href would otherwise
-        // survive and fail strict EPUB-3 validation on import.
         let delinked = transform::strip_root_escaping_links(&transformed);
 
         // Strip Amazon-specific attributes (aid, data-Amzn*) — except
@@ -883,19 +821,12 @@ impl Azw3Importer {
         // Ensure the root `<html>` carries both `xml:lang` and `lang`.
         // Calibre's AZW3 exporter scrubs `xml:lang` and leaves only `lang=`,
         // dropping per-spine-doc xml:lang counts versus the publisher EPUB.
-        // `ensure_html_lang_dual` pairs them; the fallback to
-        // `metadata.language` covers AZW3s with no lang signal on `<html>`.
         let with_lang = transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
 
         Ok(with_lang)
     }
 
     /// Drop `styles/styleNNNN.css` asset entries that correspond to flows
-    /// whose actual content is SVG (full-page illustration wrappers). These
-    /// get inlined into chapter HTML by `inline_svg_flows`, so emitting them
-    /// as orphan `.css` assets ships dead bytes — and leaks the SVG's
-    /// `kindle:embed:` URLs into the EPUB zip. Mirrors the same prefix-sniff
-    /// `transform::inline_svg_flows` uses.
     fn prune_svg_flow_assets(&mut self) {
         if self.text_cache.is_none() {
             self.text_cache = self.extract_text().ok();
@@ -926,11 +857,6 @@ impl Azw3Importer {
         let mut assets = Vec::new();
 
         // Stylesheets from the flow table. Flow 0 is HTML body; flows 1..N
-        // are auxiliary resources, by convention CSS (matches the
-        // `kindle:flow:N` → `styles/style{N-1}.css` rewrite in
-        // `transform_kindle_refs`). Registering them here makes
-        // `book.list_assets()` enumerate stylesheets so `export_raw` emits
-        // them to the EPUB zip alongside images.
         for css_idx in 0..self.kf8.flow_table.len().saturating_sub(1) {
             assets.push(PathBuf::from(format!("styles/style{:04}.css", css_idx)));
         }
@@ -1014,8 +940,6 @@ impl Azw3Importer {
 }
 
 // ============================================================================
-// Shared helpers
-// ============================================================================
 
 fn detect_format(
     mobi: &MobiHeader,
@@ -1051,16 +975,6 @@ fn looks_like_svg_flow(bytes: &[u8]) -> bool {
 
 /// The reassembled flow 0: chapters materialized (chunks spliced into their
 /// skeletons) plus the coordinate map anchor resolution needs.
-///
-/// KF8 stores flow 0 on disk as `[skel₀][chunk₀…][skel₁][chunk₁…]` — every
-/// chunk sits after its file's whole skeleton — but the frag/chunk position
-/// tables (`insert_pos`) and KindleUnpack's `getIDTag` address the *reassembled*
-/// text, where each chunk is spliced back into its skeleton. Resolving anchors
-/// against the on-disk flow makes a backward walk from a chunk-start land on the
-/// skeleton's tail element (the wrong div). Reassembly runs once and anchors
-/// resolve against [`concat`](Self::concat).
-/// `html`'s spread side from the page div's `class="fs leftspread"` /
-/// `"fs rightspread"`. `None` when `html` carries neither.
 fn parse_spread_class(html: &str) -> Option<crate::model::PageSpread> {
     if html.contains("leftspread") {
         Some(crate::model::PageSpread::Left)
@@ -1073,10 +987,6 @@ fn parse_spread_class(html: &str) -> Option<crate::model::PageSpread> {
 
 /// The [`Importer::load_asset`] path of every `<link>`ed stylesheet in `html`,
 /// in document order.
-///
-/// The reassembled flow still names its sheets `kindle:flow:NNNN`; the
-/// `styles/styleNNNN.css` rewrite happens per chapter in
-/// [`transform::transform_kindle_refs`], so both forms resolve here.
 fn linked_stylesheets(html: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = html;
@@ -1125,10 +1035,6 @@ struct ReassembledFlow {
 /// Reassemble flow 0 from its `[skel][chunks]` on-disk layout, tracking where
 /// each chunk's content lands. Mirrors the historical `build_parts` splice
 /// (insert each chunk at `insert_pos - skel_start` into the growing skeleton)
-/// exactly, so the produced chapter bytes are unchanged; it additionally
-/// concatenates the parts and records each element's final offset (shifting
-/// earlier placements when a later chunk splices before them) for pos:fid /
-/// TOC anchor resolution.
 fn reassemble_flow(text: &[u8], files: &[SkeletonFile], elems: &[DivElement]) -> ReassembledFlow {
     let mut parts = Vec::new();
     let mut concat: Vec<u8> = Vec::new();

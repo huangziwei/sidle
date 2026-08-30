@@ -1,8 +1,6 @@
-//! Tauri commands backing the "Reading Log" page — reading time recovered from
-//! a Kindle's own system logs (see [`sidle_core::library::reading_log`]).
-//!
-//! Read-only over `reading_sessions`, apart from `books.finished_at` and the
-//! attribution a tie settles.
+//! Tauri commands over `reading_sessions` (see
+//! [`sidle_core::library::reading_log`]), writing only `books.finished_at` and
+//! the attribution a tie settles.
 
 use serde::Serialize;
 use tauri::State;
@@ -19,17 +17,9 @@ pub struct ReadingDay {
     pub seconds: i64,
 }
 
-/// Everything the Reading Log page needs on open: every day ever read, and the
-/// all-time headline totals.
-///
-/// The book grid is **not** here — it is scoped to whatever the heatmap is
-/// showing (a year, or one day of it) and comes from [`reading_log_books`],
-/// because a book's time within a window is a different number from its time
-/// ever and cannot be derived by filtering an all-time list.
-///
-/// Every figure here covers books the library actually holds. Sessions whose
-/// book is gone are counted nowhere — see
-/// [`db::resolve_reading_sessions`].
+/// Every day ever read and the all-time totals. The book grid comes from
+/// [`reading_log_books`] at the selected scope. Sessions whose book is gone
+/// count nowhere — see [`db::resolve_reading_sessions`].
 #[derive(Debug, Serialize)]
 pub struct ReadingOverview {
     /// All of them, every year: the heatmap draws one year at a time, but which
@@ -45,14 +35,12 @@ pub struct ReadingOverview {
     /// the last M days".
     pub days_read: i64,
     /// Longest run of consecutive days with reading, and the run ending today
-    /// (or yesterday, so a day still in progress doesn't read as a broken
-    /// streak).
+    /// or yesterday.
     pub longest_streak: i64,
     pub current_streak: i64,
     /// When in the day the reading happened, as a (month, weekday, hour) cube —
-    /// see [`db::reading_clock`]. All-time like `days`, and for the same reason:
-    /// hour-seconds are additive, so the page sums the months of whichever year
-    /// the heatmap is showing rather than asking again per year.
+    /// see [`db::reading_clock`]. All-time like `days`: hour-seconds are
+    /// additive, and the page sums the months of the year it draws.
     pub clock: Vec<db::ClockCell>,
 }
 
@@ -134,15 +122,9 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
 /// A range wide enough to mean "ever" against `YYYY-MM-DD` day keys.
 const ALL_TIME: (&str, &str) = ("0000-00-00", "9999-99-99");
 
-/// What was read over `[from, to]` (inclusive, `YYYY-MM-DD`).
-///
-/// The page's one book query, at whatever scope is selected: a year while the
-/// heatmap is showing one, a single day once a square is clicked. `sort` names
-/// a column ([`db::ReadingSort`]) and defaults, like the page, to most recently
-/// read first — a reading log is a record of what you are reading now.
-///
-/// `bucket` ([`db::ReadingBucket`]) subdivides the window so the same year can
-/// be shown whole or split into months or days; it defaults to undivided.
+/// What was read over `[from, to]` (inclusive, `YYYY-MM-DD`). `sort` names a
+/// column ([`db::ReadingSort`]), defaulting to most recently read first;
+/// `bucket` ([`db::ReadingBucket`]) subdivides the window, defaulting to whole.
 #[tauri::command]
 pub async fn reading_log_books(
     state: State<'_, AppState>,
@@ -198,12 +180,9 @@ pub async fn reading_log_book(
     })
 }
 
-/// Reading that several books could equally be, and those books.
-///
-/// `candidates` are the books whose axis ends exactly where this reading
-/// stopped. There are always at least two — that tie is the only reason the
-/// automatic pass left it alone, and it is the whole of what a person needs to
-/// answer it: the covers of two or three books, one of which they read.
+/// Reading that several books could equally be, and those books. `candidates`
+/// hold the books whose axis ends where this reading stopped, always two or
+/// more.
 #[derive(Debug, Serialize)]
 pub struct AmbiguousReading {
     #[serde(flatten)]
@@ -211,16 +190,9 @@ pub struct AmbiguousReading {
     pub candidates: Vec<db::BookRow>,
 }
 
-/// The reading a person can still resolve: every unattributed position that
-/// **several** library books end at.
-///
-/// A position no book ends at is deliberately absent, and is not a lesser
-/// version of this case. It means the book is not in the library — deleted, or
-/// never imported — and nothing about the group says which book it was: a
-/// duration, a date span and a word count identify nothing. Offering it as a
-/// choice would be inviting a guess, so it stays where it already is: kept as a
-/// row, counted nowhere, and named the moment its book comes back and
-/// [`db::resolve_reading_sessions`] can see it.
+/// Every unattributed position that **several** library books end at. A
+/// position no book ends at is absent: its book is outside the library, and the
+/// row waits for [`db::resolve_reading_sessions`] to see it.
 #[tauri::command]
 pub async fn reading_log_ambiguous(
     state: State<'_, AppState>,
@@ -240,8 +212,8 @@ pub async fn reading_log_ambiguous(
                 candidates.push(book);
             }
         }
-        // A candidate whose row vanished between the two queries would leave a
-        // tie of one, which is not a question worth asking.
+        // A tie of one is no question. `candidates` can lose a row between the
+        // two queries above.
         if candidates.len() > 1 {
             out.push(AmbiguousReading {
                 reading,
@@ -253,11 +225,8 @@ pub async fn reading_log_ambiguous(
 }
 
 /// Settle a tied position: `book_id` takes every unattributed session that
-/// stopped there. Returns how many sessions moved.
-///
-/// The user's answer to a question only they can answer, so it is final — the
-/// position leaves [`reading_log_ambiguous`] and the reading is that book's from
-/// then on.
+/// stopped there, and the position leaves [`reading_log_ambiguous`]. Returns
+/// how many sessions moved.
 #[tauri::command]
 pub async fn reading_log_attribute(
     state: State<'_, AppState>,
@@ -268,16 +237,9 @@ pub async fn reading_log_attribute(
     db::attribute_reading_position(&conn, end_position, book_id).map_err(|e| e.to_string())
 }
 
-/// Throw the whole reading log away.
-///
-/// Everything, both tables: sessions and the record of which snapshots produced
-/// them. Anything short of that leaves a library that shows no reading and also
-/// refuses to import the archives back.
-///
-/// Not recoverable, whatever archives happen to be on disk. A device sends only
-/// what is newer than the newest session stored and clears its own copy at that
-/// mark, so reading that arrived from a Kindle goes with these rows; only days a
-/// `logbackup` snapshot still covers can be read again.
+/// Throw the whole reading log away — both tables, sessions and the record of
+/// which snapshots produced them. A device sends only what is newer than the
+/// newest session stored, and clears its own copy at that mark.
 #[tauri::command]
 pub async fn reading_log_clear(state: State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().await;
@@ -285,11 +247,8 @@ pub async fn reading_log_clear(state: State<'_, AppState>) -> Result<usize, Stri
 }
 
 /// Longest and current run of consecutive days, from an ascending list of
-/// `YYYY-MM-DD`.
-///
-/// "Current" counts back from the most recent day read rather than from today,
-/// and is reported only when that day is today or yesterday — a streak should
-/// not break at midnight while the evening's reading is still unsynced.
+/// `YYYY-MM-DD`. The current run counts back from the most recent day read, and
+/// is reported only when that day is today or yesterday.
 fn streaks<'a>(days: impl IntoIterator<Item = &'a str>) -> (i64, i64) {
     let parsed: Vec<chrono::NaiveDate> = days
         .into_iter()
@@ -338,8 +297,7 @@ mod tests {
 
     #[test]
     fn yesterday_still_counts_as_current() {
-        // Today's reading may not have synced yet, so the streak must survive
-        // midnight rather than resetting every morning.
+        // A streak survives midnight: the evening's reading syncs later.
         let y = chrono::Local::now().date_naive() - chrono::Duration::days(1);
         let d = y.format("%Y-%m-%d").to_string();
         assert_eq!(streaks([d.as_str()]).1, 1);

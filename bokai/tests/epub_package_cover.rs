@@ -1,15 +1,4 @@
 //! A built package reports its cover overlap instead of resolving it.
-//!
-//! A source that ships its own cover page and a synthesized SVG titlepage both
-//! render the same image, and a shipped container holds only one of them. Which
-//! one to drop depends on the consumer: a container drops the source's page (a
-//! bare `<img>` inherits body margins in a foreign reader), while anything that
-//! resolves `(element, offset)` handles keeps it, because the titlepage carries
-//! no source elements and so has no reading position.
-//!
-//! So the package keeps both and marks the overlap. This pins that: the
-//! suppressed document is still in the package, it is the one carrying source
-//! elements, and the container is the thing that drops it.
 
 use std::io::Cursor;
 
@@ -86,12 +75,6 @@ fn the_container_drops_the_cover_page_the_package_keeps() {
 }
 
 /// Every TOC entry must name a document the package holds.
-///
-/// The container's navigation remaps the suppressed cover section onto the
-/// synthesized `cover.xhtml`, which exists only inside the zip. A renderer
-/// consumes `EpubPackage.toc` alongside `documents` and holds no such file, so
-/// a remapped entry that reached the package would be a TOC row — 表紙/Cover
-/// among them — that navigates nowhere.
 #[test]
 fn every_toc_entry_names_a_document_the_package_holds() {
     let Ok(kfx) = std::fs::read(REFLOWABLE) else {
@@ -130,13 +113,6 @@ fn every_toc_entry_names_a_document_the_package_holds() {
 }
 
 /// A renderer's chapter list reaches the cover exactly once.
-///
-/// Plenty of books leave the cover out of their own chapter list and record the
-/// page only in the landmarks, and a list rebuilt from a book's Contents page
-/// never has one (a Contents page links neither the cover nor itself). A Kindle
-/// composes the two and shows a Cover row either way; the package does the same
-/// for a renderer — without giving a second row to the books whose publisher
-/// already put one there.
 #[test]
 fn a_renderers_toc_reaches_the_cover_exactly_once() {
     let Ok(kfx) = std::fs::read(REFLOWABLE) else {

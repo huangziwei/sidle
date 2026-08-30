@@ -1,9 +1,4 @@
 //! Repairing a spine that contradicts the book's own navigation.
-//!
-//! The measurement, the proposal and the write are pinned together, because the
-//! whole point of the repair is that the three agree: what the audit counts is
-//! what the proposal moves, and what the proposal says is what the OPF ends up
-//! declaring. The write is a permutation and is held to it.
 
 mod misordered_epub;
 

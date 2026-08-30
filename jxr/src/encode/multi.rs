@@ -1,14 +1,4 @@
 //! Multi-component plane encoder (`INT_YUVK` / `INT_NCOMPONENT`) — the
-//! forward mirror of the decoder's per-component arms: these formats
-//! entropy-code each component as an independent YONLY-style channel inside
-//! one plane (decoder `mb_dc`/`mb_lp`/`mb_cbphp`/`mb_hp_flex`, the
-//! `INT_YONLY | INT_YUVK | INT_NCOMPONENT` branches — per-component abs
-//! flags, raw per-component CBPLP bits, `outer_iters = nc` CBPHP with the
-//! YONLY tables), while sharing one set of plane-level adaptive state with
-//! the usual two class buckets (component 0 = "luma", everything else =
-//! "chroma" — `chroma_component`). YUVK additionally folds components 1–2
-//! into the DC/HP prediction-strength sums exactly like YUV444;
-//! NCOMPONENT keeps them luma-only (decoder lines `mb_dc`/`mb_hp_flex`).
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;
@@ -28,9 +18,6 @@ const I_OFF: [i32; 6] = [0, 4, 2, 8, 12, 1];
 const I_FLC: [u32; 6] = [0, 2, 1, 2, 2, 0];
 
 /// One `nc`-component image plane coded per-component: quantized
-/// coefficients plus the shared adaptive entropy state, encodable one
-/// macroblock at a time ([`super::gray::YOnlyPlane`] × N components with the
-/// class-bucketed state of [`super::color::ColorPlane`]).
 pub(super) struct MultiPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
@@ -93,9 +80,6 @@ impl MultiPlane {
     /// Build from pre-bias component planes (already color-converted —
     /// CMYK arrives lifted into the YUVK domain, NCOMPONENT raw), padded to
     /// the window grid, forward-transformed and quantized per component.
-    /// Component QP bytes: component 0 takes `qp`, every other component the
-    /// `chroma` set (`COMP_SEPARATE` semantics; equal sets ⇒ `COMP_UNIFORM`
-    /// on emission).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         comps: &[Vec<i32>],
@@ -183,11 +167,6 @@ impl MultiPlane {
                     let hp_sf = csf(byte_of(comp, qp.hp, chroma_qp.hp), comp, scaled, HP);
                     let buf = &mut buf_grid[mbx][mby][comp];
                     // Scaled mode floor-halves the block-DCs of every
-                    // component > 0 (the decoder doubles them back,
-                    // decoder.rs first_level_inverse_transform — the generic
-                    // full-res arm covers YUVK/NCOMPONENT, not just YUV
-                    // chroma). Same half-step floor caveat as scaled color:
-                    // scaled q1 is NOT bit-lossless for multi-component.
                     transform::forward_stage2_mb(buf, scaled && comp > 0);
                     if hp_sf > 1 {
                         for blk in 0..16 {
@@ -534,10 +513,6 @@ impl MultiPlane {
         }
 
         // CBPHP for ALL components first (decoder `mb_cbphp`): per component,
-        // un-predict with the class state — the model updates after each
-        // component's prediction, exactly the decoder's two-loop order
-        // (VLC reads are comp-ordered, model updates are comp-ordered; both
-        // sequences interleave identically when done in one pass here).
         {
             let bw = sink.hp();
             for comp in 0..nc {
@@ -653,7 +628,6 @@ impl MultiPlane {
     /// Write one component's CBPHP difference pattern — the VLC half of
     /// [`hp::encode_cbphp`] against this plane's shared `num_cbphp`/
     /// `num_blk_cbphp` state (multi-component planes use the YONLY tables:
-    /// `NUM_CBPHP` for both levels, `DELTA1`).
     fn write_cbphp_diff(&mut self, bw: &mut BitWriter, i_diff: i32) {
         let nibbles = [
             i_diff & 0xF,
@@ -712,9 +686,6 @@ impl codestream::TileEncode for MultiPlane {
 }
 
 /// Depth-general multi-component driver (`OUT_CMYK` / `OUT_CMYKDIRECT` /
-/// `OUT_NCOMPONENT` over an `INT_YUVK` or `INT_NCOMPONENT` plane): `comps`
-/// already forward-converted ([`super::convert`] — CMYK lifted into YUVK,
-/// CMYKDIRECT/NCOMPONENT plain-biased), optional alpha image plane (CMYKA).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_multi_prebias(
     comps: &[Vec<i32>],

@@ -1,25 +1,4 @@
 //! In-place EPUB (OCF zip) editing — the shared surgical-write harness.
-//!
-//! Every EPUB source edit has the same shape: open the zip, change a chosen
-//! handful of member files (the OPF, a nav doc, one image), and pass every
-//! *other* member through unchanged, then repackage with the OCF invariant —
-//! `mimetype` first and uncompressed. This is the EPUB analog of
-//! [`crate::formats::kfx::container_edit`]: metadata / cover / image / TOC edits all
-//! build on this one audited core rather than each re-implementing the zip walk.
-//!
-//! Unlike KFX (binary Ion behind a doc-symbol table), EPUB members *are*
-//! human-editable XHTML/CSS/OPF/NCX, so the harness exposes them by path:
-//! [`EpubPackage::get`] / [`replace`](EpubPackage::replace) /
-//! [`set`](EpubPackage::set) / [`remove`](EpubPackage::remove), then
-//! [`into_bytes`](EpubPackage::into_bytes) to repackage. Members are held
-//! decompressed in their original order; an untouched member re-serializes with
-//! the same storage method it had on disk (so already-compressed images stay
-//! `Stored` rather than being wastefully re-deflated).
-//!
-//! Parse is deliberately lenient (it does not require a `mimetype` or
-//! `container.xml`); the EPUB-aware accessors [`opf_path`](EpubPackage::opf_path)
-//! / [`opf_bytes`](EpubPackage::opf_bytes) validate when a consumer actually
-//! needs the package document.
 
 use std::io::{self, Cursor, Read, Write};
 
@@ -46,21 +25,12 @@ struct Entry {
 }
 
 /// An EPUB opened for surgical editing: every zip member decompressed in memory,
-/// in original order. Mutate members by path, then
-/// [`into_bytes`](Self::into_bytes) to repackage — `mimetype` first and
-/// uncompressed, every other member after it with its original storage method.
 pub struct EpubPackage {
     entries: Vec<Entry>,
 }
 
 impl EpubPackage {
     /// Parse an EPUB's zip directory, decompressing every member into memory.
-    ///
-    /// Retries once on the spurious-ZIP64 repair (a handful of producers emit
-    /// extra fields the `zip` crate misreads — the same recovery the
-    /// [`EpubImporter`](crate::import::EpubImporter) applies). Directory entries (names ending in
-    /// `/`) are dropped: they carry no data and are implied by member paths, so
-    /// readers reconstruct them (calibre and the bokai exporter do the same).
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {
         match Self::parse_inner(bytes) {
             Ok(pkg) => Ok(pkg),
@@ -134,10 +104,6 @@ impl EpubPackage {
 
     /// A new package holding only the members `keep` accepts, each with its
     /// original bytes, order and storage method.
-    ///
-    /// For carving a smaller book out of a larger one without decompressing
-    /// anything twice: the members that survive are the ones the source shipped,
-    /// unchanged.
     pub fn subset(&self, keep: impl Fn(&str) -> bool) -> Self {
         Self {
             entries: self
@@ -177,9 +143,6 @@ impl EpubPackage {
     }
 
     /// Repackage into EPUB (OCF) bytes. `mimetype` is written first and
-    /// uncompressed (`Stored`) per OCF §3.3; every other member follows in
-    /// original order with the storage method it was parsed with. A source that
-    /// lacked a `mimetype` gets the canonical one synthesized.
     pub fn into_bytes(self) -> io::Result<Vec<u8>> {
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
 

@@ -1,15 +1,4 @@
 //! Strict A/B tree diff between two EPUBs.
-//!
-//! Unlike the sibling fidelity checks, both inputs are EPUBs: `a` is the
-//! reference and `b` the candidate. The comparison is deliberately byte-exact
-//! per zip entry — no canonicalization, no "semantically equivalent"
-//! tolerance — because the question it usually answers is whether a change
-//! moved any bytes at all, and a tolerant diff cannot answer that. Zip-level
-//! details (entry order, compression, timestamps) are out of scope: the tree
-//! is compared by entry name.
-//!
-//! Differences are classified by artifact kind so a corpus sweep can rank
-//! them by diff-class frequency.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};

@@ -1,12 +1,4 @@
 //! Guards for the deep/exotic decode formats: 16-bit gray (BD16 + SHIFT_BITS
-//! path), half-float RGBA with a SEPARATE container alpha codestream
-//! (`decode_image` merge), and RGBE (the PostScalingF2 shared-exponent
-//! packing).
-//!
-//! Fixtures are libjxr-minted (JxrEncApp, lossless) from deterministic
-//! patterns; the `.raw` blobs hold interleaved i32 LE samples, half/float
-//! formats as bit patterns. The encode is lossless, so exact equality — not a
-//! tolerance — is the correct assertion.
 
 use jxr::decode::{container, decode_image};
 

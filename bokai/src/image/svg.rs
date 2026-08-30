@@ -1,16 +1,4 @@
 //! SVG rasterization for KFX bundling (EPUB→KFX).
-//!
-//! KFX has no vector-image resource format: real Amazon containers only
-//! carry `gif`/`jpg`/`jxr`/`pdf`/`png`/`webp` resources, and Amazon's own
-//! converter rasterizes SVG sources into JPEG/JXR (keeping the original
-//! `image/svg+xml` mime on the resource record). Bundling raw SVG bytes
-//! therefore guarantees a blank image on device — the renderer has no
-//! decoder for them. This module renders SVG assets to a white-flattened
-//! raster so the export path can push them through the normal JXR plate
-//! encoder.
-//!
-//! Also home to the process-wide system-font database used by every
-//! resvg consumer (this module and the Aozora cover generator).
 
 #[cfg(feature = "svg")]
 use std::sync::{Arc, OnceLock};
@@ -28,15 +16,10 @@ const MAX_DIM: f32 = 1920.0;
 
 /// Supersample factor over the SVG's intrinsic CSS-px size. E-ink Kindles
 /// are ~300 ppi vs CSS's 96 (~3.1× physical); round up for zoom headroom.
-/// Display size still comes from the content's own CSS — supersampling
-/// only sharpens, it never changes layout for images with explicit sizes.
 #[cfg(feature = "svg")]
 const SCALE: f32 = 4.0;
 
 /// Cache the system-font scan. `load_system_fonts()` walks every
-/// `/Library/Fonts`, `~/Library/Fonts`, `/System/Library/Fonts` entry on
-/// macOS — ~150-300 ms per call. We scan once per process and clone the
-/// `Arc<Database>` into each render's `Options`.
 #[cfg(feature = "svg")]
 pub fn cached_fontdb() -> Arc<usvg::fontdb::Database> {
     static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
@@ -50,24 +33,12 @@ pub fn cached_fontdb() -> Arc<usvg::fontdb::Database> {
 }
 
 /// Quick sniff: do these bytes look like an SVG document? Checks for an
-/// `<svg` tag start within the first 1 KiB (past any BOM / XML prolog /
-/// comments / DOCTYPE). Cheap pre-filter so non-SVG assets skip the XML
-/// parser entirely.
 pub(crate) fn looks_like_svg(data: &[u8]) -> bool {
     let head = &data[..data.len().min(1024)];
     memchr::memmem::find(head, b"<svg").is_some()
 }
 
 /// Rasterize an SVG to an opaque RGB image, flattened over white.
-///
-/// The pixmap is filled white before rendering, so SVG transparency
-/// composites onto the page color exactly like the raster paths'
-/// alpha-over-white flatten. Scale is the SVG's intrinsic CSS size ×
-/// [`SCALE`], clamped so neither dimension exceeds [`MAX_DIM`] (an SVG
-/// with a huge intrinsic size downscales to the cap).
-///
-/// `None` when the bytes don't sniff as SVG or fail to parse — callers
-/// fall through to their non-SVG handling.
 #[cfg(feature = "svg")]
 pub(crate) fn rasterize(data: &[u8]) -> Option<image::DynamicImage> {
     if !looks_like_svg(data) {

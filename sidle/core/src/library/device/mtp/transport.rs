@@ -1,24 +1,6 @@
 //! [`Transport`] over MTP via mtp-rs.
 //!
 //! mtp-rs is async by design (every method on `Storage` returns a future).
-//! Our [`Transport`] trait is sync because the mass-storage impl wraps
-//! `std::fs`. We bridge with `futures::executor::block_on`:
-//!
-//! - mtp-rs is runtime-agnostic — its main `nusb` dep has neither the `tokio`
-//!   nor the `smol` feature enabled, and the bulk-transfer futures are
-//!   real waker-driven futures (see nusb's `device.rs::next_complete`)
-//!   that any executor can drive. No tokio runtime needed.
-//! - `tokio::runtime::Runtime::block_on` would panic from inside
-//!   `spawn_blocking` ("can't block a runtime from within a runtime"); a
-//!   plain futures executor sidesteps that.
-//!
-//! Atomicity: weaker than mass-storage. `SendObjectInfo` allocates the object
-//! handle before `SendObject` streams the bytes, so a failed mid-upload can
-//! leave a zero-or-partial-byte object visible to the device's indexer. Both
-//! ways that happens are visible to the caller — a USB unplug, and
-//! `Error::Cancelled`, which propagates — so nothing here hides a torn write.
-//! Upload-as-`.partial` + `MoveObject` would close the window on devices that
-//! advertise `SetObjectPropValue` (`MtpDevice::supports_rename()`).
 
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -34,17 +16,6 @@ use crate::library::device::transport::{ChildFiles, TEntry, TPath, Transport};
 
 pub struct MtpTransport {
     /// The bound MTP storage, behind a `Mutex` that serves two purposes:
-    ///
-    /// 1. Live free space. [`free_space`](Transport::free_space) re-reads
-    ///    `GetStorageInfo` via [`Storage::refresh`], which needs `&mut self` —
-    ///    but the [`Transport`] trait only hands out `&self`. The mutex is the
-    ///    interior mutability that lets the popover show the real free/total
-    ///    after a push or delete instead of a stale session-open snapshot.
-    /// 2. Single-session op lock. Every on-wire operation holds the guard for
-    ///    the whole `block_on`, so the high-level trait calls (which chain
-    ///    multiple MTP round-trips: walk, list, upload) run one at a time and
-    ///    concurrent push/delete from the UI can't interleave transaction IDs
-    ///    against the one PTP session.
     storage: Mutex<Storage>,
     /// Firmware/OS version parsed from `system/version.txt`, read off the
     /// object tree at session open. `None` if the file wasn't reachable.
@@ -70,10 +41,6 @@ impl MtpTransport {
                 .next()
                 .ok_or_else(|| anyhow!("Kindle reports no MTP storage — try reconnecting"))?;
             // Firmware: the Kindle exposes its real filesystem over MTP, so read
-            // `system/version.txt` — the same file mass-storage parses. The MTP
-            // `GetDeviceInfo.device_version` field comes back empty on Kindle,
-            // and none of its device properties carry the OS version. One extra
-            // round-trip at session open, alongside the storage-info read.
             let firmware = read_firmware(&storage).await;
             Ok::<_, anyhow::Error>((storage, firmware))
         })?;
@@ -87,9 +54,6 @@ impl MtpTransport {
 }
 
 /// Read and parse `system/version.txt` off the device for the firmware string.
-/// Best-effort: any failure (file absent, download error, no version token in
-/// the line) yields `None` — firmware is informational and must never block or
-/// fail the session open.
 async fn read_firmware(storage: &Storage) -> Option<String> {
     let path = TPath::parse(crate::library::device::VERSION_TXT_REL);
     let handle = resolve(storage, &path).await.ok().flatten()?;
@@ -136,11 +100,6 @@ async fn ensure_folder(storage: &Storage, path: &TPath) -> Result<Option<ObjectH
 
 /// Upload `bytes` to `path` over MTP with byte-progress, overwriting any
 /// existing object. Shared by [`MtpTransport::write_atomic`] (no-op progress)
-/// and [`MtpTransport::copy_in_atomic_with_progress`]. The bytes are chunked so
-/// the PTP send issues bounded bulk-OUT transfers (mirror of the 64 KiB
-/// download chunking) and `on_progress` ticks repeatedly over a multi-MiB push
-/// rather than once at the end. mtp-rs drives the callback from inside the send
-/// stream, which is why it must be `Send + Sync`.
 async fn upload_streamed(
     storage: &Storage,
     path: &TPath,
@@ -155,9 +114,6 @@ async fn upload_streamed(
 
     // MTP has no atomic overwrite: delete-then-upload, accepting a tiny window
     // where neither the old nor new object is present — see the module header.
-    // Push routes here for the real (color-cover, send) writes; the window is
-    // between an existing same-name object's delete and the new upload, which
-    // only happens on a re-push of an edited book.
     let entries = storage.list_objects(parent).await.map_err(map_mtp_err)?;
     if let Some(existing) = entries.into_iter().find(|o| o.filename == name) {
         storage
@@ -199,11 +155,6 @@ impl Transport for MtpTransport {
                 .await?
                 .ok_or_else(|| anyhow!("MTP read: object not found at `{path}`"))?;
             // Stream the object in bounded (64 KiB) chunks instead of `download()`,
-            // which asks for the entire payload in ONE bulk-IN transfer. The Scribe
-            // stalls a multi-MB single-transfer GetObject — the host sees IOKit
-            // `kIOReturnNotResponding` (0xe00002ed) and the transport gets evicted
-            // ("disconnect"). `download_stream` issues many small
-            // `receive_bulk(64 KiB)` reads, each well within what the device serves.
             let mut dl = storage.download_stream(handle).await.map_err(map_mtp_err)?;
             let total = dl.size();
             let mut buf = Vec::with_capacity(total as usize);
@@ -231,12 +182,6 @@ impl Transport for MtpTransport {
         on_progress: &(dyn Fn(u64, u64) + Send + Sync),
     ) -> Result<()> {
         // Buffer the local file fully before uploading. Real KFX files are
-        // typically <30MB, occasionally up to ~100MB for image-heavy comics —
-        // in-memory buffering keeps the upload path identical to `write_atomic`
-        // and dodges streaming a `std::io::Read` across the async boundary.
-        // `upload_streamed` then re-chunks the buffer so the SEND still streams
-        // bounded bulk-OUT transfers (and ticks `on_progress`). Revisit if
-        // pushes start failing on RAM pressure.
         let bytes =
             std::fs::read(src_local).with_context(|| format!("read {}", src_local.display()))?;
         let guard = self.storage.lock().expect("storage lock poisoned");
@@ -263,8 +208,6 @@ impl Transport for MtpTransport {
     fn delete_dir(&self, path: &TPath) -> Result<bool> {
         // PTP `DeleteObject` is a single transaction — mtp-rs explicitly
         // doesn't loop, and device behavior on non-empty folders is undefined.
-        // So we walk children, accumulate handles in preorder, and delete in
-        // reverse so leaves go before their parents.
         let guard = self.storage.lock().expect("storage lock poisoned");
         let storage = &*guard;
         block_on(async {
@@ -299,10 +242,6 @@ impl Transport for MtpTransport {
         pick_file: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<ChildFiles>> {
         // Resolve `dir` ONCE, then list each matching child + read its matching
-        // files BY HANDLE — no per-file re-walk of `dir` from the storage root (the
-        // O(N²) that made sync scale badly with library size). `.yjr`/`.yjf`/`nbk`
-        // are tiny; this is one `dir` resolve + a quick listing & small read per
-        // child, all within the one open session.
         let guard = self.storage.lock().expect("storage lock poisoned");
         let storage = &*guard;
         block_on(async {
@@ -382,10 +321,6 @@ impl Transport for MtpTransport {
 
     fn free_space(&self) -> Option<(u64, u64)> {
         // Live re-read: `Storage::refresh` issues a fresh `GetStorageInfo` over
-        // the open session so the popover reflects the real free/total after a
-        // push or delete, not the session-open snapshot. Best-effort — if the
-        // round-trip fails we fall back to the last known `info()` (open-time or
-        // a prior refresh) rather than regressing the display to "—".
         let mut guard = self.storage.lock().expect("storage lock poisoned");
         if let Err(e) = block_on(guard.refresh()) {
             eprintln!("[sidle/mtp] free_space refresh failed, using cached: {e}");
@@ -407,10 +342,6 @@ impl Transport for MtpTransport {
 
 /// Map mtp-rs errors to anyhow with actionable text for the common
 /// "another app owns the device" case.
-/// MTP `DateModified` (`YYYYMMDDThhmmss`, the device's wall clock) → a naive ISO
-/// string `YYYY-MM-DDTHH:MM:SS`. Deliberately no timezone: the value renders as
-/// the Kindle's own clock (matching Finder / Image Capture), which is what the
-/// user expects for "last edited on the device".
 fn mtp_modified_iso(dt: &mtp_rs::ptp::DateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",

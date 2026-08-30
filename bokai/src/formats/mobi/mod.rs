@@ -30,13 +30,6 @@ pub use parser::{
 };
 
 /// Sniff PDB + MOBI header + EXTH from a byte source and classify the format.
-///
-/// Cheap (reads PDB header + record 0 only). Used by `Book::from_bytes` and
-/// `Book::open_format` to route `.mobi` inputs: KF8 / KF8+MOBI6 combo files
-/// go through the AZW3 importer (which extracts source CSS, the KF8 spine,
-/// proper xml:lang on chapter HTML, and matches what Apple Books / strict
-/// EPUB-3 readers need for vertical Japanese text). Pure MOBI6 files keep
-/// the single-text-stream MOBI importer.
 pub fn sniff_format(source: &dyn ByteSource) -> io::Result<MobiFormat> {
     let file_len = source.len();
     let header_start = source.read_at(0, 78)?;
@@ -83,13 +76,6 @@ pub fn parse_base32(s: &[u8]) -> usize {
 
 /// The raw record offset an asset filename encodes, or `None` for a path that
 /// is not one of ours.
-///
-/// Asset paths are minted as `images/image_{offset:04}.{ext}`, where `offset`
-/// counts records from `first_image_index` and includes the non-image records
-/// (`RESC`, `DATP`, `FLIS`, `FCIS`, …) that discovery drops. Carrying the offset
-/// in the name is what lets a caller address a record after filtering: a
-/// position in the filtered list is not the offset, and the two diverge by
-/// however many records were skipped ahead of the target.
 pub fn asset_record_offset(path: &std::path::Path) -> Option<u32> {
     path.file_stem()
         .and_then(|s| s.to_str())

@@ -1,19 +1,4 @@
 //! What the Wi-Fi route offers, and where its bytes are read from.
-//!
-//! [`refresh`] describes a [`DevicePlan`] in two files under
-//! `<data-dir>/device-dist/`, and copies nothing. `manifest.json` is what
-//! `sidle-server` serves and `sidle-native` reads; `sources.json` stays on this
-//! machine and points each path at the file it is served from.
-//!
-//! A registered app lives where its own build put it. Its bytes are read there
-//! on the way out, the way a cable push reads them.
-//!
-//! A manifest `path` is mount-relative: one string keys the served route, the
-//! on-device destination, and the `sources.json` entry.
-//!
-//! [`restamp`] re-reads every manifest entry from the file `sources.json` names
-//! for it: the sha256 a device verifies against and the bytes it downloads come
-//! from one file at one moment.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};

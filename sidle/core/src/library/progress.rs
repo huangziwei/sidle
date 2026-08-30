@@ -1,11 +1,4 @@
 //! How a phase report becomes a progress bar.
-//!
-//! bokai and the import pipeline both report what they are doing as
-//! `(phase_key, current, total, human_label)` — honest about the step, silent
-//! about how much of the whole job it is. That last part is a UI judgement, so
-//! it lives here: one band table covering every pipeline the app shows a bar
-//! for, and one throttle so a per-image phase doesn't fire an event per
-//! percent-hundredth.
 
 use std::cell::Cell;
 

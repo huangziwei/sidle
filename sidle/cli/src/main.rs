@@ -1,17 +1,4 @@
 //! `sidle-cli` — the library without the window.
-//!
-//! The desktop app works one book at a time, which is right for curation and
-//! wrong for a sweep across two thousand rows. This binary opens the same
-//! library — same `config.json`, same `library.db`, same files — and does the
-//! sweeps: reconvert everything after a bokai change, retag a series, re-fetch a
-//! shelf of covers, send a selection to the Kindle, pull the annotations back.
-//!
-//! It is not a second implementation of anything. Every operation is
-//! `sidle-core` plus `bokai`, the same calls the desktop makes.
-//!
-//! Two things make it scriptable: every command that acts on books takes the
-//! same [`select`] flags, and `--json` turns every report into a machine-
-//! readable object.
 
 mod cmd;
 mod ctx;

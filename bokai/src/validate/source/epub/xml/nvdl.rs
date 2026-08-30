@@ -1,23 +1,4 @@
 //! NVDL — the dispatch layer that decides *which* schema validates *what*.
-//!
-//! An EPUB content document is not validated against one grammar. epubcheck
-//! hands it to an NVDL script (ISO/IEC 19757-4), and the script decomposes it
-//! into **sections** by namespace: the XHTML goes to `epub-xhtml-30.rnc`, an SVG
-//! island inside it goes to the SVG grammar, an EPUB 2 `<switch>` goes to
-//! `ops20.rng`, and content in a namespace nobody claims is *removed* before any
-//! grammar sees it. `OPSChecker` names only the `.nvdl` files — the `.rnc` and
-//! `.sch` are reached through them — so skipping this layer would report a
-//! foreign-namespace element as an RSC-005 that epubcheck never emits.
-//!
-//! Only the constructs epubcheck's own scripts use are interpreted; anything
-//! else is a compile error rather than a silent misreading, since these ten
-//! files are the entire input this will ever see.
-//!
-//! The one simplification against the specification: NVDL groups *consecutive*
-//! sibling elements dispatched to the same schema into one section, and this
-//! groups all siblings under one parent section regardless of what separates
-//! them. The grammars here validate whole documents rather than fragment
-//! sequences, so the distinction never arises.
 
 use std::collections::HashMap;
 
@@ -33,11 +14,6 @@ pub const NVDL_NS: &str = "http://purl.oclc.org/dsdl/nvdl/ns/structure/1.0";
 pub struct SchemaRef(pub String);
 
 /// One decomposed part of a document, and the schema it must satisfy.
-///
-/// A rule with several `<validate>` actions produces several sections, not one
-/// with several schemas: each carries its own `useMode`, and for SVG those modes
-/// differ — the grammar is given a document with foreign content stripped, the
-/// Schematron set one with everything attached.
 #[derive(Debug)]
 pub struct Section {
     pub schema: SchemaRef,
@@ -232,12 +208,6 @@ impl Rules {
     }
 
     /// Process one element.
-    ///
-    /// Dispatch happens only where a namespace *changes* (§7 of the
-    /// specification): an element in the same namespace as its parent already
-    /// belongs to its parent's section and is copied straight into it. That is
-    /// what makes the modes readable — `allowForeignNS` never mentions SVG
-    /// because SVG children of an SVG element are never dispatched at all.
     fn walk(&self, doc: &Document, node: NodeId, frame: &Frame, state: &mut Walk) {
         let Some(element) = doc.element(node) else {
             return;
@@ -322,9 +292,6 @@ impl Rules {
                     self.copy(doc, node, &inner, index, parent, state);
                 }
                 // Neither keeps the element itself. Its children are dispatched
-                // afresh — they belong to no section yet, which is how the XHTML
-                // inside an EPUB 2 `<switch>`'s `<default>` reaches the
-                // surrounding document's own section.
                 Action::Unwrap(_) | Action::Allow(_) => {
                     let inner_mode =
                         context_mode(next_contexts, &element.name.local).unwrap_or(next_mode);
@@ -355,10 +322,6 @@ impl Rules {
         let element = doc.element(node).expect("caller checked");
         let namespace = doc.expanded(&element.name).0.map(str::to_string);
         // Attributes are dispatched by their own namespace in the same mode. One
-        // whose rule says `allow` is dropped before the grammar sees it; one
-        // with no rule at all is kept, because a mode that names no attribute
-        // rules (every `attach` mode here) means "leave them alone", and
-        // dropping `xlink:href` would make a valid `<image>` fail.
         let mode_rules = self.modes.get(frame.mode);
         let attrs: Vec<(Option<String>, String, String)> = element
             .attrs

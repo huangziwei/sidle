@@ -1,7 +1,6 @@
 //! `bcRawFont` entity extraction.
 //!
 //! `tests/fixtures/fonts_only.kfx.gz` holds bcRawFont ($418) and font ($262)
-//! entities and nothing else.
 
 use bokai::Book;
 use flate2::read::GzDecoder;

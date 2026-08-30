@@ -1,20 +1,4 @@
 //! Cross-process live-apply after a LAN sync — annotations and books.
-//!
-//! The standalone `sidle-server` daemon runs as a separate process, so it can't
-//! emit a Tauri event into the app. Instead it atomically writes sidecar pulse
-//! files at the data-dir root, and this watcher reacts:
-//!
-//! - `.sync-pulse.json` (`{ts, device_serial, report}`) after a changed
-//!   annotation import → re-emit the **same** `annotations:sync-done` event the
-//!   USB sync path emits (`device/monitor.rs`); the frontend toasts and repaints
-//!   an open reader.
-//! - `.book-pulse.json` (`{ts, books:[{id, needs_enqueue}]}`) after a WiFi book
-//!   import (`POST /sync/book`) → enqueue the pending `kfx_to_epub` conversion and
-//!   re-emit `device:autopull-done` so the shelf refreshes, exactly as the USB
-//!   `/dedrm` auto-pull does.
-//! - `.reading-pulse.json` (`{ts, device_serial, added, extended, attributed}`)
-//!   after a `POST /sync/reading-log` that stored rows → emit
-//!   `reading-log:changed`; the Reading Log page refetches.
 
 use std::sync::mpsc;
 
@@ -35,9 +19,6 @@ const BOOK_PULSE_FILE: &str = ".book-pulse.json";
 const READING_PULSE_FILE: &str = ".reading-pulse.json";
 
 /// Spawn the pulse watcher on a dedicated thread (it blocks on a channel recv, so
-/// it can't share the async runtime). Lives for the app's lifetime; a watch setup
-/// error just logs and ends the thread — LAN live-repaint stops, but nothing else
-/// is affected (reopening the reader still shows the synced rows).
 pub fn spawn(app: AppHandle, paths: LibraryPaths, queue: QueueHandle) {
     std::thread::spawn(move || {
         if let Err(e) = run(&app, &paths, &queue) {
@@ -123,9 +104,6 @@ struct BookEntry {
 }
 
 /// Enqueue each pending conversion, then refresh the shelf by re-emitting the USB
-/// auto-pull's `device:autopull-done` (the frontend toasts "N imported" and
-/// refetches). Enqueue is fire-and-forget on Tauri's runtime — this watcher runs
-/// on a plain thread with no async context of its own.
 fn apply_book_pulse(app: &AppHandle, queue: &QueueHandle, books: &[BookEntry]) {
     for b in books {
         if b.needs_enqueue {
@@ -143,10 +121,6 @@ fn apply_book_pulse(app: &AppHandle, queue: &QueueHandle, books: &[BookEntry]) {
 }
 
 /// Extract `(ts, report)` from a pulse blob — the bits [`run`] emits. Split out so
-/// the JSON contract with the daemon's `sidle_server` `write_sync_pulse`
-/// (`{ts, device_serial, report}`) is unit-testable: a field-name drift between the
-/// writer and this reader would otherwise fail silently (no live repaint). Returns
-/// `None` for unparseable bytes or a pulse missing its `report`.
 fn parse_pulse(bytes: &[u8]) -> Option<(Option<String>, serde_json::Value)> {
     let pulse: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let ts = pulse.get("ts").and_then(|v| v.as_str()).map(str::to_owned);

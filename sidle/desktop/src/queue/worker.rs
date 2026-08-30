@@ -1,12 +1,5 @@
 //! Conversion worker: runs the library's conversion pipeline on a blocking
 //! thread and reports what it is doing to the window.
-//!
-//! The conversion itself — both directions, the cover-enrichment tail, the DB
-//! write-back, the re-anchor — is `sidle_core::library::convert`, which the CLI
-//! drives too. What lives here is what the desktop adds: the app's one database
-//! connection, taken only for the short half of the job, and
-//! `conversion:status` / `conversion:progress` events for the gallery's
-//! per-row bar.
 
 use sidle_core::library::convert::{self, Mode};
 use sidle_core::library::progress;
@@ -20,9 +13,6 @@ use crate::state::DbHandle;
 /// Run a single conversion job: mark `converting`, convert, write the results
 /// back, mark `done`/`error`. Errors are recorded in the DB; never propagated to
 /// the caller (this is a fire-and-forget worker).
-///
-/// `reconvert` = a forced re-run of the format conversion (the "Force
-/// re-convert" button), as opposed to a first import. See [`Mode`].
 pub async fn run_job(
     app: &AppHandle,
     db: &DbHandle,
@@ -63,8 +53,6 @@ pub async fn run_job(
         };
         // The database is taken only once the slow half is finished: `run` is
         // minutes of CPU and holds nothing, `record` is a handful of writes.
-        // Both stay on this thread — the text index `run` builds for the
-        // re-anchor is not `Send`.
         let produced = convert::run(&paths, &book, &kind, mode, &on_progress)?;
         let conn = db_owned.blocking_lock();
         convert::record(&conn, &book, produced)

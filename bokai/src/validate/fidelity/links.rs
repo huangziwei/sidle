@@ -1,30 +1,5 @@
 //! Link-preservation validation — verify that every `<a href>` in the source
 //! EPUB has a corresponding link target in the converted KFX.
-//!
-//! Source-side: walk each spine XHTML, collect `<a href>` values plus every
-//! `id` attribute, which tells an internal `#frag` with a source-side target
-//! from one without. Source-side dangling hrefs are reported separately from
-//! KFX-side defects.
-//!
-//! KFX-side: enumerate Anchor entities (type 266). Each has an `anchor_name`
-//! plus either a `uri` (external link, e.g. `https://…`) or a `position`
-//! (internal link, with `id` = content fragment ID + optional `offset`).
-//! Then walk every Storyline, collect `link_to` references from `style_events`.
-//!
-//! Checks performed:
-//!
-//! 1. **External round-trip** — every distinct `<a href>` URL with an http/
-//!    https/mailto/… scheme should appear as the `uri` of some KFX Anchor.
-//!    This is an exact-string match: source `href="https://example.com"`
-//!    must produce KFX `uri: "https://example.com"`.
-//! 2. **Dangling KFX anchors** — an Anchor whose `position.id` points to a
-//!    content fragment that doesn't exist in the entity index. The Kindle
-//!    reader taps to nowhere on these.
-//! 3. **Orphan KFX link_to** — a `style_event.link_to` symbol with no
-//!    matching `anchor_name` on any Anchor entity. The link is dead in KFX.
-//! 4. **Source-side dangling refs** — a `<a href="#frag">` (or
-//!    `path#frag`) whose fragment has no `id="frag"` anywhere in the source.
-//!    Reported for visibility; not counted as a bokai bug.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::{HashMap, HashSet};
@@ -426,8 +401,6 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 }
 
 // ============================================================================
-// Source-side extraction
-// ============================================================================
 
 /// Walk every spine XHTML and return all `<a href>` occurrences plus the set
 /// of link targets defined anywhere (`id` attributes keyed as
@@ -627,8 +600,6 @@ fn filename_only(path: &str) -> Option<String> {
     path.rsplit('/').next().map(|s| s.to_string())
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 #[derive(Debug, Default)]

@@ -1,19 +1,6 @@
 //! What a `font-family` stack asks for.
-//!
-//! A stack is a preference list ending in a fallback: `booksming, serif` means
-//! "a serif face, ideally booksming". The *category* is the part a renderer can
-//! always honor — a name it doesn't have resolves to the category anyway. So
-//! two stacks sharing a category render alike wherever their preferred faces
-//! are absent, which is what lets a consumer treat them as one voice.
 
 /// Is this token a generic font *category* rather than a typeface name?
-///
-/// CSS defines the categories; Kindle extends them with locale-specific cuts
-/// (`serif-ja`, `sans-serif-ja`, and their `-v` vertical variants), which are
-/// still categories. `標楷體` and `MS Mincho` are typefaces.
-///
-/// Distinct from "may this token appear unquoted in CSS" — that question also
-/// covers the CSS-wide keywords (`inherit`, `unset`), which name no category.
 pub fn is_generic_font_keyword(name: &str) -> bool {
     generic_category(name).is_some()
 }
@@ -38,10 +25,6 @@ fn generic_category(name: &str) -> Option<&'static str> {
 }
 
 /// The category a whole stack asks for: the first generic in it, wherever the
-/// author put it. `serif, PMingLiU` and `booksming, serif` both answer `serif`
-/// — a stack names its fallback category in one position or another, and which
-/// one carries no meaning a renderer can act on. `None` when a stack names only
-/// typefaces, which commits to those faces and to no category at all.
 pub fn font_stack_category(stack: &str) -> Option<&'static str> {
     stack.split(',').find_map(generic_category)
 }
@@ -57,10 +40,6 @@ pub fn preferred_font_face(stack: &str) -> &str {
 }
 
 /// A stack with no padding around its separators — `a, b` becomes `a,b`.
-///
-/// KFX writes stacks this way without exception, so matching it keeps a
-/// converted book's styles indistinguishable from a native one's. Spaces
-/// *inside* a name (`times new roman`) are part of the name and stay.
 pub fn compact_font_stack(stack: &str) -> String {
     stack
         .split(',')

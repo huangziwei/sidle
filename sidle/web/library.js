@@ -8,14 +8,12 @@ const state = {
   view: "gallery", // 'gallery' | 'list'
   // Grouping axis, orthogonal to view. 'none' = flat (every book); 'series' =
   // collapse same-series books into a collection you drill into. Persisted.
-  // Series is the default — the library reads as Kindle-style collections; a
-  // user can still flip to flat via the toggle (persisted, see loadPreferences).
   group: "series", // 'none' | 'series'
   // When grouped, the series whose contents are being browsed, or null at the
   // top level. Ephemeral navigation — never persisted.
   seriesView: null, // string | null
   // Top-level tab. 'device' is the Kindle page, reached from the upper-right
-  // pill rather than the tab strip.
+  // pill, outside the tab strip.
   section: "books", // 'books' | 'notes' | 'misc' (the Files tab) | 'reading' | 'device'
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
@@ -31,23 +29,13 @@ const state = {
     formats: new Set(), // "EPUB" | "PDF" (+ "KFX" in source mode) — see formatFacetMode
   },
   // How the Format facet classifies each book. "companion" (default) = the
-  // non-KFX file it has (EPUB|PDF; KFX is universal, so not an option). "source"
-  // = the format it was imported from (kind's first token), which makes KFX a
-  // real, non-universal option. Persisted; consumed by extractFacetValues.
   formatFacetMode: "companion", // "companion" | "source"
   search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
   sent: [],     // Vec<DeviceBookRow>
   sentSet: new Set(), // sha256s currently on device, derived from `sent`
-  // Column order/visibility + widths for the list view now live in the shared
-  // TableView instance (`booksTable`), persisted under "columnConfig"/"columnWidths".
-  // Cover cache-busting is now per-book (`BookRow.cover_rev`, the served image's
-  // mtime), appended as `?v=` in `coverUrlFor` — no global counter.
-  // Live per-book conversion progress, keyed by book id: `{ fraction, label }`
-  // (fraction is a monotonic 0–1 estimate from the worker; label is the current
-  // step, e.g. "Encoding images"). Set on the `conversion:progress` event,
-  // seeded on `converting`, and dropped on `done`/`error`. Drives the
-  // determinate queue bar in `queueRow`.
+  // Column order, visibility and widths for the list view live in the shared
+  // TableView (`booksTable`), under "columnConfig"/"columnWidths".
   convProgress: {},
   // Book ids whose conversion failed since the failure report was last
   // dismissed, so a batch of failures reads as one list. Cleared by
@@ -58,31 +46,12 @@ const state = {
   // clobber the autopull line with the queue summary.
   autopull: null,
   // When non-null, a foreground import (user-initiated drop / add) is in
-  // flight. `{ message, failed, name, fraction, label, index, total }` — shown
-  // in the status bar with priority over the autopull and queue summary lines,
-  // and as a determinate row in the queue drawer. The last four arrive on
-  // `library:import-progress` and are only present for the formats converted
-  // during the import (azw3 / mobi / aozora zip / kfx-zip); the ones stored as
-  // they arrive finish before a bar would mean anything.
   importing: null,
   // The in-flight send-to-Kindle batch: one task per book, surfaced in the
-  // queue drawer (like conversions) AND the status-bar summary. Each is
-  // `{ id, title, author, status, done, total }` with status queued → sending →
-  // sent/skipped/failed, driven by `device:send-active` (live bytes) and
-  // `device:send-progress` (terminal). Seeded by `sendBooks`, cleared when it
-  // resolves. Empty = no send in flight. A foreground action, so it outranks
-  // the autopull / queue summary lines.
   sendQueue: [],
   // When non-null, a long library file op (backup / restore / merge) is in
-  // flight. `{ op, done, total }` from `library:fileop-progress` — shown in the
-  // status bar (and folded into the settings modal's status line). Cleared when
-  // the triggering handler resolves; restore restarts so it never clears there.
   fileop: null,
   // When non-null, books are being removed from the Kindle. `{ done, total,
-  // title }` — `done` counts `device:delete-progress` events, which the backend
-  // emits one per file. The device list can only be re-read once at the end (a
-  // per-book refresh would be an MTP round trip each), so without this a batch
-  // is minutes of a UI that looks asleep.
   deleting: null,
   // True while a Kindle annotation sync (auto-on-connect or manual) is
   // running. Surfaced in the status bar; lower priority than importing /
@@ -93,10 +62,6 @@ const state = {
   // cleared by openReader once the reader is up (or the open fails).
   opening: null,
   // Keyboard focus cursor (Books section) — a stable key for the currently
-  // highlighted tile, distinct from selection so the cursor can land on series
-  // collections (which are navigate-only, never selected). "book:<id>" or
-  // "series:<name>", or null when nothing is focused. Re-applied across renders
-  // by paintFocus(); ephemeral, never persisted.
   focusKey: null,
   // Anchor for Shift+arrow range extension — the book key where the current
   // range began. Cleared by any plain (non-shift) cursor move or selection edit.
@@ -104,15 +69,11 @@ const state = {
 };
 
 // The Books section's multi-select. The Notes section owns a second instance of
-// the SAME SelectionController (see notebooks.js) so click / cmd / shift / lasso
-// / select-all behave identically across both. Only the adapter differs: which
-// ids, which DOM containers, which selection bar.
 const booksSelection = new window.SelectionController({
   idAttr: "bookId",
   // The selectable books currently on screen, in display order — so shift-range
   // and select-all scope to what's shown. Flat = all sorted books (unchanged);
   // grouped top level = standalone books only (collections aren't selectable);
-  // inside a series = its members.
   orderedIds: () => displayedSelectableBookIds(),
   // The selectable elements on the visible surface. In List view the grouped
   // top level is the series index, where only standalone (`.book-row`) rows are
@@ -123,9 +84,6 @@ const booksSelection = new window.SelectionController({
     return $$("#list tbody tr");
   },
   // Paint `.selected` across whichever surface is populated. render() builds
-  // only the active view's surface and clears the other two, so at most one of
-  // these queries is non-empty; a view switch rebuilds (with selection applied
-  // at build time), so nothing goes unpainted.
   paintContainers: () => [
     ...$$("#gallery-grid .book-card"),
     ...$$("#list tbody tr"),
@@ -147,11 +105,6 @@ function activeController() {
   // The Kindle page, the Files tab and the Reading Log have no selectable items —
   // return no controller so the lasso and the Esc/Cmd-A handlers (which bail on
   // a null controller) stay inert there.
-  //
-  // This is not only about the lasso being pointless: `beginLasso` calls
-  // `preventDefault()` on the mousedown, which stops a native control from ever
-  // opening. A section missing from this list gets dropdowns that cannot be
-  // clicked — which is exactly what the Reading Log's selects did.
   if (state.section === "device" || state.section === "misc" || state.section === "reading") {
     return null;
   }
@@ -178,9 +131,6 @@ const SORT_KEYS = [
 const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags", "formats"];
 
 // Display names for the canonical language codes the backend harmonizes to
-// (see sidle-core `library::lang`). Codes the backend can't simplify fall back
-// to the raw code, so an unmapped language still shows *something*. Chinese is
-// split by script because Simplified vs Traditional is a real reading choice.
 const LANGUAGE_NAMES = {
   en: "English",
   ja: "日本語",
@@ -231,18 +181,6 @@ function facetOptionLabel(facet, value) {
 }
 
 // The Books list-view column schema. The shared TableView (table.js) renders
-// these with sortable headers, drag-to-reorder, resizable widths, and a
-// right-click visibility menu — the SAME component the Notes tab uses, so the
-// two list views behave identically. `render(item)` returns a string (plain
-// cell) or a Node (rich cell). sortable=false skips data-sort wiring (Tags is
-// multi-value, Formats is widgets — neither sorts cleanly).
-//
-// `edit` opts a column into click-to-edit: a plain click on the cell of an
-// already-selected row swaps it for an inline editor that writes straight back
-// through `library_update_metadata` (see commitInlineEdit / the TableView).
-// `textEdit(get)` is the common case (a text field seeded from get(book));
-// Language is a <select>. Columns with no `edit` (Date added, Size, Formats, On
-// Kindle) stay read-only — they're derived/system values, not metadata.
 const textEdit = (get) => ({ type: "text", get });
 const BOOK_COLUMNS = [
   { key: "title",        label: "Title",      sortable: true,  render: (b) => b.title || "Untitled",    edit: textEdit((b) => b.title || "") },
@@ -355,7 +293,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
   subscribeRecrawlProgress();
-  // If the user left off in the Notes tab, populate it now that boot is done.
+  // Populate the Notes tab where boot left off in it.
   if (state.section === "notes" && window.Notebooks) {
     window.Notebooks.setView(state.view);
     window.Notebooks.show();
@@ -372,10 +310,6 @@ function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
   // Grouping default flipped to "series" (2026-06). Read from a NEW key so the
-  // flip lands even where the old "group" key auto-persisted "none" — that key
-  // was rewritten on every preference change, so a stored "none" isn't a
-  // deliberate "flat" choice. An explicit toggle from here on persists under
-  // the new key and is honored on the next load.
   const group = localStorage.getItem("groupMode");
   if (group === "none" || group === "series") state.group = group;
   localStorage.removeItem("group"); // drop the abandoned pre-flip key
@@ -407,9 +341,6 @@ function loadPreferences() {
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
   // Every section setSection persists (i.e. all but the transient Kindle page)
-  // is a section boot can land on — otherwise a stored one it refuses to read
-  // doesn't just fail to open, it costs the user the tab they actually left off
-  // in, which the same key was holding.
   const section = localStorage.getItem("section");
   if (
     section === "notes" ||
@@ -466,8 +397,8 @@ function wireToolbar() {
   $("#settings-restore").addEventListener("click", pickRestore);
   $("#settings-merge").addEventListener("click", doMerge);
   $("#settings-confirm-cancel").addEventListener("click", resetRelocateConfirm);
-  // Arrow-wrapped, not passed by reference: the listener's first argument is the
-  // click event, and a truthy one would read as "keep a copy".
+  // Arrow-wrapped, past a reference: the listener's first argument is the click
+  // event, which reads as a truthy "keep a copy".
   $("#settings-confirm-ok").addEventListener("click", () => confirmRelocate(false));
   $("#settings-confirm-keep").addEventListener("click", () => confirmRelocate(true));
 }
@@ -480,11 +411,7 @@ async function onAddClick() {
 
 function setView(v) {
   state.view = v;
-  // render() builds the now-active surface (the other view's DOM is cleared each
-  // render) and, via applyView(), toggles visibility + syncs Notes' view and the
-  // list-view column widths (rAF ensureWidths). A view switch is deliberate and
-  // infrequent, so paying one surface build here buys ~half the DOM work on every
-  // other (frequent) render.
+  // render() builds the active surface (the other view's DOM is cleared each
   render();
   persistPreferences();
 }
@@ -495,9 +422,6 @@ function applyView() {
   // Content visibility is driven by `.view.active { display: block }`, an author
   // rule that OVERRIDES the `hidden` attribute (`[hidden]` is only a UA rule), so
   // the `active` class — not `hidden` — is what actually shows/hides a section.
-  // The book views activate ONLY in the Books section; gate positively on `books`
-  // so neither Notes nor the device page lets the gallery show through. `hidden`
-  // is kept in sync for a11y.
   const galleryActive = books && state.view === "gallery";
   // In List view the grouped TOP level shows the lightweight series index
   // (#series-list); flat and drilled-into-a-series both use the book table.
@@ -547,10 +471,6 @@ function setGroup(g) {
 let lastLibrarySection = "books";
 
 // One scroll container (#main) holds every section, and swapping which one is
-// visible does not move it — so leaving a long page deep down opens the next one
-// at that same offset, or clamped to its end. Each navigation that swaps what is
-// on screen parks the offset it is leaving under the page it is leaving, and
-// restores the arriving page's own (0 the first time it is seen).
 const scrollMarks = new Map();
 
 // Which page the scroller is showing. Inside Books a series drill-in is its own
@@ -570,14 +490,9 @@ function restoreScroll(key) {
 }
 
 // Top-level Books / Notes / Files / Kindle split. Books and Notes share the
-// Gallery/List view toggle; switching swaps the action button (Add → Import) and
-// hides the Books-only filter chrome. Notes shows the Scribe notebook grid/list
-// (owned by notebooks.js); Files shows what a Sync backs up off the Kindle
-// (owned by misc.js). 'device' is the full-screen Kindle page (entered via the
-// upper-right pill or `\`) — transient: never persisted, never the boot home.
 function setSection(s) {
-  // Re-picking the section already open is not a navigation: leave the scroller
-  // alone rather than yanking the page the user is reading back to its top.
+  // Re-picking the open section is no navigation, and leaves the scroller where
+  // the reader put it.
   const moving = state.section !== s;
   if (moving) parkScroll(scrollKey());
   state.section = s;
@@ -613,10 +528,6 @@ function setSection(s) {
     refreshDevicePage();
   } else if (s === "books") {
     // Re-render the book views on return. A device refresh (a Kindle connect, or
-    // refreshDeviceList while the Kindle page is open) calls render() with
-    // section≠"books", and displayMode() is section-gated, so it rebuilds the
-    // gallery/list FLAT into the hidden DOM. Rebuild now that section==="books"
-    // so the grouping matches the flat|series toggle again.
     render();
   }
   // Last, so the arriving section's content — and therefore its height — is in
@@ -636,8 +547,8 @@ function applySection() {
   // the rest.
   const bare = device || misc || reading;
   const unfiltered = notes || apps || bare;
-  // Section tabs light up for their own section. None of Books/Notes/Files is
-  // active on the Kindle page — the upper-right pill carries that state instead.
+  // Section tabs light up for their own section. The Kindle page activates none
+  // of Books/Notes/Files; the upper-right pill carries that state.
   $("#section-books").classList.toggle("active", books);
   $("#section-notes").classList.toggle("active", notes);
   $("#section-misc").classList.toggle("active", misc);
@@ -663,8 +574,8 @@ function applySection() {
   if (search) search.hidden = unfiltered;
   $("#view-seg").hidden = bare;
   $("#view-sep").hidden = bare;
-  // Addressed by id: the Reading Log pill introduced a second .toolbar-sep
-  // ahead of this one, so "the first in DOM order" no longer identifies it.
+  // Addressed by id: a second .toolbar-sep sits ahead of this one, and DOM order
+  // identifies neither.
   const sectionSep = $("#section-view-sep");
   if (sectionSep) sectionSep.hidden = bare;
   // `#notes` / `#misc` / `#device-page` use the same `.view`/`.view.active`
@@ -692,9 +603,9 @@ function applySection() {
 // up the cover drop target without re-sniffing.
 let dragHasImage = false;
 
-// The cover preview element when it can accept a dropped image — i.e. the
-// single-book metadata editor is open. `null` (no cover target) otherwise, so
-// drops fall through to the normal library import.
+// The cover preview element while it accepts a dropped image, with the
+// single-book metadata editor open. `null` for a drop falling through to the
+// normal library import.
 function coverDropTarget() {
   const modal = $("#metadata-modal");
   if (!modal || modal.hidden || !metadataBook || metadataBulk) return null;
@@ -712,10 +623,6 @@ function wireDragDrop() {
     const t = payload.type;
 
     // Cover drop target: while the single-book editor is open, an image dropped
-    // anywhere on it replaces the cover (OS file drags arrive through Tauri, not
-    // HTML5 drop, so we route them here instead of a DOM dropzone). Non-image
-    // files fall through to the normal import below — so dropping a book while
-    // the editor happens to be open still imports it.
     const coverBox = coverDropTarget();
     if (coverBox) {
       if (t === "enter") dragHasImage = (payload.paths || []).some(isImagePath);
@@ -763,9 +670,6 @@ function wireDragDrop() {
           // device renders the PDF; the pen draws over it).
           lower.endsWith(".pdf") ||
           // Plain .zip is accepted silently so an Aozora Bunko archive can
-          // be dropped in. Non-aozora .zips fail at the backend with a
-          // standard import-failed toast; no special UI signal that .zip
-          // is supported (intentional — see import.rs convert_aozora_zip).
           lower.endsWith(".zip")
         );
       });
@@ -781,19 +685,6 @@ function wireDragDrop() {
 // ---------------------------------------------------------------------------
 // Drag a book onto a series tile to file it there
 // ---------------------------------------------------------------------------
-//
-// Grab a book tile/row (or, if it's part of the current selection, the whole
-// selection) and drop it on a series tile to set those books' series_name —
-// the quick path that skips opening the metadata editor.
-//
-// Mouse-based, NOT the HTML5 drag API: the webview runs with dragDropEnabled
-// (for file-drop import), so WebKit hands native drags to Tauri at the OS level
-// and dragstart/drop never reach our DOM — the same reason the column reorder
-// in table.js is mouse-driven. We mirror that pattern: a small movement
-// threshold separates a drag from a click, a floating ghost trails the cursor,
-// the series tile under it lights up, and mouseup files the books via the
-// existing bulk-metadata command. Series tiles need no per-tile wiring — they're
-// found by hit-testing `[data-series]` under the cursor.
 
 const BOOK_DRAG_THRESHOLD = 4; // px a mousedown must travel before it's a drag
 
@@ -814,8 +705,8 @@ function onBookDragDown(e, el, book) {
 
   const startX = e.clientX;
   const startY = e.clientY;
-  // Grab the whole selection when the book is part of it; otherwise just this
-  // one, without disturbing an unrelated selection.
+  // Grab the whole selection where the book is part of it, and this one alone
+  // where the selection is unrelated.
   const ids = booksSelection.has(book.id) ? booksSelection.ids() : [book.id];
 
   let dragging = false;
@@ -847,8 +738,8 @@ function onBookDragDown(e, el, book) {
     if (!dragging) return; // never crossed the threshold — a plain click
 
     el.classList.add("just-dragged"); // swallow the trailing synthetic click
-    // Drop it again after that click would have fired, so an aborted drag
-    // (released over nothing → no re-render) can't swallow the next real click.
+    // Drop it again past that click's moment, holding an aborted drag —
+    // released over nothing, with no re-render — off the next real click.
     setTimeout(() => el.classList.remove("just-dragged"), 0);
     const target = seriesTileAt(ev.clientX, ev.clientY);
     if (target) assignBooksToSeries(ids, target.dataset.series);
@@ -873,9 +764,9 @@ function paintSeriesDropTarget(el) {
   if (el) el.classList.add("series-drop-target");
 }
 
-// Set `series_name` on the dropped books via the bulk-metadata command (same
-// path as the editor), then merge the returned rows and re-render once. Books
-// already in the series are skipped so the toast count is truthful.
+// Set `series_name` on the dropped books through the bulk-metadata command the
+// editor uses, then merge the returned rows and re-render once. A book in the
+// series is skipped, and the toast count states what moved.
 async function assignBooksToSeries(bookIds, seriesName) {
   const name = (seriesName || "").trim();
   if (!name || !bookIds || bookIds.length === 0) return;
@@ -893,8 +784,8 @@ async function assignBooksToSeries(bookIds, seriesName) {
       patch: { series_name: name },
     });
     for (const r of rows) mergeBookRow(r);
-    // The books collapsed into the series tile and are no longer individually
-    // shown, so drop them from the selection if they were in it.
+    // The books collapse into the series tile, showing individually nowhere,
+    // and drop out of the selection.
     if (targets.some((id) => booksSelection.has(id))) booksSelection.clear();
     render();
     showToast(`Added ${rows.length} book${rows.length === 1 ? "" : "s"} to "${name}".`);
@@ -953,10 +844,6 @@ async function importPaths(paths) {
 }
 
 // Persistent failure report. The detailed `error` from Rust (the full anyhow
-// context chain, e.g. "read metadata from …: invalid Zip archive: …") is what
-// makes a failure diagnosable instead of just "failed", so it gets a panel that
-// stays until dismissed rather than a 4-second toast. Shared by the import and
-// conversion paths: each `entry` is `{ name, reason, onRetry? }`.
 function showErrorReport(title, entries) {
   const panel = $("#error-report");
   const list = $("#error-report-list");
@@ -1006,9 +893,6 @@ function showImportErrorReport(failures) {
 }
 
 // Why a conversion failed, with its Retry one click away. Reached from the
-// failed format badge, the queue drawer's "Failed", and automatically when a
-// `conversion:status` error arrives — the reason is the point, because a book
-// silently sitting at "failed" tells the user nothing.
 function showConversionErrorReport(bookIds) {
   const books = bookIds
     .map((id) => state.books.find((b) => b.id === id))
@@ -1067,13 +951,11 @@ function importFormatName(path) {
 
 // Live progress for the file currently being imported. Only the formats
 // converted during the import report these — see the `importing` state comment.
-// The event carries the source path, so the row is named after the file even
-// before the book has a title.
 function subscribeImportProgress() {
   window.api.listen("library:import-progress", (e) => {
     const { path, index, total, fraction, label } = e.payload || {};
-    // A tick that outlives its import (the command already resolved) must not
-    // resurrect the status line.
+    // A tick outliving its import, past the command's resolve, leaves the status
+    // line down.
     if (!state.importing || state.importing.failed) return;
     const batch = total > 1 ? ` (${(index ?? 0) + 1}/${total})` : "";
     state.importing = {
@@ -1117,22 +999,18 @@ async function refresh() {
 function setSent(rows) {
   state.sent = rows || [];
   // Only `sent` rows have a full sha256 we can intersect with the local
-  // library; `orphan` rows expose a sha8 prefix only. The sentSet drives
-  // the green-badge / Send vs Remove decisions, which only matter for
-  // books that actually exist locally — so excluding orphans here is
-  // correct, not an omission.
   state.sentSet = new Set(
     state.sent.filter((r) => r.kind === "sent").map((r) => r.sha256),
   );
 }
 
 function render() {
-  // Prune selection of any books that no longer exist (e.g. after a refresh).
+  // Prune the selection of books a refresh has dropped.
   booksSelection.prune(new Set(state.books.map((b) => b.id)));
   const visible = sortedBooks(visibleBooks(state.books));
 
-  // Drop a drill-in whose series no longer has any visible book (filtered out,
-  // removed, or its series_name edited away) so we never strand on an empty view.
+  // Drop a drill-in whose series holds no visible book — filtered out, removed,
+  // or its series_name edited away — leaving no empty view to strand on.
   if (
     state.seriesView != null &&
     !visible.some((b) => seriesNameOf(b) === state.seriesView)
@@ -1140,12 +1018,7 @@ function render() {
     state.seriesView = null;
   }
 
-  // Grouping is a presentation layer on the already-filtered, already-sorted
-  // `visible`. Build ONLY the surface the active view shows and clear the other
-  // two — so a gallery render doesn't also rebuild the ~N-row table (and its
-  // per-row listeners) into hidden DOM, and the cross-surface painters
-  // (paintContainers / paintFocus) never iterate stale rows. `setView` re-runs
-  // render() on a gallery⇄list switch, so the newly-active surface is current.
+  // Grouping is a presentation layer on the filtered, sorted
   const mode = displayMode();
   const galleryView = state.view === "gallery";
   let count;
@@ -1186,9 +1059,6 @@ function render() {
   paintSeriesSelection(); // re-mark selected collections on the rebuilt tiles
   updateSendUnsentButton();
   // The empty-state messages are wired to whether the *visible* set is
-  // empty. If the underlying library is non-empty but filters hide
-  // everything, the empty state surfaces in the same slot — the user
-  // can clear filters via the "All" pill.
   $("#gallery-empty").hidden = count > 0;
   $("#list-empty").hidden = count > 0;
   $("#series-list-empty").hidden = count > 0;
@@ -1202,11 +1072,6 @@ function render() {
 }
 
 // Natural-order string collation: digit runs compare as numbers, so "Vol 2"
-// sorts before "Vol 10" instead of lexicographically after it. Used for every
-// title/name/facet ordering, so a series' volumes line up by their in-title
-// number even before a numeric series index is set. `numeric: true` is the only
-// override — case/accent handling stays the locale default, matching the bare
-// `localeCompare` it replaces.
 const naturalCollator = new Intl.Collator(undefined, { numeric: true });
 function naturalCompare(a, b) {
   return naturalCollator.compare(a, b);
@@ -1234,19 +1099,10 @@ function sortValue(b, key) {
 }
 
 // Composite sort key for the Series column: primary by series_name,
-// secondary by series_index. We pack both into a single string with a
-// control-char separator ( sorts before every printable char) and
-// a zero-padded index, so the existing naturalCompare path in
-// sortedBooks() handles the two-level ordering without any tuple
-// machinery. Books without a series return null and sink to the bottom
-// via the existing null-handling.
 function seriesSortKey(b) {
   const name = b.series_name?.trim();
   if (!name) return null;
   // Scale by 10000 so sub-volumes down to four decimals (5.1, 5.25, …) sort
-  // correctly under the numeric collator (a pure integer — no "." — keeps the
-  // digit run unambiguous); an unset index uses a large sentinel so those books
-  // sort after every numbered one.
   const rawIdx =
     b.series_index != null && Number.isFinite(b.series_index)
       ? Math.round(b.series_index * 10000)
@@ -1265,19 +1121,17 @@ function seriesText(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Series grouping (flat ⇄ collections). Pure presentation over the
-// already-filtered, already-sorted `visible` list — see render().
-// ---------------------------------------------------------------------------
+// Series grouping (flat ⇄ collections). Pure presentation over the filtered,
+// sorted `visible` list — see render().
 
 // A book's series identity, or null when it has none (→ stays standalone).
 function seriesNameOf(b) {
   return b.series_name?.trim() || null;
 }
 
-// What to show in the Books section right now.
+// What the Books section shows.
 //   'flat'    — every book individually (also the Notes section)
-//   'grouped' — series collections + standalone books (the grouped top level)
-//   'series'  — the members of the one series being drilled into
+//   'grouped' — series collections + standalone books
 function displayMode() {
   if (state.section !== "books" || state.group !== "series") return "flat";
   return state.seriesView != null ? "series" : "grouped";
@@ -1301,10 +1155,9 @@ function membersOfSeries(books, name) {
   return books.filter((b) => seriesNameOf(b) === name).sort(bySeriesIndex);
 }
 
-// Fold the already-sorted list into entries: a series collection appears at the
-// position of its FIRST-seen member, so the active sort drives tile/row order
-// for free (Title → first book alphabetically; Date added → newest member;
-// Author → under its author). Books with no series stay standalone.
+// Fold the sorted list into entries: a series collection appears at its
+// first-seen member's position, and the active sort drives tile/row order
+// (Title → first book alphabetically; Date added → newest member;
 function groupBySeries(sortedVisible) {
   const out = [];
   const seen = new Map();
@@ -1372,19 +1225,6 @@ function exitSeries() {
 
 // ---------------------------------------------------------------------------
 // Filter algorithm (cascading facets + free-text search)
-//
-// Composition: render() calls sortedBooks(visibleBooks(state.books)).
-//   - visibleBooks applies the global search and AND-across-facets.
-//   - facetOptions, used by the dropdown, applies a "leave-one-out" view
-//     so selecting language=jp narrows the Author pill's options, but the
-//     Language pill itself still shows every language in the library.
-//
-// Author splitting: extractFacetValues splits on /\s*[&、]\s*/ — " & " (the
-// import/editor join, matching calibre/KFX) or the CJK ideographic comma 「、」.
-// NEVER a plain comma: that separates "Surname, Given" inside a single Western
-// name (e.g. "Kafka, Franz"), which import flips to "Franz Kafka". Everywhere
-// else is just JS Unicode-native string ops (.includes, .toLowerCase, etc.).
-// ---------------------------------------------------------------------------
 
 function extractFacetValues(book, facet) {
   switch (facet) {
@@ -1410,9 +1250,6 @@ function extractFacetValues(book, facet) {
       // Two classifications, chosen by state.formatFacetMode:
       //  - "companion": the non-KFX file this book has (EPUB|PDF). KFX is
       //    universal, so it's never an option here.
-      //  - "source": the format it was imported from (kind's first token),
-      //    which makes KFX a real, non-universal option.
-      // Uppercased so the value doubles as the dropdown / pill label.
       return [
         (state.formatFacetMode === "source" ? sourceFormat(book) : nonKfxFormat(book)).toUpperCase(),
       ];
@@ -1439,22 +1276,7 @@ function matchesFacets(book, facets) {
   return true;
 }
 
-// Canonical match form, mirroring sidle-core's `romaji::canon` (the fold used to
-// build each book's `search_key`): NFKD-decompose, lowercase, then keep only
-// [a-z0-9] — dropping spaces, punctuation, and the combining accent marks NFKD
-// splits off (ō→o, é→e, fullwidth→half). Space-insensitive on both sides, so
-// "sekaisaikou" hits "sekai saikou …".
-//
-// Two query-side deviations from the backend fold:
-//  - ß/œ/ø/æ have no NFKD decomposition and would be dropped; expand them to
-//    the digraph spellings the stored key also indexes (strasse, oeuvre — see
-//    `romaji::expand_latin`), so a query typed with the real glyph stays on
-//    this path ("müller straße" still hits "Müller-Straße 7").
-//  - Lossy-fold guard: kana/kanji strip to *nothing*, so a CJK query would
-//    canon to its stray alnum remnants — "クラスで２" → "2" — and containment
-//    would match every book with a 2 anywhere in its key. If any letter/digit
-//    fails to survive into [a-z0-9], return "" so matchesSearch skips the
-//    romaji path; native-script queries belong to the raw substring path.
+// Canonical match form, mirroring sidle-core's `romaji::canon` (the fold behind
 function canonSearch(s) {
   const folded = (s || "")
     .replace(/[ßẞ]/g, "ss")
@@ -1467,11 +1289,6 @@ function canonSearch(s) {
 }
 
 // The query-side folds, computed ONCE per filter pass and reused for every book
-// (they don't vary by book): `raw` = NFKC width-folded (２→2, ｶ→カ, ideographic
-// space→space), trimmed, lowercased query for the native substring path; `q` =
-// NFKD-stripped canon for the romaji-key path (only when the query is non-empty
-// — canonSearch's NFKD+regex is the pass's costliest bit, so we don't want it
-// per book). An empty `raw` short-circuits matchesSearch.
 function searchTerms() {
   const raw = state.search.normalize("NFKC").trim().toLowerCase();
   return { raw, q: raw ? canonSearch(state.search) : "" };
@@ -1481,19 +1298,8 @@ function matchesSearch(book, terms) {
   const { raw, q } = terms;
   if (!raw) return true;
   // (1) Romaji-aware match. Fold the query the same way the backend folded each
-  //     book's `search_key` (curated title/author romaji + auto-romanized
-  //     series/publisher/tags + the raw fields, all canon'd) and test
-  //     containment. This is what lets a romaji query surface a CJK book —
-  //     "murakami" finds 村上春樹 — the same key the on-device picker searches.
-  //     Space-insensitive, so "sekaisaikou" also hits "sekai saikou …".
   if (q && book.search_key && book.search_key.includes(q)) return true;
   // (2) Raw native-text match. `canon` strips CJK to nothing, so it can't match a
-  //     query typed in the actual script; the desktop has a real keyboard (the
-  //     device's on-screen one is ASCII-only), so keep the plain substring search
-  //     over the raw fields — typing 暗殺 or 村上 still filters. The romaji columns
-  //     are folded in too, so they're searchable even on this path. NFKC-folded
-  //     like the query, so an IME's width choice doesn't matter: ２/2 and ｶ/カ
-  //     match either way (titles routinely use fullwidth digits, e.g. クラスで２番目).
   const hay = [
     book.title,
     book.author,
@@ -1528,9 +1334,6 @@ function facetOptions(facet) {
     }
   }
   // Always include this pill's currently-selected values, even if the
-  // cross-facet filter would exclude them. Without this, a user who
-  // selected author=A then language=B (excluding A's books) would have
-  // no way to unselect A.
   for (const v of state.filters[facet]) {
     if (!counts.has(v)) counts.set(v, 0);
   }
@@ -1572,9 +1375,8 @@ function clearFacet(facet) {
 }
 
 // Switch the Format facet between "companion" (non-KFX file present) and
-// "source" (imported-from format). KFX is a valid value only in source mode, so
-// leaving source prunes a selected "KFX" (it would otherwise filter to zero).
-// Re-renders the open dropdown (counts move) and the whole view (pill + list).
+// "source" (imported-from format). KFX is valid in source mode alone, and
+// leaving source prunes a selected "KFX", which filters to zero.
 function setFormatFacetMode(mode) {
   if (mode === state.formatFacetMode) return;
   state.formatFacetMode = mode;
@@ -1584,12 +1386,7 @@ function setFormatFacetMode(mode) {
   render();
 }
 
-// One set of listeners on the gallery grid instead of ~4 per card × N books:
-// each event resolves `event.target` up to its `.book-card` and back to the
-// book via `dataset.bookId`. The grid element itself persists across renders
-// (only its children are cleared), so this is wired once at boot. Series tiles
-// live in the same grid but aren't `.book-card`, so they fall through to their
-// own per-tile handlers (seriesCard) untouched.
+// One set of listeners on the gallery grid, past ~4 per card × N books:
 function wireGalleryDelegation() {
   const grid = $("#gallery-grid");
 
@@ -1714,9 +1511,6 @@ function seriesCard(entry) {
 }
 
 // Grouped list top level: a navigation index. Series rows drill in; standalone
-// (no-series) book rows behave like book-table rows — selectable (class
-// `book-row`, so the SelectionController's `#series-list tbody tr.book-row`
-// query finds them), double-click to read, right-click for the book menu.
 function renderSeriesList(entries) {
   const tbody = $("#series-list tbody");
   tbody.innerHTML = "";
@@ -1828,7 +1622,6 @@ function metaBadges(b) {
 // Format badges for a series collection tile (gallery view): the distinct
 // non-KFX sides present across its members — usually one, since a series is
 // typically uniform, but a mixed series shows both — then the universal KFX.
-// Reuses the per-book `.meta-badges` row, so series tiles read like book cards.
 function seriesMetaBadges(entry) {
   const wrap = document.createElement("div");
   wrap.className = "meta-badges";
@@ -1843,8 +1636,8 @@ function seriesMetaBadges(entry) {
 }
 
 // The member whose conversion status for `format` is the most urgent
-// (error > converting > pending > done), so a collection's badge surfaces any
-// still-converting or failed volume. Defaults to the first member.
+// (error > converting > pending > done), surfacing a converting or failed
+// volume on the collection's badge. Defaults to the first member.
 const STATUS_RANK = { error: 3, converting: 2, pending: 1, done: 0 };
 function worstForFormat(books, format) {
   let rep = books[0];
@@ -1866,17 +1659,11 @@ function nonKfxFormat(b) {
 }
 
 // The format a book was imported *from*: the first token of `b.kind`
-// ("<source>_to_<target>"). Unlike nonKfxFormat (the surviving non-KFX side),
-// this returns "kfx" for a KFX-sourced book, so KFX becomes a real Format-facet
-// option in source mode. Falls back to "epub" for a row without a kind yet.
 function sourceFormat(b) {
   return (b.kind || "epub_to_kfx").split("_to_")[0];
 }
 
 // Returns the conversion status as it applies to the given format side
-// (`"epub"`, `"pdf"`, or `"kfx"`). The format the import wrote directly is
-// always "done"; the format the queue produces follows b.status. `b.kind` is
-// "<source>_to_<target>" — the queue produces the target.
 function formatStatusFor(format, b) {
   const target = (b.kind || "epub_to_kfx").split("_to_")[1] || "kfx";
   return format === target ? b.status : "done";
@@ -1951,18 +1738,13 @@ function subscribeStatus() {
     } else {
       delete state.convProgress[book_id];
     }
-    // A failure surfaces its reason on its own — the book is otherwise left
-    // sitting at "failed" with the cause only reachable by hovering a badge.
-    // Accumulate so a batch of failures reads as one list, not a panel that
-    // rerenders down to whichever book failed last.
+    // A failure surfaces its reason on its own, past a book sitting at "failed"
+    // with the cause behind a badge hover.
     if (status === "error") {
       if (!state.convFailures.includes(book_id)) state.convFailures.push(book_id);
       showConversionErrorReport(state.convFailures);
     }
     // When a conversion finishes, re-pull rows to pick up kfx_path — and the
-    // fresh `cover_rev`: the worker may have just overwritten the grayscale
-    // cover.jpg with the color-fetch result, and the new mtime busts that one
-    // tile's `?v=` so the browser drops the cached desaturated image.
     if (status === "done") {
       refresh();
     } else {
@@ -1971,9 +1753,6 @@ function subscribeStatus() {
   });
 
   // Live per-book conversion progress. These fire often (once per chapter /
-  // image for EPUB→KFX), so update just the affected row in place rather than
-  // rebuilding the queue list each tick; fall back to a full render only if the
-  // row isn't mounted yet (the seeding `converting` status hasn't arrived).
   window.api.listen("conversion:progress", (e) => {
     const { book_id, fraction, label } = e.payload || {};
     if (book_id == null) return;
@@ -1983,15 +1762,6 @@ function subscribeStatus() {
 }
 
 // Build the URL we hand to <img src=…>. Returns null when the book has no
-// cover on disk yet. The `?v=N` cache buster matches the file's "version"
-// from sidle's perspective — incrementing it on every cover overwrite is
-// the cheap way to force the webview to re-fetch.
-// `thumb: true` prefers the small gallery-sized thumbnail sidecar
-// (`cover.thumb.jpg`, ~48KB / ≤400×520) that the backend derives when it
-// exists, falling back to the full-res cover — an 8×-smaller download and
-// ~15×-less decode per grid tile, with no visible difference at the 150px cell.
-// The metadata-editor preview and drag-drop target leave `thumb` off: they want
-// the full art. Both resolve through the same asset:// scope (same directory).
 function coverUrlFor(b, { thumb = false } = {}) {
   if (!b) return null;
   const path = (thumb && b.cover_thumb_path) || b.cover_path;
@@ -1999,10 +1769,6 @@ function coverUrlFor(b, { thumb = false } = {}) {
   const base = window.api.fileUrl(path);
   if (!base) return null;
   // Per-book cache token = the served image's mtime (`cover_rev`, from the
-  // backend). It changes iff THIS book's cover file changes, so replacing one
-  // cover re-fetches only its tile — not the whole gallery, which is what a
-  // single global cache-bust counter would cost. `|| 0` for a
-  // coverless/unstattable row.
   return `${base}?v=${b.cover_rev || 0}`;
 }
 
@@ -2011,9 +1777,6 @@ function coverUrlFor(b, { thumb = false } = {}) {
 // ---------------------------------------------------------------------------
 
 // Re-pull everything the Kindle page shows. Fired on entering the device section
-// (pill click or `\`). Deploy staleness + LAN-server state change out-of-band
-// (server token rotates, native rebuilt, a start-stop from elsewhere), so this
-// re-probes rather than trusting cached state.
 function refreshDevicePage() {
   refreshDeviceList();
   refreshServerStatus();
@@ -2021,8 +1784,8 @@ function refreshDevicePage() {
 
 function wireDevice() {
   // The pill toggles the full-screen Kindle page: into it, or back to the last
-  // library section if we're already there (preserves the click-to-dismiss feel
-  // the popover had). setSection's "device" branch fires the on-enter refreshes.
+  // library section from inside it, which is the popover's click-to-dismiss.
+  // setSection's "device" branch fires the on-enter refreshes.
   $("#device-pill").addEventListener("click", () => {
     setSection(state.section === "device" ? lastLibrarySection : "device");
   });
@@ -2039,9 +1802,9 @@ const FILEOP_VERB = { backup: "Backing up", restore: "Restoring", merge: "Mergin
 // the triggering handler cleared it (same race as sendInFlight).
 let fileopInFlight = false;
 
-// Live progress for a long library file op (backup / restore / merge), shown in
-// the footer status line and folded into the settings modal's own status line —
-// these ops are triggered from there, so that's where the user is looking.
+// Live progress for a long library file op (backup / restore / merge), in the
+// footer status line and in the settings modal's own line, which is where the
+// op is triggered.
 function subscribeFileopProgress() {
   window.api.listen("library:fileop-progress", (e) => {
     const p = e?.payload;
@@ -2081,7 +1844,7 @@ function subscribeSendProgress() {
     const r = e.payload;
     if (!r) return;
     // Move the matching queue task to its terminal state (drawer + summary).
-    // find() on an already-cleared queue is a safe no-op for a late event.
+    // find() on a cleared queue is a safe no-op for a late event.
     const task = state.sendQueue.find((t) => t.id === r.book_id);
     if (task) {
       task.status =
@@ -2209,9 +1972,8 @@ function updateDeviceUI(info) {
     label.textContent = `Kindle ${free}`.trim();
     status.className = "device-popover-status connected";
     status.textContent = "Connected";
-    // Eject is mass-storage-only. MTP devices close their USB session
-    // on unplug — no eject concept — so hide the button instead of
-    // showing a no-op.
+    // Eject is mass-storage-only. An MTP device closes its USB session on
+    // unplug and has no eject, which hides the button.
     const ejectBtn = $("#btn-device-eject");
     if (ejectBtn) {
       ejectBtn.hidden = info.transport !== "mass_storage";
@@ -2236,9 +1998,6 @@ function updateDeviceUI(info) {
         : "—";
     // MTP devices need exclusive USB session access, so any other app
     // currently talking to the Kindle (Image Capture, OpenMTP, Calibre)
-    // will block sidle's push/delete with a "device busy" error. The tip
-    // names them so the user knows what to quit. Mass-storage doesn't
-    // have this contention.
     if (info.transport === "mtp") {
       tip.textContent =
         "MTP device. Quit Image Capture, OpenMTP, or Calibre if a push fails — only one app can hold the USB session at a time.";
@@ -2268,8 +2027,8 @@ function updateDeviceUI(info) {
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
-    // The apps card stays up with no Kindle — it lists what a push would carry
-    // and lets one be registered before the cable is in.
+    // The apps card stays up with no Kindle, listing what a push carries and
+    // taking a registration before the cable is in.
     invalidateApps();
     // Hide eject button on disconnect — nothing to eject.
     const ejectBtn = $("#btn-device-eject");
@@ -2323,8 +2082,7 @@ function renderDeviceList() {
   updateSendUnsentButton();
 
   // Bulk "Import all orphans" — count + show/hide. The button drives
-  // `device_import_orphan` per row, which already enqueues the KFX→EPUB
-  // background job; nothing extra to do here.
+  // `device_import_orphan` per row, which enqueues the KFX→EPUB background job.
   const orphanCount = rows.filter((r) => r.kind === "orphan").length;
   const btn = $("#btn-import-all-orphans");
   if (btn) {
@@ -2450,11 +2208,6 @@ async function ejectDevice() {
 }
 
 // Status-bar feedback for a device orphan import. The backend's read is the
-// slow part (an MTP pull spans several PTP sessions), so we light up the status
-// bar the instant the user clicks, so the stretch between the click and the
-// final toast does not read as nothing happening. `importBase` is
-// the label the handler sets ("Importing X…"); the `device:import-progress`
-// listener appends a live MiB counter to it (see `subscribePullProgress`).
 let importBase = null;
 
 function setImportStatus(label) {
@@ -2540,18 +2293,9 @@ async function importOrphan(filename) {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-pull from Kindle /dedrm
-//
-// The backend pulls and converts every new /dedrm file on Kindle connect —
-// no user interaction needed. We just listen for the per-file progress (to
-// keep the Kindle page's status line current) and a final summary toast.
-// ---------------------------------------------------------------------------
 
 function subscribePullProgress() {
   // Per-file event from the autopull worker. Updates the Kindle-page status
-  // line for users who have it open, and — for actually-imported files —
-  // triggers a library refresh so the new row appears in the gallery the
-  // moment it lands on disk, instead of waiting for the whole batch to finish.
   window.api.listen("device:pull-progress", async (e) => {
     const r = e.payload;
     if (!r) return;
@@ -2567,9 +2311,6 @@ function subscribePullProgress() {
   });
 
   // Live byte-progress for a manual orphan import (the per-book "Import" /
-  // "Import all orphans" buttons). The handler sets the base label; here we
-  // append a MiB counter as the device read advances. Gated on `importBase` so
-  // stray events after an import finishes don't resurrect the status line.
   window.api.listen("device:import-progress", (e) => {
     const p = e.payload;
     if (!p || importBase === null) return;
@@ -2624,15 +2365,10 @@ function subscribePullProgress() {
 
 // ---------------------------------------------------------------------------
 // Kindle annotation sync (highlights / notes / bookmarks)
-//
-// Auto-runs in the background on mass-storage connect (the backend monitor
-// fires `annotations:sync-*`); the popover button is the manual re-run for
-// when the auto sync didn't catch something. Either way it's idempotent.
-// ---------------------------------------------------------------------------
 
 // Turn a DeviceImportReport into a one-line summary for the toast. Sidle is an
-// additive backup — sync only adds (never deletes), so this reports new
-// annotations + handwritten pages; a no-op sync reads "already up to date".
+// additive backup: a sync adds and deletes nothing, and this reports new
+// annotations and handwritten pages. A no-op sync reads "up to date".
 function annotationSyncSummary(report) {
   const added = report?.annotations?.inserted ?? 0;
   const inkPages = report?.ink_pages ?? 0;
@@ -2648,8 +2384,8 @@ function annotationSyncSummary(report) {
   if (files > 0) parts.push(`${files} file${files === 1 ? "" : "s"}`);
   if (parts.length > 0) return `Synced ${parts.join("; ")}`;
 
-  // Nothing new to sync. Logs refresh on every sync (they grow by appending), so
-  // surface them only as the fallback message rather than on every toast.
+  // Nothing new to sync. Logs refresh on every sync, growing by appending, and
+  // surface as the fallback message alone.
   if (logs > 0) return `Backed up ${logs} log${logs === 1 ? "" : "s"}`;
   return "Annotations already up to date";
 }
@@ -2681,7 +2417,7 @@ async function syncAnnotations() {
     state.annotationSync = false;
     renderQueue();
     btn.textContent = prevLabel;
-    // Re-enable as long as a Kindle (either transport) is still connected.
+    // Re-enable while a Kindle on either transport is connected.
     btn.disabled = !state.device;
     if (prog) setTimeout(() => (prog.hidden = true), 2000);
   }
@@ -2747,7 +2483,7 @@ function subscribeAnnotationSync() {
     state.annotationSync = { stage: "annotations", current: 0, total: 0, label: "" };
     renderQueue();
   });
-  // Per-item progress: which book/notebook is syncing now (count + label).
+  // Per-item progress: which book/notebook is syncing (count + label).
   window.api.listen("annotations:sync-progress", (e) => {
     if (state.annotationSync) {
       state.annotationSync = e.payload;
@@ -2761,9 +2497,9 @@ function subscribeAnnotationSync() {
     const added = report?.annotations?.inserted ?? 0;
     const inkPages = report?.ink_pages ?? 0;
     const files = report?.misc_new ?? 0;
-    // Only toast when the sync actually pulled something new — a no-op reconnect
-    // shouldn't nag. Files the library had never seen count; refreshed ones
-    // don't (a log updates on every sync, so it would toast on every connect).
+    // Toast where the sync pulled something new, leaving a no-op reconnect
+    // quiet. Files the library had never seen count; a refreshed one does not,
+    // a log updating on every sync toasting on every connect.
     if (added > 0 || inkPages > 0 || files > 0) showToast(annotationSyncSummary(report));
     // If the user is reading one of the synced books, repaint in place.
     window.sidleReader?.reloadAnnotations?.();
@@ -2807,11 +2543,7 @@ function renderQueue() {
 
   const ul = $("#queue-list");
   ul.innerHTML = "";
-  // The import that's running now sits at the top: it's the newest thing in
-  // flight, and it's the one holding the user's attention. Only the imports
-  // that report their steps get a row — a bar stuck at zero for an import with
-  // nothing to report says less than the status line already does, and the
-  // device-orphan path writes `importing` with no fraction at all.
+  // The running import sits at the top, the newest thing in
   const importRow = state.importing?.label ? importQueueRow() : null;
   if (importRow) ul.appendChild(importRow);
   // A delete batch outranks the conversion queue for the same reason an import
@@ -2827,8 +2559,8 @@ function renderQueue() {
     deleteRow != null;
 }
 
-// The single status-bar line. Split out from `renderQueue` because the frequent
-// in-place progress patches repaint it without rebuilding the drawer list.
+// The single status-bar line, apart from `renderQueue`: the frequent in-place
+// progress patches repaint it and leave the drawer list built.
 function renderStatusSummary(active) {
   const counts = {
     converting: active.filter((b) => b.status === "converting").length,
@@ -2844,8 +2576,6 @@ function renderStatusSummary(active) {
   // Priority order in the status bar:
   //   1. foreground import (state.importing) — user-initiated drop / add
   //   2. autopull from Kindle's /dedrm folder (state.autopull)
-  //   3. Kindle annotation sync (state.annotationSync)
-  //   4. background conversion queue summary (the default)
   if (state.opening) {
     // The user just double-clicked a book; a large KFX can take a beat to load,
     // so name the one being opened (cleared by openReader once it's up).
@@ -2923,12 +2653,6 @@ function renderStatusSummary(active) {
 }
 
 // A queue-drawer row for the import in flight. Same shape as a conversion row —
-// an import of an azw3 or mobi *is* a conversion, just one that runs before the
-// book has a row to hang a job off. Reuses the `converting` classes so the bar
-// and status text match the queue below it.
-// A determinate row for a Kindle delete batch — the same shape a converting
-// book gets, because it is the same kind of wait: a queue of files being worked
-// through one at a time with an end in sight.
 function deleteQueueRow() {
   const d = state.deleting;
   const pct = d.total > 0 ? Math.round((d.done / d.total) * 100) : 0;
@@ -3073,10 +2797,6 @@ function queueRow(b) {
 }
 
 // A queue-drawer row for a book in the send-to-Kindle batch — mirrors queueRow
-// but driven by the send task's status + byte counts. Reuses the conversion
-// row's CSS classes (pending / converting / error) so bar + status styling
-// match: queued → pending stub, sending/sent/skipped → determinate fill,
-// failed → error.
 function sendQueueRow(t) {
   const cls =
     t.status === "failed" ? "error" : t.status === "queued" ? "pending" : "converting";
@@ -3116,8 +2836,7 @@ function sendQueueRow(t) {
   return li;
 }
 
-// Status text for a send task — live bytes while sending, a terminal word
-// otherwise.
+// Status text for a send task — live bytes while sending, else a terminal word.
 function sendStatusText(t) {
   switch (t.status) {
     case "sending":
@@ -3146,9 +2865,6 @@ function convFillPct(prog) {
 }
 
 // Patch one queue row's fill + status text in place for a progress tick, so the
-// frequent (per-image) events don't rebuild the whole list. Returns false when
-// the row isn't mounted yet (the seeding `converting` status hasn't rendered),
-// letting the caller fall back to a full `renderQueue`.
 function updateQueueRowProgress(bookId) {
   const li = document.querySelector(`#queue-list li[data-book-id="${bookId}"]`);
   if (!li) return false;
@@ -3163,17 +2879,6 @@ function updateQueueRowProgress(bookId) {
 // ---------------------------------------------------------------------------
 // Book actions
 // ---------------------------------------------------------------------------
-//
-// Every action a book, a multi-selection, or a whole series collection can be
-// put through, declared once. Both surfaces that offer actions — the right-click
-// menu and the selection bar — render from this one list (see actions.js), so an
-// action added here reaches both of them, and neither can drift into offering
-// something the other doesn't.
-//
-// actions.js documents an entry's fields. `group` both orders the list and draws
-// the menu's separators, so the five groups below are the menu's five sections,
-// in this order: open it, change it, put it somewhere else, rebuild it, destroy
-// it. A new action belongs to whichever of those it does.
 
 const BOOK_ACTIONS = [
   {
@@ -3215,9 +2920,6 @@ const BOOK_ACTIONS = [
   },
   {
     // Splitting reads the EPUB side, so it's offered as soon as that side
-    // exists — a KFX-sourced book qualifies once kfx→epub has run, without
-    // waiting on anything else. Whether the book is actually a collection is
-    // the proposal's answer, not something to guess from the title here.
     id: "split",
     group: "modify",
     scopes: ["book"],
@@ -3299,15 +3001,6 @@ const BOOK_ACTIONS = [
 
 function wireContextMenu() {
   // Suppress the WebView's native right-click menu (Reload, Open Frame in New
-  // Window, …) app-wide — it exposes nothing useful and its Reload reloads
-  // index.html, dropping you out of the reader back to the library. Our own
-  // card/row/header handlers preventDefault and open #ctx-menu in the target
-  // phase, before this bubble-phase listener runs, so they're unaffected; this
-  // just kills the native menu everywhere they don't. Editable fields are the
-  // exception — there the native Cut/Copy/Paste/spellcheck menu is genuinely
-  // useful (metadata editor, search boxes). (Reader section iframes are
-  // separate documents whose events don't bubble here; they're handled in
-  // reader.js's create-overlayer hook.)
   document.addEventListener("contextmenu", (e) => {
     const t = e.target;
     const inField =
@@ -3320,9 +3013,9 @@ function wireContextMenu() {
   });
 }
 
-// What a right-click acts on: the whole selection when the clicked book is part
-// of a multi-selection (`onItemContext` has already reset it to just this book
-// otherwise), and the book alone when it isn't.
+// What a right-click acts on: the whole selection where the clicked book is
+// part of a multi-selection, and the book alone where it is not, which
+// `onItemContext` has reset the selection to.
 function bookContext(b) {
   if (booksSelection.count() > 1) return { kind: "books", items: selectedBooks() };
   return { kind: "book", items: [b], book: b };
@@ -3333,9 +3026,6 @@ function openContextMenu(x, y, b) {
 }
 
 // Right-click on a series collection tile/row (grouped top level). A collection
-// is navigate-only for selection, but it gets every action that makes sense for
-// a whole series — at minimum editing the metadata of every book in it (e.g. fix
-// the author or rename the series across all volumes at once).
 function openSeriesContextMenu(x, y, entry) {
   ActionMenu.open(x, y, BOOK_ACTIONS, {
     kind: "series",
@@ -3352,9 +3042,6 @@ function openSeriesContextMenu(x, y, entry) {
 // ---------------------------------------------------------------------------
 
 // The export formats, in menu order. KFX is universal (every book has it); EPUB
-// and PDF are the two possible companion sides — a book pairs KFX with exactly
-// one of them. TXT is special: it has no stored file and is generated on demand
-// (book content → Markdown), so it's offered for every book.
 const EXPORT_FORMATS = [
   ["epub", "EPUB"],
   ["pdf", "PDF"],
@@ -3363,10 +3050,6 @@ const EXPORT_FORMATS = [
 ];
 
 // Whether `b`'s `fmt` file is present and finished converting, so it can be
-// copied out. KFX is always the canonical side; EPUB/PDF exist only for the
-// matching companion, and only once the queue marks that side done. (The file
-// could still be missing on disk — the backend is authoritative and reports a
-// skip; this just drives the menu's enabled formats + counts.)
 function hasFormatReady(b, fmt) {
   if (fmt === "kfx") return formatStatusFor("kfx", b) === "done";
   // TXT is generated from whatever content side is ready — KFX (universal) or
@@ -3454,9 +3137,9 @@ function onSeriesClick(e, name) {
   }
 }
 
-// Add a collection's currently-visible members to the book selection, or remove
-// them if they're all already selected. Lets one Export (or any bulk action)
-// span whole series + standalone books at once.
+// Add a collection's visible members to the book selection, or remove them from
+// a selection holding all of them. One Export, or any bulk action, spans whole
+// series and standalone books together.
 function toggleSeriesSelection(name) {
   const visible = sortedBooks(visibleBooks(state.books));
   const members = membersOfSeries(visible, name);
@@ -3498,9 +3181,8 @@ function wireSelection() {
   // resize re-renders it; what doesn't fit moves under More…, never disappears.
   window.addEventListener("resize", renderSelectionBar);
 
-  // Lasso + click-to-clear behavior on empty area of main. We use mousedown
-  // (rather than click) so we can distinguish a drag (→ lasso) from a tap
-  // (→ clear selection).
+  // Lasso and click-to-clear on the empty area of main. mousedown separates a
+  // drag (→ lasso) from a tap (→ clear selection).
   $("#main").addEventListener("mousedown", onMainMouseDown);
 
   // Esc clears selection; Cmd/Ctrl-A selects all — dispatched to whichever
@@ -3540,9 +3222,6 @@ function onMainMouseDown(e) {
 // shared controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
   // A drag that releases back on its origin tile fires a trailing click; swallow
-  // it once so the drag doesn't also re-select (see wireBookDragSource). Key off
-  // the target's ancestry, not `e.currentTarget` — the gallery grid delegates
-  // this handler (currentTarget = the grid), while list rows attach it directly.
   const dragged = e.target.closest(".just-dragged");
   if (dragged) {
     dragged.classList.remove("just-dragged");
@@ -3552,8 +3231,8 @@ function onItemClick(e, b) {
   setFocusKey(`book:${b.id}`); // keyboard cursor follows the clicked book
 }
 
-/// Context menu (right-click): keep an existing multi-selection so the menu can
-/// act on it; otherwise reset to just the clicked book.
+/// Context menu (right-click): an existing multi-selection stays for the menu
+/// to act on, and anything else resets to the clicked book.
 function onItemContext(_e, b) {
   booksSelection.context(b.id);
 }
@@ -3569,13 +3248,6 @@ function selectedBooks() {
 // ---------------------------------------------------------------------------
 // Keyboard shortcuts + focus cursor (Books section)
 // ---------------------------------------------------------------------------
-//
-// A focus cursor — a highlighted tile, distinct from selection so it can land on
-// series collections (navigate-only, never selected). Arrows move it; Enter
-// reads a book / drills a series; Backspace exits a series; Space and
-// Shift+arrows drive selection. Plus app-level keys (search, view, group,
-// section, settings, and a `?` cheat sheet). The reader owns the keyboard while
-// open, and modals/text fields are exempt — see onLibraryKeydown's gating.
 
 // Focusable tiles in the ACTIVE view, in display order (for cursor movement):
 // gallery cards (book + series) or list / series-index rows.
@@ -3829,9 +3501,6 @@ function handleBooksNavKey(e) {
 }
 
 // The selection bar is a view of BOOK_ACTIONS on the current selection — the
-// same list the right-click menu renders, laid out for a bar: the few actions
-// marked `bar`, then More…, which opens the rest. Nothing about which actions
-// exist is decided here, so the bar can't fall behind the menu.
 function renderSelectionBar() {
   const bar = $("#selection-bar");
   const n = booksSelection.count();
@@ -3842,8 +3511,8 @@ function renderSelectionBar() {
   bar.hidden = false;
   $("#selection-count").textContent = `${n} selected`;
   const items = selectedBooks();
-  // One selected book is a book, not a one-book batch: it gets the single-book
-  // actions (Read, Split, Open in Finder), same as right-clicking it would.
+  // One selected book is a book, past a one-book batch: it takes the
+  // single-book actions (Read, Split, Open in Finder) a right-click gives.
   const ctx =
     items.length === 1
       ? { kind: "book", items, book: items[0] }
@@ -3867,9 +3536,9 @@ async function unsendBooks(books) {
   );
 }
 
-// Queue a forced re-convert for every book in `books`. Always full color
-// (grayscale retired). Invokes the command directly rather than `retryConvert`
-// so the batch shows ONE summary toast, not one per book.
+// Queue a forced re-convert for every book in `books`, always full colour. It
+// invokes the command directly, past `retryConvert`, and the batch shows one
+// summary toast.
 async function retryConvertAll(books) {
   if (!books.length) return;
   let failed = 0;
@@ -3889,8 +3558,6 @@ async function retryConvertAll(books) {
 // Re-fetch color covers for every book in `books`. The backend runs them
 // sequentially — one Amazon round-trip + EPUB/KFX cover rewrite per book — and
 // streams `library:recrawl-progress`; we refresh the gallery once at the end.
-// Overwrites each book's current cover (including a manually-set one), so we
-// confirm first. Guarded against re-entry while a run is in flight.
 let recrawlInFlight = false;
 async function recrawlCovers(books) {
   if (recrawlInFlight) return;
@@ -3965,10 +3632,7 @@ async function removeBooks(books) {
     try {
       await window.api.invoke("library_remove", { bookId: b.id });
     } catch (e) {
-      // library_remove now surfaces IO errors (e.g. Spotlight/Books.app
-      // holding a handle on the EPUB) instead of silently leaving the
-      // files behind. Show the first one in a toast and keep going so
-      // partial success still gets reported.
+      // library_remove surfaces IO errors (e.g. Spotlight/Books.app
       failed += 1;
       if (failed === 1) showToast(`remove failed for "${b.title}": ${e}`, true);
       console.error("remove failed:", b.id, e);
@@ -4008,9 +3672,6 @@ async function openInFinder(bookId) {
 // Open a book in the built-in reader. `reader.js` (an ES module) installs
 // `window.sidleReader`; it loads after this classic script, so it's always
 // present by the time a card is clicked.
-// Monotonic open-request id: only the most recent openReader clears the status
-// line, so opening a second book before the first finishes doesn't blank the
-// "Opening…" message early.
 let openReqSeq = 0;
 // Open the Calibre-style book editor (window.sidleEditor). KFX- and EPUB-source
 // books; the caller gates the menu item so this is reached only for those.
@@ -4023,10 +3684,6 @@ function openEditor(b) {
 }
 
 // Open a book in the reader, reporting the load on the status line. `b` needs
-// only `id` and `title`, which is what lets the Reading Log's book page call
-// this with a pair of its own instead of reaching for `sidleReader.open`: a KFX
-// can take seconds to open, and every route to the reader owes the user the
-// same "Opening …" while it does.
 async function openReader(b) {
   if (!window.sidleReader) {
     showToast("reader not ready", true);
@@ -4046,10 +3703,6 @@ async function openReader(b) {
 }
 
 // Queue a re-convert: a forced re-convert of a `done` book, or completing a
-// failed/pending first import. All EPUB→KFX output is full color now (grayscale
-// retired); the encoder auto-collapses B&W pages to `8bppGray`, so there's no
-// choice to make. Shared by the "Force re-convert" menu, the retry button, and
-// auto-reconverts (page-direction change, metadata edit).
 async function retryConvert(bookId) {
   try {
     await window.api.invoke("conversion_retry", { bookId });
@@ -4120,8 +3773,6 @@ function showToast(msg, isError = false) {
 // ---------------------------------------------------------------------------
 // Library settings (the ⚙ in the status bar): show where the library lives and
 // move it to / adopt one in another folder. Both repoint the root (config.json)
-// and restart the app — see commands::library::library_relocate_*.
-// ---------------------------------------------------------------------------
 
 let relocatePending = null; // { mode: "move" | "use", dest: string }
 
@@ -4161,8 +3812,8 @@ function resetRelocateConfirm() {
 async function pickRelocate(mode) {
   const dest = await window.api.invoke("library_pick_folder");
   if (!dest) return;
-  // From a known state: a restore prompt left open would otherwise lend this one
-  // its two yes-buttons.
+  // From a known state: a restore prompt left open lends this one its two
+  // yes-buttons.
   resetRelocateConfirm();
   relocatePending = { mode, dest };
   $("#settings-confirm-text").textContent =
@@ -4179,8 +3830,8 @@ async function pickRelocate(mode) {
 async function confirmRelocate(keepPrevious) {
   if (!relocatePending) return;
   const { mode, dest } = relocatePending;
-  // Both yes-buttons go down together: two live ways to commit while one is
-  // already running is two restores.
+  // Both yes-buttons go down together: two live ways to commit during a running
+  // restore is two restores.
   $("#settings-confirm-ok").disabled = true;
   $("#settings-confirm-keep").disabled = true;
   setSettingsStatus(
@@ -4243,12 +3894,6 @@ async function doBackup() {
 }
 
 // Restore IS destructive and restarts, so it routes through the shared confirm
-// box (mode "restore"), handled in confirmRelocate — with a second yes-button,
-// because "what happens to the library being replaced" is a real choice and the
-// wrong default is expensive either way: keeping it silently leaves a second
-// whole library on the disk, deleting it leaves the archive as the only copy.
-// Replace outright is the offered one; keeping is for a restore you are unsure
-// of, and the undo is yours to delete afterwards.
 async function pickRestore() {
   const src = await window.api.invoke("library_restore_pick_src");
   if (!src) return;
@@ -4267,9 +3912,9 @@ async function pickRestore() {
   $("#settings-status").hidden = true;
 }
 
-// Merge is additive and non-destructive (no replace, no restart), so — like
-// backup — it's a direct action rather than the confirm/restart flow. Picks a
-// .sidlebak, folds its books/notebooks in, reports what came in, and re-lists.
+// Merge is additive and non-destructive, with no replace and no restart: a
+// direct action like backup, outside the confirm/restart flow. It picks a
+// .sidlebak, folds its books and notebooks in, and re-lists.
 async function doMerge() {
   const src = await window.api.invoke("library_merge_pick_src");
   if (!src) return;
@@ -4301,13 +3946,6 @@ function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-// ---------------------------------------------------------------------------
-// Filter bar + sort UI
-//
-// One filter bar serves both gallery and list views — it lives between the
-// toolbar and <main>, outside either view section. render() composes
-// sortedBooks(visibleBooks(state.books)) so both views consume the same
-// filtered+sorted set.
 // ---------------------------------------------------------------------------
 
 // Currently-open dropdown facet name (e.g. "language") or null.
@@ -4612,14 +4250,6 @@ function wireSortPopover() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata editor modal
-//
-// Right-click → "Edit metadata…" opens this modal prefilled from the row.
-// All text fields commit together on Save (the form always submits the
-// full set — matches the Rust MetadataPatch shape). Cover changes commit
-// immediately when the user picks a file via library_set_cover; Cancel
-// does NOT revert the cover.
-// ---------------------------------------------------------------------------
 
 let metadataBook = null;
 // When non-null, the modal is in bulk mode editing this array of books. Bulk
@@ -4687,10 +4317,6 @@ const BULK_FIELDS = [
 // The "Reading layout" select value for a book: its explicit writing_mode if
 // one was set, else "" (Auto — let the converter derive the axis from source).
 // `ppd` is deliberately NOT consulted: it encodes only the page-turn (rtl/ltr)
-// and is populated at import from the source for every book, so a vertical-rl
-// Japanese book carries ppd=rtl. Deriving "horizontal-rl" from that mislabelled
-// the vast majority of the library as horizontal — the axis is unknown from ppd
-// alone, and Auto is the honest answer.
 function readingLayoutValue(book) {
   return book.writing_mode || "";
 }
@@ -4795,8 +4421,8 @@ function setBulkPlaceholders(bulk) {
   }
 }
 
-// Live validity feedback for the ASIN field, and gate the Re-fetch button on a
-// real-looking ASIN (the recrawl backend would otherwise just return NoAsin).
+// Live validity feedback for the ASIN field, gating the Re-fetch button on a
+// real-looking ASIN. The recrawl backend returns NoAsin for anything else.
 function renderAsinHint() {
   const v = $("#metadata-form").amazon_asin.value.trim();
   const hint = $("#asin-hint");
@@ -4858,9 +4484,6 @@ async function submitMetadataForm() {
     author: form.author.value.trim(),
     language: form.language.value.trim(),
     // Reading layout drives the writing-mode axis; a chosen layout re-derives
-    // ppd from its `-rl`/`-lr` suffix. On Auto both are left alone: writing_mode
-    // stays null and ppd keeps its existing (source-derived) value — nulling it
-    // would silently wipe the imported page-turn (rtl for Japanese).
     writing_mode: form.reading_layout.value || null,
     ppd: form.reading_layout.value
       ? form.reading_layout.value.endsWith("-rl")
@@ -4902,9 +4525,6 @@ async function submitMetadataForm() {
   }
 
   // The catalogue ASIN is saved by its own command (library_set_asin): it isn't
-  // part of the book's description, and it's validated rather than stored as
-  // typed. Emptying it clears it — the resting state for a book Amazon doesn't
-  // sell, and the way out of a wrong paste.
   const asin = form.amazon_asin.value.trim();
   const asinChanged = asin !== (metadataBook.amazon_asin || "");
   if (asinChanged && asin !== "" && !looksLikeRealAsin(asin)) {
@@ -4943,9 +4563,6 @@ async function submitMetadataForm() {
 }
 
 // Bulk mode: build a sparse patch from only the fields the user filled in
-// (empty = leave unchanged), tags additive. Calls library_bulk_update_metadata,
-// which returns the updated rows (it doesn't emit row-updated, to avoid one
-// render per book), so we merge them all and render once.
 async function submitBulkMetadataForm() {
   const books = metadataBulk;
   if (!books || books.length === 0) return;
@@ -5041,9 +4658,9 @@ async function applyCoverFromPath(src) {
       srcPath: src,
     });
     if (result.kind === "updated") {
-      // Re-pull rows so this book's `cover_rev` (new mtime) reloads the tile
-      // and the modal preview from disk instead of the cached image; then
-      // re-point `metadataBook` at the refreshed row and repaint the preview.
+      // Re-pull rows: this book's `cover_rev` carries a new mtime, reloading the
+      // tile and the modal preview from disk past the cached image. Then
+      // `metadataBook` re-points at the refreshed row and the preview repaints.
       await refresh();
       const idx = state.books.findIndex((b) => b.id === metadataBook.id);
       if (idx !== -1) metadataBook = state.books[idx];
@@ -5056,9 +4673,9 @@ async function applyCoverFromPath(src) {
   }
 }
 
-// "Re-fetch cover" in the editor: persist the (possibly just-edited) ASIN, then
-// re-pull the color cover from Amazon. Stays in the modal and refreshes the
-// preview itself, because library_recrawl_cover does NOT emit row-updated.
+// "Re-fetch cover" in the editor: persist the ASIN, edits included, then re-pull
+// the colour cover from Amazon. It stays in the modal and refreshes the preview
+// itself; library_recrawl_cover emits no row-updated.
 async function onCoverRefetchClick() {
   if (!metadataBook) return;
   const asin = $("#metadata-form").amazon_asin.value.trim();
@@ -5122,13 +4739,6 @@ async function onAsinSearchClick() {
 // ---------------------------------------------------------------------------
 // Split a collection into a series
 // ---------------------------------------------------------------------------
-//
-// A 合本版 / 全集 / boxed set is N books in one file. `omnibus_propose` reads
-// where they divide and what to call them; the modal below is the form the user
-// corrects before anything is written, because a machine reading of a volume
-// title's number is a suggestion and the series name is guessed from prose.
-// `omnibus_split` then writes each volume, imports it, and puts the omnibus in
-// the series alongside its volumes.
 
 let splitBook = null;
 
@@ -5199,8 +4809,8 @@ function renderSplitRows(volumes) {
     numInput.step = "any";
     numInput.min = "0";
     numInput.value = String(v.number);
-    // A number the splitter counted rather than read off the volume's own
-    // label is the one worth a second look.
+    // A number the splitter counted, past the volume's own label, is the one
+    // worth a second look.
     if (v.counted) {
       numInput.classList.add("counted");
       numInput.title = "counted from the volume before — this book didn't say";
@@ -5224,7 +4834,7 @@ function renderSplitRows(volumes) {
   updateSplitFootnote();
 }
 
-// The volumes as the form now reads: the plan `omnibus_split` is handed.
+// The volumes as the form reads: the plan `omnibus_split` is handed.
 function splitPlanFromForm() {
   const volumes = [];
   for (const tr of $("#split-rows").querySelectorAll("tr")) {
@@ -5278,8 +4888,7 @@ async function submitSplit() {
 
   closeSplitModal();
   await refresh();
-  // Land on the series that was just made, which means grouping by series
-  // whether or not the user was already.
+  // Land on the series just made, grouping by series from any prior view.
   setGroup("series");
   enterSeries(summary.series_name);
 
@@ -5348,18 +4957,9 @@ function wireSplitModal() {
 // ---------------------------------------------------------------------------
 // Inline (list-view) metadata editing
 // ---------------------------------------------------------------------------
-//
-// Click a field on a selected list row and the shared TableView swaps in an
-// editor (see table.js). On commit it calls back here with the book, the column
-// key, and the new raw string. We fold that single change into a FULL
-// MetadataPatch built from the book's current values and send it through the
-// SAME command the modal editor uses (`library_update_metadata` is a
-// full-replacement patch) — so canonicalization, the on-disk file rename, and
-// validation are identical no matter which editor the user reached for. Every
-// field but the edited one matches what's already stored, so nothing else moves.
 
-// A MetadataPatch mirroring the book as it stands (what the modal would send
-// with nothing changed). The caller overrides exactly one field.
+// A MetadataPatch mirroring the book as it stands, which the modal sends for an
+// unchanged form. The caller overrides exactly one field.
 function fullPatchFromBook(b) {
   return {
     title: b.title || "",
@@ -5379,11 +4979,6 @@ function fullPatchFromBook(b) {
 }
 
 // Parse the Series cell's single text field back into its two DB columns,
-// mirroring seriesText's "Name #index" display. The index is the LAST
-// "#<number>" (integer or decimal); text before it is the name. A "#" inside
-// the name is fine — only a trailing "#<number>" is read as the index ("C# Guide
-// #3" → {name:"C# Guide", index:3}). No trailing number → index cleared; empty
-// field → whole series cleared.
 function parseSeriesCell(text) {
   const s = text.trim();
   if (s === "") return { name: null, index: null };
@@ -5412,10 +5007,6 @@ async function commitInlineEdit(book, key, value) {
       break;
     case "series": {
       // The Series cell is really two DB fields shown as "Name #index" (see
-      // seriesText). Editing is a single field over that same text: a trailing
-      // "#<number>" becomes series_index, everything before it series_name. No
-      // "#<number>" clears the index; an empty field clears the whole series
-      // (the backend then drops any orphaned index).
       const parsed = parseSeriesCell(value);
       patch.series_name = parsed.name;
       patch.series_index = parsed.index;

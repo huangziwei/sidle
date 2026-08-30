@@ -1,15 +1,4 @@
 //! What an app's tree says it is.
-//!
-//! An app is a directory under `extensions/` on a Kindle's `/mnt/us`, built by
-//! a repo that has never heard of sidle. So none of this is read out of a file
-//! sidle asks that repo to carry: the id is the directory's own name, the
-//! display name and version come from the KUAL descriptor the Kindle itself
-//! defines at `extensions/<id>/config.xml`, and the tile is whichever
-//! `documents/*.sh` launches the extension.
-//!
-//! Every field but the id is optional. A tree stating none of them is a whole
-//! app: its files install the same with no version anywhere, and a missing
-//! field shows as a missing field, never as a reason to refuse the tree.
 
 use std::path::Path;
 
@@ -172,12 +161,6 @@ fn tile_header(bytes: &[u8], key: &str) -> Option<String> {
 }
 
 /// The tile that launches `extensions/<id>`.
-///
-/// A tile exists to run the app, so it spells the app's directory out — every
-/// one in the fleet execs or calls something under
-/// `/mnt/us/extensions/<id>/`. That reference is the link, and it survives a
-/// rename of the tile itself. The trailing separator keeps one id from
-/// claiming a tile whose id extends it.
 fn find_tile(mount: &Path, id: &str) -> Option<String> {
     let needle = format!("extensions/{id}/");
     let mut hits: Vec<String> = Vec::new();
@@ -208,9 +191,6 @@ fn find_tile(mount: &Path, id: &str) -> Option<String> {
 }
 
 /// An id is a directory name that has to serve as a path segment on a FAT
-/// mount, in a URL, and in a mount-relative key. It is not sidle's to choose —
-/// it is whatever the repo named the directory — so this refuses only what
-/// could not address a file.
 fn validate_id(id: &str) -> Result<()> {
     if id.is_empty() || id == "." || id == ".." {
         bail!("an app id is a directory name under extensions/, and {id:?} is not one");

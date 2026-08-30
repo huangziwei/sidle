@@ -1,14 +1,5 @@
 //! Static Huffman (VLC) encoding — the inverse of the decoder's
 //! [`crate::decode::misc::Deserializer::huff`].
-//!
-//! The decoder's tables map a code (the `hbin` key: the code bits prefixed
-//! with a synthetic leading `1`) to a value. To encode we find the value's
-//! code key and emit it with the leading `1` stripped, so the decoder's
-//! bit-by-bit `huff` walk lands on exactly that entry.
-//!
-//! Scope: one table, applied as given. Choosing *which* table — the adaptation
-//! the decoder does in `adapt_lp`/`adapt_hp` — is the caller's, not this
-//! module's.
 
 use super::bitstream::BitWriter;
 use std::collections::HashMap;

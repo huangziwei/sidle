@@ -1,7 +1,4 @@
 //! Decode-path fuzz target: arbitrary bytes through the full consumer
-//! pipeline — container parse, primary + separate-alpha codestream decode,
-//! pixel-buffer packing, orientation transform. Any panic, abort, OOM, or
-//! timeout is a finding; errors are the expected outcome for garbage.
 
 #![no_main]
 

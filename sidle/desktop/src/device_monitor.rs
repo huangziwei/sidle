@@ -1,15 +1,4 @@
 //! Background polling for Kindle connect/disconnect events.
-//!
-//! Polls every 2 seconds, dedupes against the last snapshot, emits
-//! `device:status` over Tauri events when state changes (and also on the very
-//! first tick so the frontend has an initial value without a separate fetch).
-//!
-//! On every transition into "Kindle connected" (the previous snapshot had a
-//! different serial — None, or a different device — and the current one has
-//! a serial), the monitor fires off a one-shot auto-pull of `<kindle>/dedrm`.
-//! Each new file is imported via the standard pipeline and its background
-//! conversion enqueued, so the user doesn't have to click anything for a
-//! freshly-DRM-stripped book to land in the library.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,13 +45,6 @@ pub fn spawn(
                 let prev = guard.clone();
 
                 // Mass-storage refreshes `free_bytes` cheaply on every poll
-                // via `statvfs`. MTP can't: each refresh would claim the USB
-                // interface, which can race with a user-initiated push. So
-                // `mtp::detect()` returns `None` for free/total/firmware, and
-                // we preserve the last known values across polls when the
-                // serial matches. Initial population comes from the on-connect
-                // refresh task spawned below; without this carry-over the
-                // session-derived fields would flicker back to "—" every tick.
                 if let (Some(new_info), Some(prev_info)) = (next.as_mut(), prev.as_ref()) {
                     let same_device = new_info.serial == prev_info.serial;
                     let is_mtp = matches!(new_info.transport, TransportKind::Mtp { .. });
@@ -120,11 +102,6 @@ pub fn spawn(
                     }
                     TransportKind::Mtp { .. } => {
                         // No DeDRM auto-pull: non-jailbroken (MTP-class)
-                        // Kindles have no `/dedrm` folder, and the jailbreak
-                        // that creates it isn't available for Scribe-and-later
-                        // firmware. Refresh free space, then sync annotations —
-                        // sequentially, since MTP allows only one USB session
-                        // at a time.
                         tauri::async_runtime::spawn(on_mtp_connect(
                             app.clone(),
                             state.clone(),
@@ -143,27 +120,11 @@ pub fn spawn(
 }
 
 /// Borrow the shared on-device transport, opening it the first time anyone
-/// asks. Subsequent callers reuse the same `Arc<dyn Transport>` — so two
-/// simultaneous Tauri commands or an on-connect monitor task all share the one
-/// MTP session, and `MtpTransport`'s storage mutex serializes their on-wire ops
-/// inside it. The session is released when the monitor clears the cell on
-/// disconnect (see `just_disconnected` in [`spawn`]).
-///
-/// Opening the MTP transport calls `mtp_rs` synchronously (it wraps an internal
-/// `block_on`), so we route through the blocking pool — calling from a Tauri
-/// async command directly would block the executor.
 pub async fn ensure_transport(
     cell: &SharedTransport,
     device: &DeviceInfo,
 ) -> anyhow::Result<Arc<dyn Transport>> {
     // Hold the lock through the open. mtp-rs cannot tolerate two concurrent
-    // `MtpDevice::open_by_location` calls against the same USB device — the
-    // PTP transaction-ID counters interleave and the device returns mismatched
-    // response containers ("Transaction ID mismatch: expected 1, got 0"). The
-    // 2024+ Kindle Scribe firmware is especially picky here. Tokio's `Mutex`
-    // is .await-aware, so holding it across `spawn_blocking` is fine; serial
-    // waiters wake up in order and either reuse the cached Arc (if the first
-    // succeeded) or take their own turn at opening (if it failed).
     let mut guard = cell.lock().await;
     if let Some(t) = guard.as_ref() {
         return Ok(t.clone());
@@ -178,13 +139,6 @@ pub async fn ensure_transport(
 }
 
 /// Drop the cached transport so the next [`ensure_transport`] opens fresh.
-/// Called from a command's error path when on-wire IO threw — the cached `Arc`
-/// is likely talking to a wedged USB endpoint (e.g. mtp-rs's reaction to an
-/// "endpoint stalled" or a TXID desync), and reusing it just multiplies
-/// errors. The next caller pays one fresh `MtpDevice::open_by_location`,
-/// which lets mtp-rs renegotiate the session against the device — recovers
-/// the common-case stall, surfaces a clear error if the firmware is still
-/// confused (in which case the user needs to physically replug).
 pub async fn evict_transport(cell: &SharedTransport) {
     *cell.lock().await = None;
 }
@@ -192,11 +146,6 @@ pub async fn evict_transport(cell: &SharedTransport) {
 /// Everything that should happen the moment a mass-storage Kindle is plugged
 /// in, in the background so the user can keep working:
 ///   1. Auto-pull any new DeDRM'd books off `/dedrm` (and enqueue conversions).
-///   2. Sync highlights / notes / bookmarks off the device into the library.
-///
-/// The pull runs first so a freshly added book is already in the DB (and so
-/// matchable by `kfx_sha256` infix) before the annotation sync tries to link
-/// its `.yjr` to a library row.
 async fn on_mass_storage_connect(
     app: AppHandle,
     transport: SharedTransport,
@@ -219,12 +168,6 @@ async fn on_mass_storage_connect(
 /// Everything that should happen when an MTP Kindle (Scribe, 2024+) connects.
 /// Sequential, not concurrent: MTP exposes a single USB session, so the
 /// device-info read and the annotation pull must not overlap.
-///   1. One-shot session read (free space + firmware) so the popover stops
-///      showing "—" for those fields.
-///   2. Sync highlights / notes / bookmarks off the device.
-///
-/// Whether step 2 finds anything depends on the device exposing its `.sdr/.yjr`
-/// sidecars over MTP; if it doesn't, the import is a harmless no-op (0 books).
 async fn on_mtp_connect(
     app: AppHandle,
     state: DeviceState,
@@ -239,12 +182,6 @@ async fn on_mtp_connect(
 
 /// Import highlights / notes / bookmarks off the connected Kindle — either
 /// transport (mass-storage reads the volume; MTP pulls the `.yjr` over USB).
-/// Runs on the blocking pool; the import is idempotent (`dedup_hash`), so
-/// re-running on every connect is safe and cheap.
-///
-/// Emits `annotations:sync-start` before and `annotations:sync-done` (with the
-/// [`ingest::DeviceImportReport`]) / `annotations:sync-error` after, so the
-/// status bar can show progress without a modal or stealing focus.
 async fn sync_annotations_on_connect(
     app: AppHandle,
     transport: SharedTransport,
@@ -257,9 +194,6 @@ async fn sync_annotations_on_connect(
     let _ = app.emit("annotations:sync-start", ());
 
     // Borrow the shared transport up front (async path, since opening MTP
-    // routes through `spawn_blocking` itself). Failure here means the device
-    // came + went before the connect task fired — surface it like any other
-    // sync error rather than panicking.
     let shared = match ensure_transport(&transport, &device).await {
         Ok(t) => t,
         Err(e) => {
@@ -294,10 +228,6 @@ async fn sync_annotations_on_connect(
         .await;
 
     // Same MTP-stall recovery as the Tauri commands: on any error the cached
-    // session is likely talking to a wedged USB endpoint, so drop it. The
-    // monitor itself doesn't auto-retry — the next user action (popover
-    // refresh, manual re-sync) will trigger a fresh open via
-    // `ensure_transport`.
     let evicted = matches!(result, Err(_) | Ok(Err(_)));
     if evicted {
         evict_transport(&transport).await;
@@ -332,12 +262,6 @@ async fn sync_annotations_on_connect(
 /// Scan the device's `/dedrm` folder, import every file not already in the
 /// library, and enqueue each fresh row for its background KFX→EPUB
 /// conversion. Best-effort: errors are logged but don't unwind.
-///
-/// The DB lock is acquired briefly per-step (one short scan, then one short
-/// acquisition per imported file) rather than held for the whole batch. That
-/// keeps concurrent `library_list` invokes from the frontend unblocked, so
-/// the initial gallery renders without waiting for the autopull, and newly-
-/// imported rows can show up progressively as each one lands.
 async fn autopull_on_connect(
     app: AppHandle,
     db: DbHandle,
@@ -348,9 +272,6 @@ async fn autopull_on_connect(
     let serial = device.serial.clone();
 
     // 1a. Hash dedrm files OFF the DB lock. Reading several MB-each off a
-    //     USB-attached Kindle takes a second or two; doing it under the
-    //     mutex would block the frontend's first `library_list` invoke and
-    //     leave the gallery empty during that window.
     let candidates = {
         let device = device.clone();
         match tokio::task::spawn_blocking(move || dedrm::hash_dedrm_candidates(&device)).await {
@@ -462,18 +383,6 @@ struct AutoPullSummary {
 }
 
 /// One-shot MTP session read after the user plugs in: `GetStorageInfo` for
-/// free/total bytes plus the firmware (`device_version`, captured when the
-/// transport opened). The 2s detect poll deliberately doesn't open MTP
-/// sessions — each open claims the USB interface and would race with a
-/// user-initiated push. Instead we do it once on connect, write the result
-/// back into `state.device`, and emit a follow-up `device:status` so the
-/// popover swaps "—" for real numbers.
-///
-/// Staleness after a push/delete is the trade-off: the cached free/total
-/// won't drop until the next reconnect. Acceptable for sidle's usage
-/// pattern (occasional manual push); if it becomes annoying, the push
-/// command can refresh in-place via `mtp_rs::Storage::refresh` before
-/// dropping its transport.
 async fn refresh_mtp_storage_info(
     app: AppHandle,
     state: DeviceState,
@@ -524,15 +433,6 @@ async fn refresh_mtp_storage_info(
 }
 
 /// Re-read the connected device's free/total over the already-open transport
-/// and publish it into `state` + a follow-up `device:status` emit. Called after
-/// any on-device mutation (send / delete) so the popover's free-space number
-/// tracks what's actually on the Kindle instead of waiting for a reconnect.
-///
-/// Transport-agnostic: mass-storage re-runs `statvfs`, MTP re-issues
-/// `GetStorageInfo` via [`Transport::free_space`]. Reuses the cached transport
-/// (the mutation that just ran left it open), so there's no extra USB session
-/// open on the MTP path. Best-effort throughout — no connected device, a failed
-/// re-open, or a failed round-trip simply leaves the last known value in place.
 pub async fn refresh_free_space(app: &AppHandle, state: &DeviceState, transport: &SharedTransport) {
     let device = match state.lock().await.clone() {
         Some(d) => d,
@@ -557,9 +457,6 @@ pub async fn refresh_free_space(app: &AppHandle, state: &DeviceState, transport:
         let mut guard = state.lock().await;
         match guard.as_mut() {
             // Same-device guard as `refresh_mtp_storage_info`: if the user
-            // unplugged (or swapped devices) between the mutation and this
-            // refresh, drop the result rather than stamping it onto whatever's
-            // connected now.
             Some(current) if current.serial == serial => {
                 current.free_bytes = Some(free);
                 current.total_bytes = Some(total);

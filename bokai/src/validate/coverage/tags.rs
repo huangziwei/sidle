@@ -1,20 +1,6 @@
 //! HTML tag coverage validation — report which element names used in the
 //! source EPUB get an explicit semantic role in bokai's `role_map` versus
 //! falling through to the generic-container catch-all.
-//!
-//! Why this matters: `role_map::element_to_role` returns `Role::Container`
-//! for any unrecognised element name. Content still flows through (text
-//! leaves are preserved), but no semantics — so `<svg>`, `<math>`,
-//! `<details>`-children, or custom-namespaced elements lose their meaning
-//! on the Kindle. The validator lists every distinct tag the book uses
-//! and buckets them by quality:
-//!
-//! - **Semantic**: maps to a meaningful role (Paragraph, Heading, Table,
-//!   Figure, Link, Image, …) — full handling.
-//! - **Generic**: handled explicitly but as a `Container`/`Inline` shell —
-//!   no special structure but content flows.
-//! - **Fallback**: not in `role_map` at all, silently downgraded to
-//!   generic Container. These are the priorities for `role_map.rs`.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -224,9 +210,6 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 }
 
 /// Walk one XHTML doc and count every Start/Empty element by local name.
-/// We deliberately do not skip `<head>` here — `<title>`, `<link>`, `<meta>`
-/// are real source elements and the role_map should account for them
-/// (currently they fall through to Container, which is the right surfacing).
 pub fn count_tags_in_xhtml(xhtml: &str, counts: &mut HashMap<String, usize>) {
     let mut reader = Reader::from_str(xhtml);
     reader.config_mut().trim_text(false);

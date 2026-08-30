@@ -1,16 +1,4 @@
 //! Minimal PDF probe for the PDF→KFX path.
-//!
-//! We do *not* convert PDF content. Amazon's "Send to Kindle" wraps the PDF
-//! verbatim inside a KFX container and lets the device render each page (which
-//! is what makes the Scribe pen draw over it). So all we need from the PDF is
-//! the structural shape of a fixed-layout book:
-//!
-//! - page **count**,
-//! - each page's **MediaBox** size in points and its `/Rotate` (both with
-//!   inheritance from the page tree resolved; the size is post-rotation), and
-//! - the document `/Info` **title** / **author** (best effort).
-//!
-//! The original bytes are carried through untouched for embedding.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -95,13 +83,6 @@ fn info_string(doc: &Document, key: &[u8]) -> Option<String> {
 /// Walk the document outline (`/Outlines`) into a resolved bookmark tree. Each
 /// item carries its title and the 0-based page its destination jumps to. Empty
 /// if the PDF has no outline or none of it resolves to a page.
-///
-/// Bookmark destinations come in several shapes — an explicit `[pageRef /Fit …]`
-/// array, a named destination (string/name resolved through `/Names /Dests` or
-/// the legacy catalog `/Dests`), or a `/GoTo` action carrying one of those — and
-/// real books mix them, so all are handled. Everything is best-effort: an
-/// unresolvable entry is dropped (its children promoted) rather than failing the
-/// conversion.
 fn extract_outline(
     doc: &Document,
     page_index_of: &HashMap<ObjectId, usize>,

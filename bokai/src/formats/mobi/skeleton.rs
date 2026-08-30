@@ -1,10 +1,4 @@
 //! KF8 Skeleton Chunking
-//!
-//! Implements the algorithm for breaking HTML content into skeleton + chunks
-//! as used by Amazon's KF8/AZW3 format.
-//!
-//! The skeleton is the HTML structure with large content removed.
-//! Chunks are the removed content pieces, each with an insert position.
 
 use std::collections::HashMap;
 
@@ -131,9 +125,6 @@ impl Skeleton {
     }
 
     /// Get the reassembled file content (chunks inserted into the skeleton
-    /// at their `insert_pos`). This is what Kindle materialises when
-    /// rendering a part; `chunk_table.insert_pos` and `pos_fid` offsets are
-    /// in *this* coordinate space, not in the rawML layout.
     pub fn rebuild(&self) -> Vec<u8> {
         // Sort chunks by their position-within-skel so multiple chunks per
         // skel insert in order. (In the current writer there's always one
@@ -226,9 +217,6 @@ impl Chunker {
         }
 
         // Build SKEL and Chunk tables directly from the per-file chunks
-        // produced by process_file. SKEL.length is the skeleton's bytes (0
-        // in this writer); chunks' insert_pos and length describe the
-        // content slice that lives in the rawML right after the skeleton.
         let mut chunk_table: Vec<ChunkEntry> = Vec::new();
         let mut seq_num = 0usize;
         for skel in &mut skeletons {
@@ -261,10 +249,6 @@ impl Chunker {
         let text: Vec<u8> = skeletons.iter().flat_map(|s| s.raw_text()).collect();
 
         // Build aid_offset_map by scanning the *reassembled* book — chunks
-        // inserted into their skeletons — because `chunk_table.insert_pos`
-        // is in reassembled coordinates. Calibre does the same in
-        // `Skeleton.set_internal_links` (it iterates `rebuilt_text`, not
-        // the rawML).
         let rebuilt: Vec<u8> = skeletons.iter().flat_map(|s| s.rebuild()).collect();
         let aid_offset_map = self.build_aid_offset_map(&rebuilt, &chunk_table);
 
@@ -308,10 +292,6 @@ impl Chunker {
                     let aid = String::from_utf8_lossy(aid_bytes).to_string();
 
                     // `offset` is in reassembled coordinates. Find the chunk
-                    // whose [insert_pos, insert_pos+length) range contains
-                    // it. Calibre falls back to "the chunk immediately
-                    // after" when the aid is in the skeleton (e.g. on
-                    // `<body aid="0000">`), with an in-chunk offset of 0.
                     let (seq_num, offset_in_chunk) = if chunk_table.is_empty() {
                         (0usize, offset)
                     } else {
@@ -349,17 +329,6 @@ impl Chunker {
     }
 
     /// Process a single HTML file into a skeleton + chunk.
-    ///
-    /// Layout mirrors calibre's approach: the skeleton holds the HTML
-    /// scaffolding (everything up to and including the `<body...>` opening
-    /// tag, plus `</body></html>` at the end), while the chunk holds the
-    /// body content. When Kindle reassembles, it reads `skel.length` bytes
-    /// of scaffold from the rawML, then inserts each chunk at its
-    /// `insert_pos` into that scaffold.
-    ///
-    /// Every skel needs real scaffolding bytes of its own: Kindle's layout
-    /// engine freezes on the whole file packed into one chunk behind an empty
-    /// skeleton.
     fn process_file(
         &mut self,
         file_number: usize,
@@ -393,16 +362,9 @@ impl Chunker {
         skeleton_bytes.extend_from_slice(skel_suffix);
 
         // Split body content into ~CHUNK_SIZE pieces at `<` tag boundaries.
-        // Kindle's renderer freezes on chunks larger than this — calibre's
-        // writer enforces the same limit. Splitting at `<` is safe because
-        // chunks are simply concatenated when Kindle reassembles the file;
-        // no chunk needs to be valid HTML on its own.
         let body_chunks = split_body_into_chunks(body_content, CHUNK_SIZE);
 
         // Build the chunk selector from this file's body aid. Kindle's
-        // renderer uses chunk selectors to map a chunk's content back to
-        // its enclosing DOM element; without per-file uniqueness it
-        // conflates positions across files when laying out and locks up.
         let body_aid = extract_body_aid(skel_prefix).unwrap_or_else(|| "0000".to_string());
         let selector = format!("P-//*[@aid='{body_aid}']");
 
@@ -437,9 +399,6 @@ impl Chunker {
 const CHUNK_SIZE: usize = 8192;
 
 /// Extract the `aid="…"` value from the `<body…>` tag inside the scaffold
-/// prefix. Calibre's chunker tracks this naturally via DOM walk; in our
-/// byte-level chunker we recover it by scanning the prefix bytes for the
-/// already-inserted aid attribute on the body opening tag.
 fn extract_body_aid(skel_prefix: &[u8]) -> Option<String> {
     use memchr::memmem;
     let body_pos = memmem::find(skel_prefix, b"<body")?;
@@ -457,18 +416,6 @@ fn extract_body_aid(skel_prefix: &[u8]) -> Option<String> {
 
 /// Split body-content bytes into chunks of at most ~`max_size` bytes each,
 /// always cutting at HTML element boundaries (after a closing tag).
-///
-/// We walk the bytes tracking tag nesting depth. After each closing tag or
-/// self-closing tag we're at a safe boundary between sibling elements. Cut
-/// there once the in-progress chunk has reached `max_size`, preferring the
-/// *shallowest* such boundary so each chunk ends with a complete (possibly
-/// nested) element rather than mid-way through some deeply-nested run.
-///
-/// In practice this gives chunks that always contain whole `<p>` /
-/// `<li>` / `<section>` etc. units. Comments, processing instructions,
-/// CDATA, and doctypes don't affect depth. A single element larger than
-/// `max_size` becomes one oversized chunk (rare; would need to recurse
-/// inside it to split further, which we don't here).
 fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
     if body.is_empty() {
         return vec![Vec::new()];
@@ -529,10 +476,6 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
         i = tag_end;
 
         // Cut at the first element-closing boundary once we've reached the
-        // target size — first-fit rather than "prefer shallowest". A deep
-        // run that doesn't surface within target shouldn't be allowed to
-        // grow past the limit, which is exactly what Kindle's renderer
-        // can't handle.
         if (is_close || self_closing) && (i - chunk_start) >= max_size {
             chunks.push(body[chunk_start..i].to_vec());
             chunk_start = i;
@@ -559,10 +502,6 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
 }
 
 /// Split an HTML document into `(scaffold_before_body_content, body_content,
-/// scaffold_after_body_content)`. The split point is just past the `<body…>`
-/// opening tag and just before the matching `</body>`. If either tag isn't
-/// found, returns the whole document as scaffold with empty body content (so
-/// minimal files don't break the writer).
 fn split_body(html: &[u8]) -> (&[u8], &[u8], &[u8]) {
     use memchr::memmem;
 

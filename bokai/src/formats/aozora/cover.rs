@@ -1,16 +1,4 @@
 //! Generate the Aozora cover as a JPEG.
-//!
-//! Faithful port of `buildCoverSvg` from the aozora-epub reference tool. The
-//! SVG template is identical: 1050×1500, cream background `#F2EBDA`, sage
-//! `#8B9E78` double border, "青空文庫" letter-spaced collection label,
-//! auto-fit title (sizes 100→36 step 4, 1–3 lines), divider, author below.
-//! Rasterized via `resvg` + `tiny-skia` and encoded JPEG via the existing
-//! `jpeg-encoder` dep.
-//!
-//! Fonts are looked up via `fontdb::load_system_fonts()` —
-//! on a macOS host, so
-//! `Hiragino Mincho ProN` (named first in the SVG `font-family` list)
-//! resolves at runtime. No bundled fallback.
 
 use std::io;
 
@@ -29,8 +17,6 @@ pub fn render_cover_jpeg(title: &str, author: &str) -> io::Result<Vec<u8>> {
     rasterize_to_jpeg(&svg)
 }
 
-// =========================================================================
-// SVG template
 // =========================================================================
 
 const PAD: u32 = 60;
@@ -228,8 +214,6 @@ fn escape_xml(s: &str) -> String {
 }
 
 // =========================================================================
-// Rasterize + JPEG encode
-// =========================================================================
 
 fn rasterize_to_jpeg(svg: &str) -> io::Result<Vec<u8>> {
     // usvg 0.47's `Options` owns the fontdb (Arc-wrapped). Reuse the
@@ -269,8 +253,6 @@ fn rasterize_to_jpeg(svg: &str) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-// =========================================================================
-// Tests
 // =========================================================================
 
 #[cfg(test)]

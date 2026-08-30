@@ -185,11 +185,9 @@
         </div>
       </section>
 
-      <!-- Files: what a Sync brings off the Kindle besides books (device::misc).
-           One group per collection in device-sync.json, in that order, built by
-           misc.js (window.Misc) — images as a thumbnail grid, everything else as
-           a list. misc.js also owns the in-app viewers (lightbox / text <pre>)
-           and the settings editor for the collections themselves. -->
+      <!-- Files: what a Sync brings off the Kindle besides books
+           (device::misc). One group per collection in device-sync.json, built
+           by misc.js (window.Misc), which owns the viewers and the editor. -->
       <section id="misc" class="view misc" aria-label="Files" hidden>
         <div id="misc-empty" class="empty" hidden>
           <p>Nothing backed up yet.</p>
@@ -201,10 +199,9 @@
         <div id="misc-content" hidden></div>
       </section>
 
-      <!-- Apps: the programs that install to a Kindle's /mnt/us and run there
-           on their own — the picker, bokai, and whatever folders are
-           registered. apps.js (window.Apps) owns everything inside. This is the
-           only place an app is installed, updated, removed or added. -->
+      <!-- Apps: the programs that install to a Kindle's /mnt/us. apps.js
+           (window.Apps) owns everything inside, and is the one place an app is
+           installed, updated, removed or added. -->
       <section id="apps" class="view apps" aria-label="Apps" hidden>
         <header class="apps-head">
           <div class="apps-summary" id="apps-summary"></div>
@@ -250,10 +247,9 @@
         </div>
       </section>
 
-      <!-- Reading Log: time read per day, recovered from the Kindle's own
-           system logs (library::reading_log). readinglog.js (window.ReadingLog)
-           owns everything inside; two views live here — the year heatmap with a
-           day breakdown, and a per-book page reached by clicking a book. -->
+      <!-- Reading Log: time read per day, from the Kindle's system logs
+           (library::reading_log). readinglog.js (window.ReadingLog) owns the
+           year heatmap and the per-book page a book click opens. -->
       <section id="reading-log" class="view reading-log" aria-label="Reading Log" hidden>
         <!-- Overview -->
         <div id="rl-overview">
@@ -286,10 +282,8 @@
             </section>
 
             <!-- Which days, beside which hours of them. The calendar is a fixed
-                 53 weeks wide and left half the window empty on its own; the
-                 clock takes that half and answers the question the calendar
-                 cannot — not whether you read that day, but when in it. Both
-                 draw the same year, so the pair reads as one picture. -->
+                 53 weeks wide and the clock fills the rest of the row. Both
+                 draw the same year. -->
             <div class="rl-panels">
               <div class="rl-heatmap-wrap">
                 <!-- One year at a time. The arrows step to the next year that has
@@ -331,9 +325,8 @@
               </div>
 
               <!-- Hour of the day, on the device's own local clock. Three cuts
-                   of one cube (readinglog.js): the year's hours as bars, then
-                   the same hours against the weekday and against the month,
-                   which is where a habit shifting over the year shows up. -->
+                   of one cube (readinglog.js): the year's hours as bars, and
+                   the same hours against the weekday and against the month. -->
               <section class="rl-clock-wrap">
                 <header class="rl-nav rl-clock-head">
                   <strong>When you read</strong>
@@ -374,10 +367,9 @@
                        #rl-day-clear beside it. -->
                   <button type="button" id="rl-finished" class="btn btn-quiet" aria-pressed="false"
                           title="Only books read to the end or marked finished">Finished</button>
-                  <!-- How finely the year is cut up. Always the same books —
-                       only the bands they sit in change, and each band's figures
-                       are that band's own. Hidden while a single day is
-                       selected, which is already one band. -->
+                  <!-- How finely the year is cut up. The same books throughout,
+                       each band carrying its own figures. Hidden while a single
+                       day is selected. -->
                   <div class="seg rl-bucket-seg" id="rl-bucket-seg" role="tablist"
                        aria-label="Group the year by">
                     <button class="seg-btn active" data-bucket="year" role="tab" aria-selected="true"
@@ -397,10 +389,9 @@
               <div id="rl-book-list" class="rl-cards"></div>
             </section>
 
-            <!-- Deliberately at the far end of the page and not in the toolbar:
-                 a button that erases the whole log has no business one misclick
-                 away from Import. It also confirms, and it only exists at all
-                 while there is something to delete. -->
+            <!-- At the far end of the page, away from the toolbar. #rl-purge
+                 confirms, and exists only while there is something to
+                 delete. -->
             <footer class="rl-danger">
               <button id="rl-purge" class="btn btn-danger"
                       title="Delete every reading session Sidle has stored">Delete the reading log…</button>
@@ -408,10 +399,9 @@
             </footer>
           </div>
 
-          <!-- Reading that two or more books explain equally well. Deliberately
-               OUTSIDE #rl-body: a library whose reading is all unresolved has no
-               days to draw and shows the empty state instead — and that is
-               precisely the library that needs to reach this. -->
+          <!-- Reading that two or more books explain equally well. Outside
+               #rl-body: a library whose reading is all unresolved draws no days
+               and shows the empty state. -->
           <section id="rl-ambiguous" class="rl-ambiguous" hidden>
             <header class="rl-group-head">
               <strong>Which book was this?</strong>
@@ -428,10 +418,8 @@
           </section>
         </div>
 
-        <!-- One book. The identity (cover, title, figures) is a column of its
-             own so the calendar and the annotations can have the rest of the
-             width; the figures stack vertically down the side rather than
-             running off in a strip of boxes. -->
+        <!-- One book. The identity column holds cover, title and figures; the
+             calendar and the annotations take the rest of the width. -->
         <div id="rl-book" hidden>
           <button id="rl-back" class="rl-back">‹ Reading Log</button>
           <div class="rl-book-layout">
@@ -465,8 +453,7 @@
               </div>
 
               <!-- Every highlight and note this book carries, in reading order.
-                   The same set the reader's sidebar lists, laid out to be read
-                   in full rather than skimmed three lines at a time. -->
+                   The same set the reader's sidebar lists, laid out in full. -->
               <section class="rl-notes">
                 <header class="rl-group-head">
                   <strong>Highlights &amp; notes</strong>
@@ -483,11 +470,9 @@
         </div>
       </section>
 
-      <!-- Kindle / device-management page. The pill in the header is the entry
-           point; this is a full-width section like #gallery / #notes. The ids
-           here are the ones the device JS (updateDeviceUI / refreshDeviceList /
-           refreshDeviceAppStatus / refreshServerStatus) queries, so renaming
-           one silently stops it populating. -->
+      <!-- Kindle / device-management page, a full-width section like #gallery.
+           updateDeviceUI, refreshDeviceList, refreshDeviceAppStatus and
+           refreshServerStatus query the ids here by name. -->
       <section id="device-page" class="view device-page" aria-label="Kindle" hidden>
         <header class="device-page-header">
           <div class="device-page-title">
@@ -573,8 +558,7 @@
     </div>
 
     <!-- In the page's flex column, between the selection bars and the status
-         bar it belongs to, so it shrinks the view instead of covering whatever
-         is at the foot of the window. -->
+         bar it belongs to, shrinking the view. -->
     <aside id="queue-drawer" class="queue-drawer" hidden aria-label="Queue">
       <header class="queue-drawer-header">
         <strong>Queue</strong>
@@ -799,10 +783,9 @@
             <button type="button" id="settings-use" class="btn">Choose folder&hellip;</button>
           </section>
 
-          <!-- Which folders on the Kindle a Sync brings back. The list is the
-               library's (device-sync.json); the picker fetches it before every
-               scan, so adding or renaming one here needs no device redeploy.
-               Rows are built by misc.js. -->
+          <!-- Which folders on the Kindle a Sync brings back, from the
+               library's device-sync.json. The picker fetches it before every
+               scan; misc.js builds the rows. -->
           <section class="settings-section">
             <h3>Kindle folders</h3>
             <p class="settings-hint">
@@ -843,9 +826,8 @@
              or status in view. -->
         <div class="settings-pinned">
           <!-- One confirm box, shared by relocate (move / use) and restore.
-               Restore is the only one with two ways to say yes, so it borrows
-               #settings-confirm-keep and relabels the primary button;
-               resetRelocateConfirm puts both back. -->
+               Restore borrows #settings-confirm-keep and relabels the primary
+               button; resetRelocateConfirm puts both back. -->
           <div id="settings-confirm" class="settings-confirm" hidden>
             <p id="settings-confirm-text" class="settings-confirm-text"></p>
             <div class="settings-confirm-actions">

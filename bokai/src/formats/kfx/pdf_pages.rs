@@ -1,22 +1,5 @@
 //! The page-level view of a PDF-backed KFX: per-page text geometry, the
 //! anchors registered on each page, the outline, and the page labels.
-//!
-//! A PDF-backed KFX carries the source PDF verbatim (see
-//! [`pdf_container`](super::pdf_container)) and renders each page from it, with
-//! a `type:text` storyline pinned over the page at fixed `top`/`left`/`width`/
-//! `height`. That storyline is what makes the page's words addressable —
-//! selectable, searchable, and anchorable by eid — without the glyphs
-//! themselves ever leaving the PDF. This module reads it.
-//!
-//! [`page_text_layer`] follows the same chain a conversion walks (reading order
-//! → section → page_template → storyline → overlay storyline) but collects run
-//! geometry in place of content. It keys on *structure*, not on fragment
-//! names: Amazon's Send-to-Kindle output and
-//! [`pdf_to_kfx`](crate::export::pdf_to_kfx)'s both read.
-//!
-//! [`read_pages`] adds what the container's `book_navigation` states: the
-//! outline and the per-page labels, both written at authoring time. The page
-//! box sizes come from the page templates here too.
 
 use std::collections::HashMap;
 

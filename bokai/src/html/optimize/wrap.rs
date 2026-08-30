@@ -8,22 +8,6 @@ use super::predicates::{is_block_container, is_inline_role};
 /// Wrap consecutive inline children in a Container when they're siblings to block elements.
 ///
 /// HTML allows mixed inline and block content in some containers:
-/// ```html
-/// <blockquote>
-///   <p>Some verse...</p>
-///   <cite>— Author</cite>
-/// </blockquote>
-/// ```
-///
-/// In this example, `<cite>` (mapped to `Inline`) is a sibling to `<p>` (a block element).
-/// During KFX export, inline children become spans on the parent container, which inverts
-/// the content order (inlines appear before blocks).
-///
-/// This pass detects block containers with mixed inline/block children and wraps
-/// consecutive inline runs in a Container node, normalizing the structure:
-///
-/// Before: BlockQuote > [Paragraph, Inline "cite"]
-/// After:  BlockQuote > [Paragraph, Container > [Inline "cite"]]
 pub fn wrap_mixed_content(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         wrap_mixed_children(chapter, parent_id);

@@ -1,62 +1,6 @@
 //! # bokai
 //!
 //! A high-performance, format-agnostic ebook processing engine.
-//!
-//! ## Architecture
-//!
-//! Bokai uses an **Importer** architecture for reading ebooks:
-//! - `Book` is the runtime handle that wraps format-specific backends
-//! - `Importer` trait defines the interface for format backends
-//! - Lazy loading via `ByteSource` for efficient random access
-//!
-//! ## Supported Formats
-//!
-//! | Format   | Read | Write |
-//! |----------|------|-------|
-//! | EPUB     | ✓    | ✓     |
-//! | KFX      | ✓    | ✓     |
-//! | AZW3     | ✓    | ✓     |
-//! | MOBI     | ✓    | -     |
-//! | PDF      | ✓    | -     |
-//! | Markdown | -    | ✓     |
-//!
-//! ## Module map
-//!
-//! Layered: vocabulary (`model`, `style`) → markup compiler (`html`) →
-//! format internals (`formats`) → directions (`import`, `export`).
-//!
-//! - [`model`] — the IR and the [`Book`] runtime handle: chapters, nodes,
-//!   roles, semantics, links, metadata
-//! - [`style`] — CSS vocabulary: property types, typed + raw declarations,
-//!   cascade, computed-style pool
-//! - [`html`] — the chapter-markup compiler (HTML/XHTML + CSS → IR),
-//!   serving every importer whose chapter content is HTML
-//! - [`formats`] — per-format internals shared by import and export
-//!   (containers, parsers, schemas, source repairs; PDF page rasterization
-//!   lives at [`formats::pdf::render`])
-//! - [`import`] — the [`Importer`] trait and per-format importers
-//! - [`export`] — the [`export::Exporter`] trait and per-format exporters
-//! - [`image`], [`io`] — image codecs and byte sources
-//! - [`validate`] — book/conversion validation (source structure, fidelity,
-//!   tag coverage)
-//! - `util`, `trace` — crate-internal helpers
-//!
-//! ## Quick Start
-//!
-//! ```no_run
-//! use bokai::Book;
-//!
-//! let mut book = Book::open("input.epub")?;
-//! println!("Title: {}", book.metadata().title);
-//!
-//! // Iterate chapters (collect spine first to avoid borrow issues)
-//! let spine: Vec<_> = book.spine().to_vec();
-//! for entry in spine {
-//!     let content = book.load_raw(entry.id)?;
-//!     println!("Chapter: {} bytes", content.len());
-//! }
-//! # Ok::<(), std::io::Error>(())
-//! ```
 
 pub mod export;
 pub mod formats;

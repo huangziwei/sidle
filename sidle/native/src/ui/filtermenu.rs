@@ -1,22 +1,6 @@
 //! Filter & sort overlay — the strip's entry point.
 //!
 //! Two blocking sub-loops in the `ui/sortmenu.rs` / `ui/diag.rs` mold:
-//!
-//! - [`run`] — the **menu**: a row per facet (showing its selected-count), a
-//!   `Sort:` row, and a `[ Done | Clear all ]` strip. Tapping a facet row opens
-//!   its value picker; tapping `Sort:` opens [`crate::ui::sortmenu`]. Mutates
-//!   the caller's `Filters` + `SortState` in place.
-//! - [`value_picker`] — a **paged checklist** of one facet's options
-//!   (value + count), tap to toggle, `[ Back | Clear | ← Prev N/M Next → ]`
-//!   strip + bezel paging for long lists (100+ authors).
-//!
-//! Refresh discipline matches the grid and sortmenu: full GC16 on open / page
-//! turn / rotation; a single-row DU on a toggle so a tap doesn't flash the
-//! screen. Each sub-loop handles its own rotation (`Tick`) — the main loop
-//! isn't running while we own input.
-//!
-//! Markers are bracketed ASCII (`[x]` / `[ ]`, `>`) — no glyph-coverage risk,
-//! same reasoning as `ui/diag.rs`.
 
 use crate::api::Book;
 use crate::eink::buttons::PageButton;
@@ -32,9 +16,6 @@ use crate::ui::text::TextRenderer;
 const STRIP_H: u32 = 120;
 const MARGIN_X: u32 = 60;
 /// Fixed-width left zones in the filter-menu and value-picker strips, each this
-/// wide: the leave action (Done / Back) then a Clear action. In the picker, page
-/// nav fills the rest. Mirrors the gallery strip's Exit/Filter/Sync zones, so the
-/// leave action lands in the same left slot on every screen.
 const ZONE_W: u32 = 200;
 
 fn row_h(lh: u32) -> u32 {
@@ -72,7 +53,6 @@ fn draw_title(fb: &mut Framebuffer, renderer: &mut TextRenderer, lh: u32, title:
 
 // ===========================================================================
 // Menu (facet rows + Sort row + Done / Clear all)
-// ===========================================================================
 
 enum MenuTap {
     Facet(Facet),
@@ -240,7 +220,6 @@ pub fn run(
 
 // ===========================================================================
 // Value picker (paged checklist for one facet)
-// ===========================================================================
 
 enum PickTap {
     Toggle(usize), // index into `options`
@@ -407,9 +386,6 @@ fn redraw_pick_row(
 }
 
 /// Paged checklist for one facet. Mutates `filters` in place. The option list +
-/// counts are computed once on entry and stay fixed while toggling: a facet's
-/// own options are leave-one-out (independent of its own selections — see
-/// `filter::facet_options`), so only the checkmarks change per tap.
 fn value_picker(
     fb: &mut Framebuffer,
     input: &mut Input,

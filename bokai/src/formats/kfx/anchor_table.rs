@@ -1,13 +1,5 @@
 //! KFX anchor table — the one rule set for turning `$266 anchor` entities and
 //! `book_navigation` target positions into HTML ids.
-//!
-//! The importer stamps `id="…"` attributes at anchored `(eid, offset)`
-//! positions and emits nav/NCX/guide fragments from the same names.
-//!
-//! Registration order is part of the contract: real `$266` anchors first, in
-//! sorted-name order, then synthetic `toc-…` anchors at TOC target positions,
-//! then `page-…` at page-list positions. A position holding an anchor is never
-//! re-registered.
 
 use std::collections::HashMap;
 

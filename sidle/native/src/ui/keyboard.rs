@@ -1,29 +1,4 @@
 //! On-screen Latin keyboard — the romaji search overlay.
-//!
-//! A full CJK IME is infeasible on the device, but search needs only the ~26
-//! Latin letters a book's romaji is spelled with (the romanization happens once
-//! on the desktop; see `sidle_core::library::romaji`). So this is a plain QWERTY
-//! grid: tap letters/digits, watch a **live match count** update, hit
-//! `[ Search ]` to filter the grid or `[ Back ]` to leave it as it was.
-//!
-//! Layout follows a physical keyboard rather than a phone: there is a number
-//! row, so `Del` sits at its right end where a keyboard puts Backspace. The
-//! screen-level commands are not keys — they live in a bottom strip with the
-//! same geometry and grammar as [`crate::ui::filtermenu`] and
-//! [`crate::ui::pager`].
-//!
-//! Two of those commands leave the overlay and they are not the same thing.
-//! `[ Search ]` is this keyboard's Enter: it submits, and sits at the far right
-//! where a keyboard puts Enter. `[ Back ]` abandons, returning the query the
-//! overlay opened with, and takes the leftmost slot — the one the gallery gives
-//! `Exit`. Without it the only way out committed a query, so an overlay opened
-//! by accident had to be paid for with one.
-//!
-//! Same blocking-sub-loop shape as [`crate::ui::filtermenu`] / [`crate::ui::sortmenu`]:
-//! it owns input while open, full GC16 on open / page / rotate, and a single-band
-//! DU on a keystroke so typing doesn't flash the whole panel. All key labels are
-//! ASCII (`Del`/`Clear`/`space`/`[ Back ]`/`[ Search ]`) — no glyph-coverage
-//! risk, same discipline as `ui::diag`.
 
 use crate::api::Book;
 use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
@@ -45,9 +20,6 @@ const GAP: i32 = 8;
 const MARGIN: i32 = 20;
 
 /// Bottom command strip: `[ Back ] | Clear | space | [ Search ]`. Height matches
-/// `ui/filtermenu.rs` and `ui/sortmenu.rs`; `ZONE_W` matches the fixed left slots
-/// in `ui/pager.rs` and `ui/filtermenu.rs`, so `[ Back ]` lands where `Exit` and
-/// the menus' own leave action do.
 const STRIP_H: u32 = 120;
 const ZONE_W: u32 = 200;
 /// Thickness of the strip's divider rules, matching the other bottom strips.
@@ -102,20 +74,6 @@ fn strip_top(yres: u32) -> u32 {
 }
 
 /// Keyboard metrics: `(unit, unit_digits, key_h, keys_top)`.
-///
-/// Letter rows divide the span into ten columns. The digit row spans the same
-/// width but needs an eleventh cell for `Del`, so it divides that span into
-/// eleven — the two rows line up at their edges and not in between, which is
-/// what a physical keyboard's stagger does anyway.
-///
-/// Key faces are square: a row is as tall as a letter key is wide. Nothing
-/// physical or on-screen uses keys taller than they are wide, and the panel has
-/// vertical room to spare, so height follows width rather than stretching it.
-/// One row height serves every row, so the digit row's slightly narrower cells
-/// stay aligned with the letters above and below.
-///
-/// The four-row block is bottom-anchored above the command strip, so the search
-/// field stays at the top and the keys rest near the thumb.
 fn metrics(xres: u32, yres: u32) -> (i32, i32, i32, i32) {
     let span = (xres as i32 - 2 * MARGIN).max(1);
     let unit = (span / 10).max(1);
@@ -166,9 +124,6 @@ fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
     // Command strip. `[ Back ]` takes the leftmost slot, the one `ui/pager.rs`
     // gives `Exit` on the gallery and `ui/filtermenu.rs` gives its own leave
     // action — leaving a screen is the same gesture wherever you are.
-    // `[ Search ]` is this keyboard's Enter, so it sits at the far right where a
-    // keyboard puts it, with the wide `space` between it and `Clear` so a
-    // mis-tap cannot wipe the query and submit in one slip.
     let sy = strip_top(yres) as i32;
     let side = ZONE_W.min(xres / 5);
     for (x, w, key, label) in [
@@ -222,11 +177,6 @@ fn band_rect(fb: &Framebuffer, lh: u32) -> MxcfbRect {
 
 /// The drawn face of a key: for a grid key the cell inset by half a gap; for a
 /// strip slot the cell inset past the strip's rules on its top and left edges.
-///
-/// That inset is what keeps a press from erasing the chrome. The rules are drawn
-/// *inside* the slot rects — the top rule along the strip's first rows, each
-/// vertical rule at a slot's own left edge — so a face covering the whole cell
-/// paints over them when it fills, and the restore leaves them gone.
 fn face(kb: &KeyButton) -> (i32, i32, u32, u32) {
     match kb.style {
         Style::Zone => (
@@ -304,9 +254,6 @@ fn draw_band(
 }
 
 /// Draw one key. `pressed` inverts it — filled black with a white label — which
-/// is the only acknowledgement a tap gets while the finger is still down: the
-/// band refresh lands later and at the far end of the screen, so without this a
-/// tap that registered looks exactly like one that missed.
 fn draw_key(fb: &mut Framebuffer, renderer: &mut TextRenderer, kb: &KeyButton, pressed: bool) {
     let (x, y, w, h) = face(kb);
     let (top, left) = (y.max(0) as u32, x.max(0) as u32);
@@ -364,9 +311,6 @@ fn hit(keys: &[KeyButton], tx: u32, ty: u32) -> Option<Key> {
 }
 
 /// Run the keyboard. Returns the typed query on `[ Search ]`, or `initial`
-/// unchanged on `[ Back ]` — the caller acts only when the two differ, so
-/// abandoning costs nothing. `initial` also pre-fills the box, so re-opening
-/// edits the current search rather than starting over.
 pub fn run(
     fb: &mut Framebuffer,
     input: &mut Input,
@@ -404,8 +348,6 @@ pub fn run(
                 // The search bar stays live in the overlay — its `✕` clears,
                 // consistent with the grid view; a field tap is a no-op (already
                 // open). Otherwise resolve a key.
-                // `with_button = false` here (the overlay draws no action discs),
-                // so `drm` is moot — only `Clear`/`Open` come back.
                 if let Some(tap) =
                     searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false)
                 {
@@ -542,9 +484,6 @@ mod tests {
     #[test]
     fn pressing_a_strip_slot_cannot_erase_the_chrome() {
         // A slot's face must stay inside its cell. A face covering the whole
-        // cell paints over the top rule and over the vertical rule at its own
-        // left edge when filled on press, and the restore draws no chrome, so
-        // both stay missing. The space bar, the widest slot, shows it worst.
         let keys = layout(XRES, YRES);
         let strip = strip_top(YRES) as i32;
         for kb in keys.iter().filter(|k| k.style == Style::Zone) {

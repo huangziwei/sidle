@@ -1,9 +1,4 @@
 //! Bit/byte-stream reader for the JXR decoder.
-//!
-//! Port of calibre's `jxr_misc.Deserializer`. Same semantics: byte-aligned
-//! reads via `extract`/`unpack_*`, unaligned reads via `unpack_bits`. The
-//! deserializer keeps a bit buffer for fractional reads and panics if a
-//! byte-aligned op is requested with bits still pending (matching calibre).
 
 use std::collections::HashMap;
 
@@ -57,9 +52,6 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Read `size` bytes from current offset. Errors if too few bytes are
-    /// available. By default verifies the bit buffer is empty (byte-aligned
-    /// read); pass `check_remaining=false` to skip that (used internally by
-    /// the bit reader to refill its 8-bit window).
     pub fn extract(&mut self, size: usize, check_remaining: bool) -> Result<&'a [u8]> {
         if check_remaining && self.bits_remaining != 0 {
             return Err(DeserializerError::UnexpectedBits(self.bits_remaining));

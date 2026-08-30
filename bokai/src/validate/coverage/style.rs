@@ -1,15 +1,5 @@
 //! Style-coverage validation — count CSS declarations in the source and
 //! report which property names bokai's parser silently drops.
-//!
-//! Every `(property_name, raw_value)` declaration in the source's linked
-//! stylesheets, inline `<style>` blocks and element `style=` attributes goes
-//! through `Declaration::parse(name, value)`. A supported property yields a
-//! non-empty `Vec<Declaration>`; an unsupported one yields an empty `Vec`.
-//! The report ranks the dropped property names by count.
-//!
-//! Scope: property names alone. Whether a parsed declaration reaches a KFX
-//! style symbol belongs to the export-side pass, and a parsed property's
-//! value is not checked.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::{HashMap, HashSet};
@@ -502,8 +492,6 @@ fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
         .count())
 }
 
-// ============================================================================
-// CSS collection
 // ============================================================================
 
 /// Every `(property, value)` declaration in the EPUB: manifest `.css` files,

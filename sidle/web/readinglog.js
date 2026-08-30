@@ -1,18 +1,6 @@
-// Reading Log: what was read on which day, and for how long.
-//
-// Classic script loaded AFTER library.js. Self-contained IIFE exposing
-// `window.ReadingLog` ({ refresh, show, hide, invalidate }); library.js's
-// section toggle drives show/hide. Backend: commands/reading_log.rs —
-// reading_log_overview / _books / _book / _import / _clear / _cancel /
-// _pick_folders, plus commands/reader.rs's `annotations_for_book` for the
-// highlights and notes on a book's page.
-//
-// The data behind this comes from the Kindle's own system logs, which name no
-// book: every session is identified by the book's end position and matched
-// against the library. Two consequences show up in the UI and are deliberate —
-// time on a book the library no longer holds is counted nowhere (the backend
-// never sends it), and nothing appears at all until the user imports an archive,
-// because those logs live wherever they were copied to.
+// Reading Log: what was read on which day, and for how long. An IIFE exposing
+// `window.ReadingLog` ({ refresh, show, hide, invalidate }), over
+// commands/reading_log.rs and `annotations_for_book`.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
@@ -42,10 +30,8 @@
     overviewScroll: 0, // where the overview was left when a book was opened
   };
 
-  // Every section shares one scroll container, and swapping the overview for the
-  // book page does not move it — so a book opened from halfway down the list
-  // opens halfway down itself. The drill-in parks the overview's offset and
-  // starts the book at its top; going back puts the overview back where it was.
+  // Every section shares one scroll container. The drill-in parks the
+  // overview's offset and starts the book at its top; going back restores it.
   const scroller = () => q("#main");
 
   function toast(msg, isError = false) {
@@ -55,9 +41,8 @@
 
   // ── Formatting ─────────────────────────────────────────────────────────────
 
-  // Durations read as "4h 12m" / "37m" / "2m". Seconds are never shown: the
-  // underlying counter is not that precise, and a reading log measured to the
-  // second would claim an accuracy it does not have.
+  // Durations read as "4h 12m" / "37m" / "2m". The underlying counter carries
+  // no second-level precision.
   function fmtDuration(secs) {
     if (!secs || secs < 60) return "<1m";
     const h = Math.floor(secs / 3600);
@@ -67,15 +52,9 @@
     return `${m}m`;
   }
 
-  // A "~" on a figure the Kindle's own reading timer did not produce.
-  //
-  // That timer runs on words and reading speed, so a book it can count no words
-  // in — manga, a fixed-layout magazine — is never timed: the device's own book
-  // info reads zero however long it was read. Two things stand in, and they are
-  // not equally good. `dwell_seconds` is the reader's page records, timed page
-  // by page — a measurement. `awake_seconds` is how long the device was awake
-  // with the book open — a bound. The mark names whichever carries more of the
-  // figure, and an entry with any of either takes it.
+  // A "~" on a figure the Kindle's reading timer did not produce. The timer
+  // runs on words, leaving manga and fixed-layout magazines at zero.
+  // `dwell_seconds` is a measurement, `awake_seconds` a bound.
   function estimateMark(e) {
     const dwell = e.dwell_seconds || 0;
     const awake = e.awake_seconds || 0;
@@ -129,9 +108,8 @@
     });
   }
 
-  // `YYYY-MM-DD` → local Date. Built component-wise, never `new Date(iso)`,
-  // which parses a bare date as UTC and lands on the previous day west of
-  // Greenwich — every square would sit one day off.
+  // `YYYY-MM-DD` → local Date, built component-wise. `new Date(iso)` parses a
+  // bare date as UTC and lands on the previous day west of Greenwich.
   function parseDay(iso) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
     return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
@@ -178,10 +156,8 @@
     state.calRows.clear();
     state.calShapes.clear();
     try {
-      // Two halves of the same picture: what the library could name on its own,
-      // and the ties it would not guess at. The second is reading the page
-      // reports in no total, so it is fetched alongside rather than behind a
-      // click nobody would think to make.
+      // Two halves of one picture: what the library named on its own, and the
+      // ties it left. The second appears in no total on the page.
       [state.overview, state.ambiguous] = await Promise.all([
         api.invoke("reading_log_overview"),
         api.invoke("reading_log_ambiguous"),
@@ -200,7 +176,7 @@
     else render();
   }
 
-  // A popover left open would float over whichever section replaces this one.
+  // A popover left open floats over the section replacing this one.
   function hide() {
     closeSort();
   }
@@ -227,9 +203,7 @@
       q("#rl-stats").innerHTML = "";
       return;
     }
-    // The current year, which is what someone opening this page wants to see —
-    // falling back to the newest year that has any reading, so a library whose
-    // logs stop last year opens on data rather than on an empty grid.
+    // The current year, falling back to the newest year with any reading.
     const years = yearsWithData(o);
     if (!years.includes(state.year)) {
       const now = new Date().getFullYear();
@@ -295,9 +269,8 @@
     q("#rl-stats").innerHTML = tiles.join("");
   }
 
-  // The arrows step to the next year that *has* reading, never onto a blank
-  // grid; with a single year of history there is nowhere to go, so the pair is
-  // hidden rather than shown dead.
+  // The arrows step to the next year with reading. A single year of history
+  // hides the pair.
   function renderYearNav(o, years) {
     const i = years.indexOf(state.year);
     const prev = i > 0 ? years[i - 1] : null;
@@ -310,9 +283,8 @@
     q("#rl-year-total").textContent = secs ? fmtDuration(secs) : "";
   }
 
-  // A navigation arrow: disabled and unlabelled when there is nothing that way.
-  // `target` is stashed on the element so the click handler reads its
-  // destination rather than recomputing the bounds.
+  // A navigation arrow, disabled and unlabelled with nothing that way. `target`
+  // sits on the element for the click handler to read.
   function setStep(sel, target, title) {
     const btn = q(sel);
     btn.disabled = target === null;
@@ -320,8 +292,8 @@
     btn.title = target === null ? "" : title(target);
   }
 
-  // Scale by the busiest day rather than fixed thresholds, so the range is
-  // meaningful whether the reader does 20 minutes or 4 hours a day.
+  // Scaled by the busiest day, holding the range across 20 minutes and 4 hours
+  // a day alike.
   function levelScale(days) {
     const peak = Math.max(...days.map((d) => d.seconds), 1);
     return (secs) => {
@@ -331,17 +303,15 @@
     };
   }
 
-  // GitHub-style: one column per week, Sunday at the top. The grid is built
-  // from a fixed start so every column is a real week — padding the leading
-  // days keeps the weekday rows aligned instead of shearing by one.
+  // One column per week, Sunday at the top, from a fixed start. Padding the
+  // leading days holds the weekday rows aligned.
   function renderHeatmap(o) {
     const totals = new Map(o.days.map((d) => [d.day, d.seconds]));
     const end = new Date(state.year, 11, 31);
     let start = new Date(state.year, 0, 1);
     start = new Date(start.getFullYear(), start.getMonth(), start.getDate() - start.getDay());
 
-    // Across all years, so a quiet year reads as quiet instead of being
-    // stretched to fill the same five shades as a heavy one.
+    // Across all years: a quiet year keeps its own place on the five shades.
     const level = levelScale(o.days);
 
     const cols = [];
@@ -359,8 +329,8 @@
         }
         const key = dayKey(cur);
         const secs = totals.get(key) || 0;
-        // Only a day with reading is clickable: selecting an empty one would
-        // filter the grid down to nothing.
+        // Only a day with reading is clickable. An empty one filters the grid
+        // to nothing.
         const hit = secs ? ` data-day="${key}" role="button" tabindex="0"` : "";
         const sel = key === state.day ? " rl-sel" : "";
         week.push(
@@ -747,17 +717,8 @@
   }
 
   // ── When you read ──────────────────────────────────────────────────────────
-  //
-  // The heatmap answers "which days"; this answers "when in them". Both draw the
-  // selected year, so they read as one picture — a square on the left is a day,
-  // and the panel on the right is what the hours of such days look like.
-  //
-  // The backend sends one cube of (month, weekday, hour) seconds for all time
-  // (`db::reading_clock`, where the spreading rule and its one caveat live).
-  // Every view here is a marginal of it, which is why they can be cut in the
-  // page rather than asked for: hour-seconds add up, unlike the per-book
-  // aggregates the grid below shows, where re-slicing a total is exactly the
-  // bug `ReadingBucket` exists to prevent.
+  // `db::reading_clock` sends one (month, weekday, hour) cube for all time, and
+  // every view here is a marginal of it.
 
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const MONTHS = [
@@ -785,8 +746,8 @@
 
   function renderClock(o) {
     const cells = clockOfYear(o);
-    // A year always has days here — `render` only reaches this with data — but
-    // a year whose every session predates the stamps would have no cube.
+    // `render` reaches this with days. A year whose every session predates the
+    // stamps carries no cube.
     q(".rl-clock-wrap").hidden = cells.length === 0;
     if (!cells.length) return;
     renderClockSeg();
@@ -820,8 +781,7 @@
     const peak = Math.max(...hours, 1);
     const bars = hours
       .map((secs, h) => {
-        // A zero bar draws nothing at all — a stub of colour would read as a
-        // little reading rather than as none.
+        // A zero bar draws nothing at all, down to the stub of colour.
         const v = secs / peak;
         return (
           `<div class="rl-bar" style="--v:${v.toFixed(4)}" ` +
@@ -830,8 +790,8 @@
         );
       })
       .join("");
-    // Every third hour, so the axis stays legible at any panel width while each
-    // label still sits under the bar it names.
+    // Every third hour: the axis stays legible at any panel width, each label
+    // under the bar it names.
     const axis = hours
       .map((_, h) => `<span>${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`)
       .join("");
@@ -867,9 +827,8 @@
         .join("");
     const body = order
       .map((key) => {
-        // A month inside the reading span with nothing in it is a real row of
-        // zeroes — a month you did not read is worth seeing — so it is drawn
-        // rather than skipped.
+        // A month inside the reading span with nothing in it draws as a row of
+        // zeroes.
         const hours = rows.get(key) || new Array(24).fill(0);
         const name = label(key);
         return (
@@ -896,9 +855,8 @@
     ];
   }
 
-  // Every month from the first read to the last, so a gap between two reading
-  // months is visible instead of being closed up — the same rule the book
-  // page's calendar arrows follow.
+  // Every month from the first read to the last, gaps included. The book page's
+  // calendar arrows follow the same rule.
   function monthSpan(rows) {
     const keys = [...rows.keys()].sort();
     const [lo, hi] = [+keys[0].slice(5, 7), +keys[keys.length - 1].slice(5, 7)];
@@ -908,9 +866,8 @@
     return out;
   }
 
-  // "Most at Tue 22:00–23:00 · 4h 12m". One line, because a chart of this size
-  // states its shape and nothing else — the figure behind the tallest bar is
-  // the one thing you cannot read off it.
+  // "Most at Tue 22:00–23:00 · 4h 12m" — the figure behind the tallest bar, in
+  // one line.
   function peakNote(pairs) {
     let best = null;
     for (const [label, secs] of pairs) {
@@ -919,10 +876,9 @@
     return best ? `most at ${best[0]} · ${fmtDuration(best[1])}` : "";
   }
 
-  // The cover markup the gallery uses, so a book looks the same wherever it
-  // appears — and `coverUrlFor` (library.js) stays the one place that knows the
-  // thumb-vs-full choice and the cache-busting token. Split in two because the
-  // book page owns its own frame element and only fills it.
+  // The gallery's cover markup. `coverUrlFor` (library.js) holds the
+  // thumb-vs-full choice and the cache-busting token. Split in two: the book
+  // page owns its frame element and fills it.
   function coverInner(url, title) {
     return url
       ? `<img src="${esc(url)}" alt="" loading="lazy" draggable="false">`
@@ -958,16 +914,13 @@
     ["words", "Words", "Most words read first"],
   ];
 
-  // The grid always shows exactly what the heatmap above it is showing: the
-  // whole year, or one day of it once a square is clicked. Its figures come
-  // from a windowed query rather than a filtered all-time list, because a
-  // book's hours *that day* are not its hours ever — which is also why the
-  // month/day bands are asked for by the query instead of being cut out of a
-  // yearly list here: a book read across three months has three sets of figures.
+  // The grid shows what the heatmap shows: the whole year, or one clicked day.
+  // Its figures come from a windowed query, and the month/day bands come from
+  // the query too — a book read across three months has three sets of figures.
   async function renderScope() {
     const day = state.day;
     const [from, to] = day ? [day, day] : [`${state.year}-01-01`, `${state.year}-12-31`];
-    // A selected day is already a single band, and the header names it.
+    // A selected day is one band, which the header names.
     const bucket = day ? "total" : state.bucket;
     q("#rl-books-title").textContent = day ? fmtDay(day) : `Books in ${state.year}`;
     q("#rl-day-clear").hidden = !day;
@@ -1000,9 +953,8 @@
       : state.finishedOnly
         ? "nothing finished"
         : "nothing read";
-    // A band per day means every card already sits under its own date, so the
-    // cards say the time of day instead of repeating it — the same thing they
-    // do when a single day is selected.
+    // A band per day sits every card under its own date, and the cards say the
+    // time of day.
     const daily = !!day || bucket === "day";
     const banded = bucket === "month" || bucket === "day";
     const list = q("#rl-book-list");
@@ -1011,8 +963,7 @@
   }
 
   // A day's cards say when the sitting began; a year's say when the book was
-  // last open, which is what the default order sorts on — so the sequence on
-  // screen is legible rather than something you have to take on trust.
+  // last open, which the default order sorts on.
   function cardsHtml(rows, daily) {
     return rows
       .map((r) =>
@@ -1026,8 +977,8 @@
       .join("");
   }
 
-  // Rows come back grouped and already in the asked-for direction, so one pass
-  // over them keeps that order rather than re-deriving it.
+  // Rows come back grouped in the asked-for direction, and one pass keeps that
+  // order.
   function bandsHtml(rows, bucket, daily) {
     const out = [];
     for (let i = 0; i < rows.length; ) {
@@ -1096,26 +1047,11 @@
   }
 
   // ── Which book was this? ───────────────────────────────────────────────────
-  //
-  // A device's log names no book: it states the position its reading stopped at,
-  // and a book is recognised by ending exactly there. Two books of identical
-  // length end at the same position, so the reading fits both and the automatic
-  // pass refuses to pick — the one question here that a person can answer, by
-  // looking at two covers and remembering which they read.
-  //
-  // Reading whose position fits NO book is not this case and is never listed.
-  // That book is not in the library, and nothing about the group says which book
-  // it was: a duration, a date span and a word count identify nothing. It stays
-  // where it is — counted nowhere, named on its own the day its book comes back.
-  //
-  // The backend sends only ties (`reading_log_ambiguous`), so everything drawn
-  // here has candidates to draw.
+  // Two books of identical length end at one position, and
+  // `reading_log_ambiguous` sends only those ties.
 
-  // Where reading stopped is the identity of a group, so it is what every action
-  // is keyed by — never the sessions, which are just what accumulated there.
-  // No early return on an empty list: hiding the section while leaving the last
-  // question drawn inside it keeps a settled tie in the page, one `hidden` away
-  // from being shown again.
+  // Where reading stopped identifies a group and keys every action. An empty
+  // list takes no early return, leaving a settled tie drawn.
   function renderAmbiguous() {
     const groups = state.ambiguous;
     const secs = groups.reduce((a, g) => a + g.seconds, 0);
@@ -1173,10 +1109,8 @@
     );
   }
 
-  // Settle one. The choice is the answer, not a proposal: the row goes, the
-  // reading belongs to that book, and the page reloads because the totals, the
-  // heatmap and the grid all change — this is reading that was in none of them
-  // a moment ago.
+  // Settle one: the row goes, the reading belongs to that book, and the page
+  // reloads with the totals, the heatmap and the grid all changed.
   async function nameBook(position, bookId) {
     const group = state.ambiguous.find((g) => g.end_position === position);
     const book = (group?.candidates || []).find((b) => b.id === bookId);
@@ -1201,10 +1135,9 @@
     // the card the user pressed was on screen.
     const from = scroller().scrollTop;
     try {
-      // The annotations are the reader's own query — one book's highlights and
-      // notes, already grouped — so this page and the reader's sidebar can never
-      // disagree about what the book carries. A failure there is reported but
-      // does not hold up the reading history, which is what the page is for.
+      // The annotations come from the reader's own query, holding this page and
+      // the reader's sidebar to one answer. A failure there is reported and
+      // leaves the reading history drawn.
       let failed = false;
       const [data, notes] = await Promise.all([
         api.invoke("reading_log_book", { bookId }),
@@ -1227,12 +1160,9 @@
     }
   }
 
-  // Into the book itself, from the cover. Goes through the gallery's own open
-  // path (`openReader`, library.js) rather than calling the reader directly, so
-  // a slow KFX load says "Opening …" in the status bar exactly as it does from
-  // the Books grid — the alternative is a click that looks like it did nothing
-  // for several seconds. The reader is a full overlay: closing it comes back to
-  // this page, untouched.
+  // Into the book from the cover, through the gallery's `openReader`
+  // (library.js), which says "Opening …" in the status bar on a slow KFX load.
+  // The reader is a full overlay and closing it returns here.
   function openInReader() {
     const { id, entry } = state.book || {};
     if (!entry) return;
@@ -1249,11 +1179,8 @@
     box.innerHTML = entry ? coverInner(cover, entry.title) : "";
 
     if (entry) {
-      // The cover opens the book. It carries the affordance only while there is
-      // a book behind it — an entry-less page draws an empty frame, and a
-      // control that opens nothing has no business being focusable. `role` is
-      // also what the click and key handlers match on, so the thing that looks
-      // pressable and the thing that responds are the same thing.
+      // The cover opens the book, carrying the affordance while an entry sits
+      // behind it. The click and key handlers match on the same `role`.
       box.setAttribute("role", "button");
       box.setAttribute("tabindex", "0");
       box.setAttribute("aria-label", `Open ${entry.title} in the reader`);
@@ -1261,8 +1188,7 @@
 
       const span = spanDays(days);
       const perDay = days.length ? Math.round(entry.seconds / days.length) : 0;
-      // Pace comes from the device's own word counts, which is why it can be
-      // shown at all — nothing here is inferred from page geometry.
+      // Pace comes from the device's own word counts, never page geometry.
       const wpm = entry.seconds > 0 ? Math.round((entry.words * 60) / entry.seconds) : 0;
       q("#rl-book-stats").innerHTML = [
         factHtml("Total", `${esc(fmtDuration(entry.seconds))}${estimateMark(entry)}`),
@@ -1352,10 +1278,9 @@
     renderFinishMark();
   }
 
-  // Time left and a finish date, at this book's own measured pace. Both are
-  // absent without a position, and at the end of the book.
-  // `paceFacts` scales by `(1 - frac) / frac`, which runs away as `frac`
-  // approaches zero. PACE_FLOOR is the fraction its projection needs.
+  // Time left and a finish date at this book's measured pace, absent without a
+  // position and at the end. `paceFacts` scales by `(1 - frac) / frac`, and
+  // PACE_FLOOR is the fraction its projection needs.
   const PACE_FLOOR = 0.05;
 
   function paceFacts(entry, days) {
@@ -1470,26 +1395,19 @@
   }
 
   // ── Highlights and notes ───────────────────────────────────────────────────
-  //
-  // Everything the book carries, on one page, the way a Kindle's own notebook
-  // page shows it: the passages in reading order, each note under the passage it
-  // annotates. Nothing here is editable — the reader owns that, and a record of
-  // what was read has no business rewriting it.
+  // The passages in reading order, each note under the passage it annotates.
+  // The reader owns editing.
 
-  // The edge colour of a row: the colour the reader paints that mark, resolved
-  // by the reader itself so the two can't disagree — including the yellow it
-  // gives a highlight the device left colourless. Only a hex value is passed on,
-  // because it lands in a `style` attribute and `color` arrives from a file the
-  // device wrote; every colour a Kindle names is one, so the guard costs
-  // nothing and an exotic literal simply goes unswatched.
+  // The edge colour of a row, resolved by the reader, including the yellow it
+  // gives a colourless highlight. Only a hex value passes on: `color` arrives
+  // from a device-written file and lands in a `style` attribute.
   function noteColor(name) {
     const css = window.sidleReader?.highlightColor?.(name);
     return /^#[0-9a-f]{3,8}$/i.test(css || "") ? css : null;
   }
 
-  // "Yellow highlight" — the colour is named only when the device named it, so a
-  // literal or missing colour reads as a plain "Highlight" rather than echoing a
-  // hex value at the reader.
+  // "Yellow highlight", naming the colour the device named. A literal or
+  // missing colour reads as a plain "Highlight".
   function noteKind(a) {
     if (a.kind === "highlight") {
       const named = a.color && window.sidleReader?.highlightColors?.[a.color];
@@ -1500,10 +1418,8 @@
     return a.kind;
   }
 
-  // When the Kindle says the mark was made. The year is shown only when it is
-  // not this one, so the common case stays short. Blank for a row imported
-  // before Sidle kept the stamp — no date beats the import date pretending to
-  // be one.
+  // When the Kindle says the mark was made, carrying the year outside this one.
+  // A row imported without the stamp reads blank.
   function noteWhen(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -1516,24 +1432,23 @@
     });
   }
 
-  // The notes written against one highlight. A highlight can carry several —
-  // one added in Sidle, others on the Kindle — and they belong under the passage
-  // rather than as entries of their own. A hidden one is left out here as it is
-  // anywhere else; the count beside the heading is what says it exists.
+  // The notes written against one highlight, which can carry several, under the
+  // passage. A hidden one is left out, and the count beside the heading holds
+  // it.
   function notesOn(a) {
     return state.notes.filter((n) => n.attached_to === a.id && !n.hidden);
   }
 
-  // "43 highlights · 2 notes". Bookmarks are counted separately and only when
-  // there are any: on most books the word would just be a zero.
+  // "43 highlights · 2 notes". Bookmarks count separately, and only when a book
+  // carries some.
   function noteCounts(rows, hidden) {
     const parts = [];
     for (const kind of ["highlight", "note", "bookmark"]) {
       const n = rows.filter((a) => a.kind === kind).length;
       if (n) parts.push(`${n} ${kind}${n === 1 ? "" : "s"}`);
     }
-    // Hidden rows are curated out of the reader, so they are curated out here
-    // too — but silently dropping them would make the count contradict the book.
+    // Hidden rows are curated out of the reader and out of here, with the count
+    // above holding them.
     if (hidden) parts.push(`${hidden} hidden`);
     return parts.join(" · ");
   }
@@ -1563,23 +1478,14 @@
     const listed = rows.filter((a) => a.attached_to == null);
     const hidden = state.notes.length - rows.length;
     q("#rl-notes-count").textContent = noteCounts(rows, hidden);
-    // The hint says how highlights get here, so it belongs only to a book that
-    // has none at all — a book whose every mark is hidden has them, and the
-    // count beside the heading already says so. A failed query leaves the
-    // section blank rather than telling the user a book carries nothing when
-    // what actually happened was that nothing could be read.
+    // The hint belongs to a book with no highlights at all; a book whose every
+    // mark is hidden carries them. A failed query leaves the section blank.
     q("#rl-notes-empty").hidden = state.notes.length > 0 || state.notesFailed;
     q("#rl-notes-list").innerHTML = listed.map(noteRow).join("");
   }
 
-  // ── Import ─────────────────────────────────────────────────────────────────
-
-  // Named steps, so the label says what is happening rather than just ticking.
-  // "index" is the long one and the one that needs explaining: it is not
-  // Erasing the whole log is not undoable, and mostly not recoverable either: a
-  // Kindle sends only what is newer than the newest session stored, so what it
-  // has already pushed it will not push again. The dialog says so and states
-  // exactly what goes.
+  // Erasing the whole log is undoable nowhere: a Kindle sends only what is
+  // newer than the newest session stored. The dialog states what goes.
   async function doPurge() {
     const o = state.overview;
     const what = o
@@ -1662,8 +1568,8 @@
       renderScope();
     });
 
-    // Hour / Week / Month. Three cuts of one cube already in hand, so this
-    // redraws the panel and asks the backend nothing.
+    // Hour / Week / Month: three cuts of one cube in hand, redrawing the panel
+    // and asking the backend nothing.
     q("#rl-clock-seg").addEventListener("click", (e) => {
       const btn = e.target.closest(".seg-btn[data-clock]");
       if (!btn || btn.dataset.clock === state.clockView) return;
@@ -1671,8 +1577,8 @@
       if (state.overview) renderClock(state.overview);
     });
 
-    // Sort: the gallery's control, over reading figures. Only the grid changes,
-    // so this re-runs the scope query rather than the whole page.
+    // Sort: the gallery's control over reading figures, re-running the scope
+    // query alone.
     q("#rl-sort-button").addEventListener("click", () => {
       const pop = q("#rl-sort-popover");
       if (!pop.hidden) return closeSort();
@@ -1705,9 +1611,8 @@
     q("#rl-back").addEventListener("click", () => {
       state.book = null;
       render();
-      // The grid keeps the height it had until `renderScope`'s reply replaces
-      // it with the same rows, and a card's height is its cover's aspect ratio,
-      // not a loaded image — so the offset is good to restore right now.
+      // The grid keeps its height until `renderScope`'s reply lands, and a
+      // card's height is its cover's aspect ratio. The offset restores here.
       scroller().scrollTop = state.overviewScroll;
     });
     for (const sel of ["#rl-prev", "#rl-next"]) {
@@ -1719,8 +1624,8 @@
       });
     }
 
-    // One delegated handler for the whole page: the heatmap and both lists are
-    // re-rendered wholesale, so per-element listeners would leak on every draw.
+    // One delegated handler for the whole page. The heatmap and both lists
+    // re-render wholesale, leaking any per-element listener.
     q("#reading-log").addEventListener("click", (e) => {
       // Matched before `.rl-cal-cell`, which a bar overlaps.
       const span = e.target.closest(".rl-cal-span[data-book], .rl-tl-block[data-book]");
@@ -1741,8 +1646,8 @@
         openBook(Number(row.dataset.book));
         return;
       }
-      // `[role]` rather than the id alone: the renderer sets it only on a cover
-      // that has a book behind it.
+      // `[role]` beside the id: the renderer sets it on a cover with a book
+      // behind it.
       if (e.target.closest("#rl-book-cover[role]")) {
         openInReader();
         return;

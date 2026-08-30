@@ -1,10 +1,4 @@
 //! Media Overlay (SMIL) documents — what the validator reads out of one.
-//!
-//! An overlay narrates a content document: `<text src>` points at the element
-//! being read, `<audio src>` at the recording, and `clipBegin`/`clipEnd` mark
-//! the span of it. The rules that key on this content are `MED-005` and
-//! `MED-008`…`MED-014`; the overlay's *structure* is the schema engine's job
-//! (`media-overlay-30.rnc` / `.sch`), so nothing here re-checks it.
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -72,13 +66,6 @@ pub fn parse(smil: &str) -> Overlay {
 }
 
 /// A SMIL clock value in milliseconds, or `None` if it is not one.
-///
-/// A transcription of epubcheck's `SmilClock`, including the order it tries the
-/// three formats in — *timecount first*, which is what makes `10:30` a partial
-/// clock (10 min 30 s) rather than anything else, and `1.5h` a time count.
-///
-/// An unparseable value yields `None` and no finding: the grammar types
-/// `clipBegin`/`clipEnd`, so a malformed clock is already an RSC-005.
 pub fn clock(s: &str) -> Option<f64> {
     let s = s.trim();
     let s = s.strip_prefix("npt=").unwrap_or(s);

@@ -1,37 +1,6 @@
 //! DOM-synthesis regime of the normalized EPUB export: chapter documents
 //! built through the shared XHTML DOM ([`super::dom`]), plus the stylesheet
 //! machinery for source-declared style programs.
-//!
-//! `normalize_book` selects this regime when the importer supplies a
-//! [`CssProgram`](crate::import::CssProgram) via
-//! [`crate::import::Importer::stylesheet_program`]
-//! (today only the KFX importer does); books without one go through the
-//! string-synthesis regime in `super::synth`. Chapters run calibre's DOM,
-//! consolidation passes, and serializer, which is what keeps the emitted
-//! XHTML the shape existing readers and stored links expect.
-//!
-//! The chapter build keeps calibre's attribute channels:
-//!
-//! - **Walk-time attributes** (`href`, `src`, `alt`, `id`) go directly onto
-//!   the element, in calibre's insertion order.
-//! - **Block classes / inline styles** accumulate in pending maps and land
-//!   *after* the walk via [`dom::finalize_attrs`] — so a stamped `id`
-//!   precedes `class` on block elements.
-//! - **Inline-run classes** (styled spans, ruby, links — calibre's
-//!   `attach_inline_style` sites) are set at creation, so a
-//!   later-stamped `id` follows `class` on those.
-//!
-//! Block containers all emit as `<div>`; the shared
-//! [`dom::consolidate_part`] performs the div→p leaf-text rename and the
-//! `<h<N>>` promotion off the layout-hint map, exactly as calibre does.
-//! Roles this regime never receives from its current source
-//! (definition lists, code blocks) keep their natural tags.
-//!
-//! Stylesheet side: class-name sanitization ([`safe_class_name`]),
-//! spec-default pruning ([`prune_default_decls`]), repeated-inline-style
-//! promotion ([`promote_repeated_inline_styles`]), and final assembly
-//! ([`StylesheetDoc::emit`]) — all over the raw declaration container
-//! [`CssDecl`] from [`crate::style`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -61,9 +30,6 @@ pub struct ChapterEmit<'a> {
     /// The assets the source actually holds, when the importer can enumerate
     /// them. An `<img>` whose `src` is not in this set degrades to a `<span>`
     /// carrying its alt text — see `Builder::emit_image`.
-    ///
-    /// `None` disables the check, which is what a caller that cannot name the
-    /// container's contents should pass; guessing would drop real images.
     pub available_assets: Option<&'a HashSet<String>>,
 }
 
@@ -129,9 +95,6 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
     merge_sole_container_into_body(&mut dom, body_id, &mut classes, &mut styles, &mut hints);
 
     // Same pass order as calibre's pipeline (`build_output`): links are
-    // already resolved (walk-time), then consolidate → list normalization →
-    // EOL → (styles were pruned/promoted book-wide upstream) → attribute
-    // finalization → document assembly.
     dom::consolidate_part(&mut dom, &classes, &styles, &hints);
     dom::normalize_lists_dom(&mut dom);
     dom::replace_eol_with_br_dom(&mut dom);
@@ -142,11 +105,6 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
 
 /// The chain of boxes from `<body>` down to the one element a document's
 /// whole content leads to, or `None` when the document branches.
-///
-/// A KFX section that holds nothing but a full-page plate arrives as exactly
-/// this shape: one unbranched line of wrapper boxes ending at the `<img>`.
-/// Any sibling box or stray text and the chain stops standing for the page,
-/// which is the whole reason [`anchor_page_plate_height`] may size it.
 fn sole_content_path(dom: &Dom, body: dom::NodeId) -> Option<Vec<dom::NodeId>> {
     let mut path = Vec::new();
     let mut id = body;
@@ -172,23 +130,6 @@ fn sole_content_path(dom: &Dom, body: dom::NodeId) -> Option<Vec<dom::NodeId>> {
 }
 
 /// Give a full-page plate's percentage height something to resolve against.
-///
-/// KFX sizes such a plate as `height: 100%` of its section's page template,
-/// and that template *is* the page — a height the format never has to state.
-/// CSS has no implicit page box: a percentage height whose containing block
-/// is auto-height is undefined, and readers split on it. Some fit the plate
-/// to the page; others fall back to the image's intrinsic size, which for
-/// artwork authored at page scale lands visibly small beside the sized
-/// artwork around it. Naming the chain — `html`, `body`, and every box down
-/// to the plate — is what makes the percentage mean what the KFX meant.
-///
-/// `max-width` comes with it: on a page narrower than the plate's aspect
-/// wants, CSS recomputes a replaced element's used height from the clamped
-/// width, so the plate scales down whole instead of overflowing the column.
-///
-/// Only a document whose entire content is that one plate qualifies — see
-/// [`sole_content_path`]. The height has to be inline on the plate, which is
-/// where the block-image partition puts an image's own properties.
 fn anchor_page_plate_height(dom: &mut Dom, head: dom::NodeId, body: dom::NodeId) {
     let Some(path) = sole_content_path(dom, body) else {
         return;
@@ -237,16 +178,6 @@ fn inline_decl(dom: &Dom, id: dom::NodeId) -> CssDecl {
 }
 
 /// Adopt a document's sole top-level container as its `<body>`.
-///
-/// A source that frames each document in one container (KFX gives every
-/// section a page template) is describing the page, not a box on it. Emitting
-/// it as a child of `<body>` puts its padding inside the page margin instead
-/// of being it, and — where the container names a writing mode running across
-/// the book's — makes an orthogonal flow, which shrink-wraps to its content
-/// and sits at one page edge rather than filling the page.
-///
-/// The container's style channels move with it, so the emitted document is
-/// the same one with a level removed.
 fn merge_sole_container_into_body(
     dom: &mut Dom,
     body_id: dom::NodeId,
@@ -295,9 +226,6 @@ struct Builder<'a, 'b> {
 
 impl Builder<'_, '_> {
     /// Append IR text lxml-style: onto the parent's leading text when it has
-    /// no element children yet, else onto the last child's tail. This is the
-    /// post-`strip_empty_spans` shape calibre reaches — plain
-    /// runs merge into the surrounding text slots.
     fn append_text(&mut self, parent: dom::NodeId, text: &str) {
         if text.is_empty() {
             return;
@@ -365,9 +293,6 @@ impl Builder<'_, '_> {
     }
 
     /// Carry the node's `epub:type` onto its element. It is what a reader
-    /// keys a popup note on, and what states the role of a section the
-    /// landmarks nav cannot name — both facts about the element, not about
-    /// the document.
     fn stamp_epub_type(&mut self, id: IrNodeId, el: dom::NodeId) {
         let Some(epub_type) = self.ir.semantics.epub_type(id).map(str::to_string) else {
             return;
@@ -377,19 +302,6 @@ impl Builder<'_, '_> {
     }
 
     /// Emit an image, or the degradation for one whose bytes aren't there.
-    ///
-    /// A source can reference an image it does not ship: an `<img src>` whose
-    /// extension disagrees with the manifest entry, or a spine that cites more
-    /// images than the container holds. KFX does it too, where the cited
-    /// `bcRawMedia` is absent.
-    ///
-    /// Carrying the reference through would put an `<img src>` in the output
-    /// naming a file the container has no entry for — epubcheck RSC-007, and a
-    /// broken-image box where content should be. Emitting a `<span>` with the
-    /// alt text keeps whatever semantic content the source gave and references
-    /// nothing. This matches calibre's long-standing behavior for
-    /// KFX; it applies here to every source because the rule is about what a
-    /// container may contain, not about where the book came from.
     fn emit_image(&mut self, id: IrNodeId, parent: dom::NodeId) {
         let src = self.ir.semantics.src(id);
         // `alt` is always present (calibre: calibre defaults "").
@@ -423,10 +335,6 @@ impl Builder<'_, '_> {
     }
 
     /// Carry the node's source element id onto its DOM element, so a renderer
-    /// can resolve an `(element, offset)` handle by querying `[data-eid]` and
-    /// walking text from there. Precedes [`Self::stamp_id`] at every call site
-    /// — calibre stamps the eid before the position anchor, and matching
-    /// that attribute order keeps the documents calibre-shaped.
     fn stamp_source_element(&mut self, id: IrNodeId, el: dom::NodeId) {
         if self.opts.source_elements == SourceElements::Omit {
             return;
@@ -514,9 +422,6 @@ impl Builder<'_, '_> {
                 let span = self.dom.sub_element(parent, "span");
                 if self.ir.semantics.render_inline(id) {
                     // A demoted `render: inline` block keeps the block
-                    // attribute channels (id at walk time, class/style via
-                    // the pending maps) — calibre's demotion retags the
-                    // div but leaves its attribute plumbing alone.
                     self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
                     self.stamp_epub_type(id, span);
@@ -548,9 +453,6 @@ impl Builder<'_, '_> {
                 self.stamp_epub_type(id, el);
                 self.attach_block_style(id, el);
                 // A spanning cell keeps its geometry: dropping the attribute
-                // shifts every following cell in the row into the wrong
-                // column, which no amount of styling recovers. `<col>` states
-                // the same count under HTML's own name for it.
                 match tag {
                     "td" | "th" => {
                         if let Some(n) = self.ir.semantics.col_span(id) {
@@ -602,8 +504,6 @@ impl Builder<'_, '_> {
     /// Tag for a block-level role, pre-consolidation. KFX block containers
     /// (including headings, figures, captions, quotes, and note asides — the
     /// calibre's EPUB-2.0-gated promotions) all emit `<div>`;
-    /// [`dom::consolidate_part`] renames leaf-text divs to `<p>` and
-    /// promotes hinted headings to `<h<N>>`.
     fn block_tag(&self, role: Role) -> &'static str {
         match role {
             Role::OrderedList => "ol",
@@ -629,11 +529,6 @@ impl Builder<'_, '_> {
     }
 }
 /// Sanitize a source style name into a valid CSS class name (and matching HTML
-/// `class` attribute). Non-identifier characters become `_`; a leading digit
-/// (or `-digit` / lone `-`) is prefixed with `_`, since a CSS identifier can't
-/// start with a digit — an unescaped `.0HrDijd…` selector is a parse error
-/// (epubcheck CSS-008). Applied identically to the selector and the element's
-/// class attribute so they stay in sync.
 pub fn safe_class_name(name: &str) -> String {
     let mut out: String = name
         .chars()
@@ -661,12 +556,6 @@ pub fn safe_class_name(name: &str) -> String {
 /// Drop declarations whose value matches the CSS spec default (a no-op both
 /// in the stylesheet and inline). Mirrors calibre's `simplify_styles` at the
 /// high-impact level:
-///   - `letter-spacing` / `word-spacing`: `0` / `0em` / `0px` / `0rem` /
-///     `normal` → drop
-///   - `text-indent`: `0` / `0em` / `0px` / `0rem` / `0%` → drop
-///   - `white-space` / `font-style` / `font-weight` / `font-variant` /
-///     `font-stretch`: `normal` → drop
-///   - `text-decoration` / `text-transform`: `none` → drop
 pub fn prune_default_decls(decl: &mut CssDecl) {
     decl.items.retain(|(k, v)| !is_default_decl(k, v));
 }
@@ -688,18 +577,6 @@ fn is_default_decl(name: &str, value: &str) -> bool {
 
 /// Promote inline-style declarations that repeat across elements into
 /// auto-generated class rules.
-///
-/// Mirrors a subset of calibre's `fixup_styles_and_classes`
-/// (yj_to_epub_properties.py): when the same serialized declaration
-/// shows up on ≥ 2 elements across the book, it gets a `g<N>` class rule and
-/// the caller replaces each matching inline style with the class reference.
-/// Single-occurrence styles stay inline — keeps the stylesheet readable.
-///
-/// `inline_decls` is the multiset of serialized non-empty inline styles
-/// (one entry per styled element). Promoted rules are appended to
-/// `generated` (numbering continues from its current length so class names
-/// stay stable); the returned map is serialized-style → class name for the
-/// caller's rewrite pass.
 pub fn promote_repeated_inline_styles(
     inline_decls: impl IntoIterator<Item = String>,
     generated: &mut Vec<(String, CssDecl)>,
@@ -736,9 +613,6 @@ pub struct StylesheetDoc {
     /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
     pub writing_mode: String,
     /// Named rules: (raw source style name, declarations). Emitted sorted by
-    /// name, selectors sanitized via [`safe_class_name`]; empty declarations
-    /// are skipped (a class attribute may still reference them — the rule is
-    /// simply absent, which renders identically).
     pub named_rules: Vec<(String, CssDecl)>,
     /// State-conditional rules: (raw source style name, pseudo-class,
     /// declarations). Emitted as `.name:pseudo { … }` after the base rule of
@@ -751,15 +625,6 @@ pub struct StylesheetDoc {
 
 impl StylesheetDoc {
     /// Assemble the final `style.css` text.
-    ///
-    /// Layout matches calibre's output: `@charset` first; for fixed-layout
-    /// books a reset that sizes images to the viewport (the page wrapper
-    /// establishes no definite height, and a vertical-rl body would flip the
-    /// block axis — page-turn direction is carried by
-    /// `page-progression-direction`, so forcing horizontal-tb is safe); for
-    /// reflowable books a `body { writing-mode: … }` rule when the book is
-    /// not horizontal-tb. Then one rule per named style (sorted), then the
-    /// generated classes.
     pub fn emit(&self) -> String {
         let mut s = String::new();
         s.push_str("@charset \"utf-8\";\n");
@@ -778,9 +643,6 @@ impl StylesheetDoc {
         }
 
         // One pass over every style name that has anything to say, base rule
-        // or state rule. Taking the union rather than walking `named_rules`
-        // alone means a style whose only content is its link states still
-        // reaches the sheet.
         let mut names: Vec<&str> = self
             .named_rules
             .iter()

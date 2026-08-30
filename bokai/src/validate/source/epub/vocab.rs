@@ -1,22 +1,4 @@
 //! The package document's property vocabularies.
-//!
-//! An EPUB 3 package document carries *properties* in six places, and each
-//! place draws from its own vocabulary: `<item properties>`, `<itemref
-//! properties>`, `<meta property>`, `<meta scheme>`, `<link rel>`, `<link
-//! properties>`. A property is `prefix:name`, where an absent prefix means the
-//! place's default vocabulary.
-//!
-//! Four rules key on this: a malformed `prefix:name` (`OPF-026`), a list where
-//! one value is required (`OPF-025`), a name the vocabulary does not define
-//! (`OPF-027`), and an `<item>` property that is defined but not for that
-//! item's media type (`OPF-012`).
-//!
-//! **What is judged.** `OPF-027` needs the vocabulary's *complete* member list
-//! to be safe, so it is asked only where this module has one: the default
-//! vocabulary of each context, plus the `rendition:` and `media:` vocabularies.
-//! A property under any other reserved or author-declared prefix is left alone
-//! — a recall gap, never a false positive. (An undeclared prefix is `OPF-028`,
-//! checked separately.)
 
 /// Where a property appears, which decides its default vocabulary and whether
 /// a whitespace-separated list is allowed.
@@ -137,9 +119,6 @@ impl Context {
                 "playback-active-class",
             ]),
             // The media-overlays vocabulary defines nothing for an `<item>` or
-            // an `<itemref>`, so any `media:` property there is undefined —
-            // epubcheck maps the prefix to an empty vocabulary in exactly those
-            // two contexts.
             ("media", Context::Item | Context::Itemref) => Some(&[]),
             _ => None,
         }
@@ -148,8 +127,6 @@ impl Context {
 
 /// The media types an `<item>` property is defined for. `None` means this
 /// module does not constrain it (which never fires `OPF-012`).
-///
-/// A `/` suffix is a prefix match, which is how `image/*` is spelled.
 fn item_property_types(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
         "cover-image" => &["image/"],
@@ -191,11 +168,6 @@ pub enum Defect {
 }
 
 /// Judge one property attribute's value.
-///
-/// `media_type` is the `<item media-type>` for [`Context::Item`], which is what
-/// `OPF-012` compares against; it is ignored elsewhere. A value that is a list
-/// where the context forbids one yields `Err(the raw value)` — `OPF-025` —
-/// and its members are not judged further, as epubcheck also stops there.
 pub fn check(
     context: Context,
     value: &str,

@@ -457,7 +457,6 @@ enum ValidateCheck {
     },
 
     /// Report CSS coverage + class-system richness (class= attr counts, CSS
-    /// rule counts, <p> vs <div> leaf ratio) against the KFX baseline
     Style {
         epub: String,
         kfx: String,
@@ -505,7 +504,6 @@ enum ValidateCheck {
     },
 
     /// Verify book-level writing mode (horizontal-tb / vertical-rl / vertical-lr)
-    /// is preserved across the conversion
     WritingMode {
         epub: String,
         kfx: String,
@@ -523,8 +521,6 @@ enum ValidateCheck {
     },
 
     /// Verify a fixed-layout (manga / comic) KFX produced a conformant
-    /// pre-paginated EPUB: rendition:layout, per-page viewport, page-spread
-    /// properties, and no orphan page thumbnails
     Fxl {
         epub: String,
         kfx: String,
@@ -557,7 +553,6 @@ enum ValidateCheck {
     },
 
     /// Strict A/B tree diff of two EPUBs (byte-exact per zip entry) — the
-    /// before/after gate for any change to the EPUB output
     EpubDiff {
         /// Reference EPUB (A — the before)
         a: String,
@@ -2389,7 +2384,6 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 // =========================================================================
 // PDF → KFX dispatch (called from `convert` when input is .pdf → .kfx)
-// =========================================================================
 
 #[cfg(feature = "pdf")]
 fn convert_pdf_to_kfx(
@@ -2546,7 +2540,6 @@ fn pdf_file_stem(path: &str) -> String {
 
 // =========================================================================
 // Aozora dispatch (called from `convert` when input is .zip → .epub)
-// =========================================================================
 
 #[cfg(feature = "aozora")]
 fn aozora_dispatch(

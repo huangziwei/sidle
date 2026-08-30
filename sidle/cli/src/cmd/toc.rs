@@ -1,8 +1,4 @@
 //! Tables of contents, across a whole shelf.
-//!
-//! The app judges and repairs one book's TOC in the editor's TOC panel. The same
-//! two operations over a selection are what turns "this book's chapter list is
-//! broken" into a thing you can find and fix everywhere at once.
 
 use anyhow::Result;
 use clap::Args;
@@ -141,9 +137,6 @@ pub fn run(ctx: &Ctx, args: TocArgs) -> Result<()> {
     })?;
 
     // An EPUB or PDF source derives the KFX the Kindle reads, so the repair only
-    // reaches the device once that is rebuilt. A KFX source was edited in place
-    // and needs nothing — but it costs one skipped book to let the sweep decide
-    // that per row rather than guessing here.
     if !reconvert.is_empty() && !args.no_reconvert {
         crate::cmd::convert::run(
             ctx,

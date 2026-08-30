@@ -1,54 +1,5 @@
 //! EPUB-3 standalone validator. Catches format-level defects that corrupt
 //! downstream KFX conversion or that strict readers (Apple Books) reject.
-//! Distinct from the pair-conversion validator at
-//! [`crate::validate`], which compares semantic preservation across
-//! formats; this one checks one EPUB against the EPUB-3 spec.
-//!
-//! Rules covered:
-//!
-//! - `mimetype` is the first zip entry, `STORED`, exact 20-byte content
-//!   `application/epub+zip` (EPUB 3.3 §3.4).
-//! - `META-INF/container.xml` exists and points to an OPF that's in the zip.
-//! - Every manifest `<item href>` resolves to a file inside the zip.
-//! - Every zip entry under the OPF directory is declared in the manifest
-//!   (besides `mimetype` and `META-INF/*`).
-//! - Every spine `<itemref idref>` matches a manifest id.
-//! - Exactly one manifest item carries `properties="nav"` (EPUB 3 nav doc).
-//! - Every spine item with `linear="no"` is the target of an `<a href>`
-//!   from another doc in the publication (EPUB 3.3 §5.8.2 reachability —
-//!   the rule that fails downstream KFX conversion silently).
-//! - Every internal reference in XHTML resolves to a file in the zip
-//!   (epubcheck RSC-007): hyperlinks (`<a>`/`<area>`) and resource loads
-//!   (`<img>`, `<link>`, SVG `<image>`/`<use>`, `<object>`, and the media
-//!   elements). Any `#fragment` a reference carries resolves to an element
-//!   `id` in the (local, XHTML) target document — same-document `#frag`
-//!   included (epubcheck RSC-012). Fragments into SVG/other targets and `srcset`
-//!   are not yet indexed.
-//! - Every `url()`/`@import` reference in a CSS resource resolves to a file in
-//!   the zip (RSC-007) and stays inside the container (RSC-026), resolved
-//!   relative to the stylesheet. Inline `<style>`/`style=` CSS is not yet scanned.
-//! - No href in OPF or XHTML resolves to a path outside the OPF root
-//!   directory. `..` parent segments inside the OPF tree are fine (e.g.
-//!   `../style.css` from a chapter is legal); escapes above the OPF root
-//!   are not — Apple Books rejects them silently.
-//! - Every content document declares `<!DOCTYPE html>` (not a legacy XHTML DTD)
-//!   — epubcheck HTM-004, the content-conformance rule real books trip most.
-//! - **Every document is validated against the schemas epubcheck ships**:
-//!   [`xml`] holds a RELAX NG validator, a Schematron engine and the NVDL
-//!   dispatch layer, run over the package document, the content documents, the
-//!   navigation document, the NCX, the media overlays and the OCF metadata
-//!   files. Every violation reports on the RSC-005 channel, as epubcheck's do.
-//!   This is the bulk of what the validator knows: a grammar admits what the
-//!   format admits.
-//!
-//! Each rule is keyed to its **epubcheck message id** ([`Rule::message_id`] —
-//! `RSC-007`, `HTM-004`, …), drawn from the full [`messages::CATALOG`] (every
-//! id epubcheck defines, with its default severity). A
-//! [`crate::validate::Finding`] carries that id, matching W3C epubcheck
-//! output. Three checks are bokai-native (kebab ids) where epubcheck has no
-//! dedicated code. Port coverage is tracked by [`epubcheck_error_coverage`].
-//!
-//! Out of scope (deferred): CSS validation and fragments into SVG targets.
 
 pub mod css;
 pub mod messages;
@@ -76,9 +27,6 @@ impl Report {
     }
 
     /// Any error-level violation. [`is_clean`](Self::is_clean) is true only
-    /// with zero violations of *any* severity; this one tracks epubcheck's exit
-    /// code, which is 0 for a book whose violations are all warnings. The
-    /// conversion/repair flags key on this.
     pub fn has_errors(&self) -> bool {
         self.violations
             .iter()
@@ -94,9 +42,6 @@ impl Report {
     }
 
     /// A [`fmt::Display`] view of only the error-level violations, for the
-    /// conversion/repair flags (which key on errors, not warnings — see
-    /// [`has_errors`](Self::has_errors)). Renders the same per-violation lines
-    /// as the full report, minus the warnings.
     pub fn errors_display(&self) -> ErrorsDisplay<'_> {
         ErrorsDisplay(self)
     }
@@ -110,9 +55,6 @@ impl Report {
     }
 
     /// Lower these EPUB violations into the unified
-    /// [`crate::validate::Finding`] model the book
-    /// editor consumes (via [`crate::validate::source::validate`]). The rich
-    /// [`Violation`]/[`Rule`] internals stay; this is just the projection.
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {
         self.violations
             .into_iter()
@@ -289,15 +231,9 @@ pub enum Rule {
     // XML document is not well-formed / namespace-well-formed (epubcheck RSC-016).
     MalformedXml,
     /// The schema channel: a RELAX NG grammar or a Schematron assertion
-    /// rejected the document ([`xml::engine`]). epubcheck funnels every such
-    /// verdict through one id, `RSC-005`, with `RSC-017` for the assertions
-    /// whose message marks itself a warning.
     SchemaViolation,
     SchemaWarning,
     /// The two defects epubcheck reports from its document-rewrite step, not
-    /// from a schema: a `data-` attribute whose name is not a valid custom-data
-    /// name (`HTM-061`), and a custom-element namespace
-    /// reserved to the format's own authorities (`HTM-054`).
     InvalidDataAttribute,
     ReservedCustomNamespace,
     /// Fixed-layout viewport metadata (`HTM-047/056/057/059`) and the SVG
@@ -308,10 +244,6 @@ pub enum Rule {
     ViewportPropertyRepeated,
     SvgFixedLayoutNoViewBox,
     /// Stylesheet-facing content rules: an untitled alternate stylesheet
-    /// (`CSS-015`), an empty CSS `url()` (`CSS-002`), a property an EPUB style
-    /// sheet may not carry (`CSS-001`), a stylesheet that stops making sense
-    /// (`CSS-008`), and a stylesheet that is not UTF-8 (`CSS-004`, with
-    /// `CSS-003` for the UTF-16 case epubcheck rates a warning).
     AlternateStylesheetNoTitle,
     EmptyCssReference,
     ForbiddenCssProperty,
@@ -322,9 +254,6 @@ pub enum Rule {
     /// declares a media-overlay styling class (`CSS-030`).
     OverlayStylingWithoutCss,
     /// Package-document property rules ([`vocab`]): a list where one value is
-    /// required (`OPF-025`), a malformed `prefix:name` (`OPF-026`), a name the
-    /// vocabulary does not define (`OPF-027`), and an `<item>` property that is
-    /// defined but not for that item's media type (`OPF-012`).
     PropertyListNotAllowed,
     PropertyMalformed,
     PropertyUndefined,
@@ -378,10 +307,6 @@ pub enum Rule {
     NavNoPageList,
     PaginationSourceMissing,
     /// Media overlay (SMIL) rules. An `<audio src>` naming a resource that is
-    /// not a core audio type (`MED-005`) or carrying a fragment (`MED-014`); a
-    /// clip whose `clipBegin` is after (`MED-008`) or equal to (`MED-009`) its
-    /// `clipEnd`; and the four ways an overlay and the content document it
-    /// narrates can disagree about each other (`MED-010`…`MED-013`).
     OverlayAudioNotCoreType,
     OverlayAudioSrcHasFragment,
     ClipBeginAfterEnd,
@@ -539,12 +464,6 @@ impl Rule {
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
-    /// [`crate::validate::Finding`] carries, matching W3C epubcheck output. Ids
-    /// in `XXX-NNN` form are real epubcheck messages present in
-    /// [`messages::CATALOG`] (enforced by a test); the two kebab ids are
-    /// bokai-native, where epubcheck enforces the single-nav-document
-    /// requirement through its OPF schema (RSC-005 channel) under no dedicated
-    /// code.
     pub fn message_id(self) -> &'static str {
         match self {
             Rule::ZipMalformed => "PKG-004",
@@ -688,11 +607,6 @@ impl Rule {
         use crate::validate::Severity;
         match self {
             // The rules epubcheck rates below Error: undeclared extra resources
-            // (OPF-003), UTF-16 in a non-XHTML resource (RSC-027), an invalid
-            // UUID identifier (OPF-085), a non-recommended date syntax in
-            // EPUB 3 (OPF-053), a schema assertion that marks its own message a
-            // warning (RSC-017), and a UTF-16 stylesheet (CSS-003 — the same
-            // split as RSC-027 for a UTF-16 XML resource).
             Rule::FileNotInManifest
             | Rule::XmlEncodingUtf16
             | Rule::IdentifierInvalidUuid
@@ -728,7 +642,6 @@ impl Rule {
 /// Port progress against the epubcheck catalog: `(implemented, total)`
 /// error-level messages. `implemented` is the count of distinct epubcheck
 /// error-level ids some [`Rule`] emits; `total` is [`messages::error_level_count`].
-/// Bokai-native rule ids (kebab) match no catalog id and raise neither count.
 pub fn epubcheck_error_coverage() -> (usize, usize) {
     let implemented: HashSet<&str> = Rule::ALL.iter().map(|r| r.message_id()).collect();
     let covered = messages::CATALOG
@@ -954,10 +867,6 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
 }
 
 /// The XML-resource checks that read a resource's bytes: character encoding
-/// (RSC-028 / HTM-058 / RSC-027), then — for the resources that decode as UTF-8
-/// — XML version (HTM-001), external entities (HTM-003), and the DOCTYPE rules
-/// (HTM-004 / OPF-073). A non-UTF-8 resource gets its encoding finding; the
-/// text-based checks skip it (its real content is unreadable here).
 fn check_xml_resources(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -989,10 +898,6 @@ fn check_xml_resources(
             check_doctype_rules(text, &path, &item.media_type, epub2, epub3, report);
         }
         // Well-formedness runs on the lossy decode when the resource is (or
-        // defaults to) UTF-8: a UTF-8-declared resource with invalid bytes is a
-        // fatal parse error in epubcheck too, and keeping the bytes as U+FFFD
-        // preserves trailing/embedded garbage that Xerces stops on. A resource
-        // that *declares* a non-UTF-8 charset is the RSC-028 case, not RSC-016.
         let declares_utf8 = sniff_xml_encoding(&bytes).is_none_or(|enc| enc == "UTF-8");
         if declares_utf8 {
             check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, epub3, report);
@@ -1001,13 +906,6 @@ fn check_xml_resources(
 }
 
 /// **RSC-005 / RSC-017** — the schema channel, over every resource epubcheck
-/// schema-validates: the two OCF metadata files, the package document, and each
-/// manifest item whose media type a schema covers. [`xml::engine`] owns which
-/// schemas apply; this owns which resources reach it.
-///
-/// One [`xml::engine::Engine`] serves the whole book: the HTML5 module set
-/// (which `epub-xhtml-30.rnc` pulls in wholesale) compiles once per book, not
-/// once per chapter.
 #[allow(clippy::too_many_arguments)]
 fn check_schemas(
     pkg: &opf::Package,
@@ -1151,9 +1049,6 @@ fn check_xml_encoding(buf: &[u8], path: &str, media_type: &str, report: &mut Rep
 }
 
 /// The declared/detected character encoding of an XML document (uppercased), or
-/// `None` when none is declared — which the XML spec treats as UTF-8. A faithful
-/// port of epubcheck's `XMLEncodingSniffer`: byte-order marks first, then the
-/// `encoding="…"` pseudo-attribute in the document's leading ASCII run.
 fn sniff_xml_encoding(buf: &[u8]) -> Option<String> {
     let buf = &buf[..buf.len().min(256)];
     if buf.len() < 4 {
@@ -1223,16 +1118,6 @@ fn check_xml_conformance(text: &str, path: &str, report: &mut Report) {
 /// RSC-016 (FATAL): the document is not well-formed, or not namespace-well-formed.
 ///
 /// A faithful *subset* of what epubcheck's XML parser (Xerces, namespace-aware)
-/// rejects fatally: a syntax error (mismatched end tag, stray `<`, malformed
-/// attribute), an element left unclosed at end of file, an unbound namespace
-/// prefix on an element or attribute, a duplicate attribute, content after the
-/// root element, and a reference to an entity nothing declares.
-///
-/// Under-detection is a recall gap, never a false positive: every construct
-/// flagged is one Xerces also fatals on. Namespace binding is tracked with a
-/// scope stack of the prefixes declared (`xmlns` / `xmlns:p`) on each open
-/// element; `xml` is always bound. Reports the first problem only, matching
-/// epubcheck, which stops at the first fatal parse error.
 fn check_xml_well_formedness(text: &str, path: &str, epub3: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     reader.config_mut().check_end_names = true;
@@ -1326,20 +1211,6 @@ fn check_xml_well_formedness(text: &str, path: &str, epub3: bool, report: &mut R
 
 /// The entity names a document may reference, or `None` when they cannot be
 /// known — in which case nothing about its entities may be reported.
-///
-/// An EPUB 3 document resolves no external identifier at all (epubcheck hands
-/// its parser an empty source for every one), leaving the internal subset the
-/// one source of declarations. For the rest, the DOCTYPE's system identifier
-/// decides, through [`xml::dtd`]; one that catalogue cannot resolve completely
-/// yields `None`. `doctype` is the declaration's inner text — everything between
-/// `<!DOCTYPE` and its closing `>`, which is what quick-xml hands over and the
-/// only reading that sees a whole internal subset (the subset contains `>` of
-/// its own).
-///
-/// A subset that *references* a parameter entity yields `None`: what that entity
-/// expands to may itself be a run of declarations. An external identifier that
-/// does not parse into a system id yields `None` too — `PUBLIC`/`SYSTEM` names
-/// an unread source, and the document's entity set is unknown.
 fn declared_entities(doctype: &str, epub3: bool) -> Option<HashSet<String>> {
     // The internal subset is bracketed and always comes last; the external
     // identifier, if any, is in front of it.
@@ -1403,9 +1274,6 @@ fn entity_is_declared(name: &str, declared: &HashSet<String>) -> bool {
 /// The first entity reference in an attribute value that nothing declares.
 ///
 /// quick-xml hands attribute values over raw; this reads the `&…;` runs itself.
-/// A `&` that opens no reference at all — no `;`, or a name with a character no
-/// XML name may contain — is left alone: naming that *different* fatal error
-/// takes Xerces' name rules, which this walk does not carry.
 fn undeclared_entity_in(value: &str, declared: &HashSet<String>) -> Option<String> {
     let mut rest = value;
     while let Some(amp) = rest.find('&') {
@@ -1593,10 +1461,6 @@ fn resolve_prefix(prefix: &[u8], scopes: &[Vec<(Vec<u8>, Vec<u8>)>]) -> Option<V
 }
 
 /// What kind of thing an element `id` names — epubcheck's `ResourceRegistry` id
-/// types, which is what lets `RSC-014` judge whether a reference suits its
-/// target. Only the SVG elements that can serve *one* kind of reference are
-/// distinguished; every other element, in any namespace, is [`IdKind::Generic`]
-/// and satisfies any reference that accepts a generic target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdKind {
     /// Anything not below — the overwhelming majority of elements.
@@ -1646,7 +1510,6 @@ enum RefUse {
     /// `<use>`: a symbol, or any ordinary element (`<use>` may instantiate one).
     Symbol,
     /// A reference `RSC-014` does not type-check — an image, a stylesheet, the
-    /// package document's `<guide>` (epubcheck registers it `GENERIC`), …
     Untyped,
 }
 
@@ -1674,15 +1537,6 @@ impl RefUse {
 }
 
 /// **RSC-015** and the SVG half of **RSC-014** over one document. SVG reaches a
-/// publication two ways — as a content document of its own and inline in XHTML —
-/// and this walks either, keying on the namespace, not on the file's media
-/// type.
-///
-/// Both rules need the same two things: which references are SVG-typed, and what
-/// kind of element each `id` in the document names. Paint and `<use>` references
-/// into *another* document are left unjudged: they resolve across the
-/// publication, past the reach of this per-document walk. Missing them is a
-/// recall gap, never a false positive.
 fn check_svg_references(text: &str, path: &str, svg_document: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
@@ -1750,11 +1604,6 @@ fn check_svg_references(text: &str, path: &str, svg_document: bool, report: &mut
 
 /// One element's contribution to the SVG reference model: the `id` it declares
 /// (with the kind of thing it is) and the SVG-typed references it makes.
-///
-/// A `<use>` instantiates the element its fragment names; `fill`/`stroke` name a
-/// paint server through the CSS `url(…)` form. Both are SVG-namespace-only —
-/// `fill` on an HTML element is not a reference — and this keys on the resolved
-/// namespace, not on the local name alone.
 fn collect_svg_element(
     e: &quick_xml::events::BytesStart,
     scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
@@ -1796,9 +1645,6 @@ fn collect_svg_element(
 }
 
 /// OPF package/manifest/spine structural rules that need no zip access beyond
-/// the parsed [`opf::Package`] (epubcheck OPF-030/031/033/034/040/048/050/074/
-/// 091/096/099). Resource *existence* is covered separately by
-/// [`check_manifest_files`]; these check the package's internal consistency.
 fn check_opf_structure(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -1810,12 +1656,6 @@ fn check_opf_structure(
     let manifest_ids: HashSet<&str> = pkg.manifest.iter().map(|m| m.id.as_str()).collect();
 
     // OPF-048 / OPF-030: the package must declare a unique-identifier that
-    // resolves to a <dc:identifier id="…">. The identifier-resolution half
-    // (OPF-030) keys on bokai's modern `<dc:identifier id=…>` capture, which
-    // both EPUB 2.0.1 and EPUB 3 use; it fires for either. A version-less/OEB-1.x
-    // package is out of scope (rejected via OPF-001; its legacy `<dc-metadata>`
-    // structure false-fires here). The missing-attribute half (OPF-048) is
-    // universal.
     match pkg.unique_identifier.as_deref() {
         None | Some("") => report.push(Violation::new(
             Rule::UniqueIdentifierMissing,
@@ -1958,12 +1798,6 @@ fn check_opf_structure(
 /// Manifest fallback-chain integrity and spine-item fallback requirements:
 ///
 /// - **OPF-045** — a cycle in the `fallback` graph (reported once).
-/// - **OPF-043** — a spine item whose media type is not a spine-blessed content
-///   type and which has no `fallback` at all.
-/// - **OPF-044** — a spine item whose media type is not spine-blessed and whose
-///   fallback chain never reaches a content document.
-///
-/// (Missing-target fallbacks are OPF-040, handled in [`check_opf_structure`].)
 fn check_fallback_chain_and_spine(
     pkg: &opf::Package,
     epub2: bool,
@@ -2011,9 +1845,6 @@ fn check_fallback_chain_and_spine(
     }
 
     // OPF-043 / OPF-044: a spine item with a non-blessed media type needs a
-    // fallback (chain) that reaches a content document. EPUB 3-specific (the
-    // spine content-model + fallback machinery is EPUB 3's; legacy packages use
-    // a different model epubcheck rejects with OPF-001). Gated to EPUB 3.
     for s in pkg.spine.iter().filter(|_| epub3) {
         let Some(item) = by_id.get(s.idref.as_str()) else {
             continue; // unknown idref is OPF-049
@@ -2060,9 +1891,6 @@ fn check_fallback_chain_and_spine(
 }
 
 /// A media type permitted directly in the spine (epubcheck `isBlessedItemType`):
-/// XHTML in either version, plus SVG (EPUB 3) or DTBook (EPUB 2). Deliberately
-/// excludes the deprecated `text/html` / `text/x-oeb1-document` — those are
-/// content documents for the guide (OPF-032) but not blessed spine items.
 fn is_blessed_spine_type(media_type: &str, epub2: bool) -> bool {
     let mt = media_type.trim();
     mt.eq_ignore_ascii_case("application/xhtml+xml")
@@ -2146,11 +1974,6 @@ fn reaches_core_media_type(
 /// The RSC-010/011 verdict for a hyperlink whose target is the declared, present,
 /// non-CFI manifest item `target` — a direct port of epubcheck's `HYPERLINK` case
 /// in `ResourceReferencesChecker::checkReferenceType`:
-/// - **RSC-010** if the target is not a content document (blessed or deprecated-
-///   blessed) and its fallback chain reaches none either.
-/// - else **RSC-011** if the target is not a spine item.
-///
-/// `None` when the hyperlink is conformant.
 fn hyperlink_target_rule(
     target: &opf::ManifestItem,
     by_id: &HashMap<&str, &opf::ManifestItem>,
@@ -2195,10 +2018,6 @@ fn reaches_content_document(
 /// The EPUB 3 reserved vocabulary prefixes — declared implicitly, and a property
 /// token using one is never OPF-028. This is the **union** of every package
 /// property context's reserved set (meta / item / itemref / link / link-rel);
-/// epubcheck reserves a prefix per-context (e.g. `a11y` is reserved for `meta`
-/// and not for `item`). The union is a superset: the port fires OPF-028 only
-/// where epubcheck does (zero false positives), at the cost of missing the rare
-/// cross-context case (a recall gap).
 const RESERVED_PREFIXES: &[&str] = &[
     "a11y",
     "dcterms",
@@ -2213,9 +2032,6 @@ const RESERVED_PREFIXES: &[&str] = &[
 /// The prefixes declared in a package `prefix` attribute value (e.g.
 /// `"foaf: http://xmlns.com/foaf/spec/ ex: http://example.org/"`). Deliberately
 /// lenient — any whitespace token's leading `NCName:` segment counts as declared.
-/// Over-capturing (e.g. reading a bare URI's `http:` scheme as a prefix) only
-/// *suppresses* OPF-028, never introduces a false positive; the faithful state
-/// machine's job here is just "which prefixes must not be flagged".
 fn parse_declared_prefixes(decl: &str) -> HashSet<String> {
     let is_ncname_byte = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.');
     decl.split_whitespace()
@@ -2227,16 +2043,6 @@ fn parse_declared_prefixes(decl: &str) -> HashSet<String> {
 }
 
 /// OPF-028: every prefix used in a package-document property token
-/// (`<meta property>`/`scheme`, `<item>`/`<itemref properties>`, `<link>`
-/// `rel`/`properties`) must be reserved or declared in the package `prefix`
-/// attribute. A token like `access:scroll-both` whose `access:` prefix is
-/// neither is undeclared. EPUB 3 only — the prefix mechanism is EPUB 3's
-/// (epubcheck runs it from `OPFHandler30`).
-///
-/// A bare/unprefixed token uses the default vocabulary (never OPF-028); a
-/// malformed `:name`/`prefix:` token is OPF-026 and a known prefix with an
-/// undefined local name is OPF-027, both [`check_property_vocabularies`]'s.
-/// Reported once per distinct prefix.
 fn check_prefix_declarations(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let declared = parse_declared_prefixes(pkg.prefix_decl.as_deref().unwrap_or(""));
     let mut reported: HashSet<String> = HashSet::new();
@@ -2266,9 +2072,6 @@ fn check_prefix_declarations(pkg: &opf::Package, opf_path: &str, report: &mut Re
 }
 
 /// RSC-020 for the URLs declared in the package document itself — manifest item
-/// `href`s, `<guide>` references, and package `<link>` `href`s. (Content-document
-/// references are checked in [`check_xhtml_hrefs_and_reachability`], with each
-/// one in hand.) See [`url_has_illegal_space`] for the ported class.
 fn check_opf_url_validity(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let hrefs = pkg
         .manifest
@@ -2315,9 +2118,6 @@ const MARC_RELATORS: &[&str] = &[
 ];
 
 /// **OPF-052** — a `<dc:creator opf:role>` must be a MARC relator code. Both
-/// versions: `OPFHandler` is the base checker, and `OPFHandler30` inherits it
-/// (where an `opf:`-namespaced attribute is *also* an RSC-005, since the EPUB 3
-/// package grammar declares none).
 fn check_creator_roles(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     for m in pkg.metadata.iter().filter(|m| m.name == "creator") {
         // `oth.` prefixes a role outside the MARC scheme, which the spec allows.
@@ -2336,12 +2136,6 @@ fn check_creator_roles(pkg: &opf::Package, opf_path: &str, report: &mut Report) 
 
 /// Dublin Core metadata-value checks. (Which elements must be *present*, and
 /// with what content, is the package grammar's job — the schema channel.)
-///
-/// - **OPF-053 / OPF-054** — every `<dc:date>` must be a valid W3C-DTF date
-///   (warning in EPUB 3, error in EPUB 2).
-/// - **OPF-085** — a `<dc:identifier>` marked as a UUID (a `urn:uuid:` value or
-///   `opf:scheme="uuid"`) must be a syntactically valid UUID.
-/// - **OPF-092** — every `<dc:language>` must be a well-formed BCP 47 tag.
 fn check_metadata(pkg: &opf::Package, epub2: bool, opf_path: &str, report: &mut Report) {
     for m in &pkg.metadata {
         match m.name.as_str() {
@@ -2412,16 +2206,6 @@ fn is_valid_uuid(s: &str) -> bool {
 }
 
 /// BCP-47 (RFC 5646) *well-formedness*, a faithful port of Java's
-/// `sun.util.locale.LanguageTag.parse` — the oracle epubcheck's OPF-092 uses via
-/// `new Locale.Builder().setLanguageTag(tag)`. This checks syntax only, never
-/// registry validity: `english` and `zz` are well-formed (accepted), while
-/// `en_US`, `en-`, and `toolongsubtag` are not. `Ok(())` when well-formed; the
-/// `Err` mirrors Java's `IllformedLocaleException` message.
-///
-/// Java collapses the RFC subtag productions to length+charclass tests. This
-/// port splits on `-` only (`_` is never a separator) and keeps empty tokens,
-/// surfacing a leading/trailing/doubled `-` as an "Empty subtag". Grandfathered
-/// tags map to well-formed replacements before parsing, and pass.
 fn language_tag_wellformed(tag: &str) -> Result<(), String> {
     if is_grandfathered_langtag(tag) {
         return Ok(());
@@ -2507,9 +2291,6 @@ fn language_tag_wellformed(tag: &str) -> Result<(), String> {
 }
 
 /// The RFC 5646 grandfathered tags (irregular + regular). Java's parser maps each
-/// to a well-formed replacement before parsing; all are well-formed. Several
-/// irregular ones (`i-klingon`, `en-GB-oed`, `sgn-*`) fail the `langtag`
-/// production on their own. Matched case-insensitively, like Java's lookup.
 fn is_grandfathered_langtag(tag: &str) -> bool {
     const GRANDFATHERED: &[&str] = &[
         "art-lojban",
@@ -2543,16 +2324,6 @@ fn is_grandfathered_langtag(tag: &str) -> bool {
 }
 
 /// EPUB 3 remote/data-URL manifest rules (epubcheck's `OPFChecker30`). **RSC-029**:
-/// a manifest `<item href>` that is a `data:` URL is not allowed. **RSC-006**: a
-/// spine item may never be a remote resource — spine content is always a content
-/// document, past the reach of the audio/video/font remote exemption, and the
-/// rule fires regardless of scripts (unlike the non-spine cases).
-///
-/// The broader RSC-006 surface — a remote reference *from* content, or an
-/// unreferenced remote manifest item — needs the content-document reference graph
-/// and script detection, and stays deferred. Under-reporting here is safe;
-/// over-reporting (flagging a script-retrieved remote resource epubcheck rates
-/// USAGE) is not.
 fn check_remote_and_data_urls(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
     for item in &pkg.manifest {
@@ -2582,14 +2353,6 @@ fn check_remote_and_data_urls(pkg: &opf::Package, opf_path: &str, report: &mut R
 }
 
 /// RSC-006: a remote reference from a content document is not allowed in EPUB 3
-/// unless the context permits it. A hyperlink or non-stylesheet `<link>` may
-/// always be remote; an audio, video, or font reference may be remote — by
-/// element type (`<audio>`/`<video>`/`<source>` in one) or by the declared
-/// target's media type being audio/video/font; a spine item's own remoteness is
-/// reported in the package document (`RemoteResourceInSpine`) and exempt here.
-/// Every other remote reference — a remote image, stylesheet, object, iframe,
-/// script, embed, track — is RSC-006. Direct port of
-/// `ResourceReferencesChecker.checkRemoteReference`.
 fn check_remote_references(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -2650,7 +2413,6 @@ fn check_remote_references(
 /// One open element in the foreign-resource walk. Every non-void element pushes a
 /// frame, keeping the stack balanced whichever elements bear references, and
 /// carries its name, `hidden` flag, and accumulated palpable-content state;
-/// `role` distinguishes the elements whose *end* triggers a check.
 struct ForeignFrame {
     name: Vec<u8>,
     hidden: bool,
@@ -2659,9 +2421,6 @@ struct ForeignFrame {
 }
 
 /// The reference-bearing role of a [`ForeignFrame`]. `Object` (`<object>`/
-/// `<embed>`) resolves its fallback from palpable content at its end; `Media`
-/// (`<audio>`/`<video>`) gathers `<source>` children (`href`, `type`) to decide
-/// whether it has a core-type source; `Picture` marks the `<picture>` context.
 enum ForeignRole {
     Object {
         href: Option<String>,
@@ -2674,9 +2433,6 @@ enum ForeignRole {
 }
 
 /// epubcheck's `OPSHandler30.isPalpable`: whether an element counts as palpable
-/// (fallback) content. A `hidden` element never does; embedded content always
-/// does; document/metadata elements never do; every other element counts iff it
-/// accumulated palpable content. (SVG/MathML are approximated by local name.)
 fn is_palpable_elem(name: &[u8], hidden: bool, own_palpable: bool) -> bool {
     if hidden {
         return false;
@@ -2690,20 +2446,6 @@ fn is_palpable_elem(name: &[u8], hidden: bool, own_palpable: bool) -> bool {
 }
 
 /// RSC-032 / MED-003 / MED-007: fallback rules for foreign (non-core-media-type)
-/// resources referenced from a content document — a port of
-/// `ResourceReferencesChecker.checkFallbacks` and `OPSHandler30`'s media/image
-/// handling.
-///
-/// - **RSC-032** — an `<img>`/`<object>`/`<embed>`/`<input>`/media reference whose
-///   *declared* target is not a core media type must have a fallback: intrinsic (an
-///   `<img>` in a `<picture>`, an `<object>`/`<embed>` with fallback content, a
-///   media element with a core `<source>`) or a manifest `fallback` chain reaching
-///   a core media type.
-/// - **MED-003** — an `<img>` child of `<picture>` must reference a core image type.
-/// - **MED-007** — a `<source>` child of `<picture>` with no `type` attribute must
-///   reference a core image type.
-///
-/// Undeclared/missing targets are out of scope here (RSC-007/008 handle them).
 fn check_foreign_resources(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -2869,9 +2611,6 @@ fn walk_foreign_resources(
                     }
                     b"source" => {
                         // MED-007: a `<picture>` `<source>` offers an
-                        // alternative rendering, and a reading system knows its
-                        // format before fetching only from a core format or a
-                        // `type` attribute.
                         if in_picture
                             && attr(b"type").is_none_or(|t| t.trim().is_empty())
                             && let Some(src) = href_attr(b"srcset").or_else(|| href_attr(b"src"))
@@ -3005,10 +2744,6 @@ fn remove_media_params(mt: &str) -> &str {
 }
 
 /// The lowercased scheme of an absolute URL reference (`"http"`, `"data"`,
-/// `"file"`, …), or `None` for a relative reference. RFC 3986: a scheme is an
-/// ALPHA followed by ALPHA/DIGIT/`+`/`-`/`.`, then `:`. A relative reference's
-/// first path segment cannot form a scheme (a `:` there is preceded by a
-/// non-scheme char or a `/`): `../a`, `text/ch.xhtml`, and `#frag` yield `None`.
 fn url_scheme(href: &str) -> Option<String> {
     let colon = href.find(':')?;
     let scheme = &href[..colon];
@@ -3027,17 +2762,6 @@ fn is_data_url(href: &str) -> bool {
 }
 
 /// RSC-020: a referenced URL that is not valid per the WHATWG URL standard.
-/// Ported for the class the corpus exhibits — a raw *interior* space (U+0020) in
-/// a URL's path or host, which galimatias (epubcheck's strict URL parser) always
-/// rejects ("space is not allowed"); such a URL must percent-encode the space
-/// (`%20`).
-///
-/// Faithful to the URL parser's preprocessing: leading/trailing C0-control-or-
-/// space is stripped and all tab/newline removed *before* parsing, leaving those
-/// unflagged (a trailing space like `"http://x "` is stripped, and epubcheck
-/// stays silent — this walk matches). Only the hierarchical part (before any
-/// `?`/`#`) is judged, and `data:` URLs (whose whitespace epubcheck collapses)
-/// are exempt. Other illegal-character classes are a recall gap here, never an FP.
 fn url_has_illegal_space(href: &str) -> bool {
     if is_data_url(href) {
         return false;
@@ -3058,11 +2782,6 @@ fn url_has_illegal_space(href: &str) -> bool {
 }
 
 /// RSC-020, second corpus class: a *special*-scheme URL with an empty host.
-/// The WHATWG URL parser requires a non-empty host for `http`/`https`/`ws`/
-/// `wss`/`ftp` and fails with "host is missing": `href="http://"` and
-/// `http:///path` are invalid, `file:///path` (whose host may legally be
-/// empty) is valid. The same emptiness makes the value fail XSD `anyURI` in the
-/// EPUB 2 content grammar, and it feeds the schema channel as well.
 fn url_has_empty_host(href: &str) -> bool {
     let href = href.trim_matches(|c: char| c <= ' ');
     let Some(scheme) = url_scheme(href) else {
@@ -3118,16 +2837,6 @@ fn is_remote_exempt_type(mt: &str) -> bool {
 /// EPUB 3 package `<link>` element rules (epubcheck's `OPFHandler30::processLink`
 /// and `OPFChecker30::checkLinkedResources`):
 /// - **RSC-029** — a `data:` URL on a `<link>` is not allowed.
-/// - **OPF-098** — the `href` must not reference an element *inside the package
-///   document itself* (a fragment resolving back to the OPF).
-/// - **OPF-089** — the `alternate` rel keyword must not be paired with others.
-/// - **OPF-095** — a `voicing` link must have an audio media type.
-/// - **OPF-067** — a link must not resolve to a manifest item that is not a spine
-///   item (a publication resource is referenced twice, once outside the spine).
-///
-/// Faithful to epubcheck's control flow: RSC-029 and OPF-098 short-circuit the
-/// link (matching its `return`, which also skips registration, past the reach of
-/// OPF-067); OPF-089/095 do not.
 fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
     let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
     for link in &pkg.links {
@@ -3160,9 +2869,6 @@ fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &m
             }
         }
         // OPF-093 / OPF-094: a `<link>` without a media-type. A metadata link
-        // to a resource *in the container* always needs one (093); a link with
-        // no media type at all needs one when its `rel` is a keyword whose
-        // meaning depends on the format (094).
         if link.media_type.is_none() {
             let remote = is_remote_href(href);
             if !remote && link.in_metadata {
@@ -3204,9 +2910,6 @@ fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &m
             ));
         }
         // OPF-067: a *metadata* link resolving to a manifest item that is not in
-        // the spine. Only metadata `<link>`s populate epubcheck's linked-resources
-        // set; collection `<link>`s (preview/dictionary) fall to the collection
-        // rules and never trigger OPF-067.
         if link.in_metadata
             && let Some(target) = resolve_href(opf_path, href)
         {
@@ -3229,9 +2932,6 @@ fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &m
 }
 
 /// Validate a W3C-DTF (ISO-8601 profile) date, a faithful port of epubcheck's
-/// `DateParser` plus its four-digit-year guard. `Ok(())` when valid; `Err`
-/// carries a short reason. Accepts `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, and the full
-/// `YYYY-MM-DDThh:mm:ss(.s)?(Z|±hh:mm)` forms; rejects out-of-range fields.
 fn parse_w3c_date(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("zero-length string".into());
@@ -3399,9 +3099,6 @@ fn check_duplicate_zip_entries(zip_names: &[String], report: &mut Report) {
 }
 
 /// OCF file-name constraints (EPUB OCF §4.2). PKG-009: a name must not contain
-/// the OCF-restricted characters `" * : < > ? \ |` or any control character
-/// (C0/C1/DEL). PKG-011: no path segment may end with `.`. `/` is the path
-/// separator and is allowed.
 fn check_ocf_filenames(zip_names: &[String], report: &mut Report) {
     const FORBIDDEN: &[char] = &['"', '*', ':', '<', '>', '?', '\\', '|'];
     for name in zip_names {
@@ -3425,12 +3122,6 @@ fn check_ocf_filenames(zip_names: &[String], report: &mut Report) {
     }
 }
 
-// =========================================================================
-// Content-document conformance: EPUB 3 content docs need `<!DOCTYPE html>`
-// and a non-empty <title> (epubcheck HTM-004 / RSC-005). Pre-EPUB-3 source
-// (a Sigil-authored book carried through AZW3: XHTML 1.1 DOCTYPE, empty
-// <title>) tripped both — passthrough export emitted it verbatim and neither
-// this validator nor the pair harness noticed.
 // =========================================================================
 
 fn check_content_conformance(
@@ -3472,8 +3163,6 @@ fn check_content_conformance(
         let features = detect_content_features(&text);
         // OPF-014: a manifest property the content *requires* (inline SVG /
         // MathML / scripting / a remote resource) must be declared on the item.
-        // Detection is a subset of epubcheck's: a missed feature is a recall
-        // gap, never a false positive (see [`detect_content_features`]).
         for (required, property) in [
             (features.inline_svg, "svg"),
             (features.mathml, "mathml"),
@@ -3491,13 +3180,6 @@ fn check_content_conformance(
             }
         }
         // OPF-015 is OPF-014 read backwards: a property declared that the
-        // content does not require. Under-detecting costs a recall gap for
-        // OPF-014 and a *false positive* here, and the check runs only on the
-        // two properties bokai detects exhaustively. `scripted` is not one of
-        // them (epubcheck also counts event-handler attributes and
-        // `javascript:` URLs), and `nav`,
-        // `data-nav`, `cover-image` and `remote-resources` are excluded by
-        // epubcheck itself.
         for (required, property) in [(features.inline_svg, "svg"), (features.mathml, "mathml")] {
             if !required && item.properties.iter().any(|p| p == property) {
                 report.push(Violation::new(
@@ -3587,12 +3269,6 @@ fn outermost_svg_has_viewbox(text: &str) -> bool {
 }
 
 /// The manifest ids of the spine items that are Fixed-Layout Documents, resolved
-/// exactly as epubcheck's `OPFHandler30::processItemrefProperties`: an itemref
-/// with `rendition:layout-pre-paginated` is fixed; one with
-/// `rendition:layout-reflowable` is reflowable; one with neither inherits the
-/// publication default (`<meta property="rendition:layout">pre-paginated`).
-/// Only spine items can be fixed-layout (a manifest item outside the spine has
-/// no itemref to carry the override, and the global default does not reach it).
 fn fixed_layout_spine_ids(pkg: &opf::Package) -> HashSet<&str> {
     let global_fxl = pkg.rendition_layout.as_deref() == Some("pre-paginated");
     pkg.spine
@@ -3608,15 +3284,6 @@ fn fixed_layout_spine_ids(pkg: &opf::Package) -> HashSet<&str> {
 
 /// DOCTYPE-declaration conformance, keyed on the resource's media type and the
 /// publication version (epubcheck `DeclarationHandler`):
-///
-/// - **XHTML** (EPUB 3 only): only `<!DOCTYPE html>` or `<!DOCTYPE html SYSTEM
-///   "about:legacy-compat">` is allowed. A public identifier, or any other system
-///   identifier, is **HTM-004**. EPUB 2 XHTML permits the XHTML 1.1 public DTD;
-///   the rule is version-gated, keeping 2.0 content clear of false positives.
-/// - **Other XML** (EPUB 3 only): an external identifier (`PUBLIC`/`SYSTEM`) is
-///   forbidden — **OPF-073** — except the three fixed DTDs epubcheck sanctions
-///   for SVG, MathML, and NCX. EPUB 2 permits legacy DTDs; the rule is
-///   version-gated, keeping 2.0 content clear of false positives.
 fn check_doctype_rules(
     text: &str,
     path: &str,
@@ -3660,12 +3327,6 @@ fn check_doctype_rules(
         }
     } else if epub2 {
         // EPUB 2 (OPS 2.0): the content DTD must be *exactly* the sanctioned one
-        // — XHTML 1.1 for XHTML content documents, NCX 2005-1 for the NCX. Any
-        // other declaration (an HTML5 `<!DOCTYPE html>`, XHTML 1.0, a bare/empty
-        // public id, a mismatched system id, …) is HTM-004. Faithful port of
-        // epubcheck's `DeclarationHandler` version-2 branch. A version-less/legacy
-        // package is not EPUB 2 (it is rejected via OPF-001); this needs a
-        // positive EPUB 2 version.
         let expected: Option<(&str, &str)> = if is_xhtml(media_type) && dt.root == "html" {
             Some((
                 "-//W3C//DTD XHTML 1.1//EN",
@@ -3819,9 +3480,6 @@ fn is_epub2(pkg: &opf::Package) -> bool {
 }
 
 /// True only when the package explicitly declares an EPUB 3 version. EPUB-3-
-/// specific rules gate on *this* (not `!is_epub2`), keeping a version-less or
-/// legacy (OEB 1.x / unparseable-version) package — which epubcheck rejects with
-/// OPF-001 — clear of EPUB 3 requirements.
 fn is_epub3(pkg: &opf::Package) -> bool {
     pkg.version
         .as_deref()
@@ -3844,10 +3502,6 @@ fn is_content_document(media_type: &str, epub2: bool) -> bool {
 }
 
 /// NCX-001: when the publication carries both an NCX `dtb:uid` and an OPF
-/// unique-identifier value, the two must be equal (the NCX uid is trimmed
-/// before comparison, matching epubcheck's `NCXChecker`). Fires only when both
-/// are present, leaving a book without an NCX — or without a resolvable
-/// unique-identifier — unflagged.
 fn check_ncx_identifier(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -3916,16 +3570,9 @@ fn ncx_dtb_uid(text: &str) -> Option<String> {
 }
 
 // =========================================================================
-// Rule: mimetype is first entry, STORED, exact "application/epub+zip"
-// =========================================================================
 
 fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
     // Local file header layout: PK\x03\x04 (4) + version (2) + flags (2) +
-    // compression (2) + time/date (4) + crc (4) + comp size (4) + uncomp
-    // size (4) + name len (2) + extra len (2) = 30 bytes, then name, extra,
-    // data. EPUB 3.3 §3.4 requires the first entry to be `mimetype` with
-    // compression method 0 (STORED), no extra field, content equal to the
-    // 20 bytes `application/epub+zip`.
     const REQUIRED: &[u8] = b"application/epub+zip";
 
     if bytes.len() < 30 + 8 + REQUIRED.len() {
@@ -3976,18 +3623,8 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
         ));
     }
     // Content must equal `application/epub+zip`. epubcheck reads the mimetype
-    // entry *decompressed*, through the zip, and compares the whole string — it
-    // does NOT flag the compression method (a Deflated mimetype with the right
-    // content is not an epubcheck error, and real books ship them). The content
-    // compare applies only to a STORED entry, whose bytes ARE the content
-    // verbatim; a compressed mimetype's raw bytes go uncompared here, clear of a
-    // false PKG-007.
     if compression == 0 {
         // A data descriptor (general-purpose bit 3) zeroes the local-header size
-        // fields — the real size lives in the trailing descriptor / central
-        // directory epubcheck reads. With that bit set, `uncomp_size` is
-        // 0/unreliable and the compare falls back to leading bytes, blind to
-        // trailing garbage and quiet on a correct mimetype stored that way.
         let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
         let has_data_descriptor = flags & 0x08 != 0;
         let content_start = 30 + name_len + extra_len;
@@ -4012,13 +3649,8 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
 }
 
 // =========================================================================
-// Container.xml → OPF path
-// =========================================================================
 
 /// The package document `META-INF/container.xml` points at, and how many
-/// `<rootfile>` elements declare the OPS media type — a publication with more
-/// than one is a *multiple-rendition* publication, which EPUB 2 does not allow
-/// (PKG-013) and EPUB 3 holds to extra rules.
 fn read_container_opf_path(
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
@@ -4108,8 +3740,6 @@ fn read_container_opf_path(
 }
 
 // =========================================================================
-// Manifest ↔ files
-// =========================================================================
 
 fn check_manifest_files(
     pkg: &opf::Package,
@@ -4120,11 +3750,6 @@ fn check_manifest_files(
 ) {
     for item in &pkg.manifest {
         // Remote (http[s]:, …) and data: resources are not expected in the
-        // container; their absence is never RSC-001 (epubcheck checks remote
-        // items through the remote-resource rules). file: URLs (RSC-030) and
-        // hrefs that leak outside the container (RSC-026, path-absolute or too
-        // many `..`) are no container paths either — reported by
-        // check_parent_paths_in_opf, never as a missing file here.
         if is_remote_href(&item.href)
             || is_data_url(&item.href)
             || url_scheme(&item.href).as_deref() == Some("file")
@@ -4191,14 +3816,8 @@ fn check_spine_idrefs(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
 }
 
 // =========================================================================
-// Nav doc
-// =========================================================================
 
 /// NAV-010: within the EPUB 3 navigation document, a hyperlink inside a `toc`,
-/// `page-list`, or `landmarks` nav must not point at a remote resource — those
-/// navs must reference in-container content documents. (Links to out-of-spine
-/// container items are RSC-011; per epubcheck's `NavHandler`, NAV-010 covers only
-/// the remote case.) The nav type is the nearest enclosing `<nav epub:type>`.
 fn check_nav_remote_links(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4289,13 +3908,6 @@ fn epub_type_attr(e: &quick_xml::events::BytesStart) -> String {
 }
 
 /// An attribute's value as the document *means* it: quick-xml hands back the
-/// bytes between the quotes, where character references are markup. Every check
-/// that interprets a value reads it through here — `href="a&amp;b.xhtml"` names
-/// the file `a&b.xhtml`, and a `style` attribute whose font stack is quoted with
-/// `&quot;` is one declaration, not three (undecoded, the `;` ending each
-/// reference reads as a declaration separator and yields a CSS-008 finding).
-/// The lone exception is the RSC-016 entity scan, whose subject is the undecoded
-/// reference itself.
 fn attr_value(a: &quick_xml::events::attributes::Attribute) -> String {
     xml::tree::expand_entities_in(&String::from_utf8_lossy(&a.value))
 }
@@ -4310,9 +3922,6 @@ fn attr_by_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<Stri
 }
 
 /// PKG-026: a resource obfuscated with the IDPF Font Obfuscation algorithm must be
-/// a font. Reads `META-INF/encryption.xml`, finds every resource encrypted with
-/// the IDPF embedding algorithm (the only algorithm epubcheck marks "obfuscated"),
-/// and flags any whose manifest media-type is not a font core media type.
 fn check_obfuscated_fonts(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4345,9 +3954,6 @@ fn check_obfuscated_fonts(
 /// Every container-root-relative URI `encryption.xml` encrypts, whatever the
 /// algorithm. epubcheck can decrypt none of them (each of its `EncryptionFilter`
 /// implementations answers `canDecrypt() == false`, font obfuscation included);
-/// it reports RSC-004 and skips the resource's content checks entirely, leaving
-/// ciphertext unjudged by every content rule. The *declaration* stays fair game
-/// (PKG-026 keys on it).
 fn encrypted_uris(text: &str) -> HashSet<String> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
@@ -4369,9 +3975,6 @@ fn encrypted_uris(text: &str) -> HashSet<String> {
 }
 
 /// The container-root-relative URIs obfuscated with the IDPF Font Obfuscation
-/// algorithm (`http://www.idpf.org/2008/embedding`) in an `encryption.xml`. The
-/// governing algorithm is the `<EncryptionMethod>` of the enclosing
-/// `<EncryptedData>`, which precedes the `<CipherReference URI>`.
 fn idpf_obfuscated_uris(text: &str) -> Vec<String> {
     const IDPF: &str = "http://www.idpf.org/2008/embedding";
     let mut reader = Reader::from_str(text);
@@ -4406,15 +4009,6 @@ fn idpf_obfuscated_uris(text: &str) -> Vec<String> {
 
 /// Raster-image resource conformance (epubcheck's `BitmapChecker`), for the three
 /// checked bitmap types (`image/jpeg`, `image/gif`, `image/png`):
-///
-/// - **OPF-029** — the leading bytes don't match the declared format's signature
-///   (`checkHeader`). Conservative: only the unambiguous magic numbers, and only
-///   when the file has enough bytes to judge.
-/// - **PKG-021** — the bytes cannot be decoded to obtain the image's dimensions
-///   (`getImageSizes`, "Corrupted image file"). Independent of OPF-029: a
-///   wrong-magic-but-decodable file is OPF-029 + PKG-022 (not PKG-021), while a
-///   truly garbage or truncated file is both OPF-029 and PKG-021 — matching
-///   epubcheck, which can raise the two together.
 fn check_image_headers(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4500,11 +4094,6 @@ fn check_css_syntax(text: &str, css_path: &str, epub3: bool, report: &mut Report
 
 /// **OPF-071 / OPF-075 / OPF-076 / OPF-081…OPF-084** — what each kind of
 /// `<collection>` may contain.
-///
-/// A collection groups manifest resources under a *role*, and each role means
-/// something specific about what belongs in it: an index is XHTML, a preview
-/// points at content documents without a canonical fragment, and a dictionary
-/// is exactly one Search Key Map plus its XHTML entries.
 fn check_collections(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
     const SKM: &str = "application/vnd.epub.search-key-map+xml";
     let by_path: HashMap<String, &opf::ManifestItem> = pkg
@@ -4617,14 +4206,6 @@ fn check_collections(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: 
 }
 
 /// **NAV-003 / OPF-066** — pagination. When the content carries page-break
-/// markers, a reader must be able to *use* them: the navigation document needs
-/// a page list to jump by, and the metadata must say which edition the page
-/// numbers come from (`<dc:source>` refined by `source-of="pagination"`).
-///
-/// Both are gated on the EduPub profile, as epubcheck's `checkPagination` is —
-/// the profile is what makes pagination mandatory. bokai reads the profile off
-/// `<dc:type>edupub</dc:type>`, the same signal epubcheck's
-/// `PackageDocumentData` uses.
 fn check_pagination(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4701,11 +4282,6 @@ fn check_pagination(
 
 /// **HTM-052 / NAV-009** — region-based navigation, which maps areas of a
 /// fixed-layout page to destinations.
-///
-/// `epub:type="region-based"` only means anything on a `<nav>` in a *data
-/// navigation document* (a manifest item with the `data-nav` property), and the
-/// links inside such a nav must point at fixed-layout documents — a region of a
-/// reflowable page is not a place.
 fn check_region_based_navs(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4840,9 +4416,6 @@ fn check_dictionary_content(
 /// **RSC-021** — a Search Key Map document indexes the words of a dictionary,
 /// and every `href` in it must name a document a reader can turn to: one in the
 /// spine.
-///
-/// An `epubcfi(…)` fragment is exempt — a canonical fragment identifier can
-/// address a place in a document that is not itself a spine item.
 fn check_search_key_maps(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4924,11 +4497,6 @@ fn check_search_key_maps(
 
 /// **OPF-005 / OPF-006** — the syntax of the package `prefix` attribute, which
 /// is a whitespace-separated sequence of `prefix: URI` pairs.
-///
-/// `OPF-005` is a trailing `prefix:` with no URI after it; `OPF-006` is a URI
-/// that is not one. Only characters no URI may contain unescaped are judged
-/// (RFC 3986's excluded set); a URI this rejects is one Java's `URI`
-/// constructor rejects too.
 fn check_prefix_syntax(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let Some(decl) = pkg.prefix_decl.as_deref() else {
         return;
@@ -4981,9 +4549,6 @@ fn report_bad_uri(uri: &str, prefix: &str, opf_path: &str, report: &mut Report) 
 /// **OPF-065** — the `refines` graph must be a DAG. A metadata expression
 /// refines another to say something about it; a cycle says nothing about
 /// anything, and epubcheck's metadata builder cannot resolve one.
-///
-/// Reported once per package, as epubcheck does: the cycle is a property of the
-/// `<metadata>` element, and naming every member of it repeats one defect.
 fn check_refines_graph(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let edges: HashMap<&str, &str> = pkg
         .refines_edges
@@ -5012,9 +4577,6 @@ fn check_refines_graph(pkg: &opf::Package, opf_path: &str, report: &mut Report) 
 }
 
 /// **OPF-012 / OPF-025 / OPF-026 / OPF-027** — every property-bearing
-/// attribute in the package document, judged against the vocabulary its
-/// context draws from. [`vocab`] owns the vocabularies and the rules; this
-/// walks what the parser kept.
 fn check_property_vocabularies(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     for attr in &pkg.property_attrs {
         let defects = match vocab::check(attr.context, &attr.value, attr.media_type.as_deref()) {
@@ -5058,12 +4620,6 @@ fn check_property_vocabularies(pkg: &opf::Package, opf_path: &str, report: &mut 
 
 /// **MED-005 / MED-008…MED-014** — the media-overlay rules that judge what an
 /// overlay says, not its structure (which the schema engine judges).
-///
-/// The four MED-010…013 rules are one question asked from both sides: an
-/// overlay and the content document it narrates must agree that they are a
-/// pair. epubcheck builds a document → overlay map while reading the overlays,
-/// then compares it with the manifest's `media-overlay` attributes; this does
-/// the same in one pass over the manifest.
 fn check_media_overlays(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -5226,7 +4782,6 @@ fn dir_of(path: &str) -> String {
 /// **CSS-001 / CSS-008** over the CSS written *inside* a content document —
 /// every `<style>` element's text (a stylesheet) and every `style=""`
 /// attribute (a declaration list). epubcheck runs the same checker over both;
-/// only its `Mode` differs.
 fn check_inline_css(text: &str, path: &str, epub3: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
@@ -5276,9 +4831,6 @@ fn check_inline_css(text: &str, path: &str, epub3: bool, report: &mut Report) {
 }
 
 /// **CSS-003 / CSS-004** — a stylesheet must be UTF-8. UTF-16 is a warning
-/// (CSS-003), any other declared encoding an error (CSS-004). Only a byte-order
-/// mark or a leading `@charset` declares anything; a file that declares nothing
-/// is UTF-8 by definition.
 fn check_css_encoding(bytes: &[u8], css_path: &str, report: &mut Report) {
     let Some(charset) = css::declared_charset(bytes) else {
         return;
@@ -5300,12 +4852,6 @@ fn check_css_encoding(bytes: &[u8], css_path: &str, report: &mut Report) {
 }
 
 /// RSC-007 / RSC-026 for the references *inside* CSS resources — `url(...)` and
-/// `@import` targets, which epubcheck resolves the same way it resolves document
-/// references. Each target is resolved relative to the CSS file it appears in: a
-/// target that leaks the container is RSC-026, one that resolves to no zip entry
-/// is RSC-007; the URL-integrity siblings (RSC-020 space, RSC-030 file:, RSC-033
-/// relative-query) are applied too, matching the content-reference pass. (Inline
-/// `<style>` / `style=` CSS is not yet scanned — a recall gap, not an FP.)
 fn check_css_references(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -5405,15 +4951,6 @@ fn check_css_references(
             }
         }
         // A `url()`/`@import` target with an opaque scheme (`kindle:embed:…`, …)
-        // that no manifest item declares. epubcheck treats any non-`data`,
-        // non-same-origin URL as remote; its verdict then depends on the CSS
-        // context (a direct port of `ResourceReferencesChecker`):
-        //   * inside `@font-face` (a FONT reference, remote-exempt in EPUB 3) it
-        //     falls through to the undeclared check → **RSC-008**;
-        //   * anywhere else (image/other, or EPUB 2) a remote reference is not
-        //     allowed → **RSC-006**.
-        // `http`/`https` (declared remote resources are a real EPUB 3 feature —
-        // FP-risky), `data:` (inline), and `file:` (RSC-030) are left alone.
         let font_face_targets = css::font_face_url_tokens(&text);
         for tok in css::url_tokens(&text) {
             let Some(scheme) = url_scheme(&tok) else {
@@ -5444,11 +4981,6 @@ fn check_css_references(
 }
 
 /// True when `bytes` cannot be decoded to image dimensions — the signal behind
-/// PKG-021. A valid raster image always yields its dimensions from the header
-/// (`into_dimensions` reads only that, not the full pixel data); a failure means
-/// the format is unrecognized (garbage bytes) or the header is truncated.
-/// Mirrors epubcheck raising "Corrupted image file" when Java ImageIO cannot
-/// read the image.
 fn image_fails_to_decode(bytes: &[u8]) -> bool {
     match image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() {
         Ok(reader) => reader.into_dimensions().is_err(),
@@ -5526,8 +5058,6 @@ fn check_nav_present(pkg: &opf::Package, epub3: bool, opf_path: &str, report: &m
 }
 
 // =========================================================================
-// XHTML href scan: reachability for non-linear spine + broken href + parent paths
-// =========================================================================
 
 #[allow(clippy::too_many_arguments)]
 fn check_xhtml_hrefs_and_reachability(
@@ -5542,21 +5072,12 @@ fn check_xhtml_hrefs_and_reachability(
     report: &mut Report,
 ) {
     // Collect every internal target referenced from any XHTML in the manifest:
-    // hyperlinks (`<a>`/`<area>`) plus resource references (`<img>`, `<link>`,
-    // SVG `<image>`/`<use>`, `<object>`, media elements, …). Paths are resolved
-    // relative to the XHTML they appear in. Only hyperlink targets feed the
-    // reachability check; every reference feeds RSC-007 (present in the zip) and
-    // the OPF-root-escape check.
     let mut hyperlink_targets: HashSet<String> = HashSet::new();
     // Element `id` set per content document, for fragment (RSC-012 / RSC-014)
     // resolution. Built across all docs first: a link may target a document not
     // yet visited.
     let mut doc_ids: HashMap<String, DocumentIds> = HashMap::new();
     // (source_path, raw_href, what the reference expects) for every reference
-    // carrying a `#fragment`. The package document's own `<guide>` references are
-    // among them: epubcheck resolves them like any other reference and reports
-    // RSC-012 against the OPF. It types them `GENERIC`, holding them out of the
-    // RSC-014 judgement.
     let mut fragment_refs: Vec<(String, String, RefUse)> = pkg
         .guide_hrefs
         .iter()
@@ -5584,8 +5105,6 @@ fn check_xhtml_hrefs_and_reachability(
     // OPF-096's script exemption: a non-linear spine item that no hyperlink
     // reaches is only an error when the publication has no scripts (with scripts,
     // epubcheck downgrades it to OPF-096b USAGE — a script may navigate to it).
-    // Seed from the declared `scripted` manifest property; also set below if any
-    // content document contains a `<script>` element.
     let mut has_scripts = pkg
         .manifest
         .iter()
@@ -5662,10 +5181,6 @@ fn check_xhtml_hrefs_and_reachability(
                 ));
             }
             // RSC-026: a reference that is not a valid relative OCF URL leaks
-            // outside the container — either path-absolute ("/foo") / scheme-
-            // relative ("//host/foo"), or rising above the container root via too
-            // many `..`. Fully-absolute URLs with a scheme are external and
-            // filtered by resolve_href returning None.
             if href.split('#').next().unwrap_or(&href).starts_with('/')
                 || href_leaks_container(&path, &href)
             {
@@ -5677,21 +5192,12 @@ fn check_xhtml_hrefs_and_reachability(
                 // The WHATWG parser clamps surplus `..` at the container root and
                 // the reference is then existence-checked like any other (a
                 // leaking href naming a missing file is RSC-026 *and* RSC-007)
-                // — [`resolve_href`] clamps the same way. A path-absolute URL
-                // resolves against the container root, past what this pass can
-                // express, and stops here.
                 if href.split('#').next().unwrap_or(&href).starts_with('/') {
                     continue;
                 }
             }
             if let Some(resolved) = resolve_href(&path, &href) {
                 // RSC-033: a *relative* URL must not carry a query component. An
-                // unhandled '?' is swallowed into the resolved path and misfires
-                // as a broken href; this runs first and skips the rest. A
-                // scheme'd URL (e.g. `kindle:embed:0007?mime=…`) is no relative
-                // reference — its '?' is part of an opaque path — and falls to
-                // the resolution/existence checks below (epubcheck resolves it and
-                // reports RSC-007, not RSC-033).
                 if url_scheme(&href).is_none()
                     && href.split('#').next().unwrap_or(&href).contains('?')
                 {
@@ -5705,11 +5211,6 @@ fn check_xhtml_hrefs_and_reachability(
                 if kind == RefKind::Hyperlink {
                     hyperlink_targets.insert(resolved.clone());
                     // RSC-010/011: a hyperlink to a *declared, present* resource
-                    // must point at an EPUB content document (or a type with a
-                    // content-document fallback) that is a spine item. Undeclared
-                    // or missing targets are RSC-007/008, handled below; epubcheck
-                    // runs this only for a resolved manifest item. EPUB CFI
-                    // fragments are out of scope (epubcheck skips them too).
                     let frag = href.split_once('#').map(|(_, f)| f).unwrap_or("");
                     if zip_paths.contains(&resolved)
                         && !frag.starts_with("epubcfi(")
@@ -5733,8 +5234,6 @@ fn check_xhtml_hrefs_and_reachability(
                     // RSC-007 is the *undeclared*-target message: epubcheck only
                     // reaches it when the target is not a registered publication
                     // resource (`ResourceReferencesChecker.checkUndeclaredReference`).
-                    // A declared manifest item missing from the container is
-                    // RSC-001, reported once against the manifest.
                     report.push(Violation::new(
                         Rule::BrokenHref,
                         path.clone(),
@@ -5759,18 +5258,6 @@ fn check_xhtml_hrefs_and_reachability(
     }
 
     // The NCX (EPUB 2 nav) is not an XHTML content document; the loop above skips
-    // its `<content src="…#frag">` targets. epubcheck resolves those fragments,
-    // firing RSC-012 on the NCX exactly as it does on a nav.xhtml href. Feed them
-    // through the same check (source = the NCX path; targets resolve against the
-    // `doc_ids` built above). Each NCX target is ALSO a hyperlink for
-    // reachability: epubcheck's NCXHandler registers `<content src>` as
-    // `Reference.Type.HYPERLINK`, satisfying OPF-096 (non-linear reachable) like
-    // an `<a href>` — a cover reached only from the NCX toc is reachable.
-    //
-    // Which item *is* the NCX is decided by `<spine toc="…">`, not by media
-    // type: epubcheck marks an item as the NCX only when the spine names it, and
-    // an item it never marks is never read. A book whose manifest carries an NCX
-    // no spine points at gets no NCX findings from either tool.
     if let Some(ncx) = pkg
         .spine_toc
         .as_deref()
@@ -5786,9 +5273,6 @@ fn check_xhtml_hrefs_and_reachability(
             for src in collect_ncx_content_srcs(&text) {
                 if let Some(target) = resolve_href(&ncx_path, &src) {
                     // RSC-007: an NCX `<content src>` target must exist in the
-                    // container, exactly as a nav.xhtml `<a href>` target must
-                    // (epubcheck resolves both the same way). Reported once per
-                    // missing target.
                     if !zip_paths.contains(&target)
                         && !manifest_paths.contains(&target)
                         && ncx_broken_reported.insert(target.clone())
@@ -5802,9 +5286,6 @@ fn check_xhtml_hrefs_and_reachability(
                         ));
                     }
                     // RSC-010/011: an NCX `<content src>` is a HYPERLINK reference
-                    // (epubcheck's NCXHandler); a present, manifest-declared
-                    // target must be a content document that is a spine item — the
-                    // same verdict [`hyperlink_target_rule`] applies to an `<a href>`.
                     let frag = src.split_once('#').map(|(_, f)| f).unwrap_or("");
                     if zip_paths.contains(&target)
                         && !frag.starts_with("epubcfi(")
@@ -5833,10 +5314,6 @@ fn check_xhtml_hrefs_and_reachability(
     }
 
     // SVG content documents are indexed for their ids only: a fragment into one
-    // resolves like any other (epubcheck reports RSC-012 for an SVG target too),
-    // and the kind of element each id names is what RSC-014 judges a `<use>` or
-    // a hyperlink against. Their own references are walked by
-    // [`check_svg_references`], not here.
     for item in &pkg.manifest {
         if !item.media_type.trim().eq_ignore_ascii_case("image/svg+xml") {
             continue;
@@ -5861,8 +5338,6 @@ fn check_xhtml_hrefs_and_reachability(
     // Reachability: every spine item with `linear="no"` must be the target of
     // some hyperlink elsewhere in the publication — unless the publication has
     // scripts, which may navigate to it (epubcheck's OPF-096b USAGE case).
-    // OPF-096 is an EPUB 3 rule (epubcheck emits it only from `OPFChecker30`);
-    // EPUB 2 has no non-linear-reachability requirement, and it never fires there.
     for s in pkg.spine.iter().filter(|_| epub3 && !has_scripts) {
         if s.linear != Some(false) {
             continue;
@@ -5908,9 +5383,6 @@ fn check_parent_paths_in_opf(
             continue;
         }
         // RSC-026: a path-absolute manifest href ("/EPUB/x") or one that rises
-        // above the container root (too many `..`) is not a valid relative OCF
-        // URL — it leaks outside the container. (join_opf clamps it to a
-        // container path, keeping it out of the missing/undeclared report.)
         if item.href.starts_with('/') || opf_href_leaks(opf_dir, &item.href) {
             report.push(Violation::new(
                 Rule::HrefEscapesOpfRoot,
@@ -5934,13 +5406,6 @@ enum RefKind {
 }
 
 /// Fine-grained reference type for the remote-resource rule (RSC-006), a reduced
-/// form of epubcheck's `Reference.Type` keeping only the distinctions RSC-006
-/// keys on: `LinkLike` (`<a>`/`<area>`/non-stylesheet `<link>` — always allowed
-/// remote), `Audio`/`Video` (allowed remote in EPUB 3 by element type), and
-/// `Other` (`<img>`, stylesheet `<link>`, `<object>`, `<iframe>`, `<script>`, … —
-/// not allowed remote unless the *declared* target is itself an audio/video/font
-/// media type). A remote font is exempted through that target-media-type path (a
-/// font reference is only ever declared, via `@font-face` or the manifest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefType {
     LinkLike,
@@ -5950,10 +5415,6 @@ enum RefType {
 }
 
 /// Every reference in `content` paired with its [`RefType`], tracking the nearest
-/// `<audio>`/`<video>`/`<picture>` ancestor to type a `<source>` by its
-/// parent (audio source → `Audio`, video source → `Video`, picture source →
-/// `Other`/image). Used by the remote-resource check; the fragment/existence
-/// checks use the coarser [`collect_references`].
 fn typed_content_refs(content: &str) -> Vec<(RefType, String)> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
@@ -6041,11 +5502,6 @@ fn classify_element_refs(
 
 /// Every internal reference in the document, paired with its kind. Covers the
 /// reference-bearing element/attribute pairs epubcheck resolves (RSC-007):
-/// hyperlinks `<a|area href>`; resources `<link href>`, `<img src>`, SVG
-/// `<image|use href>` (incl. `xlink:href`, via attribute local-name),
-/// `<object data>`, `<embed|iframe|source|audio|video|track|script src>`, and
-/// `<video poster>`. External URLs and data: URIs are filtered later by
-/// [`resolve_href`]. `srcset` (multi-URL) and CSS `url()` are out of scope here.
 fn collect_references(content: &str) -> Vec<(RefKind, String)> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
@@ -6116,9 +5572,6 @@ struct DocumentIds {
 }
 
 /// Every `id` attribute value in the document, with the kind of element it names
-/// — the fragment-target namespace, plus what `RSC-014` needs to judge whether a
-/// reference suits its target. Per HTML5 (and epubcheck's ID registry, which
-/// reads `getAttribute("id")`), legacy `name=` anchors are *not* counted.
 fn collect_element_ids(content: &str) -> HashMap<String, IdKind> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
@@ -6159,16 +5612,6 @@ fn collect_element_ids(content: &str) -> HashMap<String, IdKind> {
 
 /// The element id a URL fragment names, or `None` when the fragment is not an id
 /// reference at all.
-///
-/// A transcription of epubcheck's `URLFragment` parser, under which
-/// `#svgView(viewBox(0,0,9,9))`, `#xywh=0,0,9,9` and `#chapter:~:text=foo` do not
-/// resolve as ids: they are a scheme-based fragment, a media fragment and a
-/// fragment directive. `svg` selects the SVG micro-syntax, where an `&` splits
-/// the shorthand bare name from trailing time segments.
-///
-/// A percent-encoded fragment yields `None`: a byte-for-byte compare against an
-/// `id` misreads it, and decoding it to compare properly is more than the two
-/// rules that consume this need.
 fn fragment_id(fragment: &str, svg: bool) -> Option<&str> {
     if fragment.is_empty() || fragment.contains('%') {
         return None;
@@ -6209,13 +5652,6 @@ fn fragment_id(fragment: &str, svg: bool) -> Option<&str> {
 }
 
 /// Content-document features epubcheck's `OPSHandler30` derives to decide the
-/// *required* manifest properties (OPF-014) and the fixed-layout viewport
-/// requirement (HTM-046). Every signal here is one epubcheck also raises, and
-/// detection is deliberately a **subset** of epubcheck's: under-detecting only
-/// misses a finding (a recall gap), over-detecting fires OPF-014 where epubcheck
-/// stays silent (a false positive). The port errs toward silence (e.g. it does
-/// not scan CSS `url()` or inline event-handler attributes for scripting/remote
-/// resources).
 #[derive(Default)]
 struct ContentFeatures {
     /// An inline `<svg>` element → the `svg` property is required.
@@ -6340,13 +5776,6 @@ fn pi_pseudo_attribute(data: &str, name: &str) -> Option<String> {
 }
 
 /// The `<meta name="viewport">` microsyntax, a faithful port of epubcheck's
-/// `org.w3c.epubcheck.util.microsyntax.ViewportMeta`: a `name=value` list
-/// separated by `,`/`;`/whitespace. Returns `Err` on the first parse error (the
-/// parser bails there, exactly as the Java one does), else the properties in
-/// document order, duplicates kept — HTM-059 needs to count them.
-///
-/// The state machine is a transcription, including the deliberate Java
-/// fall-through from the space-or-separator state into the separator state.
 fn parse_viewport_meta(s: &str) -> Result<Vec<(String, String)>, ()> {
     #[derive(PartialEq)]
     enum State {
@@ -6470,8 +5899,6 @@ fn viewport_value_is_valid(property: &str, value: &str) -> bool {
 
 /// The fixed-layout viewport rules over one content document's first viewport
 /// meta (epubcheck `OPSHandler30::processMeta`): a syntax error is **HTM-047**;
-/// a parsed viewport must carry `width` and `height` (**HTM-056**), each declared
-/// once (**HTM-059**) and valid (**HTM-057**).
 fn check_viewport_meta(content: &str, path: &str, report: &mut Report) {
     let Ok(props) = parse_viewport_meta(content) else {
         report.push(Violation::new(
@@ -6517,9 +5944,6 @@ fn check_viewport_meta(content: &str, path: &str, report: &mut Report) {
 }
 
 /// True if a `<script>` element's `type` makes it executable JavaScript — a
-/// faithful port of epubcheck's `OPFChecker.isScriptType` (a missing `type`
-/// defaults to JavaScript). A non-JS type (e.g. `application/ld+json`) is a data
-/// block, not scripting, and requires no `scripted` property.
 fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
     let Some(ty) = e
         .attributes()
@@ -6558,10 +5982,6 @@ fn attr_local_eq(e: &quick_xml::events::BytesStart<'_>, key: &[u8], val: &str) -
 
 /// True when `e` loads a resource from a remote origin through one of the
 /// resource-URL attributes epubcheck routes to its remote-resources check.
-/// Hyperlinks (`<a>`/`<area>`) and `<link>` are excluded: a hyperlink is not a
-/// resource load, and `<link>` remote handling differs — excluding them keeps
-/// OPF-014 free of false positives at the cost of missing the rare remote
-/// stylesheet (a recall gap).
 fn element_loads_remote_resource(local: &[u8], e: &quick_xml::events::BytesStart<'_>) -> bool {
     let attrs: &[&[u8]] = match local {
         b"img" | b"image" | b"use" | b"embed" | b"iframe" | b"script" | b"audio" | b"source"
@@ -6608,14 +6028,6 @@ fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
 }
 
 /// **RSC-012** — every `#fragment` must name an element `id` in its target
-/// document — and the cross-document half of **RSC-014**: a hyperlink may not
-/// land on an SVG paint server, clip path or symbol, which exist only to be
-/// referenced by paint, `clip-path` or `<use>`.
-///
-/// Scoped to the local documents this pass indexes; a fragment into an image,
-/// stylesheet, or an entirely missing file (reported as a broken href / RSC-007)
-/// is left alone. A same-document `#frag` resolves against the source document
-/// itself.
 fn check_fragments(
     doc_ids: &HashMap<String, DocumentIds>,
     fragment_refs: &[(String, String, RefUse)],
@@ -6663,8 +6075,6 @@ fn check_fragments(
 }
 
 // =========================================================================
-// Path helpers
-// =========================================================================
 
 fn join_opf(opf_dir: &str, href: &str) -> String {
     resolve_container(opf_dir, href).0
@@ -6678,11 +6088,6 @@ fn opf_href_leaks(opf_dir: &str, href: &str) -> bool {
 }
 
 /// Resolve an OCF `href` (a URL) against the OPF directory into a zip-relative
-/// container path, returning `(path, leaked)`. `.`/`..` segments are collapsed
-/// (RFC 3986 style) and each remaining segment is percent-decoded to match the
-/// literal zip entry names. A `..` rising above the container root is
-/// clamped (the path stays in-container) and reported via `leaked`. A
-/// path-absolute href (`/x`) resolves against the container root.
 fn resolve_container(opf_dir: &str, href: &str) -> (String, bool) {
     let (mut parts, rest): (Vec<String>, &str) = if let Some(rooted) = href.strip_prefix('/') {
         (Vec::new(), rooted)
@@ -6709,7 +6114,6 @@ fn resolve_container(opf_dir: &str, href: &str) -> (String, bool) {
 /// Percent-decode a URL path (`%20` → space, UTF-8 aware). A manifest/reference
 /// `href` is a URL and zip entry names are literal; the href decodes before
 /// matching (a file named `a b.xhtml` referenced as `a%20b.xhtml` must resolve).
-/// Invalid/truncated escapes are left literal.
 fn percent_decode(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();
@@ -6744,7 +6148,6 @@ fn hex_digit(b: u8) -> Option<u8> {
 /// Normalize an OCF path to Unicode NFC. A filename may be stored decomposed (NFD,
 /// e.g. macOS-authored content: `u`+combining-diaeresis) yet referenced composed
 /// (NFC: precomposed `ü`) or vice versa. epubcheck compares OCF paths in NFC;
-/// bokai normalizes every container path to NFC before matching.
 fn nfc(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     if s.is_ascii() {
@@ -6754,15 +6157,6 @@ fn nfc(s: &str) -> String {
 }
 
 /// The in-scope base URL of a document, tracked exactly as epubcheck's
-/// `BaseURLHandler` tracks it: a single value, updated in document order by an
-/// HTML `<base href>` element or by any element's `xml:base` attribute, and
-/// *never restored* when that element ends. Every reference is resolved against
-/// it before any other check runs: under a remote base, every relative reference
-/// in the rest of the document is a remote reference (RSC-006's jurisdiction),
-/// no container path.
-///
-/// `None` — the common case — leaves the base at the document's own URL, and
-/// [`BaseUrl::resolve`] hands hrefs back untouched.
 #[derive(Default)]
 struct BaseUrl(Option<String>);
 
@@ -6820,10 +6214,6 @@ fn split_url_authority(url: &str) -> (&str, &str) {
 }
 
 /// Resolve a reference against a base URL (RFC 3986 §5.2, minus dot-segment
-/// removal — the container resolvers collapse `.`/`..` downstream, and a remote
-/// result is never turned into a path). `base` may itself be relative; the
-/// result then stays relative to the document, under the ordinary container
-/// resolution.
 fn resolve_against_base(base: &str, href: &str) -> String {
     let href = href.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'));
     if href.is_empty() {
@@ -6863,9 +6253,6 @@ fn resolve_against_base(base: &str, href: &str) -> String {
 }
 
 /// Resolve `href` against the directory of `source_path`. Returns `None`
-/// for external URLs (`http:`, `mailto:`, …), pure fragments, and empty
-/// hrefs. The result is the zip-relative path of the link target with the
-/// fragment stripped.
 fn resolve_href(source_path: &str, href: &str) -> Option<String> {
     // Leading/trailing ASCII whitespace is stripped from a URL before parsing
     // (WHATWG URL); a whitespace-only href (`href=" "`) is an empty same-document
@@ -6905,10 +6292,6 @@ fn resolve_href(source_path: &str, href: &str) -> Option<String> {
 }
 
 /// True when resolving `href` against `source_path`'s directory rises above
-/// the container root — more leading `..` than the source file's depth — which is
-/// RSC-026 (leaks outside the container). Resolving to a *sibling* directory
-/// inside the container (`../images/x.png`, or a resource at the zip root) is
-/// legal and unflagged; escaping the container root is the whole subject.
 fn href_leaks_container(source_path: &str, href: &str) -> bool {
     let no_frag = href.split('#').next().unwrap_or(href);
     let path = no_frag.split('?').next().unwrap_or(no_frag);
@@ -6956,10 +6339,6 @@ fn read_bytes(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<Vec
 }
 
 /// The archive index of the entry whose OCF (UTF-8) path is `name`. The zip crate
-/// keys `by_name`/`index_for_name` on the CP437-decoded name when an entry lacks
-/// the language-encoding flag, and a non-ASCII OCF path (always UTF-8 per the
-/// spec) can miss there; the fallback matches the raw name bytes decoded as
-/// UTF-8, matching how epubcheck reads OCF names.
 fn resolve_entry_index(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<usize> {
     if let Some(i) = zip.index_for_name(name) {
         return Some(i);
@@ -6974,8 +6353,6 @@ fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|b| *b == b':').next().unwrap_or(name)
 }
 
-// =========================================================================
-// Tests
 // =========================================================================
 
 #[cfg(test)]
@@ -7059,10 +6436,6 @@ mod tests {
         assert_eq!(total, 138, "error-level catalog total drifted");
         // Distinct epubcheck error-level ids bokai implements. A ratchet:
         // raise it when a rule adds an id, never lower it to make a run pass.
-        //
-        // It counts *ids*, understating the schema engine badly — every grammar
-        // and every assertion reports through RSC-005, one id the hand-written
-        // checks that emit it have counted.
         assert_eq!(
             covered, 121,
             "epubcheck error coverage changed: {covered}/{total}"
@@ -7072,9 +6445,6 @@ mod tests {
     #[test]
     fn bokai_never_rates_a_rule_below_epubcheck() {
         // The parity invariant: for a rule keyed to an epubcheck id, bokai's
-        // severity is at least epubcheck's; an epubcheck ERROR is never
-        // downgraded (bokai may be stricter, e.g. OPF-003 USAGE surfaced as
-        // Warning).
         for &rule in Rule::ALL {
             let Some(known) = messages::lookup(rule.message_id()) else {
                 continue; // bokai-native rule
@@ -7223,10 +6593,6 @@ mod tests {
     fn mimetype_content_check_matches_epubcheck() {
         // epubcheck's PKG-007 is content-only, read through the zip (decompressed,
         // central-directory size): (1) a correct STORED mimetype is clean;
-        // (2) a correct mimetype STORED with a data descriptor (GP bit 3 → zeroed
-        // local-header size) is clean, never a false PKG-007; (3) a Deflated
-        // mimetype is left alone (compression is not an epubcheck error); (4) a
-        // STORED mimetype with wrong content fires.
         fn hdr(flags: u16, comp: u16, uncomp: u32, data: &[u8]) -> Vec<u8> {
             let name = b"mimetype";
             let mut v = Vec::new();
@@ -8551,12 +7917,6 @@ mod tests {
     }
 
     /// An attribute value is markup until it is decoded, and the checks that
-    /// read one must see what it *means*. A font stack quoted with `&quot;` —
-    /// which is how the KFX→EPUB exporter writes one — reaches the CSS scanner
-    /// decoded; undecoded, the `;` closing each reference reads as a declaration
-    /// separator and splits one valid declaration into components with no
-    /// `name: value`, raising two CSS-008 errors on a document epubcheck calls
-    /// clean.
     #[test]
     fn a_character_reference_in_an_attribute_is_decoded_before_it_is_judged() {
         let doc = |style: &str| {
@@ -8582,8 +7942,6 @@ mod tests {
         // A reference is decoded wherever a value is read: `href="a&amp;b"`
         // names the file `a&b`; one no decoder here can resolve stays verbatim
         // (an entity a DTD declares is RSC-016's subject, not this check's).
-        // Built from raw bytes: the `(&str, &str)` constructor escapes on the
-        // way in, the opposite direction.
         let raw = |value: &'static [u8]| {
             attr_value(&quick_xml::events::attributes::Attribute::from((
                 &b"href"[..],
@@ -9017,8 +8375,6 @@ mod tests {
     /// Assemble a minimal EPUB zip: `mimetype` (stored), `container.xml`, an OPF
     /// at `OEBPS/content.opf`, and the given `OEBPS/<name>` documents. For the
     /// content-conformance / property checks that read content documents.
-    /// Region-based navigation and EduPub pagination, both of which key on
-    /// `epub:type` tokens in the content and a manifest property beside them.
     #[test]
     fn region_based_navigation_and_pagination_key_on_epub_type() {
         let doc = |body: &str| {
@@ -9986,10 +9342,6 @@ mod tests {
             // OPF-096 must NOT fire when the only inbound reference to a
             // linear="no" item is an NCX `<content src>`: epubcheck's NCXHandler
             // registers those as HYPERLINK references, and the item is reachable.
-            // (Paired with `detects_non_linear_cover_without_hyperlink`, where
-            // nothing — NCX included — points at the non-linear cover.) Real
-            // books whose only path to a non-linear cover is the NCX toc are
-            // common; firing here is a systematic false positive.
             let bytes = sample_aozora_epub();
             // Cover becomes non-linear...
             let m1 = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
@@ -10063,11 +9415,6 @@ mod tests {
         #[test]
         fn scheme_url_with_query_is_not_rsc033() {
             // A scheme'd URL (`kindle:embed:…?mime=…`, common in Kindle-origin
-            // EPUBs) is no relative reference — its '?' is part of an opaque
-            // path, not a query — and must not trip RSC-033. epubcheck resolves
-            // it and reports RSC-007 (broken href); the paired
-            // `detects_relative_url_with_query` proves a real relative '?'
-            // fires.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |x| {
                 x.replace(
@@ -10115,11 +9462,6 @@ mod tests {
         #[test]
         fn detects_dangling_fragment_in_ncx() {
             // RSC-012 must also fire on an NCX `<content src="…#frag">` whose
-            // fragment names no id in the target — epubcheck resolves NCX
-            // navigation targets exactly as it does nav.xhtml hrefs. The clean
-            // sample's NCX carries a *resolvable* `#h1` (the chapter navPoint);
-            // `aozora_output_passes_after_fix` is the paired proof this does
-            // not false-fire on a valid NCX fragment.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/toc.ncx", |ncx| {
                 ncx.replace(
@@ -10133,9 +9475,6 @@ mod tests {
                 "expected RSC-012 from the NCX, got:\n{report}"
             );
             // …and only under the spine naming it. Which manifest item *is* the
-            // NCX is decided by `<spine toc="…">`, not by media type; an NCX
-            // the spine does not point at is never read, and epubcheck reports
-            // nothing about it either.
             let orphaned = rewrite_zip_entry(&mutated, "OEBPS/content.opf", |opf| {
                 let stripped = opf.replace(" toc=\"ncx\"", "");
                 assert_ne!(stripped, opf, "the sample spine should name the NCX");
@@ -10265,15 +9604,6 @@ mod tests {
         #[test]
         fn detects_href_escaping_opf_root() {
             // RSC-026 is a *container-root* escape, not an OPF-dir escape. From
-            // `OEBPS/text/title.xhtml`, `../../../escape.xhtml` rises above the zip
-            // root (three `..` from a depth-2 directory) — must flag. A reference
-            // resolving to a sibling in-container path (e.g. `../../escape.xhtml`
-            // → `escape.xhtml` at the zip root) is legal and never RSC-026.
-            //
-            // The leak does not end the reference's life: the WHATWG parser clamps
-            // the surplus `..` at the container root, the reference is
-            // existence-checked, and a missing target is *also* RSC-007. Verified
-            // against epubcheck 5.3.0 on this exact document — it reports both.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
                 xhtml.replace(

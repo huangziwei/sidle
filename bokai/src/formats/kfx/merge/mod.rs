@@ -1,17 +1,4 @@
 //! `.kfx-zip` → `.kfx` merge dispatcher.
-//!
-//! Two paths share the support modules (`symtab`, `node`, `fragment`,
-//! `container`, `structure`, `catalog`, `common`, `trace`):
-//!
-//!  - `mechanical`: faithful port of calibre's `convert_to_single_kfx`
-//!    pipeline. Every entity is parsed → walked → re-encoded. Correctness
-//!    ground truth.
-//!  - `fast`: byte-passthrough merge. Skips entity-body parse + re-encode,
-//!    synthesizes only `$270` and `$419`. Produces a different byte stream
-//!    that calibre still accepts (verified to produce identical EPUBs).
-//!
-//! Default is [`MergeMode::Fast`]. Switch via CLI flag or the
-//! `merge_kfx_zip_with_mode` entry point.
 
 mod catalog;
 mod common;
@@ -30,9 +17,6 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, Default)]
 pub enum MergeMode {
     /// Byte-passthrough merge. Entity bodies are copied verbatim from source
-    /// to output; only the merged container's `$270` + `$419` are encoded
-    /// fresh. Default — produces calibre-accepted output with ~3-6× the
-    /// throughput of [`MergeMode::Mechanical`].
     #[default]
     Fast,
     /// Faithful port of calibre's `convert_to_single_kfx` pipeline. Slower,
@@ -49,19 +33,11 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 /// Merge in-memory `.kfx-zip` bytes into a single `.kfx` payload — no
-/// filesystem. Always uses the thread-free [`MergeMode::Mechanical`] path (the
-/// [`MergeMode::Fast`] path relies on `std::thread::scope`). Mechanical is the
-/// correctness ground truth, so the output is the same calibre-accepted `.kfx`.
 pub fn merge_kfx_zip_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
     mechanical::merge_kfx_zip_reader(io::Cursor::new(data))
 }
 
 /// Merge using the specified mode. Each mode is terminal: [`MergeMode::Fast`]
-/// does **not** fall back to [`MergeMode::Mechanical`]. A bundle whose
-/// preconditions the fast path can't meet (e.g. multiple sources carry
-/// `doc_symbols`) surfaces as an `io::ErrorKind::Unsupported` error rather than
-/// silently rerouting. Select [`MergeMode::Mechanical`] explicitly to run the
-/// full-roundtrip path.
 pub fn merge_kfx_zip_with_mode(path: &Path, mode: MergeMode) -> io::Result<Vec<u8>> {
     match mode {
         MergeMode::Mechanical => mechanical::merge_kfx_zip(path),

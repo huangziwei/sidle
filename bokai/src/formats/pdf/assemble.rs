@@ -1,17 +1,4 @@
 //! Build a multi-page PDF from per-page vector art.
-//!
-//! The write-side counterpart to [`super::render`] (which rasterizes an
-//! existing PDF's pages): here each page arrives as an SVG document and leaves
-//! as one page of a fresh PDF. Fixed-layout sources — handwritten notebooks,
-//! image comics — are exactly the shape this serves: one self-contained page
-//! image per page, no text flow to typeset.
-//!
-//! Raster, not vector: the only clean vector route (`svg2pdf`) pins `usvg` 0.45
-//! against this crate's 0.47, which would fork the whole SVG stack into the
-//! build. Rasterizing reuses the `resvg`/`tiny_skia`/`lopdf` already compiled
-//! here and handles every primitive the page SVGs use (nested `<svg>`,
-//! transforms, embedded images) for free. Pages render at a fixed long-edge
-//! resolution so handwriting stays crisp on screen and in print.
 
 use std::io::{self, Write as _};
 

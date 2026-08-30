@@ -143,11 +143,9 @@ button {
   color: white;
 }
 
-/* The grouping toggle reuses the segmented `.seg` markup but lives in the
-   filter bar, so it's restyled to read as part of that pill row rather than as
-   another toolbar tab: fully rounded like the pills, a readable (--fg) inactive
-   label instead of the toolbar's muted one, and an accent-filled active half.
-   The id-scoped rules out-specify the base `.seg`/`.seg-btn` above. */
+/* #group-seg carries `.seg` markup in the filter bar: fully rounded, a --fg
+   inactive label, an accent-filled active half. The id-scoped rules
+   out-specify `.seg`/`.seg-btn` above. */
 #group-seg {
   border-radius: 999px;
   background: var(--surface);
@@ -180,9 +178,8 @@ button {
   flex-wrap: wrap;
 }
 
-/* applySection() hides the book-only filter pills on the Notes tab via the
-   `hidden` attribute; the author `display: flex` above would otherwise win over
-   the UA `[hidden]` rule, so restore it. */
+/* applySection() hides the book-only filter pills with `hidden`. The author
+   `display: flex` above wins over the UA `[hidden]` rule; this restores it. */
 .filter-bar[hidden] {
   display: none;
 }
@@ -547,13 +544,8 @@ button {
 }
 
 /* ---------------------------------------------------------------------------
-   Kindle page (#device-page)
-   The pill in the header is the entry point; this is a full-width `.view` inside
-   #main, on the same show/hide system as #gallery / #notes. The inner blocks —
-   .device-fields, .device-actions, .device-sent-list, .server-section — each sit
-   in a card, which is what neutralises the dividers a few of them carry. Apps
-   are not here: they are managed in the Apps tab.
-   --------------------------------------------------------------------------- */
+   Kindle page (#device-page): a full-width `.view` in #main, each inner block
+   in a card.  ---------------------------------------------------------------- */
 
 .device-page {
   max-width: 920px;
@@ -581,8 +573,8 @@ button {
   font-size: 20px;
 }
 
-/* The pill doubles as this page's tab — a soft accent tint marks it active
-   without disturbing the status dot or label (the pill is otherwise unchanged). */
+/* The pill doubles as this page's tab. A soft accent tint marks it active,
+   leaving the status dot and label alone. */
 .device-pill.active {
   background: var(--accent-soft);
   border-color: var(--accent);
@@ -618,9 +610,8 @@ button {
   font-size: 13px;
 }
 
-/* Neutralise popover-era dividers now that each block is boxed by its card: the
-   card draws the edge, so drop the actions/sent-list bottom rules and the
-   deploy/LAN-server top rules (which existed to separate stacked popover blocks). */
+/* The card draws each block's edge. These drop the actions/sent-list bottom
+   rules and the deploy/LAN-server top rules. */
 .device-card .device-actions,
 .device-card .device-sent-list {
   border-bottom: 0;
@@ -704,10 +695,8 @@ button {
   padding: 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  /* Internal scroll, capped so a long list doesn't push the deploy +
-     LAN-server sections off the popover. The popover itself also
-     scrolls if total content exceeds 80vh, so the user always reaches
-     everything either way. */
+  /* Internal scroll, capped to keep the deploy and LAN-server sections on the
+     popover. The popover scrolls past 80vh of content. */
   max-height: 260px;
   overflow-y: auto;
 }
@@ -877,9 +866,7 @@ button {
 }
 
 /* ---------------------------------------------------------------------------
-   Apps (#apps)
-   One row per program that installs to the Kindle. The row is three columns:
-   what the app is, what the device has, and what can be done to it.
+   Apps (#apps): one row per program installing to the Kindle, in three columns.
    --------------------------------------------------------------------------- */
 
 .apps {
@@ -1364,11 +1351,9 @@ kbd {
   flex: 0 0 auto;
 }
 
-/* Series collections (grouped gallery). A tile is `.series-card`, NOT
-   `.book-card`, so the SelectionController's `.book-card` queries skip it —
-   collections are navigation, never selectable. Chrome: book-edge bars stacked
-   above the lead cover (which is full-bleed left/right like a standalone book),
-   a red count pill bottom-left, and a 2×3 dot overflow menu bottom-right. */
+/* Series collections (grouped gallery). A tile is `.series-card`, which the
+   SelectionController's `.book-card` queries skip. Book-edge bars stack above
+   the lead cover, with a count pill and a 2×3 dot overflow menu. */
 
 .series-card {
   background: var(--surface);
@@ -1643,9 +1628,8 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* Override the global body { user-select: none } so users can highlight
-     and copy individual cell values. Column headers stay unselectable
-     because that's where drag-to-reorder lives. */
+  /* Overrides the global body { user-select: none } for cell values. Column
+     headers stay unselectable, carrying drag-to-reorder. */
   user-select: text;
   -webkit-user-select: text;
 }
@@ -1693,8 +1677,8 @@ kbd {
   opacity: 0.4;
 }
 
-/* Drop indicator: a vertical accent line on the side the dragged column
-   would land. Drawn with inset shadow so it doesn't shift layout. */
+/* Drop indicator: a vertical accent line on the dragged column's landing side,
+   drawn with an inset shadow that shifts no layout. */
 .book-table thead th.drop-left {
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
@@ -1703,9 +1687,8 @@ kbd {
   box-shadow: inset -2px 0 0 0 var(--accent);
 }
 
-/* Floating ghost element shown next to the cursor during a column drag.
-   We use a custom element (not HTML5's native drag image) because the
-   webview's dragDropEnabled=true blocks the native drag API. */
+/* Floating ghost beside the cursor during a column drag. dragDropEnabled=true
+   blocks the platform drag API. */
 .col-drag-ghost {
   position: fixed;
   pointer-events: none;
@@ -1963,8 +1946,8 @@ kbd {
   color: var(--accent);
 }
 
-/* An action with nowhere to go — an Export with no converted side ready yet.
-   Shown rather than hidden so the menu still says where the action lives. */
+/* An action with nowhere to go — an Export with no converted side. Shown, and
+   the menu keeps saying where the action lives. */
 .ctx-menu li.disabled {
   color: var(--muted);
   cursor: default;
@@ -2015,9 +1998,8 @@ kbd {
 .ctx-menu li.has-sub:hover > .ctx-submenu {
   display: block;
 }
-/* When the menu sits at the right edge of the window, open submenus to the LEFT
-   of the parent instead, so they don't fly off-screen (set when the menu is
-   placed — see actions.js). */
+/* A menu at the right edge of the window opens its submenus to the left.
+   actions.js sets this as it places the menu. */
 .ctx-menu.flip-sub .ctx-submenu {
   left: auto;
   right: 100%;
@@ -2060,7 +2042,7 @@ kbd {
    "why". Sits just above where the toast appears. */
 .error-report {
   position: fixed;
-  /* Sit above the toast (bottom: 16px), which still shows the count summary. */
+  /* Sits above the toast at bottom: 16px, which shows the count summary. */
   bottom: 64px;
   left: 50%;
   transform: translateX(-50%);
@@ -2076,9 +2058,8 @@ kbd {
   overflow: hidden;
 }
 
-/* Author `display: flex` shadows the UA `[hidden]{display:none}`, so restore it
-   — otherwise the panel shows on launch and the ✕ (which sets `hidden`) can't
-   dismiss it. */
+/* Author `display: flex` shadows the UA `[hidden]{display:none}`. This restores
+   it, for the launch state and for the ✕ that sets `hidden`. */
 .error-report[hidden] {
   display: none;
 }
@@ -2396,9 +2377,8 @@ kbd {
   white-space: nowrap;
 }
 
-/* Split a collection into a series (#split-modal) — one row per volume the
-   book evidences, with the series name above them. Everything editable, because
-   a proposal is a filled-in form, not a decision. */
+/* Split a collection into a series (#split-modal) — one row per volume the book
+   evidences, the series name above them, every field editable. */
 
 .split-panel {
   width: min(720px, 100%);
@@ -2621,9 +2601,7 @@ kbd {
   animation: none;
 }
 
-/* In flow in the page's flex column, so opening it shrinks the view above
-   rather than painting over it (it used to be `position: fixed` at the foot of
-   the window, which hid the selection bar underneath it). */
+/* In flow in the page's flex column: opening it shrinks the view above. */
 .queue-drawer {
   flex: 0 0 auto;
   max-height: 50vh;
@@ -2735,9 +2713,8 @@ kbd {
   width: 8%;
 }
 
-/* Converting now uses a determinate child fill (.queue-progress-fill) driven by
-   the live progress fraction — hide the default ::after so it doesn't sit as a
-   full muted bar behind the fill. */
+/* .queue-progress-fill carries the live progress fraction. This hides the
+   default ::after that sits behind it. */
 .queue-progress.converting::after {
   display: none;
 }
@@ -2773,8 +2750,8 @@ kbd {
   margin-left: 6px;
 }
 
-/* "Failed" in the queue drawer — a button, because it opens the reason. Styled
-   as the text it replaced so the row reads the same. */
+/* "Failed" in the queue drawer — a button opening the reason, styled as
+   text. */
 .queue-why {
   background: none;
   border: none;
@@ -2787,11 +2764,9 @@ kbd {
 }
 
 /* ---- Reader -------------------------------------------------------------- */
-/* The reader's chrome follows the open book's per-book page colors, set by
-   reader.js (`applyChrome`) as inline `--reader-*` vars on `.reader-view`. The
-   defaults below reproduce the original always-light look (white page, near-
-   black ink) so a book with no saved settings looks exactly as before; a sepia
-   or dark page retints the gutter, bars, and side panels to match. */
+/* The reader's chrome follows `--reader-*`, which reader.js (`applyChrome`)
+   sets inline on `.reader-view`. The defaults below are a white page and
+   near-black ink; a sepia or dark page retints gutter, bars and panels. */
 .reader-view {
   position: fixed;
   inset: 0;
@@ -2823,12 +2798,9 @@ kbd {
   background: var(--reader-bg);
   transition: opacity 0.3s ease;
 }
-/* Auto-hidden while reading (armed by reader.js). The bar fades out but keeps
-   its 44px slot — and that slot is the page color, so it reads as a clean top
-   margin rather than an empty gap. Because the slot stays in flow, hiding never
-   resizes the stage and the paginator never re-columnizes. The slot also stays
-   in place to catch the click that brings the bar back (reader.js swallows that
-   click so it doesn't also hit an invisible button). */
+/* Auto-hidden while reading, armed by reader.js. The bar fades and keeps its
+   44px slot in the page color, leaving the stage unresized and the paginator
+   uncolumnized. The slot catches the click that brings the bar back. */
 .reader-topbar.is-hidden {
   opacity: 0;
 }
@@ -2885,16 +2857,12 @@ kbd {
 /* The paginator lives in a host that fills the stage; nav zones overlay it. */
 .reader-paginator-host { position: absolute; inset: 0; }
 
-/* PDF (fixed-layout) mode: a spread of one or two page images, centered in the
-   host and fit to the stage. The :has guard only applies when the host holds a
-   spread, leaving the reflowable paginator layout untouched. Nav zones still
-   overlay (siblings of the host). */
-/* Fixed-layout viewport: flex-centers the spread. Flex (not grid) keeps it a
-   definite-size parent, so the notebook page's max-height:100% contain-fit
-   resolves — a grid's auto track would make the height indefinite and the page
-   would blow up. overflow:auto + `safe` centering then let it scroll WITHOUT
-   clipping the start edge when zoomed past fit (the classic flex-overflow trap).
-   No-op at zoom 1, where the spread fills the viewport exactly. */
+/* PDF (fixed-layout) mode: one or two page images centered in the host and fit
+   to the stage. The :has guard applies to a host holding a spread. Nav zones
+   overlay as siblings of the host. */
+/* Fixed-layout viewport: flex-centers the spread. Flex keeps a definite-size
+   parent, resolving the notebook page's max-height:100% contain-fit.
+   overflow:auto with `safe` centering scrolls without clipping the start edge. */
 .reader-paginator-host:has(> .reader-pdf-spread) {
   display: flex;
   align-items: safe center;
@@ -2913,9 +2881,8 @@ kbd {
   gap: 12px; /* the gutter between two facing pages */
 }
 /* "Merge seam" spread (manga / comics): the two facing pages butt together with
-   no gutter so a cross-page panel reads as one continuous image. The per-page
-   drop shadow would otherwise draw a seam down the centre, so drop it and frame
-   the whole spread box with a single shadow instead. */
+   no gutter, dropping the per-page drop shadow for a single shadow on the whole
+   spread box. */
 .reader-pdf-spread.double.merged {
   gap: 0;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
@@ -2923,8 +2890,8 @@ kbd {
 .reader-pdf-spread.double.merged .reader-pdf-page {
   box-shadow: none;
 }
-/* RTL (Japanese/manga) double-spread: the lower-numbered page sits on the right.
-   Only the visual order flips — pageL is still the lower index in reader.js. */
+/* RTL (Japanese/manga) double-spread: the lower-numbered page sits on the
+   right. The visual order alone flips; pageL keeps the lower index. */
 .reader-pdf-spread.rtl.double {
   flex-direction: row-reverse;
 }
@@ -2952,10 +2919,9 @@ kbd {
 .reader-pdf-spread.invert .reader-pdf-img {
   filter: invert(1) hue-rotate(180deg);
 }
-/* Handwritten-ink overlay: the transparent ink the user drew on the Scribe,
-   composited over the page image and *under* the selectable text layer. The
-   inner SVG (canvas-unit viewBox) is stretched to the page box; the layer is
-   pointer-transparent so selection still reaches the text spans. */
+/* Handwritten-ink overlay, composited over the page image and under the
+   selectable text layer. The inner SVG stretches to the page box, and the layer
+   is pointer-transparent for selection on the text spans. */
 .reader-pdf-ink {
   position: absolute;
   inset: 0;
@@ -2967,15 +2933,13 @@ kbd {
   width: 100%;
   height: 100%;
 }
-/* Night mode inverts the page image; invert the ink too so dark strokes stay
-   visible on the now-dark page. */
+/* Night mode inverts the page image, and the ink with it. */
 .reader-pdf-spread.invert .reader-pdf-ink {
   filter: invert(1) hue-rotate(180deg);
 }
 /* The selectable text layer: transparent KFX runs absolutely positioned over
-   the page image (mirrors the Scribe's invisible text overlay). It hosts the
-   same eid-anchored select / highlight / search machinery as the reflowable
-   reader. */
+   the page image, hosting the same eid-anchored select / highlight / search
+   machinery as the reflowable reader. */
 .reader-pdf-text {
   position: absolute;
   inset: 0;
@@ -2994,10 +2958,9 @@ kbd {
   -webkit-user-select: text;
 }
 
-/* Notebook (handwritten Scribe) mode renders inside a `.reader-pdf-spread`, reusing
-   the PDF viewport-centering + `.double` gutter — as one or two pages. Each page
-   SVG is sized explicitly in reader.js (fit-to-stage × zoom), like a PDF page, so
-   zoom + scroll work uniformly; the vector re-rasterizes crisply at any size. */
+/* Notebook (handwritten Scribe) mode sits inside a `.reader-pdf-spread`, taking
+   the PDF viewport-centering and `.double` gutter. reader.js sizes each page SVG
+   explicitly at fit-to-stage × zoom. */
 .reader-notebook-page {
   display: block;
   background: #fff;
@@ -3010,11 +2973,9 @@ kbd {
   filter: invert(1) hue-rotate(180deg);
 }
 
-/* Prev/next: slim hover-revealed arrows pinned to the page's OUTER margin. The
-   width tracks the paginator's outer track (its --_half-gap is gap/2 = 3.5% of
-   the stage), so the zone stays in the margin and never overlaps the text
-   columns. Invisible until the margin is hovered; the background is the page
-   color so the strip blends into the page rather than the gutter. */
+/* Prev/next: slim hover-revealed arrows pinned to the page's outer margin. The
+   width tracks the paginator's outer track, whose --_half-gap is 3.5% of the
+   stage. The background is the page color. */
 .reader-nav-zone {
   position: absolute;
   top: 0;
@@ -3085,9 +3046,8 @@ kbd {
   padding: 0 4px;
 }
 
-/* Resume control: its own tap region (the Loc keeps its click-to-cycle), and
-   invisible until the status bar is hovered — like the page-turn nav zones.
-   `pointer-events: none` while hidden so a click in its slot still cycles. */
+/* Resume control: its own tap region, with the Loc keeping its click-to-cycle.
+   Hidden until the status bar is hovered, and `pointer-events: none` there. */
 .reader-status-resume {
   white-space: nowrap;
   margin: 0;
@@ -3402,8 +3362,8 @@ kbd {
   overflow: hidden;
 }
 
-/* The other notes on this highlight — a Kindle lets one carry several, so they
-   sit as switchable chips above the editor rather than a single hidden field. */
+/* The other notes on this highlight, as switchable chips above the editor. A
+   Kindle highlight carries several. */
 .reader-note-others {
   display: flex;
   flex-wrap: wrap;
@@ -3609,9 +3569,8 @@ kbd {
 .rs-footer .btn-link { font-size: 12px; }
 
 /* ---------------------------------------------------------------------------
-   Library settings: the ⚙ gear at the right of the status bar (the toggle's
-   flex:1 pushes it here) + the relocate modal.
-   --------------------------------------------------------------------------- */
+   Library settings: the ⚙ gear at the right of the status bar, and the
+   relocate modal.  --------------------------------------------------------- */
 .status-bar-gear {
   flex: 0 0 auto;
   background: transparent;
@@ -3806,10 +3765,8 @@ kbd {
 }
 
 /* ===========================================================================
-   Notes — Scribe handwritten notebooks (Books/Notes tab). Grid reuses the
-   .book-card / .cover primitives; tiles are page-shaped (3:4) instead of the
-   2:3 book cover, and the viewer is a fixed overlay like the reader.
-   =========================================================================== */
+   Notes — Scribe notebooks. The grid takes .book-card / .cover with 3:4 tiles,
+   and the viewer is a fixed overlay.  ======================================= */
 
 .notes-grid {
   display: grid;
@@ -3817,10 +3774,9 @@ kbd {
   gap: 18px;
 }
 
-/* render() toggles the grid vs the list table via the `hidden` attribute; the
-   author `display: grid` above would otherwise win over the UA `[hidden]` rule,
-   leaving the grid visible behind the list. (The list `<table>` sets no display,
-   so its UA `[hidden]` already wins — but pin it too so it can't regress.) */
+/* render() toggles the grid against the list table with `hidden`. The author
+   `display: grid` above wins over the UA `[hidden]` rule; both are pinned
+   here. */
 .notes-grid[hidden],
 #notes-list[hidden] {
   display: none;
@@ -3997,8 +3953,8 @@ kbd {
   color: var(--accent);
 }
 
-/* Viewer overlay: reuses .modal, but wider (screenshots/logs need room) and
-   with a plain flex body instead of the metadata modal's 2-column grid. */
+/* Viewer overlay on .modal, widened for screenshots and logs, with a plain flex
+   body in place of the metadata modal's 2-column grid. */
 .misc-viewer-panel {
   width: min(900px, 100%);
   height: min(90vh, 100%);
@@ -4044,11 +4000,8 @@ kbd {
 }
 
 /* =========================================================================
-   Book editor (#editor-view) — Calibre "Edit book" analog. A full-screen
-   overlay parallel to #reader-view, but themed to the app's normal tokens
-   (not the reader's per-book sepia/dark). Left rail (structure) → center
-   (panel surface) → top bar (title, validate chip, Revert/Save).
-   ========================================================================= */
+   Book editor (#editor-view): a full-screen overlay beside #reader-view, on the
+   app's tokens. Left rail, centre panel, top bar.  ========================== */
 .editor-view {
   position: fixed;
   inset: 0;
@@ -4088,8 +4041,8 @@ kbd {
   gap: 8px;
   flex: 0 0 auto;
 }
-/* The editor reuses .reader-btn for the back arrow but sits on the app bg, so
-   pin its ink to --fg rather than the reader's per-book --reader-fg. */
+/* The editor's back arrow takes .reader-btn on the app bg, with its ink pinned
+   to --fg. */
 .editor-topbar .reader-btn {
   color: var(--fg);
 }
@@ -4097,8 +4050,7 @@ kbd {
   background: var(--border);
 }
 
-/* Primary (accent) button — the editor's Save. Net-new: the app had only the
-   neutral .btn until now. */
+/* Primary (accent) button — the editor's Save. */
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
@@ -4314,19 +4266,16 @@ kbd {
   color: var(--accent);
   border-color: var(--accent);
 }
-/* Re-shaping an entry, on both axes: ↑ ↓ order it among its siblings, ⇤ ⇥
-   re-parent it. Disabled means that particular move has nowhere to go — the
-   first child can't move up, a top-level entry can't nest out, the first entry
-   of all has nothing to nest under. */
+/* Re-shaping an entry on both axes: ↑ ↓ order it among its siblings, ⇤ ⇥
+   re-parent it. Disabled marks a move with nowhere to go. */
 .toc-ops {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-/* A reading-order row names a document rather than labelling it: what it is
-   called is the book's fact, not the reader's, so the name is read-only where a
-   TOC row's is an input. */
+/* A reading-order row names a document the book has named, and its name is
+   read-only where a TOC row's is an input. */
 .spine-label {
   flex: 1 1 auto;
   min-width: 0;
@@ -4501,13 +4450,8 @@ kbd {
 }
 
 /* ---------------------------------------------------------------------------
-   Reading Log — time read per day, recovered from the Kindle's system logs.
-
-   Two views share the section: the year heatmap (#rl-overview) and one book's
-   month calendar (#rl-book). Both colour days on a shared five-step scale whose
-   top step is the busiest day in view, so the ramp stays readable whether the
-   reader does twenty minutes a day or four hours.
---------------------------------------------------------------------------- */
+   Reading Log — #rl-overview's year heatmap and #rl-book's month calendar, both
+   on a five-step scale topped by the busiest day in view.  ------------------ */
 
 .reading-log {
   padding: 18px 22px 40px;
@@ -4529,18 +4473,15 @@ kbd {
   gap: 8px;
 }
 
-/* Step-through navigation — the year above the heatmap, the month on a book's
-   calendar. Both are bounded by the data, so an arrow is disabled when there is
-   nothing that way and `.rl-nav-fixed` hides the pair outright when there is
-   only ever one step to show. */
+/* Step-through navigation: the year above the heatmap, the month on a book's
+   calendar. An arrow with nothing that way is disabled, and `.rl-nav-fixed`
+   hides the pair at one step. */
 .rl-nav {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Tall enough for the tallest control either header can carry — a segmented
-     control on one side, the quiet arrows on the other — so the two panels'
-     titles sit on one line and their charts start at the same height, whether
-     or not the year arrows are there to hold the row open. */
+  /* Tall enough for the tallest control either header carries, holding both
+     panels' titles on one line and their charts at one height. */
   min-height: 28px;
   margin-bottom: 10px;
 }
@@ -4561,13 +4502,8 @@ kbd {
 
 .rl-muted { color: var(--muted); }
 
-/* Headline figures. Tabular numerals keep the row from twitching as values
-   re-render after an import.
-
-   The row is the page's full width and the tiles share it equally, rather than
-   six small boxes huddled at the left with the window's other half blank. The
-   count is fixed, so `1fr` each is a real layout and not a guess: widen the
-   window and the figures stay a row of six, evenly spaced. */
+/* Headline figures, with tabular numerals holding the row steady across a
+   re-render. The tiles share the page's full width at `1fr` each. */
 .rl-stats {
   flex: 1;
   min-width: 0;
@@ -4603,16 +4539,9 @@ kbd {
 
 /* ── Heatmap, and the clock beside it ────────────────────────────────────── */
 
-/* The calendar is 53 fixed-width columns and cannot use more width than that,
-   so on a wide window it used to sit in a full-width card with half of it
-   empty. It now takes exactly what it needs and the clock takes the rest.
-   Below the breakpoint there is no rest to take and they stack.
-
-   Vertically the pair is one band, not two independent cards: grid items
-   stretch, so both panels stand as tall as the taller of the two and the slack
-   falls inside the shorter one. Sizing each to its own content instead left the
-   clock ending a dozen pixels above the calendar — near enough to read as a
-   mistake, which it was. */
+/* The calendar takes its 53 fixed-width columns and the clock takes the rest,
+   stacking below the breakpoint. Grid items stretch, standing both panels at
+   the taller one's height with the slack inside the shorter. */
 .rl-panels {
   display: grid;
   grid-template-columns: auto minmax(320px, 1fr);
@@ -4623,15 +4552,14 @@ kbd {
   .rl-panels { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Nothing to draw beside the calendar — every session predates the stamps the
-   clock needs — so the calendar takes the row rather than sitting next to a
-   reserved-but-empty column. */
+/* The calendar takes the whole row where every session predates the stamps the
+   clock needs. */
 .rl-panels:has(> .rl-clock-wrap[hidden]) {
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* Columns, so that whichever panel is the shorter of the two can hand its share
-   of the band's height to the chart inside it. */
+/* Columns: the shorter panel hands its share of the band's height to its
+   chart. */
 .rl-heatmap-wrap,
 .rl-clock-wrap {
   display: flex;
@@ -4666,36 +4594,22 @@ kbd {
 .rl-clock-seg .seg-btn:hover { background: var(--surface); }
 .rl-clock-seg .seg-btn.active { background: var(--accent); color: #fff; }
 
-/* Takes whatever the band leaves after the header — normally the calendar's
-   height, which is what squares the two panels off against each other. All
-   three views draw into that one box and any view shorter than it is centred in
-   it rather than left hanging from the top, so switching cuts moves nothing on
-   the page. The one view that can outgrow the calendar is a full year of months;
-   that enlarges the band itself, both panels together, which is a page that
-   grew rather than a panel that spilled. The floor is for the stacked layout
-   below the breakpoint, where there is no calendar beside it to take the
-   height from. */
+/* Takes what the band leaves after the header, which squares the two panels
+   against each other. All three views draw into that box and centre in it; a
+   full year of months enlarges the band. The floor is the stacked layout's. */
 .rl-clock {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  /* Grows into the band's slack from its content height, rather than from zero:
-     a zero basis would leave the panel's own height to the intrinsic-sizing
-     rules for flex items, and a month grid taller than the calendar has to
-     enlarge the band, not spill out of it. */
+  /* Grows into the band's slack from its content height. A zero basis leaves
+     the panel's height to the intrinsic-sizing rules for flex items. */
   flex: 1 1 auto;
   min-height: 133px;
 }
 
-/* Hour of the day as bars. They share the width equally and grow from the
-   baseline; `--v` is the fraction of the busiest hour, set per bar.
-
-   The height stays a fixed length on purpose: every bar is a percentage of it
-   (`.rl-bar`, and the `--v` fill inside it), and a percentage needs a definite
-   height to resolve against. Flexing this box to fill the panel would leave
-   that height definite only through three levels of post-layout flex and grid
-   resolution — correct by spec, but the failure if an engine disagrees is a
-   chart of nothing. The panel's spare height is centred around it instead. */
+/* Hour of the day as bars sharing the width and growing from the baseline, with
+   `--v` the fraction of the busiest hour. The height is a fixed length: every
+   bar is a percentage of it and resolves against a definite height. */
 .rl-bars {
   display: flex;
   align-items: flex-end;
@@ -4711,8 +4625,7 @@ kbd {
   align-items: flex-end;
 }
 
-/* An hour with no reading draws nothing: a one-pixel stub would read as a
-   little reading rather than as none. */
+/* An hour with no reading draws nothing, down to the one-pixel stub. */
 .rl-bar i {
   display: block;
   width: 100%;
@@ -4742,8 +4655,8 @@ kbd {
   text-align: left;
 }
 
-/* Weekday × hour, or month × hour: the heatmap's own five-step ramp, on cells
-   that stretch to fill the panel instead of the calendar's fixed 13px. */
+/* Weekday × hour, or month × hour: the heatmap's five-step ramp, on cells that
+   stretch to fill the panel past the calendar's fixed 13px. */
 .rl-clock-grid {
   display: grid;
   grid-template-columns: 28px repeat(24, minmax(0, 1fr));
@@ -5213,9 +5126,8 @@ kbd {
   color: var(--accent);
 }
 
-/* Year / Month / Day, sitting beside the sort button and matched to it: same
-   height, same border, same surface, so the header reads as one row of controls
-   rather than a toolbar tab that wandered down the page. */
+/* Year / Month / Day, matched to the sort button beside it: same height, same
+   border, same surface. */
 .rl-bucket-seg {
   background: var(--surface);
 }
@@ -5234,19 +5146,16 @@ kbd {
   color: #fff;
 }
 
-/* Books read are shown as covers, on the gallery's own `.book-card` / `.cover`
-   primitives — the same book should look the same everywhere in the app. A
-   little tighter than the gallery: these tiles are a reading list, not the
-   place you browse the library from. */
+/* Books read as covers, on the gallery's `.book-card` / `.cover` primitives, a
+   little tighter than the gallery. */
 .rl-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 14px;
 }
 
-/* Months or days as bands down the page. Each band owns its own grid: sharing
-   one would let a short day's covers slide up into the row above and lose the
-   date they belong to. */
+/* Months or days as bands down the page, each band owning its grid. One shared
+   grid slides a short day's covers into the row above. */
 .rl-bands {
   display: flex;
   flex-direction: column;
@@ -5271,9 +5180,8 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-/* Marks a duration the Kindle did not count itself. Quiet on purpose: it
-   qualifies the figure beside it rather than competing with it, and most
-   reading carries no mark at all. */
+/* Marks a duration the Kindle did not count itself, qualifying the figure
+   beside it. */
 .rl-estimate {
   margin-left: 2px;
   color: var(--muted);
@@ -5313,8 +5221,7 @@ kbd {
 
 /* ── One book ────────────────────────────────────────────────────────────── */
 
-/* A breadcrumb, not a button: it leaves the page rather than acting on it, and
-   a filled control beside the cover competed with the book for attention. */
+/* A breadcrumb leaving the page, quiet beside the cover. */
 .rl-back {
   display: inline-flex;
   align-items: center;
@@ -5339,8 +5246,8 @@ kbd {
   align-items: start;
 }
 
-/* `min-width: 0` so a long unbroken highlight scrolls its own row rather than
-   widening the grid column and pushing the page sideways. */
+/* `min-width: 0` scrolls a long unbroken highlight inside its own row, holding
+   the grid column's width. */
 .rl-book-main {
   display: flex;
   flex-direction: column;
@@ -5439,9 +5346,7 @@ kbd {
 }
 
 /* No `background` here. Every real cell carries an `.rl-l0`–`.rl-l4` class of
-   the same specificity, and this rule comes later in the sheet, so setting one
-   would win over all of them and flatten the calendar to a single shade. The
-   level classes are the only thing that colours a day. */
+   the same specificity, and those level classes are what colour a day. */
 .rl-mday {
   display: flex;
   flex-direction: column;
@@ -5457,14 +5362,11 @@ kbd {
 .rl-mday em { font-size: 10px; font-style: normal; opacity: 0.85; }
 
 /* Filled days carry white text on the two darkest steps, where the accent red
-   is dark enough that body colour would fail contrast. */
+   fails contrast against the body colour. */
 .rl-mday.rl-l3, .rl-mday.rl-l4 { color: #fff; }
 
 /* ── Highlights and notes (book page) ────────────────────────────────────────
-   The reader's sidebar clamps a quote to three lines because it is a jump list
-   beside the book. This is the page where a highlight is read instead, so
-   nothing is truncated and the column is held to a measure rather than stretched
-   across a wide window. */
+   Nothing is truncated here, and the column is held to a measure. */
 .rl-note-list {
   list-style: none;
   margin: 0;
@@ -5475,10 +5377,9 @@ kbd {
   max-width: 78ch;
 }
 
-/* The coloured edge IS the colour of the mark in the book — set per row from
-   the reader's palette. A row without one (a bookmark, a note standing alone)
-   falls back to the ordinary border, so the edge never claims a colour the
-   device did not give. */
+/* The coloured edge is the colour of the mark in the book, set per row from the
+   reader's palette. A bookmark or a lone note falls back to the ordinary
+   border. */
 .rl-note {
   padding: 10px 14px;
   background: var(--surface);
@@ -5499,9 +5400,9 @@ kbd {
 
 .rl-note-kind { text-transform: uppercase; letter-spacing: 0.04em; }
 
-/* `pre-wrap`: the paragraph breaks inside a long highlight are the book's own,
-   and a typed note is written in lines. `overflow-wrap` so an unbroken run — a
-   URL, a language that does not space its words — wraps instead of overflowing. */
+/* `pre-wrap` keeps the book's own paragraph breaks and a typed note's lines.
+   `overflow-wrap` wraps an unbroken run: a URL, or a language that spaces no
+   words. */
 .rl-note-text {
   margin: 0;
   font-size: 13px;
@@ -5510,8 +5411,7 @@ kbd {
   overflow-wrap: break-word;
 }
 
-/* A note is the reader's own voice, so it reads against the passage above it
-   rather than as more of it. */
+/* A note reads against the passage above it. */
 .rl-note-body {
   margin-top: 8px;
   padding-left: 10px;
@@ -5532,9 +5432,8 @@ kbd {
 }
 
 /* ── Which book was this? ────────────────────────────────────────────────────
-   Reading that two same-length books fit equally well. Sits below everything the
-   page does count, and reads as an open question rather than an error: the log
-   is intact, and the answer is a person looking at two covers. */
+   Reading that two same-length books fit equally well, below everything the
+   page counts. */
 .rl-ambiguous { margin-top: 28px; }
 
 .rl-ambiguous-hint {
@@ -5574,8 +5473,8 @@ kbd {
   color: var(--muted);
 }
 
-/* The candidates, side by side. A tie is two or three books, so they lay out as
-   a row of covers rather than a list: the choice is made by looking. */
+/* The candidates side by side. A tie is two or three books, laid out as a row
+   of covers. */
 .rl-pick-books {
   display: flex;
   flex-wrap: wrap;
@@ -5625,11 +5524,9 @@ kbd {
 .rl-pick-book .t { font-size: 12px; line-height: 1.35; }
 .rl-pick-book .a { font-size: 11px; line-height: 1.3; color: var(--muted); }
 
-/* The Reading Log entry point: a standalone pill at the far upper-left, the
-   mirror of the Kindle pill on the right. It is deliberately not a member of
-   the Books/Notes/Misc. tablist — those are three views of the library, this is
-   a separate page — so it keeps its own pressed state and stays visible on the
-   surfaces that collapse the rest of the toolbar. */
+/* The Reading Log entry point: a standalone pill at the far upper-left,
+   mirroring the Kindle pill. Outside the Books/Notes/Misc. tablist, it keeps
+   its own pressed state and survives a collapsed toolbar. */
 .section-pill {
   display: inline-flex;
   align-items: center;

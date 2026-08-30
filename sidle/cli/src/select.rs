@@ -1,9 +1,4 @@
 //! Which books a command acts on.
-//!
-//! One flag group, shared by every command that takes books, so `list` is how
-//! you check what a `convert` or a `remove` is about to touch. Filters are
-//! ANDed; a run that names none is refused, and `--all` says the whole library
-//! out loud.
 
 use anyhow::Result;
 use clap::Args;

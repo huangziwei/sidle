@@ -1,31 +1,6 @@
 //! Image-preservation validation — verify that every `<img src>` in the
 //! source EPUB has a corresponding image resource and a storyline reference
 //! in the converted KFX.
-//!
-//! KFX represents images with three pieces:
-//!
-//! 1. **`external_resource` ($164)** — metadata: `resource_name`, `location`
-//!    (path to bytes), `format` (Png/Jpg/Gif/Webp/Bmp/Svg), `mime`, optional
-//!    `resource_width`/`resource_height`.
-//! 2. **`bcRawMedia` ($417)** — the raw bytes, named `resource/<resource_name>`.
-//! 3. **Storyline element** with `type: image` and `resource_name` pointing
-//!    at an external_resource. This is what actually renders.
-//!
-//! Without all three, the image either doesn't load, doesn't render, or
-//! produces a phantom resource entry. The validator catches:
-//!
-//! - **dropped images** — source has more `<img>` than KFX has image
-//!   elements in storylines.
-//! - **dangling external_resource** — metadata exists but the `bcRawMedia`
-//!   entity it points at is missing.
-//! - **orphan image refs** — storyline references a `resource_name` with no
-//!   matching `external_resource`.
-//! - **orphan raw media** — `bcRawMedia` bytes that no `external_resource`
-//!   points at (a wasted entity, but not user-visible).
-//!
-//! Image and font resources both use `external_resource`; this validator
-//! filters by `format` symbol to image formats only (Png/Jpg/Gif/Webp/Bmp/
-//! Svg) so it doesn't flag fonts.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashSet;
@@ -423,8 +398,6 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 }
 
 // ============================================================================
-// Source-side extraction
-// ============================================================================
 
 pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, String> {
     let cursor = Cursor::new(epub_bytes);
@@ -618,8 +591,6 @@ pub fn extract_images_from_xhtml(xhtml: &str, spine_path: &str, out: &mut Vec<Ep
     }
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 #[derive(Debug, Default)]

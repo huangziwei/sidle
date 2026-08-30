@@ -1,12 +1,4 @@
 //! EPUB-native TOC evidence for [`super::validate`].
-//!
-//! Builds the same format-neutral [`TocEvidence`](super::TocEvidence) the KFX
-//! extractor produces, but from an EPUB's own structures: the declared TOC (EPUB
-//! 3 nav doc or EPUB 2 NCX, via `crate::epub`'s parsers), the spine XHTML (`<hN>`
-//! headings, chapter-marker section starts), and an in-book Contents page (a
-//! spine doc that links to many other spine docs). Reads only the EPUB — never a
-//! converted KFX. Structural EPUB conformance is a separate concern owned by
-//! [`crate::validate::source::epub`]; this is a TOC-*completeness* check.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashSet;
@@ -111,9 +103,6 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
         section_heads,
         has_toc_landmark,
         // Whether the declared TOC flattened a multi-work book's levels. The
-        // repair module owns the rule (and answers zero straight away for a
-        // book that declares its structure), so a diagnosis here and the fix
-        // there can never disagree.
         flattened: crate::formats::epub::toc_repair::declared_toc_flattening(epub_bytes)
             .unwrap_or_default(),
         // Whether the spine reads those entries in the order the TOC lists

@@ -1,23 +1,6 @@
 //! Series grouping — the picker's view model.
 //!
 //! The on-Kindle picker is **grouped by series, always** (no flat toggle):
-//! same-series books fold into one
-//! navigable collection tile, the opposite default from the desktop gallery
-//! (which defaults flat and offers a toggle). Small screen, slow e-ink + LAN,
-//! and one-cover-per-collection fetches are the reasons grouping is the only
-//! mode here.
-//!
-//! This module is the **pure** half — no framebuffer, no network — so it lives
-//! at the crate root (re-exported by `lib.rs`) and its tests run on the host
-//! via `cargo test --lib`, the same split as [`crate::wrap`]. Rendering the
-//! resulting [`Cell`]s is `ui::grid` (device-only); the drill-in state machine
-//! is `main.rs`.
-//!
-//! Port of the desktop's `groupBySeries` / `bySeriesIndex` / `seriesNameOf`
-//! (`web/library.js`). One deliberate divergence: members are sorted **eagerly**
-//! here (the desktop sorts lazily at render). Collation matches the desktop —
-//! [`crate::collate::natural_compare`], the port of `naturalCompare`, shared
-//! with `ui::sort`.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -26,23 +9,12 @@ use crate::api::Book;
 use crate::collate::natural_compare;
 
 /// A top-level tile: either a standalone book or a series collection. Folded
-/// from the filtered+sorted view by [`group_by_series`]; a collection appears
-/// at the position of its **first-seen** member so the active sort drives tile
-/// order for free.
-// `Standalone(Book)` dwarfs the `Series` variant, tripping `large_enum_variant`
-// on a 64-bit host build. The picker ships on 32-bit armv7, where the variants
-// stay under the lint's threshold (clean on-target); boxing the common
-// standalone variant would add a heap allocation per book to this transient,
-// bounded view model for no on-device gain.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Entry {
     /// A book with no series — rendered and downloaded as itself.
     Standalone(Book),
     /// A series collection. `books` are the available-to-download members,
-    /// sorted into canonical within-series order ([`by_series_index`]) so
-    /// `books[0]` is the lead (used for the tile cover) and a drill-in renders
-    /// them in reading order.
     Series { name: String, books: Vec<Book> },
 }
 
@@ -78,9 +50,6 @@ pub fn series_name_of(b: &Book) -> Option<&str> {
 }
 
 /// Canonical within-series order: by `series_index` ascending (half-numbers
-/// like 1.5 sort correctly), books with no index after those with one, then by
-/// title in natural order ([`natural_compare`], so "Vol 9" precedes "Vol 10"
-/// without a hand-entered index). Port of `bySeriesIndex`.
 pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
     let an = a.series_index.filter(|x| x.is_finite());
     let bn = b.series_index.filter(|x| x.is_finite());
@@ -96,12 +65,6 @@ pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
 }
 
 /// Fold the already-filtered+sorted `view` into entries. A series collection
-/// appears at the position of its first-seen member (so the active sort drives
-/// order); books with no series stay standalone. Consumes `view` — each book is
-/// *moved* into its entry, not cloned.
-///
-/// Members are sorted eagerly here (the desktop sorts lazily in `seriesCard`):
-/// equivalent result, and it lets `books[0]` be the lead everywhere downstream.
 pub fn group_by_series(view: Vec<Book>) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
@@ -133,9 +96,6 @@ pub fn group_by_series(view: Vec<Book>) -> Vec<Entry> {
 }
 
 /// Build the top-level tiles from the grouped entries: a standalone book → a
-/// [`CellKind::Book`] cell; a series → a [`CellKind::Series`] cell whose cover
-/// is the lead member (`books[0]`, lowest `series_index`) and whose count is the
-/// member total.
 pub fn cells_for_top(entries: &[Entry]) -> Vec<Cell> {
     entries
         .iter()

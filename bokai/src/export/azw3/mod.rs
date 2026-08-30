@@ -133,9 +133,6 @@ impl BookContext {
             let href = book.source_id(id).unwrap_or("unknown.xhtml").to_string();
             let data = book.load_raw(id)?;
             // Guess from the extension so a non-XHTML spine item (SVG-in-spine
-            // is legal EPUB) keeps its real type and is routed to resource
-            // records, not the text/chunker pipeline; fall back to XHTML only
-            // for unknown/extensionless names.
             let media_type = match guess_media_type(&href).as_str() {
                 "application/octet-stream" => "application/xhtml+xml".to_string(),
                 _ => guess_media_type(&href),
@@ -184,19 +181,11 @@ impl BookContext {
 
         // Spine filenames from source ids via the shared `chapter_filenames`
         // (the scheme `normalize_book` resolved the chapters' links against).
-        // Computed once here — reused for the spine below and, first, to
-        // resolve the TOC/landmark targets.
         let filenames = crate::export::epub::chapter_filenames(
             normalized.chapters.iter().map(|c| c.source_path.as_str()),
         );
 
         // Resolve TOC + landmark hrefs (`#eid[:offset]` placeholders) to
-        // `file#frag` against the normalized spine, exactly as the EPUB nav
-        // emitter does (shared `resolve_nav_href`), so `flatten_toc` /
-        // `collect_guide_entries` resolve each entry to a distinct position
-        // through the chunker's id_map. Without it the KFX TOC's bare `#eid`
-        // hrefs miss id_map and every entry collapses onto pos 0 — one shared
-        // href, unusable in-book navigation.
         if !toc.is_empty() || !landmarks.is_empty() {
             let spine_ids: Vec<crate::import::ChapterId> =
                 book.spine().iter().map(|e| e.id).collect();
@@ -241,12 +230,6 @@ impl BookContext {
         }
 
         // Build spine from normalized chapters; bytes stored once in
-        // `resources`. Files are named by `filenames` above (shared
-        // `chapter_filenames`) — the SAME scheme `normalize_book` resolved the
-        // chapters' internal links against (and the EPUB exporter emits), so
-        // `<a href="{source}.xhtml">` targets match the spine hrefs and become
-        // real pos:fid links instead of dangling `chapter_N.xhtml` names that
-        // no file answers to (epubcheck RSC-007 on re-import).
         let mut spine = Vec::with_capacity(normalized.chapters.len());
         for (chapter, href) in normalized.chapters.iter().zip(&filenames) {
             resources.insert(
@@ -278,12 +261,6 @@ impl BookContext {
 }
 
 /// Rewrite each TOC entry's `#eid[:offset]` placeholder href to its resolved
-/// `file#frag` form (recursively over children) via the shared
-/// [`resolve_nav_href`](crate::export::epub::resolve_nav_href), so the
-/// chunker's id_map lookup in `flatten_toc` finds a distinct position per
-/// entry. An entry whose target doesn't resolve keeps its original href —
-/// `flatten_toc` then falls back to the chapter start, matching a label-only
-/// node.
 fn resolve_toc_hrefs(
     entries: &mut [TocEntry],
     book: &Book,

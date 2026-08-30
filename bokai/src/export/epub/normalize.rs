@@ -1,28 +1,4 @@
 //! Normalized export pipeline.
-//!
-//! This module provides functionality for transforming ebooks through the IR layer
-//! to produce clean, consistent output. It merges styles from all chapters into a
-//! unified stylesheet and synthesizes normalized XHTML.
-//!
-//! # Two-Pass Export Flow
-//!
-//! 1. **Pass 1**: Load all chapters as IR, merge styles into GlobalStylePool
-//! 2. **Pass 2**: Generate unified CSS, synthesize XHTML per chapter with remapped styles
-//!
-//! # Example
-//!
-//! ```no_run
-//! use bokai::Book;
-//! use bokai::export::normalize_book;
-//!
-//! let mut book = Book::open("input.epub")?;
-//! let content = normalize_book(&mut book)?;
-//!
-//! // content.css contains the unified stylesheet
-//! // content.chapters contains synthesized XHTML documents
-//! // content.assets contains all referenced asset paths
-//! # Ok::<(), std::io::Error>(())
-//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -35,10 +11,6 @@ use crate::style::{CssDecl, StyleId, StylePool, parse_inline_decl};
 use super::synth::{generate_css, synthesize_xhtml_document_with_links};
 
 /// Collects styles from all chapters into a unified pool.
-///
-/// When merging styles from multiple chapters, identical styles are deduplicated
-/// and assigned the same global StyleId. Each chapter's local StyleIds are remapped
-/// to global IDs for consistent class names across the book.
 #[derive(Debug)]
 pub struct GlobalStylePool {
     /// The unified style pool containing all unique styles.
@@ -65,14 +37,6 @@ impl GlobalStylePool {
     /// Merge styles from a chapter into the global pool.
     ///
     /// This method:
-    /// 1. Iterates over all styles in the chapter's pool
-    /// 2. Interns each style into the global pool (deduplicating identical styles)
-    /// 3. Records the mapping from local to global StyleId
-    ///
-    /// # Arguments
-    ///
-    /// * `chapter_idx` - Index of the chapter (used for remap lookups)
-    /// * `chapter` - The IR chapter containing styles to merge
     pub fn merge(&mut self, chapter_idx: usize, chapter: &Chapter) {
         // Ensure remaps vec is large enough
         while self.remaps.len() <= chapter_idx {
@@ -89,15 +53,6 @@ impl GlobalStylePool {
     }
 
     /// Remap a local StyleId to its global equivalent.
-    ///
-    /// # Arguments
-    ///
-    /// * `chapter_idx` - Index of the chapter the style belongs to
-    /// * `local_id` - The local StyleId from that chapter
-    ///
-    /// # Returns
-    ///
-    /// The global StyleId, or the default style if not found.
     pub fn remap(&self, chapter_idx: usize, local_id: StyleId) -> StyleId {
         self.remaps
             .get(chapter_idx)
@@ -128,9 +83,6 @@ impl GlobalStylePool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceElements {
     /// Omit them — the shape a container ships. A reading device's element
-    /// ids are an addressing scheme for the source, not content, and an EPUB
-    /// that carried them would leak a foreign format's internals into a
-    /// published file.
     Omit,
     /// Stamp `data-eid="<id>"` on the element each source id maps to, so a
     /// renderer can resolve an `(element, offset)` handle to a DOM range.
@@ -187,10 +139,6 @@ pub enum InlineStyleEmit {
 }
 
 /// Source-style resolution for normalized synthesis when the importer
-/// declares a style program: maps each node's `semantics.class` to the
-/// emitted class attribute and its `semantics.style` to a promoted class
-/// or an inline `style` attribute. When present, the computed-style class
-/// list is ignored entirely.
 pub struct SourceStyles<'a> {
     /// Raw source style name → sanitized class name (`None` = the style
     /// produced no declarations, so no class attribute).
@@ -200,10 +148,6 @@ pub struct SourceStyles<'a> {
 }
 
 /// Normalize all chapters in a book through the IR pipeline.
-///
-/// The entry point for normalized export, in five passes: each chapter to IR,
-/// every style into a global pool, a unified CSS stylesheet, per-chapter XHTML
-/// with remapped styles, and the asset references those name.
 pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     normalize_book_with(book, SourceElements::Omit)
 }
@@ -217,8 +161,6 @@ pub fn normalize_book_with(
     let spine: Vec<_> = book.spine().to_vec();
     let max_workers = book.max_workers();
 
-    // =========================================================================
-    // Pass 1: Load all chapters and merge styles
     // =========================================================================
 
     let mut global_styles = GlobalStylePool::new();
@@ -242,27 +184,12 @@ pub fn normalize_book_with(
     }
 
     // =========================================================================
-    // Generate unified CSS
-    // =========================================================================
-    //
-    // Two regimes, keyed on the importer's declared capability. A source
-    // whose importer supplies a style program (today only the KFX importer
-    // does): the stylesheet is the source's own styles, converted by the
-    // `dom_synth` machinery — rules keyed by the raw style names each node
-    // carries in `semantics.class`, matching calibre's CSS. All other
-    // normalized sources: classes are interned computed
-    // styles (`.c<N>`) from the global pool.
     let css_program = book.stylesheet_program();
     let (css_text, source_style_maps, css_artifact) = match &css_program {
         Some(program) => {
             // One walk collects both style channels: used named classes and
             // per-node inline declarations. Class attributes reference every
             // used style whose conversion yields any declaration;
-            // stylesheet rules additionally drop spec-default declarations
-            // (a rule pruned to empty vanishes from the sheet while its
-            // class attribute stays — both render identically). Inline
-            // declarations prune the same way, then values repeating across
-            // the book promote to shared `g<N>` classes.
             let mut used: HashSet<String> = HashSet::new();
             let mut pruned_of_raw: HashMap<String, Option<String>> = HashMap::new();
             let mut inline_occurrences: Vec<String> = Vec::new();
@@ -365,15 +292,6 @@ pub fn normalize_book_with(
 
     // =========================================================================
     // Link resolution (normalized-only sources)
-    // =========================================================================
-    //
-    // KFX chapters carry `link_to` targets as `#anchor-name` placeholders;
-    // resolve each to the chapter file its stamped id actually landed in
-    // (`chapter.xhtml#id`), sanitize external URLs, and drop the href — the
-    // `<a>` stays as a non-linking element — when the target was never
-    // stamped. The same rules calibre applies in
-    // `resolve_link_placeholders`. Passthrough-capable sources keep their
-    // hrefs verbatim.
     let resolve_links = book.requires_normalized_export();
     if resolve_links {
         let anchor_chapters: Vec<(ChapterId, Arc<Chapter>)> = ir_chapters
@@ -422,17 +340,12 @@ pub fn normalize_book_with(
     };
 
     // =========================================================================
-    // Pass 2: Synthesize XHTML with remapped styles
-    // =========================================================================
 
     let mut chapters = Vec::with_capacity(ir_chapters.len());
     let mut all_assets = HashSet::new();
     let language = book.metadata().language.clone();
 
     // What the source actually holds, so an `<img>` naming something absent
-    // degrades instead of shipping a dangling reference (see
-    // `dom_synth::Builder::emit_image`). `bundled_assets` is the importer's
-    // authoritative list where it has one; otherwise the container inventory.
     let available_assets: HashSet<String> = match book.bundled_assets() {
         Some(paths) => paths
             .iter()
@@ -446,18 +359,6 @@ pub fn normalize_book_with(
     };
 
     // Declared style program: build each chapter through the shared XHTML
-    // DOM + consolidation passes — the same code calibre serializes with, so
-    // chapter files keep calibre's byte shape. The title comes from
-    // `chapter_title` (a fixed-layout page is titled by its owning section, not
-    // its per-page name), matching calibre's `push_book_part`; the
-    // viewport is the FXL page's pixel box.
-    //
-    // Link resolution reads the importer through `book`, which cannot
-    // cross threads — so every href the emit walk will consult is resolved
-    // up front into a plain map, and the per-chapter synthesis (a pure
-    // function of the IR) runs across cores. `parallel_map` preserves
-    // input order and the asset set is order-insensitive, so the output
-    // bytes are exactly the serial loop's.
     if let Some(src) = &source_styles {
         let mut link_map: HashMap<String, LinkOutcome> = HashMap::new();
         for (_, _, ch) in &ir_chapters {

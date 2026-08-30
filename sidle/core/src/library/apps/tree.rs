@@ -1,11 +1,5 @@
 //! Finding an app's mount-rooted tree on this machine and walking it into a
 //! file list.
-//!
-//! An app is `extensions/<id>/**` plus the one `documents/*.sh` that launches
-//! it. `documents/` itself is never swept.
-//!
-//! A directory holding `extensions/` is a mount root. Each directory under it
-//! that holds a payload file is one app, and `discover` returns all of them.
 
 use std::path::{Path, PathBuf};
 

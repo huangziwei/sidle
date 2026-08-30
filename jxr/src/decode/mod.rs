@@ -1,19 +1,6 @@
 //! JPEG-XR decoder: TIFF-like container parsing + full T.832 codestream
 //! reconstruction. The codestream side follows the ITU-T T.832 pseudo-code
 //! and covers the whole specification, past the subset a Kindle emits.
-//!
-//! Entry points: [`container::parse`] for the outer file, then
-//! [`decoder::Decoder`] on the extracted codestream bytes.
-//!
-//! ## Layout
-//!
-//! Public modules are the decoded-artifact vocabulary: [`container`] (outer
-//! file), [`decoder`] (codestream pipeline, [`decoder::DecodedImage`], and
-//! the [`decoder::Decoder::parse_headers`] sniffing view), [`pixels`]
-//! (interleaved pixel-buffer view) and [`consts`] (the T.832 constants the
-//! raw `u8` fields are expressed in). The machinery — `misc` (bit reader),
-//! `math` (transform primitives), `state` (plane/MB/VLC state), `tables`
-//! (spec Huffman tables) — is crate-internal.
 
 pub mod consts;
 pub mod container;

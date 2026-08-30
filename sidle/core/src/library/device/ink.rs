@@ -1,13 +1,4 @@
 //! Pull a Scribe's handwritten ink — the pen strokes drawn *on* a sideloaded
-//! doc, stored in `.notebooks/<asin>!!PDOC!!notebook/nbk` — and import it against
-//! the host book, in the SAME pass as the annotation sync
-//! ([`crate::library::device::annotations::import_device_annotations`]).
-//!
-//! Like [`crate::library::device::annotations`], only the device-side walk lives here
-//! (the [`Transport`] is an app concept); the decode → join → storage is
-//! [`sidle_core::library::ink`], which the LAN server drives too. Ink is a
-//! Scribe feature, so this runs only on the MTP path — mass-storage Kindles have
-//! no handwriting.
 
 use std::collections::HashSet;
 
@@ -20,25 +11,12 @@ use crate::library::ink::CollectedInk;
 const PDOC_SUFFIX: &str = "!!PDOC!!notebook";
 
 /// Walk the device `.notebooks/` for OUR sideloaded-doc ink
-/// (`<content_id>!!PDOC!!notebook/nbk`) and pull each `nbk`. `known_asins` is the
-/// set of `books.asin` (baked content_ids) in the library; a dir is OURS iff its
-/// id is in that set — the content_id's alphabet varies per book (hex *or*
-/// Crockford-base32), so this is the only reliable test. Skips Amazon cloud
-/// notebooks (a `!!PDOC!!` id not in our library) and standalone notebooks (uuid
-/// dirs, no `!!PDOC!!`) — both without a wasted pull. The USB phase: run *before*
-/// taking the DB lock (slow `GetObject`s), mirroring [`collect_device_yjr`]. A
-/// device that exposes no `.notebooks/` over MTP yields nothing (harmless no-op).
-///
-/// [`collect_device_yjr`]: crate::library::device::annotations::collect_device_yjr
 pub fn collect_device_ink(
     transport: &dyn Transport,
     known_asins: &HashSet<String>,
 ) -> Result<Vec<CollectedInk>> {
     let root = TPath::parse(".notebooks");
     // Resolve `.notebooks` ONCE and pull every OUR `nbk` by handle in one
-    // session (see [`Transport::read_files_in_children`]) — not a path-based
-    // `read()` per file, which re-walks the whole directory each call (the reason
-    // ink sync stayed slow even after pruning orphans down to ~100 entries).
     let pulled = transport.read_files_in_children(
         &root,
         &|name| pdoc_asin(name).is_some_and(|id| known_asins.contains(&id)),
@@ -55,9 +33,6 @@ pub fn collect_device_ink(
 }
 
 /// The content_id of a `<id>!!PDOC!!notebook` dir (sideloaded-doc ink), or `None`
-/// for any other entry (a standalone-notebook uuid dir, etc.). Whether the id is
-/// OURS is decided by the caller via the library's asin set — NOT a hex test (our
-/// content_ids are hex for some books, Crockford-base32 for others).
 fn pdoc_asin(dir_name: &str) -> Option<String> {
     dir_name
         .strip_suffix(PDOC_SUFFIX)

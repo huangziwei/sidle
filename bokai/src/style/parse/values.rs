@@ -31,10 +31,6 @@ pub(crate) fn parse_color(input: &mut Parser<'_, '_>) -> Option<Color> {
             "gray" | "grey" => Color::rgb(128, 128, 128),
             "transparent" => Color::TRANSPARENT,
             // `currentColor` means "the current `color` property value." We
-            // don't have access to the cascade here, so we map to BLACK as
-            // a pragmatic default — Kindle falls back to text color for
-            // borders/decorations without an explicit color anyway, and
-            // currentColor is overwhelmingly used in those shorthands.
             "currentcolor" => Color::BLACK,
             _ => return None,
         };
@@ -43,8 +39,6 @@ pub(crate) fn parse_color(input: &mut Parser<'_, '_>) -> Option<Color> {
 
     // Try ID token (which is how cssparser parses hex colors like #ff0000)
     // Or Hash token (for colors starting with digits like #222299)
-    // We must check the token type INSIDE try_parse, otherwise try_parse won't reset
-    // the position when we get the wrong token variant.
     if let Ok(hash) = input.try_parse(|i| -> Result<_, ParseError<'_, ()>> {
         match i.next()? {
             Token::IDHash(h) | Token::Hash(h) => Ok(h.clone()),
@@ -78,12 +72,6 @@ pub(crate) struct BackgroundShorthand {
 }
 
 /// Parse the CSS `background` shorthand.
-///
-/// The shorthand can carry color, image, position, repeat, size, attachment,
-/// origin and clip in any order, so we parse tokens in a loop and keep the
-/// components the IR models. Size, attachment, origin and clip are consumed
-/// and discarded — the IR has no vocabulary for them yet.
-/// See https://www.w3.org/TR/css-backgrounds-3/#background
 pub(crate) fn parse_background_shorthand(input: &mut Parser<'_, '_>) -> BackgroundShorthand {
     let mut out = BackgroundShorthand::default();
     // Positional keywords bind to an axis by order, not by name: `center` on
@@ -236,9 +224,6 @@ pub(crate) enum PositionComponent {
 }
 
 /// Assign collected position components to axes.
-///
-/// One value sets x and centres y; two values are x then y unless a named
-/// keyword says otherwise (`bottom left` is legal and means y then x).
 pub(crate) fn resolve_position(parts: &[PositionComponent]) -> (Option<Length>, Option<Length>) {
     if parts.is_empty() {
         return (None, None);
@@ -447,10 +432,6 @@ pub(crate) fn parse_length(input: &mut Parser<'_, '_>) -> Option<Length> {
 }
 
 /// Parse a length value or the `normal` keyword (-> 0px).
-///
-/// Used for `letter-spacing` and `word-spacing`, where the CSS initial value
-/// is `normal` and means "browser default" — which for both properties is
-/// effectively zero additional spacing.
 pub(crate) fn parse_length_or_normal(input: &mut Parser<'_, '_>) -> Option<Length> {
     if let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned())
         && ident.as_ref() == "normal"

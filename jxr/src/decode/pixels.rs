@@ -1,8 +1,4 @@
 //! Consumer-grade pixel buffer: packs a [`DecodedImage`]'s raw `i32` planes
-//! into interleaved little-endian samples with an explicit layout, so callers
-//! don't need to know the per-bitdepth value conventions (clamping, float
-//! bit patterns, RGBE, …). The raw planes remain available on
-//! [`DecodedImage`] as the escape hatch.
 
 use super::consts::*;
 use super::decoder::DecodedImage;

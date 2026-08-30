@@ -1,10 +1,4 @@
 //! KDF/KPF SQLite container read.
-//!
-//! Reads the `fragments` table (id → Ion-binary blob), applying
-//! `local_delta_fragments` overrides on top (a `deleted` row tombstones its id).
-//! Mirrors the merge in kfxlib's `kpf_container.deserialize`: deltas win by id,
-//! deletions remove. rusqlite needs a file path, so the de-fingerprinted bytes
-//! are written to a temp file (same as kfxlib's `temp_filename`).
 
 use std::collections::HashMap;
 use std::path::Path;

@@ -1,19 +1,4 @@
 //! Additive backup of the folders a Kindle is configured to share — screenshots,
-//! logs, and whatever else `device-sync.json` lists — pulled through the
-//! [`Transport`] abstraction on every Sync, so one path covers mass-storage
-//! (KOA2 etc.) and MTP (Scribe/2024+).
-//!
-//! Each collection names the device folders to scan, the filenames to take, and
-//! whether to descend; see [`SyncCollections`] for the model and the defaults.
-//! A collection whose folder isn't on this device simply yields nothing.
-//!
-//! Additive, like the annotation sync: **Sidle never mutates the device here**.
-//! A collection's `clear_device` / `purge` are the picker's to honour on its
-//! WiFi push, where the file has just been confirmed stored; over USB we only
-//! read. What the two paths do share is the storage policy — an
-//! [`UpdatePolicy::Once`](crate::library::device_backup::UpdatePolicy) file
-//! already backed up is skipped before the read, which is the expensive part
-//! over MTP (every read re-walks the object tree from the root).
 
 use std::collections::BTreeMap;
 
@@ -38,8 +23,6 @@ pub struct MiscBackupReport {
     /// Of those, the ones from [`UpdatePolicy::Once`] collections — a file we
     /// had never seen before. What a "your sync found something" notice should
     /// count.
-    ///
-    /// [`UpdatePolicy::Once`]: crate::library::device_backup::UpdatePolicy::Once
     pub new_files: usize,
     /// The rest: files from `Always` collections, re-copied because they may
     /// have grown. A quiet sync still refreshes these, so they are not news.
@@ -54,13 +37,6 @@ impl MiscBackupReport {
 }
 
 /// Back up the connected device's configured collections into
-/// `device-backup/<serial>/` under the library root — the USB twin of the WiFi
-/// `POST /sync/misc` the picker pushes, sharing the exact same
-/// [`store_collection_file`] policy. Best-effort per file: an unreadable file or
-/// a directory the device's MTP responder doesn't expose is logged and skipped,
-/// never fatal — the annotation sync this rides along with must still succeed.
-/// Only a failure to create the local backup dir (a real local-fs problem)
-/// propagates.
 pub fn backup_device_misc(
     transport: &dyn Transport,
     serial: &str,
@@ -96,10 +72,6 @@ pub fn backup_device_misc(
 }
 
 /// Scan one device directory for `collection`, recursing when it asks for it.
-/// `rel` is the path of `dir` relative to the collection's scanned folder — the
-/// same relative path the file is stored under, so the two scanned dirs of the
-/// screenshots collection land in one flat namespace and a file present in both
-/// is stored once.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     transport: &dyn Transport,
@@ -170,10 +142,6 @@ mod tests {
     use crate::library::device_backup::SyncCollection;
 
     // Drive the backup through the mass-storage transport against a fake device
-    // tree (MTP can't be unit-tested without hardware). Confirms screenshots are
-    // pulled from BOTH `screenshots/` and the root (the KOA2 case), logs come
-    // from `logs/` only, non-matching files are ignored, and a second run is a
-    // no-op for screenshots (Once) but re-copies logs (Always).
     #[test]
     fn backs_up_the_default_collections() {
         let device = tempfile::tempdir().unwrap();

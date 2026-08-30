@@ -1,8 +1,4 @@
 //! Aozora Bunko `.txt` parser.
-//!
-//! Faithful port of `parseTxt` + `convertAozoraLine` from the aozora-epub
-//! reference tool. The HTML tool is the spec; output XHTML structure should
-//! be functionally identical.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -35,8 +31,6 @@ pub struct TocEntry {
 }
 
 // =========================================================================
-// Decoding
-// =========================================================================
 
 /// Decode Aozora source bytes: UTF-8 (with BOM detection) preferred,
 /// Shift-JIS fallback. Mirrors the HTML tool's `detectAndDecode`.
@@ -53,8 +47,6 @@ pub fn decode_bytes(bytes: &[u8]) -> Cow<'_, str> {
     s
 }
 
-// =========================================================================
-// Top-level parser
 // =========================================================================
 
 /// Parse Aozora `.txt` source into a [`Document`]. Mirrors the HTML tool's
@@ -139,16 +131,9 @@ pub fn parse_txt(text: &str) -> Document {
 }
 
 // =========================================================================
-// Body-loop state machine
-// =========================================================================
 
 /// A `字下げ` block: how far the first line of a paragraph is indented and how
 /// far the lines it wraps onto are, both in characters.
-///
-/// `［＃ここからN字下げ］` sets them equal. `折り返してM字下げ` (and its
-/// `改行天付き` variant, whose first line starts flush) makes the wrapped lines
-/// deeper — a hanging indent, which is `text-indent` measured back from the
-/// wrap depth.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Indent {
     first: u32,
@@ -163,12 +148,6 @@ impl Indent {
     /// `class`/`style` attribute text for a `<p>` carrying this indent. The
     /// stylesheet's `.indent` already means one character, so the common case
     /// needs no inline metrics.
-    ///
-    /// The offset is written as the physical `margin-top`, not the logical
-    /// `margin-inline-start`. The document is authored `vertical-rl`, where the
-    /// two are the same edge, and physical is the form both the style pipeline
-    /// and commercial vertical editions speak — a logical property is dropped
-    /// on the way to KFX, which left every 字下げ block flush on the device.
     fn attrs(&self, extra_classes: &[&str]) -> String {
         let mut classes = vec!["indent"];
         classes.extend_from_slice(extra_classes);
@@ -205,10 +184,6 @@ struct BodyState {
     /// a slot so that its `終わり` pops the right entry.
     block_styles: Vec<Option<&'static str>>,
     /// State of the currently-open `罫囲み` (ruled box). `None` when not inside
-    /// a box; `Some(first)` while a box `<p>` is open, where `first` is true
-    /// until the first line is written (so lines after it get a `<br/>`
-    /// separator). A box is ONE `<p>` whose lines are joined by `<br/>` — see
-    /// [`is_box_class`].
     box_first: Option<bool>,
     heading_id: u32,
     toc: Vec<TocEntry>,
@@ -218,14 +193,6 @@ struct BodyState {
 
 /// Class for a `［＃ここから…］` block style, or `None` when the marker names a
 /// print-layout fact that reflowable vertical text renders as ordinary text.
-///
-/// `横組み` is the latter. It records that the 底本 set a run horizontally —
-/// formulae, a Latin sentence — but a writing-mode switch is the wrong way to
-/// carry that: CSS ignores it on an inline box, and KFX does *not*, so the same
-/// markup did nothing in the EPUB while rotating whole runs 90° out of the
-/// column on the device. Commercial vertical editions of the same text set
-/// every one of these runs in the ordinary vertical flow, which is also what a
-/// Latin run does by itself under `text-orientation: mixed`.
 fn block_style_class(name: &str) -> Option<&'static str> {
     match name {
         "ゴシック体" => Some("gothic"),
@@ -238,14 +205,6 @@ fn block_style_class(name: &str) -> Option<&'static str> {
 }
 
 /// A `罫囲み`/`枠囲み` (ruled box) class. The box is emitted as ONE `<p>` whose
-/// lines are joined by `<br/>`, NOT a per-paragraph border nor a `<div>` of
-/// separate `<p>`s. Both alternatives broke Kindle: a per-paragraph border made
-/// N one-line boxes (each its own page), and a `<div>` of N `<p>` block children
-/// made the device paginate *between* the children (still one line per page).
-/// Kindle paginates between a container's block children but flows `<br/>`/`\n`
-/// line breaks *within* a single text block — so one `<p>` with `<br/>`s keeps
-/// every line together in one box. The other block styles (gothic, italic)
-/// compose fine per-paragraph and stay that way.
 fn is_box_class(cls: &str) -> bool {
     cls.starts_with("keigakomi")
 }
@@ -273,10 +232,6 @@ static BLOCK_START_RE: LazyLock<Regex> = LazyLock::new(|| {
 static BLOCK_END_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃ここで(横組み|ゴシック体|斜体|[^］]*囲み)終わり］").unwrap());
 /// `字詰め` (characters-per-line) block markers, e.g. `［＃ここから３５字詰め］`
-/// / `［＃ここで字詰め終わり］`. A fixed line length is a print-layout concept
-/// with no equivalent in reflowable text, so these carry no style — but they
-/// must be *consumed* as no-ops. Left to fall through, the stripped-empty line
-/// emitted a stray empty `<p>`.
 static JIZUME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"［＃ここから[０-９0-9]+字詰め］|［＃ここで字詰め終わり］").unwrap()
 });
@@ -287,19 +242,6 @@ static PAGE_BREAK_LINE_ONLY_RE: LazyLock<Regex> =
 static HEADING_PRECEDES_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃[大中小]見出し］").unwrap());
 /// Postfix heading marker (Aozora's *other* heading convention, not
-/// supported by the original HTML tool): `［＃「TEXT」は<大|中|小>見出し］`
-/// says the immediately-preceding `TEXT` is a heading. Common in long
-/// Aozora prose (e.g. 夏目漱石『吾輩は猫である』, 寺田寅彦『柿の種』);
-/// without this, those books produce no TOC.
-///
-/// The quoted capture is greedy (`(.+)`, not `([^」]+)`) so a heading whose
-/// own text contains a nested `「…」` still matches — e.g. 坂口安吾『不連続
-/// 殺人事件』ch.22 `二十二　「八月九日　宿命の日」`, whose annotation is
-/// `［＃「二十二　「八月九日　宿命の日」」は中見出し］`. Greedy `.+` backtracks
-/// to the final `」は…見出し］`; the `plain_text_for_heading(head) == target`
-/// guard in `process_line` stops it from over-reaching across other markup.
-/// (A non-greedy/`[^」]`-based capture stopped at the inner `」` and silently
-/// dropped such chapters from the TOC.)
 static POSTFIX_HEADING_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃「(.+)」は([大中小])見出し］").unwrap());
 static HEADING_OOMIDASHI_RE: LazyLock<Regex> =
@@ -316,9 +258,6 @@ static INDENT_SINGLE_PREFIX_RE: LazyLock<Regex> =
 static EDITORIAL_BASE_NOTE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃「[^」]*」は底本では[^］]*］").unwrap());
 /// Notes the input made about the 底本 rather than about setting: what the
-/// printed page had before Aozora corrected it, and `ママ` marking a reading
-/// left as printed. They address the reader of the source file, not the reader
-/// of the book, so they carry no markup and are removed wherever they appear.
 static EDITORIAL_NOTE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"［＃(?:ルビの)?「[^」]*」は底本では[^］]*］|［＃(?:「[^」]*」は)?ママ］").unwrap()
 });
@@ -509,12 +448,6 @@ fn process_line_inner(raw_in: &str, state: &mut BodyState) -> PendingClose {
     raw = INDENT_SINGLE_PREFIX_RE.replace_all(&raw, "").to_string();
 
     // Postfix heading form: `TEXT［＃「TEXT」は<大|中|小>見出し］`. Detect
-    // before the regular-paragraph fallback. The preceding text may carry
-    // `｜`/`《…》` ruby markup; compare against the bracketed plain form
-    // after stripping markup (via `plain_text_for_heading`), and render
-    // the raw form so `convert_aozora_line` can emit `<ruby>` inside the
-    // heading. Strict superset over the JS reference — see the
-    // `POSTFIX_HEADING_RE` doc comment.
     if let Some(caps) = POSTFIX_HEADING_RE.captures(&raw) {
         let m = caps.get(0).unwrap();
         let target = caps.get(1).unwrap().as_str().to_string();
@@ -544,9 +477,6 @@ fn process_line_inner(raw_in: &str, state: &mut BodyState) -> PendingClose {
         // Postfix annotation present but the preceding text doesn't match
         // the quoted target verbatim (rare — usually means the heading text
         // contains other markup we'd need to process first). Fall through;
-        // the inline-strip in `convert_aozora_line` will drop the marker so
-        // the heading still renders as a paragraph (matches HTML-tool
-        // behavior for this edge).
     }
 
     // Inside a `罫囲み` box: append this line to the open box `<p>`, joining
@@ -597,7 +527,6 @@ fn plain_text_for_heading(s: &str) -> String {
 
 // =========================================================================
 // Inline annotation processing (convertAozoraLine)
-// =========================================================================
 
 /// Convert one line of Aozora source to inline XHTML: ruby, gaiji, images and
 /// the inline annotations. Exposed for the parts of a document that are not
@@ -608,11 +537,6 @@ pub fn convert_line(line: &str, images: &mut Vec<String>) -> String {
 
 fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
     // Per-line fast paths. Most lines in a typical Aozora book have *no*
-    // annotation markers (`［＃`) and no gaiji marker (`※`); a meaningful
-    // fraction have ruby (`《》` ± `｜`). Gate each block on a cheap
-    // `memchr`-backed `contains` so we skip the regex passes that would
-    // find nothing anyway. Without this, every line was being scanned
-    // ~30× — the dominant cost vs V8 regex.
     let has_anno = line.contains('［');
     let has_ruby = line.contains('《');
     let has_gaiji = line.contains('※');
@@ -653,9 +577,6 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
     if has_anno {
         // Editorial notes come out before anything reads a range. They record
-        // what the 底本 printed and never wrap text, but a note landing inside
-        // a 割り注 or 傍点 range split it — every paired form stops at `［`, so
-        // the enclosing style was silently lost.
         s = re_replace_str_cow(&EDITORIAL_NOTE_RE, s, "");
 
         // --- Block-form paired annotations ---
@@ -730,10 +651,6 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         }
 
         // 割り注 — a two-line note set inline. The marker states the *setting*;
-        // the delimiters around it are the 底本's own text and are already in
-        // the source (`人形（［＃割り注］…［＃割り注終わり］）`), so adding a pair
-        // here doubled every one of them. Small type is what carries the
-        // distinction in reflowable text, matching the commercial editions.
         static WARICHU_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap());
         s = re_replace_cow(&WARICHU_RE, s, |caps| {
@@ -743,20 +660,11 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         // Strip editorial notes and heading-reference notes.
         s = re_replace_str_cow(&EDITORIAL_BASE_NOTE_RE, s, "");
         // Greedy `.*` mirrors POSTFIX_HEADING_RE so a heading-ref marker whose
-        // quoted text contains a nested `「…」` is stripped by this pass rather
-        // than left for the catch-all below. (Functionally a no-op for the
-        // catch-all already removes any leftover `［＃…］`, but keeping the two
-        // heading regexes in lockstep avoids a confusing asymmetry.)
         static HEADING_REF_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃「.*」は[大中小]見出し］").unwrap());
         s = re_replace_str_cow(&HEADING_REF_RE, s, "");
 
         // 地付き / 地からN字上げ — a signature (e.g. 坂口安吾) set to the bottom
-        // (inline-end) of its column. Wrap the rest of the line in `.chitsuki`
-        // (end-aligned) on its own line so it reads as a signature rather than
-        // running on inline. The N of 地からN字上げ (gap from the bottom) is a
-        // print-precise offset with no reflowable equivalent — recording the
-        // class is the meaningful part.
         static JIAGE_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃地から[０-９0-9]+字上げ］(.*)$").unwrap());
         s = re_replace_cow(&JIAGE_RE, s, |caps| {
@@ -778,16 +686,8 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 }
 
 // =========================================================================
-// Ruby
-// =========================================================================
 
 /// The character classes an unmarked ruby base is allowed to span.
-///
-/// Aozora only requires the explicit `｜` marker when the base does not start
-/// on a class boundary; otherwise the base is "everything back to the last
-/// character of a different class". Classes are the ones the input rules name:
-/// 漢字 (with the iteration/repetition marks that behave as kanji), ひらがな,
-/// カタカナ, and 欧字 in either width.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum RubyClass {
     Kanji,
@@ -822,20 +722,6 @@ fn ruby_class(c: char) -> RubyClass {
 }
 
 /// Replace every `《reading》` with a `<ruby>` over the base that precedes it.
-///
-/// The explicit form `｜base《reading》` states its own base. Otherwise the base
-/// is found by walking backwards: over an element when one ends there, over a
-/// `〔…〕` accent-decomposition group, or over the run of same-class characters.
-/// A base that cannot be identified leaves the `《…》` untouched rather than
-/// guessing.
-///
-/// A base that is an element rather than text is a glyph with no character to
-/// stand for it (梵字, ヘブライ文字), which reaches the reader as an `<img/>`.
-/// Ruby cannot ride on it: KFX annotates a character range within a text run,
-/// an image occupies no range there, and the reading would reach the EPUB and
-/// vanish from the KFX. It goes into the image's description instead, where
-/// both formats keep it — which is also how commercial vertical editions set
-/// these glyphs.
 fn apply_ruby(s: Cow<'_, str>) -> Cow<'_, str> {
     if !s.contains('《') {
         return s;
@@ -887,9 +773,6 @@ fn apply_ruby(s: Cow<'_, str>) -> Cow<'_, str> {
 }
 
 /// Record a reading on the element that would have been its ruby base, by
-/// adding it to the image's `alt`. The annotation's own prose often already
-/// names the reading (`底本が「ラン」とルビを付した梵字`), so it is only appended
-/// when the description does not already carry it.
 fn fold_reading_into_alt(base: &str, reading: &str) -> String {
     let Some(alt_start) = base.find(r#" alt=""#).map(|i| i + r#" alt=""#.len()) else {
         return base.to_string();
@@ -964,10 +847,6 @@ fn escape_xml_lazy(s: &str) -> Cow<'_, str> {
 }
 
 /// Wrap `Regex::replace_all` so the result threads through a `Cow<str>`.
-/// When no match: input is returned unchanged (no allocation). When there
-/// is a match: the closure produces the replacement and `replace_all`
-/// allocates once for the whole pass. Either way we keep ownership of
-/// the previous `Cow` so the next pass can read from it cheaply.
 fn re_replace_cow<'a>(
     re: &Regex,
     s: Cow<'a, str>,
@@ -1061,8 +940,6 @@ fn parse_zenkaku_int(s: &str) -> Option<u32> {
 }
 
 // =========================================================================
-// Postfix annotations
-// =========================================================================
 
 /// Map of `key` suffix → `(open_tag_inner, close_tag_name)` for postfix
 /// annotations `［＃「text」に<key>］` / `［＃「text」は<key>］`. The pair
@@ -1116,9 +993,6 @@ fn apply_postfix_annotations(s: &str) -> String {
         // Remove the annotation.
         out.replace_range(start..end, "");
         // Walk backward in the truncated buffer for the immediately-preceding
-        // occurrence of `target` (plain text — may incidentally match inside
-        // an HTML attribute value, but the HTML tool ships with the same
-        // limitation and we preserve byte-level parity).
         let head = &out[..start];
         if let Some(target_idx) = head.rfind(&target) {
             let replacement = format!("<{}>{}</{}>", open_inner, target, close_name);
@@ -1128,8 +1002,6 @@ fn apply_postfix_annotations(s: &str) -> String {
     out
 }
 
-// =========================================================================
-// Tests
 // =========================================================================
 
 #[cfg(test)]
@@ -1249,7 +1121,6 @@ mod tests {
         // A glyph with no character to stand for it arrives as an image. Ruby
         // cannot ride on an image through KFX, so the reading is recorded on
         // the image rather than emitted as markup that only one output keeps.
-        // The raw `《…》` must not survive either way.
         let mut imgs = Vec::new();
         let out = convert_aozora_line(
             "ヘブライ文字の［＃ヘブライ文字「YOD」（fig24.png、横15×縦23）入る］《ヨッド》まで",
@@ -1358,9 +1229,6 @@ mod tests {
     #[test]
     fn yokogumi_stays_in_the_vertical_flow() {
         // The marker records that the 底本 set the run horizontally. Carrying
-        // that as a writing-mode switch is inert on an inline box in CSS but
-        // live in KFX, where it rotates the run out of the column; commercial
-        // vertical editions set these runs in the ordinary flow.
         let src = "T\nA\n\n-------\n式は［＃横組み］犯人＋Ｘ［＃横組み終わり］だ\n［＃ここから横組み］\n段落［＃ここで横組み終わり］\n後\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;
@@ -1392,10 +1260,6 @@ mod tests {
     #[test]
     fn keigakomi_block_is_one_paragraph_with_breaks() {
         // A 罫囲み (ruled box) block is ONE `<p>` whose lines are joined by
-        // `<br/>` — a single bordered text block. Per-paragraph borders made N
-        // full-page boxes on Kindle; a `<div>` of N `<p>`s made the device
-        // paginate between the children (one line per page). One `<p>` keeps
-        // every line in one box. Mirrors 坂口安吾『不連続殺人事件』ch.1.
         let src = "T\nA\n\n-------\n前\n［＃ここから罫囲み］\n一行目\n二行目\n三行目\n［＃ここで罫囲み終わり］\n後\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;

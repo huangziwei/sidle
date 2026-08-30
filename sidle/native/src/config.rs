@@ -63,9 +63,6 @@ pub fn parse(raw: &str) -> Result<ServerConfig> {
 
 /// `raw` with its `HOST=` value replaced by `host`, appended when `raw` carries
 /// no `HOST=` line.
-///
-/// Every other line copies through: `TOKEN=` and `SERIAL=` have no second
-/// source on this device.
 pub fn set_host(raw: &str, host: &str) -> String {
     let mut out = String::with_capacity(raw.len() + host.len());
     let mut replaced = false;
@@ -87,8 +84,6 @@ pub fn set_host(raw: &str, host: &str) -> String {
 
 /// [`set_host`]'s result at `path`, through a sibling `.tmp` and a `rename(2)`
 /// within the one `/mnt/us` mount.
-///
-/// A partially written `path` names no reachable server.
 pub fn save_host(path: &Path, host: &str) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut tmp = path.as_os_str().to_owned();

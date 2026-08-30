@@ -1,15 +1,4 @@
 //! Which note belongs to which highlight.
-//!
-//! A Kindle stores a highlight and a note as two independent records — separate
-//! lists in the sidecar's annotation cache — and groups them for display by
-//! span. Sidle stores them as separate rows for the same reason, so every record
-//! round-trips to the row it came from, and works out the grouping here.
-//!
-//! Deriving the attachment rather than storing it is deliberate: the device
-//! re-derives it on every render from the spans alone, so a stored parent link
-//! would be a second source of truth that could disagree with the file. There is
-//! nothing to migrate, nothing to keep in sync, and a note whose highlight is
-//! deleted simply stops being attached.
 
 use super::db::AnnotationRow;
 
@@ -27,12 +16,6 @@ fn end(a: &AnnotationRow) -> Option<(i64, i64)> {
 }
 
 /// Whether `note` sits inside `hl`.
-///
-/// Comparison is on `(element, offset)` pairs, which is what the sidecar
-/// addresses with and therefore the same basis the device groups on. A note the
-/// Kindle attaches to a highlight is a **zero-length point at the highlight's
-/// end anchor**, so containment has to be inclusive at both ends — an exclusive
-/// end would reject exactly the shape the device produces.
 fn contains(hl: &AnnotationRow, note: &AnnotationRow) -> bool {
     let (Some(hs), Some(he)) = (start(hl), end(hl)) else {
         return false;
@@ -54,11 +37,6 @@ fn width(a: &AnnotationRow) -> (i64, i64) {
 }
 
 /// For each note in `rows`, the id of the highlight it annotates.
-///
-/// Returns `(note_id, highlight_id)` pairs; a note enclosed by no highlight is
-/// absent, and stands on its own as a free-floating annotation. When several
-/// highlights enclose a note the tightest wins, with the lowest id breaking a
-/// tie, so the answer never depends on row order.
 pub fn attachments(rows: &[AnnotationRow]) -> Vec<(i64, i64)> {
     let highlights: Vec<&AnnotationRow> = rows.iter().filter(|r| r.kind == "highlight").collect();
     rows.iter()

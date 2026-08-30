@@ -1,27 +1,5 @@
 //! PDF page rasterization + text extraction via **Apple PDFKit / Core Graphics**
 //! — the system engine Preview uses. No bundled `libpdfium`: we call the OS.
-//!
-//! Two jobs, one engine:
-//! - **Page images** ([`render_pdf_page_jpeg`] / [`render_pdf_page_png`]):
-//!   `PDFPage.draw(with:to:)` into a Core Graphics bitmap context → JPEG/PNG.
-//!   This is exactly Preview's "export page as image". It renders the book's
-//!   **cover** (page 1 — the one thing we do that Amazon's cover-less PDOC
-//!   doesn't), backs the fixed-layout reader, and is how the editor exports
-//!   pages: a PDF page *is* an image, so this is the only honest way to get one
-//!   out — it shows the page, not merely the largest thing drawn on it, and it
-//!   works whatever the page's images are encoded with (JPEG 2000, CCITT and
-//!   JBIG2 all render, and none of them have a decoder in this codebase).
-//! - **Text layer** ([`extract_pdf_text`]): `PDFPage.string` +
-//!   `characterBounds(at:)` give Unicode + per-glyph boxes — Apple's Core Text
-//!   does the font/encoding/CMap work — which the KFX emit path turns into the
-//!   invisible, selectable text storylines.
-//!
-//! macOS-only by design (`cfg(target_os = "macos")`): non-macOS builds don't
-//! rasterize (the Kindle never *converts* — conversion is always Mac-side),
-//! and a future Linux build would slot Poppler (`poppler_page_get_text_layout` =
-//! the same per-char boxes) behind these same two functions. Every other target
-//! gets an `Unavailable` stub, and the emit path treats that as "no cover / no
-//! text layer", never a failed conversion.
 
 use std::fmt;
 
@@ -34,16 +12,6 @@ pub const COVER_TARGET_WIDTH_PX: u32 = 1000;
 pub const COVER_JPEG_QUALITY: u8 = 85;
 
 /// One PDF page's extracted text as positioned runs — the **invisible,
-/// selectable overlay** the device draws over the rendered page image. This is
-/// how Amazon's PDF→KFX makes a "fixed-layout" page's text *live*
-/// (select / search / dictionary / highlight) rather than a flat picture: each
-/// run is laid out at a fixed position with `visibility: false`, so the reader
-/// hit-tests against it while showing the crisp PDF glyphs underneath.
-///
-/// All geometry is in **points × 100** (the KFX fixed-layout unit), with a
-/// **top-left origin and Y increasing downward** — the same space as the page
-/// storyline's `fixed_width`/`fixed_height`. PDFKit's native page space (points,
-/// bottom-left origin, Y up) is flipped during extraction.
 #[derive(Debug, Clone, Default)]
 pub struct PageText {
     /// Text runs (≈ visual lines), in reading order.
@@ -73,8 +41,6 @@ pub struct TextRun {
 /// One `style_events` entry: a `[offset, offset+length)` slice of the run's
 /// `content` with its rendered `width` (pt×100). Offsets/lengths are **UTF-16
 /// code units** (KFX's string-indexing convention — and PDFKit's native unit).
-/// `is_word` marks a word (Amazon's `model: word`) versus an inter-word run of
-/// whitespace (no model).
 #[derive(Debug, Clone)]
 pub struct StyleSeg {
     pub offset: usize,
@@ -109,8 +75,6 @@ impl std::error::Error for RenderError {}
 
 /// Render one PDF page to a JPEG, scaled to `target_width_px` wide (height
 /// follows the page aspect). `page_index` is 0-based; `quality` is 1..=100.
-/// Returns the JPEG bytes, or a [`RenderError`] the caller downgrades to
-/// "no cover".
 #[cfg(target_os = "macos")]
 pub fn render_pdf_page_jpeg(
     pdf_bytes: &[u8],
@@ -123,10 +87,6 @@ pub fn render_pdf_page_jpeg(
 
 /// Render one PDF page to a PNG — the lossless counterpart of
 /// [`render_pdf_page_jpeg`], sharing its rasterizer.
-///
-/// Worth the (much) larger file for a page of text or line art, where JPEG rings
-/// around every glyph edge. A scanned page, already JPEG inside the PDF, gains
-/// nothing from it.
 #[cfg(target_os = "macos")]
 pub fn render_pdf_page_png(
     pdf_bytes: &[u8],
@@ -164,10 +124,6 @@ pub fn render_pdf_page_jpeg(
 }
 
 /// Extract every page's selectable text layer from the PDF, in page order.
-///
-/// Returns one [`PageText`] per page (empty `runs` for a page with no
-/// extractable text — e.g. a scanned/image-only page). A whole-document
-/// [`RenderError`] lets the caller ship an embed-only, visual-only KFX.
 #[cfg(target_os = "macos")]
 pub fn extract_pdf_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
     macos::extract_text(pdf_bytes)
@@ -221,16 +177,8 @@ mod macos {
             let page = unsafe { doc.pageAtIndex(page_index) }
                 .ok_or_else(|| RenderError::Render(format!("no page {page_index}")))?;
             // The MediaBox is the page a viewer shows (= Preview): its origin may be
-            // non-zero, and content/marks outside it (a press PDF's bleed + trim
-            // marks) are clipped, which is what we want. Amazon's KFX text layer
-            // measures from the MediaBox origin too (verified: a glyph at absolute
-            // x=72 on a page with MediaBox `[9 9 441 657]` is stored at 63), so the
-            // overlay lines up when we draw the MediaBox origin-relative.
             let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
             // `boundsForBox` reports the page's own box, *un*rotated, while
-            // `drawWithBox` draws the page as displayed — so a quarter-turn page
-            // must be measured with its axes swapped or the drawing lands outside
-            // the bitmap entirely.
             let (mut pw, mut ph) = (bounds.size.width, bounds.size.height);
             if quarter_turns(&page) % 2 == 1 {
                 std::mem::swap(&mut pw, &mut ph);
@@ -268,13 +216,6 @@ mod macos {
             let ctx: &CGContext = &ctx_owned;
 
             // Scale points → pixels. `drawWithBox(MediaBox)` already maps the
-            // displayed MediaBox's lower-left to the context origin (so a
-            // non-(0,0) MediaBox origin is handled by PDFKit) and clips to the
-            // MediaBox — exactly Preview's output, so a press PDF's bleed/trim
-            // marks outside the MediaBox don't render. Do NOT also translate by
-            // the origin: that double-subtracts it, shifting the page left/up off
-            // the bitmap. `extract_text` maps glyph boxes into the same displayed
-            // space, so the overlay spans line up with the rendered glyphs.
             CGContext::scale_ctm(Some(ctx), scale, scale);
             unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) };
             drop(ctx_owned); // flush + release before we read `buf`
@@ -359,14 +300,6 @@ mod macos {
     fn extract_page(page: &PDFPage) -> PageText {
         let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
         // KFX positions are measured from the **MediaBox** top-left, Y down —
-        // matching Amazon's S2K text layer (on a page with MediaBox
-        // `[9 9 441 657]`, a glyph at absolute x=72 is stored at 63 = 72−9, and a
-        // line at absolute y=384 at top 263 = (9+648)−384).
-        //
-        // `characterBoundsAtIndex` reports the page's own space, ignoring
-        // `/Rotate`, so every glyph box is mapped into displayed space below
-        // before anything reads it. Line grouping then works on what the reader
-        // sees: a sideways-drawn page reads as horizontal lines once turned.
         let turns = quarter_turns(page);
         let (x0, y0) = (bounds.origin.x as f32, bounds.origin.y as f32);
         let (bw, bh) = (bounds.size.width as f32, bounds.size.height as f32);
@@ -380,10 +313,6 @@ mod macos {
             None => return PageText::default(),
         };
         // PDFKit's `string` inserts line/fragment separators (\n, \r) that the
-        // `characterBoundsAtIndex` index space does NOT contain — leaving them in
-        // drifts the glyph↔bounds alignment by one per line. Drop them so
-        // `utf16[i]` lines up with `characterBoundsAtIndex(i)`; visual lines are
-        // recovered from geometry below, and real inter-word spaces are kept.
         let utf16: Vec<u16> = text
             .encode_utf16()
             .filter(|&u| u != 0x000A && u != 0x000D)
@@ -491,15 +420,6 @@ mod macos {
             // A word's width is its own ink extent; a space's width is the gap
             // between the neighbouring words (PDFKit gives spaces no ink box, so
             // their advance has to come from the surrounding glyphs).
-            //
-            // Amazon also emits a `left` kerning correction on a segment whose
-            // start disagrees with the widths that precede it, on well under
-            // 0.1% of segments. Deliberately not reproduced: the obvious rule —
-            // derive it from the gap between the running pen and the glyph's
-            // ink — fires on roughly one segment in six, two orders of magnitude
-            // too often, so it is not the rule Amazon uses. A wrong correction
-            // drags every later word's hit box off its glyphs, which is worse
-            // than omitting a rare one.
             let mut words: Vec<StyleSeg> = Vec::with_capacity(segs.len());
             for (k, s) in segs.iter().enumerate() {
                 let width = if !s.space && s.r > s.l {
@@ -528,13 +448,6 @@ mod macos {
             }
 
             // Amazon ends every run with a space, folded into the final word's
-            // segment ("Anthropological " as one 16-unit word), and a run that is
-            // the whole of a short page gets one too. It is the line separator
-            // made explicit: without it the last word of a line and the first of
-            // the next are adjacent in the position axis, so the word iterator
-            // runs them together and each line costs one reading position less
-            // than Amazon's — measured as a 2-position shortfall per page on a
-            // two-line page.
             let mut content = content;
             if !content.ends_with(char::is_whitespace) {
                 content.push(' ');
@@ -556,10 +469,6 @@ mod macos {
 
         // Group units into visual lines by VERTICAL OVERLAP: a char whose whole
         // box sits below the current line's lowest point starts a new (lower)
-        // line. This is robust to descenders (which dip the bottom but keep their
-        // top within the line) where a baseline-jump threshold over-splits. Run
-        // granularity only needs to track lines — selection/search read the
-        // per-word geometry above, not run boundaries.
         let mut runs: Vec<TextRun> = Vec::new();
         let mut cur: Vec<Unit> = Vec::new();
         let mut line_bottom: Option<f32> = None;
@@ -590,9 +499,6 @@ mod macos {
 #[cfg(test)]
 mod tests {
     /// Assemble a one-page PDF with the given MediaBox and `/Rotate`, drawing a
-    /// short line of Helvetica text near the page's lower left. Object offsets
-    /// and the xref table are computed as the objects are appended, so the file
-    /// is well-formed for any reader.
     fn one_page_pdf(media: [i32; 4], rotate: i64) -> Vec<u8> {
         let content = "BT /F1 24 Tf 40 30 Td (Hi) Tj ET\n";
         let objects: Vec<String> = vec![
@@ -656,12 +562,6 @@ mod tests {
     }
 
     /// The rendered page and the text overlay must agree on a rotated page:
-    /// PDFKit draws the page as displayed but reports both its box and its glyph
-    /// boxes unrotated, so the raster is sized from the turned extents and the
-    /// glyph boxes are mapped into the same space.
-    ///
-    /// The assertion is alignment rather than fixed numbers: the one run's box,
-    /// scaled into raster pixels, must land on the ink the rasterizer drew.
     #[cfg(target_os = "macos")]
     #[test]
     fn rotated_page_overlay_lands_on_the_rendered_ink() {

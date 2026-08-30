@@ -1,8 +1,6 @@
 //! KFX container serialization.
 //!
 //! Handles the binary format for KFX containers and entities.
-//! This module provides functions to serialize KFX fragments into
-//! the container format that Kindle devices can read.
 
 use super::fragment::{FragmentData, KfxFragment};
 use super::ion::{IonValue, IonWriter};

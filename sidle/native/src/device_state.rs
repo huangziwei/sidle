@@ -1,14 +1,4 @@
 //! Device-side state derived from `/mnt/us/documents/Sidle/` contents.
-//!
-//! The picker filters its grid to "books not on this Kindle." Source of
-//! truth for "is it on this Kindle" is the download dir, where every
-//! file we ever wrote lives as `<base>.<sha8>.kfx`. We scan the dir,
-//! parse the sha8 out of each filename, and hand `main.rs` a `HashSet`
-//! to filter against.
-//!
-//! Missing dir → empty set. That's first-ever-launch (we haven't created
-//! `/mnt/us/documents/Sidle/` yet) and also the dev-box path where the
-//! dir genuinely doesn't exist. Not an error.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,9 +6,6 @@ use std::path::Path;
 use crate::api::SHA_INFIX_LEN;
 
 /// Read `dir` and return the sha8 prefix of every `<base>.<sha8>.kfx`
-/// file found. Files that don't match the shape (legacy downloads,
-/// manual sideloads, the Kindle indexer's `.sdr` companion dirs) are
-/// silently skipped.
 pub fn scan_downloaded_shas(dir: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -37,10 +24,6 @@ pub fn scan_downloaded_shas(dir: &Path) -> HashSet<String> {
 }
 
 /// Every on-device `<base>.<sha8>.kfx` filename (not the sha8 — the whole
-/// name), for the in-place update pass ([`crate::updates`]), which matches each
-/// to a library book and overwrites it under its existing name when the server
-/// has a newer revision. Non-`.kfx` entries (`.sdr` dirs, `.part` temporaries,
-/// sideloads) are skipped. Missing dir → empty.
 pub fn scan_downloaded_files(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

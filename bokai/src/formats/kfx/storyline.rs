@@ -1,21 +1,4 @@
 //! KFX storyline parsing and IR building.
-//!
-//! This module handles bidirectional conversion between KFX storyline
-//! structures and bokai's IR, using a schema-driven approach:
-//!
-//! Import: Ion → TokenStream → IR
-//! Export: IR → TokenStream → Ion
-//!
-//! ## Key Design: Generic Interpreter
-//!
-//! The interpreter is completely generic - it knows nothing about KFX semantics.
-//! All mapping logic is driven by the schema:
-//!
-//! 1. Read element type symbol ID
-//! 2. Fetch Strategy from schema
-//! 3. Execute Strategy to determine role
-//! 4. Extract ALL attributes using schema's AttrRules
-//! 5. Apply transformers to convert values
 
 use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::{SymbolTable, get_field};
@@ -50,8 +33,6 @@ macro_rules! sym {
     };
 }
 
-// ============================================================================
-// IMPORT: Ion → TokenStream → IR
 // ============================================================================
 
 /// Tokenize a KFX storyline into a flat token stream for the stack builder.
@@ -121,7 +102,6 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         .unwrap_or(sym!(Container)) as u32;
 
     // Use schema to resolve role with attribute lookup closure
-    // Return int values directly, or symbol IDs cast to i64 for symbol-based attributes
     let mut role = schema().resolve_element_role(kfx_type_id, |symbol| {
         get_field(fields, symbol as u64)
             .and_then(|v| v.as_int().or_else(|| v.as_symbol().map(|s| s as i64)))
@@ -150,7 +130,6 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     }
 
     // Check for span indicators on elements (e.g., link_to → Link)
-    // This enables standalone Link elements to be recognized
     if let Some(override_role) =
         schema().check_span_role_override(|sym| get_field(fields, sym as u64).is_some())
     {
@@ -598,7 +577,6 @@ where
 
 // ============================================================================
 // Token Stream → IR (Stack-based builder)
-// ============================================================================
 
 /// Pending style_events of an open interleave element, whose text arrives as
 /// bare-string runs in `content_list`. `cursor` holds the event-offset
@@ -1811,8 +1789,6 @@ fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
 }
 
 // ============================================================================
-// Helper functions
-// ============================================================================
 
 /// Resolve a value that could be either a symbol or string.
 fn resolve_symbol_or_string(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
@@ -1821,7 +1797,6 @@ fn resolve_symbol_or_string(value: &IonValue, symbols: &SymbolTable) -> Option<S
 
 // ============================================================================
 // High-level API (used by KfxImporter)
-// ============================================================================
 
 /// Parse a storyline and build its IR in one step. `anchors` resolves an
 /// external link's `anchor_name` → uri, `styles` a `style_name` → its
@@ -1842,8 +1817,6 @@ where
     build_ir_from_tokens_anchored(&tokens, symbols, styles, anchor_table, content_lookup)
 }
 
-// ============================================================================
-// EXPORT: IR → TokenStream → Ion
 // ============================================================================
 
 use crate::formats::kfx::context::ExportContext;
@@ -1932,7 +1905,6 @@ fn walk_node_for_export(
     }
 
     // Text nodes: emit just the text, not a container
-    // Text nodes are leaf nodes that contain the actual string data
     if node.role == Role::Text {
         if !node.text.is_empty() {
             let text = chapter.text(node.text);
@@ -1956,14 +1928,12 @@ fn walk_node_for_export(
     }
 
     // Break nodes: emit a newline character
-    // KFX represents <br> as \n within text content, not as separate elements
     if node.role == Role::Break {
         stream.push(KfxToken::Text("\n".to_string()));
         return;
     }
 
     // Definition lists: group dt+dd pairs into wrapper elements
-    // HTML has dt/dd as flat siblings, but KFX needs them grouped for float to work
     if node.role == Role::DefinitionList {
         emit_definition_list(chapter, node_id, sch, ctx, stream);
         return;
@@ -2039,7 +2009,6 @@ fn walk_node_for_export(
     }
 
     // SCHEMA-DRIVEN attribute export
-    // Create a closure to get semantic values by target
     let export_ctx = crate::formats::kfx::transforms::ExportContext {
         spine_map: None,
         resource_registry: Some(&ctx.resource_registry),
@@ -2213,8 +2182,6 @@ fn collect_column_format(
         .collect()
 }
 
-// ============================================================================
-// Inline content flattening
 // ============================================================================
 
 // Nested inline elements (Link, Inline, Text) become flat KFX style_events,
@@ -2614,7 +2581,6 @@ fn emit_definition_list(
             stream.push(KfxToken::StartElement(wrapper_elem));
 
             // Emit the dt as a Container (with float:left style)
-            // Use DefinitionTerm role since it maps to KfxSymbol::Container
             let dt_style = ctx.register_style_id_with_hint(
                 child.style,
                 &chapter.styles,
@@ -2684,7 +2650,6 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
     let mut stack: Vec<IonBuilder> = vec![IonBuilder::new()];
 
     // Span stack: (start_byte_offset, SpanStart info)
-    // Offset/length for style_events
     let mut span_stack: Vec<(usize, SpanStart)> = Vec::new();
 
     for token in tokens {
@@ -2833,7 +2798,6 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     ctx.record_content_id(inner_id);
 
                     // Inner element uses default style (minimal, no borders)
-                    // This matches KPR behavior where inner text has separate style
                     let inner_style = ctx.cite_default_style();
                     inner_fields.push((sym!(Style), IonValue::Symbol(inner_style)));
 
@@ -2872,7 +2836,6 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     }
 
                     // Style reference - use per-element style if available, else default
-                    // Required for text rendering on Kindle
                     let style_sym = match elem.style_symbol {
                         Some(sym) => sym,
                         None => ctx.cite_default_style(),
@@ -2923,7 +2886,6 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     }
 
                     // Add layout_hints based on element role and semantics
-                    // This affects Kindle's rendering behavior for headings, figures, and captions
                     let layout_hint = match elem.role {
                         // Headings (h1-h6) → treat_as_title
                         Role::Heading(_) => Some(KfxSymbol::TreatAsTitle),
@@ -3025,18 +2987,15 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
             }
             KfxToken::Text(text) => {
                 // Append text to the current element's accumulated content
-                // This ensures all text within an element is concatenated
                 if let Some(current) = stack.last_mut() {
                     current.append_text(text);
                 }
             }
             KfxToken::StartSpan(span) => {
                 // Push the span onto the stack with current text offset
-                // The offset is relative to the current element's accumulated text
                 let current_offset = stack.last().map(|b| b.text_len()).unwrap_or(0);
 
                 // Create anchor for inline elements with IDs or that are link/TOC targets
-                // For elements inside container wrappers, use the outer container's ID
                 if let Some(node_id) = span.node_id
                     && let Some(parent) = stack.last()
                 {
@@ -3100,7 +3059,6 @@ struct IonBuilder {
     /// Accumulated text content for this element (concatenated during build)
     accumulated_text: String,
     /// Character count of accumulated text (for style event offsets)
-    /// KFX uses character offsets, not byte offsets
     accumulated_char_count: usize,
     /// Collected style events for this element (inline spans)
     style_events: Vec<IonValue>,
@@ -3265,7 +3223,6 @@ impl IonBuilder {
     /// Finalize and build the Ion struct, creating content reference if text was accumulated.
     fn build(mut self, ctx: &mut ExportContext) -> IonValue {
         // KFX storylines are flat lists of elements, not nested structs
-        // Each element is a struct with type, content reference, and possibly nested content_list
         if !self.fields.is_empty() {
             // The content id's text length in characters, which is what
             // location_map divides by. An inline image occupies an offset-space
@@ -3299,7 +3256,6 @@ impl IonBuilder {
 
             // If this element has accumulated text, create ONE content reference
             // Skip if the only content is zero-width spaces (anchor markers from empty ID elements)
-            // These interfere with image display when mixed with image children
             let has_real_text = self.accumulated_text.chars().any(|c| c != '\u{200B}');
 
             // §7.4 — an element states `content` or `content_list`, never both.
@@ -3836,8 +3792,6 @@ mod tests {
         assert_eq!(chapter.semantics.alt(node_id), Some("An image"));
     }
 
-    // ========================================================================
-    // Export tests
     // ========================================================================
 
     #[test]
@@ -4650,7 +4604,6 @@ mod tests {
     #[test]
     fn test_heading_with_border_exports_as_container() {
         // Test that elements with borders are wrapped in type: container
-        // with nested type: text for KFX border rendering
         use crate::style::{BorderStyle, ComputedStyle, Length};
 
         let mut chapter = Chapter::new();
@@ -5152,7 +5105,6 @@ mod tests {
         let inline_style = chapter.styles.intern(inline_computed);
 
         // Build tree: Link > Inline > Text("1.") + Text(" Easy")
-        // Create text nodes
         let text1_range = chapter.append_text("1.");
         let mut text1 = Node::new(Role::Text);
         text1.text = text1_range;
@@ -5300,7 +5252,6 @@ mod tests {
         chapter.append_child(h2_id, text_id);
 
         // Add an inline span with an ID (like <span id="p6"/>)
-        // This simulates how EPUB anchors are often placed
         let span_node = Node::new(Role::Inline);
         let span_id = chapter.alloc_node(span_node);
         chapter.append_child(h2_id, span_id);
@@ -5327,7 +5278,6 @@ mod tests {
         let (fragment_id, _offset) = anchor_pos.unwrap();
 
         // Get the list of content IDs recorded for this chapter
-        // Container wrapper creates 2 content IDs: outer container and inner text
         let content_ids = ctx.content_ids_by_chapter.get(&chapter_id);
         assert!(
             content_ids.is_some(),

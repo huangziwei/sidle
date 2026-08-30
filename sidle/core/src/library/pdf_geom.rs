@@ -1,19 +1,4 @@
 //! Cached per-page anchor geometry for a PDF-backed (fixed-layout) KFX: the
-//! eid→page map and each page's box size — the *only* things ink import needs
-//! from the host KFX (to place a `handwritten_note` anchor on a page and crop
-//! the overlay to the page box).
-//!
-//! Deriving this means a full [`bokai::formats::kfx::pdf_pages::page_text_layer`]
-//! parse: for a
-//! ~15 MB PDF KFX that's ~0.5 s (release) / ~1.4 s (debug) — the same
-//! heavyweight Ion container parse the reader pays on open and caches per
-//! session. Ink sync used to run it for *every* drawn book on *every* connect,
-//! under the DB lock, which is what made one "sync annotations" take seconds
-//! (the actual nbk→SVG decode is ~6 ms next to it). The geometry is a pure
-//! function of the KFX bytes — immutable per `kfx_sha256` — so we cache it as a
-//! derived-asset sidecar keyed by that
-//! sha: computed once (warmed at conversion, see the worker), read as a few-KB
-//! JSON on every sync thereafter.
 
 use std::path::Path;
 
@@ -23,10 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::library::LibraryPaths;
 
 /// One page's anchor geometry. `eids` is the union of the page's text-run eids
-/// and its structural eids (image / container / page_template) — the same set
-/// the reader's `buildPdfEidIndex` registers, so an anchor eid resolves to the
-/// same page in both. No word text/positions: ink anchoring needs only which
-/// page an eid is on plus the box to align the overlay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageGeom {
     /// Page box width in points (the box the overlay crop is relative to).
@@ -94,9 +75,6 @@ pub fn write_sidecar(
 }
 
 /// The per-page geometry for a host KFX: the cached sidecar if it's for the
-/// current `kfx_sha` (a reconversion changes the sha → stale → recompute),
-/// otherwise parsed from the KFX file and cached for next time. Empty if the
-/// KFX is unreadable.
 pub fn ensure(
     paths: &LibraryPaths,
     book_sha: &str,

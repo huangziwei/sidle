@@ -1,12 +1,4 @@
 //! Per-notebook symbol resolution.
-//!
-//! An `.nbk`'s `$ion_symbol_table` fragment imports `YJ_symbols` (with some
-//! `max_id`) and then defines local `nmdl.*` symbols. Ion assigns the first
-//! local symbol id = `1 + 9 (ion system) + sum(import.max_id)`. That base is
-//! per-file (the real notebooks import `YJ_symbols` `max_id=816` → base 826),
-//! so bokai's fixed `KFX_SYMBOL_TABLE`-length offset (852) can't be reused for
-//! locals. Structural YJ symbols ($146/$159/$176/$260/…) are < the base and
-//! resolve straight from `KFX_SYMBOL_TABLE`.
 
 use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::symbols::{KFX_SYMBOL_TABLE, symbol_name};

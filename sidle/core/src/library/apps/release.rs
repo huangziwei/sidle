@@ -1,14 +1,4 @@
 //! An app from a GitHub release.
-//!
-//! Every repo in the fleet publishes the same pair: a zip whose entries are
-//! paths under `/mnt/us`, and a `.sha256` beside it. That is the whole bundle
-//! format — the tree a checkout holds, packed.
-//!
-//! [`fetch`] takes the pair, checks the bundle against its sidecar, and unpacks
-//! it under [`LibraryPaths::app_release_dir`], where [`super::discover`] reads
-//! it exactly as it reads a repo. A release is what makes a version a thing
-//! that exists apart from a working tree, and what puts the fleet on a machine
-//! that never built any of it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

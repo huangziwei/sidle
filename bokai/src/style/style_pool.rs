@@ -7,7 +7,6 @@ use super::types::{ComputedStyle, StyleId};
 /// SoA style pool for efficient storage and deduplication.
 ///
 /// Styles are interned: identical styles share the same StyleId.
-/// This is memory-efficient when many elements share the same style.
 #[derive(Clone)]
 pub struct StylePool {
     /// All unique styles.
@@ -38,7 +37,6 @@ impl StylePool {
     /// Intern a style, returning its StyleId.
     ///
     /// If an identical style already exists, returns the existing ID.
-    /// Otherwise, allocates a new style and returns its ID.
     pub fn intern(&mut self, style: ComputedStyle) -> StyleId {
         if let Some(&id) = self.intern_map.get(&style) {
             return id;
@@ -66,11 +64,6 @@ impl StylePool {
     }
 
     /// Rewrite every style in place, keeping each one's `StyleId`.
-    ///
-    /// Ids are positional and nodes hold them, so entries are edited where
-    /// they sit rather than re-interned. A rewrite can make two entries
-    /// equal; the dedup map is rebuilt so later interning still finds one of
-    /// them, and the duplicate simply stays unreferenced.
     pub fn rewrite<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut ComputedStyle),

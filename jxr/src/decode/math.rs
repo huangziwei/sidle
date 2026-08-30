@@ -1,11 +1,4 @@
 //! JPEG-XR integer transform / overlap-filter primitives.
-//!
-//! Direct port of the bottom of `jxr_image.py` (lines ~2200-2545). Same
-//! function names so the math can be cross-referenced against the spec.
-//!
-//! All values are `i32`. Python's arbitrary-precision ints don't actually
-//! grow large here — the JXR spec works in fixed precision and rounds via
-//! right-shift, which we match with arithmetic right shift.
 
 #![allow(non_snake_case)]
 

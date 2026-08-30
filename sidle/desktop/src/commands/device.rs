@@ -463,9 +463,6 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
 /// The mount tree the fleet should have: the built-in tree plus every app
 /// registered in the library. `stage_binary` puts the cross-built picker into
 /// that tree at the path it installs to.
-///
-/// `dist::refresh` re-describes the composed plan in `device-dist/` on the way
-/// out. A warm call is one stat per file and writes nothing.
 pub async fn compose_plan(
     state: &AppState,
     source: &deploy::DeploySource,

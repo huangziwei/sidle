@@ -1,7 +1,4 @@
 //! LAN search for sidle-server.
-//!
-//! [`find_server`] sweeps this Kindle's subnet on the server port and offers
-//! each open address to a CA-pinned probe.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Mutex;
@@ -25,9 +22,6 @@ const SWEEP_STACK: usize = 64 * 1024;
 const MIN_PREFIX: u32 = 24;
 
 /// This Kindle's IPv4 on the interface holding the default route.
-///
-/// `connect` on a `UdpSocket` fixes the route and sends nothing; `local_addr`
-/// names the outbound interface's address.
 pub fn local_ipv4() -> Option<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     // TEST-NET-3 (RFC 5737), unrouted.
@@ -39,9 +33,6 @@ pub fn local_ipv4() -> Option<Ipv4Addr> {
 }
 
 /// An address from a [`ROUTE_TABLE`] hex field.
-///
-/// The four bytes are host byte order: the leading hex pair is the last octet
-/// on every little-endian target.
 fn hex_ipv4(field: &str) -> Option<Ipv4Addr> {
     if field.len() != 8 {
         return None;
@@ -53,9 +44,6 @@ fn hex_ipv4(field: &str) -> Option<Ipv4Addr> {
 
 /// The netmask of the directly-connected route holding `ip`, from [`ROUTE_TABLE`]
 /// text.
-///
-/// A non-zero `Gateway` field skips the row; among the rest the first network
-/// containing `ip` answers.
 pub fn netmask_from_route(table: &str, ip: Ipv4Addr) -> Option<Ipv4Addr> {
     let want = u32::from(ip);
     for line in table.lines().skip(1) {
@@ -78,8 +66,6 @@ pub fn netmask_from_route(table: &str, ip: Ipv4Addr) -> Option<Ipv4Addr> {
 
 /// Every address on `ip`'s subnet, ascending, minus `ip` and the network and
 /// broadcast addresses.
-///
-/// A `mask` shorter than [`MIN_PREFIX`] narrows to [`MIN_PREFIX`].
 pub fn candidates(ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<Ipv4Addr> {
     let narrowed = u32::from(mask) | !(u32::MAX >> MIN_PREFIX);
     let host = u32::from(ip);
@@ -127,8 +113,6 @@ pub fn open_hosts(hosts: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
 
 /// The first address on this Kindle's subnet that `verify` accepts, with one
 /// `log` line per stage.
-///
-/// `None` for no routable interface, no open `port`, or no `verify` match.
 pub fn find_server(
     port: u16,
     verify: impl Fn(Ipv4Addr) -> bool,

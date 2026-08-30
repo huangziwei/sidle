@@ -1,24 +1,4 @@
 //! Move a book's annotations onto a rebuilt copy of that book.
-//!
-//! An annotation is stored as `(eid, offset)` handles into the KFX the device
-//! read. Those handles are not portable between two builds of one book: a
-//! converter that emits one more fragment per page shifts every element id
-//! after it, so a handle that was exact against the old build lands somewhere
-//! else in the new one — and silently, because the new element has text too.
-//! The device's own copy is untouched by any of this, so its highlights stay
-//! where the reader put them while the library's drift away from them.
-//!
-//! What does survive a rebuild is the **text**, which is why it is stored
-//! rather than derived on demand. Re-anchoring is therefore a search: take the
-//! words the annotation covers, find them in the new build, and rewrite the
-//! handles to point where they now live.
-//!
-//! Conservative on purpose. A handle that still lands on its own text is left
-//! alone, so a rebuild that moved nothing costs nothing. Text that turns up in
-//! more than one place is left alone too: several candidates is not a weaker
-//! answer than none, it is a different one, and moving a highlight to the wrong
-//! occurrence is worse than leaving it where the reader can still see it is
-//! stale.
 
 use rusqlite::{Connection, params};
 
@@ -46,9 +26,6 @@ struct Stored {
 
 /// Re-anchor every annotation on `book_id` against `index`, the book as it now
 /// is.
-///
-/// Call after anything that rewrites a book's KFX. Idempotent: a second pass
-/// over an unchanged book finds every handle intact and writes nothing.
 pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Result<Reanchored> {
     // A book with no text index can only strand every annotation it is asked
     // about, and would report that as a finding. It is a container we cannot
@@ -58,10 +35,6 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     }
     let mut stmt = conn.prepare(
         // Text-less rows are selected too, so they are counted rather than
-        // quietly passed over: a bookmark on an element that carries no text
-        // has nothing to search for, and it stays on a handle the rebuild may
-        // have moved. That is a stranded annotation, and saying so is the only
-        // way it is ever noticed.
         "SELECT id, eid_start, off_start, text FROM annotations WHERE book_id = ?1",
     )?;
     let rows: Vec<Stored> = stmt
@@ -124,13 +97,6 @@ type Sig = (char, i64, i64);
 
 /// Every non-whitespace character of the book, lowercased, in reading order,
 /// each paired with the element and offset it came from.
-///
-/// Whitespace is dropped on both sides of the comparison because it is exactly
-/// what a converter change moves. A build that learns to put a space between
-/// two runs turns `theHigh` into `the High` — the same words, a different
-/// string — and a literal search would call that a different annotation and
-/// strand it. Letters are what the reader highlighted; spacing is the
-/// converter's opinion about them.
 fn significant(index: &BookIndex) -> impl Iterator<Item = Sig> + '_ {
     index.reading_order().iter().flat_map(move |&eid| {
         index
@@ -145,15 +111,6 @@ fn significant(index: &BookIndex) -> impl Iterator<Item = Sig> + '_ {
 
 /// Where `text` now lives in the book, or `None` when it is not there or is
 /// there more than once.
-///
-/// Found by its head: a fixed-length window slides over the book's significant
-/// characters, so the cost is one pass and a few dozen characters of state
-/// rather than an index of the whole book — which for a large book is hundreds
-/// of megabytes to answer one question about one highlight.
-///
-/// Several candidates is not a weaker answer than none. An annotation moved to
-/// the wrong occurrence reads as correct and is never questioned again, so the
-/// tie is left unbroken and the reader keeps a highlight they can see is stale.
 fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
     let needle: Vec<char> = text
         .chars()
@@ -202,10 +159,6 @@ fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
 }
 
 /// Whether the stored handle still points at the stored text.
-///
-/// The whole test, and the reason an unchanged book is free: a handle that is
-/// still right needs no search, and a search over every annotation of a large
-/// book is the expensive part.
 fn still_lands_on_its_text(row: &Stored, index: &BookIndex) -> bool {
     let (Some(eid), Some(offset)) = (row.eid_start, row.off_start) else {
         return false;

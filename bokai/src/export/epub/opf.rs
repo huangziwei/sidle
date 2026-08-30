@@ -1,16 +1,4 @@
 //! Shared `content.opf` (OPF package document) emitter.
-//!
-//! Every EPUB writer in the crate — the exporter's raw and normalized paths
-//! alike — builds an [`OpfPackage`] and serializes it through [`emit_opf`],
-//! giving one package-document shape: element order, refinement style,
-//! attribute forms.
-//!
-//! The emitted package is EPUB 3 throughout: creator roles and sort keys
-//! ride `<meta refines>` (the EPUB-2 `opf:role`/`opf:file-as`/`opf:scheme`
-//! attributes are rejected by epubcheck under 3.x as RSC-005), the ASIN is
-//! a plain `<dc:identifier id="asin">`, and `<meta name>` Kindle hints
-//! (cover, primary-writing-mode, fixed-layout) are kept alongside their
-//! EPUB 3 equivalents for reader compatibility.
 
 use crate::model::{LandmarkType, OrientationLock};
 
@@ -24,10 +12,6 @@ pub struct OpfCreator {
 }
 
 /// Per-creator `file-as` values, one per author. Creator `i` gets the
-/// positional `author_sorts[i]`; a creator past the end of the vec (or every
-/// creator, when the source declared no sort keys) falls back to the joined
-/// author list, keeping multi-author books sortable in an EPUB library. Both
-/// EPUB writers derive their creators through this.
 pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
     let joined = authors.join(" & ");
     (0..authors.len())
@@ -124,9 +108,6 @@ pub struct OpfItemref {
 }
 
 /// One `<guide>` reference (EPUB 2.0 landmarks, read by Apple Books / Kindle /
-/// calibre). An empty `title` is emitted as `title=""`. The nav doc's
-/// `<nav epub:type="landmarks">` renders from the same entries
-/// (`export::nav::emit_nav`).
 #[derive(Debug, Clone)]
 pub struct OpfGuideRef {
     pub guide_type: String,
@@ -455,10 +436,6 @@ pub fn make_manifest_id(filename: &str, taken: impl Fn(&str) -> bool) -> String 
 }
 
 /// EPUB 3 manifest `properties` a content document must declare (OPF-014):
-/// `svg` / `mathml` / `scripted` when the XHTML embeds those elements. The
-/// scan looks for real element openings — text-node `<` is `&lt;`-escaped in
-/// XHTML, so a raw `<svg` is always a genuine element and the inverse
-/// (over-declaring, OPF-015) can't happen.
 pub fn xhtml_content_properties(xml: &str) -> Vec<&'static str> {
     let mut props = Vec::new();
     if contains_element(xml, "svg") {
@@ -495,10 +472,6 @@ fn contains_element(xml: &str, name: &str) -> bool {
 /// Format a source publication date for `<dc:date>`: a bare `YYYY-MM-DD`
 /// (the KFX `issue_date` form) gains a UTC midnight time to match calibre's
 /// ISO-8601 output; anything else passes through unchanged.
-/// Repair the one W3CDTF syntax defect seen in the wild: a datetime with a
-/// space between date and time (Amazon EXTH 106 ships
-/// `2022-04-27 23:00:00+00:00`, which epubcheck rejects as OPF-053). The
-/// `T` separator is the only change; anything else passes through verbatim.
 fn w3cdtf_t_separator(date: &str) -> String {
     let b = date.as_bytes();
     if b.len() > 10
@@ -549,9 +522,6 @@ pub fn landmark_guide_type(t: LandmarkType) -> &'static str {
 }
 
 /// Point the guide's `cover` reference at the synthesized titlepage (the
-/// cover the reader actually sees), inserting one when the source had no
-/// cover landmark. Apple Books renders the `type="cover"` target as the
-/// cover page; without the rewrite it would show the first content page.
 pub fn repoint_cover_guide(guide: &mut Vec<OpfGuideRef>, titlepage_href: &str) {
     if let Some(cover_ref) = guide.iter_mut().find(|g| g.guide_type == "cover") {
         cover_ref.href = titlepage_href.to_string();

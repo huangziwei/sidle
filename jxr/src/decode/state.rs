@@ -1,9 +1,4 @@
 //! Decoder state types ported from `jxr_image.py`.
-//!
-//! All the per-plane / per-MB / per-band state Python kept across class
-//! instances is flattened into plain Rust structs here. Methods that
-//! mutate this state live in `decoder.rs` so we can centralise the bitstream
-//! reader.
 
 #![allow(non_snake_case)]
 // See decoder.rs: JPEG-XR spec port — explicit index loops over parallel state
@@ -276,9 +271,6 @@ fn shift_left_signed(man: i32, exp: i32) -> i32 {
 }
 
 /// One macroblock of decoder state.
-///
-/// `num_components` is captured at construction time so the per-component
-/// buffers can be sized correctly.
 pub struct MB {
     // Port-parity position fields (jxr_image.py stores them on each MB;
     // the Rust pipeline threads positions as arguments instead).
@@ -319,17 +311,9 @@ pub struct MB {
     pub model_bits_mb_hp: [i32; 2],
     pub mb_qp_index_lp: usize,
     /// This MB's HP QP-set index (DQUANT). Stored per MB because in
-    /// frequency mode the HP dequantization runs in the FLEX pass, after the
-    /// HP pass has already advanced the plane-level `index_qps` past this MB
-    /// — using the global value there dequantizes every MB with the last
-    /// MB's index. (Latent until the encoder could mint DQUANT × frequency
-    /// files; JxrDecApp arbitrates the per-MB semantics.)
     pub mb_qp_index_hp: usize,
 
     /// MBBuffer flat across components: `mb_buffer[c * MB_BUF_PER_COMP + pos]`
-    /// where `pos` ∈ 0..256. Original Python layout was per-component
-    /// `Vec<Vec<i32>>`; flattened to one alloc per MB to avoid the
-    /// per-MB pointer chase in the IDCT / overlap-filter inner loops.
     pub mb_buffer: Vec<i32>,
 }
 
@@ -375,12 +359,6 @@ impl MB {
             mb_lp_mode: NO_PREDICTION,
             mb_hp_mode: NO_PREDICTION,
             // Coefficient/sample buffers are allocated lazily by
-            // `alloc_buffers` when `coded_tiles` first decodes this MB. The
-            // grid is materialised up front (so it can be indexed by
-            // [MBx][MBy]) but holds only cheap skeletons until then — a
-            // large-but-bogus geometry rejected before decoding (e.g. a bad
-            // index table) never allocates the whole grid's per-MB buffers,
-            // which for a near-cap geometry would be ~1 GB of pure waste.
             hp_input_vlc: Vec::new(),
             hp_input_flex: Vec::new(),
             mb_dclp: Vec::new(),
@@ -393,12 +371,6 @@ impl MB {
     }
 
     /// Allocate this MB's coefficient/sample buffers (idempotent). Called by
-    /// `coded_tiles` the first time it decodes the MB, so the cost is paid only
-    /// for macroblocks actually reached — never for a geometry rejected before
-    /// decoding. Re-entrant across the DC/LP/HP/FLEX passes of frequency mode
-    /// (the first pass allocates; later passes see non-empty buffers and skip).
-    /// Produces exactly the zero-filled buffers `new` used to, so decode output
-    /// is unchanged.
     pub fn alloc_buffers(&mut self, num_components: usize) {
         if self.mb_buffer.is_empty() {
             self.hp_input_vlc = vec![0; num_components * HP_INPUT_PER_COMP];
@@ -492,9 +464,6 @@ pub struct Plane {
 }
 
 /// 2D image plane stored flat row-major in a single `Vec<i32>`. Replaces the
-/// `[c][x][y]`-indexed `Vec<Vec<Vec<i32>>>` of the original Python port: same
-/// logical access pattern, one allocation per component instead of one per
-/// column. Cache-friendly traversal in either axis.
 #[derive(Debug, Default, Clone)]
 pub struct Plane2D {
     pub data: Vec<i32>,

@@ -1,18 +1,6 @@
 //! Fragment-list rebuild + symtab GC (mirrors a subset of `yj_structure.py`).
 //!
 //! For the kfx-zip → kfx mechanical port we need:
-//!
-//! 1. **Consolidate `$270` fragments** — every source container contributes a
-//!    `$270` (container_info). Calibre's `check_fragment_usage(rebuild=True)`
-//!    drops them all and emits a single fresh `$270` for the merged container.
-//! 2. **Rebuild `$419` (container_entity_map)** — the on-wire entity list and
-//!    dependency map for the merged container.
-//! 3. **Sort fragments** by `PREFERED_FRAGMENT_TYPE_ORDER`.
-//! 4. **GC the symtab** — keep only locally-defined symbols that are actually
-//!    referenced by a non-container fragment, sorted by `natural_sort_key`.
-//!
-//! Steps 1–3 mirror `check_fragment_usage`; step 4 mirrors
-//! `check_symbol_table`. Walk traversal (`walk_fragment`) is reused by 2 + 4.
 
 use std::collections::HashSet;
 
@@ -22,10 +10,6 @@ use super::node::IonNode;
 use super::symtab::LocalSymbolTable;
 
 /// Drives the per-fragment walker. Mirrors calibre's `walk_fragment` for the
-/// subset of behavior we need: gather all `IonSymbol` references that appear
-/// inside any value (struct keys, struct values, list/sexp items,
-/// annotations), plus a string-key reference for `$165` (file location, which
-/// calibre escalates from `IonString` to `IonSymbol`).
 fn collect_symbol_references(fragment: &YJFragment, into: &mut HashSet<String>) {
     walk_node(&fragment.value, into);
     // calibre also adds the ftype itself when used in fragment.is_root.
@@ -83,10 +67,6 @@ fn for_each_symbol(node: &IonNode, cb: &mut impl FnMut(&str)) {
 /// Build calibre's `entity_dependencies` list (`$253` payload).
 ///
 /// For each `$260` (section) fragment we list every `$164` (external_resource)
-/// it references — transitively any `$417` (bcRawMedia) the resource itself
-/// names. For each `$164` we list its `$417`(s). This is a generic walk: we
-/// look at every IonSymbol inside the fragment value and check whether it
-/// matches the fid of a known `$164` or `$417` fragment.
 pub fn determine_entity_dependencies(fragments: &[YJFragment]) -> Vec<IonNode> {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,10 +190,6 @@ pub fn rebuild_fragments_and_container_map(
     }
 
     // Prefer the source's $253 verbatim when available — KFXGEN already
-    // populated it with the transitive `$260 → $164 → $417` graph (the same
-    // graph calibre's `walk_fragment` would rebuild). Falling back to a
-    // computed list only when no source $419 was present keeps us closer to
-    // wire fidelity without needing to port the full reachability walker.
     let deps = if let Some(src) = existing_entity_deps {
         Some(src)
     } else {
@@ -287,9 +263,6 @@ fn flush_natural_chunk(chunk: &str, is_digit: Option<bool>, out: &mut String) {
 }
 
 /// Mirrors `check_symbol_table(rebuild=True)`: collect every symbol used by
-/// any non-container fragment, filter to those that resolve to local IDs,
-/// sort by `natural_sort_key`, and `replace_local_symbols` on the symtab. The
-/// `$ion_symbol_table` fragment is rebuilt to match.
 pub fn rebuild_symbol_table(fragments: &mut Vec<YJFragment>, symtab: &mut LocalSymbolTable) {
     let mut used: HashSet<String> = HashSet::new();
     for f in fragments.iter() {

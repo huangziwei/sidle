@@ -1,16 +1,6 @@
 //! Regression guard for the JPEG-XR **grayscale** decode path (YONLY), in
 //! **frequency order** — libjxr's default bitstream layout, which the
 //! spatial-order `color444` fixture doesn't exercise.
-//!
-//! `gray8_16x16_lossless.jxr` is a real **libjxr**-minted lossless 8bppGray
-//! JXR (frequency order, overlap 1 — `JxrEncApp` defaults at `-q 1`),
-//! produced from the deterministic image `expected_gray()` below — a true
-//! external producer, not a self-loop. Lossless ⇒ the decode must be
-//! **bit-exact**.
-//!
-//! The test needs only the committed fixture, but `expected_gray` below must
-//! keep reproducing the exact image the fixture was encoded from — change one
-//! and the pair stops meaning anything.
 
 use jxr::decode::{container, decoder::Decoder};
 

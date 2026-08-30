@@ -1,34 +1,4 @@
 //! Kindle Reader Data Store — the container behind a book's `.sdr` sidecars.
-//!
-//! A Kindle keeps its per-book reading state beside the book: `<book>.sdr/`
-//! holds a `.yjr` (annotations, font choices, synced position) and a `.yjf`
-//! (whatever changes every page turn — last page read, reading timers). AZW3-era
-//! devices name the same two files `.azw3r` / `.azw3f`. All four are this
-//! format, which is Amazon's own and unrelated to Ion despite living next to
-//! KFX.
-//!
-//! The container is a tree of **named objects** holding **typed values**:
-//!
-//! ```text
-//! signature  00 00 00 00 00 1A B1 26
-//! version    a long
-//! count      an int — how many top-level objects follow
-//! objects    FE <name> <value>* FF, nesting freely
-//! ```
-//!
-//! Values are a type byte then a big-endian payload; an object's *name* is a
-//! bare UTF-8 payload with no type byte of its own. There is no checksum and no
-//! signature beyond the magic, which is what makes a host-authored sidecar
-//! something a device will accept.
-//!
-//! ## Why this round-trips exactly
-//!
-//! [`Store::encode`] reproduces its input byte-for-byte, and the tests hold it
-//! to that over real device files. This is a hard requirement rather than a
-//! nicety: writing a sidecar back means handing a file to firmware that also
-//! keeps `font.prefs`, `ReaderMetrics` and other records this crate has no
-//! opinion about. Preserving unknown records verbatim is the difference between
-//! adding a highlight and quietly resetting someone's reader.
 
 use std::fmt;
 
@@ -342,10 +312,6 @@ impl Store {
     }
 
     /// A minimal, valid sidecar: an empty annotation cache and nothing else.
-    ///
-    /// What to start from for a book that has no sidecar yet. A device fills in
-    /// its own `font.prefs` and friends the first time it opens the book; the
-    /// point here is to carry annotations, not to invent reader preferences.
     pub fn empty() -> Self {
         Self {
             version: 1,
@@ -381,12 +347,6 @@ pub enum Kind {
     /// Handwriting drawn on a sideloaded document. One record per drawn page:
     /// the anchor is the host page, the inline body the ink notebook's
     /// page-container id. It covers no text.
-    ///
-    /// Devices write it under two names — `handwritten_note`, and
-    /// `handwritten_on_content_note` when the ink sits over the book's own
-    /// content rather than a blank page. Both carry the same anchor + container
-    /// id, so they are one kind here; the name is held so a record re-encodes
-    /// under the one it arrived with.
     Handwritten(String),
     /// Any other `annotation.personal.<x>` — kept verbatim rather than dropped.
     Other(String),
@@ -438,11 +398,6 @@ impl Kind {
 
 /// One endpoint of an annotation: which element, how far into it, and where
 /// that lands on the book's linear scale.
-///
-/// On the wire this is `base64(type, eid, offset) ":" position` — the base64 is
-/// the authoritative anchor and the trailing number a derived reading position
-/// (what a device shows as a "Location"). Both are reproduced exactly, so a
-/// decoded anchor re-encodes to the string it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Anchor {
     /// Leading byte of the packed form; `1` in everything observed.
@@ -501,27 +456,13 @@ pub const TEXT_PLACEHOLDER: char = '\u{FFFC}';
 const DEFAULT_TEMPLATE: &str = "0\u{FFFC}0";
 
 /// The highlight colours a Kindle names, as it spells them.
-///
-/// A colour-capable device (Colorsoft) appends the name as a plain string after
-/// the template; a monochrome one writes no colour value at all, which is why
-/// absence means "the device had nothing to say", not "yellow".
 pub const COLORS: [&str; 4] = ["yellow", "blue", "pink", "orange"];
 
 /// The colour to give a highlight when writing one for a colour-capable device
 /// and none is recorded.
-///
-/// Such a device names a colour on **every** highlight it makes, and a record
-/// without one is not merely uncoloured — its reader can display the marked text
-/// but cannot select it, so the highlight can't be recoloured, annotated or
-/// deleted on the device. Yellow is what a Kindle marks with by default.
 pub const DEFAULT_COLOR: &str = COLORS[0];
 
 /// Whether a trailing string is a colour rather than a note body.
-///
-/// The two occupy the same shape — an untyped string after the template — so
-/// they are told apart by value. A note whose body is exactly a colour word
-/// would be read as a colour; that is the known cost of a format that doesn't
-/// label its fields.
 fn is_color(s: &str) -> bool {
     COLORS.contains(&s)
 }
@@ -634,10 +575,6 @@ impl Annotation {
 
 impl Store {
     /// Every annotation in the file, in document order.
-    ///
-    /// Records are found by name anywhere in the tree rather than by walking the
-    /// map's declared shape, so a sidecar whose cache is laid out differently
-    /// than expected still yields its annotations.
     pub fn annotations(&self) -> Vec<Annotation> {
         self.all_objects()
             .into_iter()
@@ -646,9 +583,6 @@ impl Store {
     }
 
     /// A named position — `lpr` (last page read) or `fpr` — from a `.yjf`.
-    ///
-    /// The record holds the same anchor form an annotation uses, sometimes
-    /// behind a version byte, so the first decodable string wins.
     pub fn position(&self, key: &str) -> Option<Anchor> {
         let o = self.all_objects().into_iter().find(|o| o.name == key)?;
         o.values
@@ -658,11 +592,6 @@ impl Store {
     }
 
     /// When a named position record was last written, in epoch milliseconds.
-    ///
-    /// Both `lpr` and `fpr` carry their timestamp as the first long in the
-    /// record. Across a library this orders the books by when each was last
-    /// read, which is how a caller works out which book a device currently has
-    /// open — the one whose reader state is live in memory.
     pub fn position_time(&self, key: &str) -> Option<i64> {
         let o = self.all_objects().into_iter().find(|o| o.name == key)?;
         o.values
@@ -673,12 +602,6 @@ impl Store {
 
     /// Add `incoming` to the annotation cache, leaving every other record in the
     /// file untouched. Returns how many were new.
-    ///
-    /// A record whose span already exists is skipped — the device's own copy
-    /// stays, keeping its stamps. New records join their kind's list and the
-    /// list is re-sorted by start position, which is the order devices write and
-    /// the order the "interval tree" name implies. Kinds already in the file
-    /// that aren't being added to are not rewritten at all.
     pub fn merge_annotations(&mut self, incoming: &[Annotation]) -> usize {
         if incoming.is_empty() {
             return 0;
@@ -717,15 +640,6 @@ impl Store {
 
     /// Give every highlight that carries no colour the colour `default`,
     /// returning how many were changed.
-    ///
-    /// For a device that needs one on each. Such a reader can display a
-    /// colourless highlight but cannot *select* it, so the mark is stuck: no
-    /// toolbar, and no way to recolour, annotate or delete it on the device.
-    /// Repairing the file is the only way out, because the very thing that is
-    /// broken is the ability to act on it.
-    ///
-    /// Deliberately narrow — it only ever fills an absent colour, and never
-    /// touches one already written or any other value in the record.
     pub fn fill_missing_highlight_colors(&mut self, default: &str) -> usize {
         let cache = self.cache_object_mut();
         let mut slots = read_slots(cache);

@@ -1,13 +1,4 @@
 //! The reader's view of a book, assembled from the IR.
-//!
-//! Every field here is one a paginator or an annotation handle depends on, so
-//! the whole shape is pinned: a section list that gains an entry, a character
-//! count that drifts, a location map that renumbers, all move where a stored
-//! highlight lands.
-//!
-//! The fixture is bokai's — this test reads it through a path relative to that
-//! crate and skips when it isn't there, so sidle-core still builds and tests
-//! standing alone.
 
 use sidle_core::reader::ReaderBook;
 
@@ -127,9 +118,6 @@ fn a_delivered_image_is_labelled_with_what_it_actually_is() {
     }
 
     // The manifest's media type is a prediction made before the bytes exist;
-    // the delivered one is read off the bytes. A reader that trusted the
-    // prediction would hand a webview a payload it can't decode under a type
-    // it can.
     let hrefs: Vec<String> = book.images.iter().map(|i| i.href.clone()).collect();
     for got in store.fetch_many(&hrefs) {
         assert_eq!(

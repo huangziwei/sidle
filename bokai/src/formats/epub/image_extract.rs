@@ -1,15 +1,4 @@
 //! Pull every embedded image out of an EPUB, in memory.
-//!
-//! The EPUB analog of [`crate::formats::kfx::image_extract`]: where the KFX walk resolves
-//! `external_resource` → `bcRawMedia` bytes, this walks the OPF manifest for
-//! image media-types and reads each backing zip member through the shared
-//! [`EpubPackage`] harness, flagging the book's declared cover. It serves the
-//! editor's "extract one or two images" use case.
-//!
-//! EPUB images are already display-ready (JPEG/PNG/GIF/WebP/SVG), so — unlike
-//! the KFX path, which transcodes JPEG-XR — every image passes through verbatim.
-//! Pixel dimensions are sniffed from the header for the common raster formats
-//! (the OPF manifest, unlike KFX resources, does not declare them).
 
 use crate::formats::epub::edit::EpubPackage;
 use crate::formats::epub::parse_opf;
@@ -39,12 +28,6 @@ pub struct ExtractedImage {
 }
 
 /// Extract every embedded image from an in-memory EPUB.
-///
-/// Returns the images sorted by member `path` for a stable order. An image is
-/// any OPF manifest item with an `image/*` media-type (or, when the media-type
-/// is missing/unrecognized, whose bytes sniff as a known raster format);
-/// non-image members are skipped. Errors only when the bytes aren't a readable
-/// EPUB zip.
 pub fn epub_extract_images(epub_bytes: &[u8]) -> std::io::Result<Vec<ExtractedImage>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;

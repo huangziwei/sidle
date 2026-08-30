@@ -1,11 +1,6 @@
 //! Pull a device's annotations (`.yjr` + `.yjf`) through the [`Transport`]
 //! abstraction so the same import works on both mass-storage (KOA2 and other
 //! jailbroken/pre-2024 Kindles) and MTP (Scribe, 2024+).
-//!
-//! The transport-agnostic import logic lives in [`ingest::import_collected`];
-//! this module is the *device-side scan* that feeds it. Mass-storage has a real
-//! volume, so it uses `ingest`'s own `std::fs` collector
-//! (`ingest::import_from_device`) instead — same import, cheaper scan.
 
 use anyhow::Result;
 
@@ -28,26 +23,9 @@ pub struct SyncProgress {
 }
 
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
-/// `.yjr` (annotations) and `.yjf` (last-read position) bytes — either may be
-/// absent. Mirrors the mass-storage `std::fs` scan in
-/// `ingest::import_from_device`: `.yjr.bad_file` is excluded (doesn't end in
-/// `.yjr`), `.sdr` dirs with NEITHER sidecar (pure pagination caches) are
-/// skipped, and `documents/Downloads/Items01/` (DRM'd Amazon KFX) is never
-/// touched. The global `documents/My Clippings.txt` is deliberately ignored
-/// — it would conflate Amazon-store books with Sidle-sideloaded ones.
-///
-/// Whether the device exposes its `.sdr/*.yjr` sidecars at all is up to its MTP
-/// responder — `documents/Sidle/*.kfx` is always enumerable (that's where we
-/// sideload), but Amazon's private reading-state dirs may or may not be. An
-/// empty result on a Scribe means they aren't.
 pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
     // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in
-    // one session (see [`Transport::read_files_in_children`]) — not a
-    // path-based `list` + `read` per `.sdr`, which re-walks the whole Sidle dir on
-    // every call (O(books²), the same blowup the ink walk had). `.yjr.bad_file` is
-    // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a
-    // pure pagination cache) yields no matching files and is dropped.
     let pulled =
         transport.read_files_in_children(&sidle, &|name| name.ends_with(".sdr"), &|file| {
             file.ends_with(".yjr") || file.ends_with(".yjf")
@@ -71,17 +49,6 @@ pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>
 }
 
 /// Write Sidle's annotations back into the device's own sidecars.
-///
-/// The other half of the sync: [`import_device_annotations`] pulls what the
-/// Kindle marked, this contributes what was marked in Sidle's reader. Each write
-/// is the device's own `.yjr` with our records merged in, so the device keeps
-/// everything it had — see [`push::plan`] for what is deliberately left out,
-/// including the one book a write would silently lose to.
-///
-/// The DB lock is taken twice and never held across a device write: planning
-/// reads the library, the writes are USB-slow, and the checkpoint is a single
-/// row. A write that fails is logged and skipped — its book simply has no
-/// checkpoint, so the next sync plans it again.
 fn push_device_annotations(
     transport: &dyn Transport,
     db: &impl db::Access,
@@ -113,9 +80,6 @@ fn push_device_annotations(
             continue;
         }
         // Checkpoint what we wrote. The next connect compares the device's file
-        // against this: matching means the write survived, differing means
-        // either the device added something of its own or it overwrote us from
-        // memory — both of which are handled by importing and planning again.
         let sha = import::sha256_of_bytes(&outgoing.bytes);
         db.with(|conn| db::set_yjr_sync_sha(conn, device_serial, outgoing.book_id, &sha, now))?;
         report.pushed_books += 1;
@@ -125,23 +89,6 @@ fn push_device_annotations(
 }
 
 /// Import annotations off any connected Kindle into the library — mass-storage
-/// via core's `std::fs` scan, MTP via the [`Transport`] scan above. Blocking
-/// (USB / DB IO); call on the blocking pool. Idempotent (`dedup_hash`), so it's
-/// safe on every connect.
-///
-/// On MTP this also syncs **handwritten ink** drawn on sideloaded docs (the
-/// `.notebooks/<asin>!!PDOC!!notebook/nbk` pull → [`crate::library::ink`]) in the
-/// SAME pass, folding its counts into the returned report — so one
-/// "sync annotations" covers highlights/notes/bookmarks, last-read position, AND
-/// ink. (Mass-storage Kindles have no handwriting, so that branch skips it.)
-///
-/// For MTP the USB scans run *before* the DB lock is taken — `GetObject` over
-/// USB is slow enough that holding the connection mutex through it would stall
-/// the frontend's DB queries. Mass-storage keeps core's existing behavior (a
-/// fast local `std::fs` scan under the lock).
-/// `on_progress(stage, current, total, label)` reports which item is syncing now,
-/// for the status bar: `stage` is `"annotations"` or `"ink"`, `current`/`total`
-/// count books/notebooks, `label` is the book title. Pass a no-op to ignore it.
 pub fn import_device_annotations(
     device: &DeviceInfo,
     transport: &dyn Transport,
@@ -153,9 +100,6 @@ pub fn import_device_annotations(
     let mut report = match device.mass_storage_mount() {
         Some(mount) => {
             // Mass-storage has a real volume — bypass the transport and use
-            // the `std::fs` scanner so the USB scan + DB import can happen
-            // under one lock (the volume IO is local-fast). No ink: handwriting
-            // is a Scribe (MTP) feature.
             let imported =
                 db.with(|conn| ingest::import_from_device(conn, &mount, &device.serial, &now));
             // Push back over the transport, which for mass-storage is the same
@@ -217,9 +161,6 @@ pub fn import_device_annotations(
             })?;
 
             // No on-device cleanup: Sidle never deletes data on the device (a
-            // backup must not mutate its source). Stranded `.notebooks/<id>!!PDOC!!`
-            // dirs are the device owner's to clear. The push below only ever
-            // *adds* to a sidecar, never removes.
             let mut report = report;
             if let Err(e) = push_device_annotations(
                 transport,
@@ -237,10 +178,6 @@ pub fn import_device_annotations(
     }?;
 
     // Additive backup of the device folders the library is configured to sync,
-    // over whichever transport this Kindle uses. Best-effort at every step: a
-    // config that won't parse, or a backup failure, must never fail the
-    // annotation sync it rides along with — log it and move on with the counts
-    // we did get. Runs on every Sync (manual button + auto-on-connect).
     match device_backup::SyncCollections::load(paths) {
         Ok(config) => match misc::backup_device_misc(transport, &device.serial, paths, &config) {
             Ok(m) => {
@@ -261,9 +198,6 @@ mod tests {
     use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     // Drives the collector through the mass-storage transport (MTP can't be
-    // unit-tested without a device). Confirms it finds both sidecars inside a
-    // `.sdr`, STILL collects a `.yjf`-only (read, never highlighted) `.sdr`,
-    // skips a pure pagination-cache `.sdr`, and ignores `.yjr.bad_file`.
     #[test]
     fn collects_yjr_and_yjf_over_transport() {
         let tmp = tempfile::tempdir().unwrap();

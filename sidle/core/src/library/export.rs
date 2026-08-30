@@ -1,9 +1,4 @@
 //! Writing books out of the library, as files someone else can read.
-//!
-//! `epub` / `pdf` / `kfx` copy the stored file verbatim — each already carries
-//! its `[Author] Title (Year)` basename. `txt` has no stored file: it is
-//! generated on demand by converting the book's content to Markdown (the EPUB
-//! when present — closest to the source text — else the universal KFX side).
 
 use std::path::{Path, PathBuf};
 
@@ -59,11 +54,6 @@ pub struct Summary {
 
 /// Write `format` for every book in `book_ids` into `dest_dir`, as a flat folder
 /// of files (no per-author subfolders).
-///
-/// A name collision in the destination is disambiguated with a ` (n)` suffix so
-/// two same-named files never clobber each other. A book with no usable source
-/// on disk — the companion side hasn't converted yet, or the file was deleted —
-/// is skipped and counted; the export never aborts on a single failure.
 pub fn export_books(
     conn: &Connection,
     book_ids: &[i64],

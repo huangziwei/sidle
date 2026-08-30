@@ -1,14 +1,5 @@
 //! Guards for YUV 4:2:0 / 4:2:2 decode reconstruction: joint-coded chroma
 //! entropy, chroma transforms + overlap, upsampling.
-//!
-//! Both fixtures are **libjxr-minted** (JxrEncApp, q16 lossy, frequency order,
-//! overlap 1 — encoder defaults): real external producers. The expected `.rgb`
-//! blobs (interleaved RGB, row-major) are libjxr's own output for these files,
-//! pixel-exact against JxrDecApp. Decoding a lossy file is deterministic, so
-//! exact equality — not a tolerance — is the correct assertion.
-//!
-//! The 4:2:2 fixture is also what holds `UpdateModelMB` to Table 116's
-//! `iWeight2`: get that weight wrong and this file desyncs the bitstream.
 
 use jxr::decode::{container, decoder::Decoder};
 

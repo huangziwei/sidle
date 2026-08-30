@@ -1,12 +1,6 @@
 //! Build an EPUB byte stream from a parsed Aozora [`Document`].
 //!
 //! Faithful port of `buildEpub` in the aozora-epub reference tool.
-//! Output mirrors the HTML tool's package shape: mimetype-first STORE'd,
-//! `META-INF/container.xml`, `OEBPS/style.css`, per-chapter XHTML split at
-//! the shallowest heading level present, EPUB-3 nav doc + NCX (for older
-//! readers), OPF with
-//! `xml:lang="ja"` and `page-progression-direction="rtl"`. Cover is a
-//! pre-rendered JPEG supplied by the caller.
 
 use std::io::{self, Write};
 
@@ -36,10 +30,6 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
     let chapters = split_into_chapters(doc);
     let id_to_file = build_id_to_file_map(&chapters);
     // EPUB publisher is always "青空文庫" (the digital publisher). The print
-    // publisher that the HTML tool used to extract from the 底本 colophon
-    // line is just the *source* paperback — kept inside the colophon
-    // chapter text but not surfaced as `<dc:publisher>`. Pub-date is still
-    // parsed from the colophon as the work's most authoritative date.
     let publisher = "青空文庫";
     let pub_date = parse_pub_date(&doc.colophon);
 
@@ -123,8 +113,6 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
 }
 
 // =========================================================================
-// Chapter splitting
-// =========================================================================
 
 struct Chapter {
     /// Filename within `OEBPS/text/`, e.g. `"title.xhtml"`, `"ch1.xhtml"`.
@@ -136,21 +124,6 @@ struct Chapter {
 }
 
 /// Split the document body at the shallowest heading level present.
-///
-/// The parser maps 大見出し→`<h2>`, 中見出し→`<h3>`, 小見出し→`<h4>`, but a
-/// great many Aozora works (especially 中見出し-only books, where 大見出し is
-/// reserved for multi-part collections) carry *no* `<h2>` at all. Splitting on
-/// a hardcoded `<h2>` — as the JS reference tool and bokai's first port both did
-/// — then collapses the whole body into the title page, leaving every TOC entry
-/// pointing at `#fragment`s of one giant file (a TOC most readers, and the
-/// downstream KFX conversion, fail to navigate). So we split at the *minimum*
-/// heading level the TOC actually uses: 大見出し parts still split at `<h2>`
-/// (中見出し chapters nested as fragments inside — the intended shape), while a
-/// 中見出し-only book splits at `<h3>` into one file per chapter.
-///
-/// First chunk = title page (`<h1>title</h1><p>author</p>` + any body content
-/// before the first split-level heading). Each subsequent split-level heading
-/// starts a new chapter. A colophon, if present, gets a trailing chapter.
 fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
     let body = &doc.body_xhtml;
     // Shallowest level the TOC uses (2/3/4). Empty TOC ⇒ no headings to split
@@ -182,10 +155,6 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
     let mut chapters = Vec::with_capacity(splits.len() + 1);
 
     // If the body opens directly with a split-level heading (no front matter —
-    // the common case for Aozora novels, which start at chapter 1), the title
-    // page is just title+author and that first heading begins ch1. Otherwise
-    // the leading non-heading content (preface, frontispiece, …) shares the
-    // title page, and the first heading begins ch1.
     let first_is_heading = splits
         .first()
         .is_some_and(|s| s.trim_start().starts_with(tag.as_str()));
@@ -224,10 +193,6 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
         let mut col_body = String::from(r#"<div class="colophon" id="colophon">"#);
         col_body.push('\n');
         // The colophon is Aozora prose like any other: the 底本 notes it carries
-        // quote ruby and gaiji from the text they discuss, so they go through
-        // the same line conversion instead of reaching the reader as raw
-        // `《…》` and `※［＃…］`. Images it might name are already manifested by
-        // the body pass, so nothing new is collected here.
         let mut colophon_images = Vec::new();
         for line in doc.colophon.lines() {
             col_body.push_str("<p>");
@@ -256,8 +221,6 @@ fn extract_heading_text(body: &str, level: u8) -> Option<String> {
     Some(crate::util::strip_tags(inner))
 }
 
-// =========================================================================
-// TOC structure
 // =========================================================================
 
 /// Map from `<h2>/<h3>/<h4>` id (e.g. `"h3"`) → chapter file
@@ -289,8 +252,6 @@ fn toc_href(entry: &TocEntry, id_to_file: &std::collections::HashMap<String, Str
     format!("text/{}#{}", file, entry.id)
 }
 
-// =========================================================================
-// XHTML / NAV / NCX / OPF templates
 // =========================================================================
 
 fn wrap_chapter_xhtml(ch_title: &str, ch_body: &str) -> String {
@@ -544,8 +505,6 @@ fn build_opf(
 }
 
 // =========================================================================
-// Colophon parsing — publisher + pub date
-// =========================================================================
 
 fn parse_pub_date(colophon: &str) -> String {
     if colophon.is_empty() {
@@ -563,8 +522,6 @@ fn parse_pub_date(colophon: &str) -> String {
         .unwrap_or_default()
 }
 
-// =========================================================================
-// Helpers
 // =========================================================================
 
 fn escape_xml(s: &str) -> String {
@@ -632,8 +589,6 @@ fn epoch_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 }
 
 // =========================================================================
-// Templates
-// =========================================================================
 
 const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -699,8 +654,6 @@ em.batsu { font-style: normal; -webkit-text-emphasis: "×"; text-emphasis: "×";
 .colophon p { text-indent: 0; margin: 0.2em 0; }
 "#;
 
-// =========================================================================
-// Tests
 // =========================================================================
 
 #[cfg(test)]
@@ -780,10 +733,6 @@ mod tests {
         assert!(bytes.starts_with(b"PK"), "zip magic missing");
 
         // mimetype must be the first entry and stored uncompressed: check by
-        // verifying the literal `application/epub+zip` appears at the right
-        // offset (after `PK\x03\x04` + 26-byte local file header + 8-byte
-        // name "mimetype"). For simplicity just confirm the string is
-        // present near the start.
         let head = &bytes[..200];
         assert!(
             head.windows(20).any(|w| w == b"application/epub+zip"),
@@ -928,9 +877,6 @@ mod tests {
     #[test]
     fn body_starting_with_heading_gives_ch1_its_own_file() {
         // Real Aozora novels (e.g. 不連続殺人事件) carry no front matter: the
-        // body opens directly with the first heading. The title page must then
-        // be title+author only, and that first heading must begin ch1 — not be
-        // absorbed into the title page.
         let doc = Document {
             title: "本".to_string(),
             author: "著".to_string(),

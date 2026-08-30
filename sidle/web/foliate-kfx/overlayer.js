@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Vendored from foliate-js (https://github.com/johnfactotum/foliate-js),
 // Copyright (c) 2022 John Factotum. May be modified for sidle.
-// See ./LICENSE for the MIT terms.
 
 const createSVGElement = tag =>
     document.createElementNS('http://www.w3.org/2000/svg', tag)
@@ -163,8 +162,6 @@ export class Overlayer {
     }
     // make an exact copy of an image in the overlay
     // one can then apply filters to the entire element, without affecting them;
-    // it's a bit silly and probably better to just invert images twice
-    // (though the color will be off in that case if you do heu-rotate)
     static copyImage([rect], options = {}) {
         const { src } = options
         const image = createSVGElement('image')

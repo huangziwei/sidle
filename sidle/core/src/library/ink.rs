@@ -1,16 +1,5 @@
 //! Handwritten-ink ingest: `bokai::formats::nbk` decodes an `nbk` to per-page
 //! SVG, and [`import_ink`] stores the renders against the host book.
-//!
-//! One `handwritten_note` per drawn page sits in the host book's `.yjr`. Its
-//! anchor handle resolves to a host PDF page through the `eid → page` map, and
-//! its inline body is the page-container `kfx_id`.
-//!
-//! The `nbk` is `.notebooks/<asin>!!PDOC!!notebook/nbk`, `asin` being the baked
-//! content_id. An ink page joins its `handwritten_note` by
-//! `page.container_id == note body`, and display-sorts by the note's `linear`.
-//!
-//! [`import_ink`] takes `nbk` bytes and parsed `handwritten_note` records from
-//! its caller, the shape `import_yjr` takes.
 
 use std::collections::HashMap;
 use std::path::Path;

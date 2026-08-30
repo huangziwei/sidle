@@ -1,17 +1,4 @@
 //! Pull Scribe handwritten notebooks off the connected Kindle through the
-//! [`Transport`] abstraction — the device-side counterpart to the manual
-//! `.notebooks/` folder import (`commands::notebook::import_dir`), and the
-//! default path now that the toolbar's Import button targets the device.
-//!
-//! Mirrors [`crate::library::device::annotations`]: the slow USB scan + reads run BEFORE
-//! the DB lock is taken, then each notebook is imported under it.
-//!
-//! On the device, notebooks live at `.notebooks/<uuid>/nbk`, with cover
-//! thumbnails in `.notebooks/thumbnails/<uuid>.png`. Only standalone
-//! (dashed-uuid) notebooks are imported; the `!!PDOC!!` / `!!EBOK!!` annotation
-//! notebooks are skipped, matching the folder import. Whether the device exposes
-//! `.notebooks/` over MTP at all is up to its responder — an empty result means
-//! it doesn't, or there are none.
 
 use anyhow::{Context, Result};
 
@@ -30,12 +17,6 @@ struct Pulled {
 }
 
 /// The standalone notebook directories under `.notebooks/`, identified by their
-/// dashed-UUID name. This excludes the device's bookkeeping dirs (`thumbnails/`,
-/// `page_cache/`, `clipboard/`, `.backups/`, `.tmp/`) and the `…!!PDOC!!` /
-/// `…!!EBOK!!` annotation notebooks WITHOUT a `list` round-trip into each — a
-/// single `list` of `.notebooks/` is enough. (The old "list every child to look
-/// for an `nbk`" approach listed `page_cache/` too, which is large and slow over
-/// USB; that needless work is what made every import drag.)
 fn list_candidates(transport: &dyn Transport, root: &TPath) -> Result<Vec<String>> {
     Ok(transport
         .list(root)?
@@ -88,10 +69,6 @@ fn pull_one(
 /// Pull + import every standalone notebook on the device, calling `on_progress`
 /// with `(done, total)` after each candidate so the UI can show "Importing N/M…".
 /// Blocking (USB + DB IO); call on the blocking pool.
-///
-/// Pull (USB) and import (decode + DB) are INTERLEAVED per notebook — the DB lock
-/// is taken per import and released across the slow USB reads, so the frontend's
-/// DB queries aren't stalled for the whole import.
 pub fn import_device_notebooks(
     transport: &dyn Transport,
     paths: &LibraryPaths,
@@ -145,10 +122,6 @@ mod tests {
     use crate::library::device::mass_storage::transport::MassStorageTransport;
 
     // Drives the device scan/pull through the mass-storage transport (MTP can't
-    // be unit-tested without a device). Confirms `list_candidates` excludes the
-    // `!!EBOK!!` annotation notebook, and `pull_one` takes the standalone
-    // notebook's bytes + cover (`thumbnails/<uuid>.png`) + file mtime as
-    // `updated_at`, while returning `None` for an `nbk`-less cache dir.
     #[test]
     fn scans_and_pulls_standalone_notebooks() {
         let uuid = "da85e6f7-9672-2e2b-ef94-e57fc3502e45";

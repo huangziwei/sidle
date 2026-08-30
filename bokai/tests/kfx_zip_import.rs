@@ -1,10 +1,4 @@
 //! End-to-end tests for `.kfx-zip` ingestion.
-//!
-//! Amazon ships KFX books as a zip of several `.kfx` containers (the main
-//! storyline file plus `metadata.kfx` and one or more `CR!*.kfx` resource
-//! containers). bokai handles them by merging into a single in-memory KFX
-//! container (via `kfx::merge`) before importing — see the merge module for
-//! the design.
 
 use std::io::Write;
 use std::path::Path;

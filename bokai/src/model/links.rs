@@ -1,21 +1,11 @@
 //! Universal link representation for ebook formats.
 //!
 //! Ebooks use fundamentally different addressing modes:
-//! - **EPUB**: Semantic IDs (`#footnote-1`, `chapter2.xhtml#section-5`)
-//! - **AZW3/KFX**: Physical offsets (`kindle:pos:fid:000B:off:00000002SO`)
-//!
-//! This module provides a format-agnostic representation that captures both.
-//!
-//! Links are stored as raw href strings in `SemanticMap.href` and parsed
-//! on-demand using `Link::parse()` when needed (e.g., for export).
 
 use crate::import::ChapterId;
 use crate::model::NodeId;
 
 /// Uniquely identifies a node across the entire book.
-///
-/// Combines a chapter identifier with a node identifier to provide
-/// a globally unique reference to any node in any chapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalNodeId {
     pub chapter: ChapterId,
@@ -30,9 +20,6 @@ impl GlobalNodeId {
 }
 
 /// The resolved target of a link.
-///
-/// After resolving hrefs against the book structure, each link points to
-/// one of these target types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorTarget {
     /// Link to a specific node in a specific chapter.
@@ -52,7 +39,6 @@ pub enum AnchorTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InternalLocation {
     /// EPUB style: Go to the element with this ID.
-    /// Example: `footnote-1` from `#footnote-1`
     ElementId(String),
 
     /// AZW3/KFX style: Go to this byte offset in the text stream.
@@ -115,10 +101,6 @@ impl Link {
     /// Parse a raw href string into a Link.
     ///
     /// This handles:
-    /// - External URLs (http://, https://, mailto:)
-    /// - EPUB fragment IDs (#footnote-1)
-    /// - Kindle position URLs (kindle:pos:fid:...:off:...)
-    /// - Relative paths (chapter2.xhtml#section-5)
     pub fn parse(href: &str) -> Link {
         let href = href.trim();
 
@@ -156,10 +138,6 @@ impl Link {
     }
 
     /// Parse a Kindle position link.
-    ///
-    /// Format: `kindle:pos:fid:XXXX:off:YYYYYYYYYYYY`
-    /// - fid: Fragment ID (hex, maps to spine position)
-    /// - off: Byte offset within fragment (Kindle's custom base32)
     fn parse_kindle_link(href: &str) -> Link {
         // Try to extract fid and off values
         let parts: Vec<&str> = href.split(':').collect();
@@ -192,7 +170,6 @@ impl Link {
 /// Decode Kindle's custom base32 offset encoding.
 ///
 /// Kindle uses a non-standard base32 with digits: 0-9, A-V (case insensitive).
-/// The offset is big-endian.
 fn kindle_base32_decode(s: &str) -> Option<u32> {
     let mut result: u64 = 0;
 

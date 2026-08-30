@@ -1,24 +1,4 @@
 //! Where a word may be broken at the end of a line.
-//!
-//! Hyphenation is a pattern set in the Liang tradition: short letter sequences
-//! carrying digits, the odd values marking a legal break, matched everywhere
-//! in a word at once. Two forms of the same thing are read here — the text
-//! form pattern sets are written and distributed in ([`patterns`]), and the
-//! precompiled byte image a Kindle carries ([`compiled`]) — and both build the
-//! same automaton ([`automaton`]).
-//!
-//! A dictionary is levelled. The first level finds the breaks a word already
-//! carries, where a hyphen or an apostrophe divides it, and each part it finds
-//! is then run through the language's own patterns on its own.
-//!
-//! # What ships
-//!
-//! [`for_language`] answers with the pattern set bundled for a language, and
-//! `None` where none is — no language is hyphenated by a dictionary that was
-//! not made for it, and most of the world's languages hyphenate not at all.
-//! The bundled sets are stock, openly-licensed pattern sets, each with the
-//! per-word decisions of [`curation`] over it where machine-generated patterns
-//! read badly; `dic/LICENSE` states where each came from.
 
 mod automaton;
 mod compiled;
@@ -62,9 +42,6 @@ static BUNDLED: [Bundled; 2] = [
 ];
 
 /// The hyphenator for a language, or `None` where nothing bundled covers it.
-///
-/// `language` is a BCP-47 tag whose primary subtag decides, so `en-GB` and
-/// `en-US` answer alike.
 pub fn for_language(language: &str) -> Option<&'static Hyphenator> {
     let primary = language.split(['-', '_']).next()?.to_ascii_lowercase();
     let bundled = BUNDLED
@@ -297,9 +274,6 @@ fn chars_between(s: &str, from: usize, to: usize) -> usize {
 }
 
 /// `word` in lower case, and where each byte offset of it sits in the
-/// original. A character whose lower case spells out as several characters
-/// has no offset of its own past its first byte, so a break inside one is not
-/// a break in the word.
 fn lowercase_with_origins(word: &str) -> (String, Vec<Option<usize>>) {
     let mut lowered = String::with_capacity(word.len());
     let mut origin = Vec::with_capacity(word.len() + 1);

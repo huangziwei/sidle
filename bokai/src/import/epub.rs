@@ -58,7 +58,6 @@ pub struct EpubImporter {
     css_cache: HashMap<String, Stylesheet>,
 
     // --- Link resolution ---
-    /// Maps path (without fragment) -> ChapterId
     path_to_chapter: HashMap<String, ChapterId>,
 
     /// Maps "path#id" -> GlobalNodeId for fragment resolution

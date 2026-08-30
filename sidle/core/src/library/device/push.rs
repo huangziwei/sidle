@@ -1,21 +1,5 @@
 //! Push a KFX from the local library to the device's documents directory,
 //! and remove what we've sent.
-//!
-//! State model: there is no on-device manifest. The `documents/Sidle/`
-//! directory is the source of truth — every file in it is something we
-//! pushed, and the sha8 infix in each filename (`<basename>.<sha8>.kfx`)
-//! links it back to a `books.sha256` in the local library DB. To detect
-//! "already pushed" we list `Sidle/` and look for any `*.<sha8>.kfx`; to
-//! delete we scan for that same pattern and remove both the `.kfx` and the
-//! Kindle-created `<basename>.<sha8>.sdr/` sidecar next to it (reading
-//! progress, annotations, highlights — invisible to sidle but it
-//! accumulates if we don't clean it up).
-//!
-//! Routes through [`Transport`] so the same code handles mass-storage (KOA2
-//! family) and MTP (Scribe, 2024+): `copy_in_atomic` does the right thing
-//! for each (`.partial` + `rename` on a real filesystem, `SendObjectInfo`
-//! / `SendObject` over MTP), and `delete_dir` handles the `.sdr/` recursion
-//! on MTP where `DeleteObject` doesn't loop.
 
 use std::path::Path;
 
@@ -51,10 +35,6 @@ pub enum PushResult {
 }
 
 /// Push one book's KFX to the device, streaming byte-progress for the copy via
-/// `on_progress(bytes_sent, total_bytes)` — this drives the footer "Sending …"
-/// counter from `device_send`; pass `&|_, _| {}` for a silent push. Progress
-/// covers only the file transfer; the preflight + already-present scan that
-/// precede it are fast and silent.
 pub fn push_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
@@ -80,9 +60,6 @@ pub fn push_one(
     let dest_dir = documents_dir();
 
     // Already-pushed check: any file in Sidle/ ending in the KFX sha8
-    // infix is ours, regardless of basename (a metadata edit can leave
-    // the on-device file with the old basename — that's fine, sha is
-    // the stable identity).
     if let Some(existing) = find_by_sha(transport, &dest_dir, kfx_sha)? {
         return Ok(PushResult::AlreadyPresent {
             book_id: book.id,
@@ -122,10 +99,6 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
 }
 
 /// Scan `documents/Sidle/` for a file whose name contains our sha8 infix.
-/// Returns the actual filename if present. Skips `._*` AppleDouble
-/// companions — macOS drops them next to the real file on FAT volumes,
-/// and matching one of those would have us return (and later delete) the
-/// metadata file instead of the KFX itself.
 fn find_by_sha(transport: &dyn Transport, dir: &TPath, sha256: &str) -> Result<Option<String>> {
     let suffix = kfx_suffix(sha256);
     for entry in transport.list(dir)? {
@@ -147,19 +120,12 @@ fn find_by_sha(transport: &dyn Transport, dir: &TPath, sha256: &str) -> Result<O
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeleteResult {
     /// `.kfx` removed (or already absent — `file_existed` reflects the prior
-    /// state). All matching `.sdr/` sidecars were wiped as well — both the
-    /// filename-style (`<basename>.<sha8>.sdr`) and any catalog-style
-    /// (`<title>_<ASIN>.sdr`) Kindle invented next to the file.
-    /// `sdr_existed` records whether at least one was present at delete.
     Removed {
         filename: String,
         file_existed: bool,
         sdr_existed: bool,
     },
     /// Filename didn't look like one of ours (no `.<sha8>.kfx` suffix), or
-    /// it tried to climb out of `Sidle/` via path separators. Treated as a
-    /// hard refusal — better to surface than to silently target the wrong
-    /// thing.
     NotOurs {
         filename: String,
     },
@@ -170,11 +136,6 @@ pub enum DeleteResult {
 }
 
 /// Remove an on-device file (and any `.sdr/` it spawned) by filename. The
-/// popup always has the exact filename, so we don't need to scan + match
-/// for the .kfx itself — we just verify the filename has our `.<sha8>.kfx`
-/// shape (defense against a stale UI passing in arbitrary user files) and
-/// delete by name. The `asin` argument enables a second .sdr cleanup pass
-/// keyed on the catalog-style name Kindle invents (see below).
 pub fn delete_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
@@ -220,13 +181,6 @@ pub fn delete_one(
     };
 
     // Kindle also drops a *catalog-style* `<title>_<ASIN>.sdr/` next to
-    // the file (mirrors how Amazon-fetched books are tracked by ASIN
-    // server-side, even for PDOC sideloads). The title segment is
-    // Kindle-normalized — different from our `<basename>` — so we can't
-    // predict the exact name, but the `_<ASIN>.sdr` suffix is unique
-    // per book (the ASIN is bokai's content-derived fabricated value,
-    // or a real catalog one if it came from kfxlib). Scan `Sidle/` and
-    // wipe any `.sdr` whose name ends with `_<ASIN>.sdr`.
     let catalog_sdr_existed = match asin {
         Some(asin) if !asin.is_empty() => wipe_catalog_sdrs(transport, &dir, asin, &sdr_name),
         _ => false,
@@ -242,7 +196,6 @@ pub fn delete_one(
 /// Scan `documents/Sidle/` for any directory ending with `_<asin>.sdr` and
 /// wipe it. Skips the filename-style `.sdr` that the caller already
 /// handled. Returns true if at least one extra directory was wiped.
-/// Errors are logged, never propagated — the kfx is gone either way.
 fn wipe_catalog_sdrs(
     transport: &dyn Transport,
     dir: &TPath,

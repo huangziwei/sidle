@@ -9,8 +9,6 @@ use bokai::model::Chapter;
 use bokai::style::{ComputedStyle, FontStyle, FontWeight, StyleId};
 
 // ============================================================================
-// Unit Tests for GlobalStylePool
-// ============================================================================
 
 #[test]
 fn test_global_style_pool_merge_deduplicates() {
@@ -110,8 +108,6 @@ fn test_global_style_pool_used_styles_dedupes_and_sorts() {
 }
 
 // ============================================================================
-// Integration Tests
-// ============================================================================
 
 fn extract_style_classes(document: &str) -> Vec<String> {
     let mut classes = Vec::new();
@@ -174,12 +170,6 @@ fn test_normalized_export_contains_css_and_source_named_chapters() {
     // Chapters are named from their source ids (KFX: section names; EPUB:
     // source-relative paths) so the normalized tree can converge on the
     // mechanical kfx→epub route's `{section}.xhtml` naming.
-    //
-    // Sample from *after* the leading cover: normalized export emits its own
-    // full-page `cover.xhtml` and drops a source section that merely repeats
-    // it (`is_redundant_cover_section`), so this fixture's calibre
-    // `OEBPS/titlepage.xhtml` is legitimately absent from the output. Every
-    // content chapter must still carry its source name.
     let content_sources: Vec<String> = {
         let spine: Vec<_> = book.spine().to_vec();
         spine

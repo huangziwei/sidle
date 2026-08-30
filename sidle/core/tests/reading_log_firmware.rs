@@ -140,11 +140,6 @@ fn content_point(stamp: &str) -> String {
 
 /// A book `ReadingTimerController` never times is measured page by page, not
 /// bounded by the awake span.
-///
-/// Four pages at 11:21, 11:22, 11:24 and 11:26:30. The book states no words, so
-/// each dwell falls on the wordless branch, [3 s, 120 s]: 60 s, then 120 s and
-/// 120 s clamped down from 120 s and 150 s. The page open at the end closes
-/// nothing.
 #[test]
 fn a_book_the_device_never_times_is_measured_by_its_page_dwell() {
     let pages = [
@@ -174,9 +169,6 @@ fn a_book_the_device_never_times_is_measured_by_its_page_dwell() {
 
 /// A page turned before the first `ReadingTimerController` line that carries a
 /// position still counts.
-///
-/// On the stack that refuses to time such a book, that line can lag the open by
-/// minutes — here the open is 11:20:35 and the first positioned line 11:24:14.
 #[test]
 fn a_page_turned_before_the_run_opens_is_not_lost() {
     let early = [page("260814:112100", 0), page("260814:112200", 0)];
@@ -212,9 +204,6 @@ fn a_counted_sitting_is_untouched_by_the_page_records() {
 }
 
 /// Turns come from one stack or the other, never both.
-///
-/// `CVM` names two `NextPage` events and writes page records for the same
-/// turns; summing them reports four.
 #[test]
 fn a_turn_named_by_both_stacks_is_counted_once() {
     let turns = [turn("260807:101501"), turn("260807:101543")];
@@ -248,10 +237,6 @@ fn turns_are_taken_from_the_page_records_where_no_event_names_one() {
 }
 
 /// The other stack's turn record is read too.
-///
-/// `ereader_book_page_turn` is what the Corretto/KPP firmware writes, and it is
-/// the only turn record on a device that writes no
-/// `ereader_book_linear_page_actions` at all.
 #[test]
 fn turns_are_taken_from_either_stacks_turn_record() {
     let turns = [turn_kpp("260814:112500"), turn_kpp("260814:112600")];
@@ -269,9 +254,6 @@ fn turns_are_taken_from_either_stacks_turn_record() {
 }
 
 /// A chapter boundary is not a page turn.
-///
-/// `ereader_content_point` carries a `point_type` and no `action_id`, and sits
-/// among the turn records on both stacks.
 #[test]
 fn a_chapter_boundary_is_not_counted_as_a_turn() {
     let points = [
@@ -292,10 +274,6 @@ fn a_chapter_boundary_is_not_counted_as_a_turn() {
 }
 
 /// The zone comes off a record stating an instant the prefix also states.
-///
-/// `close_timestamp` 1786882311101 is 12:11:51 UTC, under the prefix
-/// `260816:141151` — +02:00, and the reading-timer lines state no instant at
-/// all.
 #[test]
 fn a_sitting_records_the_zone_its_clock_was_in() {
     let close = r#"260816:141151.131 fastmetrics[10393]: D fastmetrics:KindleFastMetricsPublisher:[6587.267540]: Emitting a new record. SchemaName[ereader_close_book], Fields[{ 	"close_method" : "Navigation", 	"close_position" : 5070, 	"close_timestamp" : 1786882311101, 	"is_opened_by_kpp_reader" : "Yes" } ]. :"#;

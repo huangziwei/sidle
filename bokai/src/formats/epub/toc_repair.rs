@@ -1,22 +1,6 @@
 //! Surgical TOC repair for an EPUB: derive a chapter list from the book's own
 //! in-book Contents page (or its headings) and write it into the EPUB 3 nav doc
 //! **and** the EPUB 2 NCX, in place — synthesizing either when the book has none.
-//!
-//! The EPUB analog of [`crate::formats::kfx::toc_repair`]. Where the KFX side rewrites
-//! `nav_container` Ion, this edits the two XML documents a reader consults: it
-//! **splices** a fresh `<nav epub:type="toc">` into an existing nav doc (leaving
-//! its landmarks / page-list untouched) or **synthesizes** a nav doc, and the
-//! same for the NCX `<navMap>`; a synthesized doc is registered in the OPF
-//! manifest (and the NCX in the spine `toc`). Because EPUB hrefs *are* the nav
-//! targets, no eid resolution is needed — the proposer pairs each Contents-page
-//! link's text with its href directly.
-//!
-//! [`propose_toc`] reads the chapter list; [`set_toc`] writes a caller-supplied
-//! one; [`repair_toc`] composes them. Public hrefs are **absolute zip paths**
-//! (e.g. `"OEBPS/c1.xhtml#ch1"`); [`set_toc`] rebases each to the nav/NCX
-//! document it writes. The importer re-derives the KFX nav from whichever of the
-//! two is richer, so one repair fixes both the EPUB's own nav and the KFX
-//! derived from it.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -35,26 +19,15 @@ use crate::model::{LandmarkType, TocEntry};
 use crate::util::{decode_text, extract_xml_encoding, percent_decode};
 
 /// Minimum distinct chapter links for a page to count as a real Contents page (or
-/// headings for the fallback). Below this, a stray cross-reference or two is just
-/// noise. A shade lower than the validator's evidence gate because repair is
-/// opt-in — the user asked for a TOC and reviews the proposal.
 const MIN_CHAPTER_LINKS: usize = 3;
 
 // `MIN_SECTION_CONTENTS_LINKS` is the threshold for the Contents page *inside*
-// an already-evidenced volume span (`volume_groups`) — lower than
-// `MIN_CHAPTER_LINKS`, which has to tell a Contents page from noise across a
-// whole book. It is shared with the splitter, which asks the same question of
-// the same spans.
 
 // ---------------------------------------------------------------------------
 // Proposer
 // ---------------------------------------------------------------------------
 
 /// Derive a chapter list from the EPUB's own structure, for [`set_toc`]. Uses the
-/// richest of: the book's own declared TOC (NCX / nav doc, when it lists real
-/// chapters) and the densest in-body Contents-page link cluster; falls back to
-/// the spine's text headings. Each entry's `href` is an absolute zip path. Empty
-/// when nothing usable is found.
 pub fn propose_toc(epub_bytes: &[u8]) -> io::Result<Vec<TocEntry>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -77,10 +50,6 @@ pub struct Flattening {
 
 /// Measure what [`repair_toc`] would re-parent: a multi-work book whose
 /// declared TOC lists every volume and every chapter at one depth.
-///
-/// The measurement is the repair's own rule, so a diagnosis and the fix can
-/// never disagree. A book that declares its structure, or that has no volume
-/// structure to declare, measures zero — the common case, and the early exit.
 pub fn declared_toc_flattening(epub_bytes: &[u8]) -> io::Result<Flattening> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -112,16 +81,9 @@ pub(super) fn propose_from_pkg(
     opf_str: &str,
 ) -> Vec<TocEntry> {
     // 1. The book's own authored TOC (NCX / nav doc). Whatever else is found, it
-    //    is never discarded: it is the only source that knows the entries no
-    //    Contents page links (the cover, the Contents page itself, the colophon),
-    //    and dropping one would make a "repair" a regression for the reader.
     let declared = existing_declared_toc(pkg, opf, opf_base);
 
     // 2. The densest in-body Contents-page link cluster, else — only when
-    //    neither it nor the declared TOC knows any chapters — one entry per spine
-    //    doc that opens with a text heading. Image-heavy books render both the
-    //    Contents page and the chapter headings as images, so there is nothing to
-    //    derive from and the declared TOC is all there is.
     let spine = spine_documents(opf, opf_base);
     let contents = contents_page_links(pkg, opf, opf_base, opf_str);
     let derived = if contents.len() >= MIN_CHAPTER_LINKS {
@@ -138,11 +100,6 @@ pub(super) fn propose_from_pkg(
     };
 
     // 3. Merge, in spine order: every declared entry survives, and a derived one
-    //    joins it wherever the declared TOC doesn't already reach. The cover and
-    //    the Contents page itself are deliberately not added from the book's
-    //    landmarks — a reader reaches those because the renderer composes the
-    //    landmarks into its own view, and writing them in here would list them
-    //    twice for every book whose publisher already declared them.
     let positions: HashMap<&str, usize> = spine
         .iter()
         .enumerate()
@@ -161,18 +118,6 @@ pub(super) fn propose_from_pkg(
 
 /// Restore every level a flattened TOC lost, to the depth the book itself
 /// evidences — **not** to a fixed number of levels.
-///
-/// Two signals compose, and each is re-applied inside whatever the other
-/// produced, so a 部 that contains 巻 that contain 章 that contain 節 comes out
-/// four deep without anything here counting levels:
-///
-/// 1. **Volume grouping** ([`nest_by_volume_groups`]) — a section that opens
-///    with its own cover page and names its contents. Nests to any depth by
-///    containment: a start a enclosing volume's Contents page lists is that
-///    volume's child, not its sibling.
-/// 2. **Label indentation** ([`nest_by_label_indent`]) — the levels a publisher
-///    kept as leading whitespace when the NCX lost them. Arbitrary depth by
-///    construction.
 fn nest_levels(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<TocEntry> {
     let mut out = nest_by_label_indent(nest_by_volume_groups(entries, groups));
     for entry in &mut out {
@@ -195,17 +140,6 @@ struct VolumeGroup {
 }
 
 /// The volume groupings a book declares about itself, in spine order.
-///
-/// Deliberately narrow, because the signals are individually weak. A volume
-/// start must be all three of: a page of pictures, a page the TOC actually
-/// points at (`targets` — an illustration plate is an image page too, and a
-/// light novel carries hundreds), and not the first spine document (the book's
-/// own cover starts no volume). A start then only forms a group if a Contents
-/// page within its span names its chapters, and fewer than two groups is no
-/// collection — one volume never was one, and a book that forms exactly one has
-/// found its own front matter rather than a volume. So a book with no volume
-/// structure is never invented one, and back matter that no volume's Contents
-/// page lists is never swallowed by the volume in front of it.
 fn volume_groups(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -262,16 +196,6 @@ fn volume_groups(
 /// Re-parent a flat entry list into the volumes [`volume_groups`] found: an
 /// entry that opens a volume becomes a parent, and the entries after it that
 /// its own Contents page names become its children.
-///
-/// **Volumes nest inside volumes** — the open volumes form a stack, and a
-/// volume start that an enclosing volume's Contents page lists becomes that
-/// volume's child rather than its sibling. Nothing here fixes a depth: a book
-/// that stacks 部 → 巻 → 篇 comes out that deep.
-///
-/// A TOC that already declares nesting is left alone, an entry no open volume
-/// claims closes them until one does (or lands at the top level), and a book
-/// whose groups adopt nothing comes back unchanged — this pass only ever
-/// restores structure the book states about itself.
 fn nest_by_volume_groups(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<TocEntry> {
     if groups.is_empty() || entries.iter().any(|e| !e.children.is_empty()) {
         return entries;
@@ -328,9 +252,6 @@ fn contents_page_links(
 }
 
 /// The book's declared TOC as each of the two documents a reader may consult has
-/// it — `(NCX, EPUB-3 nav doc)` — with every href resolved to an absolute zip
-/// path so it can be re-emitted by [`set_toc`]. Either may be empty; they can
-/// also disagree, which is itself something [`repair_toc`] fixes.
 fn declared_toc_documents(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -430,9 +351,6 @@ fn dedup_entries(links: Vec<(String, String)>) -> Vec<TocEntry> {
 }
 
 /// Every landmark the book declares, hrefs resolved to absolute zip paths: the
-/// EPUB 3 nav doc's `landmarks` first, then the EPUB 2 `<guide>` — which older
-/// readers still consult, and which is all an EPUB 2 has. A book carrying both
-/// usually says the same thing twice; callers keep the first of each target.
 fn book_landmarks(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -483,15 +401,6 @@ fn toc_landmark_basename(
 // ---------------------------------------------------------------------------
 
 /// Drop every `#fragment` its target document doesn't actually define.
-///
-/// A book's own Contents page can link anchors that a conversion lost. A
-/// proposal mined from that page would otherwise write the dead fragments into
-/// the nav doc *and* the NCX, turning one broken page into three. The entry
-/// itself survives — the document is still the right place to land — it just
-/// points at the document instead of at an anchor that isn't there.
-///
-/// A fragment whose document isn't in the container is left alone: the entry is
-/// broken either way, and that is a different defect with its own report.
 fn resolve_fragments(pkg: &EpubPackage, entries: &[TocEntry]) -> Vec<TocEntry> {
     let mut wanted: HashMap<&str, HashSet<&str>> = HashMap::new();
     collect_fragments(entries, &mut wanted);
@@ -555,10 +464,6 @@ fn strip_undefined_fragments(
 
 /// True if `xhtml` defines `id` as a fragment target: an `id` attribute with
 /// that value, or the older `<a name>` form.
-///
-/// Deliberately permissive — a scan, not a parse. Guessing "defined" leaves a
-/// working target alone, while guessing "not defined" would demote a good anchor
-/// to its document, so anything that reads like the attribute counts.
 fn defines_fragment(xhtml: &str, id: &str) -> bool {
     for attr in ["id=", "name="] {
         let mut rest: &str = xhtml;
@@ -578,11 +483,6 @@ fn defines_fragment(xhtml: &str, id: &str) -> bool {
 }
 
 /// Write `entries` into the EPUB's nav doc and NCX, in place — splicing over an
-/// existing toc / navMap, or synthesizing (and registering in the OPF) when the
-/// book has none. `entries` hrefs are absolute zip paths, and any `#fragment`
-/// the target document doesn't define is dropped (`resolve_fragments`).
-///
-/// Errors if `entries` is empty or the bytes aren't a readable EPUB.
 pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
     if entries.is_empty() {
         return Err(io::Error::new(
@@ -622,10 +522,6 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
     let mut opf_dirty = false;
 
     // Whichever nav document the book already has is rewritten. A *missing* one
-    // is only synthesized when the package's own version asks for it: an EPUB 3
-    // must carry a nav doc, an EPUB 2 must carry an NCX, and adding the other is
-    // a version change nobody requested — one that, in an EPUB 2 package, an
-    // `properties="nav"` manifest item doesn't even validate as.
     let epub2 = opf.version.starts_with('2');
 
     // --- nav doc (EPUB 3) ---
@@ -704,13 +600,6 @@ pub fn repair_toc(epub_bytes: &[u8]) -> io::Result<Vec<u8>> {
     }
     // Since the proposal starts from the declared TOC, a book with nothing to
     // add and no structure to restore proposes exactly what it already has.
-    // Writing that back is not a repair — say so, rather than report a fix that
-    // changed nothing.
-    //
-    // What has to already be right is the EPUB 3 nav doc, plus the NCX *if the
-    // book has one*: a missing or disagreeing nav doc is a real defect this
-    // write fixes, while a missing NCX is not — EPUB 3 does not ask for one, and
-    // synthesizing it would be a change nobody requested.
     let (ncx, nav) = declared_toc_documents(&pkg, &opf, &opf_base);
     if entries == nav && (ncx.is_empty() || entries == ncx) {
         return Err(io::Error::new(
@@ -931,9 +820,6 @@ mod tests {
     const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
     /// Build an EPUB whose Contents page links chapters by `#fragment`, some of
-    /// which the chapter documents don't define — what a conversion that dropped
-    /// anchors leaves behind. `version` and the identifier list are caller-set so
-    /// one builder covers the writer's version and `dtb:uid` rules too.
     fn epub_with_broken_anchors(version: &str, identifiers: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -1045,9 +931,6 @@ mod tests {
     }
 
     /// Repair fixes a book's TOC; it does not change which EPUB version the book
-    /// is. An EPUB 2 gets its NCX and no nav document (a `properties="nav"`
-    /// manifest item doesn't even validate there); an EPUB 3 gets its nav
-    /// document and no NCX, which EPUB 3 never required.
     #[test]
     fn repair_does_not_change_the_books_epub_version() {
         let ids = r#"<dc:identifier id="uid">urn:uuid:versioned</dc:identifier>"#;
@@ -1316,9 +1199,6 @@ mod tests {
     }
 
     /// A 合本版 whose NCX flattens two volumes and their chapters to one depth.
-    /// Each volume opens with its own full-bleed cover page (which the TOC
-    /// points at) and carries its own Contents page; the colophon at the end
-    /// belongs to no volume.
     fn flat_omnibus_epub(volumes: usize) -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -1447,9 +1327,6 @@ mod tests {
     }
 
     /// Two entries on one target keep distinct navPoint ids but share a
-    /// playOrder — the NCX rule epubcheck fails as RSC-005. Real books repeat a
-    /// target (a duplicated 目次 row; a volume whose first chapter starts on the
-    /// volume's own page).
     #[test]
     fn repeated_ncx_targets_share_one_play_order() {
         let entries = vec![
@@ -1550,11 +1427,6 @@ mod tests {
     }
 
     /// An ordinary novel: a title page of two publisher logos and a plate, both
-    /// pages of pictures the TOC points at, and a back-matter list of the
-    /// author's other books that reads as link-dense as any Contents page. Two
-    /// starts, but only the title page's span holds that list, so only one
-    /// group can form — and a book is not a collection of one. Counting starts
-    /// instead of groups nested the whole novel under its own title page.
     fn novel_with_a_pictorial_title_page() -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -1658,9 +1530,6 @@ mod tests {
     }
 
     /// A book with an image 目次 and image chapter headings (no
-    /// links, no heading text) still proposes its chapters — from the declared
-    /// NCX — instead of coming up empty. Repair then writes them so it reopens
-    /// with a real TOC.
     #[test]
     fn proposes_from_declared_ncx_when_body_is_images() {
         let epub = image_toc_and_ncx_epub();

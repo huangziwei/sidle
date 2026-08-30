@@ -1,40 +1,4 @@
 //! Font fallback: which face draws which character.
-//!
-//! The device ships one face per script family and no single one covers the
-//! library. The Japanese sans we draw with has no glyph for the PRC-only
-//! simplifications (纟 讠 饣 钅 车 马 鸟 见 页 贝 门 …) — they were never
-//! adopted in Japan and are in no JIS standard — so a Simplified Chinese
-//! title drawn from it alone comes out part text, part `.notdef`. A few
-//! simplified forms *are* in JIS X 0208/0212 (楼, 梦, 达), which is why the
-//! damage looks random rather than total.
-//!
-//! A face is chosen per string, not per character. Han unification gives one
-//! codepoint to shapes that differ by region (直, 骨, 今, 令 …), so resolving
-//! character by character would draw a Chinese title with Japanese shapes
-//! wherever the Japanese face happens to have the codepoint and Chinese
-//! shapes elsewhere — inconsistent inside one title, and the wrong regional
-//! convention for the book. Whole-string selection keeps one convention per
-//! title and drops to per-character only when no single face covers the run.
-//!
-//! Coverage alone can't get this right, because it only ever sees what a face
-//! *lacks*. A Traditional Chinese title is covered by the Japanese face
-//! almost completely — so coverage keeps it there, in Japanese shapes, and
-//! nothing looks broken enough to notice. The book's own language tag is the
-//! better evidence, so a caller that knows it ([`Script::of_language`]) passes
-//! it in and the chain is tried in that order. The hint only *reorders*:
-//! coverage still decides which face actually draws, so a missing or wrong
-//! tag costs regional shapes, never glyphs.
-//!
-//! Fallback faces are read on first miss, never at startup. A loaded face
-//! costs its file size in resident bytes — the Chinese faces are ~10 MB each
-//! against the Japanese face's 3.8 MB — and a shelf of Japanese and Latin
-//! titles never needs them. (The rasterizer outlines a glyph when asked
-//! rather than the whole cmap up front, so reading the file is the entire
-//! cost; a rasterizer that front-loads the glyph geometry cannot fit a
-//! second CJK face on this device at all.)
-//!
-//! The selection policy is a free function over a coverage oracle so it can
-//! be exercised on the host, where none of these faces exist.
 
 use std::path::{Path, PathBuf};
 
@@ -93,14 +57,6 @@ pub struct Candidate {
 /// Faces to draw with, best first, at their paths on KOA2 firmware 5.16
 /// (`/usr/java/lib/fonts`). Absent entries are skipped when the chain loads,
 /// so the list is safe to extend for firmware that ships more.
-///
-/// Japanese leads because it is the bulk of the library and the best default
-/// for an untagged book; a language hint reorders from there.
-/// `STHeitiMedium` (Simplified) and `STHeitiTC` (Traditional) are Heiti sans
-/// at the same *Medium* weight as `TBGothicMed` — weight matters because the
-/// renderer thresholds coverage to one bit and a Regular face thins out under
-/// the cut. `code2000` is a pan-Unicode catch-all and the last resort before
-/// the missing-glyph mark, which is why it claims no script of its own.
 pub const CANDIDATES: &[Candidate] = &[
     Candidate {
         path: "/usr/java/lib/fonts/TBGothicMed_213.ttf",
@@ -135,9 +91,6 @@ pub enum Selection {
 
 /// Order to try faces in: the one that sets the wanted convention first, then
 /// the rest of the chain as declared.
-///
-/// `promoted` is a chain position, not an index into [`CANDIDATES`] — a
-/// firmware missing a face shortens the chain.
 pub fn visiting_order(faces: usize, promoted: Option<usize>) -> impl Iterator<Item = usize> {
     promoted
         .into_iter()
@@ -145,10 +98,6 @@ pub fn visiting_order(faces: usize, promoted: Option<usize>) -> impl Iterator<It
 }
 
 /// First face in `order` that has every visible character of `text`.
-///
-/// `has_glyph(face, ch)` answers coverage; it is asked only until a face
-/// misses, so a face that no string needs is never consulted (and, in the
-/// renderer, never read from disk).
 pub fn covering_face<I, F>(text: &str, order: I, mut has_glyph: F) -> Option<usize>
 where
     I: IntoIterator<Item = usize>,
@@ -173,19 +122,6 @@ where
 /// Code points that carry no glyph: the C0/C1 controls, plus the zero-width
 /// and formatting family — the BOM and zero-width spaces, bidi marks, the word
 /// joiner and invisible operators, and the soft hyphen.
-///
-/// They must never reach the rasterizer. No face has a glyph for them, and a
-/// font answers "no glyph" by handing back `.notdef` — so a character that is
-/// invisible everywhere else in the product turns into a visible box here.
-/// Worse, one of them in a run also costs every *other* character its face:
-/// coverage is decided per string, and a character no face has drops the whole
-/// run to per-character resolution. The zero-width family is also
-/// collation-ignorable, which is why [`crate::api`] drops it from the fields
-/// the picker sorts on.
-///
-/// A control is skipped, never interpreted. `\n` in particular is a layout
-/// instruction that whoever owns the layout has to consume first — see
-/// [`crate::ui::toast`], which lays a message out one row per line.
 pub fn is_invisible(c: char) -> bool {
     c.is_control()
         || matches!(c,
@@ -206,9 +142,6 @@ pub struct FontChain {
 }
 
 /// A fallback slot. Candidates this firmware doesn't have are dropped when
-/// the chain loads rather than kept here, so the chain is exactly the font
-/// files the device offers, in order. The path outlives the read: it is what
-/// [`FontChain::paths`] reports.
 struct Face {
     path: PathBuf,
     script: Script,
@@ -228,10 +161,6 @@ impl FontChain {
     /// Take the `candidates` this firmware actually has and keep the first
     /// that parses as the primary; the rest become fallbacks, unread until a
     /// character misses.
-    ///
-    /// Fails only when none of them loads. A firmware that has moved or
-    /// dropped one face is not a reason to refuse to start — the picker draws
-    /// with whatever it finds, and only an empty chain has nothing to say.
     pub fn load(candidates: &[Candidate]) -> Result<Self> {
         // Existence is settled here, parsing is not: a stat per candidate is
         // free, and it keeps `paths` an honest account of this device.
@@ -313,10 +242,6 @@ impl FontChain {
     }
 
     /// Chain position of the face that sets `script`, if this device has it.
-    ///
-    /// [`Script::Unknown`] promotes nothing: it means "no preference", and it
-    /// is also what the pan-Unicode catch-all sets — matching on it would put
-    /// the chain's weakest face first.
     fn promoted(&self, script: Script) -> Option<usize> {
         if script == Script::Unknown {
             return None;
@@ -436,10 +361,6 @@ mod tests {
     #[test]
     fn control_characters_never_reach_the_rasterizer() {
         // A banner message joins its clauses with `\n`. No face has U+000A, so
-        // a newline that got this far both drew the missing-glyph box and, by
-        // missing everywhere, dropped the rest of the line to per-character
-        // resolution. The layout consumes it; the renderer skips whatever is
-        // left, here and for any other control that rides in on metadata.
         for c in ['\n', '\r', '\t', '\u{0}', '\u{7F}', '\u{85}'] {
             assert!(is_invisible(c), "{c:?} would draw as a box");
         }

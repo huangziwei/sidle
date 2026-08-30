@@ -1,19 +1,4 @@
 // Files section: what a Sync brings off the Kindle besides books.
-//
-// Classic script loaded AFTER library.js. Self-contained IIFE exposing
-// `window.Misc` ({ refresh, show, hide, invalidate, editCollections }); the
-// section toggle in library.js drives show/hide, and each Sync path calls
-// invalidate() to refresh.
-//
-// One group per collection in the library's device-sync.json, in that order,
-// each hidden when it has no files. Within a group, images render as a
-// thumbnail grid and everything else as a list — inferred per file, so a folder
-// of drafts reads as a list and a folder of captures as a grid without either
-// having to say so. Both open the shared #misc-viewer overlay (image or <pre>).
-//
-// Also owns the settings editor for the collections themselves, since it is the
-// same vocabulary. Reuses the global `window.api` (IPC + fileUrl) and
-// `window.showToast`. Backend: commands/misc.rs.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
@@ -297,10 +282,6 @@
   }
 
   // The library folder a collection's files are stored in, derived from what the
-  // user named it. Deliberately NOT from the folder on the Kindle: that path is
-  // the volatile one — an app's folder gets renamed — while the name the user
-  // gave the collection is theirs. Either can still change, which is what
-  // `renames` is for; this only decides what the storage folder is called.
   function storageId(label) {
     const slug = (label ?? "")
       .toLowerCase()
@@ -325,9 +306,6 @@
   }
 
   // One editable collection. Nothing here is a permanent identity: the Kindle
-  // folder can be renamed, the name can be renamed, and saving moves whatever
-  // was already synced to match. The row shows where in the library the files
-  // land so that follow-the-name is visible rather than a surprise later.
   function collectionRow(c, index) {
     const row = document.createElement("div");
     row.className = "settings-collection";

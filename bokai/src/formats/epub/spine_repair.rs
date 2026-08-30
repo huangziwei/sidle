@@ -1,19 +1,4 @@
 //! Reading order that contradicts the book's own navigation.
-//!
-//! An EPUB states its reading order twice over: the spine says which document
-//! follows which, and the navigation says which chapter follows which. A
-//! well-made book says the same thing both times. Some retail books do not —
-//! their spine is the manifest run through a lexicographic sort, so a colophon
-//! whose filename sorts early lands mid-book and a chapter whose filename lacks
-//! the `-N` its siblings carry lands last. The navigation still reads correctly,
-//! because a human wrote it.
-//!
-//! Every other repair in this crate treats the navigation as the thing that's
-//! broken. This one is the other way round, and it is the *spine* that gets
-//! rewritten — which is why it is a permutation and nothing else: the same
-//! documents, the same manifest, the same navigation, in a different order.
-//!
-//! Reading positions move when a spine moves. Nothing here runs unattended.
 
 use std::collections::HashMap;
 use std::io;
@@ -55,9 +40,6 @@ pub struct Misordering {
     /// On its own this decides which side is wrong: the spine.
     pub machine_sorted: bool,
     /// The first entry the spine reads *late* — the TOC lists it before the
-    /// entry after it, and the spine puts it after. Naming this side of the
-    /// inversion is what makes the report legible — "【九】 reads after the
-    /// appendices" rather than "the spine disagrees with the TOC".
     pub first_out_of_order: Option<String>,
 }
 
@@ -70,19 +52,11 @@ impl Misordering {
 
 /// Measure what [`propose_spine`] would move: a spine whose order disagrees
 /// with the order the book's own declared TOC lists its chapters in.
-///
-/// The measurement is the proposal's own rule, so a diagnosis and the fix can
-/// never disagree — the same contract [`declared_toc_flattening`] keeps.
-///
-/// [`declared_toc_flattening`]: crate::formats::epub::toc_repair::declared_toc_flattening
 pub fn declared_spine_misordering(epub_bytes: &[u8]) -> io::Result<Misordering> {
     Ok(analyze(epub_bytes)?.misordering)
 }
 
 /// The spine in the order the book's own navigation implies, ready for a human
-/// to adjust and commit. On a book whose spine and navigation already agree
-/// this is the spine unchanged, which is what makes it safe to open the panel
-/// on any book.
 pub fn propose_spine(epub_bytes: &[u8]) -> io::Result<Vec<SpineDoc>> {
     let a = analyze(epub_bytes)?;
     Ok(a.proposed.into_iter().map(|i| a.docs[i].clone()).collect())
@@ -94,18 +68,6 @@ pub fn current_spine(epub_bytes: &[u8]) -> io::Result<Vec<SpineDoc>> {
 }
 
 /// Write `order` — a list of manifest ids — as the book's spine.
-///
-/// **A permutation and nothing else.** `order` must name exactly the documents
-/// the spine already names, each once; anything else is rejected rather than
-/// interpreted, because adding or dropping a document is a different edit with
-/// different consequences. Each `<itemref>`'s own text is carried across
-/// verbatim into its new slot, so `properties`, `linear` and any attribute this
-/// crate doesn't model survive untouched, and so does whatever sits between the
-/// tags (indentation, comments).
-///
-/// A no-op order is refused. Rewriting the file would re-hash it and renumber
-/// every reading position downstream, and doing that for an order the book
-/// already has is pure loss.
 pub fn set_spine(epub_bytes: &[u8], order: &[String]) -> io::Result<Vec<u8>> {
     let mut pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -217,12 +179,6 @@ fn analyze(epub_bytes: &[u8]) -> io::Result<Analysis> {
 /// The proposed reading order: the documents the navigation names, in *its*
 /// order, each still trailed by whichever documents followed it in the spine
 /// without being named.
-///
-/// That anchoring is what keeps the repair from scattering a book's unlisted
-/// parts. A title page, a blank, an illustration plate — the navigation says
-/// nothing about them, so the only thing that knows where they belong is the
-/// document they currently follow, and they travel with it. Anything ahead of
-/// the first named document stays at the front, where a cover belongs.
 fn reorder_to(nav_order: &[usize], len: usize) -> Vec<usize> {
     let mut named = vec![false; len];
     for &i in nav_order {
@@ -256,13 +212,6 @@ fn reorder_to(nav_order: &[usize], len: usize) -> Vec<usize> {
 }
 
 /// Whether the spine is its own manifest in lexicographic order — by `idref` or
-/// by filename. Both are checked because a packaging tool sorts whichever
-/// string it happens to hold, and the two differ exactly on books where the
-/// suffix conventions are inconsistent (`vol-1` beside `vol-1.xhtml`).
-///
-/// Only meaningful once the spine and the navigation are known to disagree: a
-/// well-made book whose chapters are simply named in order is lexicographic
-/// too, and has nothing wrong with it.
 fn is_machine_sorted(opf: &OpfData, docs: &[SpineDoc]) -> bool {
     if docs.len() < 3 {
         return false; // too short for an order to mean anything
@@ -278,12 +227,6 @@ fn is_machine_sorted(opf: &OpfData, docs: &[SpineDoc]) -> bool {
 }
 
 /// The declared TOC flattened to `(label, absolute href)` in its own order.
-///
-/// "The declared TOC" is whichever of the book's two nav documents is richer —
-/// [`existing_declared_toc`]'s rule, reused rather than restated. It matters
-/// here: a book can carry a stale NCX that agrees with a wrong spine beside a
-/// full nav doc that doesn't, and picking the poorer one would report the
-/// contradiction away.
 fn flatten_declared(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<(String, String)> {
     fn walk(entries: &[crate::model::TocEntry], out: &mut Vec<(String, String)>) {
         for e in entries {
@@ -318,12 +261,6 @@ fn is_permutation(a: &[String], b: &[String]) -> bool {
 }
 
 /// Rewrite the OPF so its `<itemref>`s read in `order`.
-///
-/// The tags are treated as contents of fixed slots: slot *n* keeps everything
-/// around it — the indentation before it, a comment after it — and receives the
-/// tag text of `order[n]`. Nothing outside the tags is rewritten, so an OPF this
-/// crate only partly models comes back byte-identical apart from the tags
-/// themselves.
 fn permute_itemrefs(opf: &str, order: &[String]) -> io::Result<String> {
     let spine_start = opf
         .find("<spine")

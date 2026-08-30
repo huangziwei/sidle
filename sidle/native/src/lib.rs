@@ -1,8 +1,4 @@
 //! The host-buildable half of the picker.
-//!
-//! `eink/fb.rs` and `eink/touch.rs` pass `libc::ioctl` a `c_ulong` on BSD and a
-//! `c_int` on Linux, and stay declared in `main.rs` alone. The modules below
-//! parse, shape HTTP, and scan the filesystem.
 
 pub mod api;
 pub mod collate;

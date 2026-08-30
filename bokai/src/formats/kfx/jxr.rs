@@ -1,9 +1,5 @@
 //! Bundled JPEG-XR images: decode with the pure-Rust [`jxr`] codec crate, then
 //! re-encode as JPEG, which is what every downstream reader can display.
-//!
-//! This is KFX-side glue, **not** part of the codec — it speaks
-//! [`KfxError`], resource names and the `FORMAT_*` symbols, none of which
-//! belong in the standalone zero-dependency `jxr` crate.
 
 use crate::formats::kfx::error::KfxError;
 use jxr::decode::{container, decoder};
@@ -22,9 +18,6 @@ pub struct TranscodeTiming {
 /// Transcode a JPEG-XR file (with outer TIFF container) into a JPEG byte
 /// stream. Returns `(bytes, format_symbol, timing)` where `format_symbol` is
 /// one of `"jpg"` / `"jxr"` (matching `resources::FORMAT_*`).
-///
-/// On any decoder failure the original bytes pass through with format
-/// `"jxr"` so the caller can decide whether to error or bundle as-is.
 pub fn transcode(
     jxr_bytes: &[u8],
     resource_name: &str,

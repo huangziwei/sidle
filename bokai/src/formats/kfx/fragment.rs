@@ -1,7 +1,4 @@
 //! KFX fragment representation.
-//!
-//! A fragment is the fundamental unit of KFX content. Fragments can contain
-//! either Ion data (for structured content) or raw bytes (for media like images).
 
 use super::ion::IonValue;
 use super::symbols::KfxSymbol;
@@ -47,7 +44,6 @@ impl KfxFragment {
         value: IonValue,
     ) -> Self {
         // Store the name as fid for debugging, but the fragment_id is what matters
-        // for serialization
         let _ = fragment_id; // ID is embedded in the entity table during serialization
         Self {
             ftype: ftype.into(),
@@ -68,7 +64,6 @@ impl KfxFragment {
     /// Create a nameless fragment: one whose entity id is the reserved `$348`,
     /// which a KFX container gives a fragment carrying no name of its own. Book-
     /// wide singletons (`metadata`, `document_data`, …) and every `font` ($262)
-    /// travel this way. The `$<ftype>` `fid` is the in-memory marker for it.
     pub fn nameless(ftype: impl Into<u64>, value: IonValue) -> Self {
         let ftype_val = ftype.into();
         Self {
@@ -80,12 +75,6 @@ impl KfxFragment {
 
     /// The `container_entity_map` fragment, carrying the Ion annotation Amazon
     /// puts on it.
-    ///
-    /// This is the one annotated fragment in a KFX container — verified across a
-    /// Send-to-Kindle build, where `container_entity_map::{…}` is the only
-    /// `type::` prefix in 2124 entities. Readers reach the struct through
-    /// [`IonValue::unwrap_annotated`] either way; matching it keeps a written
-    /// container byte-comparable with Amazon's.
     pub fn container_entity_map(value: IonValue) -> Self {
         let ftype = KfxSymbol::ContainerEntityMap as u64;
         Self::nameless(ftype, IonValue::Annotated(vec![ftype], Box::new(value)))

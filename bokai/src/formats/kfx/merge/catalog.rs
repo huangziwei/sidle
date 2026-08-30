@@ -1,17 +1,6 @@
 //! KFX symbol catalogs (mirrors `yj_symbol_catalog.py`).
 //!
 //! Calibre keeps two shared symbol tables:
-//!
-//! - `$ion` (Ion 1.0 system symbols, 9 entries with their textual names).
-//! - `YJ_symbols` (Amazon KFX domain symbols). Calibre's catalog names every
-//!   entry literally as `$N` — `$10`, `$11`, ... — where N is the absolute
-//!   symbol ID. Some entries carry a trailing `?` marking them as "unexpected
-//!   if used"; the suffix is stripped on import, so the canonical form is
-//!   always plain `$N`.
-//!
-//! Because the canonical YJ symbol name equals its ID as a string, we don't
-//! need to materialize 825 individual strings — the symtab resolves YJ IDs
-//! via a `$<id>` formatter and never has to walk a catalog vec.
 
 pub const SYSTEM_SYMBOLS_NAME: &str = "$ion";
 

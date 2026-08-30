@@ -3,12 +3,6 @@
 use super::node::IonNode;
 
 /// Rewrite the `cde_content_type` field in a `$490` book_metadata value to
-/// `"PDOC"`. Amazon's distributed bundles ship with `"EBOK"`; we sideload as a
-/// personal document so the device's library tile + sleep-screen cover lookup
-/// uses the embedded cover instead of an ASIN-catalog probe that fails. See
-/// the matching note in `kfx::metadata` for the EPUB→KFX direction.
-///
-/// Returns `true` if a change was made.
 pub fn rewrite_cde_content_type_pdoc(value: &mut IonNode) -> bool {
     let Some(top) = value.as_struct_mut() else {
         return false;
@@ -71,9 +65,6 @@ pub fn rewrite_cde_content_type_pdoc(value: &mut IonNode) -> bool {
 }
 
 /// Calibre-style `CR!` container id for a merged bundle when no source
-/// container supplies a stable id and no asset_id is recoverable from
-/// `$490` metadata — the one shared generator; callers pass a fixed salt
-/// (this last-resort arm has no stable book identity at hand).
 pub use crate::formats::kfx::serialization::generate_container_id;
 
 #[cfg(test)]

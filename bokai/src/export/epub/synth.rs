@@ -1,27 +1,6 @@
 //! String-synthesis regime of the normalized EPUB export: XHTML emitted by
 //! direct string building, styled with `.c<N>` classes derived from the
 //! computed-style pool ([`generate_css`]).
-//!
-//! `normalize_book` uses this regime for books whose importer declares no
-//! source style program (see [`super::dom_synth`] for the other regime).
-//! The synthesizer walks the IR tree and emits XHTML tags, using the
-//! generated CSS class names for styling; it tracks asset references
-//! (images) so the exporter knows which files to bundle.
-//!
-//! # Example
-//!
-//! ```
-//! use bokai::model::Chapter;
-//! use bokai::export::{generate_css, synthesize_html};
-//!
-//! let chapter = Chapter::new();
-//! let used_styles = vec![];
-//! let css = generate_css(&chapter.styles, &used_styles);
-//! let result = synthesize_html(&chapter, &css.class_map);
-//!
-//! // result.body contains the XHTML body content
-//! // result.assets contains referenced image paths
-//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -41,15 +20,6 @@ pub struct SynthesisResult {
 }
 
 /// Synthesize XHTML from an IR chapter.
-///
-/// # Arguments
-///
-/// * `ir` - The IR chapter to convert
-/// * `style_map` - Mapping from StyleId to CSS class name (from `generate_css`)
-///
-/// # Returns
-///
-/// A `SynthesisResult` containing the XHTML body and referenced assets.
 pub fn synthesize_html(ir: &Chapter, style_map: &HashMap<StyleId, String>) -> SynthesisResult {
     let resolver = HashMapResolver { map: style_map };
     synthesize_html_with_resolver(ir, &resolver)
@@ -86,17 +56,6 @@ fn synthesize_html_with_resolver<R: StyleResolver>(ir: &Chapter, resolver: &R) -
 }
 
 /// Synthesize a complete XHTML document (with DOCTYPE, html, head, body).
-///
-/// # Arguments
-///
-/// * `ir` - The IR chapter to convert
-/// * `style_map` - Mapping from StyleId to CSS class name
-/// * `title` - Document title
-/// * `stylesheet_href` - Optional href to external stylesheet
-///
-/// # Returns
-///
-/// A complete XHTML document string.
 pub fn synthesize_xhtml_document(
     ir: &Chapter,
     style_map: &HashMap<StyleId, String>,
@@ -118,17 +77,6 @@ pub fn synthesize_xhtml_document_with_class_list(
 
 /// [`synthesize_xhtml_document_with_class_list`] with link and class
 /// resolution.
-///
-/// Every `href` consults `href_resolver`, which may rewrite it (internal
-/// anchor → `chapter.xhtml#id`, URL sanitation) or drop it (unresolvable
-/// target — the `<a>` stays as a non-linking element so its text survives,
-/// and no dangling fragment reaches the output; epubcheck RSC-012/RSC-020).
-///
-/// When `source_styles` is given (see [`SourceStyles`]), class and style
-/// attributes come from each node's `semantics.class` / `semantics.style`
-/// and the computed-style `class_list` is ignored entirely. Sources whose
-/// importer declares a style program use this so attributes match their
-/// emitted `style.css` rules.
 pub fn synthesize_xhtml_document_with_links(
     ir: &Chapter,
     class_list: &[Option<&str>],
@@ -261,10 +209,6 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
     let mut attrs = String::new();
 
     // Class/style attributes: with source-style resolution, the node's
-    // source class name and inline declarations decide (named class first,
-    // then a promoted inline class; unpromoted declarations stay a `style`
-    // attribute — the same shape calibre finalizes). Otherwise
-    // the computed style supplies the class.
     if let Some(src) = ctx.source_styles {
         let mut classes: Vec<&str> = Vec::new();
         let mut style_attr: Option<&str> = None;
@@ -449,7 +393,6 @@ fn role_to_tag(role: Role) -> (&'static str, bool, bool) {
         Role::Paragraph => ("p", false, true),
 
         // Text nodes are leaf content - handled specially in render
-        // This fallback shouldn't normally be used
         Role::Text => ("span", false, false),
 
         // Headings with level
@@ -823,18 +766,6 @@ impl CssArtifact {
 /// Generate CSS from a StylePool for the given used styles.
 ///
 /// This function:
-/// 1. Deduplicates the provided style IDs
-/// 2. Generates a unique CSS class for each unique style (e.g., `.c1`, `.c2`)
-/// 3. Only outputs properties that differ from defaults
-///
-/// # Arguments
-///
-/// * `pool` - The StylePool containing all interned styles
-/// * `used_styles` - Slice of StyleIds actually used in the content
-///
-/// # Returns
-///
-/// A `CssArtifact` containing the stylesheet text and class name mapping.
 pub fn generate_css(pool: &StylePool, used_styles: &[StyleId]) -> CssArtifact {
     let mut stylesheet = String::new();
     let mut class_map = HashMap::new();
@@ -876,7 +807,6 @@ pub fn generate_css(pool: &StylePool, used_styles: &[StyleId]) -> CssArtifact {
 /// Generate CSS from a StylePool, including all styles in the pool.
 ///
 /// This is a convenience function when you don't know which styles are used.
-/// Generally prefer `generate_css()` with the actual used styles.
 pub fn generate_css_all(pool: &StylePool) -> CssArtifact {
     let all_ids: Vec<StyleId> = pool.iter().map(|(id, _)| id).collect();
     generate_css(pool, &all_ids)

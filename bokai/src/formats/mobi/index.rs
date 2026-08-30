@@ -1,17 +1,12 @@
 //! KF8 Index parsing (INDX, TAGX, CNCX)
 //!
 //! KF8 files use several index tables:
-//! - Skeleton index: file entries (HTML parts)
-//! - Div index: content chunks to insert into skeletons
-//! - NCX index: table of contents
-//! - Other index: guide entries (cover, toc, etc.)
 
 use std::collections::HashMap;
 
 use std::io;
 
 /// Variable-width integer decoding (forward)
-/// Each byte uses 7 bits for data, high bit indicates continuation
 pub fn decint(data: &[u8]) -> (u32, usize) {
     let mut val: u32 = 0;
     let mut consumed = 0;
@@ -385,23 +380,10 @@ pub struct DivElement {
     pub start_pos: u32,
     pub length: u32,
     /// Absolute byte offset of this chunk's content in the **reassembled**
-    /// flow-0 (all files materialized — chunks spliced into their skeletons —
-    /// and concatenated). This is the coordinate space `kindle:pos:fid`
-    /// resolution walks (the link's `off` is added to it), mirroring
-    /// KindleUnpack's `getIDTag`. It is NOT the on-disk position: flow 0 is
-    /// stored `[skel][chunks…]` per file, so every chunk sits after its whole
-    /// skeleton on disk, and a backward anchor walk from a chunk-start there
-    /// lands on the skeleton's tail element (the wrong div). Populated lazily
-    /// by the importer's reassembly once the text is decompressed.
     pub reassembled_pos: u32,
 }
 
 /// NCX entry for table of contents.
-///
-/// A book's NCX is a flat list using tags 1–6 and 21. A **periodical's** is a
-/// three-level tree that adds the periodical-only tags — 5 (`kind`), 22/23
-/// (child range) and 69/70/71 (per-article metadata) — which is what the
-/// article-list screen of a magazine renders from.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are part of MOBI format spec
 pub struct NcxEntry {
@@ -424,10 +406,6 @@ pub struct NcxEntry {
     /// Tag 70 — the article's byline.
     pub author: Option<String>,
     /// Tag 71 — the article's thumbnail, as a raw record offset from
-    /// `first_image_index`. This is the 0-based numbering EXTH 201/202 use and
-    /// that asset filenames encode — not the 1-based `recindex` numbering — so
-    /// [`asset_record_offset`](crate::formats::mobi::asset_record_offset)
-    /// resolves it directly.
     pub image: Option<u32>,
 }
 
@@ -686,29 +664,12 @@ impl IndxBuilder {
     }
 
     /// Build the INDX record(s).
-    ///
-    /// Returns `[header_record, data_record_1, data_record_2, ...]`. Layout
-    /// matches calibre's `mobi/writer8/index.py:Index.__call__` byte-for-byte
-    /// — the header record carries TAGX + a geometry block summarising each
-    /// data record (last entry name + count) + a trailing IDXT, and data
-    /// records use a completely different INDX header layout (8 bytes of
-    /// 0xFF at offset 28).
-    ///
-    /// Data records are capped at 64 KB (the PDB record limit, which also
-    /// keeps the u16 IDXT offsets from overflowing), so larger indexes
-    /// (~2800+ chunks) are split greedily across multiple data records;
-    /// `read_index` above walks `num_of_records` data records to reassemble
-    /// them.
     pub fn build(&self) -> io::Result<Vec<Vec<u8>>> {
         if self.entries.is_empty() {
             return Ok(vec![self.build_header_record(0, &[])?]);
         }
 
         // PDB records are capped at 64 KB, and a data record is
-        // `192-byte header + entry data + IDXT` where the IDXT holds one u16
-        // per entry plus an end-of-data u16, 4-byte aligned. Staying under
-        // the record cap also keeps every IDXT offset (`192 + data position`)
-        // within u16 range.
         const MAX_RECORD: usize = 0x10000;
         let idxt_size = |entry_count: usize| -> usize {
             // 'IDXT' + one offset per entry + end-of-data offset, padded.
@@ -771,9 +732,6 @@ impl IndxBuilder {
         let tagx_aligned = align_to_4(tagx);
 
         // Geometry block: per data record, `[len(name)][name bytes][count u16]`.
-        // Used by Kindle to know how many entries each data record contains
-        // and where the alphabetical boundary lies. Calibre also packs this
-        // into the header record.
         let mut geometry = Vec::new();
         let geom_start = 192 + tagx_aligned.len();
         let mut idxt_entries: Vec<u16> = Vec::with_capacity(last_indices.len());
@@ -968,9 +926,6 @@ pub fn build_skel_indx(skeletons: &[super::skeleton::SkelEntry]) -> io::Result<V
 
     for skel in skeletons {
         // Control byte calculation per Calibre:
-        // chunk_count: 2 values / vpe=1 = 2 entries. mask=3, shift=0. 3 & (2 << 0) = 2
-        // geometry: 4 values / vpe=2 = 2 entries. mask=12, shift=2. 12 & (2 << 2) = 8
-        // Total: 2 | 8 = 10 = 0x0A
         let mut tag_data = vec![0x0A];
 
         // Chunk count (repeated twice per Calibre implementation)
@@ -1022,20 +977,10 @@ const CHUNK_TAG_EOF: TagDef = TagDef {
 };
 
 /// Flush threshold for a CNCX record. PDB records are capped at 64 KB and the
-/// offset stored in index entries reserves only the low 16 bits for the
-/// within-record position; calibre's `CNCX` class (mobi/utils.py) flushes at
-/// 0xFBF8 to stay comfortably below both limits, and we mirror it.
 const CNCX_RECORD_LIMIT: usize = 0xFBF8;
 
 /// Build CNCX record(s) from labels, together with the offset each label is
 /// stored at.
-///
-/// Offsets use the Kindle convention mirrored by `Cncx::parse` above (and
-/// calibre's `CNCX` class): the record number is packed into the high bits
-/// (`record_number * 0x10000`) and the low 16 bits are the byte offset within
-/// that record. When a label would push the current record past
-/// `CNCX_RECORD_LIMIT`, the record is flushed and the next label starts a new
-/// record at the next 0x10000 boundary.
 fn build_cncx_with_offsets(selectors: &[String]) -> io::Result<(Vec<Vec<u8>>, Vec<u32>)> {
     let mut records: Vec<Vec<u8>> = Vec::new();
     let mut current: Vec<u8> = Vec::new();
@@ -1047,9 +992,6 @@ fn build_cncx_with_offsets(selectors: &[String]) -> io::Result<(Vec<Vec<u8>>, Ve
         let raw_len = len_prefix.len() + bytes.len();
 
         // A single label that can never fit in one record cannot be split
-        // (the length prefix + payload must be contiguous); refuse rather
-        // than emit a dangling offset. Calibre never hits this because it
-        // truncates labels to 500 characters much earlier.
         if raw_len > CNCX_RECORD_LIMIT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1060,8 +1002,6 @@ fn build_cncx_with_offsets(selectors: &[String]) -> io::Result<(Vec<Vec<u8>>, Ve
         if current.len() + raw_len > CNCX_RECORD_LIMIT {
             // CNCX records must be 4-byte aligned. Calibre's `CNCX` class
             // aligns every flushed record (mobi/utils.py `align_block`);
-            // without this Kindle's CNCX scanner can read a misaligned
-            // trailing varint and either return the wrong string or hang.
             records.push(align_to_4(std::mem::take(&mut current)));
         }
 
@@ -1085,17 +1025,12 @@ fn build_cncx_with_offsets(selectors: &[String]) -> io::Result<(Vec<Vec<u8>>, Ve
 }
 
 /// Build CNCX record(s) from chunk selectors. Large label sets are split
-/// across multiple records; see `build_cncx_with_offsets` for the offset
-/// convention. The records must be written to the PDB in order, immediately
-/// after the owning index's data records.
 pub fn build_cncx(selectors: &[String]) -> io::Result<Vec<Vec<u8>>> {
     build_cncx_with_offsets(selectors).map(|(records, _)| records)
 }
 
 /// Build chunk/fragment index records. `num_cncx` is the number of CNCX
 /// records that will follow the index's data records (i.e.
-/// `build_cncx(..).len()`), recorded in the INDX header so readers know how
-/// many records to fetch.
 pub fn build_chunk_indx(
     chunks: &[super::skeleton::ChunkEntry],
     cncx_offsets: &[u32],
@@ -1141,7 +1076,6 @@ pub fn build_chunk_indx(
 /// Calculate CNCX offsets for a list of selectors. Must stay consistent with
 /// `build_cncx` (both defer to `build_cncx_with_offsets`), including the
 /// record rollover: offsets encode `record_number * 0x10000 + within_record`.
-/// Returns empty offsets for label sets `build_cncx` would reject.
 pub fn calculate_cncx_offsets(selectors: &[String]) -> Vec<u32> {
     build_cncx_with_offsets(selectors)
         .map(|(_, offsets)| offsets)
@@ -1307,10 +1241,6 @@ pub fn build_ncx_indx(entries: &[NcxBuildEntry]) -> io::Result<IndxAndCncxRecord
         NCX_TAG_EOF,
     ];
     // libmobi / Kindle compute control_byte_count from the TAGX itself by
-    // counting EOF-terminator entries. NCX TAGX has exactly one EOF, so the
-    // entry uses one control byte. Pass 2 and the parse fails with
-    // "Wrong count of control bytes: 2 != 1", and Kindle refuses the file as
-    // corrupt.
     let mut builder = IndxBuilder::new(tagx, 1);
 
     // Build CNCX with labels

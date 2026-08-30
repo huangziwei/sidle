@@ -1,11 +1,4 @@
 //! Notes an EPUB marks by linking open over the page on a Kindle.
-//!
-//! An EPUB 2 has no `epub:type`, so nothing in it *names* a note. It marks one
-//! structurally instead, as a reciprocal pair of links: the marker points into
-//! the note's text and the note's text points back into the passage.
-//! Recognising that pair is what puts `yj.classification` on the body and
-//! `yj.display: yj.note` on the marker, the two fields the device reads to open
-//! a note over the page instead of navigating to it.
 
 use std::io::Write;
 

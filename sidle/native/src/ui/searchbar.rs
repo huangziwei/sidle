@@ -1,10 +1,4 @@
 //! The library search bar — **one** widget, drawn in both the grid view and the
-//! keyboard overlay. Its left edge, top, and height are constant across views, so
-//! tapping to open the keyboard never shifts the field under your finger. Only
-//! the RIGHT edge differs: the grid view leaves room for the Sync + action
-//! buttons (`with_button = true`), while the keyboard overlay has none, so the
-//! field stretches to full width (`with_button = false`) — reclaiming that space
-//! rather than leaving it blank.
 
 use crate::eink::fb::Framebuffer;
 use crate::ui::grid;
@@ -26,9 +20,6 @@ pub const BUTTON_GAP: u32 = 24;
 /// Search-field pill width for a given view. Grid view (`with_button`): the row
 /// between the side margins minus the two round buttons and the two gaps (field↔
 /// Sync, Sync↔right), so field + gaps + buttons together span `xres - 2·MARGIN_X`.
-/// Keyboard overlay (no buttons): the full span between the margins, so the field
-/// reclaims their space instead of leaving it blank. The left edge (`MARGIN_X`) is
-/// the same either way — only the right edge moves.
 pub fn field_w(xres: u32, with_button: bool) -> u32 {
     if with_button {
         xres.saturating_sub(MARGIN_X * 2 + 2 * BUTTON_GAP + 2 * BTN_D)
@@ -64,25 +55,12 @@ pub enum Tap {
     /// grid view.
     Sync,
     /// The right-hand button in the **library** view: pull the picker's next
-    /// binary from sidle-server (the LAN self-update). Drawn only in the grid
-    /// view; the keyboard overlay leaves the slot
-    /// empty, so a tap there is a harmless no-op (its handler acts only on
-    /// `Clear`).
     Update,
     /// The right-hand button in the **DRM** view: decrypt every on-device
-    /// purchase and push each to the desktop. Occupies the same slot as `Update`
-    /// (the library view's self-update, useless while browsing DRM books), and is
-    /// returned there in place of it when `drm` is set (see [`hit`]).
     DecryptAll,
 }
 
 /// Hit-test the bar. `query_active` enables the right-hand `✕` (clear) zone,
-/// which is only drawn when a query is set. `with_button` must match the value
-/// [`draw`] was called with for this view: in the grid view the right-hand pill
-/// is an action button; in the full-width keyboard overlay it's part of the
-/// field, so no action tap is ever returned there. `drm` selects that button's
-/// meaning — [`Tap::DecryptAll`] in the DRM view, [`Tap::Update`] in the library
-/// view — matching the glyph [`draw_buttons`] drew for the same view.
 pub fn hit(
     tx: u32,
     ty: u32,
@@ -119,10 +97,6 @@ pub fn hit(
 }
 
 /// Draw the search field: a rounded pill + magnifier glyph + the
-/// placeholder/query, plus an `✕` clear button when a query is set. `with_button`
-/// selects the width — shorter in the grid view (leaving room for the Sync +
-/// Update buttons, drawn separately via [`draw_buttons`]) or full width in the
-/// keyboard overlay. The left edge is the same either way, so the field never jumps.
 pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str, with_button: bool) {
     let xres = fb.var.xres;
     let x = MARGIN_X;
@@ -151,14 +125,6 @@ pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str, with
 }
 
 /// Draw the two round action buttons flush to the right margin — **Sync** (left)
-/// and the source-dependent right disc — each a circle with a hand-drawn glyph
-/// (the font has none of 🔄 / ⤓ / 🔑). Only the grid view draws them; the
-/// keyboard overlay leaves the slot empty so nothing competes with typing. Sync
-/// pushes to sidle-server (annotations in the library, decrypted books in DRM).
-/// The right disc is the library view's **Update** (download glyph — pull the
-/// picker's next binary) or, when `drm` is set, **Decrypt-All** (key glyph —
-/// decrypt every purchase); [`hit`] must be called with the same `drm` so taps
-/// resolve to the glyph shown.
 pub fn draw_buttons(fb: &mut Framebuffer, drm: bool) {
     let xres = fb.var.xres;
     // Left disc: Sync — same slot and glyph in both sources.

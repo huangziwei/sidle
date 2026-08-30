@@ -1,12 +1,4 @@
 //! KFX → `BookData` loader.
-//!
-//! Parses the container, resolves every fragment's name from the symbol
-//! table, and groups the fragments by ftype symbol id. A `bcRawMedia` ($417)
-//! or `bcRawFont` ($418) value is the raw payload bytes; every other value is
-//! a parsed `IonValue`.
-//!
-//! Loading is eager: a KFX container runs to a few hundred entities under
-//! 100 MB.
 
 use std::collections::{HashMap, HashSet};
 

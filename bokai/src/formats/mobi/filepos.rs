@@ -1,18 +1,10 @@
 //! Filepos handling for MOBI format.
-//!
-//! MOBI files use `filepos=NNNNN` attributes in anchor tags to reference
-//! byte positions in the decompressed text stream. This module provides
-//! functions matching KindleUnpack's approach:
-//! 1. Collect all filepos target positions from links
-//! 2. Insert `<a id="fileposNNNNN" />` anchor tags at exact byte positions
-//! 3. Convert `filepos=NNNNN` to `href="#fileposNNNNN"`
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Collect all filepos target values from `<a filepos=NNNNN>` attributes.
 ///
 /// Returns a set of byte positions that are referenced as link targets.
-/// Matches KindleUnpack's link_pattern: `<[^<>]+filepos=['"{0,1}(\d+)[^<>]*>`
 pub fn collect_filepos_targets(html: &[u8]) -> HashSet<usize> {
     let mut targets = HashSet::new();
     let mut pos = 0;
@@ -63,15 +55,6 @@ pub fn collect_filepos_targets(html: &[u8]) -> HashSet<usize> {
 }
 
 /// Transform MOBI HTML matching KindleUnpack's approach:
-/// 1. Insert `<a id="fileposNNNNN" />` anchor tags at exact byte positions
-/// 2. Convert `filepos=NNNNN` to `href="#fileposNNNNN"`
-/// 3. Convert `recindex=NNNNN` to proper image paths
-///
-/// This matches KindleUnpack's findAnchors() + insertHREFS() methods.
-///
-/// `extra_anchor_positions` allows inserting additional anchors (e.g. from NCX
-/// index entries) at byte positions that may not have corresponding `filepos=N`
-/// attributes in the HTML.
 pub fn transform_mobi_html(
     html: &[u8],
     assets: &[std::path::PathBuf],
@@ -83,7 +66,6 @@ pub fn transform_mobi_html(
     let targets = collect_filepos_targets(html);
 
     // Step 2: Build position map for anchor insertion
-    // KindleUnpack inserts anchors at exact byte positions
     let mut position_map: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for &position in &targets {
         if position > 0 && position <= html.len() {
@@ -106,12 +88,6 @@ pub fn transform_mobi_html(
     }
 
     // Step 3: Build recindex -> asset path mapping.
-    //
-    // `recindex` is 1-based over every record from `first_image_index`,
-    // counting the non-image ones (`RESC`, `DATP`, `FLIS`, …) that asset
-    // discovery drops. It is therefore not a position in the filtered list —
-    // the two diverge by however many records were skipped — so key on the raw
-    // offset the filename carries.
     let mut recindex_map: HashMap<u32, String> = HashMap::new();
     for asset in assets {
         if let Some(offset) = super::asset_record_offset(asset) {
@@ -184,8 +160,6 @@ pub fn transform_mobi_html(
                 }
             } else {
                 // Empty or malformed filepos (no digits) - skip the entire attribute
-                // This removes `filepos=""` or `filepos=` leaving the anchor tag
-                // which will be cleaned up later or rendered as plain text
                 pos = end;
                 continue;
             }
@@ -211,9 +185,6 @@ pub fn transform_mobi_html(
         }
 
         // An `<img>` may carry any of `lowrecindex` / `recindex` /
-        // `hirecindex`; resolve the tag as a whole so the three collapse into
-        // one `src` instead of the plain-`recindex` branch above firing on the
-        // tail of `hirecindex=` and leaving a bogus `hisrc`.
         if with_anchors[pos] == b'<'
             && with_anchors[pos + 1..].starts_with(b"img")
             && with_anchors
@@ -256,12 +227,6 @@ pub fn transform_mobi_html(
 }
 
 /// Rewrite one `<img>` tag, turning its record references into a single `src`.
-///
-/// MOBI6 offers the same picture at up to three resolutions —
-/// `lowrecindex`, `recindex`, `hirecindex` — and none of the three is a valid
-/// XHTML attribute. All are consumed and the best available one wins, matching
-/// the precedence in calibre's reader. A tag naming no resolvable record keeps
-/// whatever it already had.
 fn resolve_image_record(tag: &[u8], recindex_map: &HashMap<u32, String>) -> Vec<u8> {
     const NAME_END: usize = 4; // `<img`
     let mut attrs_end = tag.len() - 1;

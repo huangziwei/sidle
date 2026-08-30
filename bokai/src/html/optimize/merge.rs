@@ -8,26 +8,6 @@ use super::predicates::has_semantic_attrs;
 /// Merge adjacent inline/text nodes with identical styles.
 ///
 /// This pass walks the tree using the first_child/next_sibling links.
-/// When two adjacent siblings have the same role (Text), same style,
-/// no semantic attributes, and contiguous text ranges, they are merged
-/// by extending the first node's text range and unlinking the second.
-///
-/// # Why this matters
-///
-/// MOBI/AZW files often store small-caps as fragmented elements:
-/// ```html
-/// <font size="5"><b>T</b></font><font size="2"><b>HE </b></font>
-/// ```
-///
-/// Without this pass, the exported HTML keeps the split runs:
-/// ```html
-/// <b>T</b><b>HE </b>
-/// ```
-///
-/// After merging, the adjacent same-style runs coalesce:
-/// ```html
-/// <b>THE </b>
-/// ```
 pub fn merge_adjacent_spans(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         merge_siblings(chapter, parent_id);

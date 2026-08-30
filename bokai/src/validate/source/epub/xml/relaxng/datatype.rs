@@ -1,20 +1,4 @@
 //! The datatype libraries a RELAX NG grammar can reference.
-//!
-//! Two are needed here. The **built-in** library (`string` and `token`) is
-//! required of every implementation. The **XSD** library is what the vendored
-//! EPUB grammars actually lean on — `ID`, `IDREF`, `NCName`, `anyURI`, `string`,
-//! `token`, `NMTOKEN`, `language`, `positiveInteger` and a few others — and it
-//! is where a violation like "an `id` that starts with a digit" is decided.
-//!
-//! Each type answers two questions the algorithm asks: does this string belong
-//! to the type's lexical space (`allows`), and are these two strings equal in
-//! its value space (`equal`) — the second being why `<value>1</value>` matches
-//! the literal ` 1 ` for a whitespace-collapsing type and not for `string`.
-//!
-//! Unknown types are **accepted**. A grammar naming a type this module does not
-//! model would otherwise reject every document that uses it, turning a gap in
-//! coverage into a false positive; accepting is the direction that can only
-//! under-report.
 
 /// XSD's `whiteSpace` facet, which decides both what `allows` sees and how
 /// `equal` compares.

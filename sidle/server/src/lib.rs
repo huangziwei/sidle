@@ -1,13 +1,4 @@
 //! sidle LAN HTTP server.
-//!
-//! Read-only over the existing on-disk library: serves `/list.json`,
-//! `/get/{id}`, and `/cover/{id}` from the same `library.db` +
-//! `books/<sha>/` layout the Tauri desktop app writes. Token-gated so a
-//! casual LAN scan can't browse the shelf.
-//!
-//! Two launch modes use the same `serve(config)`:
-//! - Embedded — Tauri spawns it as a tokio task, sharing the runtime.
-//! - Standalone — `sidle-server` CLI binary parses args, calls `serve()`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -39,15 +30,8 @@ use sidle_core::library::{
 };
 
 // We call `db::open` per request (rather than holding a long-lived `Arc<
-// Mutex<Connection>>` like the Tauri side) because the server's workload is
-// stateless reads. Cost: re-runs the idempotent migrations on every hit,
-// which is a handful of PRAGMA / `has_column` queries — negligible at
-// single-user LAN scale.
 
 /// Runtime configuration assembled by either the CLI or the embedded
-/// caller. The token is loaded/generated outside and passed in so the same
-/// secret can also be written into the on-device app's `etc/server.conf` at
-/// install time (Phase 6).
 pub struct Config {
     pub paths: LibraryPaths,
     /// `host:port` for the listener. Defaults to `0.0.0.0:8731` from the
@@ -63,18 +47,12 @@ pub(crate) struct AppState {
 }
 
 /// Serve until the task is dropped/aborted (embedded mode) — no signal
-/// handling. The Tauri app calls this and stops the server by aborting the
-/// tokio task; installing a process-wide signal handler here would step on the
-/// app's own. The standalone binary uses [`serve_with_shutdown`] instead.
 pub async fn serve(config: Config) -> Result<()> {
     serve_with_shutdown(config, std::future::pending::<()>()).await
 }
 
 /// [`serve`] with a shutdown trigger threaded in, so axum drains in-flight
 /// requests when the future resolves instead of dropping the listener abruptly.
-/// The standalone `sidle-server` passes a SIGTERM/SIGINT future (so a graceful
-/// `kill`, an external port-kill, an app-initiated stop, and Ctrl-C all drain
-/// cleanly); a test can pass a oneshot to drive shutdown deterministically.
 pub async fn serve_with_shutdown(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
@@ -82,10 +60,6 @@ pub async fn serve_with_shutdown(
     config.paths.ensure().context("ensure library paths")?;
 
     // Backfill cover thumbnails for books imported before thumbnails existed
-    // (and self-heal any that went missing). Spawned in the background so we
-    // start listening immediately — a book whose thumbnail isn't ready yet just
-    // falls back to its full-res cover in `get_cover` until it lands.
-    // Idempotent + mtime-gated, so this is a near-instant no-op once warm.
     let thumb_paths = config.paths.clone();
     tokio::spawn(async move {
         match tokio::task::spawn_blocking(move || {
@@ -109,15 +83,9 @@ pub async fn serve_with_shutdown(
     let app = build_router(state);
 
     // rustls 0.23 needs a process-wide default provider before any config is
-    // built. `ring` rather than aws-lc-rs: it is already in the workspace graph,
-    // so this adds no new C build. Erroring means someone else installed one
-    // first (the embedded case), which is fine — theirs wins and works.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Fail loudly when the material is missing rather than falling back to
-    // plaintext: a server that quietly serves HTTP is exactly the outcome TLS
-    // exists to prevent, and the token would ride in the clear on every request
-    // without anything visibly wrong.
     let tls = RustlsConfig::from_pem_file(paths.server_cert(), paths.server_key())
         .await
         .with_context(|| {
@@ -140,10 +108,6 @@ pub async fn serve_with_shutdown(
     tracing::info!("sidle-server listening on https://{local}");
 
     // axum-server drains via a `Handle` rather than a shutdown future, so bridge
-    // the two: the caller's future still decides *when*, and in-flight requests
-    // still get to finish. The timeout bounds a wedged request so a stop can't
-    // hang forever — SIGTERM callers (the app's stop, a supervisor, plain `kill`)
-    // expect the process to actually go away.
     let handle = axum_server::Handle::new();
     let drain = handle.clone();
     tokio::spawn(async move {
@@ -175,15 +139,6 @@ pub async fn serve_with_shutdown(
 const ADDRESS_POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Re-issue and hot-swap `tls` for each new value of `address`.
-///
-/// `issue_server_cert` names the machine's address in a SAN; a client dialling
-/// an address the leaf omits refuses the handshake. `ensure_ca` leaves the root
-/// alone, so a device keeps trusting the CA it holds across every swap.
-///
-/// `address` of `None` keeps the loaded leaf: an interface that stopped routing
-/// leaves the addresses in the leaf reachable.
-///
-/// Runs until dropped.
 async fn follow_lan_address(
     paths: LibraryPaths,
     tls: RustlsConfig,
@@ -238,27 +193,14 @@ async fn follow_lan_address(
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 32 MB body cap on `POST /sync/annotations` and `POST /sync/reading-log`. A
-/// whole library's `.yjr`/`.yjf` sidecars (KB each) fit with generous headroom,
-/// as does the ink that rides along with them (an `nbk` of pen strokes on a book
-/// is tens of KB); bounds the JSON buffer the body extractor builds so a
-/// stray/oversized POST can't exhaust memory.
 const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// Body cap on `POST /sync/notebooks`. A standalone notebook is a much larger
-/// `nbk` than a book's ink — a well-used one reaches a couple of MB — so this
-/// sits higher. It is not sized for a whole Scribe at once on purpose: the
-/// device batches its upload to bound its own RAM, and a cap it can't reach is
-/// no cap at all.
 const NOTEBOOK_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Body cap on `POST /sync/book` — one decrypted book, buffered whole before
 /// it's handed to the importer. Generous for an image-heavy purchase;
 /// single-user LAN, and the transient RAM is fine.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
 /// Body cap on `POST /sync/misc` — one batch of the Kindle's configured folders,
-/// base64 in one JSON bundle. The picker batches to a fraction of this (its own
-/// memory is the tighter constraint), so the headroom is for a single outsized
-/// file, which goes in a batch of its own. Since a collection can point anywhere,
-/// a 413 on one is a clear error rather than a silent drop; the picker deletes
-/// nothing when a batch fails, so the next Sync re-sends it.
 const MISC_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// The axum app: routes + per-route layers. Factored out of
@@ -274,8 +216,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         // Write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
         // the LAN twin of the USB import. Token-gated like the reads; body-limited
         // so an oversized POST can't exhaust memory.
-        // The GET is the ink half's watermark: what this library already holds
-        // for the asking device, so the POST carries only changed notebooks.
         .route(
             "/sync/annotations",
             get(ink_manifest)
@@ -294,11 +234,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
         )
         // The Kindle pushes the folders this library asked for here on Sync — a
-        // WiFi backup, stored under `device-backup/<serial>/` (no DB, view-only
-        // in the desktop Files tab). The GET is what it asks with: the library
-        // owns the collection list, so a folder added or renamed in the app's
-        // settings reaches the picker on its next Sync with no redeploy.
-        // Token-gated + body-limited like the rest.
         .route(
             "/sync/misc",
             get(misc_collections)
@@ -411,36 +346,12 @@ pub(crate) fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
 /// One `/list.json` entry: the full library row plus `device_filename`, the
 /// canonical on-device name (`<basename>.<sha8>.kfx`) the client should save
 /// the download as.
-///
-/// The name is computed here, server-side, with the same
-/// [`kfx_device_filename`] rule the USB push uses — so a book pulled over the
-/// LAN lands under a byte-identical name to one pushed over USB, and
-/// the desktop app's USB-side delete recognizes it instead of flagging it as
-/// foreign.
-///
-/// Why ship it in the JSON body rather than let the client read it off the
-/// `/get/{id}` `Content-Disposition` header: every on-device name here is
-/// non-ASCII (Japanese), and the native client's HTTP library (`ureq`)
-/// silently drops header values containing bytes outside visible ASCII
-/// (RFC 7230 field-vchar) — so that header is invisible to it. The body has
-/// no such restriction. `None` only until a row has both `kfx_path` and
-/// `kfx_sha256` (conversion + hashing done); such a row isn't downloadable
-/// anyway (`get_book` 404s without a `kfx_path`).
 #[derive(serde::Serialize)]
 struct BookListEntry {
     #[serde(flatten)]
     row: db::BookRow,
     device_filename: Option<String>,
     // The Kindle picker's cover cache token (`cover_rev`) now rides in on the
-    // flattened `row` — `db::BookRow::cover_rev`, the ms mtime of the served
-    // image, computed once in `row_to_book`. No separate field here (a sibling
-    // would collide with the flattened key).
-    /// Content revision of the served KFX: the file's ms mtime. `kfx_sha256` is
-    /// a frozen device identity, so a reconvert that rewrites the bytes doesn't
-    /// change the on-device filename — the picker compares this against the
-    /// rev it last downloaded and re-pulls a stale book in place. 0 when the row
-    /// has no `kfx_path` (not downloadable anyway). Distinct sibling key, so no
-    /// collision with the flattened `row`.
     kfx_rev: i64,
 }
 
@@ -493,12 +404,6 @@ async fn get_book(
         .ok_or(StatusCode::NOT_FOUND)?;
     let kfx_path = book.kfx_path.ok_or(StatusCode::NOT_FOUND)?;
     // The on-device name has to match the `<basename>.<sha8>.kfx` shape
-    // the desktop app's USB push uses, so that a book downloaded via the picker is
-    // recognized by `device_list_ours` / `delete_one` and not flagged as
-    // foreign. The bootstrap backfill (`state.rs`) populates `kfx_sha256`
-    // for every row before the server takes requests; the fallback only
-    // protects against an in-flight race where a freshly-converted row
-    // hasn't had its sha hashed yet.
     let device_name = book
         .kfx_sha256
         .as_deref()
@@ -513,16 +418,6 @@ async fn get_book(
 }
 
 /// The reading-state sidecar for one book, composed from the library alone.
-///
-/// A book arriving on a device for the first time has no `.sdr` yet, so it
-/// appears in no sync bundle and the ordinary push — which answers what the
-/// device sent — has nothing to answer. Its highlights would sit in the library
-/// until the reader opened the book and synced again. This is the same
-/// composer, asked directly: give me what this book's sidecar should contain
-/// for a device holding nothing.
-///
-/// `204` when the library has nothing to write, so a caller can ask for every
-/// download without treating "no highlights yet" as a failure.
 async fn get_sidecar(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -583,10 +478,6 @@ async fn get_cover(
     let cover_path = book.cover_path.ok_or(StatusCode::NOT_FOUND)?;
 
     // The Kindle picker asks for `?thumb=1` — serve the small color thumbnail
-    // produced at import (see sidle_core::library::thumbnail). If it isn't on
-    // disk yet (the boot backfill hasn't reached this book, or it failed), fall
-    // through to the full-res cover so the picker still gets something — just
-    // slower for that one book until the thumbnail lands.
     let want_thumb = query.get("thumb").is_some_and(|v| v == "1" || v == "true");
     if want_thumb {
         let thumb = state.paths.cover_thumb(&book.sha256);
@@ -606,10 +497,6 @@ async fn get_cover(
 // ---------------------------------------------------------------------------
 
 /// The push bundle the Kindle picker (or any USB-less client) sends: each
-/// `.sdr`'s reading-state sidecars, base64 in JSON so the armv7 native client
-/// needs no multipart dep — it already speaks serde. The byte content mirrors
-/// exactly what the USB scanner ([`ingest::import_from_device`]) reads off a
-/// mounted volume. Base64 is standard alphabet *with* padding (`STANDARD`).
 #[derive(serde::Deserialize)]
 struct SyncRequest {
     /// The Kindle's own serial — annotations are keyed per device (delete
@@ -619,12 +506,6 @@ struct SyncRequest {
     sdrs: Vec<SyncSdr>,
     /// Handwritten ink drawn on sideloaded books, one entry per host book, as
     /// pulled from `.notebooks/<asin>!!PDOC!!notebook/nbk`.
-    ///
-    /// It rides in the annotation bundle rather than a route of its own because
-    /// an ink page anchors to its host page through the `handwritten_note`
-    /// records in that book's `.yjr` — the anchors are in `sdrs`, so separating
-    /// the two would import every page unanchored. Same reason the USB path
-    /// folds ink into its annotation pass. Empty from a device with no pen.
     #[serde(default)]
     inks: Vec<SyncInk>,
 }
@@ -642,10 +523,6 @@ struct SyncInk {
 
 /// What `GET /sync/annotations` answers: the ink content shas this library has
 /// already decoded for the asking device, `{asin: nbk_sha}`.
-///
-/// The device holds its own filesystem, so it hashes `.notebooks/` locally and
-/// sends only what this map doesn't already account for. Per-device because
-/// `ink_sync` is: the same book inked on two Kindles is two separate facts.
 #[derive(serde::Serialize)]
 struct InkManifest {
     ink: HashMap<String, String>,
@@ -681,9 +558,6 @@ struct OutgoingSdr {
 }
 
 /// The LAN sync's answer: what came in, and what should go back out.
-///
-/// The report is flattened so the fields the picker already reads stay where
-/// they were; `write` is additive.
 #[derive(serde::Serialize)]
 struct SyncResponse {
     #[serde(flatten)]
@@ -721,13 +595,6 @@ async fn ink_manifest(
 }
 
 /// Ingest pushed annotations — the LAN twin of the USB import. Token-gated, then
-/// base64-decode → `Vec<CollectedYjr>` → the **exact** USB-path function
-/// [`ingest::import_collected`], so a LAN import is byte-for-byte the same DB
-/// operation as a USB sync. Returns the `DeviceImportReport`
-/// so the picker can show "N new highlights", mirroring the USB report.
-///
-/// `Json` is the last parameter because it consumes the request body (axum
-/// requires body-consuming extractors last).
 async fn sync_annotations(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -768,9 +635,6 @@ async fn sync_annotations(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         // Plan the write-back from the sidecars as they arrived, before the
-        // import folds them into the library — the plan compares the device's
-        // file against what the library holds, and that comparison is the same
-        // either way. Cloned because the import consumes them.
         let for_push = collected.clone();
         // The ink anchors live in the very sidecars that just arrived — read
         // them before the import consumes the collection.
@@ -781,9 +645,6 @@ async fn sync_annotations(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         // Ink, through the same core function the USB pass calls — so a LAN sync
-        // and a cable sync are one DB operation, not two implementations. A
-        // failure here must not lose the annotations already committed above, so
-        // it's logged and the report goes back with its ink counts at zero.
         if !inks.is_empty()
             && let Err(err) = ink::import_collected_ink(
                 &conn,
@@ -837,10 +698,6 @@ async fn sync_annotations(
             }
         };
         // Live-repaint signal — only when the import changed annotation state worth
-        // repainting an open reader for. The GUI watches this file (see the
-        // desktop app's `sync_pulse`) and re-emits the `annotations:sync-done`
-        // event the USB path already fires; the daemon cannot emit a Tauri event
-        // into the app directly.
         if import_changed_anything(&report) {
             write_sync_pulse(&paths, &device_serial, &report);
         }
@@ -861,10 +718,6 @@ async fn sync_annotations(
 
 /// What `GET /sync/notebooks` answers: `{uuid: nbk_sha}` for every notebook the
 /// library holds.
-///
-/// Unlike the ink manifest this takes no device — a notebook is one library
-/// entity regardless of which Scribe wrote it, so two devices holding the same
-/// uuid hold the same notebook.
 #[derive(serde::Serialize)]
 struct NotebookManifest {
     notebooks: HashMap<String, String>,
@@ -923,10 +776,6 @@ async fn notebook_manifest(
 
 /// `POST /sync/notebooks` — back up the Scribe's standalone handwritten
 /// notebooks, the LAN twin of the desktop's MTP pull.
-///
-/// Goes through the same core import that pull uses, so a notebook that arrives
-/// over WiFi and one that arrives over a cable produce the same rows, the same
-/// page-SVG cache, and the same deletion suppression.
 async fn sync_notebooks(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -995,13 +844,6 @@ struct BookSyncResult {
 
 /// The filename extension [`sync_book`] stages an upload under, from what the
 /// pusher put in `?ext=`.
-///
-/// Kept to lowercase ASCII letters, digits and `-`, and to the length of the
-/// longest extension the library reads: a query value reaches no path outside
-/// the temp dir and hides no second extension. Anything else, `None` included,
-/// takes `kfx-zip`, the extension of every KFX push. An extension that survives
-/// but names a format the library cannot read passes through, and `import_file`
-/// answers with its own message.
 fn staged_ext(requested: Option<&str>) -> String {
     requested
         .filter(|e| {
@@ -1015,19 +857,6 @@ fn staged_ext(requested: Option<&str>) -> String {
 }
 
 /// Ingest one decrypted book pushed over the LAN — the WiFi twin of the desktop's
-/// USB `/dedrm` auto-pull. Token-gated, then the raw body is written to a temp
-/// file and handed to the **exact** import the USB pull uses
-/// ([`import::import_file`]): a WiFi import is byte-for-byte the same DB
-/// operation, hash-deduped against a book the USB pull took.
-///
-/// `?ext=` names the extension to stage the bytes under, which `import_file`
-/// dispatches on. The Kindle sends the decrypted file's own —
-/// `kfx-zip` for a KFX, `azw3`/`azw4`/`mobi` for the MOBI family. See
-/// [`staged_ext`] for what an absent or unusable value falls back to.
-///
-/// `Bytes` is last, a body-consuming extractor. [`write_book_pulse`] signals the
-/// app; absent a listening app, `state.rs` re-enqueues the pending job on the
-/// next launch.
 async fn sync_book(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1091,10 +920,6 @@ async fn sync_book(
 // ---------------------------------------------------------------------------
 
 /// Serve the library's sync-collection config, so the picker knows which device
-/// folders to scan before it pushes. Token-gated like the rest. A config file
-/// that won't parse is a 500 rather than a silent fallback to the defaults —
-/// the picker falls back on its own when the fetch fails, and it should be a
-/// visible failure that a hand-edited config sent it back to the defaults.
 async fn misc_collections(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1110,10 +935,6 @@ async fn misc_collections(
 }
 
 /// The push bundle the Kindle picker sends on Sync: each file base64 in JSON
-/// (same no-multipart-dep reason as `/sync/annotations`), tagged with the
-/// collection it was scanned for. The collection id is the only thing the
-/// server takes from the client, and it takes it only as a lookup key: the
-/// storage policy applied is this library's own, never one the client states.
 #[derive(serde::Deserialize)]
 struct MiscSyncRequest {
     /// The Kindle's serial — keys the `device-backup/<serial>/` subtree, same
@@ -1143,11 +964,6 @@ struct MiscSyncResult {
 /// Store the Kindle's pushed files under `device-backup/<serial>/<collection>/`
 /// — the WiFi backup the desktop Files tab views. Token-gated, then base64-decode
 /// and hand each file to the shared [`device_backup::store_collection_file`]
-/// policy (identical to the desktop's USB pull). No DB touch — these are files,
-/// not library rows. A file naming a collection this library doesn't have is
-/// ignored, as is one whose path doesn't survive sanitizing.
-///
-/// `Json` is last (a body-consuming extractor).
 async fn sync_misc(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1206,17 +1022,6 @@ async fn sync_misc(
 /// What the library already holds from one Kindle.
 ///
 /// Two different skips, because the device has two kinds of source:
-///
-/// - `seen` names the log snapshots already read in full. A snapshot is
-///   immutable, so its name is proof, and the device skips it without opening
-///   it — the difference between a sync that gunzips 90 MB and one that lists a
-///   directory.
-/// - `watermark` is the newest event stored, as the `YYMMDD:HHMMSS` a syslog
-///   line starts with. It filters the *live* log, which has no stable name and
-///   is appended to continuously.
-///
-/// Both are empty for a device that has never synced, which correctly means
-/// "read everything once".
 #[derive(serde::Serialize, Default)]
 struct ReadingWatermark {
     watermark: String,
@@ -1225,11 +1030,6 @@ struct ReadingWatermark {
 
 /// The picker's push: the reading-event lines it found newer than the
 /// watermark, verbatim.
-///
-/// Lines, not parsed sessions, on purpose. The session rules are subtle — a
-/// running per-book counter, gap splitting, two different end-of-book constants
-/// — and they live in exactly one implementation on this side. The device
-/// selects; the library parses.
 #[derive(serde::Deserialize)]
 struct ReadingLogRequest {
     device_serial: String,
@@ -1252,12 +1052,6 @@ struct ReadingLogResult {
     /// How far this library now holds events for the pushing device, in the
     /// `YYMMDD:HHMMSS` a log line carries — the same value a subsequent `GET`
     /// would return.
-    ///
-    /// Returned so the device can drop its own archive of anything at or before
-    /// it. That archive exists only to survive a long gap between syncs, so the
-    /// moment the library confirms it holds the events, keeping them on a Kindle
-    /// is waste. Confirmed, not assumed: the device deletes against what this
-    /// says was stored, never against what it believes it sent.
     watermark: String,
 }
 
@@ -1293,9 +1087,6 @@ async fn reading_log_watermark(
 }
 
 /// `POST /sync/reading-log` — store the events the Kindle just found.
-///
-/// Idempotent by the same uniqueness index the desktop import relies on, so a
-/// re-push of an overlapping window adds nothing.
 async fn sync_reading_log(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1323,10 +1114,6 @@ async fn sync_reading_log(
         // requires — the device's own dumps overlap heavily by design.
         let events: std::collections::BTreeSet<String> = req.lines.into_iter().collect();
         // The sitting this Kindle was in when it last synced. These events are
-        // only what it has logged since, so the run they continue is not among
-        // them and has to come from the row it was stored as — otherwise a
-        // sitting split across two Syncs is stored as two, and the reading
-        // between them is credited to neither.
         let resume = reading_log::Resume::newest(&conn, &req.device_serial).map_err(|err| {
             tracing::error!(?err, "sync/reading-log: open-sitting query failed");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1354,13 +1141,6 @@ async fn sync_reading_log(
         // What the device is cleared to drop, which is exactly what this
         // library now holds durably — the raw lines, not the sessions made of
         // them.
-        //
-        // The sessions cannot answer it. Their watermark is per device, so a
-        // sitting stored for one book carries it past another book's events;
-        // the device then purges the only copy of lines nothing here kept, and
-        // a book the parser could not measure this week can never be measured.
-        // Archiving the lines first is what makes the newest of them a safe
-        // thing to say, and an archive that failed to write says nothing.
         let held = match reading_log::archive_pushed(&paths.root, &req.device_serial, &events) {
             Ok(()) => events
                 .iter()
@@ -1419,18 +1199,11 @@ fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
 /// Did the import change anything an open reader would render? New or removed
 /// annotations, a moved last-read position, or fresh ink pages warrant a repaint
 /// pulse; a re-sync of unchanged `.yjr` (pure duplicates) does not.
-/// (`unresolved` rows are a subset of `inserted`, so checking `inserted` already
-/// covers them; `ink_unchanged` is the ink equivalent of a duplicate and is
-/// deliberately not counted.)
 fn import_changed_anything(r: &DeviceImportReport) -> bool {
     r.annotations.inserted > 0 || r.positions > 0 || r.relinked > 0 || r.ink_pages > 0
 }
 
 /// Atomically write `<root>/.sync-pulse.json` — the cross-process signal the GUI
-/// watches to live-repaint an open reader after a LAN sync. Sits beside
-/// `server.pid`/`server.log`. Best-effort: a failed pulse just means no live
-/// repaint (the next GUI poll / manual reload still shows the rows); the DB write
-/// already succeeded, so this never fails the request.
 fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceImportReport) {
     let pulse = serde_json::json!({
         "ts": db::now_iso(),
@@ -1479,12 +1252,6 @@ fn write_reading_pulse(paths: &LibraryPaths, device_serial: &str, stored: &readi
 }
 
 /// Atomically write `<root>/.book-pulse.json` — the book twin of
-/// [`write_sync_pulse`]. The detached server can't emit a Tauri event, so the
-/// app's `sync_pulse` watcher reads this to enqueue the pending `kfx_to_epub`
-/// conversion and refresh the shelf. Only a **new** import writes one (a
-/// duplicate re-push changes nothing), so a manual re-sync of already-synced
-/// books stays quiet on the desktop. Best-effort — the DB write already
-/// succeeded, so a failed pulse just defers the conversion to the next launch.
 fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     let pulse = serde_json::json!({
         "ts": db::now_iso(),
@@ -1562,9 +1329,6 @@ async fn serve_file(
     );
     if let Some(name) = download_filename {
         // Quote-escape any embedded `"` in the filename. RFC 6266 says we
-        // should also percent-encode for non-ASCII via `filename*=UTF-8''…`
-        // but every Kindle test target so far handles plain `filename="…"`
-        // with UTF-8 bytes, so keep this simple until something breaks.
         let safe = name.replace('"', "'");
         let val = format!("attachment; filename=\"{safe}\"");
         if let Ok(hv) = HeaderValue::from_str(&val) {
@@ -1611,11 +1375,6 @@ mod tests {
     /// A client built exactly the way the Kindle picker will be: the pure-Rust
     /// RustCrypto provider, and our own CA as the *sole* trust root — no public
     /// roots at all, so a certificate from anywhere else cannot satisfy it.
-    ///
-    /// Sharing the device's stack is the point. A test that used the host's
-    /// reqwest/ring client would prove the server serves TLS to *something*,
-    /// which is not the question; the question is whether the leaf we issue is
-    /// accepted by the constrained client that has to accept it.
     fn device_shaped_agent(ca_pem: &str) -> ureq::Agent {
         use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
         let ca = Certificate::from_pem(ca_pem.as_bytes()).expect("parse CA pem");
@@ -1632,9 +1391,6 @@ mod tests {
     }
 
     /// [`follow_lan_address`] over a real handshake: `axum_server` starts on a
-    /// leaf covering `127.0.0.1` alone, a pinned client dialling `localhost`
-    /// is refused, and the address change re-issues a leaf the same client and
-    /// the same pinned root accept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_moved_machine_re_issues_and_hot_swaps_its_leaf() {
         use std::net::Ipv4Addr;
@@ -1742,12 +1498,6 @@ mod tests {
     /// Graceful shutdown, over a real TLS handshake: the daemon serves `GET /`
     /// (200) to a client that trusts only our CA, then when the shutdown future
     /// resolves `serve_with_shutdown` returns `Ok(())` and frees the port.
-    ///
-    /// This is simultaneously the proof that the whole certificate path works —
-    /// `library::tls` issues a leaf, the server presents it, and the device's
-    /// exact client stack validates it against the pinned root, including the
-    /// `127.0.0.1` IP SAN. Nothing about that is verifiable from the cert bytes
-    /// alone, which is why it lives here rather than in sidle-core.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn serves_tls_to_a_pinned_client_then_shuts_down_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1824,8 +1574,6 @@ mod tests {
     /// A synthetic bookmark `.yjr`: `[marker][len:3 BE][payload]` tokens — the
     /// same recipe `sidle-core`'s ingest tests use. One bookmark = the marker
     /// key followed by a single anchor-handle string value.
-    /// A `.yjr` holding one bookmark, encoded through the format's own codec so
-    /// this fixture is bytes a real Kindle would produce.
     fn yjr_bookmark(eid: i64, off: i64, position: i64) -> Vec<u8> {
         use sidle_core::library::yjr::{Anchor, Annotation, Kind, Store};
         let mut store = Store::empty();
@@ -1971,10 +1719,6 @@ mod tests {
     }
 
     /// The decisive LAN==USB gate: a `.yjr` pushed through `POST /sync/annotations`
-    /// produces the **identical** `DeviceImportReport` and the **identical**
-    /// stored annotation rows as calling `import_collected` on the same bundle
-    /// directly (the USB path) — because the handler routes through that exact
-    /// function. Two separate library roots so the two imports don't interfere.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_annotations_equals_usb_import() {
         let yjr = yjr_bookmark(1492, 0, 9);
@@ -2023,11 +1767,6 @@ mod tests {
         let mut report_http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         // LAN == USB: identical report ...
-        //
-        // Minus `write`, which has no USB counterpart: over LAN the device does
-        // its own writing, so the sidecars to push travel in the response, while
-        // the USB path writes them itself and reports only counts. What is being
-        // compared here is the *import* result, which must not differ by route.
         let write = report_http
             .as_object_mut()
             .expect("a JSON object")
@@ -2057,9 +1796,6 @@ mod tests {
     }
 
     /// `POST /sync/misc` applies each collection's own policy — screenshots
-    /// copy-if-absent, logs overwrite — under `device-backup/<serial>/`, ignores
-    /// a collection this library doesn't have, and reports the counts. The WiFi
-    /// twin of the desktop USB pull.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_misc_stores_per_collection_policy() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2369,8 +2105,6 @@ mod tests {
         };
         // A body past the 32 MB cap → rejected by DefaultBodyLimit before the
         // handler runs (413), regardless of token validity.
-        // A body past the 32 MB cap is built by inflating a sdr_name string —
-        // anything inside the JSON suffices; the layer trips before our handler.
         let huge = "a".repeat(super::SYNC_BODY_LIMIT + 1024);
         let body = serde_json::json!({
             "device_serial": "X",
@@ -2835,12 +2569,6 @@ mod tests {
     }
 
     // --- Handwriting: ink on /sync/annotations, notebooks on their own route ---
-    //
-    // Decoding an `nbk` is `bokai::formats::nbk`'s job and needs a real KDF
-    // SQLite file, which this crate has no fixture for. What is covered here is
-    // everything around that decode: which notebooks the device is told to send,
-    // what happens to one it can't decode, and that neither route is reachable
-    // without a token.
 
     fn notebook_request(token: Option<&str>, body: serde_json::Value) -> Request<Body> {
         let mut b = Request::builder()

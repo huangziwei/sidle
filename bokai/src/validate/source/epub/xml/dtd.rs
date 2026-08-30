@@ -1,33 +1,10 @@
 //! The DTD entity catalogue — which named entities a `<!DOCTYPE>` brings into
 //! scope.
-//!
-//! XML predefines five entities and always resolves numeric character
-//! references; every other `&name;` must be *declared*, or the document is not
-//! well-formed. Most EPUB 2 content declares nothing itself and writes `&nbsp;`
-//! anyway, relying on the DTD its DOCTYPE names — so deciding whether an entity
-//! reference is undeclared means knowing what each public identifier defines.
-//!
-//! epubcheck resolves those identifiers against a fixed table of vendored DTDs
-//! ([`DefaultResolver`'s system-id map][resolver]) and never fetches anything
-//! else while offline. The same DTDs are vendored here, so this module reads
-//! them rather than transcribing their contents: [`entities`] parses the
-//! `<!ENTITY name …>` declarations out of the file a DOCTYPE resolves to and
-//! follows its external parameter entities through the vendored set.
-//!
-//! [resolver]: https://github.com/w3c/epubcheck/blob/main/src/main/java/com/adobe/epubcheck/xml/handlers/DefaultResolver.java
-//!
-//! **What is judged.** A DOCTYPE this table does not have, or one whose DTD
-//! references a file that is not vendored, yields `None` — the caller then knows
-//! nothing about that document's entities and must stay silent. Only a
-//! completely resolved DTD produces a name set.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// The vendored DTDs, by the file name other DTDs reference them with.
-///
-/// `.ent` files are vendored under a `.dtdinc` extension, which is how
-/// epubcheck stores them; [`resolve`] maps the reference back.
 static FILES: &[(&str, &str)] = &[
     (
         "dtbook-2005-2.dtd",
@@ -136,15 +113,6 @@ static SYSTEM_IDS: &[(&str, &str)] = &[
 ];
 
 /// The general entity names a DOCTYPE's external subset declares.
-///
-/// `None` means "unknown, do not judge": the system identifier is not one
-/// epubcheck resolves offline, or the DTD it names pulls in a file that is not
-/// vendored (SVG 1.1 and DTBook are modular, and their modules are not), so the
-/// set would be incomplete. `Some` is always a complete set.
-///
-/// An EPUB 3 document resolves *nothing* — epubcheck hands its parser an empty
-/// source for every external identifier — so callers pass no system id there and
-/// get the empty set from [`no_external_subset`].
 pub fn entities(system_id: &str) -> Option<&'static HashSet<String>> {
     static CACHE: OnceLock<HashMap<&'static str, HashSet<String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| {
@@ -186,11 +154,6 @@ fn resolve(file: &str, files: &HashMap<&str, &str>) -> Option<HashSet<String>> {
 
 /// The general entity names declared in one DTD, and the file names its
 /// external parameter entities reference.
-///
-/// Deliberately simple: the vendored DTDs are hand-written W3C/IDPF files whose
-/// declarations all take the plain `<!ENTITY name "value">` /
-/// `<!ENTITY % name PUBLIC "…" "file">` shapes. A declaration inside an ignored
-/// marked section would be over-counted, which can only *silence* a finding.
 fn declarations(text: &str) -> (Vec<String>, Vec<String>) {
     let (mut declared, mut includes) = (Vec::new(), Vec::new());
     let mut rest = text;

@@ -1,14 +1,4 @@
 //! Attribute transformers for bidirectional value conversion.
-//!
-//! Transformers encode the logic for converting between raw KFX attribute values
-//! and structured IR data. This keeps the interpreter generic while isolating
-//! format-specific parsing logic in testable modules.
-//!
-//! ## Example
-//!
-//! A KFX link like `kindle:pos:fid:0001:off:0000012A` needs to be:
-//! - **Import**: Parsed into `LinkTarget::KindlePosition { fid, offset }`
-//! - **Export**: Encoded back to the `kindle:pos:...` string format
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -16,9 +6,6 @@ use std::fmt::Debug;
 use crate::formats::kfx::context::ResourceRegistry;
 
 /// Context provided during import transformation.
-///
-/// Symbol ids are resolved to strings *before* transformers run (see
-/// `kfx::container::SymbolTable`), so no symbol table rides along here.
 #[derive(Debug, Default)]
 pub struct ImportContext<'a> {
     /// Current chapter/section ID if known.
@@ -78,28 +65,11 @@ impl LinkData {
 }
 
 /// Trait for bidirectional attribute value transformation.
-///
-/// Implementations of this trait handle the conversion between raw KFX
-/// string values and structured IR data types.
 pub trait AttributeTransform: Send + Sync + Debug {
     /// Import: Convert raw KFX value to structured data.
-    ///
-    /// # Arguments
-    /// * `raw_value` - The raw string value from KFX
-    /// * `context` - Import context with symbol table and metadata
-    ///
-    /// # Returns
-    /// The parsed attribute data to store in the IR's semantic map.
     fn import(&self, raw_value: &str, context: &ImportContext) -> ParsedAttribute;
 
     /// Export: Convert structured data back to raw KFX value.
-    ///
-    /// # Arguments
-    /// * `data` - The parsed attribute data from IR
-    /// * `context` - Export context with spine map and metadata
-    ///
-    /// # Returns
-    /// The raw string value to write to KFX.
     fn export(&self, data: &ParsedAttribute, context: &ExportContext) -> String;
 
     /// Clone this transformer into a boxed trait object.
@@ -112,8 +82,6 @@ impl Clone for Box<dyn AttributeTransform> {
     }
 }
 
-// ============================================================================
-// Built-in Transformers
 // ============================================================================
 
 /// Identity transformer: passes values through unchanged.
@@ -141,11 +109,6 @@ impl AttributeTransform for IdentityTransform {
 /// Transformer for KFX link references.
 ///
 /// Handles conversion between:
-/// - Raw: `kindle:pos:fid:0001:off:0000012A` or internal anchor IDs
-/// - IR: `LinkData::KindlePosition` or `LinkData::Internal` or `LinkData::External`
-///
-/// When an anchor map is provided in context, anchor names are resolved to
-/// external URIs if the anchor has a `uri` field.
 #[derive(Debug, Clone)]
 pub struct KfxLinkTransform;
 
@@ -202,8 +165,6 @@ fn parse_kfx_link(raw: &str, anchors: Option<&HashMap<String, String>>) -> LinkD
 /// Parse kindle:pos:fid:XXXX:off:YYYYYYYY format.
 fn parse_kindle_position(raw: &str) -> Option<LinkData> {
     // Format: kindle:pos:fid:XXXX:off:YYYYYYYY
-    // where XXXX is base32-encoded fragment ID
-    // and YYYYYYYY is hex-encoded offset
 
     let parts: Vec<&str> = raw.split(':').collect();
     if parts.len() < 6 {
@@ -211,11 +172,6 @@ fn parse_kindle_position(raw: &str) -> Option<LinkData> {
     }
 
     // parts[0] = "kindle"
-    // parts[1] = "pos"
-    // parts[2] = "fid"
-    // parts[3] = base32 fid
-    // parts[4] = "off"
-    // parts[5] = hex offset
 
     if parts[2] != "fid" || parts[4] != "off" {
         return None;
@@ -284,10 +240,6 @@ fn encode_kfx_link(link: &LinkData) -> String {
 /// Transformer for image resource references.
 ///
 /// On import: passes through the short resource name (e.g., "e6")
-/// On export: looks up the short name in ResourceRegistry (e.g., "epub/images/cover.jpg" → "e0").
-/// A source path the book holds no asset for yields no name at all: every KFX
-/// `resource_name` has to reach an `external_resource`, and one naming bytes
-/// the container cannot carry is a reference to nothing.
 #[derive(Debug, Clone)]
 pub struct ResourceTransform;
 
@@ -314,19 +266,11 @@ impl AttributeTransform for ResourceTransform {
 }
 
 // ============================================================================
-// KFX-Specific Format Mapping
-// ============================================================================
 
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::util::MediaFormat;
 
 /// Convert a MediaFormat to the corresponding KFX symbol ID.
-///
-/// This is the KFX-specific mapping layer. The generic `MediaFormat`
-/// detection lives in `util.rs`; this function maps it to KFX symbols.
-///
-/// Note: KFX has limited format support. Unsupported formats (SVG, WebP, fonts)
-/// fall back to `Jpg` symbol as a binary placeholder.
 pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
     match format {
         MediaFormat::Jpeg => KfxSymbol::Jpg as u64,
@@ -334,9 +278,6 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
         MediaFormat::Gif => KfxSymbol::Gif as u64,
         MediaFormat::Jxr => KfxSymbol::Jxr as u64,
         // SVG and WebP are rasterized to JPEG before bundling, so the symbol is
-        // accurate by the time it is written. KFX's format enum has no font
-        // member; fonts never reach here, since they are written as `bcRawFont`
-        // with no `external_resource` to carry a format at all.
         MediaFormat::Svg => KfxSymbol::Jpg as u64,
         MediaFormat::WebP => KfxSymbol::Jpg as u64,
         MediaFormat::Ttf => KfxSymbol::Jpg as u64,
@@ -345,8 +286,6 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
     }
 }
 
-// ============================================================================
-// Tests
 // ============================================================================
 
 #[cfg(test)]
@@ -477,8 +416,6 @@ mod tests {
         assert_eq!(exported, "kindle:pos:fid:0001:off:0000012A");
     }
 
-    // ========================================================================
-    // KFX Format Symbol Mapping Tests
     // ========================================================================
 
     #[test]

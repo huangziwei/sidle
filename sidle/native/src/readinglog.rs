@@ -1,51 +1,10 @@
 //! Reading-session event lines selected out of the Kindle's own logs for sync.
-//!
-//! `LIVE_LOG` is appended to continuously, `tinyrot` gzips it into `LOG_DIR` on
-//! a size cap, and `log_backup.sh` gzips a daily snapshot into `DUMP_DIR`.
-//! [`MARKERS`] names the lines worth sending out of all three.
-//!
-//! [`collect`] parses nothing. The session rules — running counters, gap
-//! splitting, the two end-of-book constants — have one implementation, on the
-//! desktop.
-//!
-//! `watermark` is the newest event the desktop holds from this device, and it
-//! keeps a pass off the disk: a dump whose filename timestamp is at or before it
-//! holds nothing newer, and [`take_events`] keeps only the lines past it.
-//!
-//! `LIVE_LOG` holds minutes, `tinyrot` having rotated the rest into `LOG_DIR`
-//! and pruned the oldest. [`chunks`] reads those, filtered by the same
-//! watermark. The firmware's own `showlog` reads the same two paths:
-//!
-//! ```text
-//! ALLFILES=`ls -1 $ARCHIVE_DIR/${LOG}_*.gz | xargs`
-//! cat $ALLFILES | zcat >> "$OUTFILE"
-//! cat /var/log/$LOG >> "$OUTFILE"
-//! ```
-//!
-//! Those two paths are two filesystems. `/var/log` is a directory on the tmpfs;
-//! `/var/local` is a symlink to the `/var/base-local` flash mount, and
-//! `ARCHIVE_DIR` is `/var/local/log` under it. `LIVE_LOG` is `/var/log/messages`
-//! and no file of that name sits beside the chunks.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 
 /// The tags on a line that states reading.
-///
-/// `ReadingTimerController` counts words and a WPM, and times only a book it
-/// can count words in. The `fastmetrics` records beside it come from the reader
-/// shell: `ereader_book_consume_content` spans a page with its `words_count`,
-/// `ereader_book_page_turn` and `ereader_book_linear_page_actions` name a turn,
-/// `ereader_open_book` and `ereader_close_book` bracket a book with its
-/// `book_category`, and `ereader_reader_latency_ops` and
-/// `ereader_reader_page_turn_latency_ops` carry a `cde_key`.
-///
-/// Bracketed: `ereader_open_book` is a prefix of
-/// `ereader_open_book_failure_backup`.
-///
-/// Measured against one device-day: 186 records / 45 KB, beside 43
-/// `ReadingTimerController` lines / 31 KB.
 const READING_MARKERS: [&str; 9] = [
     "ReadingTimerController",
     "SchemaName[ereader_open_book]",
@@ -60,14 +19,6 @@ const READING_MARKERS: [&str; 9] = [
 
 /// The tags on a line that states whether the device was awake, the measure
 /// left for a book `ReadingTimerController` never times.
-///
-/// `powerd` states its transitions two ways, and a Kindle writes one shape or
-/// both. `ereader_powerd_state_change` names the state moved from and the state
-/// moved to; `outOfScreenSaver` and `goingToScreenSaver` bracket the same
-/// `ACTIVE`, and `suspending` closes a span that skips the screensaver.
-///
-/// About a hundred lines a day. A device states them whether or not it was read
-/// on, which is what [`has_reading`] keeps them out of.
 const POWER_MARKERS: [&str; 4] = [
     "ereader_powerd_state_change",
     "lipc:evts:name=outOfScreenSaver, origin=com.lab126.powerd",
@@ -77,9 +28,6 @@ const POWER_MARKERS: [&str; 4] = [
 
 /// The tag on a [`take_catalog`] line, marking it this collector's statement
 /// and not the firmware's.
-///
-/// Out of [`READING_MARKERS`]: a catalog line names a book on the device and
-/// states no sitting.
 const CATALOG_TAG: &str = "SidleCatalog";
 
 /// Every tag [`take_events`] selects on; the prefilter ahead of everything
@@ -128,14 +76,11 @@ const ARCHIVE_DIR: &str = "extensions/sidle/readinglog";
 
 /// What an archive file is called: `rl_<YYMMDDHHMMSS>.txt.gz`, stamped with the
 /// newest line it holds — the shape [`DUMP_DIR`]'s names take. [`archive_files`]
-/// picks a file on the name alone; [`ARCHIVE_MARK`] states how far
-/// [`archive`] has read.
 const ARCHIVE_PREFIX: &str = "rl_";
 
 /// The newest line [`archive`] has written, in [`ARCHIVE_DIR`] beside the
 /// files. [`purge_archive`] deletes every [`ARCHIVE_PREFIX`] file the library
 /// confirms and leaves this 13-byte stamp, which is what [`archive_watermark`]
-/// reads.
 const ARCHIVE_MARK: &str = "mark";
 
 /// What one collection pass looked at, for the sync log.
@@ -172,8 +117,6 @@ pub struct Sources {
 
 /// The `YYMMDD:HHMMSS` a dump's name encodes, matching the prefix its lines
 /// carry so the two compare directly.
-///
-/// `log_backup_260809005124.txt.gz` was written at `260809:005124`.
 fn dump_stamp(name: &str) -> Option<String> {
     let digits: String = name
         .strip_prefix("log_backup_")?
@@ -198,15 +141,6 @@ fn line_stamp(line: &str) -> Option<&str> {
 
 /// Every [`MARKERS`] line newer than `watermark`, across four sources:
 /// [`DUMP_DIR`], `LIVE_LOG`, [`LOG_DIR`]'s chunks, and [`ARCHIVE_DIR`].
-///
-/// `LIVE_LOG` and the chunks hold the present; [`DUMP_DIR`] holds a month, and
-/// is all a device running this for the first time offers; [`ARCHIVE_DIR`]
-/// holds what predates both.
-///
-/// `seen` names dumps the desktop holds in full, `watermark` is `YYMMDD:HHMMSS`
-/// and filters the other three. Two empty arguments read everything once.
-///
-/// The four overlap, and the desktop de-duplicates.
 pub fn collect(us_root: &Path, watermark: &str, seen: &[String]) -> Collected {
     let mut out = Collected::default();
     // A plain Vec plus a sort. The desktop de-duplicates, and a set of every
@@ -262,13 +196,6 @@ fn catalog_paths() -> Vec<PathBuf> {
 
 /// Append one [`CATALOG_TAG`] line per book on the device to `lines`, and
 /// answer with how many.
-///
-/// `p_contentSize` equals the log's `BookEndPosition.FromBook` to the digit,
-/// and `p_cdeKey` beside it is `books.asin` for a sideload and
-/// `books.amazon_asin` for a store book.
-///
-/// Each line carries the stamp of the newest in `lines`, putting it on the same
-/// watermark as the rest. An empty `lines` takes no catalog.
 fn take_catalog(paths: &[PathBuf], lines: &mut Vec<String>) -> usize {
     let Some(stamp) = lines.iter().filter_map(|l| line_stamp(l)).max() else {
         return 0;
@@ -317,13 +244,6 @@ const CATALOG_QUERY: &str = "select p_contentSize, p_cdeKey, p_cdeType from Entr
        and p_cdeType in ('EBOK', 'PDOC', 'MAGZ')";
 
 /// Take `LIVE_LOG`'s new events into `out.lines`, and set `out.from.live_read`.
-///
-/// `LIVE_LOG` holds the minutes since the last rotation, the only source
-/// carrying a sitting in progress. [`Sources::live_read`] separates an
-/// unopened file from one with nothing past the watermark.
-///
-/// [`read_maybe_gzip`] and not `read_to_string`: the syslog carries bytes that
-/// are not valid UTF-8, on which `read_to_string` fails for the whole file.
 fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
     let Some(live) = read_maybe_gzip(path) else {
         return;
@@ -333,9 +253,6 @@ fn take_live(path: &Path, watermark: &str, out: &mut Collected) {
 }
 
 /// Whether `lines` holds any reading.
-///
-/// [`READING_MARKERS`] only. A Kindle sleeps and wakes dozens of times a day,
-/// and [`POWER_MARKERS`] land in a batch whether or not it was read on.
 pub fn has_reading(lines: &[String]) -> bool {
     lines
         .iter()
@@ -344,10 +261,6 @@ pub fn has_reading(lines: &[String]) -> bool {
 
 /// The newest archived event as the `YYMMDD:HHMMSS` a log line carries, empty
 /// for an untouched [`ARCHIVE_DIR`].
-///
-/// The greater of the [`ARCHIVE_PREFIX`] filenames and [`ARCHIVE_MARK`]: an
-/// archive from an older build carries no mark, and [`purge_archive`] deletes
-/// the files.
 pub fn archive_watermark(us_root: &Path) -> String {
     let marked =
         std::fs::read_to_string(us_root.join(ARCHIVE_DIR).join(ARCHIVE_MARK)).unwrap_or_default();
@@ -377,10 +290,6 @@ pub const DAEMON_FLAG: &str = "--archive-daemon";
 
 /// The archiver's own copy of this binary, named to share no text with the
 /// picker's `bin/sidle`.
-///
-/// The home-screen tile opens no picker while `pidof sidle` matches, and that
-/// check reaches the executable behind a process. A copy and not a link: the
-/// user partition is FAT.
 const DAEMON_BIN: &str = "/mnt/us/extensions/sidle/bin/readinglogd";
 
 /// What the pidfile and `/proc` together say about the archiver.
@@ -397,9 +306,6 @@ pub enum Archiver {
 }
 
 /// [`DAEMON_PID`] read against `/proc`.
-///
-/// A pidfile survives a crash and a reboot, and the kernel reissues a pid, so
-/// [`classify`] tests the cmdline behind it.
 pub fn archiver() -> Archiver {
     let Ok(text) = std::fs::read_to_string(DAEMON_PID) else {
         return Archiver::Absent;
@@ -438,20 +344,12 @@ pub fn stop_archiver(pid: u32) {
 }
 
 /// Start an archiver and answer with its pid.
-///
-/// Runs [`DAEMON_BIN`], with [`stage_binary`] putting a current copy there
-/// first. [`archiver`] gates the call to [`Archiver::Absent`] and
-/// [`Archiver::Outdated`], where the copy is unconditionally rewritten.
 pub fn start_archiver() -> std::io::Result<u32> {
     let bin = Path::new(DAEMON_BIN);
     stage_binary(&std::env::current_exe()?, bin)?;
     let mut cmd = std::process::Command::new(bin);
     cmd.arg(DAEMON_FLAG);
     // `setsid`, for a life independent of the launcher's session.
-    //
-    // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe calls are allowed. `setsid` is one, and an `Err` here
-    // aborts the spawn.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -490,11 +388,6 @@ pub fn claim_archiver() {
 
 /// Delete [`ARCHIVE_DIR`] files stamped at or before `watermark`, and report
 /// how many went.
-///
-/// `watermark` is what the desktop stored, not what this device sent: a line
-/// forming no storable session leaves it where it was, and this device holds
-/// the only remaining copy. [`archive`] names each file for its newest line,
-/// making the filename test exact.
 pub fn purge_archive(us_root: &Path, watermark: &str) -> usize {
     if watermark.is_empty() {
         return 0;
@@ -552,15 +445,6 @@ fn archive_stamp(name: &str) -> Option<String> {
 
 /// Add `lines` to [`ARCHIVE_DIR`], merged into the day's file, and answer with
 /// that file's name. `None` for lines carrying no stamp.
-///
-/// One file per day against [`ARCHIVE_INTERVAL`]'s ~17,500 runs a year, each
-/// burning a FAT cluster. A day's events are ~40 KB gzipped, and the day's file
-/// is read back, merged and rewritten under a name carrying the new newest
-/// line.
-///
-/// A `.part` write renamed into place, ahead of removing the old file: a torn
-/// append corrupts a whole file, and a crash here leaves the old file or both
-/// of them, overlapping into a selection the desktop de-duplicates.
 pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<String>> {
     let Some(newest) = lines.iter().filter_map(|l| line_stamp(l)).max() else {
         return Ok(None);
@@ -617,9 +501,6 @@ pub fn archive(us_root: &Path, lines: &[String]) -> std::io::Result<Option<Strin
 }
 
 /// The `YYMMDD:HHMMSS` a rotated chunk's name encodes, from its 14-digit
-/// `YYYYMMDDHHMMSS` field: `messages_00000807_20260807101501.gz` →
-/// `260807:101501`. The century is dropped so it compares directly against the
-/// stamp a syslog line carries.
 fn chunk_stamp(name: &str) -> Option<String> {
     let digits: String = name
         .strip_prefix(CHUNK_PREFIX)?
@@ -634,11 +515,6 @@ fn chunk_stamp(name: &str) -> Option<String> {
 }
 
 /// The [`LOG_DIR`] chunks worth opening, oldest first.
-///
-/// A chunk's stamp is the rotation instant, on either side of its content, so
-/// the filter takes everything past `watermark` plus the newest chunk at or
-/// before it — the one that straddles. [`take_events`] filters by line, and an
-/// extra chunk costs a gunzip.
 fn chunks(dir: &Path, watermark: &str, out: &mut Collected) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -724,10 +600,6 @@ struct Decoded {
 
 /// Decode a log file, gunzipping a gzipped one, and keep a truncated decode's
 /// intact prefix.
-///
-/// `complete` travels with the text: `log_backup.sh` gzips a dump while a pass
-/// reads it, and that file decodes to the end a minute later under the same
-/// name.
 fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
     // An empty file is a created-and-unwritten dump.

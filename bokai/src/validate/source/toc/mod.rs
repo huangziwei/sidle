@@ -1,30 +1,12 @@
 //! TOC validation — is a book's declared table of contents properly formed?
-//!
-//! Source-native and single-file: given one book (KFX or EPUB), compare its
-//! **declared** TOC (the KFX `nav_container` toc / the EPUB nav doc or NCX —
-//! what the reader's chapter sidebar shows) against the book's **own in-book
-//! chapter list** (a Contents page's links, styled headings, or numbered section
-//! starts). A book whose declared TOC is chapterless while the content clearly
-//! has chapters is *not properly formatted* — flag it.
-//!
-//! This is a validator, so it reads only the one source format it's handed; it
-//! never consults a converted/derived copy (an EPUB derived from a KFX, or vice
-//! versa, gets no say). The KFX extractor lives in `kfx`, the EPUB extractor in
-//! `epub`; both feed the one shared [`classify`] rule.
 
 mod epub;
 mod kfx;
 
 /// Format-neutral evidence extracted from a book — the shared input to
-/// [`classify`], so the KFX and EPUB extractors share one verdict rule. Each
-/// format fills these from its own structures; the meaning is identical: the
-/// *declared* TOC vs the *in-book* chapter list.
 #[derive(Debug, Clone, Default)]
 pub struct TocEvidence {
     /// The declared TOC (KFX `nav_container` toc / EPUB nav or NCX) as the tree
-    /// the book declares it, nesting intact. `nav_labels` is this flattened, and
-    /// is derived from it rather than filled separately, so the two can never
-    /// disagree about what the book declares.
     pub nav_tree: Vec<crate::model::TocEntry>,
     /// Distinct internal chapter links on the in-book Contents page (densest
     /// cluster; the marked toc page when present).
@@ -41,14 +23,9 @@ pub struct TocEvidence {
     pub has_toc_landmark: bool,
     /// Volumes of a multi-work book (合本版) that the declared TOC lists at the
     /// same depth as their own chapters, and how many entries belong under one.
-    /// Both zero for a book that declares its structure or has none. EPUB
-    /// only: the KFX extractor leaves them zero.
     pub flattened: Flattening,
     /// How far the book's reading order has drifted from the order its own TOC
     /// lists. Zero when the two agree, which is the ordinary case. EPUB only:
-    /// reordering a KFX reading order moves every position with it, so the KFX
-    /// extractor leaves this zero rather than report a defect it has no repair
-    /// for.
     pub misordered: Misordering,
 }
 
@@ -105,9 +82,6 @@ pub enum Verdict {
     /// deficient in *shape* — and the same confirm-then-fix repair restores it.
     Flattened,
     /// The book's reading order contradicts its own TOC: the TOC lists chapters
-    /// in an order the spine does not read them in. Here the TOC is the sound
-    /// side and the *spine* is the defect, so the repair reorders the spine —
-    /// the one repair in this family that moves reading positions.
     Misordered,
     /// Declared TOC is chapterless and there's no machine-readable in-book chapter
     /// list either. May be a genuinely flat book, or chapters that no signal
@@ -141,9 +115,6 @@ fn flatten_labels(entries: &[crate::model::TocEntry], out: &mut Vec<String>) {
 const MIN_EVIDENCE: usize = 5;
 
 /// A declared TOC with more real chapter entries than this is considered healthy
-/// and is never flagged, however many internal links the body carries (footnote /
-/// index / cross-reference links inflate the raw link count but say nothing about
-/// the TOC).
 const MAX_NAV_CHAPTERS_TO_FLAG: usize = 2;
 
 /// Validate a book's TOC from its bytes. Sniffs the format (EPUB = zip `PK`, KFX
@@ -159,11 +130,6 @@ pub fn validate(bytes: &[u8]) -> Result<TocAudit, String> {
 }
 
 /// Turn format-neutral evidence into a verdict. The one rule both formats share:
-/// a declared TOC with >2 real chapter entries lists chapters (footnote / index /
-/// cross-reference links never flag it) — but it can still be FLATTENED, a
-/// multi-work book at one depth, which is judged first because it is the one
-/// defect a chapter-rich TOC can still have. SUSPECT is the chapterless case:
-/// the TOC omits ≥`MIN_EVIDENCE` chapters the book itself carries; else SPARSE.
 pub fn classify(ev: TocEvidence) -> TocAudit {
     let mut nav_labels = Vec::new();
     flatten_labels(&ev.nav_tree, &mut nav_labels);
@@ -177,10 +143,6 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
     // Ground-truth chapter count = the strongest of the three in-book signals.
     let evidence = ev.contents_links.max(ev.headings).max(ev.section_heads);
     // MISORDERED leads, ahead of FLATTENED and of the chapter-rich OK gate: it
-    // is the only defect here that the reader meets while *reading* rather than
-    // while browsing, and it is measured rather than inferred — the book states
-    // two orders and they differ. A book can carry more than one of these
-    // defects; the verdict is the headline and `into_findings` reports them all.
     let verdict = if ev.misordered.contradicts() {
         Verdict::Misordered
     } else if ev.flattened.misplaced > 0 {
@@ -212,9 +174,6 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
 
 impl TocAudit {
     /// A validation pass = the book's navigation is not deficient, in any of
-    /// the three senses: chapterless (SUSPECT), shapeless (FLATTENED), or
-    /// contradicted by the book's own reading order (MISORDERED). SPARSE (no
-    /// chapter evidence found) is inconclusive, not a failure.
     pub fn is_clean(&self) -> bool {
         !matches!(
             self.verdict,
@@ -276,15 +235,6 @@ impl TocAudit {
     }
 
     /// Lower this TOC audit into the unified
-    /// [`Finding`](crate::validate::Finding) model. Three defects are reported,
-    /// and a book can carry more than one, so each is tested on its own
-    /// measurement rather than on the headline verdict: `Misordered` (the spine
-    /// contradicts the declared TOC), `Flattened` (a multi-work book listed at
-    /// one depth) and `Suspect` (the declared TOC is chapterless while the book
-    /// itself lists chapters). The first is fixed by reordering the spine, the
-    /// other two by rebuilding the TOC. `Ok` and `Sparse` are clean /
-    /// inconclusive and yield nothing. Consumed by
-    /// [`crate::validate::source::validate`].
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {
         use crate::validate::{Finding, FixHint, Severity};
         let mut out = Vec::new();
@@ -367,9 +317,6 @@ impl TocAudit {
 }
 
 /// Whether a short line reads as a standalone chapter marker: a bare number
-/// (`1`, `12`), a Japanese `第N章/部/話/節`, or an English `Chapter N`. Kept tight
-/// so prose first-lines and dropcaps (a single letter) don't match. Shared by the
-/// KFX and EPUB section-start detectors.
 fn is_chapter_marker(s: &str) -> bool {
     let t = s.trim();
     if t.is_empty() {

@@ -1,19 +1,4 @@
 //! Sort-picker overlay.
-//!
-//! Full-screen list of the seven sort keys (tap to select) + a Direction toggle
-//! row + a `[ Done ]` strip. Blocking sub-loop in the `ui/diag.rs` mold: a pure
-//! `hit` geometry fn, a `render` that paints the whole panel, and a `run` that
-//! owns input until the user taps Done — at which point the caller rebuilds the
-//! view and repaints the grid.
-//!
-//! Refresh discipline mirrors the grid: one full GC16 on open (and on a
-//! detected rotation, to clear the blank the X server leaves), but in-menu
-//! selection changes repaint only the list region with a fast DU partial — no
-//! full-screen flash per tap.
-//!
-//! Rotation is handled here, not by the main loop: while this sub-loop owns
-//! input, the main loop's `Tick` re-orient path can't run, so on a `Tick` we
-//! re-detect orientation, re-orient the input devices, and repaint ourselves.
 
 use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use crate::eink::input::{Input, InputEvent};
@@ -152,9 +137,6 @@ fn draw_done(fb: &mut Framebuffer, renderer: &mut TextRenderer, layout: &Layout)
 }
 
 /// Draw the sort picker seeded with `initial`, then block until Done. Returns
-/// the chosen `SortState` (equal to `initial` if nothing was changed — the
-/// caller no-ops a same-state result rather than rebuilding the view). `orient`
-/// is kept in sync so the caller's rotation tracking stays correct.
 pub fn run(
     fb: &mut Framebuffer,
     input: &mut Input,

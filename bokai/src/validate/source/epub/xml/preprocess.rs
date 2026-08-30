@@ -1,22 +1,4 @@
 //! The transformations an EPUB 3 document undergoes *before* a schema sees it.
-//!
-//! epubcheck does not hand the parsed document straight to its grammars. A SAX
-//! filter rewrites it first, and the grammars are written against the rewritten
-//! form — so a validator that skips this step reports errors epubcheck does not.
-//! The clearest case is `data-*`: HTML allows any `data-` attribute anywhere,
-//! RELAX NG cannot express "any name with this prefix", and epubcheck resolves
-//! the mismatch by *deleting* those attributes on the way in. Run the grammar
-//! without deleting them and every `data-*` in the book becomes a false RSC-005.
-//!
-//! Two of the transformations also report on their way past, which is why this
-//! is a validation step and not a private detail of the tree:
-//!
-//! - a `data-*` name that HTML does not allow — `HTM-061`;
-//! - an attribute in a namespace that is not one of the ones XHTML knows, but
-//!   whose host claims `w3.org` or `idpf.org` — `HTM-054`.
-//!
-//! Everything here is EPUB 3 only. An EPUB 2 document goes to `20/rng` exactly
-//! as written.
 
 use super::tree::Document;
 
@@ -213,9 +195,6 @@ fn is_ncname(s: &str) -> bool {
 }
 
 /// The organisation a custom namespace is impersonating, if any. epubcheck
-/// reports a namespace whose *host* contains `w3.org` or `idpf.org` but which is
-/// not one of the namespaces XHTML actually uses, because that is nearly always
-/// a typo in a real namespace rather than a deliberate private one.
 fn reserved_host(uri: &str) -> Option<&'static str> {
     let host = uri
         .split_once("://")

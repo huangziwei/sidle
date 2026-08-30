@@ -1,12 +1,4 @@
 //! Env-gated phase timer for ad-hoc pipeline tracing.
-//!
-//! Each [`Trace::new`] call takes a pipeline name (printed on every line) and
-//! the env var that gates output. Marks print the *cumulative* wall time
-//! since the trace was created, so the table reads top-to-bottom as a
-//! Gantt-style timeline. Output goes to stderr.
-//!
-//! Existing gates:
-//!  - `BOKO_MERGE_TRACE=1` — `.kfx-zip` → `.kfx` merge (mechanical + fast)
 
 /// Monotonic stopwatch wrapping `std::time::Instant`.
 #[derive(Debug, Clone, Copy)]

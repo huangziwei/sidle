@@ -1,8 +1,5 @@
 //! `sidle-server` CLI entry point. Stand-alone mode: read `--data-dir`,
 //! load (or generate) the bearer token, bind on `0.0.0.0:<port>`, serve.
-//!
-//! The Tauri app does the same dance in-process via `sidle_server::serve`,
-//! sharing the runtime; this binary serves a library whose GUI has quit.
 
 use std::path::PathBuf;
 
@@ -50,10 +47,6 @@ async fn main() -> Result<()> {
     let bind = format!("0.0.0.0:{}", cli.port);
 
     // PID file so the desktop app, a supervisor or the CLI can stop this daemon
-    // and show who's serving. Written here in the standalone binary — never in the
-    // shared `serve()` — so the app's (former) in-process use couldn't write the
-    // app's own PID here. Removed on graceful exit; a SIGKILL leaves it stale,
-    // which the app tolerates (it trusts the `/` probe over the file).
     let pid_path = paths.root.join("server.pid");
     if let Err(e) = std::fs::write(&pid_path, std::process::id().to_string()) {
         tracing::warn!(?e, path = %pid_path.display(), "could not write PID file");

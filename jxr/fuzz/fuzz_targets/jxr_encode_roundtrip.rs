@@ -1,21 +1,4 @@
 //! Encoder fuzz target — a ROUND-TRIP ORACLE, not just no-panic: draw a
-//! VALID input over the full envelope (every sample family × the option
-//! surface, including random `QpPlan`s), encode, decode with this crate's
-//! own decoder, and assert what the public contract promises:
-//!
-//! - encode must accept (a documented-valid combination erroring is a bug);
-//! - the file must parse and decode (any decoder panic on our own valid
-//!   output is a finding — all three historical decoder bugs were reachable
-//!   only through valid files the reference toolchain couldn't mint);
-//! - headers round-trip structurally (dims, bands, tiles, overlap,
-//!   frequency, window, scaled, alpha, internal color format);
-//! - pixels are exact / bounded where the per-family contract says so
-//!   (lossless+unscaled exact; BD32S `(x>>10)<<10`; scaled q1 integer
-//!   within the half-step floors).
-//!
-//! Run WITHOUT the decode fuzzer's `-Coverflow-checks=off` override: this
-//! target feeds VALID data end-to-end, where any overflow is a real
-//! wrong-output bug (a deliberate inversion of the Phase-3 decode flag).
 
 #![no_main]
 
@@ -142,9 +125,6 @@ fuzz_target!(|data: &[u8]| {
             let c2 = jxr::decode::container::parse(&again).unwrap();
             let img2 = jxr::decode::decode_image(&c2).expect("re-encoded F32 must decode");
             // The decoder can emit -0.0 (a flushed tiny negative keeps its
-            // sign — JxrDecApp-faithful); the encoder's fold has a single
-            // zero, so idempotence holds up to zero-sign, exactly the
-            // documented -0.0 → +0.0 exception.
             let zfold = |v: i32| if v & 0x7fff_ffff == 0 { 0 } else { v };
             for (ch, plane2) in img2.image_plane.iter().enumerate() {
                 for (i, (&a, &b)) in plane2.iter().zip(&img.image_plane[ch]).enumerate() {

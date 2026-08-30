@@ -1,19 +1,4 @@
 //! The assertion half of the schema engine.
-//!
-//! RELAX NG says what may appear where; it cannot say that an `@idref` resolves,
-//! that a `dcterms:modified` occurs exactly once, or that an `<a>` has no `<a>`
-//! inside it. epubcheck expresses those in **Schematron** — patterns of rules,
-//! each a context expression plus assertions — and reports every failure through
-//! the same `RSC-005` channel as a grammar violation. Roughly a third of the
-//! `.sch` corpus states things no grammar could.
-//!
-//! Both Schematron namespaces the vendored files use are accepted: the ISO one
-//! (`purl.oclc.org`), and the older `ascc.net` one the EPUB 2 schemas are still
-//! written in.
-//!
-//! An expression this port cannot evaluate is dropped along with its rule rather
-//! than guessed at — see [`xpath`]. That trades recall for the guarantee that
-//! every finding is one epubcheck would also make.
 
 pub mod xpath;
 
@@ -373,10 +358,6 @@ impl Schema {
     }
 
     /// Run every pattern over `doc`.
-    ///
-    /// Schematron's firing rule: within a pattern each node is matched by the
-    /// *first* rule whose context selects it, and by no other. Patterns are
-    /// independent of one another, so the same node may fire a rule in each.
     pub fn validate(&self, doc: &Document) -> Vec<Violation> {
         let mut out = Vec::new();
         let all: Vec<NodeId> = doc.descendants(doc.root());
@@ -402,14 +383,6 @@ impl Schema {
             }
 
             // Each rule's context is evaluated once for the whole document and
-            // the results intersected with what earlier rules already claimed —
-            // far cheaper than re-testing every rule at every node, and it is
-            // what "the first matching rule wins" means.
-            //
-            // Both memberships are sets, one slot per node: a chapter-sized
-            // document has as many nodes as a rule can select, so testing them
-            // by scanning made the walk quadratic in document size — 800 KB of
-            // XHTML took eighteen minutes, all of it here.
             let mut claimed = vec![false; doc.len()];
             for rule in &pattern.rules {
                 let mut ctx = Context::new(doc, NodeRef::element(doc.root()));
@@ -521,10 +494,6 @@ fn collect_namespaces(
 }
 
 /// Substitute an abstract pattern's `<param>` values.
-///
-/// The specification really does define this as textual replacement of `$name`
-/// inside the attribute, which is how a schema can write `@$idref-attr-name` and
-/// mean an attribute whose name the instantiating pattern chooses.
 fn substitute(source: &str, params: &HashMap<String, String>) -> String {
     if params.is_empty() || !source.contains('$') {
         return source.to_string();
@@ -540,10 +509,6 @@ fn substitute(source: &str, params: &HashMap<String, String>) -> String {
 }
 
 /// The node whose element children are a schema's body.
-///
-/// For a whole `<schema>` that is the root element itself; for an included
-/// fragment — a bare `<pattern>` — it is the document node, so the fragment is
-/// the single body item.
 fn schema_body(doc: &Document) -> Option<NodeId> {
     let root = doc.root_element()?;
     match local_name(doc, root)? {

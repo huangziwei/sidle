@@ -69,7 +69,6 @@ struct BlockLink {
 /// `to` is a `Body` when `from` precedes it, `to`'s subtree links back to
 /// `from`, and `to` is outside `nav_targets` and not a `Role::Heading`. Every
 /// `link` landing in a `Body` from an earlier block is a `Reference`.
-/// `chapters` is in spine order.
 pub(crate) fn detect_notes(
     chapters: &[(ChapterId, Arc<Chapter>)],
     resolved: &ResolvedLinks,

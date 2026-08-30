@@ -1,35 +1,10 @@
 //! Repair for EPUBs that carry a spurious ZIP64 extended-information field in
 //! every entry.
-//!
-//! Some EPUB producers — notably `ScribdMpubToEpubConverter` — write a full
-//! 24/28/32-byte ZIP64 extra field (id `0x0001`) into every local **and**
-//! central header, plus a ZIP64 end-of-central-directory record, even when the
-//! archive is nowhere near the 4 GiB / 65 535-entry thresholds that ZIP64 is
-//! for. The classic 32-bit size and offset fields still hold the real values
-//! rather than the `0xFFFF…` sentinel that is supposed to mean "the true value
-//! lives in the ZIP64 field".
-//!
-//! The `zip` crate reads any ZIP64 field of length ≥ 24 as carrying a real
-//! 64-bit uncompressed size, compressed size, and relative header offset, so it
-//! overwrites the (correct) 32-bit local-header offset with bytes from the
-//! field body and then fails the local-header magic check with
-//! `Invalid local file header`. The archive is structurally fine — `unzip`,
-//! Apple Books, and Calibre all read it — but bokai cannot.
-//!
-//! [`neutralize_spurious_zip64`] rewrites those fields in place: it walks the
-//! central directory (located via the ZIP64 EOCD when the classic one is all
-//! sentinels) and relabels each spurious ZIP64 field with an id the reader
-//! ignores. Only the two id bytes per field change, so every offset in the
-//! archive stays valid and the result is still a well-formed zip. An entry that
-//! genuinely needs ZIP64 — one whose 32-bit field IS the sentinel — is left
-//! untouched, so a real >4 GiB archive is never corrupted.
 
 const ZIP64_ID: u16 = 0x0001;
 /// Replacement id for a neutralized ZIP64 field. Outside the 0x0000–0x001f
 /// PKWARE-reserved range and not assigned to any known third-party field, so
 /// every conforming reader (the `zip` crate, Apple Books, Calibre) skips it.
-/// The bytes spell `KA` (bokai-**kai**) in a hex dump, marking the rewrite as
-/// deliberate.
 const NEUTRALIZED_ID: u16 = 0x4B41;
 const SENTINEL32: u32 = 0xFFFF_FFFF;
 
@@ -96,7 +71,6 @@ fn locate_central_directory(b: &[u8]) -> Option<(usize, usize)> {
 /// Walk one header's extra-field region and relabel spurious ZIP64 fields.
 /// `zip64_needed` is true when a 32-bit size/offset of the owning header is the
 /// `0xFFFFFFFF` sentinel — i.e. the ZIP64 field is real and must be preserved.
-/// Returns the number of fields relabeled.
 fn relabel_extra(buf: &mut [u8], start: usize, len: usize, zip64_needed: bool) -> usize {
     let Some(end) = start.checked_add(len).filter(|&e| e <= buf.len()) else {
         return 0;
@@ -121,10 +95,6 @@ fn relabel_extra(buf: &mut [u8], start: usize, len: usize, zip64_needed: bool) -
 }
 
 /// Relabel every spurious ZIP64 extended-information field in `bytes` (both
-/// central and local headers). Returns the repaired bytes when at least one
-/// field was rewritten, or `None` when there was nothing to fix (a clean
-/// archive, or input that isn't a parseable zip). Offset-preserving: the result
-/// is the same length as the input.
 pub fn neutralize_spurious_zip64(bytes: &[u8]) -> Option<Vec<u8>> {
     let (cd_offset, entries) = locate_central_directory(bytes)?;
     let mut out = bytes.to_vec();

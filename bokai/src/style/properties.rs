@@ -1,7 +1,4 @@
 //! CSS property types and the enum_property! macro.
-//!
-//! This module contains all the CSS property value types that are used
-//! in the style system.
 
 use std::fmt::Write;
 use std::hash::{Hash, Hasher};

@@ -1,16 +1,5 @@
 //! Forward JPEG-XR core-transform primitives — the encode-side inverses of
 //! [`crate::decode::math`].
-//!
-//! The decoder's transform is a chain of integer *lifting steps* (each
-//! modifies one lane using the others, which are unchanged in that step), so
-//! every step is exactly invertible by reversing the order and flipping the
-//! sign. We mirror the decoder's own primitives rather than porting libjxr's
-//! forward verbatim, which guarantees `decoder(encoder(x)) == x` bit-for-bit
-//! against *our* decoder. Cross-reference for the spec-forward shape:
-//! libjxr's `image/encode/strFwdTransform.c`.
-//!
-//! All arithmetic is `wrapping_*`, matching the decoder, so the round trip is
-//! exact for every `i32` input.
 
 use crate::decode::consts::MB_PIXEL_MAP;
 
@@ -86,10 +75,6 @@ pub fn fwd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
 }
 
 /// Inverse of [`crate::decode::math::inv_odd_odd`]. The decoder
-/// negates `b` and `c` on output, so we un-negate them first, then reverse the
-/// lifting steps. The `t1`/`t2` intermediates are reconstructable because the
-/// lanes they read (`d` after the first step, `c` after the second) are
-/// restored to exactly those values by the first two inverse steps.
 #[inline]
 pub fn fwd_odd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
     let mut a = a;
@@ -182,9 +167,6 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
 }
 
 /// Stage 1 only of [`forward_transform_mb_with`]: scatter into the permuted
-/// per-block layout + per-block forward DCT. Block DCs sit raw at
-/// `buf[j * 16]` — exactly where the first-level (block-DC domain) overlap
-/// PRE-filter operates between the stages when `overlap_mode == 2`.
 pub fn forward_stage1_mb(samples: &[i32; 256]) -> [i32; 256] {
     let mut buf = [0i32; 256];
     // Inverse of second_level_coefficient_combination: scatter pixels into the
@@ -530,8 +512,6 @@ fn undo_str_hst_dec(w: i32, x: i32, y: i32, z: i32) -> (i32, i32, i32, i32) {
 
 /// Forward of [`crate::decode::math::str_post_4x4_stage2_split_alternate`]
 /// (libjxr `strPre4x4Stage2Split`): the first-level (block-DC domain)
-/// overlap PRE-filter for luma/444 — the decoder's stages in reverse, each
-/// inverted. Index slots match the decoder's input layout.
 pub fn str_pre_4x4_stage2_split_alternate(input: &[i32; 16]) -> [i32; 16] {
     let mut c = *input;
     // E⁻¹: undo the four str_hst_dec quads.

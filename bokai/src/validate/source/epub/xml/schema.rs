@@ -1,22 +1,5 @@
 //! The RELAX NG, Schematron and NVDL schemas epubcheck validates against,
 //! vendored from epubcheck's `src/main/resources/com/adobe/epubcheck/schema`.
-//!
-//! They are compiled into the binary rather than read from disk: bokai has no
-//! data directory at runtime, and a validator whose grammars could go missing
-//! would report a book as invalid because of its own installation. The paths
-//! are the ones the schemas use to reference each other (`20/rng/content.rng`,
-//! `30/mod/html5/meta.rnc`, …), so [`FILES`] doubles as the resolver's map.
-//!
-//! The `20/dtd` tree is vendored alongside but is not part of [`FILES`]: no
-//! schema references a DTD. It is read by [`super::dtd`], which answers which
-//! public identifier defines `&nbsp;`.
-//!
-//! Regenerate this list after re-vendoring:
-//!
-//! ```text
-//! find bokai/src/validate/source/epub/xml/schema -type f \
-//!     \( -name '*.rng' -o -name '*.rnc' -o -name '*.nvdl' -o -name '*.sch' \)
-//! ```
 
 use std::collections::HashMap;
 

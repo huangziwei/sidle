@@ -1,8 +1,6 @@
 //! Core data types and runtime handle for ebooks.
 //!
 //! This module provides:
-//! - Format-agnostic types (`Metadata`, `TocEntry`, `Resource`, `SpineItem`)
-//! - The `Book` runtime handle for reading ebooks via importers
 
 use std::collections::HashMap;
 use std::io::{self, Seek, Write};
@@ -17,8 +15,6 @@ use crate::io::MemorySource;
 use crate::model::resolved::resolve_book_links;
 use crate::model::{AnchorTarget, Chapter, ResolvedLinks};
 
-// ============================================================================
-// Data Types
 // ============================================================================
 
 /// Ebook file format.
@@ -382,28 +378,9 @@ pub struct Landmark {
 }
 
 // ============================================================================
-// Book Runtime Handle
-// ============================================================================
 
 /// Runtime handle for an ebook: `Book` wraps a format-specific `Importer` and
 /// reaches its metadata, table of contents and content through one surface.
-///
-/// # Example
-///
-/// ```no_run
-/// use bokai::Book;
-///
-/// let mut book = Book::open("input.epub")?;
-/// println!("Title: {}", book.metadata().title);
-///
-/// // Load chapter content (collect spine first to avoid borrow issues)
-/// let spine: Vec<_> = book.spine().to_vec();
-/// for entry in spine {
-///     let raw = book.load_raw(entry.id)?;
-///     println!("Chapter {}: {} bytes", entry.id.0, raw.len());
-/// }
-/// # Ok::<(), std::io::Error>(())
-/// ```
 pub struct Book {
     backend: Box<dyn Importer>,
     /// Cache of parsed IR chapters to avoid re-parsing during normalized export.
@@ -646,50 +623,11 @@ impl Book {
     /// Load a chapter as normalized IR: its HTML content and any linked or
     ///
     /// inline CSS, parsed into a tree.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use bokai::{Book, Role};
-    ///
-    /// let mut book = Book::open("input.epub")?;
-    /// let spine: Vec<_> = book.spine().to_vec();
-    ///
-    /// for entry in spine {
-    ///     let chapter = book.load_chapter(entry.id)?;
-    ///     for id in chapter.iter_dfs() {
-    ///         let node = chapter.node(id).unwrap();
-    ///         if matches!(node.role, Role::Heading(_)) {
-    ///             // Process heading...
-    ///         }
-    ///     }
-    /// }
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     pub fn load_chapter(&mut self, id: ChapterId) -> io::Result<Chapter> {
         self.backend.load_chapter(id)
     }
 
     /// Load a chapter as IR, holding each parsed chapter in a cache. A second
-    ///
-    /// load of one id re-parses nothing, and the `Arc<Chapter>` clones cheaply
-    /// across threads.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use bokai::Book;
-    ///
-    /// let mut book = Book::open("input.epub")?;
-    /// let spine: Vec<_> = book.spine().to_vec();
-    ///
-    /// // First call parses the chapter
-    /// let chapter1 = book.load_chapter_cached(spine[0].id)?;
-    ///
-    /// // Second call returns cached version (cheap Arc clone)
-    /// let chapter2 = book.load_chapter_cached(spine[0].id)?;
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     pub fn load_chapter_cached(&mut self, id: ChapterId) -> io::Result<Arc<Chapter>> {
         // Fast path: check read lock first
         {
@@ -769,28 +707,6 @@ impl Book {
     }
 
     /// Resolve all internal links in the book.
-    ///
-    /// Uses `load_chapter_cached()` internally, so chapters are parsed once
-    /// and reused for subsequent export operations. Call this before export
-    /// to benefit from caching.
-    ///
-    /// Returns both forward mappings (source -> target) and reverse mappings
-    /// (target -> sources) for efficient lookup during traversal.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use bokai::Book;
-    ///
-    /// let mut book = Book::open("input.epub")?;
-    /// let resolved = book.resolve_links()?;
-    ///
-    /// // Check for broken links
-    /// for (source, href) in resolved.broken_links() {
-    ///     eprintln!("Broken link at {:?}: {}", source, href);
-    /// }
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     pub fn resolve_links(&mut self) -> io::Result<ResolvedLinks> {
         resolve_book_links(self)
     }
@@ -953,28 +869,6 @@ impl Book {
     }
 
     /// Export the book to a different format.
-    ///
-    /// # Supported Export Formats
-    ///
-    /// | Format   | Support |
-    /// |----------|---------|
-    /// | EPUB     | ✓       |
-    /// | KFX      | ✓       |
-    /// | Markdown | ✓       |
-    /// | AZW3     | ✗       |
-    /// | MOBI     | ✗       |
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use bokai::{Book, Format};
-    /// use std::fs::File;
-    ///
-    /// let mut book = Book::open("input.azw3")?;
-    /// let mut file = File::create("output.epub")?;
-    /// book.export(Format::Epub, &mut file)?;
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     pub fn export<W: Write + Seek>(&mut self, format: Format, writer: &mut W) -> io::Result<()> {
         self.export_with_progress(format, writer, &|_, _, _, _| {})
     }
@@ -1001,8 +895,6 @@ impl Book {
     }
 }
 
-// ============================================================================
-// Constructors
 // ============================================================================
 
 impl TocEntry {

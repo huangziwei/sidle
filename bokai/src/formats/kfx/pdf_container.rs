@@ -1,12 +1,5 @@
 //! Detect and extract PDF-backed (container) KFX — the return leg of the
 //! PDF↔KFX dual format.
-//!
-//! A PDF-backed KFX (Amazon "Send to Kindle" PDF, or bokai's `pdf_to_kfx`
-//! output) embeds the source PDF verbatim as a single `bcRawMedia` and points
-//! at it from per-page `external_resource` fragments with `format: pdf`. Such a
-//! KFX round-trips through **PDF**, not EPUB: an EPUB conversion reflows a
-//! page image into text. The embedded bytes are verbatim, and extraction is
-//! exact: `pdf → kfx → pdf` reproduces the original.
 
 use super::container::{
     EntityLoc, entity_media, parse_container_header, parse_container_info, parse_entity,
@@ -89,9 +82,6 @@ fn is_pdf_resource(v: &IonValue) -> bool {
 
 /// Whether `kfx` is a PDF-backed container: it has at least one
 /// `external_resource` with `format: pdf` (calibre's `has_pdf_resource`).
-///
-/// The routing signal: on `true` the canonical sibling format is PDF and
-/// KFX→EPUB conversion is skipped.
 pub fn kfx_is_pdf_backed(kfx: &[u8]) -> bool {
     let Some(ents) = entities(kfx) else {
         return false;
@@ -138,9 +128,6 @@ fn source_entities(source: &dyn ByteSource) -> Option<Vec<EntityLoc>> {
 }
 
 /// Extract the embedded PDF from a PDF-backed KFX, verbatim.
-///
-/// Returns the original PDF bytes (byte-identical to what was embedded). Errors
-/// if the KFX isn't PDF-backed or the blob can't be located unambiguously.
 pub fn kfx_extract_pdf(kfx: &[u8]) -> Result<Vec<u8>, PdfExtractError> {
     let ents = entities(kfx).ok_or(PdfExtractError::NotKfx)?;
 

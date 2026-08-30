@@ -1,11 +1,4 @@
 //! Stroke-point value decoder.
-//!
-//! Each `nmdl.position_x` / `nmdl.position_y` / pressure / tilt / adjust blob is
-//! a 2-byte signature `\x01\x01`, a u32-LE count, then a stream of 4-bit
-//! instructions (high nibble first; a trailing nibble is zero-padded). Each
-//! instruction yields an `increment`; values are reconstructed by **second-order
-//! (delta-of-delta) integration**. Verbatim port of `decode_stroke_values`
-//! (kfxlib's `yj_to_epub_notebook.py`).
 
 /// Decode `num_points` integer values from a stroke-point blob.
 /// Returns `None` if the blob is malformed or truncated.

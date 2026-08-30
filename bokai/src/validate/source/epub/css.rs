@@ -1,22 +1,4 @@
 //! What the validator knows about CSS.
-//!
-//! epubcheck runs a real CSS parser over every stylesheet and every inline
-//! `<style>`/`style=`, and reports four things this module covers: the
-//! references a stylesheet makes (which feed the shared reference checks),
-//! the properties an EPUB stylesheet may not contain (`CSS-001`), a syntax
-//! error (`CSS-008`), and the document's character encoding (`CSS-003` /
-//! `CSS-004`).
-//!
-//! **Why a scanner rather than [`crate::style`]'s parser.** That one exists to
-//! *render*: it is deliberately lenient, discards the at-rules and properties
-//! the renderer does not model, and reports nothing. Running it here would
-//! call every `@media` block and every unmodelled property a syntax error.
-//! What a validator needs from CSS is the lexical layer — comments, strings,
-//! `url()`, and the three bracket pairs — and that is what this is.
-//!
-//! Under-detection is a recall gap; a false positive is a book wrongly called
-//! invalid. Every rule here is therefore a strict subset of what epubcheck
-//! rejects.
 
 /// A place a stylesheet stops making sense — epubcheck's `CSS-008`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,12 +21,6 @@ pub struct ForbiddenProperty {
 const FORBIDDEN_EPUB3_PROPERTIES: &[&str] = &["direction", "unicode-bidi"];
 
 /// The unterminated constructs in a stylesheet.
-///
-/// CSS's own error recovery closes everything at end of input, so a parser
-/// never *fails* on these — but no stylesheet legitimately ends inside a block,
-/// a string, or a comment, which is why epubcheck reports each one and why this
-/// is safe to report without a full parse. Both of epubcheck's own `CSS-008`
-/// stylesheet fixtures are exactly this shape (a rule whose `}` is missing).
 pub fn syntax_errors(css: &str) -> Vec<SyntaxError> {
     let mut out = Vec::new();
     let mut open: Vec<(char, u32)> = Vec::new();
@@ -54,9 +30,6 @@ pub fn syntax_errors(css: &str) -> Vec<SyntaxError> {
             Token::Open(c, line) => open.push((c, line)),
             Token::Close(c) => {
                 // A close with nothing open, or closing the wrong bracket, is
-                // recovered from rather than reported: CSS defines that
-                // recovery, and a stray `}` is how minifiers and preprocessors
-                // routinely end a file.
                 if let Some(i) = open.iter().rposition(|(o, _)| matching(*o) == c) {
                     open.truncate(i);
                 }
@@ -79,10 +52,6 @@ pub fn syntax_errors(css: &str) -> Vec<SyntaxError> {
 
 /// The `CSS-001` declarations in a stylesheet: a property name at the start of
 /// a declaration, at block depth, that EPUB 3 forbids.
-///
-/// Matched at the lexical level — a name token followed by `:` inside a block —
-/// so a `direction` appearing in a selector, a string, a comment, or a `url()`
-/// is never mistaken for a declaration.
 pub fn forbidden_properties(css: &str) -> Vec<ForbiddenProperty> {
     let mut out = Vec::new();
     for (name, line) in Scanner::new(css).declarations() {
@@ -102,11 +71,6 @@ pub fn forbidden_properties(css: &str) -> Vec<ForbiddenProperty> {
 /// The `CSS-001` and `CSS-008` findings in a **declaration list** — the content
 /// of a `style=""` attribute, which is not a stylesheet: it has no selectors and
 /// no blocks, just `name: value` components separated by `;`.
-///
-/// The only syntax error reported is a component that carries no `:` at all
-/// (epubcheck's own fixture is `style="blue"`). An empty component is not one —
-/// `;;` and a trailing `;` are both legal — and neither is an unknown property
-/// or an unparseable value, which CSS discards without erroring.
 pub fn declaration_list_errors(css: &str) -> (Vec<SyntaxError>, Vec<ForbiddenProperty>) {
     let mut syntax = Vec::new();
     for component in Scanner::new(css).declaration_list() {
@@ -124,9 +88,6 @@ pub fn declaration_list_errors(css: &str) -> (Vec<SyntaxError>, Vec<ForbiddenPro
 /// The encoding a CSS resource declares, lowercased — from a byte-order mark,
 /// else from a leading `@charset "…";` rule. `None` means it declares none,
 /// which is UTF-8 by definition and never reported.
-///
-/// `@charset` is only a declaration when it is the very first thing in the file
-/// (CSS Syntax §3.2), which is also how epubcheck's reader reads it.
 pub fn declared_charset(bytes: &[u8]) -> Option<String> {
     for (bom, name) in [
         (b"\xEF\xBB\xBF".as_slice(), "utf-8"),
@@ -177,9 +138,6 @@ pub fn find_ascii_ci(hay: &str, kw: &[u8]) -> Option<usize> {
 }
 
 /// Every raw `url(...)` / `@import` target in a CSS resource (comments stripped,
-/// one layer of quotes removed, empties dropped) — *unclassified*. Callers filter
-/// by kind: the container-relative ones feed the existence/leak checks, while
-/// the RSC-008 pass keeps the opaque-scheme ones.
 pub fn url_tokens(css_raw: &str) -> Vec<String> {
     url_tokens_with_empties(css_raw).0
 }
@@ -225,9 +183,6 @@ pub fn url_tokens_with_empties(css_raw: &str) -> (Vec<String>, usize) {
 }
 
 /// The `url(...)` targets that appear inside `@font-face` rules — the CSS
-/// contexts epubcheck types as FONT references (remote-exempt in EPUB 3, so an
-/// undeclared remote font there is RSC-008 rather than RSC-006). `@font-face`
-/// rules do not nest, so each is the run from its `{` to the next `}`.
 pub fn font_face_url_tokens(css_raw: &str) -> std::collections::HashSet<String> {
     let css = strip_comments(css_raw);
     let mut out = std::collections::HashSet::new();

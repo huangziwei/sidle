@@ -1,8 +1,4 @@
 //! CSS cascade implementation.
-//!
-//! This module implements the CSS cascade algorithm that resolves
-//! which style declarations apply to an element based on specificity,
-//! importance, and source order.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -32,10 +28,6 @@ struct MatchedRule<'a> {
 /// Cascade precedence bucket (css-cascade §6.1), lowest first. Declarations
 /// are applied in ascending order so later writes win; within a bucket the
 /// tie-breakers are specificity, then source order.
-///
-/// Normal declarations escalate UA → author → style attribute, while
-/// importance inverts the origin order (author !important loses to UA
-/// !important).
 fn cascade_bucket(rule: &MatchedRule) -> u8 {
     match (rule.important, rule.origin, rule.from_style_attr) {
         (false, Origin::UserAgent, _) => 0,
@@ -50,12 +42,6 @@ fn cascade_bucket(rule: &MatchedRule) -> u8 {
 /// Create a new style with only CSS-inherited properties from parent.
 ///
 /// CSS inherited properties include:
-/// - color, font-*, line-height, text-align, text-indent
-/// - letter-spacing, word-spacing, hyphens, text-transform
-/// - list-style-*, visibility
-///
-/// Non-inherited properties (width, height, margin, padding, display, etc.)
-/// are NOT copied from the parent.
 fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
         // Font properties (inherited)
@@ -106,9 +92,6 @@ type RuleRef = (u32, u32);
 
 /// The bucket a selector is filed under: the single most-selective *positive*
 /// requirement (id > class > local name) in its rightmost compound selector.
-/// Selectors with no such requirement (`*`, attribute-only, `:is()`/`:not()`
-/// with no bare tag/class/id, ...) fall in the universal bucket and are always
-/// checked, so a rule that could match is never skipped.
 enum BucketKey {
     Id(String),
     Class(String),
@@ -117,12 +100,6 @@ enum BucketKey {
 }
 
 /// Determine the bucket key for one selector from its rightmost compound.
-///
-/// `Selector::iter()` yields exactly the rightmost compound's components (it
-/// stops at the first combinator). We only ever read a *positive* tag/class/id
-/// requirement; combinators, attribute selectors, negations and functional
-/// pseudo-classes are ignored, which keeps the key conservative — the full
-/// `matches_selector` still runs on every candidate.
 fn selector_bucket_key(selector: &Selector<BokoSelectors>) -> BucketKey {
     let mut id: Option<String> = None;
     let mut class: Option<String> = None;
@@ -149,11 +126,6 @@ fn selector_bucket_key(selector: &Selector<BokoSelectors>) -> BucketKey {
 }
 
 /// Reusable per-element scratch state for [`compute_styles_indexed`].
-///
-/// Owning this across a whole chapter avoids re-allocating the candidate list
-/// and rebuilding the selectors crate's matching caches for every element (the
-/// caches are designed to be shared across a traversal — see the note on
-/// [`crate::html::element_ref::ElementRef`]'s `opaque`).
 #[derive(Default)]
 pub struct CascadeScratch {
     caches: SelectorCaches,
@@ -207,8 +179,6 @@ impl<'a> CascadeIndex<'a> {
         out.extend_from_slice(&self.universal);
         // Look up by lowercased tag; the full matcher decides case. Lowercasing
         // only widens the candidate set, so it can never drop a real match.
-        // html5ever already lowercases HTML local names, so allocating a
-        // lowercase copy is only needed in the rare uppercase case.
         if let Some(name) = elem.dom.element_name(elem.id) {
             let name = name.as_ref();
             let bucket = if name.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -236,10 +206,6 @@ impl<'a> CascadeIndex<'a> {
 }
 
 /// Compute styles for an element by applying the cascade.
-///
-/// Builds a one-shot [`CascadeIndex`]. Callers that compute styles for many
-/// elements against the same stylesheets should build the index once and call
-/// [`compute_styles_indexed`] instead.
 pub fn compute_styles(
     elem: ElementRef<'_>,
     stylesheets: &[(Stylesheet, Origin)],
@@ -367,10 +333,6 @@ pub fn compute_styles_indexed(
 }
 
 /// The computed font size of a style, in CSS pixels.
-///
-/// `Auto` means no font-size was declared anywhere up the chain and resolves
-/// to the root default. Relative variants cannot survive the cascade (see
-/// `resolve_font_size`), but resolve them against the root to stay total.
 fn computed_font_px(style: &ComputedStyle) -> f32 {
     match style.font_size {
         Length::Px(v) => v,
@@ -382,10 +344,6 @@ fn computed_font_px(style: &ComputedStyle) -> f32 {
 
 /// Resolve a declared font-size to its computed pixel value (CSS "computed
 /// value"): em/% scale the parent's computed size, rem scales the root.
-///
-/// KFX styles are flat — a text run's style carries its final size with no
-/// element tree to re-resolve relative units against — so the cascade must
-/// resolve them while the parent chain is still known.
 fn resolve_font_size(declared: Length, parent_px: f32) -> Length {
     match declared {
         Length::Auto => Length::Auto,
@@ -417,9 +375,6 @@ fn rule_matches_with_caches(
 }
 
 /// Apply a declaration to a computed style.
-///
-/// `parent_font_px` is the parent's computed font size, the base for
-/// resolving relative font-size declarations.
 fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_px: f32) {
     match decl {
         // Colors
@@ -450,10 +405,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::WhiteSpace(ws) => style.white_space = *ws,
         Declaration::VerticalAlign(v) => style.vertical_align = *v,
         // CSS-wide keywords. For inherited properties the cascade has already
-        // copied the parent value via `inherit_from_parent`, so dropping the
-        // declaration here yields the spec-correct result. Non-inherited
-        // properties with `inherit`/`unset`/`revert` would need a parent lookup
-        // to be fully correct; those no-op (rare in practice).
         Declaration::UniversalKeyword { .. } => {}
         Declaration::WritingMode(w) => style.writing_mode = *w,
         Declaration::TextOrientation(o) => style.text_orientation = *o,

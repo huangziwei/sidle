@@ -1,20 +1,4 @@
 //! Sort model for the picker.
-//!
-//! Mirrors the desktop app's sort (`web/library.js` `SORT_KEYS` :50-59, `sortedBooks`
-//! / `sortValue` :449-487) minus the `on_kindle` key — the picker hides
-//! already-downloaded books (`main.rs`), so that key would be constant here.
-//!
-//! One comparator over `&Book`, applied to the view (the post-filter book list)
-//! before paging. The default is Date-added-descending, matching both the
-//! desktop default (`library.js:9`) and the server's `ORDER BY imported_at DESC`
-//! (`core/src/library/db.rs:493`) — only now it's labelled in the UI instead of
-//! reading as a random order.
-//!
-//! Collation is [`crate::collate::natural_compare`] (port of the desktop's
-//! `naturalCompare`): digit runs compare numerically — "Vol 2" before "Vol 10" —
-//! while the non-digit segments stay code-point order (correct for ASCII,
-//! code-point order for CJK). Revisit only if kana/kanji ordering looks wrong on
-//! device.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -122,9 +106,6 @@ impl SortState {
 }
 
 /// A book's comparable value for one key. `Missing` always sorts *after* any
-/// present value regardless of direction — the null-handling from
-/// `library.js` `sortedBooks` (:456-458): a book with no value for the active
-/// key sinks to the bottom whether ascending or descending.
 enum SortVal<'a> {
     Text(Cow<'a, str>),
     Num(i64),
@@ -150,11 +131,6 @@ fn value<'a>(book: &'a Book, key: SortKey) -> SortVal<'a> {
 }
 
 /// Composite series key, port of `seriesSortKey` (`library.js:477-487`):
-/// `series_name` directly followed by the index `round(index*10)` zero-padded
-/// to 8 digits, so a single `str` compare orders by name then by index, and
-/// half-numbered entries (1.5, 2.5) sort correctly. No series name → `Missing`
-/// (sinks last); a name with no index → a max sentinel index (sorts after the
-/// numbered volumes within that series).
 fn series_key(book: &Book) -> SortVal<'static> {
     let name = book
         .series_name

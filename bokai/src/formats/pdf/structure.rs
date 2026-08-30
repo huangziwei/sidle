@@ -37,8 +37,5 @@ pub struct PdfDoc {
     /// Document outline (bookmarks). Empty if the PDF has none.
     pub outline: Vec<PdfOutlineItem>,
     /// Per-page display label (`page_labels[i]` for page `i`), from the catalog
-    /// `/PageLabels` number tree. Always one per page: honors the PDF's labels
-    /// (roman front-matter, prefixes like `Cover`) and falls back to sequential
-    /// `"1".."N"` when the PDF declares none.
     pub page_labels: Vec<String>,
 }

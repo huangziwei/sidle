@@ -1,19 +1,4 @@
 //! Facet filter model.
-//!
-//! Mirrors the desktop app's facets (`web/library.js` `FACETS` :61,
-//! `extractFacetValues` :514-537, `matchesFacets` :549-555, `facetOptions`
-//! :578-600) minus the `on_kindle` facet — the picker hides already-downloaded
-//! books, so it'd be a no-op (every visible book is off-device).
-//!
-//! Semantics: **AND across facets, OR within a facet.** A book passes if, for
-//! every active facet, at least one of its values for that facet is selected.
-//! Facet option lists **cascade** (leave-one-out): the options offered for facet
-//! X are computed against the books matching all *other* active facets, so
-//! picking language=jp narrows the Author options but not the Language options.
-//!
-//! Collation is [`crate::collate::natural_compare`] (matches `ui::sort`); the
-//! "—" sentinel (a book with no value for a facet) sorts last and is itself
-//! selectable.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
@@ -34,11 +19,6 @@ pub enum Facet {
     Series,
     Tags,
     /// Format the book was imported from (PDF / EPUB / KFX).
-    ///
-    /// Unlike the others this one is about whether a book is *readable here*,
-    /// and it is useful in both directions: a Scribe filters down to the PDFs
-    /// its 10.2" panel can actually show, while a 7" Kindle filters them out
-    /// precisely because it cannot.
     Format,
 }
 
@@ -114,9 +94,6 @@ impl Filters {
 }
 
 /// The values a book contributes to a facet. Author splits on ASCII *and* CJK
-/// comma (`、`, U+3001) — Japanese OPFs pack multiple creators into one
-/// `<dc:creator>` as `村上春樹、夏目漱石`. A missing value yields the single
-/// [`NONE`] sentinel. Port of `extractFacetValues` (`library.js:514-537`).
 pub fn extract_facet_values(book: &Book, facet: Facet) -> Vec<String> {
     match facet {
         Facet::Language => vec![non_empty_or_sentinel(&book.language)],
@@ -171,9 +148,6 @@ fn non_empty_or_sentinel(s: &str) -> String {
 }
 
 /// AND across active facets, OR within (`matchesFacets` + `activeFacetsExcept`,
-/// `library.js:539-555`). `skip` excludes one facet from the test — used by
-/// [`facet_options`] for the leave-one-out cascade; pass `None` for the real
-/// visibility test.
 pub fn matches(book: &Book, filters: &Filters, skip: Option<Facet>) -> bool {
     for facet in Facet::ALL {
         if Some(facet) == skip {
@@ -192,9 +166,6 @@ pub fn matches(book: &Book, filters: &Filters, skip: Option<Facet>) -> bool {
 
 /// Distinct values for a facet among the books matching **all other** active
 /// facets (leave-one-out cascade), each with its count, sorted with [`NONE`]
-/// last. Currently-selected values are always included even if the cross-facet
-/// filter would exclude them, so they stay un-selectable-back. Port of
-/// `facetOptions` (`library.js:578-600`).
 pub fn facet_options(books: &[Book], filters: &Filters, facet: Facet) -> Vec<(String, usize)> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for b in books {

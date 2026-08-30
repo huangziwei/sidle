@@ -1,11 +1,4 @@
 //! What sidle last installed on this device.
-//!
-//! A file that differs from what an update offers is either a version behind or
-//! a value edited here; a record of what was written tells them apart. A device
-//! copy matching the receipt is sidle's to replace; one that does not is kept.
-//!
-//! Mirrors the desktop's `receipt::InstallState` — the same JSON at the same
-//! mount-relative path, written by whichever route ran last.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

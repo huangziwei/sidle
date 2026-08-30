@@ -1,9 +1,5 @@
 //! What `formats::kfx::pdf_pages` recovers from a PDF-backed KFX: page boxes,
 //! the eid sets a bookmark resolves through, the outline, and the page labels.
-//!
-//! `pdf_to_kfx` embeds the PDF and renders each page as an image, writing no
-//! text overlay; the run comparison below is empty on this input. Run geometry
-//! is pinned by `pdf_pages`'s own unit tests against a hand-built overlay.
 
 use bokai::export::{PdfKfxMeta, pdf_to_kfx};
 use bokai::formats::kfx::pdf_pages;

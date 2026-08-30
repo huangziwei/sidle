@@ -1,7 +1,4 @@
 //! HP band encoder — inverse of the decoder's `mb_cbphp` + `mb_hp_flex` for
-//! grayscale ALL_BANDS (single component, HP QP = 0). The HP coefficient is
-//! `(vlc << model_bits) + flex` (+ HP prediction): `vlc` is the run-level
-//! coarse (per 4×4 block), `flex` the low `model_bits` bits.
 
 use super::bitstream::BitWriter;
 use super::coeff;
@@ -165,10 +162,6 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
 }
 
 /// Encode the HP band of one macroblock — inverse of `mb_cbphp` + `mb_hp_flex` +
-/// `hp_transform_coefficient_decoding`. `buf` is the forward `mb_buffer`
-/// (HP at within-block positions `blk*16 + 1..16`); `mb_dclp` the LP final
-/// values (for the HP prediction mode); `cbphp_left`/`cbphp_top` the neighbours'
-/// stored `mb_cbphp`. Returns this MB's `mb_cbphp` for neighbour prediction.
 pub fn encode_hp_mb(
     sink: &mut super::codestream::Sink,
     st: &mut HpState,

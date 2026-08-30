@@ -1,15 +1,4 @@
 //! The conversion pipeline: one book, source format → target format.
-//!
-//! Both directions share the shape — read the source the row points at, run
-//! bokai, write the output beside it, record the produced paths on the row, and
-//! bring everything derived from the file's shape (cover, position axis,
-//! annotation anchors) back into agreement with the new bytes. The direction
-//! (`epub_to_kfx`, `kfx_to_epub`, `pdf_to_kfx`, `kfx_to_pdf`) is stored on the
-//! `conversion_jobs` row at import time; [`convert_book`] dispatches on it.
-//!
-//! Synchronous from end to end, the cover fetch included. Minutes of CPU per
-//! book: the desktop queue calls it on a blocking task, the CLI on a worker
-//! thread.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

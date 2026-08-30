@@ -1,8 +1,4 @@
 //! Cover section handling for KFX export.
-//!
-//! This module provides pure functions for detecting and building
-//! standalone cover sections when an EPUB's cover image differs from
-//! the first spine chapter's image.
 
 use std::path::{Path, PathBuf};
 

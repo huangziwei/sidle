@@ -1,15 +1,4 @@
 //! Fragment representation (mirrors `yj_container.py`).
-//!
-//! A `YJFragment` is the unit calibre operates on between deserialize and
-//! serialize. Each fragment has a *type* (e.g. `$258` metadata, `$417`
-//! bcRawMedia) and a *fid* — a within-type identifier. Singletons (one-per-
-//! book root types) have `fid == ftype`; non-singletons have a distinct
-//! string fid.
-//!
-//! Calibre encodes the (fid, ftype) pair in IonAnnotation form on the wire
-//! when the fragment is loose (e.g. book.ion text). Inside a KFX container,
-//! the (fid, ftype) is carried by the entity-table row instead, and the
-//! entity body is the bare value.
 
 use super::node::IonNode;
 
@@ -36,9 +25,6 @@ impl YJFragment {
 }
 
 /// Calibre's `PREFERED_FRAGMENT_TYPE_ORDER`. Fragments are emitted in this
-/// order; types not on the list sort to the end. Within a type, calibre
-/// sorts by fid (lexicographic). Both keys feed into
-/// `YJFragmentKey.sort_key`.
 pub const PREFERED_FRAGMENT_TYPE_ORDER: &[&str] = &[
     "$ion_symbol_table",
     "$270",

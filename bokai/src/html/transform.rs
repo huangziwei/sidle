@@ -16,9 +16,6 @@ const UA_CSS: &str = include_str!("data/styles.css");
 pub fn user_agent_stylesheet() -> Stylesheet {
     // The UA stylesheet is a constant, but `compile_html`/`compile_dom` runs
     // once per chapter, so re-parsing UA_CSS every time is pure redundant work.
-    // Parse it once per thread and hand back a clone (cloning already-parsed
-    // rules is far cheaper than re-tokenizing and re-parsing the CSS). Output is
-    // unchanged — the cached sheet is a clone of the same parse.
     thread_local! {
         static UA_STYLESHEET: Stylesheet = Stylesheet::parse(UA_CSS);
     }
@@ -72,7 +69,6 @@ impl<'a> TransformContext<'a> {
         // Compute the html element's style first so its inherited properties
         // (writing-mode, lang, etc.) become the parent context for body. Many
         // Japanese EPUBs put `class="vrtl"` on <html> with vertical-rl writing-mode;
-        // without this step body's cascade never sees that class.
         let html_style = html_id_opt.map(|html_id| {
             let elem_ref = ElementRef::new(self.dom, html_id);
             compute_styles_indexed(
@@ -105,11 +101,6 @@ impl<'a> TransformContext<'a> {
 
         // Promote body's `id` attribute to the chapter root so anchors that
         // target it (e.g. NCX `<content src="ch.xhtml#bodyid"/>`) resolve.
-        // Calibre-generated EPUBs frequently put a unique id on `<body>` and
-        // reference it from the TOC; without this, `resolve_href` finds no
-        // matching IR node and the TOC entry is silently dropped. The KFX
-        // export side then falls back to chapter position when the target
-        // node is ROOT (see `resolve_toc_target` in export/kfx.rs).
         if let Some(node) = self.dom.get(body)
             && let ArenaNodeData::Element { attrs, .. } = &node.data
         {
@@ -122,10 +113,6 @@ impl<'a> TransformContext<'a> {
         }
 
         // The IR root *is* `<body>`, so it carries body's own computed style,
-        // not just the inheritable part of it. A page-level declaration that
-        // inherits into nothing — `body { background: url(…) }` painting a
-        // page texture is the case in the wild — was computed here and then
-        // dropped on the floor.
         let root_style = self.chapter.styles.intern(body_style.clone());
         if let Some(root) = self.chapter.node_mut(NodeId::ROOT) {
             root.style = root_style;
@@ -167,10 +154,6 @@ impl<'a> TransformContext<'a> {
                     // Whitespace between inline elements should be preserved as a single space.
                     // We preserve whitespace unless:
                     // 1. We're at the root level (no parent style)
-                    // 2. The whitespace contains newlines and we're in a block context
-                    //
-                    // This handles cases like: <cite><abbr>A</abbr> <abbr>B</abbr></cite>
-                    // where the space between abbrs must be preserved even though cite is block.
                     let has_newlines = text.contains('\n');
                     let is_block_parent = parent_style
                         .map(|s| s.display != Display::Inline)
@@ -232,7 +215,6 @@ impl<'a> TransformContext<'a> {
                 );
 
                 // Merge lang attribute into style (for KFX language property)
-                // This must happen before interning so the style includes the language
                 for attr in attrs {
                     if attr.name.local.as_ref() == "lang" && !attr.value.is_empty() {
                         computed.language = Some(attr.value.to_string());
@@ -244,8 +226,6 @@ impl<'a> TransformContext<'a> {
                 let role = element_to_role(&name.local);
 
                 // Skip hidden elements, but preserve Break nodes
-                // CSS may hide <br> (e.g., in verse: "span + br { display: none }") but
-                // we still need them for line breaks in the exported EPUB/KFX
                 if computed.display == Display::None && role != Role::Break {
                     return;
                 }
@@ -265,9 +245,6 @@ impl<'a> TransformContext<'a> {
                     match attr_name {
                         // Core layout attributes. SVG `<image>` uses `href`
                         // (SVG2) or `xlink:href` (SVG1) for the image source;
-                        // the IR's Image role expects `src`, so redirect when
-                        // the node is an image. (HTML `<a href>` still routes
-                        // through this arm for non-image roles.)
                         "href" if role == Role::Image => {
                             self.chapter.semantics.set_src(ir_id, &attr.value);
                         }
@@ -293,8 +270,6 @@ impl<'a> TransformContext<'a> {
                             }
                         }
                         // Semantic fidelity attributes
-                        // epub:type attribute - handle both namespaced and prefixed forms
-                        // html5ever parses "epub:type" as literal name with empty namespace
                         "type" if attr_ns == "http://www.idpf.org/2007/ops" => {
                             self.chapter.semantics.set_epub_type(ir_id, &attr.value);
                         }
@@ -327,10 +302,6 @@ impl<'a> TransformContext<'a> {
                             }
                         }
                         // Class attribute: store verbatim so EPUB → KFX → EPUB
-                        // round-trips can preserve source class names instead
-                        // of synthesizing `sN`. For code/pre we also extract
-                        // the `language-xxx` / `lang-xxx` hint into the
-                        // dedicated `language` semantic.
                         "class" => {
                             self.chapter.semantics.set_class(ir_id, &attr.value);
                             if matches!(name.local.as_ref(), "code" | "pre") {
@@ -492,9 +463,6 @@ mod tests {
     #[test]
     fn test_font_size_computed_through_cascade() {
         // Font sizes must come out of the cascade as computed px — the KFX
-        // exporter emits flat styles with no element tree to resolve
-        // relative units against. Covers a px span overriding an em heading
-        // and relative sizes compounding through nesting.
         let dom = parse_html(
             r#"<html><body>
             <h1>Introduction:<span class="big">The Shadow</span></h1>
@@ -514,7 +482,6 @@ mod tests {
         // The 24px span overrides the inherited h1 size
         assert_eq!(font_px_of(&chapter, "The Shadow"), 24.0);
         // Author 2em on h2 resolves against body, and the nested 50% span
-        // compounds against the h2's computed size
         assert_eq!(font_px_of(&chapter, "Nested"), 32.0);
         assert_eq!(font_px_of(&chapter, "half"), 16.0);
     }

@@ -1,19 +1,10 @@
 //! Format-agnostic rules for reading a table of contents: how a flat run of
 //! entries is re-parented into the tree its labels imply, how two lists of
 //! entries for the same book are merged, and which labels are boilerplate.
-//!
-//! Both rules read only what every format's TOC entry has — a label, a target and
-//! children — so a KFX `nav_container` and an EPUB nav doc get identical
-//! treatment. Each format implements [`TocNode`] for its own entry type and keeps
-//! its own target vocabulary (an element id, an href, a page number); nothing
-//! here knows which is which.
 
 use std::collections::HashSet;
 
 /// One entry of a TOC tree, whatever the format's entry type is.
-///
-/// The rules in this module need a label to read structure from, a target to
-/// tell two entries apart by, and children to build the tree in.
 pub trait TocNode: Sized {
     /// The entry's display label.
     fn label(&self) -> &str;
@@ -50,21 +41,9 @@ pub fn label_indent(label: &str) -> usize {
 /// How many entries must carry a deeper indent than the run's shallowest before
 /// the indentation counts as evidence of structure at all. One or two stray
 /// leading spaces are a typo; a whole level is not.
-///
-/// This is a threshold on *evidence*, not on depth — nothing here bounds how
-/// many levels are derived.
 pub(crate) const MIN_INDENT_EVIDENCE: usize = 3;
 
 /// Re-parent a flat run by the levels its labels keep as leading indentation.
-///
-/// A publisher whose TOC lost its nesting often ships it visibly, one
-/// IDEOGRAPHIC SPACE per level: a part label flush left, its chapters indented
-/// once, their sections twice. Each entry attaches under the nearest preceding
-/// entry with a strictly shallower indent; the depth is whatever the labels
-/// encode, and the tree carries it once the indentation is trimmed.
-///
-/// A run with no deeper-indented entries (or fewer than `MIN_INDENT_EVIDENCE`)
-/// comes back untouched, as does one that declares nesting of its own.
 pub fn nest_by_label_indent<T: TocNode>(entries: Vec<T>) -> Vec<T> {
     if already_nested(&entries) {
         return entries;
@@ -92,18 +71,6 @@ pub fn nest_by_label_indent<T: TocNode>(entries: Vec<T>) -> Vec<T> {
 
 /// Merge the TOC a book **declares** with one **derived** from its content, into
 /// a single list in document order.
-///
-/// Nothing is lost: every `declared` entry survives with its own label, and a
-/// `derived` entry joins it only when its target is one `declared` misses. The
-/// result adds chapters and adds structure; it removes no entry.
-///
-/// `position` places an entry in the book (a spine index, an element's ordinal,
-/// a page); entries it can't place inherit their predecessor's, keeping the
-/// neighbours they arrived next to. Both inputs come in document order, and
-/// equal positions keep `declared` ahead of `derived`.
-///
-/// A `declared` TOC carrying nesting of its own is returned untouched: it is the
-/// publisher's structure, and a flat `derived` list names no place inside it.
 pub fn merge_by_document_order<T: TocNode>(
     declared: Vec<T>,
     derived: Vec<T>,

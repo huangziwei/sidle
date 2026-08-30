@@ -1,12 +1,4 @@
 //! Coefficient-coding primitives (encode side).
-//!
-//! These mirror the decoder's per-coefficient codecs. Unlike the transform and
-//! static-VLC layers, most of the coefficient path (`decode_block`,
-//! `decode_abs_level`, the `mb_*` methods) is **private and stateful** on the
-//! decoder — it's validated end-to-end by decoding a full codestream, not
-//! per-primitive. The pieces here are the genuinely self-contained ones that
-//! touch only the bitstream, so they round-trip against the real decoder
-//! directly.
 
 use super::bitstream::BitWriter;
 use crate::decode::state::AdaptiveVLC;
@@ -48,9 +40,6 @@ pub fn encode_run(bw: &mut BitWriter, run: u32, i_max_run: u32) {
 
 /// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
 /// the adaptive table *index* is chosen by the caller). Emits `level` (`>= 2`)
-/// with the abs-level Huffman `table` plus the fixed/escape suffix bits, and
-/// returns the `abs_level_index` (0..=6) the caller folds into the
-/// discriminator (`ABS_LEVEL_INDEX_DELTA`).
 pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i32) -> i32 {
     use super::entropy::write_huff;
     const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
@@ -95,12 +84,6 @@ pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i3
 }
 
 /// Encode-side inverse of the decoder's `decode_block` (the run-level
-/// orchestration). `pairs` are `(run, level)` for the nonzero **coarse** levels
-/// in scan order (run = zeros before each). Emits the index/flag packing
-/// (first_index / index_a / index_b), runs, signs, and abs-levels, updating the
-/// adaptive discriminators exactly as the decoder does. The caller adapts the
-/// VLC tables (`adapt_table2`/`adapt_table1`) after the MB and selects them by
-/// band/chroma.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_block(
     bw: &mut BitWriter,
@@ -193,10 +176,6 @@ fn next_flags(pairs: &[(u32, i32)], j: usize) -> (i32, i32) {
 }
 
 /// Encode one DC coefficient `value` (already a prediction residual) for a
-/// single component, as `mb_dc` + `decode_dc` expect: the `b_abs_level` flag,
-/// an optional abs-level VLC for the high part, the `model_bits` low-part
-/// refinement, then a sign bit iff nonzero. Returns `(b_abs_level, abs_index)`
-/// where `abs_index` is `-1` when `b_abs_level` is false.
 pub fn encode_dc_value(
     bw: &mut BitWriter,
     value: i32,
@@ -211,11 +190,6 @@ pub fn encode_dc_value(
 }
 
 /// Flag-less DC value body: emit the abs-level VLC (iff `b_abs_level`), the
-/// `model_bits` low part, then the sign (iff nonzero). Shared by grayscale
-/// ([`encode_dc_value`], which writes the per-component `b_abs` flag first) and
-/// **color**, where the three components' `b_abs` flags are bundled into one
-/// `val_dc_yuv` symbol written before the components (so no per-component flag).
-/// Returns the `abs_level_index` (`-1` if `!b_abs_level`).
 pub fn encode_dc_residual(
     bw: &mut BitWriter,
     value: i32,
@@ -296,9 +270,6 @@ impl ModelState {
 }
 
 /// Two-model `m_bits`/`m_state` (luma + chroma) for a **color** plane, mirroring
-/// `decode::state::Model` + `Decoder::update_model_mb` with `i_num_models =
-/// 2`. Index 0 = luma, index 1 = chroma. (Grayscale uses the single-model
-/// [`ModelState`].)
 #[derive(Clone, Copy)]
 pub struct ColorModel {
     pub m_bits: [i32; 2],
@@ -318,8 +289,6 @@ impl ColorModel {
     /// Mirror of `update_model_mb` for a 2-model plane. `lap` is the per-model
     /// abs-level escape count this MB (`lap[0]` luma, `lap[1]` chroma); `band`
     /// is 0=DC/1=LP/2=HP; `num_components` selects the chroma weight column.
-    /// This is the Table-116 "else" arm (444/YUVK/NCOMPONENT); subsampled
-    /// chroma uses [`Self::update_42x`].
     pub fn update(&mut self, mut lap: [i32; 2], band: usize, num_components: usize) {
         const W0: [i32; 3] = [240, 12, 1];
         const W1: [[i32; 16]; 3] = [
@@ -338,9 +307,6 @@ impl ColorModel {
     }
 
     /// Table-116 chroma weights for the JOINTLY-coded 420/422 chroma "plane"
-    /// (`iWeight2`, no `>>4` on HP) — mirrors `decoder.rs update_model_mb`'s
-    /// `INT_YUV420`/`INT_YUV422` arms. This was the Phase-2 hunted bug in the
-    /// decode direction; the encoder must diverge identically.
     pub fn update_42x(&mut self, mut lap: [i32; 2], band: usize, is_420: bool) {
         const W0: [i32; 3] = [240, 12, 1];
         const I_WEIGHT2: [i32; 6] = [120, 37, 2, 120, 18, 1];
@@ -403,19 +369,6 @@ impl AdaptiveVlc1 {
 }
 
 /// Encode-side inverse of the decoder's `refine_lp`.
-///
-/// The decoder reads `model_bits` refinement bits (`coeff_ref`) and folds them
-/// into a coarse coefficient `i_coeff` to produce the final `result`:
-/// - `i_coeff > 0`: `result = (i_coeff << mb) + coeff_ref`
-/// - `i_coeff < 0`: `result = (i_coeff << mb) - coeff_ref`
-/// - `i_coeff == 0`: `coeff_ref` is the magnitude; an optional sign bit follows
-///   iff it's non-zero.
-///
-/// Encode one HP **flexbits** refinement under `trim_flexbits`: emit the top
-/// `model_bits - trim` bits of the `model_bits`-wide refinement (the decoder
-/// reconstructs `flex << trim`), with the sign carried only when the coarse
-/// coefficient is zero AND the trimmed refinement is nonzero. `trim = 0`
-/// matches the plain refinement bit-for-bit.
 pub fn encode_flexbits(bw: &mut BitWriter, i_coeff: i32, result: i32, model_bits: i32, trim: u32) {
     let left = model_bits - trim as i32;
     if left <= 0 {

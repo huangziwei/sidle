@@ -1,10 +1,4 @@
 //! A book's table of contents, judged and repaired from its own source file.
-//!
-//! bokai owns both halves — the audit ([`bokai::validate::source::toc`]) and the
-//! per-format proposers that rebuild a TOC from what the book itself declares.
-//! What lives here is the library's use of them: read a book's source, ask for a
-//! verdict, and when the verdict is bad, write the repair back through the
-//! source seam so the device file and the row stay in agreement.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -37,10 +31,6 @@ impl Verdict {
 }
 
 /// Read a book's source and judge its TOC.
-///
-/// KFX and EPUB only: the audit weighs a book's declared TOC against the
-/// Contents page and headings *inside* it, and a PDF exposes neither, so there
-/// is nothing to weigh an outline against.
 pub fn audit(book: &BookRow) -> Result<Verdict> {
     let (source, path) = source::of(book)?;
     if source == Source::Pdf {
@@ -59,17 +49,6 @@ pub fn audit(book: &BookRow) -> Result<Verdict> {
 }
 
 /// Rebuild a book's TOC from what the book itself declares, and write it back.
-///
-/// The proposer mirrors the book's own structure — a flat Contents page yields a
-/// flat TOC, a Part→chapter one yields a nested TOC — so a repair never invents
-/// a shape the book does not have.
-///
-/// Returns the verdict the repaired file earns. A PDF is refused: there is no
-/// proposer for one, because a PDF without an outline usually has no links to
-/// mine either, so its TOC has to be hand-authored.
-///
-/// An EPUB- or PDF-sourced book needs its KFX re-derived afterwards; the caller
-/// owns that, because it also owns whether a conversion may run now.
 pub fn repair(conn: &Connection, book: &BookRow) -> Result<Verdict> {
     let (source, path) = source::of(book)?;
     let bytes = std::fs::read(&path).with_context(|| format!("read {path}"))?;

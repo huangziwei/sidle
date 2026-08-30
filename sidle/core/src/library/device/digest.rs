@@ -1,12 +1,4 @@
 //! Content hashes of files on this machine, kept across calls.
-//!
-//! A push and a status check both need the sha256 of every file the fleet
-//! installs. Hashing on each call reads the whole tree, and most of a tree is
-//! files no build touches — a vendored subtree, a font set.
-//!
-//! [`DigestCache`] hashes a file once per version of it. A [`Stamp`] — mtime,
-//! size and inode, from one `metadata` call — is what a recorded hash is held
-//! against.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
@@ -18,9 +10,6 @@ use serde::{Deserialize, Serialize};
 use super::deploy::sha256_bytes;
 
 /// What one `metadata` call says about a file. Any change to any field means
-/// the recorded hash describes bytes that are gone: a rewrite in place moves
-/// `mtime_ms`, a rename over the path moves `inode`, and a truncation moves
-/// `size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     pub mtime_ms: u64,
@@ -61,9 +50,6 @@ struct Entry {
 }
 
 /// Hashes keyed by absolute path, backed by one JSON file.
-///
-/// [`Self::open`] and [`Self::save`] bracket a run of lookups; a caller that
-/// hashes nothing new writes nothing back.
 #[derive(Debug)]
 pub struct DigestCache {
     path: PathBuf,

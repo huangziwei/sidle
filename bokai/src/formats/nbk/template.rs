@@ -1,20 +1,4 @@
 //! Page-template (KVG) decode + render — the ruled/grid/margin under-layer.
-//!
-//! A Scribe notebook ships the templates its pages use inside its own
-//! `note_template_collection` (reading order 1). Each content page's
-//! `nmdl.template_id` points at a template page section (`$260`) whose story
-//! (`$259`) holds one KVG-SVG content node (`$159 == $272`): a `$66`×`$67`
-//! viewBox plus a `$250` list of path shapes (`$273` — each `$249` path-command
-//! list, `$75` ARGB stroke, `$76` width). Ports the `$272`/`$273` subset of
-//! `process_content` + `process_kvg_shape`
-//! (kfxlib's `yj_to_epub_content.py` / `yj_to_epub_misc.py`) —
-//! enough for the line-art templates; other KVG shape types are skipped.
-//!
-//! The template viewBox (e.g. 1860×2480) is authored at device-screen scale,
-//! while the ink page canvas is the high-res NMDL grid (e.g. 15624×20832), so
-//! the renderer composites the template as a nested `<svg>` whose own viewBox
-//! rescales it to fill the page — matching kfxlib, which references the template
-//! SVG via a full-bleed `<image>`.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -49,10 +33,6 @@ pub struct Template {
 }
 
 /// Resolve a page's `nmdl.template_id` to a [`Template`].
-///
-/// Follows `template_id → template page ($260) → $141[0].$176 → template story
-/// ($259) → $146[0] ($272 KVG SVG) → $66/$67 + $250 shapes`. Returns `None` for
-/// the blank template (`$349`) or any unresolved / non-KVG reference.
 pub fn resolve(
     template_id: &IonValue,
     parsed: &HashMap<&str, IonValue>,

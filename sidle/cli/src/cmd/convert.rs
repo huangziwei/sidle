@@ -1,10 +1,4 @@
 //! Converting many books at once.
-//!
-//! The desktop's queue is a dispatcher over a tokio `JoinSet`, sized to the
-//! machine, feeding a window that wants progress bars. Here there is no window:
-//! the sweep is N worker threads pulling from one list, each running the same
-//! [`convert`] pipeline the desktop runs. On a terminal the run draws a
-//! [`crate::progress::Bar`]; redirected, it prints a line per finished book.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};

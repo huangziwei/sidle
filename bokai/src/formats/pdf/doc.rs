@@ -1,12 +1,5 @@
 //! Shared PDF document core: loading, object dereferencing, and the PDF text
 //! string codec.
-//!
-//! These pieces are needed by both the read side ([`crate::import::pdf`]'s
-//! `probe_pdf`) and the write side ([`super::edit`]), so they live here rather
-//! than being duplicated. In particular [`load_pdf`] is the *only* correct way
-//! to open a PDF in this codebase: a bare `Document::load_mem` silently loses
-//! the catalog and page tree on a whole class of real files (see
-//! `recover_nul_object_streams`).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
@@ -15,12 +8,6 @@ use lopdf::xref::XrefEntry;
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Stream, StringFormat};
 
 /// Load a PDF from memory, repairing the object streams lopdf drops.
-///
-/// Always prefer this over `Document::load_mem`: on a PDF whose object-stream
-/// index is NUL-separated, the bare loader returns a `Document` whose catalog
-/// does not resolve at all (`get_pages()` → empty, `catalog()` → `ObjectNotFound`).
-/// Both the probe and the editor need the catalog, so the recovery runs here,
-/// once, for every consumer.
 pub fn load_pdf(bytes: &[u8]) -> io::Result<Document> {
     let mut doc = Document::load_mem(bytes).map_err(|e| {
         io::Error::new(io::ErrorKind::InvalidData, format!("PDF parse failed: {e}"))
@@ -30,26 +17,6 @@ pub fn load_pdf(bytes: &[u8]) -> io::Result<Document> {
 }
 
 /// Work around a lopdf limitation: an object stream (`/ObjStm`) whose index uses
-/// NUL (`0x00`) as the number separator is dropped wholesale. lopdf parses that
-/// index with `str::split_whitespace()`, which doesn't treat NUL — a legal PDF
-/// whitespace byte (PDF 32000-1 Table 1) — as whitespace, so it reads one giant
-/// token instead of the `2·N` integers, extracts zero inner objects, and every
-/// object stored in the stream goes missing. In modern PDFs (xref-stream +
-/// object-stream layout) that usually includes the document catalog and the
-/// whole page tree, leaving `get_pages()` empty ("PDF has no pages").
-///
-/// Re-expand those streams ourselves using lopdf's public API: for each
-/// compressed xref entry lopdf left unresolved, decompress its container,
-/// normalize NUL→space in the *index region only* (byte-for-byte, so the
-/// data-region offsets the index points at stay valid), and re-parse through
-/// `ObjectStream` — which `decompress()`-no-ops on our already-inflated,
-/// filterless stream, then splits the now-space-separated index correctly.
-/// Recovered objects are inserted without overwriting anything lopdf already
-/// has. Entirely a no-op when no compressed object is missing (the common case),
-/// so it costs nothing for well-behaved PDFs.
-///
-/// Recovery is read-side only: it re-materializes objects the file already
-/// contains, so it never changes what a surgical edit writes back out.
 fn recover_nul_object_streams(doc: &mut Document) {
     // container object id -> the compressed obj numbers lopdf failed to load.
     let mut missing: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
@@ -143,16 +110,6 @@ pub(crate) fn decode_pdf_string(b: &[u8]) -> String {
 
 /// Encode a Rust string as a PDF text string object — the inverse of
 /// [`decode_pdf_string`], for the write side.
-///
-/// ASCII stays a plain literal `(like this)`, which is what real producers emit
-/// and keeps the appended increment legible. Anything else (a Japanese title, a
-/// curly quote) becomes UTF-16BE with a `FE FF` BOM, written as a *hex* string:
-/// hex needs no escaping, so arbitrary bytes — including the NULs that pervade
-/// UTF-16BE — survive without relying on literal-string escape rules.
-///
-/// Deliberately not PDFDocEncoding on the way out: it can only represent a
-/// subset of Unicode, so choosing it would mean silently dropping characters.
-/// UTF-16BE round-trips everything.
 pub(crate) fn encode_pdf_string(s: &str) -> Object {
     if s.is_ascii() {
         return Object::String(s.as_bytes().to_vec(), StringFormat::Literal);
@@ -165,10 +122,6 @@ pub(crate) fn encode_pdf_string(s: &str) -> Object {
 }
 
 /// Map one PDFDocEncoding byte to its Unicode char. PDFDocEncoding (PDF 32000-1
-/// Annex D.3) matches Latin-1 except for the 0x18–0x1F and 0x80–0xA0 ranges,
-/// which carry typographic glyphs — em/en dashes, curly quotes, ligatures —
-/// that appear constantly in real book titles. Decoding those as Latin-1 (where
-/// 0x80–0x9F are C1 control codes) corrupts the title; this table fixes them.
 fn pdfdoc_to_char(b: u8) -> char {
     match b {
         0x18 => '\u{02D8}', // breve
@@ -224,12 +177,6 @@ const DEFAULT_MEDIABOX: [f32; 4] = [0.0, 0.0, 612.0, 792.0];
 /// Compute a page's displayed geometry: resolve `/MediaBox` (walking the
 /// `/Pages` tree for the inherited value), apply `/Rotate` to the extents, and
 /// report the rotation as quarter turns clockwise.
-///
-/// Uses the **MediaBox** (not the CropBox): it is the page a viewer renders (=
-/// Preview), and `render.rs` rasterizes it MediaBox origin-relative — so the
-/// container dimensions, the rendered image, and the text-layer overlay share one
-/// box. (A press PDF whose CropBox is larger than its MediaBox carries trim marks
-/// in the difference; the MediaBox is the trimmed page.)
 pub(crate) fn page_geometry(doc: &Document, page_id: ObjectId) -> (f32, f32, u8) {
     let mut media: Option<[f32; 4]> = None;
     let mut rotate: i64 = 0;
@@ -359,7 +306,6 @@ mod tests {
         // A decompressed ObjStm payload whose index uses NUL (0x00) as the
         // separator — the exact shape lopdf's split_whitespace silently drops.
         // Two objects: 10 -> Boolean(true) at objects-offset 0, 11 -> Integer(42)
-        // at offset 5 (in the "true 42" region that follows the index).
         let mut content: Vec<u8> = Vec::new();
         content.extend_from_slice(b"10\x000\x0011\x005"); // index pairs (10,0) (11,5)
         let first = content.len() as i64;

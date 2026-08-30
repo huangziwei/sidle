@@ -1,7 +1,6 @@
 //! Section tree extraction from book IR.
 //!
 //! Transforms bokai's flat IR tree (where headings are siblings of paragraphs)
-//! into a hierarchical section tree (where content is nested under headings).
 
 use std::io;
 
@@ -10,8 +9,6 @@ use super::chapter::Chapter;
 use super::node::{NodeId, Role};
 use crate::util::strip_ebook_chars;
 
-// ============================================================================
-// Public Types
 // ============================================================================
 
 /// A book's content as a hierarchical section tree.
@@ -75,13 +72,8 @@ pub enum ContentBlock {
 }
 
 // ============================================================================
-// Extraction
-// ============================================================================
 
 /// Extract a section tree from a book.
-///
-/// Walks each chapter's IR tree, splits on heading nodes, and nests content
-/// under headings to form a hierarchical section tree.
 pub fn extract_section_tree(book: &mut Book) -> io::Result<SectionTree> {
     let meta = book.metadata().clone();
     let spine: Vec<_> = book.spine().to_vec();
@@ -105,7 +97,6 @@ pub fn extract_section_tree(book: &mut Book) -> io::Result<SectionTree> {
 
 // ============================================================================
 // Event collection (pass 1: flatten IR into heading/content events)
-// ============================================================================
 
 enum Event {
     Heading { level: u8, title: String },
@@ -205,7 +196,6 @@ fn collect_events(chapter: &Chapter, node_id: NodeId, events: &mut Vec<Event>) {
 
 // ============================================================================
 // Nesting (pass 2: group flat events into a section tree)
-// ============================================================================
 
 fn nest_events(events: &[Event]) -> (Vec<ContentBlock>, Vec<SectionNode>) {
     let mut preamble = Vec::new();
@@ -270,8 +260,6 @@ fn parse_siblings(events: &[Event], mut i: usize, min_level: u8) -> (Vec<Section
     (sections, i)
 }
 
-// ============================================================================
-// Text collection helpers
 // ============================================================================
 
 fn collect_text(chapter: &Chapter, node_id: NodeId) -> String {
@@ -340,8 +328,6 @@ fn collect_text_verbatim_recursive(chapter: &Chapter, node_id: NodeId, result: &
     }
 }
 
-// ============================================================================
-// Structured content extraction
 // ============================================================================
 
 fn collect_list_items(chapter: &Chapter, list_id: NodeId) -> Vec<String> {
@@ -445,8 +431,6 @@ fn is_header_row(chapter: &Chapter, row_id: NodeId) -> bool {
         .any(|id| chapter.semantics.is_header_cell(id))
 }
 
-// ============================================================================
-// Tests
 // ============================================================================
 
 #[cfg(test)]

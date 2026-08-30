@@ -1,14 +1,4 @@
 //! Forward quantization: transform coefficient → quantized level. The exact
-//! inverse of the decoder's dequant (`level * scaling_factor`). Ported from
-//! libjxr `strPredQuant.c` (`remapQP`, `QUANT`): a uniform scalar quantizer
-//! with a 3/8 deadzone. The scaling factor itself is taken straight from the
-//! decoder's `quant_map`, so encode/decode can never disagree on it.
-//!
-//! Quantize the *raw* coefficients (DC/LP/HP) right after the forward transform;
-//! all band prediction then runs in the level domain. Because the prediction is
-//! linear and the per-band scaling is uniform, the decoder's
-//! dequantize-then-predict telescopes to exactly `level * sf` — open-loop, no
-//! drift (lossless `sf == 1` is the identity special case).
 
 use crate::decode::consts::{DC, HP, LP};
 use crate::decode::state::quant_map;
@@ -35,12 +25,6 @@ impl QpSet {
 }
 
 /// Per-band, per-component-class scaling factors at quantizer set `qp` — the
-/// general per-band form. The decoder's `quant_map` derivation
-/// is MODE- and COMPONENT-dependent: `scaled_flag` selects a different
-/// mantissa/exponent split (the scaled-domain coefficients carry 3 extra
-/// fraction bits), and in scaled mode the chroma DC/LP factors sit one
-/// binary order below luma's (`i_scaled_shift` 0 vs 1). `chroma` selects the
-/// component class (any component > 0 maps the same way).
 pub fn scaling_factors_for(qp: QpSet, chroma: bool, scaled: bool) -> (i32, i32, i32) {
     let comp = usize::from(chroma);
     (
@@ -80,9 +64,6 @@ pub struct TileQps {
 }
 
 /// The 4e quantization plan for the primary plane: per-tile QP sets (one
-/// entry = image-uniform layout where possible) plus per-MB LP/HP set-index
-/// maps (row-major `mby * mbw + mbx`; empty = all zero). Every tile must
-/// declare the same LP/HP list lengths (the per-band `num_qps` shape).
 #[derive(Clone, Debug)]
 pub struct QpPlan {
     /// One entry (image-uniform) or one per tile, raster order.

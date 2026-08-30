@@ -1,25 +1,11 @@
 //! Natural-order string collation, shared by the sort, series, and facet
 //! orderings.
-//!
-//! Port of the desktop's `naturalCompare` (`web/library.js`, built on
-//! `Intl.Collator(undefined, { numeric: true })`): a
-//! run of ASCII digits compares by its numeric value, so "Vol 2" sorts *before*
-//! "Vol 10" instead of lexicographically after it. That lines a series' volumes
-//! up by their in-title number even before a numeric series index is set.
-//!
-//! `numeric` is the *only* override. The non-digit segments stay code-point
-//! order — the same `str::cmp` collation the picker already used (see
-//! `ui::sort`) — so case / accent / CJK ordering is unchanged; this
-//! purely adds the numeric-run handling.
 
 use std::cmp::Ordering;
 use std::iter::Peekable;
 use std::str::Chars;
 
 /// Compare two strings in natural order: maximal runs of ASCII digits compare by
-/// numeric value, every other character by Unicode code point. Total and
-/// deterministic, so it is safe as a `sort_by` comparator — when two digit runs
-/// have equal value the one with more leading zeros sorts first (e.g. "2" < "02").
 pub fn natural_compare(a: &str, b: &str) -> Ordering {
     let mut ai = a.chars().peekable();
     let mut bi = b.chars().peekable();
@@ -46,9 +32,6 @@ pub fn natural_compare(a: &str, b: &str) -> Ordering {
 }
 
 /// Both iterators sit at the first digit of an ASCII-digit run. Consume each
-/// maximal run and compare them as numbers (leading zeros ignored), advancing
-/// past both. Equal-valued runs break the tie by leading-zero count (fewer
-/// zeros first), keeping the order total.
 fn compare_digit_runs(a: &mut Peekable<Chars<'_>>, b: &mut Peekable<Chars<'_>>) -> Ordering {
     let zeros_a = take_zeros(a);
     let zeros_b = take_zeros(b);

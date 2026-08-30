@@ -1,8 +1,6 @@
 //! Style registry for KFX export.
 //!
 //! Handles style deduplication and ID assignment during the two-pass export:
-//! - Pass 1: Collect unique style combinations, assign IDs via hashing
-//! - Pass 2: Emit style fragment with all definitions, reference by ID in content
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -12,8 +10,6 @@ use crate::formats::kfx::style_schema::{KfxValue, StyleContext, StyleSchema, ext
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::style as ir_style;
 
-// ============================================================================
-// Computed Style
 // ============================================================================
 
 /// A set of resolved KFX property values, hashed for deduplication: identical
@@ -171,8 +167,6 @@ fn hash_kfx_value<H: Hasher>(value: &KfxValue, hasher: &mut H) {
     }
 }
 
-// ============================================================================
-// Style Registry
 // ============================================================================
 
 /// Registry for collecting and deduplicating styles during export.
@@ -426,8 +420,6 @@ fn usable_class_hint(class: &str) -> Option<String> {
 }
 
 // ============================================================================
-// Style Builder
-// ============================================================================
 
 /// Builds a ComputedStyle from IR style properties using the schema.
 pub struct StyleBuilder<'a> {
@@ -573,8 +565,6 @@ fn expand_font_shorthand(value: &str) -> Option<Vec<(String, String)>> {
     }
 }
 
-// ============================================================================
-// Tests
 // ============================================================================
 
 #[cfg(test)]

@@ -1,26 +1,4 @@
 //! Surgical in-place metadata edit for an EPUB's OPF package document.
-//!
-//! The EPUB analog of [`crate::formats::kfx::metadata_edit`]: sets
-//! title / authors / language / publisher / date / ASIN on the OPF's Dublin Core
-//! elements without touching the rest of the book. Where the KFX side rewrites
-//! Ion fragments, this does targeted text edits on the OPF XML — the same
-//! string-surgery approach the cover writer uses — through the shared
-//! [`EpubPackage`] harness: every other member passes through untouched.
-//!
-//! A single-valued field (`<dc:title>` / `<dc:language>` / `<dc:publisher>` /
-//! `<dc:date>`) has its text replaced in place (or the element is appended to
-//! `<metadata>` when absent). Authors replace the whole run of `<dc:creator>`
-//! elements. ASIN patches the `scheme="ASIN"` identifier. A `None` field is left
-//! untouched (matching the KFX primitive — v1 sets, it does not clear).
-//!
-//! Scope (v1): targets the near-universal `dc:`-prefixed Dublin Core form real
-//! EPUBs use. Replacing the author list also prunes any `<meta refines="#…">`
-//! refinement that pointed at a replaced creator — leaving it would dangle the
-//! `refines` fragment (epubcheck flags it, and it undoes the validity the
-//! exporter's `id="creatorN"` scheme guarantees). A single-valued field's edit
-//! replaces only the element's text, keeping its `id`, so a refinement on it
-//! still resolves; the refinement's own value (e.g. a title `file-as` sort key)
-//! is left as-is rather than re-derived.
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_text};
 
@@ -132,13 +110,6 @@ fn dc_content_span(opf: &str, tag: &str) -> Option<(usize, usize)> {
 
 /// Replace the run of `<dc:creator>` elements with `authors`, one element each,
 /// at the position of the first existing creator (or appended to `<metadata>`).
-///
-/// New creators carry the exporter's `id="creatorN"` scheme, and any
-/// `<meta refines="#…">` refinement (sort-key `file-as`, `role`, …) that pointed
-/// at a *replaced* creator is pruned: it described the old creator, and leaving
-/// it would dangle the `refines` fragment. New creators carry no refinement (a
-/// bare `<dc:creator>` is authorship by default, and this primitive has no
-/// sort-key input to synthesize one from).
 fn set_creators(opf: &str, authors: &[String]) -> String {
     let creators = authors
         .iter()
@@ -204,9 +175,6 @@ fn set_creators(opf: &str, authors: &[String]) -> String {
 }
 
 /// Remove every `<meta … refines="#<id>" …>…</meta>` (and self-closing form)
-/// whose `refines` fragment names one of `ids`, taking the element's whole
-/// indented line with it. Drops refinements orphaned when their `<dc:creator>`
-/// target is replaced. No-op when `ids` is empty.
 fn strip_meta_refines(opf: &str, ids: &[String]) -> String {
     if ids.is_empty() {
         return opf.to_string();
@@ -394,9 +362,6 @@ mod tests {
     }
 
     /// XML metacharacters in a value are escaped so the OPF stays well-formed and
-    /// the `&`/`<`/`>` survive the parse round-trip. (Whitespace adjacent to an
-    /// entity is dropped by the OPF parser's `trim_text`, so the fixture value
-    /// keeps the metacharacters tight against their neighbours.)
     #[test]
     fn escapes_xml_metacharacters() {
         let epub = std::fs::read(FIXTURE).expect("read fixture");
@@ -442,9 +407,6 @@ mod tests {
     }
 
     /// Replacing authors prunes the `<meta refines="#creatorN">` refinements that
-    /// pointed at the old creators, so no `refines` fragment is left dangling —
-    /// the defect that silently made an author-edited book epubcheck-dirty. This
-    /// is the exact shape the exporter emits.
     #[test]
     fn set_creators_prunes_orphaned_refines() {
         let opf = "<metadata>\n    \

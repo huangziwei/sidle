@@ -6,18 +6,11 @@ use bokai::model::{Book, Format};
 pub struct FetchedImage {
     pub href: String,
     /// Media type of `bytes` as they actually are, sniffed on delivery rather
-    /// than taken from the manifest. The two agree almost always, and the
-    /// exception matters: a JPEG-XR page the decoder can't read passes through
-    /// as JPEG-XR, though every declaration ahead of it predicted JPEG.
     pub mime: String,
     pub bytes: Vec<u8>,
 }
 
 /// Produces a book's image bytes when the reader asks for them.
-///
-/// Holds the parsed book so a fetch is a decode of one image rather than a
-/// re-parse of the container. Fetches are stateless — re-fetching an href just
-/// decodes it again — so the reader can drop and re-request freely.
 pub struct ImageStore {
     book: std::sync::Mutex<Book>,
 }
@@ -46,8 +39,6 @@ impl ImageStore {
 
     /// Fetch several at once. The importer decodes across cores where the
     /// format makes that worthwhile (KFX transcodes JPEG-XR in parallel).
-    /// Unknown or unreadable hrefs are dropped from the result rather than
-    /// failing the batch.
     pub fn fetch_many(&self, hrefs: &[String]) -> Vec<FetchedImage> {
         let Ok(mut book) = self.book.lock() else {
             return Vec::new();

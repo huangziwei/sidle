@@ -100,8 +100,6 @@ pub(super) fn flatten_toc(
 
     // Recompute lengths from the hierarchy: each entry covers up to the next
     // entry at the same or shallower depth (matches calibre's writer8/main.py).
-    // A default of `text_length - pos` makes every entry span the whole book,
-    // which breaks TBS strand classification and Kindle navigation.
     let n = result.len();
     let mut new_lengths = vec![0u32; n];
     for i in 0..n {
@@ -225,10 +223,6 @@ pub(super) fn collect_guide_entries(
 
 /// Resolve MOBI filepos anchor to the full (seq_num, offset_in_chunk, offset_in_text)
 /// entry from the aid_offset_map.
-///
-/// MOBI files use `#fileposNNN` anchors where NNN is a byte position in the
-/// original HTML content. We use the filepos_map to find the aid that was
-/// closest to that position, then return its full entry.
 pub(super) fn resolve_filepos_entry(
     file: &str,
     fragment: &str,
@@ -253,9 +247,6 @@ pub(super) fn resolve_filepos_entry(
 }
 
 /// Resolve MOBI filepos anchor to (fid, offset) for link resolution.
-///
-/// Similar to resolve_filepos but returns the seq_num and offset_in_chunk
-/// needed for kindle:pos:fid:XXXX:off:YYYYYY link format.
 pub(super) fn resolve_filepos_to_offset(
     file: &str,
     fragment: &str,

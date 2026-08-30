@@ -1,13 +1,5 @@
 //! SVG cover wrapper for the EPUB titlepage — one builder for the normalized and
 //! raw exports alike, so every synthesized cover page has the same shape.
-//!
-//! An SVG `viewBox` sized to the cover image's pixel dimensions, with the image
-//! referenced via `xlink:href`, renders full-bleed in Apple Books / Kindle: the
-//! `viewBox` is self-contained CSS-wise, bypassing the body-margin defaults a
-//! plain `<img>` would inherit. Without dimensions the `viewBox` would collapse,
-//! so a bare `<img>` wrapper ships instead. The cover page is identified through
-//! the OPF (`<meta name="cover">` / `properties="cover-image"` and the guide
-//! reference), not an in-page marker.
 
 /// Build the titlepage document. `dims` is the cover's pixel size
 /// (`None` / zero → the `<img>` fallback variant). `viewport` states the page

@@ -1,7 +1,6 @@
 //! Markdown Exporter - I/O orchestration for markdown output.
 //!
 //! This module provides the thin I/O layer for exporting books to Markdown.
-//! The actual rendering logic is in [`crate::markdown`].
 
 use std::io::{self, Seek, Write};
 

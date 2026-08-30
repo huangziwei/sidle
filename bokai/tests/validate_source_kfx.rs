@@ -1,7 +1,4 @@
 //! `source::validate` over a real container, end to end.
-//!
-//! The fixture is a well-formed published book and raises no KFX structural
-//! finding.
 
 use std::path::Path;
 

@@ -1,14 +1,4 @@
 //! Forward overlap (PRE-)filtering passes — the encode-side inverses of the
-//! decoder's `first_level_overlap_filtering` / `second_level_overlap_filtering`
-//! (`decode/decoder.rs`). Every filter window in a pass is pairwise disjoint,
-//! so each pass mirrors the decoder's traversal with the pre-filter
-//! primitives from [`super::transform`]; only the chroma corner ± phases are
-//! order-sensitive, and those run as subtract → filters → add (the exact
-//! inverse of the decoder's subtract → filters → add composition).
-//!
-//! Soft tiles only: the encoder never emits `hard_tiling_flag = 1`, so the
-//! cross-tile continuation arms are always active, exactly like the files
-//! jxrencapp produces.
 
 use super::transform::{
     overlap_pre_filter_2, overlap_pre_filter_2x2, overlap_pre_filter_4, overlap_pre_filter_4x4,
@@ -64,10 +54,6 @@ fn sp4(data: &mut [i32], stride: usize, x: usize, y: usize, list: &[(i32, i32); 
 }
 
 /// Sample-domain overlap PRE-filter over one component's padded plane
-/// (overlap modes 1 and 2). `tile_x`/`tile_y` are the tile boundaries in
-/// THIS component's pixels (MB boundaries ×16, already divided by the chroma
-/// subsampling factors), length `ntiles + 1`. Mirrors the decoder's
-/// `second_level_overlap_filtering` window-for-window.
 pub(super) fn sample_pre_filter(
     data: &mut [i32],
     stride: usize,
@@ -222,7 +208,6 @@ fn f4(g: &mut dyn DcGrid, x: usize, y: usize, list: &[(i32, i32, usize); 4]) {
 /// Block-DC-domain overlap PRE-filter for a luma / 4:4:4 component
 /// (overlap mode 2 only), between forward stage 1 and stage 2. `left_mb` /
 /// `top_mb` are the tile boundaries in MB units, length `ntiles + 1`.
-/// Geometry lists verbatim from the decoder's `first_level_overlap_filtering`.
 pub(super) fn dc_pre_filter_luma(g: &mut dyn DcGrid, left_mb: &[usize], top_mb: &[usize]) {
     let le1: [(i32, i32, usize); 4] = [(0, 0, 8), (0, 0, 12), (0, 1, 0), (0, 1, 4)];
     let le2: [(i32, i32, usize); 4] = [(0, 0, 9), (0, 0, 13), (0, 1, 1), (0, 1, 5)];
@@ -368,12 +353,6 @@ fn cf2(g: &mut dyn DcGrid, cells: [(usize, usize, usize); 2]) {
 }
 
 /// Block-DC-domain overlap PRE-filter for one 4:2:0 / 4:2:2 chroma component
-/// (overlap mode 2 only). Inverse of the decoder's
-/// `first_level_overlap_chroma` (Tables 154/155): the decoder runs corner
-/// differences (−=) → junction/edge filters → corner additions (+=), so the
-/// inverse runs corner subtractions (the additions' inverse, SAME cells) →
-/// PRE-filters over the same windows → corner additions (the differences'
-/// inverse). Soft tiles only.
 pub(super) fn dc_pre_filter_chroma(
     g: &mut dyn DcGrid,
     is420: bool,

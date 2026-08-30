@@ -1,10 +1,4 @@
 //! What a metadata edit means, independent of who asked for it.
-//!
-//! A patch arrives as whatever the editor (or a script) typed; what lands in the
-//! row is canonical: authors split and re-joined on the display separator, a
-//! harmonized language code, a reading layout and a page direction that agree,
-//! romaji that regenerate from a blank, deduped lowercase tags. Product truth,
-//! not presentation: every front end reads the same answer here.
 
 use rusqlite::Connection;
 

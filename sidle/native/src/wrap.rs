@@ -1,22 +1,6 @@
 //! Pure text-wrap utility.
-//!
-//! Lives at the crate root (not under `ui/`) because the consumer
-//! `ui::text::TextRenderer` pulls in `Framebuffer` which is Linux-only.
-//! Keeping wrap separate means `cargo test --lib` can exercise the
-//! wrap logic on the host with synthetic widths, without dragging the
-//! whole render stack into the test build.
 
 /// Word-wrap `text` to fit `max_width` per line.
-///
-/// Latin titles wrap at whitespace; CJK titles (no spaces) fall
-/// through to char-level wrap so the line packs as densely as
-/// possible without overflowing. A single Latin word wider than
-/// `max_width` is also char-broken so it doesn't escape the box.
-///
-/// `measure` is the per-substring width function. The renderer
-/// supplies a font-backed implementation; tests supply a fixed-width
-/// closure so we can reason about the wrap arithmetic without a real
-/// font.
 pub fn wrap_to_width<F>(text: &str, max_width: u32, mut measure: F) -> Vec<String>
 where
     F: FnMut(&str) -> u32,
@@ -71,15 +55,6 @@ where
 }
 
 /// Word-wrap `text` to `max_width`, then clamp to at most `max_lines`
-/// lines — appending `…` to the last kept line whenever content was
-/// dropped. The ellipsis is fitted by trimming trailing chars until
-/// `"<line>…"` measures within `max_width`, so the truncated line never
-/// overflows the box (in the degenerate case the line collapses to just
-/// `…`).
-///
-/// Same `measure` contract as [`wrap_to_width`]. Shared by the cover
-/// placeholder renderer and the diagnostics panel's error strings — one
-/// tested path for both.
 pub fn wrap_and_clamp<F>(
     text: &str,
     max_width: u32,

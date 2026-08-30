@@ -1,108 +1,5 @@
 //! KFX structural validation: one container read natively, never a derived
 //! copy, reported as defects in the source book.
-//!
-//! Every rule reads the structures `kfx/container.rs` and `kfx/loader.rs`
-//! ([`BookData`]) parse.
-//!
-//! - **Rule 1, container integrity** — `CONT` magic, info + index in bounds.
-//!   A parse failure is one `container-unreadable` error; a non-zero
-//!   `bcDRMScheme` or `bcComprType` is one `container-encrypted` /
-//!   `container-compressed` error over unreadable payloads. The header
-//!   `version`, the index table's entry alignment, the `bcContId` shape and
-//!   the symbol table's declared `max_id` are warnings. Each indexed entity is
-//!   read against the bytes it addresses: a range past the end of the file, a
-//!   payload outside the media types that is not Ion, and a name a second
-//!   fragment of the same type repeats over different bytes are errors, one
-//!   per lost fragment. The generator trailer's `kfxgen_payload_sha1` is read
-//!   against the payload region it digests (§3.5, warning), and every name
-//!   `container_entity_map` ($419) lists names a fragment an index row holds
-//!   (§6.2, warning). Every symbol id a fragment uses resolves through the
-//!   container's own table (§5.4, warning), and an id past the shared table's
-//!   entries names a newer revision of it (info).
-//! - **Rule 2, required entities** — `document_data` holding a reading order of
-//!   ≥1 section, ≥1 `section`, ≥1 `storyline` (errors); `book_navigation`
-//!   (warning: no chapter list).
-//! - **Rule 3, reading order resolves** — every reading-order section names a
-//!   real `section` ($260), and every `story_name` ($176) reachable from a
-//!   section names a real `storyline` ($259). A dangling ref is a missing
-//!   chapter or a missing chapter body (errors).
-//! - **Rule 4, content refs resolve** — every `$145 content` `{name,index}`
-//!   indirection resolves to a real shared `$145 content` block (error:
-//!   dropped text).
-//! - **Rule 5, nav and link reachability** — every navigation entry targets an
-//!   element some storyline contains; a dangling target tap-jumps to nowhere
-//!   (warning). The `toc` and `headings` containers go through
-//!   `fidelity::nav`'s extraction, which exempts cover / section-root
-//!   positions via `cover_target`; the `landmarks` and `page_list` containers
-//!   are read against the walk's own element population, and every container's
-//!   `target_position` offset against the target's base text (§9.4). A
-//!   `nav_containers` entry naming a separate `nav_container` ($391) fragment
-//!   resolves to one (error: the whole list is gone), every `link_to` ($179)
-//!   names an anchor, every anchor states a `position` or a `$186` uri (§9.3),
-//!   and every `position` names an element the walk reached. A `nav_type`
-//!   ($235) and a `landmark_type` ($238) each name a value the import schema
-//!   knows (§9.2, info).
-//! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
-//!   names a real `style` entity (warning: unstyled render), and a
-//!   style_event's `ruby_name` ($757) names a `ruby_content` ($756) declaring
-//!   every `ruby_id` ($758) it selects (§8.7). Each of `link_unvisited_style`
-//!   ($577) and `link_visited_style` ($576) holds a nested style struct (§8.1),
-//!   and a `list_style` ($100) names one of the markers the import property
-//!   table maps (§7.7, info). A `style` fragment no fragment cites ships
-//!   declarations nothing reads (info).
-//! - **Rule 7, resource refs resolve** — every `external_resource` and every
-//!   `font` ($262) that names a `location` has its bytes embedded, a font's
-//!   under `bcRawFont` ($418); every `resource_name` ($175) an element cites
-//!   and every `background_image` ($479) a style declares names a real
-//!   `external_resource`; and every embedded payload is named by one of them
-//!   (info: orphan bytes). Each resolved payload answers its own descriptor:
-//!   the magic number against the declared `format` (§11.3, info) and the
-//!   header's pixel size against `resource_width`/`resource_height` (§11.1,
-//!   warning).
-//! - **Rule 8, position-map coverage** — every reading-order section appears
-//!   in the `position_map` ($264), the device's "go to location" target
-//!   (warning; runs only on a container holding a `position_map`, some KFX
-//!   addressing purely by `position_id_map` $265).
-//! - **Rule 9, cover present + resolves** — the declared cover resource exists
-//!   and has embedded bytes (missing cover = warning; dangling = error), and
-//!   it and the `thumbnails` ($214) resource it names hold the JPEG the
-//!   library gallery draws (§13.3, warning).
-//! - **Rule 11, declarations agree with content** — each `content_features`
-//!   entry states what the book contains. See [`ContentFacts`] for the facts
-//!   each claim is read against. The two fixed-layout capabilities are read
-//!   across both places a book declares them (§12.1): a spread declared with
-//!   no fixed-layout capability pairs no pages, and every page of a
-//!   fixed-layout book states the `fixed_width`/`fixed_height` viewport it is
-//!   drawn into (§12.3). In a PDF-backed book the two pages of a facing-page
-//!   spread draw one embedded PDF at one size (§12.4).
-//! - **Rule 12, metadata** — `title` and `language` are stated, and
-//!   `author_pronunciation` stays positional with `author`.
-//! - **Rule 13, element arithmetic** — an element id names one element
-//!   book-wide; `style_events` and `word_boundary_list` ranges stay inside the
-//!   base text they count characters of; a length states a CSS unit and a
-//!   numeric magnitude; an `important_cells` coordinate lands inside its
-//!   table's grid, and a `column_format` ($152) states one entry per column of
-//!   the widest row, counting both spans of §7.6. Gathered by rule 3's walk
-//!   and a sweep of the `style` entities.
-//! - **Rule 14, the reading-position chain** — the `position_id_map` ($265)
-//!   span shape partitions the pid axis from 0 with no gap or overlap, and
-//!   `yj.location_pid_map` ($621) boundaries never go backwards. Along the
-//!   chain of §10: every element a storyline holds carries a position and
-//!   every positioned id belongs to a content fragment, each
-//!   `section_position_id_map` ($609) walk ends at the length its span
-//!   declares, every `location_map` ($550) coordinate resolves through the pid
-//!   map, the two location fragments state one axis where both are present,
-//!   and a fixed-layout book opens one Location per page and repeats the first
-//!   (§14.2). A book carrying positions and no location map is reported as
-//!   left to the device's 110-pid spacing (info).
-//! - **Rule 15, layout traps** — two §8 shapes that render wrong and raise
-//!   no error: a `px` length on a book declaring no fixed layout, read as a
-//!   device dot (§8.2); and `box_align` ($580) on a `type: text`, which places
-//!   a picture and leaves a text block flush to the inline start (§8.3, info).
-//!
-//! Rule 10 (TOC deficiency) comes from the cross-format `source::toc` check
-//! via [`crate::validate::source::validate`]. A `.kfx-zip` bundle sniffs as
-//! EPUB by its `PK` magic.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -175,8 +72,6 @@ pub fn validate(bytes: &[u8]) -> Vec<Finding> {
     findings
 }
 
-// ============================================================================
-// Rule 1 — container-layer scalars
 // ============================================================================
 
 /// The container-layer version every KFX declares.
@@ -664,8 +559,6 @@ fn is_container_id(id: &str) -> bool {
 }
 
 // ============================================================================
-// Rule 2 — required entities present
-// ============================================================================
 
 fn check_required_entities(book: &BookData) -> Vec<Finding> {
     let present = |sym: KfxSymbol| {
@@ -720,7 +613,6 @@ fn check_required_entities(book: &BookData) -> Vec<Finding> {
 
 // ============================================================================
 // Rules 3 & 6 — reference resolution (section → storyline, element → style)
-// ============================================================================
 
 /// Defects gathered by the one walk over the rendered content graph, deduped
 /// by the name or value at fault: a style cited by 10 000 elements yields one
@@ -2205,8 +2097,6 @@ fn lookup<'b>(book: &'b BookData, ftype: KfxSymbol, fid: &str) -> Option<&'b Ion
 }
 
 // ============================================================================
-// Rule 7 — external-resource bytes are embedded, format is a known one
-// ============================================================================
 
 fn check_resource_bytes(book: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -2447,8 +2337,6 @@ fn check_orphan_payloads(book: &BookData) -> Vec<Finding> {
 }
 
 // ============================================================================
-// Rule 9 — cover present and resolves
-// ============================================================================
 
 fn check_cover(book: &BookData) -> Vec<Finding> {
     let Some(cover_name) = book.metadata.cover_resource_name.as_deref() else {
@@ -2535,8 +2423,6 @@ fn described_encoding(payload: &[u8]) -> &'static str {
     crate::image::ImageFormat::sniff(payload).map_or("unrecognized", |f| f.extension())
 }
 
-// ============================================================================
-// Rule 12 — book metadata is stated and self-consistent
 // ============================================================================
 
 /// Rule 12. `title` and `language` are stated, `author_pronunciation` stays
@@ -2646,8 +2532,6 @@ fn is_language_tag(tag: &str) -> bool {
     parts.all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
-// ============================================================================
-// Rule 5 — nav reachability and vocabulary
 // ============================================================================
 
 /// The `nav_type` ($235) values a `nav_container` states.
@@ -2813,8 +2697,6 @@ fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
 }
 
 // ============================================================================
-// Rule 8 — position-map coverage
-// ============================================================================
 
 /// Rule 8. The `position_map` ($264) maps each section to its element ids,
 /// resolving a device "go to location N". A reading-order section absent from
@@ -2869,8 +2751,6 @@ fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
     out
 }
 
-// ============================================================================
-// Rule 14 — position and location arithmetic
 // ============================================================================
 
 /// Rule 14. The `position_id_map` ($265) span shape partitions the pid axis
@@ -3211,8 +3091,6 @@ fn collect_element_ids(value: &IonValue, out: &mut HashSet<i64>) {
 }
 
 // ============================================================================
-// Rule 11 — declared features agree with the content
-// ============================================================================
 
 /// Positions a section holds below the large-section declaration.
 const SECTION_PID_BOUND: i64 = 65536;
@@ -3424,8 +3302,6 @@ fn check_feature_content_agreement(book: &BookData) -> Vec<Finding> {
     out
 }
 
-// ============================================================================
-// Rule 11 — a fixed-layout book's pages state their viewport
 // ============================================================================
 
 /// The page walk's view of the loaded fragments: a page template may stand in
@@ -3660,8 +3536,6 @@ fn ion_number(value: &IonValue) -> Option<f64> {
     }
 }
 
-// ============================================================================
-// Finding constructors
 // ============================================================================
 
 fn error(rule: &str, location: &str, message: impl Into<String>) -> Finding {

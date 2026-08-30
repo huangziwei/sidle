@@ -1,40 +1,6 @@
 // Menus and action bars, rendered from a declarative list of actions — the ONE
 // implementation of "offer these actions on this target", used by every surface
 // that offers any.
-//
-// A surface (a right-click menu, the selection bar) does not decide what it
-// contains. It hands this module an action list and a target, and gets back the
-// actions that apply, laid out for that surface. Two surfaces over one list
-// cannot disagree about which actions exist, what they are called, or when they
-// are available.
-//
-// An ACTION is a plain object:
-//   id       unique, for debugging and for a surface that pins a specific one
-//   group    actions sharing a group render together; a separator (menu) is
-//            drawn wherever the group changes, so ordering the list orders the
-//            menu
-//   scopes   which target kinds it accepts — the `kind` of a context below
-//   label    (ctx) => string. Varies freely on the context, including on
-//            `ctx.surface`, so a bar can shorten what a menu spells out
-//   eligible OPTIONAL (item) => bool. Narrows a multi-item target to the items
-//            the action can actually run on. Both the count in the label and
-//            the decision to offer the action at all are read from the result,
-//            so the rule is stated once
-//   when     OPTIONAL (ctx) => bool. A condition on the world rather than on
-//            the items — a device being attached, a converted side existing
-//   run      (ctx) => void, with `ctx.eligible` already narrowed
-//   submenu  OPTIONAL (ctx) => [[label, fn], …], for an action that expands
-//            into choices instead of running. Rendered nested in a menu and as
-//            a flat popup from a bar; an empty list renders the action disabled
-//   danger   OPTIONAL, styles it as destructive and floats it to the end of a bar
-//   bar      OPTIONAL, whether it earns a button on an action bar rather than
-//            living only behind the bar's overflow menu
-//
-// A CONTEXT is what the surface knows about the target:
-//   { kind, items, …extras }
-// where `items` is every item the action would run on before `eligible` narrows
-// it, and extras (`book`, `series`, …) are whatever that kind's actions read.
-// `eligible` and `surface` are filled in here.
 
 (function () {
   const MENU_ID = "ctx-menu";
@@ -42,11 +8,6 @@
   // flipped to the other side instead of off-screen. Matches `.ctx-submenu`.
   const SUBMENU_WIDTH = 170;
   // How many actions a bar puts in front of its overflow menu. A bar is one
-  // fixed-height strip across the foot of a window, so its capacity is a
-  // question about width — and an action that doesn't fit isn't lost, it is
-  // under More… like everything else. These are rough label widths rather than
-  // measurements: one slot too few costs a click on a less-common action, one
-  // slot too many pushes the destructive action off the window.
   const BAR_FIXED_WIDTH = 430; // the count, More…, a danger action, Clear, gaps
   const BAR_SLOT_WIDTH = 145; // one action button, counting a "(11)" in its label
   const BAR_MAX_SLOTS = 4; // past this a bar is just a menu laid on its side
@@ -69,9 +30,6 @@
     const c = resolve(action, ctx, surface);
     if (action.when && !action.when(c)) return false;
     // An action with nothing to run on is not disabled, it is absent: a menu
-    // listing every action a book could theoretically have is a menu nobody
-    // reads. An action that expands into choices stays, so that an empty
-    // Export still says where export lives.
     return c.eligible.length > 0 || Boolean(action.submenu);
   }
 
@@ -173,12 +131,6 @@
   }
 
   // Show the menu at `at`, then nudge it back on-screen.
-  //
-  // `at` is `{ x, y }` to put its top-left corner there (a right-click), or
-  // `{ x, above }` to sit its BOTTOM edge just above `above` (a button on a bar
-  // at the foot of the window, whose menu must rise rather than cover the bar it
-  // came from). Either way the height isn't known until it has rendered, hence
-  // the rAF; it starts out at the anchor so it doesn't visibly jump.
   function place(menu, at) {
     menu.hidden = false;
     menu.classList.remove("flip-sub"); // default: submenus open to the right
@@ -197,9 +149,6 @@
         menu.style.top = `${Math.max(4, window.innerHeight - r.height - 4)}px`;
       }
       // A submenu opens to the right (`left: 100%`). When the menu ends up at
-      // the right edge — common for the last column of cards, and after the
-      // nudge above — that flies the submenu off-screen; flip it to the left of
-      // its parent when the right has no room.
       const moved = menu.getBoundingClientRect();
       menu.classList.toggle("flip-sub", moved.right + SUBMENU_WIDTH > window.innerWidth);
     });
@@ -233,12 +182,6 @@
   }
 
   // Render `actions` into `host` as a bar of buttons: those marked `bar` that
-  // apply, in list order, then an overflow button opening the FULL menu for the
-  // same target, then the destructive ones. The bar is therefore always a subset
-  // of its own overflow menu — it cannot fall behind as actions are added,
-  // because nothing was written down twice.
-  // A bar button that opens a menu toggles it: clicking the button the open menu
-  // came from puts it away again, rather than re-rendering it in place.
   function menuButton(label, fill) {
     return barButton(label, (el) => {
       const menu = menuEl();
@@ -278,9 +221,6 @@
     counted,
     close,
     // Position and reveal #ctx-menu after filling it by hand — for a menu whose
-    // items aren't actions on a target (a column-visibility list) or whose items
-    // carry their own interaction (a remove that arms rather than asks). Those
-    // build their own contents; where the menu lands is still decided once.
     placeAt: (x, y) => {
       const menu = menuEl();
       if (menu) place(menu, { x, y });

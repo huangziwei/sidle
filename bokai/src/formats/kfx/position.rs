@@ -1,10 +1,6 @@
 //! Reading positions: the KFX `eid → pid → device Location` chain, assembled
 //! from `position_id_map` ($265), `section_position_id_map` ($609) and
 //! `location_map` ($550) / `yj.location_pid_map` ($621) into a [`PositionMap`].
-//!
-//! [`PositionFragments::section_walks`], [`PositionFragments::location_anchors`]
-//! and [`PositionFragments::location_pids`] hand back the same fragments
-//! unreconciled, for a caller reading them against each other.
 
 use std::collections::HashMap;
 
@@ -83,9 +79,6 @@ impl<'a> PositionFragments<'a> {
     }
 
     /// The pid axis of §10 with no Locations on it yet: where each element
-    /// begins, and the mid-element anchors the position fragments state. The
-    /// `{eid, pid}` shape of `position_id_map` ($265) lists them; the span
-    /// shape replays each `section_position_id_map` ($609) walk for them.
     pub fn pid_axis(&self) -> PositionMap {
         self.axis().into_map(Vec::new(), None)
     }
@@ -102,8 +95,6 @@ impl<'a> PositionFragments<'a> {
     /// The axis the `{eid, pid}` shape of `position_id_map` ($265) states,
     /// with the pid its closing `{eid: 0}` entry carries — the axis end, and
     /// no element of the book (§10.1). An entry carrying an `offset` ($143)
-    /// re-enters an element at that character; an entry carrying none names
-    /// the element's own start.
     fn pair_axis(&self) -> (Axis, Option<i64>) {
         let mut axis = Axis::default();
         let mut terminator = None;
@@ -320,11 +311,6 @@ impl<'a> PositionFragments<'a> {
 
 /// The `eid → pid` axis a container's position fragments state, gathered
 /// before any Location divides it.
-///
-/// A `{id, offset}` coordinate (§9.4) counts characters of an element's base
-/// text, and an element interrupted by a nested one runs past its own start by
-/// more than its character count. The fragments state where each interrupted
-/// run resumes, which [`PositionMap::position`] reads a coordinate against.
 #[derive(Default)]
 struct Axis {
     /// Where each element begins on the pid axis.
@@ -374,9 +360,6 @@ struct Walk {
 }
 
 /// Replay one `section_position_id_map` ($609) delta walk (§10.2). Each entry
-/// advances the running pid: `[advance, eid]` names its element, `[advance, 0]`
-/// ends the walk, a bare advance carries the previous element id plus one, and
-/// `[advance, eid, offset]` re-enters an element at a character offset.
 fn replay(frag: &IonValue) -> Walk {
     let mut walk = Walk {
         section: None,
@@ -460,9 +443,6 @@ mod tests {
     use crate::formats::kfx::loader;
 
     /// §10.2. A `[advance, eid, offset]` entry re-enters an element the walk
-    /// has placed. The element keeps the pid it begins at, the offset
-    /// lands where the entry states, and the pids a nested element takes
-    /// between them belong to neither's character count.
     #[test]
     fn a_walk_re_enters_an_element_at_a_character_offset() {
         let section = 800u64;

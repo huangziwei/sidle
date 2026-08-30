@@ -1,8 +1,4 @@
 //! Time read, as the Kindle's own system logs recorded it.
-//!
-//! A pushed log is the only copy: the device never re-sends what it has already
-//! handed over, so an import that goes wrong cannot be redone by asking again.
-//! Nothing here clears stored reading except the command that says so.
 
 use std::path::PathBuf;
 

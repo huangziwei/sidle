@@ -1,16 +1,4 @@
 //! Pull *every* embedded image out of a KFX container, in memory.
-//!
-//! The bulk generalization of [`super::cover_extract`]: where that recovers the
-//! one declared cover, this walks every `external_resource` ($164) with a
-//! raster-image `format`, resolves its backing `bcRawMedia` ($417) bytes through
-//! the same [`crate::formats::kfx::loader`] (correct dynamic doc-symbol `base_len`), and
-//! returns them ready to write. This serves the editor's "extract one or two
-//! images" use case.
-//!
-//! JPEG-XR resources are transcoded to JPEG (mirroring the reader / EPUB
-//! resource pass); every other image format passes through verbatim. Non-image
-//! resources (fonts, an embedded PDF page) and JPEG-XR that fails to decode are
-//! skipped — a valid container with no images yields an empty list, not an error.
 
 use std::collections::HashSet;
 
@@ -45,11 +33,6 @@ pub struct ExtractedImage {
 }
 
 /// Extract every embedded image from an in-memory KFX container.
-///
-/// Returns the images sorted by `resource_name` (then location) for a stable
-/// order. Deduplicates by backing location, so a resource referenced twice
-/// yields one image. Errors (via [`KfxError`]) only when the bytes aren't a
-/// KFX container at all.
 pub fn kfx_extract_images(kfx_bytes: &[u8]) -> Result<Vec<ExtractedImage>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
@@ -120,8 +103,6 @@ pub fn kfx_extract_images(kfx_bytes: &[u8]) -> Result<Vec<ExtractedImage>, KfxEr
 
 /// The `location` of the `external_resource` whose `resource_name` field equals
 /// `name` — how [`cover_extract`] resolves the cover's backing bytes.
-///
-/// [`cover_extract`]: super::cover_extract
 fn resource_location_for_name(
     resources: &std::collections::HashMap<String, IonValue>,
     symbols: &loader::SymbolTable,

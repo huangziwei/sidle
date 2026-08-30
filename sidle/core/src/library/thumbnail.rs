@@ -1,25 +1,4 @@
 //! Cover thumbnails — small color derivatives served to the Kindle picker.
-//!
-//! The library stores full-resolution source art (median ~520KB, up to ~1MB,
-//! ~1443×2048px). Shipping those over the Kindle's slow 2.4GHz radio and
-//! decoding them on its armv7l CPU was the ~1s/cover the picker felt.
-//!
-//! A thumbnail is a derived library asset, produced once when a book is
-//! imported (and whenever its cover is replaced) — never per request. The LAN
-//! server stays a dumb file-server: it just serves `cover.thumb.jpg` when the
-//! picker asks for `?thumb=1`, and falls back to the full-res cover if the
-//! thumbnail isn't there yet.
-//!
-//! Spec: **color** JPEG, downscaled to fit within [`THUMB_W`]×[`THUMB_H`]
-//! preserving aspect, quality [`THUMB_QUALITY`]. ~30–50KB — still a big shrink
-//! that keeps the on-device decode cheap. The thumbnail is color regardless of
-//! the target panel: the Colorsoft renders it in color, and the grayscale KOA2
-//! collapses it to luma at blit time, so one asset serves both devices.
-//!
-//! [`THUMB_FORMAT_VERSION`] gates a one-time rebuild: when the output format
-//! changes (here, grayscale → color), the boot backfill force-regenerates every
-//! existing thumbnail once, since the mtime freshness check can't see a pure
-//! format flip (the old thumb is newer than its unchanged cover).
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -31,9 +10,6 @@ use super::LibraryPaths;
 use super::import::write_bytes_atomic;
 
 /// Thumbnail bounding box. A touch larger than the picker's 360×440 cell so
-/// the device downsamples (sharper) rather than upscales, and deliberately
-/// decoupled from the exact cell dims so a cell-size tweak doesn't invalidate
-/// every thumbnail.
 pub const THUMB_W: u32 = 400;
 pub const THUMB_H: u32 = 520;
 /// JPEG quality. 80 keeps a color e-ink thumbnail visually clean while holding
@@ -41,9 +17,6 @@ pub const THUMB_H: u32 = 520;
 const THUMB_QUALITY: u8 = 80;
 
 /// On-disk thumbnail format generation. Bump whenever [`make_thumbnail`]'s
-/// output format changes so the boot backfill rebuilds every existing
-/// `cover.thumb.jpg` once (see [`backfill_thumbnails`]). 1 = grayscale (the
-/// original); 2 = color RGB.
 pub const THUMB_FORMAT_VERSION: u32 = 2;
 
 /// Decode a cover image, downscale to fit [`THUMB_W`]×[`THUMB_H`], and re-encode
@@ -71,19 +44,11 @@ pub fn make_thumbnail(src: &[u8]) -> Result<Vec<u8>> {
 /// Ensure `books/<sha>/cover.thumb.jpg` exists and is no older than the cover
 /// it derives from. Returns `Ok(true)` if it (re)generated, `Ok(false)` if the
 /// existing thumbnail was already fresh.
-///
-/// Best-effort by convention: the import / cover-replace call sites `let _ =`
-/// the result — a thumbnail failure must never fail an import or a cover swap
-/// (the full-res cover still works, and the server falls back to serving it).
-/// It returns `Result` only so the boot backfill can log which book tripped.
 pub fn ensure_thumbnail(paths: &LibraryPaths, sha: &str, cover_path: &Path) -> Result<bool> {
     ensure_thumbnail_inner(paths, sha, cover_path, false)
 }
 
 /// As [`ensure_thumbnail`], but `force` rebuilds even when the existing
-/// thumbnail looks mtime-fresh — used by the backfill to reconvert thumbnails
-/// after a format change the mtime check can't detect (see
-/// [`THUMB_FORMAT_VERSION`]).
 fn ensure_thumbnail_inner(
     paths: &LibraryPaths,
     sha: &str,
@@ -102,10 +67,6 @@ fn ensure_thumbnail_inner(
 }
 
 /// True when `thumb` exists and its mtime is at or after the cover's — i.e. the
-/// cover hasn't been replaced since the thumbnail was built. A recrawl /
-/// set-cover rewrites the cover (bumping its mtime), which makes this false and
-/// triggers a rebuild. A missing thumb (or any unreadable mtime) reads as not
-/// fresh, so we (re)build rather than risk serving nothing.
 fn is_fresh(thumb: &Path, cover: &Path) -> bool {
     match (mtime(thumb), mtime(cover)) {
         (Ok(tm), Ok(cm)) => tm >= cm,
@@ -118,13 +79,6 @@ fn mtime(p: &Path) -> std::io::Result<SystemTime> {
 }
 
 /// Generate any missing or stale thumbnails across the whole library. Run in a
-/// background task at server startup so books imported before this feature
-/// shipped get thumbnails without a manual step. Idempotent and mtime-gated, so
-/// it's a near-instant no-op once warm. Returns the count (re)generated.
-///
-/// When the on-disk format version is behind [`THUMB_FORMAT_VERSION`] (e.g. the
-/// grayscale→color flip), every thumbnail is rebuilt once regardless of mtime,
-/// then the version marker is advanced so subsequent boots are warm again.
 pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
     let conn = super::db::open(&paths.db()).context("open library.db")?;
     let books = super::db::list_books(&conn).context("list books")?;
@@ -155,9 +109,6 @@ pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
 }
 
 /// True when the library's recorded thumbnail format is older than
-/// [`THUMB_FORMAT_VERSION`] (or unrecorded — a pre-marker or fresh library), so
-/// the backfill should force a one-time rebuild. An unreadable/garbage marker
-/// reads as version 0 (force), which is safe: a rebuild is idempotent.
 fn format_outdated(paths: &LibraryPaths) -> bool {
     let recorded = std::fs::read_to_string(paths.cover_thumb_format())
         .ok()

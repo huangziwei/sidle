@@ -1,30 +1,6 @@
 //! In-place PDF editing — the shared surgical-write harness.
 //!
 //! The PDF analog of [`crate::formats::kfx::container_edit`] and [`crate::formats::epub::edit`].
-//! Each format's harness expresses the same idea in that format's own terms:
-//! KFX re-serializes a container passing untouched entities through byte for
-//! byte; EPUB repackages a zip passing untouched members through; and PDF —
-//! uniquely — doesn't have to rewrite anything at all.
-//!
-//! PDF has a native surgical-edit mechanism: the **incremental update** (PDF
-//! 32000-1 §7.5.6). The original file is left byte-for-byte intact and a new
-//! generation of *only* the changed objects is appended, followed by a
-//! cross-reference section chaining back to the original via `/Prev`. A reader
-//! resolves each object to its newest generation, so appending a fresh `/Info`
-//! or `/Outlines` supersedes the old one while every page, font, and image
-//! stream keeps its original bytes and offsets.
-//!
-//! That makes this the highest-fidelity of the three harnesses: fidelity risk is
-//! bounded by construction, because the original bytes are a literal prefix of
-//! the output (asserted in this module's tests). Nothing else can be perturbed.
-//!
-//! Usage: [`PdfPackage::parse`], read the existing structure through
-//! [`original`](PdfPackage::original), mutate via
-//! [`edit_dict`](PdfPackage::edit_dict) (copy-on-write into the increment) /
-//! [`add_object`](PdfPackage::add_object) / [`info_dict`](PdfPackage::info_dict),
-//! then [`into_bytes`](PdfPackage::into_bytes).
-//!
-//! Scope (v1): **encrypted PDFs are rejected** — see [`PdfPackage::parse`].
 
 use std::io;
 
@@ -33,10 +9,6 @@ use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId};
 use super::doc::load_pdf;
 
 /// A PDF opened for surgical editing.
-///
-/// Holds the original bytes plus a pending increment. Objects you never touch
-/// are never re-encoded — they stay in the original bytes the output is built
-/// on. An untouched package repackages to the input, byte for byte.
 pub struct PdfPackage {
     inc: IncrementalDocument,
     /// Whether anything was actually staged; an untouched package short-circuits
@@ -46,16 +18,6 @@ pub struct PdfPackage {
 
 impl PdfPackage {
     /// Open a PDF for editing.
-    ///
-    /// Loads through [`load_pdf`], so the catalog and page tree resolve even on
-    /// files that defeat a bare `Document::load_mem`.
-    ///
-    /// **Encrypted PDFs are rejected.** lopdf decrypts strings and streams into
-    /// memory on load, but the incremental writer emits them back as plaintext —
-    /// so an appended `/Info` title would land unencrypted in a file whose reader
-    /// will try to decrypt it, silently producing mojibake. Refusing up front is
-    /// the honest v1 behaviour; supporting it means re-encrypting appended
-    /// objects with the document key.
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {
         let doc = load_pdf(bytes)?;
         if doc.trailer.get(b"Encrypt").is_ok() {
@@ -99,11 +61,6 @@ impl PdfPackage {
     }
 
     /// Stage `id` for modification and return its dictionary mutably.
-    ///
-    /// Copy-on-write: the object is cloned out of the original into the pending
-    /// increment on first call, so edits accumulate across calls and only the
-    /// touched objects are ever appended. Errors if `id` is absent or isn't a
-    /// dictionary.
     pub fn edit_dict(&mut self, id: ObjectId) -> io::Result<&mut Dictionary> {
         self.inc
             .opt_clone_object_to_new_document(id)
@@ -166,11 +123,6 @@ impl PdfPackage {
     }
 
     /// Serialize.
-    ///
-    /// With changes staged: the original bytes verbatim, then an appended
-    /// generation of the touched objects plus a cross-reference section chaining
-    /// back via `/Prev` (matching the original's table-vs-stream flavour).
-    /// Untouched: the original bytes, unchanged — no empty generation appended.
     pub fn into_bytes(mut self) -> io::Result<Vec<u8>> {
         if !self.dirty {
             return Ok(self.inc.get_prev_documents_bytes().to_vec());
@@ -197,10 +149,6 @@ mod tests {
 
     /// A PDF using a cross-reference **stream** + an `/Info`, the layout every
     /// modern PDF actually uses.
-    /// The harness must chain `/Prev` to it and append a matching xref *stream*,
-    /// which is a different writer path from `minimal.pdf`'s xref table — so it
-    /// gets its own coverage rather than relying on an out-of-repo book.
-    /// `Document::new` defaults to `CrossReferenceStream`, asserted below.
     fn synthetic_xref_stream_pdf() -> Vec<u8> {
         use lopdf::dictionary;
 

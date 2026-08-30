@@ -1,11 +1,4 @@
 //! The reading-position scale a KFX defines, read through the public API.
-//!
-//! A Kindle addresses text by element id and displays progress as "Loc N of
-//! M". Both halves of that chain — the element→coordinate map and the location
-//! boundaries — come out of the container, and a device writes the element ids
-//! into every annotation it syncs. The numbers pinned here are stored user
-//! data: a highlight made on hardware lands on the right words only while this
-//! scale matches the one the device used.
 
 mod common;
 
@@ -78,9 +71,6 @@ fn an_offset_advances_from_the_elements_coordinate() {
 }
 
 /// The scale is reported, not invented. EPUB addresses text structurally and
-/// defines no linear coordinate, and its importer reports none, synthesizing
-/// nothing — how a reader shows progress for such a book is the
-/// consumer's policy.
 #[test]
 fn epub_defines_no_reading_position_scale() {
     let Ok(epub) = std::fs::read(EPUB) else {

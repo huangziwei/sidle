@@ -1,11 +1,4 @@
 //! Notebook library entity: Scribe handwritten notebooks backed up + rendered.
-//!
-//! Storage mirrors `books/<sha>/`: each notebook lives at `notebooks/<uuid>/`
-//! holding the raw `nbk` backup, an optional `cover.png` (the device
-//! thumbnail), and `pages/page-<n>.svg` — the page renders cached at import
-//! time, so the viewer never
-//! re-parses the SQLite. Metadata (title, page count, content hash) lives in
-//! the `notebooks` DB table. Decode + render come from `bokai::formats::nbk`.
 
 use std::path::{Path, PathBuf};
 
@@ -38,13 +31,6 @@ pub enum NotebookOutcome {
 }
 
 /// Import a single Scribe notebook into the library from a source `nbk` file
-/// (optionally with a device cover thumbnail). `updated_at` is the on-device
-/// "Date Modified" the CALLER resolved — the source file's mtime for a folder
-/// import, the MTP object's DateModified for a device pull — since only the
-/// caller knows where the bytes came from. Idempotent: re-importing an unchanged
-/// notebook (same uuid + content hash, page cache intact) is a no-op returning
-/// the existing row (backfilling a missing `updated_at`); an edited notebook
-/// (same uuid, new bytes) re-extracts and replaces the page cache.
 pub fn import_notebook(
     conn: &Connection,
     paths: &LibraryPaths,
@@ -69,10 +55,6 @@ pub fn import_notebook(
         && paths.notebook_page_svg(uuid, 0).exists()
     {
         // Unchanged content — no re-extraction. Still backfill metadata a legacy
-        // row may lack: the on-device mtime (rows imported before that column
-        // existed) and the default title (rows still on the old 'Notebook'
-        // sentinel — the title is the first-import datetime now). Both guard
-        // internally, so this is a no-op for an already-populated row.
         db::backfill_notebook_updated_at(conn, uuid, updated_at)?;
         db::backfill_notebook_default_title(conn, uuid, updated_at)?;
         let refreshed = db::get_notebook_by_uuid(conn, uuid)?.unwrap_or(existing);
@@ -112,16 +94,6 @@ pub fn import_notebook(
 
 /// Import a notebook whose bytes arrived over a wire rather than as a file — an
 /// MTP pull from the desktop, a LAN push from the on-device picker.
-///
-/// A KDF notebook *is* a SQLite database, so it has to be decoded from a path;
-/// this stages the bytes to a temp dir, delegates to [`import_notebook`], and
-/// cleans up either way. Every transport that carries notebook bytes goes
-/// through here, so they all import identically.
-///
-/// The staging directory is unique per call, not per notebook: the desktop's USB
-/// pull and the LAN server are separate processes that can be importing the same
-/// uuid at the same moment, and a shared path would have one deleting the
-/// other's bytes mid-decode.
 pub fn import_notebook_bytes(
     conn: &Connection,
     paths: &LibraryPaths,
@@ -159,10 +131,6 @@ pub fn import_notebook_bytes(
 }
 
 /// Render a stored notebook to a single multi-page PDF — one page per cached
-/// page SVG, read from the import-time render cache so we never re-parse the
-/// `nbk`. `page_count` is the notebook row's count. Page assembly and SVG
-/// rasterization are bokai's ([`bokai::formats::pdf::svgs_to_pdf`]); what belongs
-/// here is only the library-storage half — which pages exist and where.
 pub fn export_notebook_pdf(paths: &LibraryPaths, uuid: &str, page_count: usize) -> Result<Vec<u8>> {
     if page_count == 0 {
         anyhow::bail!("notebook has no pages");
@@ -188,10 +156,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Scan `folder` for notebook directories and import each. `folder` may itself
 /// be one notebook dir (holds `nbk` directly) or a parent of many — a
 /// `.notebooks/` copied off a Scribe is the latter.
-///
-/// Standalone (dashed-UUID) notebooks only: the `!!PDOC!!` / `!!EBOK!!notebook`
-/// dirs beside them are per-book handwriting, which rides the annotation sync
-/// instead.
 pub fn import_folder(conn: &Connection, paths: &LibraryPaths, folder: &Path) -> ImportSummary {
     let mut summary = ImportSummary::default();
     let mut candidates: Vec<(String, PathBuf)> = Vec::new();
@@ -231,9 +195,6 @@ pub fn import_folder(conn: &Connection, paths: &LibraryPaths, folder: &Path) -> 
 }
 
 /// Locate the device cover thumbnail for a notebook. The device keeps these in
-/// a sibling `thumbnails/<uuid>.png` (relative to `.notebooks/`); also accept
-/// an in-dir `thumbnail.png`. Best-effort — `None` is fine (the viewer falls
-/// back to page 0).
 fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
     let mut candidates = vec![dir.join("thumbnail.png")];
     if let Some(parent) = dir.parent() {
@@ -246,9 +207,6 @@ fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
 }
 
 /// The `nbk` file's mtime as a naive local-wall-clock ISO string — the
-/// notebook's `updated_at` for a folder import. Same shape as the device pull's
-/// `TEntry::modified`, so both render identically. Falls back to the import time
-/// when the mtime can't be read.
 fn folder_updated_at(nbk: &Path) -> String {
     std::fs::metadata(nbk)
         .and_then(|m| m.modified())

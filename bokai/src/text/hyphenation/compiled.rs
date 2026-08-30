@@ -1,35 +1,6 @@
 //! The precompiled dictionary form: a pattern set already laid out as the
 //! matching automaton, which is what a Kindle carries in its reader resource
 //! bundle under `dicts/bin/hyph_<name>.bin`.
-//!
-//! # Layout
-//!
-//! All integers are little-endian. A file is a two-byte version, a two-byte
-//! level count, and then that many levels laid end to end. Each level is a
-//! 36-byte header followed by three arrays:
-//!
-//! | field | type | meaning |
-//! |---|---|---|
-//! | `+0x00` | `u32` | transition count |
-//! | `+0x04` | `u32` | string-pool length in bytes |
-//! | `+0x08` | `i16` | number of no-hyphen strings |
-//! | `+0x0a` | `i16` | state count |
-//! | `+0x0c` | `[u8; 20]` | character set name, NUL-padded |
-//! | `+0x20` | `u8` | left hyphen minimum |
-//! | `+0x21` | `u8` | right hyphen minimum |
-//! | `+0x22` | `u8` | compound left hyphen minimum |
-//! | `+0x23` | `u8` | compound right hyphen minimum in bits 0-6, UTF-8 flag in bit 7 |
-//!
-//! States are eight bytes each — a `u32` byte offset into the string pool for
-//! the state's digit string (zero meaning none), an `i16` fallback state (`-1`
-//! for none), an `i8` transition count and a `u8` pattern length. Transitions
-//! are four bytes each — a `u16` destination state, the matched byte, and one
-//! byte of padding that carries no meaning. Every state's transitions occupy a
-//! contiguous run of the transition array, and the runs follow state order, so
-//! a state's run begins after the runs of all lower-numbered states.
-//!
-//! The pool holds NUL-terminated strings: first the level's no-hyphen strings,
-//! then the digit strings the states point at.
 
 use super::HyphenationError;
 use super::automaton::{Level, State};

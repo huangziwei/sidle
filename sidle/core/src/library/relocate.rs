@@ -1,12 +1,4 @@
 //! Relocate the library to a new root, or adopt one sitting
-//! elsewhere. The copy is a consistent DB snapshot (`VACUUM INTO`, so it's
-//! transactionally consistent and WAL-free even while the conversion queue /
-//! device monitor write concurrently) plus the `books/`
-//! tree. Copy, not move, so a failure is non-destructive.
-//!
-//! Nothing here touches the source or the root pointer: the Tauri command layer
-//! repoints via [`LibraryPaths::set_root`](crate::library::LibraryPaths::set_root)
-//! and relaunches.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -42,9 +34,6 @@ pub fn copy_library(src_conn: &Connection, src_books: &Path, dest_root: &Path) -
 }
 
 /// Move the library into the empty `dest_root`: snapshot and verify the DB
-/// there, then relocate every other root entry by `rename` on one volume or a
-/// copy across two. Returns the copied source paths for [`finish_move`], which
-/// runs after the repoint and leaves a failure here with the library intact.
 pub fn move_library(
     src_conn: &Connection,
     src_root: &Path,

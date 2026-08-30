@@ -1,20 +1,5 @@
 //! Validation by pattern derivative — James Clark's *An algorithm for RELAX NG
 //! validation*, transcribed onto the interned model of [`super::pattern`].
-//!
-//! The idea: to validate a sequence against a pattern, repeatedly replace the
-//! pattern by its **derivative** — what remains to be matched after consuming
-//! one item. The document is valid when the pattern left at the end is nullable.
-//! No backtracking, one pass, and `interleave` (which no finite automaton can
-//! express) falls out of the algebra rather than needing a special case.
-//!
-//! Two departures from the paper, both deliberate:
-//!
-//! - `applyAfter` takes a function in the paper. Here it takes a `Cont`, an
-//!   enum of the four continuations the algorithm actually builds, which keeps
-//!   the recursion allocation-free.
-//! - Every derivative step is **memoised** on `(pattern, input)`. Real grammars
-//!   (the XHTML5 one runs to thousands of patterns) re-derive the same
-//!   subpattern constantly, and the cache is what keeps that linear.
 
 use std::collections::HashMap;
 
@@ -116,9 +101,6 @@ impl<'a> Validator<'a> {
                     let next = self.att_deriv(current, ans, alocal, &attr.value);
                     if self.arena.is(next, &Pattern::NotAllowed) {
                         // An attribute the grammar declares here but whose value
-                        // its datatype rejects is a different defect from one
-                        // that is not permitted at all, and listing the accepted
-                        // attribute *names* would be no help for the former.
                         let by_name = self.att_name_deriv(current, ans, alocal);
                         match self.arena.is(by_name, &Pattern::NotAllowed) {
                             true => self.fail(
@@ -169,10 +151,6 @@ impl<'a> Validator<'a> {
     }
 
     /// Record a violation, unless one is already pending for this subtree. Given
-    /// a `context` pattern the message names what the grammar would have
-    /// accepted there, which is the difference between a usable diagnostic and
-    /// "invalid"; `None` is for the failures where a list of names would not
-    /// describe what went wrong.
     fn fail(&mut self, node: NodeId, message: String, context: Option<PatternId>) {
         if !self.violations.is_empty() {
             return; // the first failure explains the rest
@@ -386,9 +364,6 @@ impl<'a> Validator<'a> {
     }
 
     /// `att_deriv` with the value check removed: would this attribute *name* be
-    /// accepted here at all? A name the grammar knows and a name it does not are
-    /// two different defects, and only the second is worth listing the permitted
-    /// names for.
     fn att_name_deriv(&mut self, p: PatternId, ns: Option<&str>, local: &str) -> PatternId {
         match self.arena.pattern(p).clone() {
             Pattern::After(a, b) => {
@@ -428,9 +403,6 @@ impl<'a> Validator<'a> {
     }
 
     /// What the grammar wanted the attribute's value to be, worded from the
-    /// declared datatype (`must be an xsd:ID`) or, for an enumeration, the
-    /// permitted literals. Falls back to quoting the value when the content
-    /// pattern is neither — the diagnostic still says which value was rejected.
     fn attribute_datatype(
         &self,
         p: PatternId,

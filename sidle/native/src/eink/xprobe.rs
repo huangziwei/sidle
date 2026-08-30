@@ -1,20 +1,5 @@
 //! `--probe-x`: dump everything that could explain why one panel refreshes and
 //! another does not, in a form two devices can be diffed against each other.
-//!
-//! This exists because the renderer rests on an assumption that was established
-//! on one device and never checked on the others: that the X server turns damage
-//! into an eink refresh by itself, so the caller need not ask for one. If that is
-//! false anywhere, drawing is correct and the screen is still stale, and no
-//! amount of adjusting *how* we upload pixels can fix it — which is exactly the
-//! shape of a bug that resists tuning.
-//!
-//! So the questions here are deliberately about the mechanism, not our usage:
-//! which extensions the server offers (an eink/refresh extension being the thing
-//! we would otherwise never think to call), what the real request limits are,
-//! whether a full-screen upload succeeds and how long the server takes to
-//! acknowledge it, and whether the classic framebuffer refresh paths still exist
-//! underneath. Run it on a device that works and on one that doesn't; the diff is
-//! the answer.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -152,11 +137,6 @@ fn probe_x(o: &mut String) {
 
 /// Actually paint, the way the renderer does, and time the server's
 /// acknowledgement.
-///
-/// Reports each band separately so a partial failure is visible as a partial
-/// failure rather than as "the screen looked wrong". The round-trip after each
-/// band is what converts an asynchronous protocol error into a value we can
-/// print next to the band that caused it.
 fn probe_paint(conn: &impl Connection, screen: &x11rb::protocol::xproto::Screen, o: &mut String) {
     let _ = writeln!(o, "\n[paint test]");
     let xres = screen.width_in_pixels as usize;
@@ -299,18 +279,6 @@ fn probe_paint(conn: &impl Connection, screen: &x11rb::protocol::xproto::Screen,
 
 /// Does a burst of small updates cancel a full-screen refresh that is still in
 /// flight?
-///
-/// This is the one thing the rest of the probe cannot answer, because it only
-/// ever paints when nothing else is. `repaint_page` does the opposite: a
-/// full-screen `GC16` — a full flash over 4.6M pixels, on the order of a second —
-/// and then, without waiting, twenty per-cover partial updates. If later updates
-/// supersede an in-flight one, the fast partials win, the full refresh is
-/// abandoned, and the panel keeps its previous frame everywhere except the cells
-/// that were painted individually. That is the reported behaviour exactly.
-///
-/// The test is visual because the outcome lives on the panel, not in the
-/// protocol: X will report success either way. Each phase says what it painted,
-/// and what you should see if the hypothesis is wrong.
 #[allow(clippy::too_many_arguments)]
 fn probe_supersession(
     conn: &impl Connection,
@@ -443,18 +411,6 @@ fn probe_supersession(
 }
 
 /// Does `BackingStore::ALWAYS` stop paints from reaching the panel?
-///
-/// Everything else in this probe has now been ruled out: the request size is
-/// irrelevant, a full-screen upload succeeds, and a burst of partial updates does
-/// not supersede a full refresh. What remains is that the probe's window and the
-/// renderer's window are not created alike — the renderer asks for backing store
-/// and the probe never did. With `Composite` active, a server that honours that
-/// request may keep our pixels in off-screen storage and propagate them to the
-/// panel on its own schedule, which looks exactly like content that is present
-/// and hit-testable but not displayed until something later flushes it.
-///
-/// Two windows, same paints, one difference. Whichever one misbehaves names the
-/// cause.
 fn probe_backing_store(o: &mut String) {
     let _ = writeln!(o, "\n[backing-store test]");
     let (conn, screen_num) = match x11rb::connect(None) {
@@ -578,24 +534,6 @@ fn probe_backing_store(o: &mut String) {
 
 /// Paint known squares, then read `/dev/fb0` back and measure what actually
 /// arrived.
-///
-/// "Some squares are missing, some are half" is the observation that matters,
-/// and it cannot be judged reliably by eye or recovered from the protocol — X
-/// reports every one of those uploads as successful. The framebuffer is the
-/// stage *after* X and before the panel, so reading it says which uploads
-/// reached panel memory and, more usefully, the exact geometry of whatever went
-/// wrong. Two candidate causes leave different fingerprints:
-///
-/// - **Stride.** The panel's line stride is 1872 while X calls the screen 1860
-///   wide. If anything writes rows at the wrong pitch, each successive row slips
-///   sideways by 12px and the damage is a shear — coverage falling off gradually
-///   down a square, and content displaced horizontally.
-/// - **Update-region limits.** An eink controller accepts a bounded number of
-///   concurrent update rectangles. Run out and whole squares vanish while
-///   partially-processed ones are cut across a row — coverage that is 100% or 0%
-///   per square, with a clean horizontal edge on the casualties.
-///
-/// The per-square coverage table below distinguishes them.
 fn probe_fb_readback(o: &mut String) {
     let _ = writeln!(o, "\n[framebuffer readback]");
 

@@ -1,17 +1,6 @@
 //! The epubcheck message catalog — every check W3C epubcheck defines, ported so
 //! bokai keys its rules to epubcheck message IDs and can measure coverage
 //! against the full spec.
-//!
-//! Generated from epubcheck 5.3.1's `DefaultSeverities.java` (the authoritative
-//! id→severity map). IDs are printed as epubcheck prints them (`RSC-007`).
-//! Severity maps FATAL/ERROR → [`Severity::Error`], WARNING → [`Severity::Warning`],
-//! USAGE/INFO → [`Severity::Info`]; `None` == epubcheck `SUPPRESSED` (not emitted
-//! by default, so bokai doesn't emit it either — kept for a complete catalog).
-//!
-//! This table is *the spec*, not bokai's coverage. A [`super::Rule`] declares
-//! which catalog id it implements via [`super::Rule::message_id`]; the tests in
-//! that module assert every mapped id exists here and that bokai never rates a
-//! rule *below* epubcheck's severity for the same id.
 
 use crate::validate::Severity;
 

@@ -1,33 +1,5 @@
 //! Give a PDF a cover page — replace its first page with an image, or insert
 //! one in front.
-//!
-//! ## Why this, and not "embed a cover image"
-//!
-//! EPUB and KFX carry a cover as a *resource* the format designates
-//! (`<meta name="cover">`, `$164 external_resource`), so their cover editors
-//! swap that resource. PDF has no such concept: a PDF's cover **is its first
-//! page**. Everything downstream already agrees — `pdf_to_kfx` builds a
-//! PDOC's library tile by rendering page 1 (`render::render_pdf_page_jpeg(.., 0, ..)`),
-//! and any viewer shows page 1 first. So the honest operation is to edit that
-//! page, after which every derived artifact follows for free.
-//!
-//! Two modes, because a PDF either has a cover page or it doesn't:
-//! - [`CoverMode::Replace`] — the book opens on a cover page already (a scan of
-//!   the jacket, a title card) and you want a better image in its place.
-//! - [`CoverMode::Insert`] — the book opens straight onto body text; it needs a
-//!   cover page it never had.
-//!
-//! ## What gets written
-//!
-//! An Image XObject (`/DCTDecode`, `/DeviceRGB`) plus a content stream that
-//! draws it, letterboxed to preserve aspect, centred on a page the same size as
-//! the book's existing first page — so the cover matches the rest of the book
-//! rather than jarring the page size. Everything rides [`PdfPackage`], so the
-//! original bytes are untouched and only the new objects are appended.
-//!
-//! `/Rotate 0` is set explicitly on the page we write. It is inheritable from
-//! the page tree, so a book whose `/Pages` node declares `/Rotate 90` would
-//! otherwise turn our cover on its side.
 
 use std::io;
 
@@ -55,17 +27,6 @@ pub enum CoverMode {
 /// Write `image` as the PDF's cover page, returning the edited bytes.
 ///
 /// `image` may be any raster the `image` crate decodes (JPEG/PNG/GIF/WebP/BMP);
-/// it is re-encoded to a baseline RGB JPEG so the embedded `/DeviceRGB` +
-/// `/DCTDecode` declaration is always truthful.
-///
-/// [`CoverMode::Insert`] shifts every subsequent page by one. Page *targets* are
-/// unaffected — outline destinations and link annotations reference page
-/// *objects*, which don't move — but the catalog's `/PageLabels` number tree is
-/// index-keyed, so it is re-indexed here and given a `Cover` label at 0.
-///
-/// Errors if the bytes aren't a readable PDF, the PDF is encrypted (see
-/// [`PdfPackage::parse`]), the image can't be decoded, or the page tree has no
-/// pages.
 pub fn set_cover_page(pdf_bytes: &[u8], image: &[u8], mode: CoverMode) -> io::Result<Vec<u8>> {
     let (jpeg, iw, ih) = crate::image::jpeg::to_baseline_rgb_jpeg(image, COVER_JPEG_QUALITY)
         .ok_or_else(|| {
@@ -166,9 +127,6 @@ fn image_xobject(jpeg: &[u8], w: u32, h: u32) -> Stream {
 }
 
 /// The content stream that paints the cover: scale the unit image square to fit
-/// the page while preserving aspect, centred (letterboxed). PDF user space has
-/// its origin bottom-left, and `Do` on an image paints it into the unit square,
-/// so the `cm` matrix *is* the placement.
 fn draw_ops(iw: u32, ih: u32, pw: f32, ph: f32) -> String {
     let (sw, sh, tx, ty) = fit(iw, ih, pw, ph);
     format!("q\n{sw:.4} 0 0 {sh:.4} {tx:.4} {ty:.4} cm\n/Im0 Do\nQ\n")
@@ -230,14 +188,6 @@ fn page_dict(
 /// Re-index the catalog's `/PageLabels` after an insert: every declared run
 /// moves one page later, and page 0 — the new cover — gets a `Cover` label,
 /// mirroring what Amazon's own PDOC pipeline emits.
-///
-/// The run dictionaries are carried over **as objects**, untouched: only the
-/// integer keys change, so no label semantics (`/S` style, `/St` start, `/P`
-/// prefix) can be lost in translation. A nested number tree is flattened to a
-/// single `/Nums` array, which is equally legal and simpler to emit.
-///
-/// A no-op when the PDF declares no labels — then `probe_pdf` falls back to
-/// sequential numbering, which stays correct with an extra page.
 fn shift_page_labels(pkg: &mut PdfPackage) -> io::Result<()> {
     let catalog_id = pkg.catalog_id()?;
     let Some(root) = pkg

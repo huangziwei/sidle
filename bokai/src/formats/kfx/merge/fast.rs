@@ -1,34 +1,4 @@
 //! Fast `.kfx-zip` → `.kfx` merge — pass entity bodies through verbatim.
-//!
-//! ## What makes this fast
-//!
-//! In Amazon-distributed `.kfx-zip` bundles, **exactly one** of the inner
-//! `.kfx` files (`metadata.kfx`) carries a `doc_symbols` Ion symbol table.
-//! The other three (`CR!*.kfx` resource containers + the main content file)
-//! are authored against that same symtab — every symbol ID inside their
-//! entity bodies resolves through `metadata.kfx`'s locals.
-//!
-//! The mechanical merge path parses, walks and re-encodes each entity body,
-//! ~75% of the merge time on a typical book. A preserved source symtab leaves
-//! every entity body's bytes valid in the merged container.
-//!
-//! This path:
-//!  - parses only the 4 container headers (~100 bytes each),
-//!  - parses `doc_symbols` once and reuses it byte-for-byte,
-//!  - parses the source `$419` body once to keep its `$253` deps,
-//!  - **copies every other entity body verbatim**,
-//!  - synthesizes a fresh `$270` container_info + `$419` entity_map.
-//!
-//! ## When this path bails out
-//!
-//! The fast path requires:
-//!  - at most one source container with `doc_symbols`, and
-//!  - the source `$419` (if any) entity-table row uses `id_idnum == $348`
-//!    (singleton form), whose body unwraps cleanly.
-//!
-//! Outside those two the merge returns `io::ErrorKind::Unsupported` and never
-//! reroutes: `MergeMode::Mechanical` is an explicit choice, and the
-//! `mechanical` module is this path's correctness reference.
 
 use std::io::{self, Read};
 use std::path::Path;
@@ -326,8 +296,6 @@ fn finalize_sha1_backfill(mut out: Vec<u8>, digest: [u8; 20]) -> Vec<u8> {
 }
 
 // =========================================================================
-// Parallel zip decompression
-// =========================================================================
 
 fn decompress_one(path: &Path, name: &str) -> io::Result<RawContainer> {
     let file = std::fs::File::open(path)?;
@@ -341,8 +309,6 @@ fn decompress_one(path: &Path, name: &str) -> io::Result<RawContainer> {
     parse_container_shallow(buf)
 }
 
-// =========================================================================
-// Shallow parse
 // =========================================================================
 
 /// The error a container section whose range falls outside the file yields.
@@ -488,8 +454,6 @@ fn populate_symtab_from_doc_symbols(symtab: &mut LocalSymbolTable, bytes: &[u8])
 }
 
 // =========================================================================
-// Metadata picker
-// =========================================================================
 
 fn pick_merged_metadata(
     raws: &[&RawContainer],
@@ -578,8 +542,6 @@ fn find_asset_id(raws: &[&RawContainer], symtab: &LocalSymbolTable) -> io::Resul
 }
 
 // =========================================================================
-// $419 body
-// =========================================================================
 
 fn build_419_body(
     container_id: &str,
@@ -622,8 +584,6 @@ fn wrap_entity_body(body: &[u8], symtab: &LocalSymbolTable) -> Vec<u8> {
     out
 }
 
-// =========================================================================
-// Container layout
 // =========================================================================
 
 /// Write the full container minus the SHA1 digest, which a side thread
@@ -775,8 +735,6 @@ fn emit_container_streaming(
     out
 }
 
-// =========================================================================
-// Helpers
 // =========================================================================
 
 fn extract_entity_body(data: &[u8], offset: usize, length: usize) -> io::Result<&[u8]> {

@@ -1,12 +1,4 @@
 //! Chapter representation for normalized ebook content.
-//!
-//! The Chapter (formerly IRChapter) provides a format-agnostic tree structure
-//! for ebook chapters:
-//! - Nodes with semantic roles (paragraphs, headings, links, etc.)
-//! - Interned styles via StylePool
-//! - Sparse semantic attributes (href, src, alt)
-//! - Universal link representation (handles both EPUB IDs and Kindle offsets)
-//! - Global text buffer with range references
 
 use super::node::{Node, NodeId, Role, TextRange};
 use super::semantic::SemanticMap;
@@ -17,9 +9,6 @@ use crate::style::StylePool;
 pub struct ChapterId(pub u32);
 
 /// A chapter's content in normalized IR form.
-///
-/// The IR tree uses a parent-pointer / first-child / next-sibling representation
-/// for efficient traversal and minimal memory overhead.
 #[derive(Debug, Clone)]
 pub struct Chapter {
     /// All nodes in the tree (index 0 is always the root).
@@ -148,11 +137,6 @@ impl Chapter {
     }
 
     /// The source element ids this chapter's nodes carry, in **document
-    /// order** — the order a rendered page presents them, which is what a
-    /// consumer needs to answer "which chapter holds element N" and to walk a
-    /// selection back to a `(element, offset)` handle. Empty for formats with
-    /// no element-id namespace. See
-    /// [`SemanticMap::source_element`](crate::model::SemanticMap::source_element).
     pub fn source_elements(&self) -> Vec<i64> {
         let mut out = Vec::new();
         for node in self.iter_dfs() {
@@ -167,9 +151,6 @@ impl Chapter {
     pub fn summary(&self) -> ChapterSummary {
         let mut out = ChapterSummary::default();
         // Whitespace collapsing spans text nodes: two adjacent runs separated
-        // only by markup are one word boundary, not two, and neither leading
-        // nor trailing space counts. So the walk carries the "a space is owed"
-        // state across nodes and only pays for it when real text follows.
         let mut text_seen = false;
         let mut pending_space = false;
         self.summarize(NodeId::ROOT, &mut out, &mut text_seen, &mut pending_space);
@@ -224,10 +205,6 @@ impl Chapter {
                 _ => {}
             }
             // A picture the stylesheet paints (a section-break ornament, say)
-            // is one the renderer has to fetch just the same, so it belongs in
-            // the fetch list. It does not make the chapter `image_only`
-            // though: a background is decoration behind content, never the
-            // content itself.
             if let Some(src) = self
                 .styles
                 .get(n.style)
@@ -245,11 +222,6 @@ impl Chapter {
 const EOL: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
 
 /// What a chapter holds, answerable without rendering it.
-///
-/// A renderer needs these before it paints anything: how much reading it
-/// represents, whether it is a full-page image rather than prose, and which
-/// images to fetch first. Deriving them from the IR keeps a consumer from
-/// re-parsing markup it just produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChapterSummary {
     /// Base-text character count: ruby annotations excluded, whitespace runs

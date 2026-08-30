@@ -1,9 +1,4 @@
 // Book editor — a Calibre "Edit book"-style surface built into Sidle. Full-screen
-// #editor-view, parallel to #reader-view, driven entirely from bokai's
-// source-edit primitives via the `editor_*` Tauri commands. Edits KFX-, EPUB-
-// and PDF-source books through the Metadata / Cover / Images / TOC panels; the
-// backend reports which of them a given source format can back. Exposed as
-// `window.sidleEditor`.
 
 const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
@@ -82,11 +77,6 @@ function removeKeys() {
 // --- left rail -------------------------------------------------------------
 
 // Metadata, Cover, Images and Table of Contents are live for every editable
-// source (KFX, EPUB, PDF); a book whose source file is missing gets none of
-// them. Reading Order is EPUB-only — reordering an EPUB's spine is a
-// permutation, while a KFX's reading order carries every position in the book
-// with it. Text (in-place typo fixes) needs the surgical text-replace primitive
-// that isn't built yet. Both gated items say why rather than sitting dark.
 function configureRail() {
   const editable = session.data.editable;
   // The backend reports which panels this source format can actually back, so
@@ -315,10 +305,6 @@ async function saveMetadata() {
 // --- cover panel -----------------------------------------------------------
 
 // The cover flow reuses the library's proven, battle-tested commands
-// (`library_set_cover` / `library_recrawl_cover`): each embeds the image into
-// the KFX (preserving the frozen on-device identity) and the derived EPUB,
-// refreshes the sidecar + gallery thumbnail, and emits `library:row-updated` so
-// the gallery stays in step — the editor just drives them and repaints.
 async function renderCoverPanel() {
   const center = $("#editor-center");
   center.replaceChildren(el("div", "editor-panel editor-muted", "Loading cover…"));
@@ -860,9 +846,6 @@ function wrapPanel(...children) {
 
 function paintTocPanel(detail) {
   // The editable model — a deep copy so edits and Reset don't mutate the cached
-  // detail. For KFX/EPUB this is a proposal that keeps the book's own nesting (a
-  // flat Contents page → flat, a Part→chapter page → nested); we never reshape
-  // it. For PDF it's the book's existing outline, or empty.
   session.tocTree = JSON.parse(JSON.stringify(detail.proposed || []));
 
   // PDF has no proposer, so its panel is a hand-authoring surface instead: each
@@ -1005,9 +988,6 @@ function treeDepth(nodes) {
 }
 
 // The tree as a flat run of `{node, depth}` in reading order. Indent/outdent and
-// removal all work in this shape: each moves a whole subtree, and rebuilding the
-// tree from depths is the one rule that can't leave a parent and its children
-// disagreeing about where they are.
 function flattenTree(nodes, depth = 0, out = []) {
   for (const node of nodes) {
     out.push({ node, depth });
@@ -1040,9 +1020,6 @@ function subtreeEnd(rows, index) {
 }
 
 // Move entry `index` (and its sub-entries) one level in or out. Indenting makes
-// it a child of the entry above; outdenting lifts it out, and the siblings that
-// followed it become its children — standard outline behaviour, and what falls
-// out of rebuilding from depths.
 function shiftTocDepth(index, delta, pageCount) {
   const rows = flattenTree(session.tocTree);
   const row = rows[index];
@@ -1061,10 +1038,6 @@ function canShift(rows, index, delta) {
 }
 
 // Where `index`'s previous sibling starts, or -1 when it is the first child.
-// Everything between two rows of equal depth belongs to the earlier one, so the
-// nearest preceding row at this depth IS the previous sibling; meeting a
-// shallower row first means we've reached the parent and there is no sibling
-// above to trade places with.
 function prevSibling(rows, index) {
   const depth = rows[index].depth;
   for (let j = index - 1; j >= 0; j--) {
@@ -1083,10 +1056,6 @@ function nextSibling(rows, index) {
 }
 
 // Move entry `index` (and its sub-entries) past the sibling above or below it.
-// Movement is sibling-only on purpose: the block keeps every depth it had and
-// lands somewhere its parent is the same one, so no move can orphan an entry or
-// invent a level — the same property `rebuildTree` guarantees for indent. To
-// carry an entry to a different parent, outdent it, move it, then indent.
 function moveTocEntry(index, delta, pageCount) {
   const rows = flattenTree(session.tocTree);
   if (!rows[index]) return;
@@ -1103,10 +1072,6 @@ function moveTocEntry(index, delta, pageCount) {
 }
 
 // Render #toc-tree from session.tocTree, indenting by depth so the book's
-// Part → chapter structure is visible. A full re-render after every edit keeps
-// each row's closure bound to the right flat index. `pageCount > 0` puts rows in
-// PDF mode, adding a page-number input; `focusIndex` restores the caret to a row
-// after a re-render, so indenting from the keyboard doesn't lose it.
 function renderProposedTree(pageCount = 0, focusIndex = -1) {
   const tree = $("#toc-tree");
   if (!tree) return;
@@ -1134,10 +1099,6 @@ function renderProposedTree(pageCount = 0, focusIndex = -1) {
 }
 
 // One editable row bound to its model node: a label input (writes back to the
-// node), a page input for PDF (the only user-editable target — KFX eids and EPUB
-// hrefs round-trip opaquely), move and indent/outdent buttons, and a remove
-// button (drops the node and its sub-entries). Re-shaping an outline takes both
-// axes: order among siblings, and level.
 function tocRow(node, depth, pageCount, ops) {
   const row = el("div", "toc-row");
   if (depth) {
@@ -1151,9 +1112,6 @@ function tocRow(node, depth, pageCount, ops) {
     node.label = input.value;
   });
   // Tab / Shift+Tab change an entry's level, Alt+↑ / Alt+↓ its order among its
-  // siblings; the buttons beside the row do the same for anyone who'd rather
-  // click. Alt is what carries the arrows here — bare arrows still move the
-  // caret through the label being typed.
   input.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       const shift = e.shiftKey ? ops.onOutdent : ops.onIndent;
@@ -1287,15 +1245,6 @@ async function runTocWrite(invoke) {
 }
 
 // --- reading order (spine) panel -------------------------------------------
-//
-// The order the book is *read* in, as against the order its table of contents
-// lists — two things an EPUB states separately and a few publishers state
-// differently. Where the TOC panel repairs the navigation, this repairs the
-// reading order, and it is the one editor write that moves reading positions:
-// every location in a book is numbered along its spine.
-//
-// So nothing here is automatic. The panel opens on the order the book's own
-// navigation implies, and the user reorders from there before committing.
 
 async function renderSpinePanel() {
   const center = $("#editor-center");

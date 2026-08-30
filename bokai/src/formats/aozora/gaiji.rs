@@ -1,16 +1,4 @@
 //! Aozora 外字 (gaiji) annotations → the characters they stand for.
-//!
-//! A Shift-JIS Aozora file cannot hold a character outside JIS X 0208, so it
-//! writes one as `※［＃description、code］` and leaves `※` in the text as a
-//! visible placeholder. `code` names the character exactly — either a
-//! JIS X 0213 面区点 (plane-ku-ten, e.g. `第3水準1-94-6`, `1-8-78`) or an
-//! explicit `U+xxxx`. Both resolve to real Unicode, so the placeholder never
-//! has to reach the reader.
-//!
-//! [`resolve`] takes the text between `［＃` and `］` and returns the character
-//! when the annotation names one. Annotations that only describe a glyph in
-//! prose (`「くさかんむり／夷」` with no code) carry no answer and return
-//! `None`; the caller keeps `※`.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -19,11 +7,6 @@ use regex::Regex;
 
 /// JIS X 0213:2004 面区点 → Unicode, keyed by `plane * 10_000 + ku * 100 + ten`
 /// and sorted by that key (binary-searched).
-///
-/// Only the code points that Shift-JIS cannot encode are listed — the rest are
-/// written literally in the source text and never appear as a gaiji
-/// annotation. A handful of entries are combining sequences rather than single
-/// scalars (Ainu kana, the JIS accented vowels), hence `&str` values.
 static X0213: &[(u16, &str)] = &[
     (10215, "＇"),
     (10216, "＂"),

@@ -1,30 +1,6 @@
 //! Headings + TOC validation — verify that `<h1>`–`<h6>` from spine XHTML
 //! and the OPF/NCX/nav table-of-contents survive into KFX's `book_navigation`
 //! ($389) entity.
-//!
-//! KFX structure (built in `export::kfx::build_book_navigation_fragment_*`):
-//!
-//! ```text
-//! book_navigation:
-//!   [{reading_order_name: $default, nav_containers: [
-//!     NavContainer{ nav_type: $headings,  entries: [NavUnit{...}, ...] },
-//!     NavContainer{ nav_type: $toc,       entries: [NavUnit{...}, ...] },
-//!     NavContainer{ nav_type: $landmarks, entries: [NavUnit{...}, ...] },
-//!   ]}]
-//! ```
-//!
-//! Each `NavUnit` has a `target_position: {id, offset}` whose `id` references
-//! an element ID emitted inside a storyline. If the id doesn't resolve, the
-//! nav entry tap-jumps to nowhere on Kindle. Checks:
-//!
-//! 1. **Headings count balance** — for each level h2–h6, the source spine's
-//!    heading count should match the count of leaf nav_units under the
-//!    KFX headings container. (h1 is intentionally not navigated by Kindle:
-//!    `build_headings_entries` skips it; see `export/kfx.rs::level_to_symbol`.)
-//! 2. **TOC count balance** — flat-traversal entry count of source NCX
-//!    against KFX TOC nav_unit count, every node carrying a target_position.
-//! 3. **Reachability** — every `target_position.id` (headings and TOC)
-//!    must resolve to an element ID present in some storyline.
 
 use crate::formats::epub::structure::{dir_of, rebase_toc, resolve_href};
 use std::collections::HashMap;
@@ -325,8 +301,6 @@ pub(crate) fn dangling_nav_targets(kfx_bytes: &[u8]) -> Result<Vec<u64>, String>
 }
 
 // ============================================================================
-// Source-side extraction
-// ============================================================================
 
 #[derive(Debug, Default)]
 struct EpubNav {
@@ -533,8 +507,6 @@ fn count_headings(xhtml: &str, out: &mut HashMap<u8, usize>) {
     }
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 #[derive(Debug, Default)]

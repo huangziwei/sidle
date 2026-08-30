@@ -7,7 +7,6 @@ use memchr::memmem;
 use std::collections::HashMap;
 
 /// Fixed-size base32 encoding (no allocation)
-/// Writes 4 digits to the provided slice, returns the slice
 #[inline]
 pub fn write_base32_4(num: usize, buf: &mut [u8; 4]) {
     const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
@@ -43,9 +42,6 @@ pub struct RewriteResult {
 /// Single-pass HTML rewriting for kindle: references.
 ///
 /// Rewrites:
-/// - `<link href="...css">` → `kindle:flow:XXXX?mime=text/css`
-/// - `<img src="...">` → `kindle:embed:XXXX?mime=...`
-/// - `<a href="...">` (internal) → placeholder for later resolution
 pub fn rewrite_html_references_fast(
     html: &[u8],
     html_href: &str,
@@ -68,10 +64,6 @@ pub fn rewrite_html_references_fast(
         .unwrap_or_default();
 
     // Finders for tag detection, with memoized next-match positions. A
-    // cached hit stays valid while it lies at or ahead of `pos`, so
-    // consuming an `<a>` tag doesn't force the `<img>`/`<link>` finders to
-    // re-scan the rest of the document, which would be O(tags × document) on
-    // anchor-heavy chapters with no images.
     let link_finder = memmem::Finder::new(b"<link ");
     let img_finder = memmem::Finder::new(b"<img ");
     let a_finder = memmem::Finder::new(b"<a ");
@@ -195,10 +187,6 @@ fn process_link_tag(
     }
 
     // No matching CSS flow. Don't pass the original `<link href="...css">`
-    // through — its href would be a relative path Kindle can't resolve,
-    // and stale stylesheet references can stall the layout engine waiting
-    // for the resource. Calibre's pipeline never emits unresolved `<link>`
-    // tags into the rawml. Drop it.
     let _ = tag;
 }
 
@@ -437,18 +425,6 @@ fn resolve_href(base_dir: &str, href: &str) -> String {
 /// Single-pass CSS url() rewriting.
 ///
 /// Rewrites two kinds of `url()` reference to Kindle's internal schemes:
-/// - an image/font target (resolved via `resource_map`) → `kindle:embed:XXXX`;
-/// - a stylesheet target (`@import url(styleNNNN.css)`, resolved via
-///   `css_flow_map` relative to `css_href`'s directory) → `kindle:flow:XXXX`.
-///
-/// The `@import` case is why `css_flow_map`/`css_href` are needed: the importer
-/// turns native `@import url(kindle:flow:NNNN)` into a sibling `styleNNNN.css`
-/// literal, but the writer renumbers CSS flows contiguously (and
-/// `prune_svg_flow_assets` may have dropped flows in between), so that literal
-/// is stale. Emitting the target's *current* flow index — which the importer's
-/// `rewrite_kindle_flow_in_css` turns back into the right `styleMMMM.css` — is
-/// what keeps a multi-flow-CSS round-trip from dangling (epubcheck RSC-007).
-/// Targets that resolve to neither map are left verbatim.
 pub fn rewrite_css_references_fast(
     css: &[u8],
     resource_map: &HashMap<String, usize>,
@@ -456,9 +432,6 @@ pub fn rewrite_css_references_fast(
     css_href: &str,
 ) -> Vec<u8> {
     // Strip CSS at-rules that Kindle's parser doesn't support: `@charset`,
-    // `@namespace`. Calibre normalises these away in its OEB transform
-    // pipeline; leaving them in is correlated with the renderer freezing
-    // on otherwise-valid books.
     let css = strip_unsupported_css_at_rules(css);
 
     // Directory the stylesheet lives in, for resolving relative `@import`s.
@@ -489,10 +462,6 @@ pub fn rewrite_css_references_fast(
                 output.extend_from_slice(&css[abs_start..content_start + paren_end + 1]);
             } else if url_str.ends_with(".css") {
                 // Stylesheet cross-reference — resolve to the target flow's
-                // current index. Resolve the (possibly `../`-relative) href
-                // against this sheet's directory and match `css_flow_map`
-                // exactly, so a suffix collision can't make the pick
-                // nondeterministic.
                 let resolved = resolve_href(base_dir, &url_str);
                 if let Some(&flow_idx) = css_flow_map.get(&resolved) {
                     let mut base32_buf = [0u8; 4];
@@ -540,11 +509,6 @@ pub fn rewrite_css_references_fast(
 }
 
 /// Strip `@charset "..."` and `@namespace ...` at-rules from CSS.
-///
-/// Kindle's CSS parser (KF8 rendering engine) doesn't implement CSS
-/// namespaces and gets unhappy with `@charset` directives; calibre's
-/// `mobiml.py` removes both as part of its normalisation pass before
-/// shipping CSS into the KF8 stream.
 fn strip_unsupported_css_at_rules(css: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(css.len());
     let mut i = 0;
@@ -591,19 +555,6 @@ pub struct AidInsertResult {
 
 /// Strip XML namespace declarations and namespaced attributes that confuse
 /// the Kindle HTML5 parser.
-///
-/// Calibre's KF8 writer explicitly does this (see `writer8/skeleton.py:remove_namespaces`)
-/// because Kindle firmware refuses to render documents with EPUB3-style
-/// prefixed attributes such as `xmlns:epub`, `epub:prefix`, `epub:type`, or
-/// `xml:lang`. Leaving them in produces files that pass libmobi parsing but
-/// still get "Unable to Open Item" on the device.
-///
-/// We strip:
-///   - Any `xmlns:NAME="..."` namespace declaration except the default xhtml one.
-///   - Any attribute with a prefix in {`epub`, `xml`, `opf`, `dc`, `dcterms`,
-///     `xsi`}, e.g. `epub:type="..."`, `xml:lang="..."`.
-///
-/// The default xhtml `xmlns="..."` is preserved.
 pub fn strip_xml_namespaces(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -617,10 +568,6 @@ pub fn strip_xml_namespaces(html: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&html[pos..tag_start]);
 
         // Closing tags, comments, processing instructions: copy unchanged.
-        // DOCTYPE declarations: drop entirely — Kindle's HTML5 parser refuses
-        // to load external DTDs (e.g. XHTML 1.1's
-        // `http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd`) and calibre's KF8
-        // writer never emits a DOCTYPE for the same reason.
         if matches!(
             html.get(tag_start + 1),
             Some(&b'/') | Some(&b'!') | Some(&b'?')
@@ -757,9 +704,6 @@ pub fn strip_xml_namespaces(html: &[u8]) -> Vec<u8> {
 fn should_drop_attr(name: &[u8]) -> bool {
     // Drop `xmlns:NAME` (but keep bare `xmlns`, and `xmlns:xlink` — it binds
     // the `xlink:href` that inlined full-page SVG illustrations depend on;
-    // dropping it leaves those `<image xlink:href>` refs unbound, which is a
-    // fatal XML parse error [epubcheck RSC-016] on re-import. Amazon's own KF8
-    // SVG carries `xmlns:xlink`, so keeping it matches retail output.)
     if name.len() > 6 && name[..6].eq_ignore_ascii_case(b"xmlns:") {
         return !name[6..].eq_ignore_ascii_case(b"xlink");
     }
@@ -772,11 +716,6 @@ fn should_drop_attr(name: &[u8]) -> bool {
         b"xsi:",
         b"xml:",
         // ARIA — Kindle's KF8 parser doesn't implement WAI-ARIA, and
-        // ARIA-DPUB role values (`doc-noteref`, `doc-chapter`, etc.) come
-        // from the same EPUB3 vocabulary family as `epub:type`. Standard
-        // Ebooks files emit them on every link/section. Stripping them
-        // here matches the same hypothesis that motivated stripping
-        // `epub:type`: same firmware sensitivity class.
         b"aria-",
     ];
     for prefix in DROP_PREFIXES {
@@ -884,7 +823,6 @@ pub fn add_aid_attributes_fast(
                     output.extend_from_slice(tag_name);
 
                     // Check if there are attributes or whitespace after tag name
-                    // tag_end points to the character AFTER '>', so tag_end - 1 is '>'
                     let is_self_closing = tag.ends_with(b"/>");
                     // For self-closing tags, exclude the trailing "/" from attributes
                     let attr_end = if is_self_closing {
@@ -895,7 +833,6 @@ pub fn add_aid_attributes_fast(
 
                     if name_end < attr_end {
                         // Copy existing attributes/whitespace, preserving format
-                        // This handles <div class="..."> and <div\nclass="...">
                         output.extend_from_slice(&html[name_end..attr_end]);
                         output.extend_from_slice(b" aid=\"");
                     } else {
@@ -971,10 +908,6 @@ mod tests {
     #[test]
     fn test_rewrite_css_import_to_flow() {
         // A stylesheet `@import` referencing a sibling CSS resolves to the
-        // target flow's CURRENT index as a `kindle:flow` ref — not left as the
-        // stale `styleNNNN.css` literal the importer wrote, which dangles
-        // (RSC-007) once the writer renumbers flows. Here `style0002.css` was
-        // flow 3 on the way in but is flow 2 now (a flow was pruned between).
         let mut css_flow_map = HashMap::new();
         css_flow_map.insert("styles/style0000.css".to_string(), 1usize);
         css_flow_map.insert("styles/style0002.css".to_string(), 2usize);

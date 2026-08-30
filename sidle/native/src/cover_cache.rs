@@ -1,21 +1,4 @@
 //! On-device cover thumbnail cache.
-//!
-//! The picker fetches a ~30–50KB color thumbnail per book over the LAN. That's
-//! fast, but a relaunch would re-fetch every visible cover — and since the
-//! picker hides already-downloaded books, it mostly shows books the in-memory
-//! cache never warmed. This disk cache bridges across launches: a cover fetched
-//! once is read straight off `/mnt/us` next time, skipping the network.
-//!
-//! Keyed by book id + cover revision: `<id>.<rev>.jpg`, where `rev` is the
-//! cover's mtime shipped in `/list.json` (`cover_rev`). A desktop cover-recrawl
-//! bumps the rev, so the next launch misses the old file and refetches — self-
-//! invalidating. `store` prunes prior revisions, so the cache holds one file
-//! per book, not one per cover version. (An older server omits `cover_rev`, so
-//! every book gets rev 0 — i.e. caches by id alone.)
-//!
-//! FAT-safe atomic write: bytes are written to a `.partial` sibling then
-//! renamed over the target, so a crash mid-write can't leave a truncated JPEG
-//! that would later decode to garbage. Mirrors core's `import::write_bytes_atomic`.
 
 use std::path::{Path, PathBuf};
 
@@ -34,11 +17,6 @@ pub fn load(dir: &Path, id: i64, rev: i64) -> Option<Vec<u8>> {
 }
 
 /// Write a thumbnail to the cache. Atomic via temp+rename so a concurrent or
-/// next-launch reader never sees a half-written file. Callers treat caching as
-/// best-effort: a write failure here must never fail the fetch that produced
-/// the bytes, so the `io::Result` is for logging only. After a successful
-/// write, older revisions of this book are pruned so the cache holds one file
-/// per book.
 pub fn store(dir: &Path, id: i64, rev: i64, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let dest = cache_file(dir, id, rev);
@@ -50,9 +28,6 @@ pub fn store(dir: &Path, id: i64, rev: i64, bytes: &[u8]) -> std::io::Result<()>
 }
 
 /// Remove this book's other `<id>.*.jpg` cache files, keeping only `keep`.
-/// Best-effort: a failure just leaves an orphaned thumbnail and never fails the
-/// store. The `<id>.` prefix can't match a different book (`1.` won't match
-/// `10.…` — the dot guards it).
 fn prune_old(dir: &Path, id: i64, keep: &Path) {
     let prefix = format!("{id}.");
     let Ok(entries) = std::fs::read_dir(dir) else {

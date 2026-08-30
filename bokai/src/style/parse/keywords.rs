@@ -1,7 +1,4 @@
 //! CSS keyword parsing.
-//!
-//! This module provides the keyword_parser! macro and keyword parsers
-//! that leverage the existing enum_property! macro's from_css method.
 
 use cssparser::Parser;
 
@@ -16,9 +13,6 @@ use crate::style::properties::{
 use crate::style::Declaration;
 
 /// Macro for generating keyword parser functions.
-///
-/// For types defined with enum_property!, this generates a simple parser
-/// that reads an identifier and calls the type's from_css method.
 macro_rules! keyword_parser {
     ($fn_name:ident, $type:ty) => {
         pub(crate) fn $fn_name(input: &mut Parser<'_, '_>) -> Option<$type> {
@@ -100,9 +94,6 @@ pub(crate) fn parse_text_emphasis_position(
 }
 
 /// Parse `text-emphasis-style`. CSS allows one or two idents (a fill and a
-/// shape) in either order, plus the special value `none`. Idents not part of
-/// the spec are tolerated and ignored. Falls back to `filled` when only a
-/// shape is given (per CSS spec default).
 pub(crate) fn parse_text_emphasis_style(input: &mut Parser<'_, '_>) -> Option<TextEmphasisStyle> {
     use TextEmphasisStyle as T;
     let first = input.expect_ident_cloned().ok()?;

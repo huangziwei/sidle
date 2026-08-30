@@ -1,11 +1,4 @@
 //! Note-model walk: `document_data` → ordered pages → ink layers → strokes.
-//!
-//! Ports `process_scribe_notebook_page_section` + `process_notebook_content`
-//! from kfxlib's `yj_to_epub_notebook.py`. A page container
-//! (`$260`) carries the canvas size and a `$141` content list; each content
-//! node (`$159 == $270`) either inlines a `$146` stroke list or references a
-//! `$259` story via `$176` whose `$146` we then walk. `nmdl.stroke` nodes are
-//! emitted; `nmdl.stroke_group` nodes are pure containers (we flatten them).
 
 use std::collections::HashMap;
 
@@ -52,9 +45,6 @@ pub struct Stroke {
 #[derive(Debug, Clone)]
 pub struct Page {
     /// The page-container fragment's `kfx_id` (e.g. `cC9KkbR1zStWRzxfccUugsw0`).
-    /// On a sideloaded-doc (PDOC) notebook this is the per-page link target: the
-    /// book's `.yjr` `handwritten_note` record names it as the note "body", so
-    /// an ink page joins to its host-page anchor by `container_id == body`.
     pub container_id: String,
     pub canvas_width: i64,
     pub canvas_height: i64,

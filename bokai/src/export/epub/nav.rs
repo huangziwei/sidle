@@ -1,15 +1,4 @@
 //! Shared `nav.xhtml` (EPUB 3 navigation document) and `toc.ncx` emitters.
-//!
-//! Like [`super::opf`], every EPUB writer in the crate — the exporter's raw
-//! and normalized paths alike — feeds a [`NavDoc`] / [`NcxDoc`] through
-//! [`emit_nav`] / [`emit_ncx`], so the two navigation artifacts have one
-//! shape by construction.
-//!
-//! Escaping is deliberately two-tiered: the TOC/page-list `<ol>` bodies and
-//! the NCX navMap leave apostrophes raw (valid XML in text and in
-//! double-quoted attributes), while the document shell and the landmarks nav
-//! escape the full five. Collapsing the two would churn the bytes of every
-//! book already published for zero validity gain.
 
 use std::collections::HashMap;
 
@@ -18,9 +7,6 @@ use crate::formats::epub::parser::epub_type_to_landmark;
 use crate::model::LandmarkType;
 
 /// One navigation entry: a TOC node (nested) or a page-list entry (flat).
-/// `href` is relative to `OEBPS/` (`chapter.xhtml`, `chapter.xhtml#frag`),
-/// or an empty string when the target never resolved — the TOC keeps such
-/// entries (label-only), the page list drops them at build time.
 #[derive(Debug, Clone)]
 pub struct NavPoint {
     pub label: String,
@@ -29,12 +15,6 @@ pub struct NavPoint {
 }
 
 /// Stable-sort each level of the TOC tree by the reading-order rank of each
-/// entry's target file. EPUB 3 requires the `toc` nav to be in reading order
-/// (epubcheck warns NAV-011 otherwise); some publisher KFX TOCs list front
-/// matter out of reading order (e.g. the 目次 entry before はじめに when はじめに
-/// physically reads first — verified against the KFX reading_order). Ties (same
-/// file, or a target file not in the spine) keep their original order, so a TOC
-/// already in reading order is left byte-identical.
 pub fn sort_toc_reading_order(toc: &mut [NavPoint], file_rank: &HashMap<String, usize>) {
     fn rank(np: &NavPoint, fr: &HashMap<String, usize>) -> usize {
         let file = np.href.split('#').next().unwrap_or(&np.href);
@@ -68,17 +48,6 @@ pub struct NavDoc<'a> {
 }
 
 /// Serialize the EPUB 3 navigation document.
-///
-/// The W3C EPUB 3.3 spec requires every Publication to include exactly one
-/// nav doc, and conformant readers (Apple Books) reject EPUB 3 packages
-/// without it. NCX no longer satisfies the requirement on its own — it's
-/// strictly legacy.
-///
-/// Body shape (mirrors calibre's EPUB 3 nav output):
-/// `<nav epub:type="toc"><ol><li><a href=…>…</a></li></ol></nav>`, an
-/// optional hidden `<nav epub:type="page-list">`, and an optional hidden
-/// `<nav epub:type="landmarks">` derived from the same guide entries the
-/// OPF `<guide>` block uses.
 pub fn emit_nav(doc: &NavDoc) -> String {
     let title = if doc.title.is_empty() {
         "Untitled"
@@ -123,8 +92,6 @@ pub fn emit_nav(doc: &NavDoc) -> String {
 
     // Page-list nav (`<nav epub:type="page-list">`) — printed page numbers →
     // positions, round-tripped from the source's page-list container.
-    // Emitted only when present; `hidden` like the landmarks nav so it
-    // drives "go to page N" without cluttering the visible TOC.
     if !doc.page_list.is_empty() {
         s.push_str("  <nav epub:type=\"page-list\" id=\"page-list\" hidden=\"\">\n");
         s.push_str("    <h2>List of Pages</h2>\n");
@@ -133,19 +100,11 @@ pub fn emit_nav(doc: &NavDoc) -> String {
     }
 
     // Landmarks nav, derived from the same guide entries the EPUB-2
-    // `<guide>` block uses. EPUB-3 vocabulary differs from EPUB-2 guide
-    // types in a few names (start → bodymatter, acknowledgements vs
-    // acknowledgments); map at emit time so the guide struct stays a single
-    // source of truth.
     if !doc.landmarks.is_empty() {
         s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
         s.push_str("    <h2>Landmarks</h2>\n");
         s.push_str("    <ol>\n");
         // EPUB 3 forbids two landmarks that share an epub:type AND reference
-        // the same resource (epubcheck RSC-005). bokai's own EPUB→KFX emits
-        // both an `srl` (start-reading) and a `bodymatter` landmark for the
-        // book's opening — which map to the same `bodymatter` + href here —
-        // so keep the first of any (type, href) pair and drop later repeats.
         let mut seen_landmarks: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
         for g in doc.landmarks {
@@ -266,10 +225,6 @@ fn write_nav_ol(s: &mut String, points: &[NavPoint], indent: usize) {
 }
 
 /// Numbering state for the NCX navMap. `id` is always unique (one per
-/// navPoint); `playOrder` is assigned per unique content target so that two
-/// navPoints referencing the same target share a playOrder — the NCX rule
-/// epubcheck enforces (RSC-005 "different playOrder values … that refer to the
-/// same target"). First-occurrence order gives reading-order playOrder.
 struct NavmapCtx {
     next_id: usize,
     next_play_order: usize,
@@ -314,7 +269,6 @@ fn write_nav_points(s: &mut String, points: &[NavPoint], ctx: &mut NavmapCtx, in
 /// Map an EPUB 2.0 `<guide>` reference type to the EPUB 3 nav-doc
 /// `epub:type` vocabulary. Most types are identical; a few names differ
 /// (`start` → `bodymatter`, `acknowledgements` → `acknowledgments`).
-/// Unknown types pass through verbatim — readers ignore unknown values.
 fn guide_type_to_epub3(guide_type: &str) -> &str {
     match guide_type {
         "start" | "text" => "bodymatter",
@@ -326,11 +280,6 @@ fn guide_type_to_epub3(guide_type: &str) -> &str {
 /// Human-readable fallback label for a landmark whose source carried no
 /// text. EPUB 3 rejects an empty `<nav>` anchor (RSC-005 "Anchors within nav
 /// elements must contain text"), so every landmark link needs a label.
-///
-/// The names come from [`LandmarkType::default_label`], so this nav doc, the
-/// guide, and a TOC completed from a book's landmarks all call the same place by
-/// the same name. An `epub:type` outside the landmark vocabulary falls back to
-/// the reading-start marker's name.
 fn landmark_default_label(epub_type: &str) -> &'static str {
     epub_type_to_landmark(epub_type)
         .unwrap_or(LandmarkType::BodyMatter)

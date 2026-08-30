@@ -1,16 +1,4 @@
 //! A RELAX NG validator.
-//!
-//! epubcheck validates package documents and content documents against RELAX NG
-//! grammars, so reproducing its `RSC-005` verdicts means running the same
-//! grammars. The implementation follows James Clark's *An algorithm for RELAX NG
-//! validation* — the derivative method, which needs no backtracking and handles
-//! `interleave` (which a finite automaton cannot express) directly.
-//!
-//! - [`pattern`] — the simplified pattern model, hash-consed into an arena.
-//! - [`datatype`] — the built-in and XSD datatype libraries the grammars use.
-//! - [`derive`](mod@derive) — validation itself, by pattern derivative.
-//! - [`rng`] — compiling a grammar written in the XML syntax (`.rng`).
-//! - [`rnc`] — translating the compact syntax (`.rnc`) into the XML one.
 
 pub mod datatype;
 pub mod derive;
@@ -208,10 +196,6 @@ mod tests {
     /// Every grammar `XMLValidators` names as an entry point has to compile —
     /// a grammar that does not is a defect here, and would disable a whole
     /// document type's worth of checking without any finding to show for it.
-    ///
-    /// `20/rng/content.rng` is deliberately absent: it aggregates the XHTML and
-    /// SVG modules and has no `<start>` of its own, so it is only ever reached
-    /// through `content-xhtml.rng` or `content-svg.rng`.
     #[test]
     fn every_entry_point_grammar_compiles() {
         for path in [
@@ -320,9 +304,6 @@ mod tests {
             assert!(found.is_empty(), "{label}: {body} is legal, got {found:?}");
         }
         // Where EPUB 2 puts `alt` in the grammar, EPUB 3 makes it optional there
-        // and requires it from `30/mod/html5/assertions.sch` instead — a
-        // reminder that a grammar-only port would lose rules moving to
-        // Schematron between versions, not just gain them.
         assert!(
             errors(&mut arena, start, &doc(r#"<p><img src="i.png"/></p>"#)).is_empty(),
             "in EPUB 3 a missing alt is a Schematron rule, not a grammar one"

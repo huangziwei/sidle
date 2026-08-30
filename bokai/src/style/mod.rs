@@ -1,10 +1,6 @@
 //! Style system for CSS property types, computed styles, and cascade.
 //!
 //! This module contains:
-//! - CSS property types (Color, Length, Display, etc.)
-//! - ComputedStyle and StylePool for style management
-//! - Declaration parsing and stylesheet handling
-//! - CSS cascade implementation
 
 mod cascade;
 mod declaration;

@@ -1,26 +1,10 @@
 //! Reading positions — the linear scale a source addresses its text on.
-//!
-//! This is the counterpart to [`crate::model::InternalLocation`]'s split. That
-//! type names *where a link points*; this one names *how far into the book a
-//! point sits*, on the scale the source itself defines.
 
 use std::collections::HashMap;
 
 /// A book's reading-position scale: every addressable element's coordinate on
 /// the source's own linear axis, plus the boundaries dividing that axis into
 /// the numbered "locations" a reading device displays.
-///
-/// Physically-addressed formats (the Kindle family) ship both halves — KFX
-/// carries an element→coordinate map and a boundary list, and the device turns
-/// a coordinate into "Location N" by counting boundaries below it.
-/// Structurally-addressed formats (EPUB) ship neither: their readers
-/// synthesize progress from the spine, a consumer's policy and no fact in
-/// the file: those importers report no map at all.
-///
-/// Elements are keyed by **the source's own identifier** — a KFX `eid`. That
-/// is the identifier a device writes into an annotation, and carrying it
-/// verbatim is what lets a highlight made on hardware resolve against a book
-/// read through the IR.
 #[derive(Debug, Clone, Default)]
 pub struct PositionMap {
     /// Source element id → its coordinate on the linear axis.
@@ -41,15 +25,6 @@ impl PositionMap {
     /// Assemble a map from an element→coordinate table and the location
     /// boundaries on the same axis. Boundaries are sorted here, and a caller
     /// hands over whatever order the source listed them in.
-    ///
-    /// `extent` is the axis end, one past the last addressable coordinate — the
-    /// same exclusive bound [`synthesized`](Self::synthesized) computes. A
-    /// source that states its own span should pass it, being the only party
-    /// that knows the **last** element's length: every other element's length
-    /// is implied by where the next one starts, and nothing follows the last
-    /// one. Pass `None` only when the source does not state it; the axis
-    /// then ends at the furthest coordinate named, which is the start of the
-    /// final element and therefore short by that element's length.
     pub fn new(
         position_of: HashMap<i64, i64>,
         mut boundaries: Vec<i64>,
@@ -75,18 +50,6 @@ impl PositionMap {
     /// Synthesize a coordinate axis for a source that ships none, measuring it
     /// in characters of the book's own text: each element sits at the running
     /// character total of everything ahead of it in reading order.
-    ///
-    /// No location boundaries come out of this, and
-    /// [`has_locations`](Self::has_locations) stays false. Dividing an axis
-    /// into numbered locations is a device convention, and a source that never
-    /// defined one has no numbering to reproduce — invented boundaries
-    /// produce a "Location 407" that looks like a device's and matches
-    /// nothing. Progress against [`max_position`](Self::max_position) is
-    /// faithful, which is what a progress readout actually needs.
-    ///
-    /// `reading_order` is every addressable element in presentation order;
-    /// repeats keep their first position. `text_len` gives an element's own
-    /// base-text length — elements it doesn't know occupy no space.
     pub fn synthesized(reading_order: &[i64], text_len: impl Fn(i64) -> i64) -> Self {
         let mut position_of = HashMap::with_capacity(reading_order.len());
         let mut cursor: i64 = 0;
@@ -107,12 +70,6 @@ impl PositionMap {
 
     /// Take the mid-element anchors a source states: per element, the
     /// coordinates it gives characters other than its first.
-    ///
-    /// An element whose text a nested element interrupts occupies more of the
-    /// axis than it has characters, and the coordinates on the far side of the
-    /// interruption are the source's to state. Without them a character
-    /// `offset` counts forward from the element's own start, which is right up
-    /// to the first interruption and short after it.
     pub fn with_anchors(mut self, anchors: HashMap<i64, Vec<(i64, i64)>>) -> Self {
         self.anchors = anchors;
         for stated in self.anchors.values_mut() {
@@ -122,9 +79,6 @@ impl PositionMap {
     }
 
     /// The coordinate of a point `offset` characters into `element`, or `None`
-    /// when the element has no position (it is not part of the source's
-    /// addressable text). Counted from the nearest anchor at or before
-    /// `offset`, which is the element's own start until one is stated.
     pub fn position(&self, element: i64, offset: i64) -> Option<i64> {
         let start = *self.position_of.get(&element)?;
         let anchor = self.anchors.get(&element).and_then(|stated| {
@@ -138,11 +92,6 @@ impl PositionMap {
     }
 
     /// Whether the source defined the numbered location scale on top of the
-    /// coordinate axis. False for a [`synthesized`](Self::synthesized) map,
-    /// whose coordinates are real and whose locations are none — a
-    /// consumer showing progress should read
-    /// [`element_positions`](Self::element_positions) against
-    /// [`max_position`](Self::max_position).
     pub fn has_locations(&self) -> bool {
         !self.boundaries.is_empty()
     }
@@ -167,9 +116,6 @@ impl PositionMap {
     }
 
     /// The location number a coordinate falls in: the count of boundaries
-    /// strictly below it. A coordinate sitting exactly on a boundary reads as
-    /// the location it *completes*, not the one it starts — the device's own
-    /// convention. Floored at 1: the first page never reads "Location 0".
     pub fn location_for(&self, position: i64) -> i64 {
         self.boundaries.partition_point(|&b| b < position).max(1) as i64
     }
@@ -181,9 +127,6 @@ impl PositionMap {
 
     /// Every positioned element paired with its location number, ordered by
     /// element id, sorted for a reproducible result:
-    /// consumers key into it and the order carries no meaning,
-    /// but an API returning a different vector each call cannot be cached,
-    /// diffed, or tested.
     pub fn element_locations(&self) -> Vec<(i64, i64)> {
         let mut out: Vec<(i64, i64)> = self
             .position_of
@@ -231,9 +174,6 @@ mod tests {
     }
 
     /// An element whose text a nested element interrupts runs past its own
-    /// start by more than its character count, and the source states where
-    /// each run resumes. An offset before the first anchor counts from the
-    /// element's start.
     #[test]
     fn offsets_past_an_interruption_count_from_the_anchor() {
         let m = sample().with_anchors(HashMap::from([(9, vec![(6, 60), (4, 55)])]));

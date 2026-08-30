@@ -1,20 +1,4 @@
 //! Malformed-input hardening for the decoder.
-//!
-//! These fixtures are real fuzz-found byte sequences that exercise the
-//! decoder's *structural* guards: a lying header that would otherwise allocate
-//! gigabytes, a tile layout that overruns the macroblock grid, and a stream
-//! that ends mid-header. Each must resolve to a clean error — never a panic,
-//! OOM, or hang — and does so in **every** build configuration (these guards
-//! fire before any reconstruction arithmetic), so they are valid under the
-//! overflow-checks-on `cargo test` build, in the workspace and in the lifted
-//! standalone copy alike.
-//!
-//! Scope note: integer-overflow-on-garbage in the reconstruction stage is NOT
-//! covered here. Such inputs wrap (the decoder's shipping/release semantics —
-//! garbage pixels, never a panic), which only holds with overflow checks off.
-//! That property belongs to the decode fuzzer, which runs with
-//! `-Coverflow-checks=off` to match the shipped binary; asserting it here
-//! would test the wrong configuration.
 
 use jxr::decode::decoder::DecodeError;
 use jxr::decode::{container, decode_image};
@@ -86,11 +70,6 @@ malformed_fixture!(
 );
 
 // Degenerate windowing: 679123969×1 px with margins that don't pad to the MB
-// grid → mb_height truncates to 0, zeroing the decode-budget product while the
-// MB-grid build still allocated one column Vec per mb_width (~1 GB of empty
-// Vec headers from a 702-byte stream) before the first tile startcode check.
-// Found by the Phase-7 certification fuzz run (slow-unit report); the
-// extended-size whole-macroblock guard now rejects it at the image header.
 malformed_fixture!(
     zero_mb_rows_column_bomb,
     "zero_mb_rows_column_bomb.jxr",

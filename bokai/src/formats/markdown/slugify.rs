@@ -8,19 +8,6 @@ use crate::model::ChapterId;
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NodeId, ResolvedLinks, Role};
 
 /// Generate a GitHub-style slug from text.
-///
-/// Converts text to lowercase, replaces spaces and special characters with hyphens,
-/// and removes consecutive/leading/trailing hyphens.
-///
-/// # Examples
-///
-/// ```
-/// use bokai::formats::markdown::slugify;
-///
-/// assert_eq!(slugify("Chapter One"), "chapter-one");
-/// assert_eq!(slugify("Hello, World!"), "hello-world");
-/// assert_eq!(slugify("  Multiple   Spaces  "), "multiple-spaces");
-/// ```
 pub fn slugify(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -42,9 +29,6 @@ pub fn slugify(text: &str) -> String {
 }
 
 /// Collect text content from a heading node (for slug generation).
-///
-/// Recursively collects all text from a node and its children,
-/// normalizing whitespace.
 pub fn collect_heading_text(chapter: &Chapter, id: NodeId) -> String {
     let mut result = String::new();
     collect_text_recursive(chapter, id, &mut result);
@@ -81,22 +65,6 @@ fn collect_text_recursive(chapter: &Chapter, id: NodeId, result: &mut String) {
 }
 
 /// Build a map of heading targets to their GitHub-style slugs.
-///
-/// For internal links pointing to headings, we use the heading text as a slug
-/// (e.g., "Chapter One" → "#chapter-one") instead of explicit anchor IDs.
-///
-/// This function takes pre-loaded chapters (no I/O) and builds the slug map.
-/// It accepts any chapter container that derefs to `Chapter` (e.g., `&Chapter`,
-/// `Arc<Chapter>`, `Box<Chapter>`).
-///
-/// # Arguments
-///
-/// * `chapters` - Slice of (ChapterId, C) pairs where C derefs to Chapter
-/// * `resolved` - The resolved links to check for internal targets
-///
-/// # Returns
-///
-/// HashMap mapping GlobalNodeId (heading nodes) to their slugs
 pub fn build_heading_slugs<C: std::ops::Deref<Target = Chapter>>(
     chapters: &[(ChapterId, C)],
     resolved: &ResolvedLinks,

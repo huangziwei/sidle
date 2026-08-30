@@ -1,9 +1,6 @@
 //! KFX format importer.
 //!
 //! KFX is Amazon's Kindle Format 10, using Ion binary data format.
-//!
-//! This module handles I/O operations for reading KFX containers.
-//! Pure parsing functions are in `crate::formats::kfx::container`.
 
 use std::collections::HashMap;
 use std::io;

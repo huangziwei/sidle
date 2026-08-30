@@ -1,15 +1,6 @@
 //! What sidle last installed on a device.
 //!
 //! The receipt tells an app's own update apart from an edit made on the device.
-//! Bytes alone cannot: a file differing from the source is either a version
-//! behind or a value someone changed there. An install records what it wrote.
-//!
-//! Recorded hashes also keep a status check off the wire. A path whose source
-//! hashes to what the receipt names needs no device read, which is what keeps
-//! a vendored subtree from being pulled back to check it.
-//!
-//! [`RECEIPT_PATH`] sits inside the picker's own directory, one file for every
-//! app.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,10 +63,6 @@ impl Default for InstallState {
 
 impl InstallState {
     /// Read the device's receipt, or an empty one.
-    ///
-    /// Absent, unreadable and unparseable give one answer: nothing is known
-    /// about this device, and every path reports against the device itself. A
-    /// first push onto a bare Kindle takes it.
     pub fn read(transport: &dyn Transport) -> Self {
         let path = TPath::parse(RECEIPT_PATH);
         let Ok(true) = transport.exists(&path) else {

@@ -1,12 +1,6 @@
 //! EPUB hrefs are URI references and may percent-encode reserved
 //! bytes, while the container's ZIP entries are stored under their literal
 //! decoded names.
-//!
-//! calibre names split chapter files like `CR!….html` but writes the manifest
-//! href as `CR%21….html`, so an encoded path handed straight to the ZIP lookup
-//! finds nothing. Every URI→archive boundary percent-decodes: spine paths, the
-//! NCX/nav TOC, landmarks, the cover, in-HTML `<img src>` / `<a href>`, and CSS
-//! `@import` URLs.
 
 use std::io::Write;
 use std::path::Path;

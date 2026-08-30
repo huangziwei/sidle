@@ -1,18 +1,4 @@
 //! Source validation — is one book file well-formed on its own? Each check
-//! reads a single input in its native format and never consults a
-//! derived/converted copy. These flag defects **in the source book**, so they
-//! are what the book editor turns into a repair list.
-//!
-//! - [`epub`] — EPUB-3 structural conformance (a Rust `epubcheck` replacement):
-//!   mimetype, container/OPF wiring, manifest ↔ zip ↔ spine integrity, nav
-//!   presence, non-linear reachability, href resolution.
-//! - [`toc`] — cross-format declared-TOC audit: is the reader's chapter sidebar
-//!   chapterless while the book itself clearly has chapters? Sniffs EPUB vs KFX
-//!   and reads only that source.
-//! - [`kfx`] — KFX structural conformance (job 2, the `epubcheck` equivalent for
-//!   KFX — no such tool exists elsewhere): container integrity, required
-//!   entities, reference resolution (section→storyline, content/style refs), nav
-//!   reachability, resource-byte and cover resolution, and position-map coverage.
 
 pub mod epub;
 pub mod kfx;
@@ -23,16 +9,6 @@ use super::{Finding, Report, Severity};
 /// Run every source check that applies to `bytes` and return one unified
 /// [`Report`]. Sniffs the format and runs the matching structural checks plus
 /// the cross-format TOC audit, lowering each check's result into [`Finding`]s.
-/// This is the single entry the book editor consumes to build its repair list.
-///
-/// Format sniff: a `PK` zip is an EPUB *unless* it bundles `.kfx` entries — an
-/// Amazon `.kfx-zip`, which is merged to a single container and run through the
-/// KFX checks (so `validate` on a bundle matches `validate` on the merged
-/// `.kfx`). Anything else is treated as a single KFX container.
-///
-/// Infallible by design: a book so broken a check cannot run (e.g. a KFX that
-/// won't load) becomes an `Error` finding rather than an `Err`, so the editor
-/// always receives a `Report`.
 pub fn validate(bytes: &[u8]) -> Report {
     let mut report = Report::default();
 
@@ -67,14 +43,6 @@ pub fn validate(bytes: &[u8]) -> Report {
 }
 
 /// The KFX side of [`validate`]: structural checks (rules 1–9) + the cross-
-/// format TOC audit (rule 10), over one already-merged container. A container
-/// that won't load is already reported by `kfx::validate` as
-/// `container-unreadable`, so the TOC audit's own load failure is swallowed
-/// here, not double-reported.
-///
-/// Both `kfx::validate` and the TOC audit load the container once each; a single
-/// shared load is a future optimization (the TOC audit's KFX evidence extractor
-/// is currently private to `toc`).
 fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
     let mut findings = kfx::validate(bytes);
     let unreadable = findings.iter().any(|f| f.rule == "container-unreadable");
@@ -86,17 +54,6 @@ fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
 
 /// The error-level findings an edit **introduced** — everything [`validate`]
 /// reports on `after` that it did not already report on `before`.
-///
-/// This is the bar for a book-mutating edit (a metadata rewrite, a TOC repair,
-/// a cover insertion). "Clean" is the wrong bar there: a wild book is usually
-/// invalid before the edit and no single edit can fix it, so the obligation is
-/// narrower and checkable — **an edit must not add a defect**. A repair that
-/// removes findings is exactly what should happen; only additions are reported.
-///
-/// Comparison is a multiset over `(check, rule, location, message)`, so three
-/// identical broken hrefs before and four after yields one added finding. Like
-/// every other validation seam this is diagnostic only: it never withholds the
-/// edited book, and the caller decides what to do with a non-empty result.
 pub fn added_errors(before: &[u8], after: &[u8]) -> Vec<Finding> {
     use std::collections::HashMap;
     let key = |f: &Finding| {
@@ -147,7 +104,6 @@ fn zip_bundles_kfx(zip_bytes: &[u8]) -> bool {
 /// Run the cross-format TOC audit and lower it to findings. A read failure — a
 /// malformed EPUB the structural check has already flagged — becomes one
 /// `source/unreadable` finding rather than an `Err`, keeping [`validate`]
-/// infallible.
 fn toc_findings(bytes: &[u8]) -> Vec<Finding> {
     match toc::validate(bytes) {
         Ok(audit) => audit.into_findings(),

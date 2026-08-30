@@ -1,32 +1,6 @@
 //! KFX Schema: The instruction set for bidirectional KFX ↔ IR conversion.
 //!
 //! This module treats KFX symbols as **opcodes** and defines strategies for each.
-//! The schema is the single source of truth for both import and export.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                         Schema                                  │
-//! │  ┌─────────────────┐          ┌─────────────────┐              │
-//! │  │   import_table  │          │  export_table   │              │
-//! │  │  (ID → Strategy)│          │ (Role → ID)     │              │
-//! │  └─────────────────┘          └─────────────────┘              │
-//! └─────────────────────────────────────────────────────────────────┘
-//!              │                            │
-//!              ▼                            ▼
-//!     ┌─────────────────┐          ┌─────────────────┐
-//!     │ Import: KFX→IR  │          │ Export: IR→KFX  │
-//!     │  (interpreter)  │          │    (future)     │
-//!     └─────────────────┘          └─────────────────┘
-//! ```
-//!
-//! ## Key Design Principles
-//!
-//! 1. **Declarative Truth**: All mapping logic lives in this schema
-//! 2. **Generic Interpreter**: The parser only knows Strategy, not semantics
-//! 3. **Bidirectional**: Every import rule has export metadata
-//! 4. **Transformers**: Complex value conversions are encapsulated in traits
 
 use crate::formats::kfx::symbols::{KfxSymbol, symbol_name};
 use crate::formats::kfx::transforms::{
@@ -37,8 +11,6 @@ use crate::model::{LandmarkType, Role};
 use crate::style::{ComputedStyle, FontStyle, FontWeight};
 use std::collections::HashMap;
 
-// ============================================================================
-// Strategy: The "Opcode" definitions
 // ============================================================================
 
 /// Strategy tells the interpreter what to do when encountering a KFX symbol.
@@ -188,8 +160,6 @@ pub enum SemanticTarget {
 }
 
 // ============================================================================
-// Attribute Extraction Rules
-// ============================================================================
 
 /// Rule for extracting an attribute from KFX to IR semantics.
 #[derive(Clone, Debug)]
@@ -226,8 +196,6 @@ impl AttrRule {
     }
 }
 
-// ============================================================================
-// Schema Registry
 // ============================================================================
 
 /// The KFX schema registry with bidirectional lookup tables.
@@ -304,7 +272,6 @@ impl KfxSchema {
         );
 
         // Also register Role::Text directly for export (IR text nodes)
-        // This ensures text leaf nodes get type: text in the output
         self.export_strategy_table.insert(
             Role::Text,
             Strategy::Structure {
@@ -521,7 +488,6 @@ impl KfxSchema {
         );
 
         // Definition list structures (dl/dt/dd)
-        // These are commonly used for footnotes in EPUBs
         self.export_strategy_table.insert(
             Role::DefinitionList,
             Strategy::Structure {
@@ -548,7 +514,6 @@ impl KfxSchema {
     /// Register span (inline) rules for style_events.
     fn register_span_rules(&mut self) {
         // Link: detected by presence of link_to field
-        // Uses KfxLinkTransform for kindle:pos:fid:... parsing
         self.span_rules.push(SpanRule {
             indicator: KfxSymbol::LinkTo,
             strategy: Strategy::Dynamic {
@@ -641,8 +606,6 @@ impl KfxSchema {
     }
 
     // =========================================================================
-    // Import API
-    // =========================================================================
 
     /// Get the strategy for a KFX element type.
     pub fn element_strategy(&self, kfx_type_id: u32) -> Option<&Strategy> {
@@ -730,7 +693,6 @@ impl KfxSchema {
         match self.span_rule(&has_field) {
             Some(rule) => {
                 // Convert has_field to get_attr: if field exists, return Some(1)
-                // This allows Dynamic strategies to detect attribute presence
                 self.execute_strategy_for_role(&rule.strategy, |sym| {
                     if has_field(sym) { Some(1) } else { None }
                 })
@@ -803,8 +765,6 @@ impl KfxSchema {
     }
 
     // =========================================================================
-    // Export API
-    // =========================================================================
 
     /// Find the KFX symbol ID for an IR Role.
     pub fn kfx_symbol_for_role(&self, role: Role) -> Option<u32> {
@@ -850,7 +810,6 @@ impl KfxSchema {
         }
 
         // Also check span rules - roles like Link are defined there
-        // This enables standalone Link elements to export link_to
         for span_rule in &self.span_rules {
             let rule_matches = match &span_rule.strategy {
                 Strategy::Dynamic { trigger_role, .. } => *trigger_role == role,
@@ -889,8 +848,6 @@ impl KfxSchema {
     }
 
     // =========================================================================
-    // Landmark API
-    // =========================================================================
 
     /// Convert a KFX landmark symbol ID to IR LandmarkType.
     pub fn landmark_from_kfx(&self, symbol_id: u64) -> Option<LandmarkType> {
@@ -916,8 +873,6 @@ impl Default for KfxSchema {
 }
 
 // ============================================================================
-// Global Schema Instance
-// ============================================================================
 
 static SCHEMA: std::sync::OnceLock<KfxSchema> = std::sync::OnceLock::new();
 
@@ -927,8 +882,6 @@ pub fn schema() -> &'static KfxSchema {
 }
 
 // ============================================================================
-// Default Roles
-// ============================================================================
 
 /// Default element role when no rule matches.
 pub const DEFAULT_ELEMENT_ROLE: Role = Role::Container;
@@ -936,8 +889,6 @@ pub const DEFAULT_ELEMENT_ROLE: Role = Role::Container;
 /// Default span role when no rule matches.
 pub const DEFAULT_SPAN_ROLE: Role = Role::Inline;
 
-// ============================================================================
-// Tests
 // ============================================================================
 
 #[cfg(test)]

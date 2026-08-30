@@ -1,23 +1,4 @@
 //! Surgical in-place metadata edit for a KFX container.
-//!
-//! Patches the book's metadata fragments — Amazon's categorised `book_metadata`
-//! ($490) wrapper and/or the flat `metadata` ($258) fragment — setting
-//! title / authors / language / publisher / issue_date / ASIN without
-//! re-encoding the book. This is the KFX side of "write metadata into the
-//! source", replacing the reconvert-to-bake path: the same fields
-//! `library_update_metadata` records in the DB row now reach the KFX artifact
-//! directly, through the container edit harness ([`edit_container`]).
-//!
-//! Both shapes are patched when present, so the value a consumer reads is the
-//! same whichever it consults — the loader prefers $490 and falls back to $258
-//! (see the KFX loader's `extract_book_metadata`). Every value written is an inline Ion
-//! string, so no doc-symbol-table growth is required; and only the metadata
-//! entities are rebuilt — the harness passes everything else through verbatim.
-//!
-//! Scope (v1): edits the existing `kindle_title_metadata` category in $490 and
-//! the flat $258 fields. It does not *create* a metadata fragment or category
-//! from scratch — a container with neither shape is rejected. Real Amazon/bokai
-//! KFX always carry `book_metadata` with a `kindle_title_metadata` category.
 
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
@@ -51,13 +32,6 @@ pub struct MetadataPatch {
     pub issue_date: Option<String>,
     pub asin: Option<String>,
     /// The device-internal key (`.sdr` directory, catalog entry). Carried in
-    /// the $490 shape only — the flat $258 fragment has no symbol for it — so
-    /// setting it on a container that has just $258 is silently a no-op, the
-    /// same as any other field that shape cannot hold.
-    ///
-    /// Set it with [`Self::asin`] to the same value to re-key a file whole: the
-    /// two are written equal at export, and a device that keys on either then
-    /// sees one identity rather than two.
     pub content_id: Option<String>,
 }
 
@@ -103,10 +77,6 @@ impl MetadataPatch {
 /// Apply `patch` to `kfx_bytes`, returning the rewritten container. Edits the
 /// `book_metadata` ($490) and/or `metadata` ($258) fragments in place and passes
 /// every other entity through byte-for-byte.
-///
-/// Returns the input unchanged when `patch` is empty. Errors (via
-/// [`KfxError::InvalidKfx`]) if the bytes aren't a KFX container, or if the
-/// container carries neither metadata shape to edit.
 pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>, KfxError> {
     if patch.is_empty() {
         return Ok(kfx_bytes.to_vec());
@@ -204,9 +174,6 @@ fn patch_category(cat: &IonValue, patch: &MetadataPatch, symbols: &SymbolTable) 
 }
 
 /// Patch the `kindle_title_metadata` key/value item list: replace single-valued
-/// keys in place (append if absent), and replace the whole run of `author` (and
-/// stale `author_pronunciation`) items with the new author list, keeping their
-/// original position.
 fn patch_title_items(items: &[IonValue], patch: &MetadataPatch) -> Vec<IonValue> {
     let singles = patch.single_kv();
     let mut single_done = vec![false; singles.len()];

@@ -1,18 +1,5 @@
 //! Ruby validation — extract `(base, annotation)` pairs independently from
 //! the source EPUB and from the converted KFX, then compare as multisets.
-//!
-//! The EPUB extractor uses quick-xml directly on each spine XHTML, with a
-//! small state machine that walks `<ruby>`/`<rb>`/`<rt>`/`<rp>` events.
-//! It deliberately does **not** go through bokai's DOM-to-IR transform —
-//! the goal is to catch bugs in that pipeline, not silently mirror them.
-//!
-//! The KFX extractor walks every storyline's `style_events` looking for
-//! entries that carry `ruby_name` + `ruby_id`, then slices the base text
-//! out of the referenced content fragment and looks the annotation up in
-//! the matching `ruby_content` fragment's `content_list`.
-//!
-//! `validate(...)` returns a `Report` with both sides plus the
-//! per-pair multiset diff (`missing` = in EPUB only, `extra` = in KFX only).
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -190,8 +177,6 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 }
 
 // ============================================================================
-// EPUB-side extraction
-// ============================================================================
 
 /// Extract ruby pairs from a source EPUB. Spine order is preserved.
 pub fn extract_pairs_from_epub(epub_bytes: &[u8]) -> Result<Vec<RubyPair>, String> {
@@ -349,8 +334,6 @@ pub fn extract_pairs_from_xhtml(xhtml: &str, out: &mut Vec<RubyPair>) {
     }
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 /// Extract ruby pairs from a converted KFX file. Storyline order is preserved.

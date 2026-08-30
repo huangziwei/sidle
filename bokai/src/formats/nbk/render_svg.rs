@@ -1,12 +1,4 @@
 //! Stroke → SVG rendering.
-//!
-//! Ports the pen-path branch of `scribe_notebook_stroke`
-//! (kfxlib's `yj_to_epub_notebook.py`): point coords are
-//! `position + stroke_bounds origin`; the polyline is split into sub-paths
-//! whenever per-point thickness changes (re-including up to two prior points so
-//! segments stay continuous). Variable-density (pencil) strokes render as a
-//! plain path, not the feathered density-map raster, and page templates (the
-//! white background) are not drawn.
 
 use std::fmt::Write;
 
@@ -23,9 +15,6 @@ pub fn page_to_svg(page: &Page) -> String {
     // White page background.
     s.push_str("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"white\"/>");
     // Ruled/grid/margin template, composited under the ink. It is authored at
-    // device-screen scale (its own viewBox), so a nested <svg> rescales it to
-    // fill the high-res page canvas (preserveAspectRatio="none": the aspect
-    // ratios match, so this just fills without distortion).
     if let Some(t) = &page.template {
         let _ = write!(
             s,
@@ -40,11 +29,6 @@ pub fn page_to_svg(page: &Page) -> String {
 }
 
 /// Render one page as a **transparent ink-only overlay** — no white background,
-/// no ruled template — for compositing on top of the host document page in the
-/// reader (the ink the user drew *over* a sideloaded PDF). Keeps ALL ink: the
-/// vector `<path>` pen/marker/highlighter strokes AND the raster `<image>`
-/// pencil strokes (whose PNG is already transparent except where the graphite
-/// lands), so the page shows through everywhere there is no ink.
 pub fn page_to_overlay_svg(page: &Page) -> String {
     let mut s = svg_open(page);
     render_ink(&mut s, page);

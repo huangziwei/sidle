@@ -1,16 +1,4 @@
 //! KFX token stream for bidirectional conversion.
-//!
-//! The token stream is an intermediate representation that abstracts away
-//! the nested Ion structure. Both import and export work through tokens:
-//!
-//! Import: Ion → TokenStream → IR
-//! Export: IR → TokenStream → Ion
-//!
-//! ## Key Design: Generic Semantic Storage
-//!
-//! Tokens use `HashMap<SemanticTarget, String>` for semantic attributes,
-//! not typed fields like `link_target` or `resource`. This keeps the token
-//! layer format-agnostic - all format-specific logic lives in the schema.
 
 use crate::formats::kfx::schema::SemanticTarget;
 use crate::model::{NodeId, Role};
@@ -60,45 +48,23 @@ pub struct ElementStart {
     /// nested `type: text` for content. Set during export by checking IR style.
     pub needs_container_wrapper: bool,
     /// Whether this element has block-level children (vs. only inline/text).
-    /// Together with [`ElementStart::needs_container_wrapper`] this decides how a bordered
-    /// element is emitted: a bordered *leaf* (inline content only) gets the
-    /// inner-text wrapper; a bordered element *with block children* (e.g. a
-    /// `罫囲み` `<div>` wrapping `<p>` lines) becomes a `type: container` whose
-    /// children form the content list directly.
     pub has_block_children: bool,
     /// `layout` symbol for a bordered `type: container` — the block-progression
     /// axis of its children, keyed to the box's own (inheritance-resolved)
-    /// writing mode: `horizontal` for vertical text (縦書き), `vertical` for
-    /// horizontal-tb. A horizontally-typeset box inside a vertical book keeps
-    /// `vertical`. `None` = not a container / fall back to the document axis.
-    /// Set during export. See [`crate::formats::kfx::context::ExportContext::container_layout_symbol`].
     pub container_layout: Option<u64>,
     /// CSS declarations converted from the content element's own outer
-    /// fields (as opposed to its named `$style` entity) — writing-mode
-    /// resets, per-image sizing, etc. Populated during import; carried into
-    /// the IR as the node's inline style.
     pub inline_style: Vec<(String, String)>,
     /// Whether the element declares `render: inline` (KFX `$601 = $283`) —
     /// an inline-flow replaced element (glyph image). Populated during
     /// import; inline images never get a block wrapper.
     pub render_inline: bool,
     /// Whether the KFX content type is `$271 image`. Populated during
-    /// import. Role overrides (a `link_to` making the element a Link, a
-    /// figure layout hint) must not swallow the `<img>` itself — the IR
-    /// builder keys its image handling on this, not on `role`.
     pub is_image: bool,
     /// `$761 layout_hints` carried on the content element's own fields
-    /// ("heading" / "figure" / "caption"). Populated during import; the IR
-    /// builder merges these with the named style's hints to settle the
-    /// element's role (calibre `attach_layout_hints` merge order).
     pub layout_hints: Vec<String>,
     /// `$790 yj.semantics.heading_level` from the element's own fields.
     pub heading_level: Option<String>,
     /// `$148 table_column_span` / `$149 table_row_span` — how many grid
-    /// columns/rows this cell occupies. A cell carries no distinguishing
-    /// element type in KFX (it is whatever `type` its content wants, sitting
-    /// in a `table_row`'s content list), so the span rides on the element
-    /// itself. Absent means one; both directions leave `None` alone.
     pub column_span: Option<u32>,
     pub row_span: Option<u32>,
     /// `$152 column_format` for a table: one entry per column, the column
@@ -106,9 +72,6 @@ pub struct ElementStart {
     /// collapses into it. Empty for every other element.
     pub column_format: Vec<ColumnFormat>,
     /// `$104 list_start_offset` — the ordinal this list, or this item, counts
-    /// from. A publisher's numbered list interrupted by prose arrives as one
-    /// list per item, each stating where it resumes, so dropping the offset
-    /// restarts every fragment at one.
     pub list_start: Option<u32>,
 }
 
@@ -198,11 +161,6 @@ pub struct SpanStart {
     /// `Role::RubyText` child carrying this text when the Ruby span closes.
     pub ruby_annotation: Option<String>,
     /// Per-sub-run ruby pairs from a `ruby_id_list` style_event
-    /// (import only): `(sub_offset, sub_length, annotation)` relative to the
-    /// event's own offset. When non-empty the IR builder emits interleaved
-    /// base-slice / `RubyText` pairs — calibre's grouped
-    /// `<ruby><rb>…</rb><rt>…</rt><rb>…</rb><rt>…</rt></ruby>` shape —
-    /// instead of the single-annotation form.
     pub ruby_pairs: Vec<(usize, usize, String)>,
 }
 

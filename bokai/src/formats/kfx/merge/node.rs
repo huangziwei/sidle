@@ -1,14 +1,4 @@
 //! Ion AST + binary parser/writer for the merge pipeline.
-//!
-//! Mirrors calibre's `ion_binary.py` model: symbols are strings (canonical
-//! form `"$N"` for catalog symbols, custom strings for locals), struct field
-//! names are strings, annotations are lists of strings. The symbol-string
-//! ↔ ID conversion happens at I/O boundaries via the [`LocalSymbolTable`].
-//!
-//! Only the subset of Ion calibre actually emits in KFX is implemented:
-//! null, bool, posint, negint, blob, list, struct, symbol, string,
-//! annotation. Floats/decimals/timestamps/clobs/s-exps are not produced by
-//! KFX and are not handled here.
 
 use std::io;
 
@@ -17,17 +7,6 @@ use super::symtab::LocalSymbolTable;
 pub const ION_BVM: [u8; 4] = [0xe0, 0x01, 0x00, 0xea];
 
 /// Ion AST node, calibre-faithful (string-symbol form).
-///
-/// `Struct` preserves insertion order via `Vec`, matching calibre's
-/// `IonStruct = OrderedDict`. Duplicate field names are allowed at the
-/// AST level — calibre logs an error on read but keeps the first value;
-/// our parser keeps both entries.
-///
-/// Float/Decimal/Timestamp are stored as their raw payload bytes
-/// (`type_code` is the high nibble of the Ion type descriptor: 4, 5, or 6).
-/// We never need to introspect their magnitudes during merge — calibre and
-/// Kindle parse them downstream — so round-tripping the wire bytes verbatim
-/// is faster and avoids precision drift on the format we don't otherwise use.
 #[derive(Debug, Clone)]
 pub enum IonNode {
     Null,
@@ -90,8 +69,6 @@ impl IonNode {
     }
 }
 
-// =========================================================================
-// Parser
 // =========================================================================
 
 /// Parse a single Ion value (BVM-prefixed) using the given symtab to resolve
@@ -300,8 +277,6 @@ impl<'a> Parser<'a> {
     }
 }
 
-// =========================================================================
-// Writer
 // =========================================================================
 
 /// Serialize a single Ion value (without the BVM prefix). Mirrors calibre's

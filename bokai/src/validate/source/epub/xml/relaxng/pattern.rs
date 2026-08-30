@@ -1,19 +1,4 @@
 //! The RELAX NG pattern model, hash-consed into an arena.
-//!
-//! This is the *simplified* syntax of the specification (§4): the form a grammar
-//! takes after the transformations that inline `<define>`/`<ref>` cycles, hoist
-//! namespaces onto names, and reduce every sugar (`<optional>`, `<zeroOrMore>`,
-//! `<mixed>`, `<element name="x">`) to the dozen primitives below. Validation is
-//! then a fold over this model and nothing else — [`super::derive`].
-//!
-//! Patterns are interned. Two reasons, both load-bearing:
-//!
-//! - **Recursion.** `element foo { element foo { … }? }` is a cycle in the
-//!   pattern graph, so a tree of owned values cannot represent it. An arena of
-//!   ids can.
-//! - **Speed.** Validation derives a new pattern per node, and the derivative of
-//!   a large grammar is mostly *the same subpatterns again*. Interning makes
-//!   structural equality a `u32` comparison and lets the derivative cache hit.
 
 use std::collections::HashMap;
 
@@ -91,19 +76,8 @@ pub enum Pattern {
     After(PatternId, PatternId),
     /// An indirection to another pattern, which [`Arena::pattern`] follows
     /// transparently.
-    ///
-    /// A `define` whose body is just `<ref name="other"/>` — the aliasing that
-    /// runs through every modular grammar — cannot be filled by *copying*
-    /// `other`'s pattern, because `other` may not be filled yet. Pointing at it
-    /// is order-independent and cycle-safe.
     Ref(PatternId),
     /// A [`Arena::reserve`]d slot that has not been [`Arena::fill`]ed yet.
-    ///
-    /// It has to be its own variant rather than a stand-in like `NotAllowed` or
-    /// `Empty`: the smart constructors below rewrite those away, so a recursive
-    /// definition built around one would silently lose its own recursion — the
-    /// pattern `(div | text)*` would collapse to `text*` while `div` was still a
-    /// placeholder. `Hole` is inert, so it survives until it is filled.
     Hole,
 }
 
@@ -161,9 +135,6 @@ impl Arena {
     }
 
     /// Reserve an id whose pattern is filled in later — the only way to build
-    /// the cycle a recursive `<define>` becomes after inlining. The slot holds
-    /// [`Pattern::Hole`] until [`fill`](Self::fill), and is deliberately not
-    /// interned so two reservations never alias.
     pub fn reserve(&mut self) -> PatternId {
         let id = PatternId(self.patterns.len() as u32);
         self.patterns.push(Pattern::Hole);

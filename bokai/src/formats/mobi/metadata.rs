@@ -1,18 +1,9 @@
 //! What a MOBI/KF8 file's headers say about the book.
-//!
-//! Both importers — MOBI 6's single text stream and KF8's skeleton/chunk
-//! layout — read the same PDB name, MOBI header and EXTH records. The
-//! KF8-only records (fixed layout, book type, page resolution) are absent
-//! from a MOBI 6 file.
 
 use crate::formats::mobi::{ExthHeader, MobiHeader, PdbInfo};
 use crate::model::{CollectionInfo, Metadata, OrientationLock};
 
 /// Read the book's metadata out of the headers.
-///
-/// The title comes from the best of three: the EXTH record the store updated,
-/// the MOBI header's own, and the PDB database name — which is truncated to 31
-/// bytes and is the last resort for that reason.
 pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>) -> Metadata {
     let title = exth
         .as_ref()
@@ -41,13 +32,6 @@ pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>)
 }
 
 /// Name the *issue*, not just the publication.
-///
-/// A periodical's title field holds the publication, the same string on every
-/// issue; the catalogue groups issues under it and separates them by date. A
-/// sideload gets no such grouping (see `Metadata::periodical`).
-///
-/// The date goes on in ISO form, keeping a plain title sort chronological.
-/// Idempotent: a title ending with the date is returned unchanged.
 fn issue_title(title: &str, date: Option<&str>) -> String {
     let Some(date) = date
         .map(crate::util::truncate_to_date)
@@ -75,13 +59,6 @@ pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a s
 }
 
 /// Is this an issue of a periodical, and of what kind?
-///
-/// Two independent declarations say so, and either alone is enough: the MOBI
-/// header type and EXTH 501. A file rebuilt by a third-party tool can carry
-/// one without the other.
-///
-/// The NCX's own tag-5 `kind` string lives in the index, not the headers. An
-/// importer that has read the index can override this.
 fn periodical_kind(
     mobi: &MobiHeader,
     exth: &Option<ExthHeader>,
@@ -112,9 +89,6 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
         .or_else(|| exth.source.clone())
         .unwrap_or_default();
     // EXTH 113 nominally holds an ASIN, but calibre's exporter writes a
-    // freshly-minted UUID there. Only promote to `metadata.asin` when the value
-    // actually looks like an Amazon ASIN (10-char alphanumeric starting with B
-    // for ebooks).
     metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
     // The series a store title states inline (EXTH 503) — the format has no
     // field of its own for it. No position comes with it: the annotation names

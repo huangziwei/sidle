@@ -1,8 +1,4 @@
 //! Core IR → Markdown rendering.
-//!
-//! This module provides pure rendering logic that transforms the book IR
-//! into Markdown strings. No I/O is performed here - the export layer
-//! handles writing to files/writers.
 
 use std::collections::HashMap;
 
@@ -340,10 +336,6 @@ impl<'a> RenderContext<'a> {
                 self.ensure_line_started();
 
                 // Resolve the link's destination. Internal references to
-                // non-heading nodes render as plain text: a flat txt/Markdown
-                // file carries no `<a id>` targets, so a `#cNnM` link would just
-                // dangle. External URLs and links to headings (which Markdown
-                // anchors by slug automatically) stay as real links.
                 let global_id = GlobalNodeId::new(self.chapter_id, id);
                 let anchor = match self.resolved.get(global_id) {
                     Some(AnchorTarget::External(url)) => Some(url.clone()),
@@ -546,9 +538,6 @@ impl<'a> RenderContext<'a> {
             }
 
             // Ruby (CJK furigana). The Ruby node holds the base Text node(s)
-            // followed by an `rt` (RubyText) child carrying the reading, so
-            // walking children in order emits base-then-reading; the RubyText
-            // arm wraps the reading in full-width parens. Net: `漢字（かんじ）`.
             Role::Ruby => {
                 self.ensure_line_started();
                 self.walk_children(id);
@@ -562,12 +551,6 @@ impl<'a> RenderContext<'a> {
             }
 
             // A `<div>`/`<section>` is block-level. Separate it from its
-            // siblings with a blank line, like a paragraph. Pure wrapper
-            // containers (a div that only holds other blocks) collapse to a
-            // single separation via the `pending_newline` logic, so nesting
-            // doesn't pile up blank lines. Without this, EPUBs that wrap every
-            // paragraph and heading in a styled `<div>` (common in Calibre /
-            // Kindle-sourced books) run all their text together on one line.
             Role::Container => {
                 self.start_block();
                 self.walk_children(id);
@@ -673,20 +656,6 @@ impl<'a> RenderContext<'a> {
 }
 
 /// Render a single chapter to markdown.
-///
-/// This is the main entry point for chapter rendering. It creates a
-/// `RenderContext`, processes all nodes, and returns the result.
-///
-/// # Arguments
-///
-/// * `chapter` - The chapter to render
-/// * `chapter_id` - The chapter's ID for building GlobalNodeIds
-/// * `resolved` - Resolved links for internal link output
-/// * `heading_slugs` - Map of heading targets to slugs
-///
-/// # Returns
-///
-/// A `RenderResult` containing the rendered markdown and any footnotes.
 pub fn render_chapter(
     chapter: &Chapter,
     chapter_id: ChapterId,

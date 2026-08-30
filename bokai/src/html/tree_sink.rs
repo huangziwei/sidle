@@ -35,9 +35,6 @@ impl Default for NodeHandle {
 }
 
 /// TreeSink implementation that builds an ArenaDom.
-///
-/// Uses interior mutability (RefCell) because html5ever's TreeSink trait
-/// requires methods to take `&self` but we need to mutate the DOM.
 pub struct ArenaSink {
     dom: RefCell<ArenaDom>,
     quirks_mode: RefCell<QuirksMode>,
@@ -184,7 +181,6 @@ impl TreeSink for ArenaSink {
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
         // For templates, just return the target itself
-        // A full implementation would track template contents separately
         target.clone()
     }
 

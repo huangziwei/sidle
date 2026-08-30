@@ -1,9 +1,4 @@
 //! JPEG-XR TIFF-like container parser.
-//!
-//! Port of calibre's `jxr_container.JXRContainer`. JXR files begin with a
-//! "II-BC 01" magic, followed by a single IFD describing one image: pixel
-//! format, dimensions, and a pointer to the WMPHOTO codestream. We extract
-//! the codestream bytes and pass them to the image decoder.
 
 use super::misc::{Deserializer, DeserializerError};
 
@@ -110,11 +105,6 @@ fn field_value_u64(field_type: u16, field_data: &[u8]) -> Option<u64> {
 }
 
 /// The Microsoft pixel-format GUID family: `24c3dd6f-034e-fe4b-b185-3d77768dc9XX`
-/// with the last byte selecting the format. Full table from libjxr
-/// `JXRGlue.h` (every non-commented `DEFINE_GUID`); names match
-/// `GUID_PKPixelFormat*`. NOTE: 0x0f is 32bppBGRA — the plain RGBA formats
-/// live OUTSIDE the family (see `ODDBALL_UUIDS`); a previous version of this
-/// table mislabeled 0x0f as "32bppRGBA".
 const FAMILY_PREFIX: &str = "24c3dd6f-034e-fe4b-b185-3d77768dc9";
 const FAMILY_FORMATS: &[(u8, &str)] = &[
     (0x05, "BlackWhite"),
@@ -209,10 +199,6 @@ pub fn format_name(uuid: &str) -> Option<&'static str> {
 }
 
 /// Format the 16 bytes of a UUID in the canonical `8-4-4-4-12` form. We have
-/// to do this by hand because the Microsoft JXR pixel-format UUID is encoded
-/// with a *mixed* endian (first three fields are little-endian, last two are
-/// big-endian) — same as Microsoft GUID-on-disk format, which is what
-/// Python's `uuid.UUID(bytes=field_data)` produces.
 fn format_jxr_uuid(b: &[u8]) -> String {
     // Python's `uuid.UUID(bytes=b)` interprets the bytes as the big-endian
     // 128-bit integer form, then prints canonical 8-4-4-4-12. So we must
@@ -240,10 +226,6 @@ fn format_jxr_uuid(b: &[u8]) -> String {
 }
 
 /// Parse the TIFF-like JXR container: locate the primary (and, when
-/// present, separate-alpha) WMPHOTO codestream, the pixel-format GUID, the
-/// dimensions, and the optional metadata ranges (ICC, XMP, EXIF). Unknown
-/// tags and trailing IFD entries are tolerated; the codestream itself is
-/// not touched (hand `image_data` to [`decoder::Decoder`](super::decoder::Decoder)).
 pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerError> {
     let mut ds = Deserializer::new(data);
     let sig = ds.extract(4, true)?;

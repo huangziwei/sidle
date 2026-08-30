@@ -1,20 +1,6 @@
 //! KFX container deserialize + serialize.
 //!
 //! A KFX container looks like:
-//!
-//! ```text
-//! offset 0   : "CONT" + version(u16 LE) + header_len(u32 LE)
-//!              + container_info_offset(u32 LE) + container_info_length(u32 LE)
-//! offset 18..: entity table (24 B per row: id u32 + type u32 + offset u64 + len u64)
-//!              + doc_symbols Ion blob (annotated $ion_symbol_table)
-//!              + format_capabilities Ion blob (annotated $593)
-//!              + container_info Ion blob (an IonStruct of bcContId/bcChunkSize/etc.)
-//!              + kfxgen_info bytes (Ion-textish key/value list)
-//! offset header_len..: concatenated entity payloads
-//! ```
-//!
-//! Each entity payload starts with `"ENTY"` + version u16 + header_len u32
-//! + entity_info Ion blob (bcComprType+bcDrmScheme) + body bytes.
 
 use std::io;
 
@@ -328,8 +314,6 @@ fn entity_to_fragment(
 }
 
 // =========================================================================
-// Serialization
-// =========================================================================
 
 /// Build the final KFX container bytes from a fragment list + symtab.
 pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) -> Vec<u8> {
@@ -582,8 +566,6 @@ fn bump_imports_max_id(value: &IonNode, delta: i64) -> IonNode {
     out
 }
 
-// =========================================================================
-// helpers
 // =========================================================================
 
 #[inline]

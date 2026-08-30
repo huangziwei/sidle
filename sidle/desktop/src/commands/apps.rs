@@ -183,9 +183,6 @@ pub async fn apps_add(state: State<'_, AppState>, path: String) -> Result<Vec<Ap
 }
 
 /// Register every app in the latest release of `source`, an `owner/repo`.
-///
-/// The bundle is checked against the sha256 its release declares and unpacked
-/// under the library root, where it is read exactly as a checkout is.
 #[tauri::command]
 pub async fn apps_add_release(
     state: State<'_, AppState>,

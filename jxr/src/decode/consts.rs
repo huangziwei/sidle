@@ -1,11 +1,4 @@
 //! T.832 constants: the public spec-code vocabulary for the raw `u8` fields
-//! on [`DecodedImage`](crate::decode::decoder::DecodedImage) and
-//! [`HeaderSummary`](crate::decode::decoder::HeaderSummary), plus the
-//! crate-internal permutation/delta tables.
-//!
-//! Direct port of the constant block at the top of calibre's `jxr_image.py`.
-//! Names preserved verbatim so cross-referencing against the Python source
-//! and the ITU-T T.832 spec is straightforward.
 
 #![allow(non_upper_case_globals)]
 

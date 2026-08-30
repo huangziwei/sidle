@@ -1,15 +1,4 @@
 //! Tauri commands for splitting a collection into the series it collects.
-//!
-//! Two calls, because the split is a confirmed action rather than a button that
-//! fires: [`omnibus_propose`] reads the book and reports what it would do, and
-//! [`omnibus_split`] carries out the plan the user hands back. Between them sits
-//! a form — the series name and every volume's title and number are the user's,
-//! and nothing is written until they say so.
-//!
-//! The commit is one long job that fans out into N conversions. It emits
-//! `library:split-progress` per volume while it writes them, and the
-//! `epub_to_kfx` job each new volume earns then shows up in the ordinary
-//! conversion queue.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -31,8 +20,6 @@ pub struct SplitProposal {
     pub volumes: Vec<omnibus::VolumeCut>,
     /// How many books other than this one already sit in `series_name` — a
     /// series it was split into before, or volumes that arrived separately.
-    /// Non-zero is a warning: the positions already taken there stay as they
-    /// are.
     pub existing_in_series: i64,
 }
 

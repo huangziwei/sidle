@@ -1,10 +1,6 @@
 // anchor.js — resolve a KFX annotation's (eid, char-offset) anchor to a DOM
 // Range inside a rendered section. Pure given the section `doc` + annotation,
 // so it's unit-testable independent of the reader coordinator.
-//
-// bokai stamps `data-eid="<eid>"` on every addressable element; the char offset
-// indexes the element's *base text* (ruby <rt>/<rp> excluded), exactly as the
-// KFX content text does — char-exact with what My Clippings records.
 
 // Element's descendant text nodes in document order, skipping ruby annotation
 // text (<rt>/<rp>) but keeping ruby base (<rb>) and ordinary text.
@@ -58,10 +54,6 @@ export function rangeFor(doc, ann) {
 }
 
 // ---- reverse: DOM selection → KFX (eid, offset) anchor ----------------------
-// The inverse of the above, for native (Sidle-authored) annotations. A user's
-// DOM selection lands on text nodes; we resolve it back to the same base-text
-// `(eid, offset)` coordinates the device path stores, so a created highlight
-// re-paints (via rangeFor) exactly where it was drawn.
 
 // Concatenated base text of an element (ruby <rt>/<rp> excluded).
 function baseString(el) {
@@ -81,9 +73,6 @@ function eidElementOf(container) {
 
 // Inverse of `textBoundary`: the base-text char offset of a (node, nodeOffset)
 // DOM position within `eidEl`. Ruby isn't counted (it isn't a base text node).
-// If the position's node isn't part of the base text (e.g. a boundary inside
-// ruby furigana), clamp to the base-char count just before the next base node in
-// document order.
 export function charOffsetIn(eidEl, node, nodeOffset) {
   let count = 0;
   for (const n of baseTextNodes(eidEl)) {
@@ -97,11 +86,6 @@ export function charOffsetIn(eidEl, node, nodeOffset) {
 }
 
 // A DOM Range (a user selection) → { eid_start, off_start, eid_end, off_end }, or
-// null if either boundary isn't inside a [data-eid] element. The Range end is
-// exclusive; stored end offsets are INCLUSIVE, so off_end = endChar − 1. When the
-// selection ends exactly at offset 0 of an element, the last covered char is the
-// previous [data-eid] element's last base char — back up so the highlight doesn't
-// claim an empty leading span.
 export function anchorFromRange(doc, range) {
   if (!range || range.collapsed) return null;
   const startEl = eidElementOf(range.startContainer);
@@ -130,11 +114,6 @@ export function anchorFromRange(doc, range) {
 }
 
 // Reconstruct an annotation's base text from the live DOM, slicing each
-// [data-eid] element it spans by the stored offsets (ruby excluded, end
-// inclusive) — the same per-element walk `annotationRects` paints over. Used so a
-// freshly-created annotation stores exactly the text rangeFor will re-resolve,
-// NOT range.toString() (which would include ruby <rt> text and desync the
-// base-text offset semantics).
 export function baseTextOf(doc, ann) {
   if (ann.eid_start == null) return "";
   const all = [...doc.querySelectorAll("[data-eid]")];
@@ -147,10 +126,6 @@ export function baseTextOf(doc, ann) {
   if (ei < si) ei = si;
   let out = "";
   // [data-eid] elements nest — a heading wrapper holds the same words as the
-  // span inside it, and the source gives the wrapper a position but no text of
-  // its own. `baseString` reads through descendants, so visiting both repeats
-  // the passage verbatim (a two-element heading highlight stored its sentence
-  // twice). Take the outermost element of each nest and skip what it contains.
   let outer = null;
   for (let i = si; i <= ei; i++) {
     const el = all[i];
@@ -159,9 +134,6 @@ export function baseTextOf(doc, ann) {
     const text = baseString(el);
     const from = el === startEl ? (ann.off_start ?? 0) : 0;
     // An end offset that lands inside a skipped descendant is measured in that
-    // descendant's frame, not this one's, so the range runs to the end of the
-    // container instead. Exact only when the two frames coincide, which is the
-    // case whenever the wrapper's text is entirely the nested element's.
     const to = el === endEl ? (ann.off_end ?? 0) + 1 : text.length;
     out += text.slice(from, Math.min(to, text.length));
   }

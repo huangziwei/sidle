@@ -1,19 +1,4 @@
 //! Keep on-device books in sync with the canonical desktop library.
-//!
-//! The desktop is canonical: when a book is reconverted (a fix), the Kindle
-//! should pull the new bytes. But the on-device filename is FROZEN — the Kindle
-//! binds each `.sdr` (highlights + reading position) to that exact name, so a
-//! rename would orphan the reader's state. `kfx_sha256` (hence `device_filename`)
-//! is therefore a stable identity, not a content hash, and can't signal that the
-//! bytes changed. The server ships a separate content revision, `kfx_rev` (the
-//! KFX file's mtime); we record what rev we last wrote for each on-device file
-//! and, on the next sync, re-download in place (same name → `.sdr` kept) any book
-//! whose server rev has moved.
-//!
-//! Matching a device file to a library book mirrors the desktop's own recovery
-//! (`find_by_kfx_basename`): by the sha8 identity first, then by the basename
-//! "stem" — which a reconvert never changes — so a book that drifted before we
-//! tracked revs still resolves and updates under its old, frozen name.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,9 +10,6 @@ use crate::config::ServerConfig;
 use crate::device_state;
 
 /// The picker's record of the KFX revision (`Book::kfx_rev`) it last wrote for
-/// each on-device file, keyed by the frozen on-device filename. Lives next to
-/// the cover cache under `extensions/sidle/`, NOT in `documents/Sidle/` (the
-/// user's book folder). Absent / unreadable → empty (first run), never an error.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Revs(pub HashMap<String, i64>);
@@ -135,9 +117,6 @@ fn plan_for(device_file: &str, book: &Book, recorded: Option<i64>) -> Plan {
         Some(_) => Plan::Update { rev },             // known & the desktop moved it
         None => {
             // First time we've seen this file. If its frozen sha8 still equals
-            // the book's current identity it wasn't reconverted since download —
-            // record the baseline without a needless pull. If it differs the book
-            // drifted (reconverted before rev tracking) → its bytes are stale.
             let drifted = device_state::extract_sha8(device_file)
                 .zip(book.kfx_sha256.as_deref())
                 .map(|(dev, srv)| !srv.starts_with(dev))
@@ -152,10 +131,6 @@ fn plan_for(device_file: &str, book: &Book, recorded: Option<i64>) -> Plan {
 }
 
 /// Re-download, in place, every on-device book the desktop has a newer revision
-/// of. Folded into the Sync tap (after annotations upload) so device upkeep is
-/// automatic. `on_book(current, total, title)` drives a progress toast; `log`
-/// records per-file outcomes. Best-effort throughout: a single failed transfer
-/// is counted and skipped, never aborting the rest.
 pub fn pull_updates(
     agent: &ureq::Agent,
     cfg: &ServerConfig,

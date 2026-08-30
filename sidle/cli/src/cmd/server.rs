@@ -1,8 +1,4 @@
 //! The LAN server the Kindle pulls from.
-//!
-//! One daemon serves whoever asks — the desktop app and this binary observe and
-//! control the same process, so starting it here and starting it from the
-//! window's toggle are the same act.
 
 use anyhow::Result;
 use clap::Subcommand;

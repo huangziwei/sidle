@@ -1,28 +1,8 @@
 //! Pure markdown escaping utilities.
-//!
-//! These functions handle escaping special Markdown characters and calculating
-//! appropriate fence/tick lengths for code blocks and inline code.
 
 /// Escape special Markdown characters in text.
 ///
 /// Escapes characters that have special meaning in Markdown:
-/// - Backslash: `\\`
-/// - Emphasis: `*`, `_`
-/// - Links: `[`, `]`
-/// - Code: `` ` ``
-/// - Headings: `#` (only at line start)
-/// - Tables: `|`
-/// - HTML: `<`, `>`
-/// - Images: `!` (when followed by `[`)
-///
-/// # Examples
-///
-/// ```
-/// use bokai::formats::markdown::escape_markdown;
-///
-/// assert_eq!(escape_markdown("*bold*"), "\\*bold\\*");
-/// assert_eq!(escape_markdown("[link]"), "\\[link\\]");
-/// ```
 pub fn escape_markdown(text: &str) -> String {
     let mut result = String::with_capacity(text.len() + text.len() / 10);
     let mut chars = text.chars().peekable();
@@ -68,21 +48,6 @@ pub fn escape_markdown(text: &str) -> String {
 }
 
 /// Calculate the minimum fence length needed for a code block.
-///
-/// Returns the smallest number of fence characters (at least 3) that
-/// doesn't appear as a run in the content.
-///
-/// # Examples
-///
-/// ```
-/// use bokai::formats::markdown::calculate_fence_length;
-///
-/// // Normal content needs 3 backticks
-/// assert_eq!(calculate_fence_length("let x = 1;", '`'), 3);
-///
-/// // Content with 3 backticks needs 4
-/// assert_eq!(calculate_fence_length("```rust\ncode\n```", '`'), 4);
-/// ```
 pub fn calculate_fence_length(content: &str, fence_char: char) -> usize {
     let mut max_run = 0;
     let mut current_run = 0;
@@ -100,21 +65,6 @@ pub fn calculate_fence_length(content: &str, fence_char: char) -> usize {
 }
 
 /// Calculate the minimum backtick count needed for inline code.
-///
-/// Returns the smallest number of backticks (at least 1) that doesn't
-/// appear as a run in the content.
-///
-/// # Examples
-///
-/// ```
-/// use bokai::formats::markdown::calculate_inline_code_ticks;
-///
-/// // Normal content needs 1 backtick
-/// assert_eq!(calculate_inline_code_ticks("code"), 1);
-///
-/// // Content with backticks needs more
-/// assert_eq!(calculate_inline_code_ticks("code with ` backtick"), 2);
-/// ```
 pub fn calculate_inline_code_ticks(content: &str) -> usize {
     let mut max_run = 0;
     let mut current_run = 0;

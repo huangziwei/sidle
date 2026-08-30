@@ -1,17 +1,4 @@
 //! Boot-failure Diagnostics screen.
-//!
-//! When `list_books` can't reach sidle-server at launch, the picker
-//! renders this panel instead of flashing a toast and exiting (the old
-//! `draw_boot_toast` path). It shows what the picker tried — host, token
-//! prefix, the actual error, a class-specific hint — and offers two tap
-//! zones, **Retry** and **Exit**, so the user has an on-device recourse
-//! (start the server, then Retry) without relaunching the picker.
-//!
-//! Modeled on `ui/pager.rs` (a bottom button strip + a pure `hit`
-//! geometry fn) and `ui/toast.rs` (a centered panel). Page-button events
-//! are ignored here — there's no paging — but because `Input` has grabbed
-//! the bezel device, a press still can't leak to the framework and
-//! repaint over us (the #7 corruption the gallery had).
 
 use crate::api::SidleError;
 use crate::config::ServerConfig;
@@ -41,10 +28,6 @@ fn btn_top(yres: u32) -> u32 {
 }
 
 /// Map a tap to a button. Anything above the button row is dead space
-/// (no action); the row splits left = Exit, right = Retry — the leave action
-/// sits leftmost, matching the gallery's Exit and the filter screens. Pure
-/// integer geometry so it can be reasoned about without a framebuffer (mirrors
-/// `pager::hit`).
 pub fn hit(tx: u32, ty: u32, xres: u32, yres: u32) -> Option<Action> {
     if ty < btn_top(yres) {
         return None;
@@ -57,9 +40,6 @@ pub fn hit(tx: u32, ty: u32, xres: u32, yres: u32) -> Option<Action> {
 }
 
 /// First 8 chars of the token, with a trailing `…` only when there's more
-/// hidden — never the full bearer secret. Byte-slicing at 8 is safe: the
-/// token is ASCII hex from `.server-token`, so there's no UTF-8 boundary
-/// to split.
 fn token_prefix(token: &str) -> String {
     let head = &token[..8.min(token.len())];
     if token.len() > 8 {
@@ -152,10 +132,6 @@ fn draw(
 }
 
 /// Two-zone button row at the bottom: `[ Exit ]` left half, `[ Retry ]`
-/// right half, a 2px top divider + a vertical mid divider in `pager`'s
-/// style. Exit (leave) is leftmost so it matches the gallery and the filter
-/// screens. Labels are bracketed ASCII (no glyph-coverage risk on a screen
-/// whose whole job is to be readable when things are broken).
 fn draw_buttons(fb: &mut Framebuffer, renderer: &mut TextRenderer) {
     let xres = fb.var.xres;
     let top = btn_top(fb.var.yres);

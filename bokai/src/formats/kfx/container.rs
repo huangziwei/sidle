@@ -555,7 +555,6 @@ mod tests {
         let mut data = vec![0u8; 18];
         data[0..4].copy_from_slice(b"CONT");
         // Skip 2 bytes (unknown)
-        // header_len at offset 6
         data[6..10].copy_from_slice(&100u32.to_le_bytes());
         // container_info_offset at offset 10
         data[10..14].copy_from_slice(&200u32.to_le_bytes());

@@ -1,20 +1,4 @@
 //! Resolve `.yjr` annotation anchors against a book's KFX content.
-//!
-//! Each [`yjr::Annotation`](super::yjr::Annotation) carries `(eid, offset)`
-//! handles into KFX elements; this module turns those handles into the *text*
-//! the annotation covers plus its linear positions, reading both through a
-//! [`BookIndex`].
-//!
-//! Division of labour:
-//!   - `yjr.rs` decodes the device file into handles + note bodies;
-//!   - bokai supplies `eid → base text` and the position scale;
-//!   - **this module** joins them into a [`Resolved`] record;
-//!   - `ingest.rs` folds in book identity + a dedup hash and writes the DB.
-//!
-//! Kindle handle semantics: the end offset is **inclusive**, so
-//! a range extraction passes `off_end + 1` to [`BookIndex::extract`], which is
-//! half-open. A bookmark anchors a point, not a span, so its "text" is the
-//! containing element's text — a location preview for the bookmark list.
 
 use std::collections::HashMap;
 
@@ -25,13 +9,6 @@ use super::yjr::{Annotation, Kind};
 
 /// A book's anchoring index: the base text the source stores per element, plus
 /// the position scale those elements sit on.
-///
-/// The two travel together because resolving one handle draws on both — the
-/// text says what characters an offset lands on, the scale says where in the
-/// book it is — but they are independent: a book can carry positions and no
-/// text at all. Building one is a full parse of the book's text, so callers
-/// cache it (see the reader's per-session cache) rather than rebuilding per
-/// query.
 pub struct BookIndex {
     text: SourceText,
     positions: PositionMap,
@@ -40,12 +17,6 @@ pub struct BookIndex {
 impl BookIndex {
     /// Index a KFX from its bytes. `None` only when the container doesn't
     /// parse.
-    ///
-    /// The two halves are taken independently: an image-only fixed-layout book
-    /// carries element positions and no base text at all. Requiring both would
-    /// throw away its positions, leaving every annotation in such a book with no
-    /// place on the reading scale — unorderable in the sidebar and unable to
-    /// name a Location.
     pub fn from_kfx(bytes: &[u8]) -> Option<Self> {
         let mut book = Book::from_bytes(bytes, Format::Kfx).ok()?;
         let positions = book.position_map().unwrap_or_default();
@@ -99,16 +70,6 @@ impl BookIndex {
     /// Every occurrence of `needle`, in reading order. v1 = strict char match,
     /// ASCII case-insensitive only — no NFKC or kata→hira folding (`「ＡＢＣ」`
     /// won't match `abc`; カタカナ won't match かたかな). v1 is also intra-element:
-    /// a match must fit inside one element, which narrative text almost always
-    /// does. Ruby `<rt>` text is not part of an element's base text, so it is
-    /// skipped for free.
-    ///
-    /// Capped at [`MAX_RESULTS`]; each hit carries up to [`PREVIEW_CHARS`] of
-    /// context per side, drawn from the *original* casing.
-    /// The elements in reading order — the sequence a scan that must cross
-    /// element boundaries walks. [`search`](Self::search) does not need it
-    /// because a query match has to fit inside one element; re-anchoring an
-    /// annotation does, because a highlight routinely spans several.
     pub fn reading_order(&self) -> &[i64] {
         self.text.reading_order()
     }
@@ -169,9 +130,6 @@ const PREVIEW_CHARS: usize = 32;
 const MAX_RESULTS: usize = 1000;
 
 /// One search hit, expressed as an annotation-shaped anchor plus preview text.
-/// `off_end` is the **inclusive** last-char index, matching the
-/// `(eid_start, off_start, eid_end, off_end)` convention the DB and the
-/// webview's range walk both use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchMatch {
     pub eid: i64,
@@ -210,11 +168,6 @@ pub struct Resolved {
     /// rather than meaning yellow.
     pub color: Option<String>,
     /// When the device says the annotation was made and last changed, epoch
-    /// milliseconds. Carried rather than dropped because it is the only dated
-    /// evidence of *when a book was open* that survives in the sidecar, and
-    /// because writing the record back to another device has to restore the
-    /// stamp it came with instead of inventing one. `None`, or a non-positive
-    /// value, means the record carried no usable clock.
     pub created_ms: Option<i64>,
     pub modified_ms: Option<i64>,
 }
@@ -245,11 +198,6 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
     let text = match &ann.kind {
         // Span-bearing kinds: walk the range. The device end offset is
         // inclusive, so pass `off_end + 1` to the half-open extractor.
-        //
-        // Unless the span is a point. A note a Kindle attaches to an existing
-        // highlight collapses to the highlight's end anchor, and covers no text
-        // at all — treating it as a span would quote the single character after
-        // it, which is neither what the user marked nor what the device shows.
         Kind::Highlight | Kind::Note | Kind::Other(_) => match (start, end) {
             (Some(s), Some(e)) if (s.eid, s.offset) == (e.eid, e.offset) => String::new(),
             (Some(s), Some(e)) => idx
@@ -417,9 +365,6 @@ mod tests {
     }
 
     /// An image-only fixed-layout book carries element positions and no base
-    /// text. Its positions must survive: they are what places an annotation on
-    /// the reading scale, and dropping them would leave every annotation in
-    /// such a book unordered and Location-less.
     #[test]
     fn positions_survive_a_book_with_no_base_text() {
         let idx =

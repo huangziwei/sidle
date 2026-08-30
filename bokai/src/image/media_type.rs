@@ -1,11 +1,4 @@
 //! What an image's bytes actually are, from its leading bytes.
-//!
-//! A container's declared format can disagree with its payload, and a
-//! transform can change the payload out from under a declaration (a JPEG-XR
-//! that fails to decode passes through as JPEG-XR even though every
-//! declaration predicted JPEG). Anything that hands image bytes onward with a
-//! media type attached wants the answer from the bytes, not from a
-//! declaration that predates them.
 
 /// A raster format identifiable by its magic bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

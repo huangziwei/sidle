@@ -1,16 +1,6 @@
 //! Proof-of-concept for the X11-window rewrite.
 //!
 //! The one risky unknown before porting Sidle's renderer off raw `/dev/fb0`:
-//! will the lab126 window manager *manage* a plain Sidle-created X11 window —
-//! show it fullscreen and recomposite the screen when it's torn down — the way
-//! it does for kterm? If yes, the windowless-exit bug (dead home status bar)
-//! goes away for free, because the compositor repaints underneath us on exit.
-//!
-//! Run via `sidle --x11-poc`: maps a fullscreen window with an unmistakable
-//! test pattern, waits for a tap, then destroys it. Success criteria:
-//!   1. the test pattern actually appears (WM shows our window), and
-//!   2. tapping exits to a cleanly-repainted home screen — no stuck frame,
-//!      status bar back — proving the WM recomposited on teardown.
 
 use anyhow::{Context, Result};
 use x11rb::connection::Connection;

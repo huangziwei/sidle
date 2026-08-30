@@ -1,19 +1,4 @@
 //! In-place KFX container editing — the shared surgical-write harness.
-//!
-//! Every surgical KFX edit has the same shape: parse the container, transform a
-//! chosen handful of entities, and pass every *other* entity through byte for
-//! byte, letting [`serialize_container`] recompute the index-table offsets and
-//! `kfxgen_payload_sha1`. Cover, image, metadata and nav edits share this core.
-//!
-//! Usage: [`crate::formats::kfx::loader::load`] the container first to resolve
-//! whatever identity the edit needs (symbol table, `by_type`, `raw_media`,
-//! metadata), then call [`edit_container`] with a callback that returns an
-//! [`EntityEdit`] per entity. The callback captures the resolved identity; the
-//! harness owns the offset/slice/serialize bookkeeping.
-//!
-//! The doc-symbol table and format-capabilities section pass through verbatim.
-//! An edit introducing a new doc-symbol needs a symbol-table grow step absent
-//! here; text and most metadata/nav values are inline Ion strings.
 
 use crate::formats::kfx::container::{
     self, EntityLoc, get_field, parse_container_header, parse_index_table, slice_at,

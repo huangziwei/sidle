@@ -1,11 +1,4 @@
 //! Where `data-eid` lands, not just which ids appear.
-//!
-//! A renderer resolves a stored `(element, offset)` handle by querying
-//! `[data-eid="N"]` and walking text from the element it finds. Agreeing on the
-//! *set* of ids is not enough — a stamp has to land on the same element,
-//! enclosing the same text, or a highlight lands on the wrong words.
-//!
-//! `kfx_source_elements.rs` pins the id lists; this pins their placement.
 
 mod common;
 
@@ -72,9 +65,6 @@ fn strip_markup(s: &str) -> String {
 }
 
 /// Where every stamp landed: section, id, the tag it marked, and the text that
-/// element encloses. A renderer paints a highlight by finding the stamped
-/// element, so a stamp that moves to a different tag — or to one enclosing
-/// different words — repaints the highlight somewhere else.
 fn placements(kfx: &[u8]) -> (usize, usize, u64) {
     let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let content = bokai::export::normalize_book_with(&mut book, SourceElements::Mark)

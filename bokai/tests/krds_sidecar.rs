@@ -1,10 +1,4 @@
 //! KRDS sidecars read off real Kindles, held to a byte-exact round trip.
-//!
-//! Writing a sidecar back to a device means handing firmware a file that also
-//! carries records this crate has no opinion about, so "re-encodes unchanged"
-//! is the property that makes writing safe at all. The fixtures are real device
-//! output; they contain anchors, timestamps and font preferences only — a
-//! sidecar never stores the text an annotation covers.
 
 use bokai::formats::krds::{Anchor, Annotation, Kind, Store};
 

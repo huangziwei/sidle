@@ -1,24 +1,9 @@
 //! Front matter for a periodical issue.
-//!
-//! A periodical's navigation lives entirely in its index: the body is a run of
-//! articles with no contents page, because the format expects the reader
-//! application to draw one from the NCX. Nothing outside Amazon's own
-//! periodical reader does, so an issue converted as an ordinary book opens on
-//! its first article with no way to see what else is in it.
-//!
-//! [`issue_front_matter`] renders that missing page as ordinary content — a
-//! masthead, then each section with its articles, their bylines, standfirsts
-//! and thumbnails. Being content rather than metadata, it survives every export
-//! and needs nothing from the reading application beyond following a link.
 
 use super::index::NcxEntry;
 
 /// Render the contents page for a periodical issue, or `None` when the index
 /// is not a periodical tree (no sections, so nothing to lay out).
-///
-/// `href_for` resolves an index entry to a link target, and `thumbnail_for`
-/// resolves NCX tag 71's record offset to an asset path; both are supplied by
-/// the importer, which owns the chapter split and the asset list.
 pub fn issue_front_matter(
     ncx: &[NcxEntry],
     title: &str,
@@ -104,9 +89,6 @@ pub fn issue_front_matter(
 }
 
 /// Does this entry claim the given kind, either by tag 5 or by its depth?
-///
-/// Tag 5 is the source stating its own structure and is preferred; depth is the
-/// fallback for an index that omits it.
 fn is_kind(entry: &NcxEntry, kind: &str, level: i32) -> bool {
     match entry.kind.as_deref() {
         Some(declared) => declared.eq_ignore_ascii_case(kind),

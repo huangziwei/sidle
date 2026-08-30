@@ -1,29 +1,5 @@
 //! Break decisions taken by hand, for the words a stock pattern set breaks
 //! badly.
-//!
-//! A pattern set is generated from a word list by machine and is judged on
-//! aggregate: it may break a rare word in an odd place and still be a good set.
-//! A reader meets the commonest words on every page, though, so a poor break
-//! in one of those is seen constantly, and no adjustment of the pattern
-//! machinery reaches it — the decision is per word.
-//!
-//! # Layout
-//!
-//! One entry per line, plus one keyword:
-//!
-//! | line | meaning |
-//! |---|---|
-//! | `MINWORDLENGTH n` | words shorter than this are never broken |
-//! | `word` | never broken |
-//! | `wo-rd` | broken only where the marks are |
-//! | `%…` | a comment |
-//!
-//! An entry replaces the patterns for the word it names, and stands whatever
-//! the word's length, being itself the exception to the line above. The
-//! dictionary's own limits on how near an edge a break may fall still apply,
-//! as they do to every break. Entries are matched without regard to case, and
-//! a word that already carries a mark cannot be named by one, the marks being
-//! the breaks; a word inside such a compound can.
 
 use std::collections::HashMap;
 

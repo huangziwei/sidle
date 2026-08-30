@@ -1,28 +1,12 @@
 //! Typed (deep) encode input and the **forward sample conversion** into the
 //! "pre-bias" `i32` domain the forward transform consumes. The exact inverse
 //! of the decoder's output-formatting chain, stage by stage:
-//! `add_bias` → `compute_scaling` → `postscaling_process` read backwards is
-//! un-postscale (`>> shift_bits`), un-scale (`<< 3` when `scaled_flag`),
-//! un-bias (`− (bias_base >> shift_bits) << 3·scaled`). The transform and
-//! entropy core are depth-agnostic (`i32` coefficients end to end), so depth
-//! only touches this conversion plus a handful of header fields ([`Depth`]).
-//!
-//! `shift_bits` policy is **cloned from libjxr**: 0 for BD16/BD16S, **10
-//! for BD32S** (`strenc.c:785` default) — 32-bit input must shed 10 low bits
-//! for `i32` transform headroom, so BD32S is never bit-lossless, even at q1
-//! (the reference behaves identically). For the same headroom reason libjxr
-//! forces unscaled arithmetic for 32-bit depths (`strenc.c:961`); we reject
-//! `scaled` there instead of silently clearing it.
 
 use crate::decode::consts::{
     BD1BLACK1, BD1WHITE1, BD5, BD8, BD10, BD16, BD16F, BD16S, BD32F, BD32S, BD565,
 };
 
 /// Typed sample planes for [`crate::encode_typed`] — one `Vec` per component
-/// (R,G,B\[,A\] order, or a single gray plane), each row-major with
-/// `len == width × height`, mirroring `decode::pixels::SampleType`. Each
-/// variant selects one T.832 `OUTPUT_BITDEPTH` family and its container
-/// pixel-format GUID family.
 pub enum SamplePlanes<'a> {
     /// 8-bit unsigned (BD8) — the [`crate::ImageInput`] family
     /// (`8bppGray` / `24bppRGB` / `32bppBGRA`), routed through the identical
@@ -35,44 +19,21 @@ pub enum SamplePlanes<'a> {
     /// Bit-exact at lossless QP (no bias — the samples are already centered).
     I16(&'a [Vec<i16>]),
     /// 32-bit signed fixed-point (BD32S): `32bppGrayFixed` / `96bppRGBFixed`.
-    /// **Never bit-lossless**: the low `shift_bits = 10` bits are dropped on
-    /// input (transform headroom; the reference encoder does the same), so
-    /// q1 round-trips `(x >> 10) << 10`. Scaled arithmetic is rejected.
     I32(&'a [Vec<i32>]),
     /// IEEE-754 **half** bit patterns (BD16F): `16bppGrayHalf` /
-    /// `48bppRGBHalf`. The codestream carries halfs through a sign-magnitude
-    /// integer fold, so lossless QP is **bit-pattern-exact** for every
-    /// pattern — NaN payloads, infinities, denormals — except `-0.0`
-    /// (`0x8000`), which normalizes to `+0.0` (the fold has a single zero;
-    /// the reference encoder does the same — probed).
     F16(&'a [Vec<u16>]),
     /// IEEE-754 **single** bit patterns (BD32F): `32bppGrayFloat` /
     /// `128bppRGBFloat`. The codestream codes a custom float
     /// (`len_mantissa = 13`, `exp_bias = 4` — the reference defaults, cloned)
-    /// through the same sign-magnitude fold, keeping the top 13 mantissa
-    /// bits **rounded** (half-up) — the float analog of BD32S's shift_bits.
-    /// Values already on that grid (e.g. anything our decoder produced from
-    /// a BD32F file, incl. wild scRGB captures) round-trip bit-exactly at
-    /// q1; ±0 normalize to +0, and scaled arithmetic is rejected (i32
-    /// headroom, as the reference forces).
     F32(&'a [Vec<u32>]),
     /// Radiance shared-exponent **RGBE** (`32bppRGBE`, BD8 + `OUT_RGBE`):
     /// exactly 4 byte planes — R, G, B mantissas and the shared exponent E.
-    /// Each channel renormalizes against E on the way in (the reference's
-    /// `forwardRGBE`, half-bit imputation included), so **normalized** RGBE
-    /// (max mantissa ≥ 128, the .hdr convention) round-trips all four planes
-    /// byte-exact at lossless QP; unnormalized pixels keep their VALUE but
-    /// re-emerge renormalized. Chroma subsampling is rejected (the shared
-    /// exponent couples the channels per pixel; the reference refuses too).
     Rgbe(&'a [Vec<u8>]),
     /// Packed 5-5-5 RGB words (`16bppRGB555`, BD5): ONE plane of u16 words,
     /// channel 0 in the low 5 bits (the decode side's layout). Lossless QP
     /// round-trips the packed words exactly.
     Packed555(&'a [Vec<u16>]),
     /// Packed 5-6-5 RGB words (`16bppRGB565`, BD565): ONE plane of u16
-    /// words, channel 0 low, the 6-bit channel in the middle. The 5-bit
-    /// channels code at doubled amplitude (the decoder's extra `>>1` on
-    /// non-green channels — mirrored exactly).
     Packed565(&'a [Vec<u16>]),
     /// Packed 10-10-10 RGB words (`32bppRGB101010`, BD10): ONE plane of u32
     /// words, channel 0 in the low 10 bits.
@@ -96,13 +57,6 @@ fn fold_f16(h: u16) -> i32 {
 }
 
 /// The BD32F fold: IEEE single bits → the custom-float pseudo-integer
-/// (`(E << len_mantissa) | M`, sign-magnitude) — a line-for-line clone of
-/// libjxr's `Forward_Float` (strenc.c), the forward inverse of the decoder's
-/// `postscale_f32`. Round-half-up on the 23−lm dropped mantissa bits (the
-/// carry rolls into the exponent field, which is exactly correct); ±0 → 0.
-/// One divergence: libjxr's `m >>= (1 - e1)` is C UB for magnitudes below
-/// ~2⁻³⁶ (shift ≥ 32); we do the honest math (flush to zero, which the
-/// decoder maps back to ±0).
 fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
     if bits & 0x7fff_ffff == 0 {
         return 0;
@@ -131,11 +85,6 @@ fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
 }
 
 /// The RGBE per-channel fold (libjxr `forwardRGBE`, strenc.c:315): mantissa
-/// byte + shared exponent → the `(e << 7) | m` pseudo-log value the
-/// codestream codes. A sub-128 mantissa is left-normalized against E with a
-/// **half-bit imputed on the first shift** — the decoder's
-/// `(2x + 1) >> (diff + 1)` recovery then reproduces the source byte
-/// exactly.
 fn fold_rgbe(mut m: i32, e: i32) -> i32 {
     if e == 0 {
         return 0;
@@ -313,9 +262,6 @@ impl SamplePlanes<'_> {
 }
 
 /// `OUTPUT_BITDEPTH` plus its plane-header conversion parameters — what the
-/// input family contributes to the image header (`output_bitdepth`), the
-/// plane header (`shift_bits`; `len_mantissa`/`exp_bias` for floats), and the
-/// forward sample conversion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Depth {
     /// T.832 `OUTPUT_BITDEPTH` code.
@@ -420,14 +366,6 @@ pub(super) fn u8_prebias(p: &[u8], scaled: bool) -> Vec<i32> {
 
 /// Forward-convert integer samples to the pre-bias domain:
 /// `((x >> shift_bits) − (bias_base >> shift_bits)) << 3·scaled`.
-///
-/// Inverts the decoder stage for stage: `postscaling_process` does
-/// `<< shift_bits` last, so `>> shift_bits` comes first (this is where BD32S
-/// sheds its low 10 bits); `compute_scaling` does `(v + rounding) >> 3` when
-/// scaled (rounding 3 or 4 — both floor an exact `<< 3` back), and `add_bias`
-/// adds `(bias_base >> shift_bits) << 3·scaled`. libjxr writes the same
-/// values as `((x − bias_base) >> shift) << 3·scaled` (`strenc.c:1766`) —
-/// identical, since `bias_base` is a multiple of `2^shift`.
 fn prebias(samples: impl Iterator<Item = i32>, d: &Depth, scaled: bool) -> Vec<i32> {
     let sh = if scaled { 3 } else { 0 };
     let s = d.shift_bits;
@@ -447,11 +385,6 @@ fn raw_plane(samples: &SamplePlanes<'_>, i: usize) -> Vec<i32> {
 }
 
 /// CMYK → internal YUVK forward — a clone of libjxr's `_CC_CMYK` lifting +
-/// its asymmetric bias placement (strenc.c:415/1970: `U = c, V = −y,
-/// K = k, Y = iOffset − m` with `iOffset` the FULL bias): the exact
-/// inverse of the decoder's Table-186 lifting + its half-bias CMYK
-/// `add_bias` arm (numerically proven over the full byte range, both
-/// arithmetic modes). Returns the 4 internal planes in Y,U,V,K order.
 pub(super) fn cmyk_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Vec<Vec<i32>> {
     let d = samples.depth();
     let sh = if scaled { 3 } else { 0 };
@@ -499,11 +432,6 @@ pub(super) fn cmykdirect_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Ve
 /// Unpack packed RGB words into the three pre-bias channel planes — the
 /// inverse of the decoder's pack (Tables 196/197/198: `c0 + (c1 << hi1) +
 /// (c2 << hi2)` over clipped channels) + its per-channel bias/scaling:
-/// BD5/BD10 take the plain bias (16/512); BD565's 5-bit channels (0 and 2)
-/// carry an extra `<< 1` (the decoder's `j_scale + 1` on non-green channels
-/// — `compute_scaling`, even unscaled). Positional channels: the YUV
-/// lifting inverts positionally, so no R/B naming is needed (we emit
-/// `red_blue_not_swapped_flag = 0`, the no-swap decode path).
 pub(super) fn packed_prebias(
     samples: &SamplePlanes<'_>,
     scaled: bool,

@@ -1,25 +1,4 @@
 //! A namespace-aware XML document tree.
-//!
-//! Every other XML consumer in bokai streams events and answers local questions
-//! ("does this element carry `alt`?"). A schema engine cannot work that way: to
-//! decide whether an element is *allowed here* it must see the element in its
-//! place among its siblings, and to evaluate a Schematron assertion it must walk
-//! back up and across the document. This is that tree — the shared foundation of
-//! [`super::relaxng`] and [`super::schematron`].
-//!
-//! It is the XML data model those two specifications assume, not a general DOM:
-//!
-//! - **Namespaces are resolved to URIs, and URIs are interned.** A pattern
-//!   matches on `(namespace-uri, local-name)`, never on prefix spelling, and
-//!   name comparison happens in the innermost loop of validation — so a URI is
-//!   an integer here, compared in one instruction.
-//! - **Namespace declarations are not attributes.** `xmlns` and `xmlns:*` bind
-//!   prefixes; the data model both specs validate against does not contain them,
-//!   and a grammar that listed them would reject every real document.
-//! - **Comments and processing instructions are dropped**, as RELAX NG's data
-//!   model requires; adjacent text and CDATA runs are merged into one text node,
-//!   which is what makes "the content of this element is a single string" a
-//!   meaningful question.
 
 use std::collections::HashMap;
 
@@ -71,11 +50,6 @@ pub struct Element {
     pub prefix: Option<String>,
     /// The `xmlns`/`xmlns:p` declarations written on this element, as
     /// `(prefix, uri)` with an empty prefix for the default namespace.
-    ///
-    /// They are not part of the data model — every name in the tree is already
-    /// expanded — but a schema document *quotes* names in attribute values
-    /// (`<attribute name="xml:lang">`), and those prefixes resolve against the
-    /// schema's own declarations. See [`Document::in_scope_namespace`].
     pub namespaces: Vec<(String, String)>,
 }
 
@@ -114,11 +88,6 @@ pub struct Document {
 
 impl Document {
     /// Parse `xml` into a tree, or report the first well-formedness error.
-    ///
-    /// Well-formedness is reported here but *judged* elsewhere: a document that
-    /// does not parse cannot be schema-validated, and epubcheck likewise reports
-    /// RSC-016 and stops. Namespace prefixes are resolved against the in-scope
-    /// declarations; an unbound prefix is a parse error, as it is for Xerces.
     pub fn parse(xml: &str) -> Result<Document, ParseError> {
         Parser::new().parse(xml)
     }
@@ -209,13 +178,6 @@ impl Document {
     }
 
     /// Every node in document order, walked once per document.
-    ///
-    /// `//x` is `descendant-or-self::node()` from the document node, and
-    /// `id-unique.sch` asks a question of that shape once per element carrying
-    /// an `id` — so the walk happens as many times as the document has ids.
-    /// Reusing it removes the walk and its allocation, not the repetition:
-    /// that assertion is a self-join and stays quadratic until the evaluator
-    /// can answer `*[@id]` from an index.
     pub fn all_nodes(&self) -> &[NodeId] {
         self.all.get_or_init(|| {
             let mut out = Vec::with_capacity(self.nodes.len());
@@ -253,11 +215,6 @@ impl Document {
 
     /// The namespace URI a prefix is bound to at `id`, per the declarations on
     /// it and its ancestors — the innermost binding wins.
-    ///
-    /// The `xml` prefix is bound everywhere without a declaration, and an empty
-    /// prefix asks for the default namespace. Used for the prefixed names a
-    /// schema document quotes in its own attribute values; the tree's own names
-    /// are expanded at parse time and never need this.
     pub fn in_scope_namespace(&self, id: NodeId, prefix: &str) -> Option<&str> {
         if prefix == "xml" {
             return Some("http://www.w3.org/XML/1998/namespace");
@@ -300,13 +257,6 @@ impl Document {
 }
 
 /// Builds a [`Document`] node by node.
-///
-/// NVDL decomposes one document into *sections*, each validated against its own
-/// schema — an SVG island inside XHTML becomes a document in its own right, with
-/// the foreign-namespace content its mode does not attach simply absent. A
-/// section is therefore a new tree assembled from parts of an existing one,
-/// which is what this builds. Byte offsets are carried over from the source
-/// nodes, so a finding in a section still names its line in the original file.
 pub struct Builder {
     nodes: Vec<Node>,
     namespaces: Vec<String>,
@@ -481,8 +431,6 @@ impl Parser {
         reader.config_mut().check_end_names = true;
         // Character data is accumulated and flushed as one text node, so that
         // `<p>a<![CDATA[b]]>c</p>` has a single child, as the data model says.
-        // `pending_at` is where the run began, which is the position a finding
-        // about the text should name.
         let mut pending = String::new();
         let mut pending_at = 0usize;
         let mut open: Vec<NodeId> = vec![NodeId(0)];
@@ -726,14 +674,6 @@ impl Parser {
 }
 
 /// Resolve one entity reference (the text between `&` and `;`).
-///
-/// XML predefines exactly five entities and always resolves numeric character
-/// references. Anything else is *declared* — by the internal subset or, for the
-/// XHTML entity sets, by the DTD the DOCTYPE names. Whether a name is declared
-/// is [`super::dtd`]'s question, and an undeclared one is a fatal parse error
-/// reported there; here an unknown name is kept literally, which preserves the
-/// character data's length and never fails. A grammar or assertion that keyed on
-/// the *character* `&nbsp;` stands for would need the catalogue threaded in.
 fn expand_entity(name: &str) -> String {
     match name {
         "amp" => return "&".to_string(),
@@ -758,11 +698,6 @@ fn expand_entity(name: &str) -> String {
 /// Expand every `&…;` in a string, for the contexts quick-xml hands over raw
 /// (attribute values). Text content arrives pre-split into `GeneralRef` events
 /// and goes through [`expand_entity`] directly.
-///
-/// Also the decoder for the streaming checks outside this module, which read
-/// attribute values through the same parser and need the same answer: what an
-/// attribute *means* is its expanded value, and a reference this cannot resolve
-/// (an entity a DTD declares) stays verbatim rather than being dropped.
 pub(crate) fn expand_entities_in(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();

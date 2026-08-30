@@ -1,10 +1,4 @@
 //! The base text a KFX stores per element, read through the public API.
-//!
-//! A Kindle's annotation file records only `(element, offset)` endpoints — it
-//! carries none of the highlighted words. Those are recovered by slicing this
-//! text, which makes every assertion here one about stored user data: change
-//! the characters an element contributes or the order elements are visited in,
-//! and the same highlight covers different words.
 
 mod common;
 
@@ -17,17 +11,6 @@ const EPUB: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
 /// Every element's text in reading order, plus the whole book as one
 /// extraction.
-///
-/// Two facts ride on this digest and neither is cosmetic: the characters an
-/// element contributes, and the order elements are visited in. Change either
-/// and the same stored `(element, offset)` pair slices different words.
-///
-/// The element count and the character count move independently, each worth
-/// its own assertion. The walk spans every element the position scale
-/// *places*, ones carrying no text of their own included — section wrappers,
-/// and headings whose words sit in a child — since a device anchors a
-/// highlight at whichever element holds the boundary. They contribute no
-/// characters: their number is structural, the character count is the words.
 fn base_text(kfx: &[u8]) -> (usize, usize, u64) {
     let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let text = book.source_text().expect("source text");

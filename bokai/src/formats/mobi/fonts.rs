@@ -1,11 +1,4 @@
 //! KF8 embedded-font (`FONT`) record decoding.
-//!
-//! Record layout after the 4-byte `FONT` magic: five big-endian u32 fields —
-//! decompressed size, flags, payload start offset, XOR key length, XOR key
-//! offset. Flag bit `0b10` means the first 1040 bytes of the payload are
-//! XOR-obfuscated with the key; flag bit `0b01` means the (de-obfuscated)
-//! payload is a zlib stream. The result is a regular font file (TrueType /
-//! OpenType / WOFF), sniffed by [`detect_font_type`].
 
 use std::io::Read;
 
@@ -28,9 +21,6 @@ pub struct FontRecord {
 }
 
 /// Decode one `FONT` record into a usable font file. `None` when the record
-/// is malformed, fails to inflate, or the result isn't a recognizable font —
-/// callers treat the reference as unresolvable (the `@font-face` rule that
-/// pointed at it gets stripped instead of dangling).
 pub fn parse_font_record(record: &[u8]) -> Option<FontRecord> {
     if record.len() < 24 || &record[..4] != b"FONT" {
         return None;

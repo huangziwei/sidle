@@ -1,20 +1,6 @@
 //! Supervises the standalone `sidle-server` as a **detached child process**, so
 //! the LAN server outlives the desktop GUI — the Kindle can still reach the
 //! library, and push annotations back, with the app closed.
-//!
-//! The syscalls and observations are `sidle_core::library::daemon`, shared with
-//! the CLI. What lives here is the desktop's policy on top of them:
-//! - **start** REPLACES an already-running instance, then spawns a fresh one.
-//!   Because the daemon outlives the GUI, the one a launching app finds is
-//!   usually its own predecessor, still running whatever code was on disk when
-//!   it started; replacing it is what keeps "the app and the server were built
-//!   from the same tree" true without anyone having to check. A daemon with no
-//!   PID file is still adopted — there is nothing to signal, and it belongs to
-//!   someone else.
-//! - **stop** SIGTERMs the daemon via its PID file, then reaps the child if we
-//!   were the one who spawned it.
-//! - **status** is observation-based, so a daemon started anywhere — by the CLI,
-//!   by an earlier app run — shows as running here, and vice-versa.
 
 use std::process::Child;
 use std::sync::Arc;
@@ -95,28 +81,12 @@ impl ServerHandle {
         self.inner.lock().await.port = port;
 
         // Replace a running daemon rather than adopt it. The server deliberately
-        // outlives the GUI, so the daemon found here is typically one an earlier
-        // app run left behind — and it is running whatever code was on disk when
-        // it started, which after a rebuild is not what this app expects. A
-        // launching app always gets a server built from the same tree it was.
-        //
-        // Unconditional, with no freshness comparison: the version string does
-        // not change between builds of the same release, so there is nothing
-        // cheap to compare that would actually be right. Restarting always is
-        // both simpler and stricter than any test for staleness.
-        //
-        // The exception is a daemon we cannot name — no PID file, so nothing to
-        // signal. That is a server someone else is running; adopt it rather than
-        // fail.
         if blocking(move || daemon::port_open(port)).await {
             if daemon::read_pid(&paths).is_none() {
                 return Ok(self.status(&paths).await);
             }
             self.stop(&paths).await;
             // The daemon drains in-flight requests before releasing the port, so
-            // binding before it lets go would fail the spawn below. If it never
-            // lets go, adopt what is there instead of erroring — a working server
-            // beats a failed launch.
             if !blocking(move || daemon::wait_for_port_free(port, DRAIN_TIMEOUT)).await {
                 tracing::warn!("sidle-server did not release :{port}; adopting it");
                 return Ok(self.status(&paths).await);
@@ -134,16 +104,6 @@ impl ServerHandle {
     }
 
     /// Bring a daemon left running by an earlier app run in line with this one.
-    ///
-    /// The server deliberately survives the GUI closing, so the next launch can
-    /// find one serving code built before the app that just started. Restarting
-    /// it here is what makes "the running server was built from the same tree as
-    /// the app" true by construction, instead of something anyone has to notice
-    /// and fix by toggling the server off and on.
-    ///
-    /// **Only ever restarts; never starts.** The LAN server is opt-in, and a
-    /// user who left it off must not find it switched on because they opened the
-    /// app. Nothing running means nothing to realign.
     pub async fn realign_on_launch(&self, paths: LibraryPaths, port: u16) -> Result<()> {
         // `port_open` rather than the TLS probe: a daemon from a pre-TLS build is
         // precisely one that needs realigning, and it cannot answer HTTPS.
@@ -176,9 +136,6 @@ mod tests {
     use super::*;
 
     /// A plaintext listener holding a port — a *squatter*, not a sidle server.
-    /// It answers HTTP and cannot complete a TLS handshake, which is what makes
-    /// it the right stand-in for both cases the adoption path guards against: a
-    /// daemon from a pre-TLS build, and an unrelated process on the port.
     fn dummy_plaintext_squatter() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -196,13 +153,6 @@ mod tests {
     /// A listener with no PID file is someone else's — there is nothing to
     /// signal, so it is adopted rather than replaced or duplicated. (The replace
     /// path needs the real binary and is covered by the live gate.)
-    ///
-    /// It is also reported as **not running**, and that is the point of the
-    /// assertion rather than an accident of the fixture: since the switch to
-    /// TLS, "running" means a daemon whose certificate our own CA vouches for —
-    /// exactly the daemon a Kindle could use. A squatter that cannot present one
-    /// is no more usable to the app than to the device, so calling it "running"
-    /// would promise a sync that cannot happen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unverifiable_squatter_is_adopted_but_not_called_running() {
         let port = dummy_plaintext_squatter();
@@ -259,9 +209,6 @@ mod tests {
             "never spawn a second server onto an occupied port"
         );
         // The port is still held, so binding a second daemon would have failed —
-        // that is what this test is really protecting. Whether the survivor is
-        // *usable* is a separate question, answered by the TLS probe, and for a
-        // plaintext squatter the answer is no.
         assert!(!s.running);
     }
 }

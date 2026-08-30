@@ -1,15 +1,4 @@
 //! Running the right schemas over the right resource.
-//!
-//! The pieces beneath this module each do one thing — [`preprocess`] rewrites,
-//! [`nvdl`] decomposes, [`super::relaxng`] judges structure, [`schematron`] judges
-//! assertions. This is the map epubcheck's `ValidatorMap` encodes: which of them
-//! apply to a package document, an XHTML content document, an NCX, a navigation
-//! document, a media overlay, and in which EPUB version.
-//!
-//! Compiled schemas are cached for the life of an [`Engine`], which is one book.
-//! `epub-xhtml-30.rnc` pulls in the whole HTML5 module set, so recompiling it
-//! per chapter would cost more than every other check in this validator put
-//! together.
 
 use std::collections::HashMap;
 
@@ -101,10 +90,6 @@ impl ResourceKind {
             ],
             (ResourceKind::Xhtml, true) => &["30/epub-xhtml-30.nvdl"],
             // A navigation document takes the navigation grammar in place of
-            // the XHTML one — `epub-nav-30.rnc` includes the XHTML modules and
-            // narrows them — and it takes both assertion sets. The version does
-            // not gate it: a `nav` item in an EPUB 2 package is held to the
-            // same schemas (and separately reported as NAV-001).
             (ResourceKind::Nav, _) => &[
                 "30/epub-nav-30.rnc",
                 "30/epub-xhtml-30.sch",
@@ -148,8 +133,6 @@ impl Engine {
     /// Validate one already-parsed document.
     ///
     /// A schema that will not compile is a defect in this port, not in the book:
-    /// it yields no messages rather than a finding, and the same failure is not
-    /// retried for the next chapter.
     pub fn validate(&mut self, kind: ResourceKind, epub3: bool, text: &str) -> Vec<Message> {
         let Ok(mut doc) = Document::parse(text) else {
             // Well-formedness is reported elsewhere, and a document that does
@@ -360,12 +343,6 @@ mod tests {
 </ncx>"##;
 
     /// The defects the schemas are responsible for reporting on the `RSC-005`
-    /// channel. Each case names a substring the reported message must contain,
-    /// so a rule that silently stops matching — the way a schema loses recall —
-    /// fails here rather than quietly reporting nothing.
-    ///
-    /// The base documents are asserted clean first: a case that "passes" only
-    /// because its base already errors would prove nothing.
     #[test]
     fn the_schemas_cover_what_the_hand_written_checks_replaced() {
         for (label, kind, epub3, base) in [

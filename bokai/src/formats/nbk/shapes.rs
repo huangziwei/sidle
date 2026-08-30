@@ -1,19 +1,5 @@
 //! Inline page shapes (the Scribe shape tool: circle / rectangle / triangle /
 //! line / arrow).
-//!
-//! Unlike pen marks, a shape is **not** an `nmdl.stroke` — the device stores it
-//! as a parametric KVG vector primitive inside a `$272` content node in the
-//! page's story (`$250` shape list): `ellipse {cx,cy,radius_x,radius_y}`,
-//! `rectangle {x,y,$56=w,$57=h}`, `polygon`/`polyline {vertex_list}`, or `line`
-//! (a `$249` path). kfxlib's *notebook* renderer only walks strokes, so it drops
-//! every shape (its shape page comes out as an empty `<g/>`); the earlier port
-//! inherited that. This module renders them.
-//!
-//! Each `$272` node carries its own viewBox (`$66`×`$67`) and is positioned on
-//! the page at `$59` (left) / `$58` (top) with size `$56`×`$57` — so we emit a
-//! positioned nested `<svg>`, exactly as for templates. Geometry attributes
-//! aside, the per-shape stroke/fill/width/transform handling mirrors kfxlib
-//! `process_kvg_shape`.
 
 use std::fmt::Write;
 
@@ -98,10 +84,6 @@ pub fn render_kvg_svg(fields: &[(u64, IonValue)], ids: &ShapeIds) -> Option<Stri
     }
 
     // Position with a plain <g> (translate + scale), NOT a nested <svg viewBox>:
-    // an `<svg>` clips to its viewport, which would lop off the part of a shape
-    // that legitimately extends past its bounding box — e.g. an arrowhead prong
-    // pokes a few units above the box. A <g> never clips. Local shape units are
-    // 1:1 with the page unless $56/$57 differ from the $66/$67 viewBox.
     let sx = if view_w != 0.0 { w / view_w } else { 1.0 };
     let sy = if view_h != 0.0 { h / view_h } else { 1.0 };
     let mut transform = format!("translate({} {})", num_str(left), num_str(top));
@@ -216,14 +198,6 @@ fn points_str(verts: &[IonValue]) -> String {
 }
 
 /// A 6-element affine list → SVG `transform="matrix(…)"`.
-///
-/// The device stores the affine in a transposed (row-vector) convention vs SVG's
-/// `matrix(a b c d e f)` — so the linear part's off-diagonal terms `b`/`c` must
-/// be swapped, or a rotation comes out mirrored (its sign flipped). kfxlib bakes
-/// the same swap into `process_transform`'s rotate() special cases (device
-/// `[0,1,-1,0]` ⇒ SVG `rotate(-90)` = `matrix(0,-1,1,0)`), but its generic
-/// `matrix(...)` fallback omits it — which is exactly the arbitrary-rotation case
-/// the shape-tool arrow hits, so we apply the swap here.
 fn matrix_str(m: &[IonValue]) -> Option<String> {
     if m.len() != 6 {
         return None;

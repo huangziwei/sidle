@@ -1,12 +1,5 @@
 //! Text-preservation validation — verify that every visible character in
 //! the source EPUB is preserved in the converted KFX.
-//!
-//! The concatenated visible text of every spine XHTML file, `<rt>` furigana
-//! included, against the concatenated text of every `content` and
-//! `ruby_content` fragment. Whitespace drops out on both sides: HTML collapses
-//! runs of it and KFX emits its own paragraph breaks. The comparison is per
-//! character over multisets, reporting each character whose KFX count is the
-//! lower one.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -195,8 +188,6 @@ fn char_counts(s: &str) -> HashMap<char, usize> {
 }
 
 // ============================================================================
-// EPUB-side extraction
-// ============================================================================
 
 /// The visible text of a source EPUB's spine XHTML files. `<script>`,
 /// `<style>` and `<rp>` content drops out; every other tag is a transparent
@@ -294,8 +285,6 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
     }
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 /// Every `content` fragment's text, plus one copy of each ruby annotation per

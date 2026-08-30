@@ -1,18 +1,4 @@
 //! Harmonize the diverse language tags books arrive with — `en`, `en-US`,
-//! `en_us`, `en-GB`, `eng`, `ENG` — into one canonical code per language, so the
-//! library's language facet collapses them instead of listing five flavors of
-//! English.
-//!
-//! Canonical form is the ISO 639-1 two-letter primary subtag where one exists
-//! (three-letter ISO 639-2/3 codes fold down: `eng` → `en`), with region and
-//! script dropped — *except* for Chinese, where Simplified vs Traditional is a
-//! genuine reading distinction. There the script is preserved as `zh-Hans` /
-//! `zh-Hant`, taken from an explicit script subtag or, failing that, inferred
-//! from the region (CN/SG/MY → Hans, TW/HK/MO → Hant). A bare `zh` with neither
-//! stays `zh`.
-//!
-//! The frontend maps these codes to display names (`en` → English, `zh-Hant` →
-//! 繁體中文); keep that map's keys in sync with what this produces.
 
 /// Normalize a raw language tag to its canonical code. Empty (or whitespace) in
 /// → empty out, so a book with no language stays blank rather than gaining one.
@@ -39,9 +25,6 @@ pub fn normalize(raw: &str) -> String {
 }
 
 /// Fold a primary subtag to its ISO 639-1 two-letter form. Two-letter codes pass
-/// through; the common three-letter ISO 639-2/3 codes (both the bibliographic
-/// "B" and terminological "T" spellings) map down; anything else is returned
-/// as-is, already lowercased.
 fn to_iso639_1(code: &str) -> String {
     if code.len() == 2 {
         return code.to_string();

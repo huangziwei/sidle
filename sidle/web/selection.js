@@ -1,27 +1,6 @@
 // Shared multi-select controller — the ONE implementation of click / cmd-click /
 // shift-range / lasso / select-all / clear, used by BOTH the Books and Notes
 // sections so selection behaves identically everywhere.
-//
-// One instance per section (see library.js `booksSelection`, notebooks.js
-// `selection`), each configured with a small adapter that supplies only what
-// genuinely differs between sections:
-//   - idAttr      : the dataset key on each selectable element ("bookId" /
-//                   "notebookId"); selection ids are the numeric values.
-//   - orderedIds(): ids in current display order (for shift-range + select-all).
-//   - containers(): the selectable elements in the VISIBLE view (gallery cards
-//                   OR list rows) — used for lasso hit-testing. NodeList/array.
-//   - paintContainers(): OPTIONAL — every element that should reflect `.selected`
-//                   across BOTH views (books keep both the gallery and list DOM
-//                   alive and don't rebuild on a view switch, so both must stay
-//                   in sync). Defaults to containers() when omitted.
-//   - lassoEl()   : the shared #lasso rubber-band element.
-//   - skipSelector: closest()-match for "this mousedown hit something actionable,
-//                   don't start a lasso / don't clear" (cards, rows, headers).
-//   - onChange()  : repaint that section's selection bar after any change.
-//
-// The mechanics (range math, lasso hit-testing, cheap class-toggle visuals) live
-// here once. Bulk actions, the selection bar's buttons, and the context menu stay
-// per-section because they're genuinely different (Send to Kindle vs Remove).
 (function () {
   const LASSO_THRESHOLD = 4; // px a mousedown must travel before it's a drag
 
@@ -110,10 +89,6 @@
     }
 
     // Replace the selection with the inclusive range anchorId..toId over the
-    // current display order. Drives keyboard Shift+arrow extension: the anchor is
-    // where the range began, `toId` the item the cursor just reached. Both must
-    // be selectable (present in orderedIds); a non-selectable cursor target (a
-    // series tile) is filtered out by the caller before this runs.
     selectRangeFromAnchor(anchorId, toId) {
       this.lastClicked = anchorId;
       this.selected = new Set();
@@ -140,8 +115,6 @@
 
     // Cheap repaint: toggle `.selected` across BOTH views + refresh the bar.
     // Never rebuilds the DOM (so notebook tile thumbnails aren't re-fetched).
-    // Paints both views so a selection made in one is already correct in the
-    // other after a view switch (matches the old full-render behavior).
     applyVisuals() {
       const attr = this.cfg.idAttr;
       const els = (this.cfg.paintContainers || this.cfg.containers)();

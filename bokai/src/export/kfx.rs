@@ -102,7 +102,6 @@ fn build_kfx_container(
     // No Ion generation.
 
     // A standalone cover section: the EPUB cover image differs from the first
-    // spine chapter's image
     let asset_paths: Vec<_> = book.list_assets().to_vec();
     let cover_image = book.metadata().cover_image.clone();
     let first_chapter_id = book.spine().first().map(|e| e.id);
@@ -276,8 +275,6 @@ fn build_kfx_container(
     ctx.nav_container_symbols.page_list = ctx.symbols.get_or_intern("page_list");
 
     // 1e. Register resource paths and create short names
-    // IMPORTANT: Short names must be interned during Pass 1 to ensure
-    // consistent symbol IDs when they're referenced later in storylines
     let asset_paths: Vec<_> = book.list_assets().to_vec();
     for asset_path in &asset_paths {
         if is_media_asset(asset_path) {
@@ -339,13 +336,11 @@ fn build_kfx_container(
     let document_data_index = fragments.len();
 
     // 2g. Chapter entities - collect separately for proper grouping
-    // Note: This also collects styles during token generation
     let mut section_fragments = Vec::new();
     let mut storyline_fragments = Vec::new();
     let mut content_fragments = Vec::new();
 
     // Generate standalone cover section if needed (c0)
-    // Note: cover_fragment_id was assigned in Pass 1 for landmark resolution
     if let Some(ref cover_path) = standalone_cover_path {
         let section_id = ctx
             .cover_fragment_id
@@ -424,7 +419,6 @@ fn build_kfx_container(
     fragments.extend(content_fragments);
 
     // 2g. Style entities ($157) - generated AFTER chapters since styles are collected during token generation
-    // This includes the default style plus any unique styles found in the content
     let style_fragments = build_style_fragments(&mut ctx);
     fragments.extend(style_fragments);
 
@@ -434,12 +428,10 @@ fn build_kfx_container(
     fragments.extend(ruby_fragments);
 
     // 2h. Anchor fragments - must come after sections/storylines/content/styles
-    // This matches the reference KFX entity ordering
     let (anchor_frags, anchor_ids_by_fragment) = build_anchor_fragments(&mut ctx);
     fragments.extend(anchor_frags);
 
     // 2i. Auxiliary data fragments - mark sections as navigation targets
-    // Generate one auxiliary_data entity per section
     if standalone_cover_path.is_some() {
         fragments.push(build_auxiliary_data_fragment(COVER_SECTION_NAME, &mut ctx));
     }
@@ -617,7 +609,6 @@ fn survey_node(chapter: &Chapter, node_id: NodeId, ctx: &mut ExportContext) {
     // GlobalNodeId targets.
 
     // Register resources (src attributes) - creates short names like "e0"
-    // Note: href and alt are used as string values, not symbols
     if let Some(src) = chapter.semantics.src(node_id) {
         ctx.resource_registry.register(src, &mut ctx.symbols);
     }
@@ -1971,8 +1962,6 @@ fn build_chapter_entities_grouped(
     }
 
     // =========================================================================
-    // 2. GENERATE: Schema-driven token generation + text/structure split
-    // =========================================================================
     let (storyline_content_list, content_strings) = if is_cover {
         ctx.inline_cover_emitted = true;
         // For cover chapters, generate flat storyline with direct image
@@ -2279,7 +2268,6 @@ fn build_chapter_entities(
         .unwrap_or_else(|| ctx.next_fragment_id());
 
     // 2. GENERATE: `ir_to_tokens` builds Tokens from the Schema;
-    // `tokens_to_ion` splits structure into Ion and text into ctx.text_accumulator
     let tokens = ir_to_tokens(chapter, ctx);
     let storyline_content_list = tokens_to_ion(&tokens, ctx);
 
@@ -2365,7 +2353,6 @@ fn build_symbol_table_ion(local_symbols: &[String]) -> Vec<u8> {
     writer.write_bvm();
 
     // Build the import entry for YJ_symbols (Amazon's KFX symbol table)
-    // { name: "YJ_symbols", version: 10, max_id: 851 }
     let import_entry = IonValue::Struct(vec![
         (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
         (5, IonValue::Int(10)),                          // $5 = version
@@ -2379,7 +2366,6 @@ fn build_symbol_table_ion(local_symbols: &[String]) -> Vec<u8> {
         .collect();
 
     // Build the $ion_symbol_table struct
-    // { imports: [...], symbols: [...] }
     let symbol_table = IonValue::Struct(vec![
         (6, IonValue::List(vec![import_entry])), // $6 = imports
         (7, IonValue::List(symbols_list)),       // $7 = symbols
@@ -2569,7 +2555,6 @@ fn build_external_resource_fragment(
 /// Build a resource fragment (bcRawMedia $417) - the actual bytes.
 fn build_resource_fragment(href: &str, data: &[u8], ctx: &mut ExportContext) -> KfxFragment {
     // Use resource/ prefix to distinguish from external_resource fragment
-    // This ensures bcRawMedia gets a different entity ID
     let resource_name = generate_resource_name(href, ctx);
     let raw_name = format!("resource/{}", resource_name);
 
@@ -2773,7 +2758,6 @@ fn build_position_map_fragment(
     let mut entries = Vec::new();
 
     // Handle standalone cover section (c0) if present
-    // Cover contains both the page_template ID and the storyline content ID
     let section_offset = if let Some(cover_fid) = ctx.cover_fragment_id {
         // Build contains list: [section_id, content_id]
         let mut contains_list = vec![IonValue::Int(cover_fid as i64)];
@@ -2794,7 +2778,6 @@ fn build_position_map_fragment(
     };
 
     // Build entries for spine chapters (skip cover section if present)
-    // Sort chapters by fragment ID to maintain consistent ordering
     let mut chapter_entries: Vec<_> = ctx.chapter_fragments.iter().collect();
     chapter_entries.sort_by_key(|(_, fid)| **fid);
 
@@ -6593,7 +6576,6 @@ mod tests {
 
             if let Some((_, IonValue::Int(max_id))) = max_id_field {
                 // max_id covers the 100 generated IDs; ExportContext starts at
-                // 866, putting 100 IDs at 965
                 assert!(
                     *max_id >= 100,
                     "max_id ({}) should reflect all generated fragment IDs",
@@ -6975,8 +6957,6 @@ mod entity_structure_tests {
         fragments.extend(content_fragments);
 
         // Entity type order: content_features, book_metadata, metadata,
-        // document_data, book_navigation, then grouped sections, storylines,
-        // content
 
         let types: Vec<u64> = fragments.iter().map(|f| f.ftype).collect();
 
@@ -7006,7 +6986,6 @@ mod entity_structure_tests {
             .take_while(|&&t| t == KfxSymbol::Content as u64)
             .count();
         // Content is optional (image-only chapters may not have content)
-        // After storylines, every remaining entity is content
         for t in after_storylines.iter().take(content_count) {
             assert_eq!(
                 *t,
@@ -7476,7 +7455,6 @@ mod anchor_resolution_tests {
         register_link_targets(&mut book, &spine_info, &resolved, &mut ctx).unwrap();
 
         // Step 3: Verify that href lookups return the same symbol as GlobalNodeId lookups
-        // Find an internal link that has both
         for (source, target) in resolved.iter() {
             if let AnchorTarget::Internal(gid) = target {
                 // Get the href for this link

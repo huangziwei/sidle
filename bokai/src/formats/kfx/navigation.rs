@@ -1,9 +1,5 @@
 //! `book_navigation` ($389) walks: nav-container resolution, anchor-table
 //! registration, and TOC extraction.
-//!
-//! Reads navigation straight out of the fragment graph and hands back IR
-//! vocabulary ([`TocEntry`], [`AnchorTable`]) — no emit-side types, so both
-//! directions and the validators can use it.
 
 use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::get_field;
@@ -14,12 +10,6 @@ use crate::formats::kfx::symbols::KfxSymbol;
 use crate::model::{LandmarkType, TocEntry};
 
 /// Resolve one `book_navigation.nav_containers` entry to its `nav_container`
-/// ($391) struct. Two forms occur: the reflowable path inlines the container
-/// struct directly, while the fixed-layout / PDOC path (which the device
-/// requires) lists a **symbol** naming a separate `nav_container` entity. This
-/// handles both — inline structs pass through; a symbol is looked up in
-/// `by_type[$391]` by its resolved name. Returns an owned value so the caller
-/// can borrow its fields through the loop body.
 pub fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<IonValue> {
     let inner = container.unwrap_annotated();
     if inner.as_struct().is_some() {
@@ -35,12 +25,6 @@ pub fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<Io
 
 /// Visit every nav container in the book's `$389 book_navigation`, resolved to
 /// its `nav_type` and `$247 entries`.
-///
-/// `book_navigation` holds one entry per reading order (or a bare struct when
-/// there is only one), each listing its containers; the containers themselves
-/// come in both the inline and the referenced form (see
-/// [`resolve_nav_container`]). This is the walk down to the entry lists —
-/// what a caller does with `toc` / `page_list` / anything else is its own.
 pub fn for_each_nav_container(book: &BookData, mut visit: impl FnMut(&str, &[IonValue])) {
     let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
         return;
@@ -102,10 +86,6 @@ pub fn extract_anchors(book: &BookData) -> AnchorTable {
 }
 
 /// Extract the TOC tree from the `nav_type=toc` container.
-///
-/// `element_id_to_filename` maps a target position's element id to the file it
-/// landed in; callers that only want the label tree (no resolved hrefs) pass an
-/// empty map and every `href` comes back blank.
 pub fn extract_toc(
     book: &BookData,
     element_id_to_filename: &std::collections::HashMap<i64, String>,
@@ -129,10 +109,6 @@ pub fn extract_toc(
 /// The display label of a `$393 nav_unit`'s fields — `representation.label`,
 /// else a direct `label`, else `"Untitled"`. `None` for the entries calibre
 /// drops: a blank label and the `heading-nav-unit` placeholder.
-///
-/// The one place that rule lives: an editor reading the declared TOC to offer it
-/// back must see exactly the entries a reader's chapter list shows, or the two
-/// views disagree about what the book declares.
 pub fn nav_unit_label(fields: &[(u64, IonValue)]) -> Option<String> {
     let label = get_field(fields, KfxSymbol::Representation as u64)
         .and_then(|v| v.as_struct())
@@ -158,9 +134,6 @@ pub fn nav_unit_target(fields: &[(u64, IonValue)]) -> Option<i64> {
 pub struct Landmark {
     pub landmark_type: LandmarkType,
     /// The landmark's own label, or the type's name when it carried none —
-    /// `cover-nav-unit` is the KPF pipeline's placeholder, not a display label
-    /// (calibre's `add_guide_entry` strips it too), and the reading-start
-    /// markers routinely carry nothing at all.
     pub label: String,
     /// The element the landmark targets, when it names one.
     pub eid: Option<i64>,

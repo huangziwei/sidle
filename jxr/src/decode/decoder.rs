@@ -1,20 +1,7 @@
 //! JPEG-XR codestream decoder.
-//!
-//! Faithful port of calibre's `jxr_image.py` decoder pipeline. Reads a
-//! WMPHOTO codestream and produces a `DecodedImage` of i32 samples per
-//! component which the caller can pack into JPEG/PNG/etc.
-//!
-//! Identifiers track Python: e.g. `decode_block` and the various
-//! `tile_MB_*` methods are matched by `decode_block` and `tile_*_mb_*`
-//! here. Where Python relied on instance attributes that span multiple
-//! classes, we centralise the state on `Decoder` and pass plane indices
-//! into helpers to keep the borrow checker happy.
 
 #![allow(non_snake_case)]
 // JPEG-XR is a faithful port of the spec's decode pipeline: explicit index
-// loops over parallel per-sample/per-band arrays and the codec's wide
-// block-decode parameter lists are intentional, and read clearer than iterator
-// or param-struct rewrites would. Allowed deliberately, not by neglect.
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 use super::consts::*;
@@ -24,9 +11,6 @@ use super::state::*;
 use super::tables;
 
 /// Errors from codestream decoding. `Unsupported` is reserved for
-/// spec-legal input this crate doesn't reconstruct; `Malformed` for input
-/// that is internally inconsistent (the hardening guards' verdict on
-/// untrusted bytes).
 #[derive(Debug)]
 pub enum DecodeError {
     /// Bitstream read error (ran out of bits / malformed escape).
@@ -36,10 +20,6 @@ pub enum DecodeError {
     /// The `WMPHOTO` codestream magic is absent.
     BadSignature(String),
     /// The codestream is internally inconsistent or describes an impossible
-    /// geometry (e.g. tile widths exceeding the image, or dimensions that
-    /// would allocate far more memory than the input could encode). Distinct
-    /// from `Unsupported`, which is reserved for spec-legal input we don't yet
-    /// reconstruct. Raised by the hardening guards on untrusted input.
     Malformed(String),
 }
 
@@ -67,11 +47,6 @@ type Result<T> = std::result::Result<T, DecodeError>;
 // Hardening ceilings for untrusted input (NOT T.832 limits). The decoder
 // materialises the entire macroblock grid and sample planes up front, so a
 // lying header could otherwise demand gigabytes from a handful of bytes.
-// `MAX_MB_COMPONENTS` caps resident memory regardless of input — roughly a
-// 4700² RGB or 8192² grayscale image, comfortably under the fuzz RSS limit —
-// while the per-byte budget rejects geometries far too large for the
-// codestream to actually encode. The floor keeps every small valid file
-// admissible (the smallest coded macroblock still costs real bits).
 const MAX_MB_COMPONENTS: u64 = 1 << 18;
 const MB_BUDGET_PER_BYTE: u64 = 64;
 const MB_BUDGET_FLOOR: u64 = 4096;
@@ -120,10 +95,6 @@ pub struct DecodeTiming {
 }
 
 /// Headers-only view of a codestream, returned by
-/// [`Decoder::parse_headers`]: the file's coding shape — dimensions,
-/// color/depth, structure, per-plane coding parameters — without any
-/// entropy or pixel work. The raw `u8` codes are expressed in the
-/// [`consts`](crate::decode::consts) vocabulary.
 #[derive(Debug, Clone)]
 pub struct HeaderSummary {
     /// Original (pre-padding) image width in pixels.
@@ -194,9 +165,6 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     /// A decoder over one WMPHOTO codestream (the `image_data` /
-    /// `alpha_data` slice a parsed container exposes). No work happens
-    /// until [`decode`](Self::decode) or
-    /// [`parse_headers`](Self::parse_headers).
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             ds: Deserializer::new(data),
@@ -242,9 +210,6 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode the codestream completely: headers, entropy decode, inverse
-    /// transforms, overlap post-filters, output formatting. Returns the
-    /// reconstructed planes; errors (never panics) on malformed or
-    /// unsupported input.
     pub fn decode(mut self) -> Result<DecodedImage> {
         use std::time::Instant;
         let mut timing = DecodeTiming::default();
@@ -300,8 +265,6 @@ impl<'a> Decoder<'a> {
     /// Parse only the image header and image-plane header(s) — no entropy
     /// decode, no pixel work. Cheap format sniffing (dimensions, color/bit
     /// depth, `scaled_flag`, `shift_bits`, `len_mantissa`/`exp_bias`, QPs…);
-    /// also how the encoder's external parity gates diff header fields
-    /// against reference-encoder output.
     pub fn parse_headers(&mut self) -> Result<HeaderSummary> {
         self.image_header()?;
         self.planes.push(Plane::new(false));
@@ -498,17 +461,6 @@ impl<'a> Decoder<'a> {
         self.hdr.mb_height = (self.hdr.height / 16) as usize;
 
         // The margin-extended size must be a whole, positive number of
-        // macroblocks (T.832 windowing semantics — the margins exist to pad
-        // the image to the MB grid; libjxr fails violations with
-        // WMP_errInvalidParameter, strdec.c:3056 — its legacy salvage there,
-        // reinterpreting right/bottom margins on already-aligned dims as an
-        // output crop, is deliberately not ported). Load-bearing for the
-        // decode-budget guard in `image_plane_header`: height 1 + margins 0
-        // truncates mb_height to 0, zeroing the budgeted mb_width × mb_height
-        // product while the grid build still allocates one column Vec per
-        // mb_width — a 702-byte header claiming 679 Mpx × 1 allocated ~1 GB
-        // of empty column headers before the first tile startcode check
-        // (Phase-7 certification slow-unit finding).
         if self.hdr.width & 0xF != 0
             || self.hdr.height & 0xF != 0
             || self.hdr.mb_width == 0
@@ -521,10 +473,6 @@ impl<'a> Decoder<'a> {
         }
 
         // Append the last "rest" tile entry. The explicit tile widths/heights
-        // must fit within the macroblock grid; a lying header that overshoots
-        // would otherwise wrap to a huge usize tile size — in release the
-        // subtraction wraps silently (no debug panic), feeding runaway loops
-        // and allocations downstream — so reject it as malformed here.
         let prev_left = *left_mb.last().unwrap();
         let prev_top = *top_mb.last().unwrap();
         let rest_w = self.hdr.mb_width.checked_sub(prev_left).ok_or_else(|| {
@@ -601,10 +549,6 @@ impl<'a> Decoder<'a> {
             INT_YUV444 => {
                 plane.num_components = 3;
                 // libjxr `ReadImagePlaneHeader` (strdec.c:2862-2866) reads TWO
-                // 4-bit reserved fields here (8 bits total) for YUV_444 —
-                // `reserved_e_bit` then `reserved_f`. Reading only 4 desyncs the
-                // entire codestream. Amazon plates are 8bppGray/YONLY and never
-                // reach this path; a libjxr-minted color JXR does.
                 self.ds.unpack_bits(8)?; // reserved_e_bit (4) + reserved_f (4)
             }
             INT_YUV420 | INT_YUV422 => {
@@ -636,10 +580,6 @@ impl<'a> Decoder<'a> {
         }
 
         // UpdateModelMB (Table 116) indexes a 16-entry per-component weight
-        // table by `num_components - 1`. The N-component syntax admits up to
-        // 4111 components, which would index out of bounds on the very first
-        // macroblock — the reference (jxr_image.py:1362) raises IndexError
-        // there too, i.e. such a stream is undecodable — so reject it up front.
         if plane.num_components > 16 {
             return Err(DecodeError::Unsupported(format!(
                 "{}-component image (max 16 supported)",
@@ -697,10 +637,6 @@ impl<'a> Decoder<'a> {
         }
 
         // Build MB grid for this plane. Reject impossible geometry before
-        // allocating: bound mb_width × mb_height × num_components by both the
-        // absolute ceiling (resident memory) and the codestream length (a
-        // decompression bomb can't claim more macroblocks than the bytes could
-        // encode). See MAX_MB_COMPONENTS et al.
         let stream_len = self.ds.buffer.len() as u64;
         let hdr = &self.hdr;
         let plane = &mut self.planes[p];
@@ -766,10 +702,6 @@ impl<'a> Decoder<'a> {
         }
         self.ds.check_bit_field(16, "index_table_startcode", &[1])?;
         // Each entry costs ≥2 bytes (vlw_esc), so the table cannot hold more
-        // entries than the stream has bytes; cap the pre-allocation so a lying
-        // tile count (up to ~16M from the 12-bit tile fields) can't reserve
-        // hundreds of MB from a short stream. The loop still errors cleanly via
-        // `?` once the bits run out.
         let cap = n_entries.min(self.ds.len());
         self.index_offset_tile = Vec::with_capacity(cap);
         for _ in 0..n_entries {
@@ -953,9 +885,6 @@ impl<'a> Decoder<'a> {
 
     fn tile_mb(&mut self, tile_type: u8, p: usize, mbx: usize, mby: usize) -> Result<()> {
         // Lazily materialise this MB's coefficient buffers on first decode
-        // (idempotent across the band passes of frequency mode). The grid was
-        // built as cheap skeletons, so a stream rejected before reaching here
-        // never paid for the per-MB buffers — see `MB::alloc_buffers`.
         let nc = self.planes[p].num_components;
         self.planes[p].mb[mbx][mby].alloc_buffers(nc);
         match tile_type {
@@ -1043,9 +972,6 @@ impl<'a> Decoder<'a> {
             let bits = bits_qp_index[num_qp.min(16)];
             let v = self.ds.unpack_bits(bits)? as usize + 1;
             // The selected QP set must exist: `bits` spans a power-of-two range
-            // that can exceed num_qp, so a valid stream only ever emits v <
-            // num_qp; a larger value would index past the QP table (used as
-            // `quant_scaling_factor[..][index_qps]`). Reject rather than panic.
             if v >= num_qp {
                 return Err(DecodeError::Malformed(format!(
                     "QP-set index {v} out of range (num_qps {num_qp})"
@@ -1298,8 +1224,6 @@ impl<'a> Decoder<'a> {
                 if is_42x && n > 0 {
                     // Joint U/V chroma block: one DECODE_BLOCK, coefficients
                     // interleaved U,V with a FIXED inverse scan (Table 53).
-                    // Our LP storage is transpose-composed, so the spec's
-                    // `LPInput[c][iTransposeNNN[iRemap]]` is `lp_input[c][iRemap]`.
                     let i_location = if int_fmt == INT_YUV420 { 10 } else { 2 };
                     let block = self.decode_block(p, true, i_location, ModelBand::LP)?;
                     i_lap_mean[1] += block.len() as i32;
@@ -1413,9 +1337,6 @@ impl<'a> Decoder<'a> {
                 }
             } else if i > 0 && int_fmt == INT_YUV422 {
                 // Table 133 (422 chroma) translated: spec {4,2,6} ↔ ours
-                // {4,1,5} (left); top: spec j4←top4, j1←top5, j5←own j1 ↔
-                // ours j4←top4, j2←top6, j6←own j2; and the MBDCMode==top
-                // special prediction applies even with LP prediction off.
                 if mb_lp_mode == PREDICT_FROM_LEFT {
                     let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
                     for j in [4usize, 1, 5] {
@@ -2080,8 +2001,6 @@ impl<'a> Decoder<'a> {
 
         // HP prediction (Table 136). In-block coefficient indices are in our
         // storage domain ({2,10,9} ≙ spec {1,2,3}; {1,5,6} ≙ spec {4,8,12});
-        // chroma 420/422 differ only in block-ID lists/strides (our chroma
-        // blocks are raster-indexed, matching the spec's lists directly).
         let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
         const K_TOP: [usize; 3] = [2, 10, 9];
         const K_LEFT: [usize; 3] = [1, 5, 6];
@@ -2690,9 +2609,6 @@ impl<'a> Decoder<'a> {
     }
 
     /// Tables 154/155 — first-level overlap filtering for 420/422 chroma
-    /// block DCs (overlap mode 2 only). Operates across MB boundaries on the
-    /// spec-raster block-DC slots; structure transcribed table-for-table
-    /// (corner difference → junction/edge filters → corner addition).
     fn first_level_overlap_chroma(&mut self, p: usize, i: usize) {
         let is420 = self.planes[p].internal_clr_fmt == INT_YUV420;
         let cbase = i * MB_BUF_PER_COMP;
@@ -3499,9 +3415,6 @@ impl<'a> Decoder<'a> {
             && matches!(out_fmt, OUT_RGB | OUT_RGBE)
         {
             // Packed formats: the pack stage (Table 196/197/198) expects
-            // B,G,R plane order; the file's components are already swapped
-            // when RED_BLUE_NOT_SWAPPED_FLAG is 0, so swap on flag == 1
-            // (verified against JxrDecApp on a minted 565 file).
             let do_swap = matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
                 && self.hdr.red_blue_not_swapped_flag != 0;
             // Get disjoint mutable borrows of the three component planes
@@ -3656,10 +3569,6 @@ impl<'a> Decoder<'a> {
         }
         let i_bias = bias_base << i_scale;
         // The alpha image plane is its own YONLY channel: it takes the plain
-        // bias regardless of the image's color format (the OUT_CMYK half/−K
-        // arm below is primary-plane semantics — indexing it against the
-        // 1-component alpha plane walked out of bounds; found by the first
-        // `-a 3` CMYKA decode, 6a).
         if self.planes[p].is_alpha {
             if i_bias != 0 {
                 for v in &mut self.planes[p].image_plane[0].data {
@@ -3715,13 +3624,6 @@ impl<'a> Decoder<'a> {
             };
         }
         // Per PLANE, not per image (jxr_image.py:991 tests the plane's own
-        // `internal_clr_fmt`; its `[RGB, RGBE, YUV444]` list is effectively
-        // `== YUV444` — RGB/RGBE are OUTPUT-format codes 7/8, which the
-        // 3-bit internal field can never hold). The alpha image plane is
-        // YONLY (1 component): scaling it with the image-level color format
-        // indexed past its single plane. Found by 5e's scaled-alpha encodes
-        // — the first files either encoder ever emitted that scale a
-        // 1-component plane in a multi-component image.
         let output_components = if self.planes[p].internal_clr_fmt == INT_YUV444 {
             3
         } else {
@@ -3838,10 +3740,6 @@ impl<'a> Decoder<'a> {
             && self.hdr.output_clr_fmt == OUT_RGB
         {
             // Tables 196/197/198: pack the three clipped channels into one
-            // value per pixel (single output array). Channel order in the
-            // planes at this point is the pack-ready order (the conversion
-            // stage's swap handling is oracle-verified for 565; BD5/BD10
-            // are unmintable via JxrEncApp — spec-transcribed self-loop).
             let (hi1, hi2, max0, max1) = match self.hdr.output_bitdepth {
                 BD5 => (5u32, 10u32, 31, 31),
                 BD10 => (10, 20, 1023, 1023),
@@ -4047,8 +3945,6 @@ pub(crate) fn ceil_div2(x: i32) -> i32 {
 /// Per-pixel inverse color transform for `INT_YUV444 → OUT_RGB`, the exact
 /// integer lifting the JPEG-XR spec / libjxr `strInvTransform` use. Returns the
 /// **pre-bias** centered RGB (the decoder adds the `1<<(bd-1)` bias afterwards).
-/// Single source of truth shared with the encoder's forward transform
-/// ([`crate::encode::color::rgb_to_yuv444`], its exact inverse).
 pub(crate) fn yuv444_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
     let temp_t = -u;
     let g = y - floor_div2(temp_t); // out1

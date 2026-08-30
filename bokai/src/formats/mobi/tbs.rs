@@ -1,13 +1,4 @@
 //! Trailing Byte Sequence (TBS) generation for KF8 text records.
-//!
-//! Every KF8 text record carries a trailing byte sequence describing which
-//! NCX entries start, complete, span, or end inside that record. Kindle uses
-//! these to build its position map; without them, modern firmware refuses to
-//! open the book ("Unable to Open Item").
-//!
-//! This is a faithful Rust port of calibre's `mobi/writer8/tbs.py` and the
-//! supporting encoders in `mobi/utils.py` (`encode_tbs`, `encode_fvwi`,
-//! `encode_trailing_data`, backward `encint`).
 
 use std::collections::BTreeMap;
 
@@ -63,10 +54,6 @@ fn encode_fvwi(val: u64, flags: u64, flag_size: u32) -> Vec<u8> {
 /// A single TBS sequence: (value, flag bits → optional payload).
 ///
 /// Flag bits per calibre:
-///   0b0001 → followed by extra varint
-///   0b0010 → followed by extra varint (tbs_type)
-///   0b0100 → followed by single byte (sibling count)
-///   0b1000 → boolean (used for cross-strand indexing, no payload)
 #[derive(Debug, Default, Clone)]
 struct Extras {
     bit0001: Option<u64>,

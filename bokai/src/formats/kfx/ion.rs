@@ -1,9 +1,6 @@
 //! Amazon Ion binary format parser.
 //!
 //! Ion is Amazon's data serialization format used in KFX ebooks.
-//! This implements a minimal parser sufficient for reading KFX content.
-//!
-//! Reference: <https://amazon-ion.github.io/ion-docs/docs/binary.html>
 
 use std::io;
 
@@ -57,8 +54,6 @@ impl IonType {
 /// Parsed Ion value.
 ///
 /// Symbols are stored as raw u64 IDs - use the KFX symbol table to resolve them.
-/// Structs use a Vec for fields (O(n) lookup) which is optimal for small structs
-/// typical in KFX data. Field order is preserved for serialization.
 #[derive(Debug, Clone)]
 pub enum IonValue {
     Null,
@@ -74,10 +69,6 @@ pub enum IonValue {
     Blob(Vec<u8>),
     List(Vec<IonValue>),
     /// S-expression (Ion type 12). Encoded exactly like a list but with a
-    /// distinct type code; used for KFX `condition: (isPortrait)` page-template
-    /// selectors. The parser maps incoming sexps onto `List` (bokai never needs
-    /// to distinguish them on read), so this variant only appears on the write
-    /// side.
     Sexp(Vec<IonValue>),
     /// Struct fields as (symbol_id, value) pairs in parse order.
     /// Order is preserved for both parsing and serialization.
@@ -89,10 +80,6 @@ pub enum IonValue {
 impl IonValue {
     /// The highest symbol id anywhere in this value, or `None` if it names no
     /// symbol at all.
-    ///
-    /// Counts every place an id can appear: symbol values, struct field keys,
-    /// and annotations. Ids come back raw, shared and document-local alike,
-    /// measured against the container's own local base.
     pub fn max_symbol_id(&self) -> Option<u64> {
         fn take(best: &mut Option<u64>, id: u64) {
             *best = Some(best.map_or(id, |b: u64| b.max(id)));
@@ -561,8 +548,6 @@ impl<'a> IonParser<'a> {
 }
 
 // ============================================================================
-// Ion Binary Writer
-// ============================================================================
 
 /// Ion binary format writer.
 ///
@@ -649,7 +634,6 @@ impl IonWriter {
     /// Write decimal value from string (e.g., "0.833333", "1.5").
     ///
     /// Encodes as Ion decimal (type 5) with coefficient + exponent.
-    /// This matches Kindle's expected format for style values.
     pub fn write_decimal(&mut self, s: &str) {
         let val: f64 = s.parse().unwrap_or(0.0);
 
@@ -923,9 +907,6 @@ mod tests {
     #[test]
     fn test_parse_struct() {
         // struct { 10: "a", 20: 1 }
-        // VarUInt encoding: value with MSB set as stop bit
-        // 10 = 0x0A, with MSB = 0x8A
-        // 20 = 0x14, with MSB = 0x94
         let data = [
             0xe0, 0x01, 0x00, 0xea, // BVM
             0xd6, // struct, length 6
@@ -943,7 +924,6 @@ mod tests {
     #[test]
     fn test_nop_pad_skipped() {
         // NOP pad: type 0, length 3 (skip 3 bytes), followed by int 42
-        // Struct content: field1(1) + nop(4) + field2(1) + int(2) = 8 bytes
         let data = [
             0xe0, 0x01, 0x00, 0xea, // BVM
             0xd8, // struct, length 8
@@ -980,8 +960,6 @@ mod tests {
         assert!(parser.parse().is_err());
     }
 
-    // ========================================================================
-    // IonWriter tests
     // ========================================================================
 
     #[test]

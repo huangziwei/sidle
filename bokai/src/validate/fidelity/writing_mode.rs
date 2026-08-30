@@ -1,19 +1,5 @@
 //! Writing-mode validation — verify the book-level writing mode survives
 //! conversion.
-//!
-//! In KFX, every style struct may carry a `writing_mode` field (symbol 560)
-//! whose value is one of `$horizontal_tb` / `$vertical_lr` / `$vertical_rl`
-//! (symbols 557/558/559). The book-level writing mode is the value most
-//! commonly applied to the storyline root / body.
-//!
-//! In EPUB, the writing mode is a CSS property — `writing-mode: vertical-rl`,
-//! optionally vendor-prefixed (`-webkit-writing-mode`, `-epub-writing-mode`).
-//! It typically appears on the `body` selector or a class applied to the
-//! storyline root.
-//!
-//! Every declared writing-mode value on each side enters a multiset. The book
-//! writing mode is the most-cited non-default value, `horizontal-tb` where
-//! none is declared.
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -183,8 +169,6 @@ fn dominant_mode(modes: &HashMap<Mode, usize>) -> Mode {
 }
 
 // ============================================================================
-// EPUB-side extraction
-// ============================================================================
 
 fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, String> {
     let cursor = Cursor::new(epub_bytes);
@@ -328,8 +312,6 @@ fn scan_xhtml_for_modes(xhtml: &str, out: &mut HashMap<Mode, usize>) {
     }
 }
 
-// ============================================================================
-// KFX-side extraction
 // ============================================================================
 
 fn extract_modes_from_kfx(kfx_bytes: &[u8]) -> Result<HashMap<Mode, usize>, String> {

@@ -6,19 +6,6 @@ use crate::model::PositionMap;
 
 /// A book's base text as the *source* stores it: for each addressable element,
 /// the characters that element contributes, with nothing added.
-///
-/// This is the substrate a physically-addressed annotation indexes into. A
-/// Kindle's annotation file carries no highlighted text — only an
-/// `(element, offset)` pair per endpoint — so the words a highlight covers are
-/// recovered by slicing this text. That makes the strings here a data
-/// contract, not a rendering detail: a change to what an element contributes,
-/// or to how its characters are counted, moves every stored highlight in the
-/// book.
-///
-/// Reading order comes from a [`PositionMap`], since element ids need not be
-/// allocated in reading order. Elements with text but no position are still
-/// addressable one at a time via [`Self::text_of`]; they are outside the
-/// ordered walk [`Self::extract`] performs.
 #[derive(Debug, Clone, Default)]
 pub struct SourceText {
     text_of: HashMap<i64, String>,
@@ -32,19 +19,9 @@ impl SourceText {
     /// Index the text against a position scale. Elements the scale does not
     /// place are kept for direct lookup but stay out of the ordered walk —
     /// nothing can be said about where they sit relative to the rest.
-    ///
-    /// The walk spans every *placed* element, including those carrying no text
-    /// of their own. A range endpoint is wherever the source put the boundary,
-    /// and structural elements — section wrappers, a heading whose text lives in
-    /// a child — are placed but textless. Keeping them out would make
-    /// [`Self::extract`] fail for the entire range whenever an endpoint landed
-    /// on one, discarding text sitting in the very next element.
     pub fn new(text_of: HashMap<i64, String>, positions: &PositionMap) -> Self {
         let mut order: Vec<i64> = positions.positions().keys().copied().collect();
         // Keyed `(position, element)`: a HashMap's iteration order is not
-        // stable, and two elements may share a position, so the element id
-        // breaks the tie. Reading order decides what a stored range covers —
-        // it has to come out the same on every run.
         order.sort_unstable_by_key(|&e| (positions.position(e, 0).unwrap_or(0), e));
         let rank = order.iter().enumerate().map(|(i, &e)| (e, i)).collect();
         Self {
@@ -78,14 +55,6 @@ impl SourceText {
     }
 
     /// The text a range spans: a reading-order walk from `start` to `end`
-    /// inclusive of both elements, slicing the first from `off_start` and
-    /// bounding the last at `off_end`. Offsets are **character** indices, and
-    /// `off_end` is exclusive.
-    ///
-    /// `None` when either element is outside the ordered walk, or when `end`
-    /// precedes `start` in reading order. Out-of-range offsets clamp rather
-    /// than panic, so a malformed handle yields a best-effort substring
-    /// instead of taking the caller down.
     pub fn extract(
         &self,
         start: i64,
@@ -156,10 +125,6 @@ mod tests {
     }
 
     /// A Kindle anchors a highlight at whichever element holds the boundary,
-    /// and that is often a structural one carrying no text of its own. The
-    /// range must still yield the words it spans — this is the shape that lost
-    /// a real highlight's text: start on a placed-but-textless element, end on
-    /// the element actually holding the passage.
     #[test]
     fn a_range_starting_on_a_textless_element_still_yields_its_text() {
         let positions = PositionMap::new(

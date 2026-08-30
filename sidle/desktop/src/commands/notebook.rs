@@ -1,9 +1,4 @@
 //! Tauri commands for Scribe handwritten notebooks (the Notes tab).
-//!
-//! Mirrors `commands::library` but for the `notebooks` entity: list, per-page
-//! SVG (read from the import-time cache — no SQLite re-parse), cover thumbnail,
-//! rename, remove, and a manual `.notebooks/` folder import — the fallback for
-//! a device whose MTP session will not expose notebooks.
 
 use std::path::{Path, PathBuf};
 
@@ -127,9 +122,6 @@ pub async fn notebook_import_folder(
 }
 
 /// Progress for a notebook device-import: emitted as `notebook:import-progress`
-/// after each candidate so the frontend can show "Importing N/M…". The pull +
-/// decode of each notebook over USB is slow, so this is the difference between
-/// the button looking dead and looking busy.
 #[derive(Clone, Serialize)]
 struct NotebookImportProgress {
     done: usize,
@@ -137,11 +129,6 @@ struct NotebookImportProgress {
 }
 
 /// Import notebooks straight off the connected Kindle — the toolbar's Import
-/// button. Pulls `.notebooks/<uuid>/nbk` over the device transport (MTP for the
-/// Scribe), capturing each notebook's on-device Date Modified as `updated_at`,
-/// and emits `notebook:import-progress` as it goes. Errors with "no Kindle
-/// connected" when nothing is plugged in; a device that doesn't expose
-/// `.notebooks/` over MTP simply yields 0 imported.
 #[tauri::command]
 pub async fn notebook_import_device(
     app: AppHandle,
@@ -197,11 +184,6 @@ pub async fn notebook_import_device(
 }
 
 /// Export each notebook in `notebook_ids` to a multi-page PDF in `dest_dir` —
-/// one `<title>.pdf` per notebook (notebooks have no author, so the folder is
-/// flat). Filenames come from the (sanitized) title; a collision gets a ` (n)`
-/// suffix. A notebook with no pages, or whose render fails, is skipped and
-/// counted; the export never aborts on a single failure. Reuses the library
-/// export's [`ExportSummary`] shape.
 #[tauri::command]
 pub async fn notebook_export_pdf(
     state: State<'_, AppState>,

@@ -1,10 +1,6 @@
 //! On-device display + input plumbing.
 //!
 //! Display goes through a real X11 window (`fb.rs`, via the pure-Rust `x11rb`)
-//! so the lab126 compositor manages + recomposites it.
-//! Input is raw evdev (`touch.rs`, `buttons.rs`) with `EVIOCGRAB`, multiplexed
-//! by `input.rs`. No `libxcb`/C dependencies. (`x11poc.rs` is a throwaway
-//! window POC behind the `--x11-poc` arg.)
 
 pub mod buttons;
 pub mod fb;

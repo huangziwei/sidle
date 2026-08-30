@@ -1,23 +1,4 @@
 //! The one list both routes install from.
-//!
-//! A cable push and a Wi-Fi pull deliver the same tree under the same per-path
-//! rules: both read a [`DevicePlan`], every registered app's tree flattened
-//! into mount-relative paths.
-//!
-//! # Where the trees come from
-//!
-//! Two sources, resolved identically once found. The **built-in** tree ships
-//! with the desktop app — the `device/` mirror in a dev checkout, the staged
-//! resources in a packaged one — and holds the picker and bokai. **Registered**
-//! trees are rows in the `apps` table: a repo checkout, or an unpacked release
-//! bundle. Where the built-in tree sits follows this binary's build, and it is
-//! not a row.
-//!
-//! # Nothing is materialised
-//!
-//! A plan is paths and their sources, not a copy of the bytes: a cable push
-//! reads each file once on its way to the device. `device::dist` materialises
-//! *from this plan* for the server, which serves files out of a directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -137,11 +118,6 @@ impl DevicePlan {
 }
 
 /// Compose the built-in tree with every registered app.
-///
-/// `builtin` is the mount root that ships with the desktop app. An error
-/// reading one registered source lands in [`DevicePlan::errors`], costing that
-/// app alone. An error reading the built-in tree is returned: it holds the
-/// picker.
 pub fn plan(conn: &rusqlite::Connection, builtin: &Path) -> Result<DevicePlan> {
     let rows = db::list_app_sources(conn).context("read the registered apps")?;
     Ok(plan_from(builtin, &rows))

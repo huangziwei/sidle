@@ -1,26 +1,4 @@
 //! Best-effort `.jxr` → 24-bit BMP viewer:
-//!
-//! ```text
-//! cargo run --release --example jxr2bmp -- input.jxr [output.bmp] [--tonemap]
-//! ```
-//!
-//! This is a *viewer*, not a color-managed converter — it exists so a decoded
-//! image can be looked at without writing pixel-packing boilerplate. Display
-//! mapping policy (the part that is policy, which is why it lives in an
-//! example and not in the library API):
-//!
-//! - `U8` / `U16` samples are treated as display-encoded and pass through
-//!   (`U16` takes the high byte).
-//! - `F16` / `F32` samples are treated as linear scene-referred (scRGB-style)
-//!   values: negatives clamp to 0, then either a straight clamp to 1.0 or —
-//!   with `--tonemap` — a luminance Reinhard curve (white point at the 99.9th
-//!   luminance percentile) compresses HDR highlights, then the sRGB transfer
-//!   encodes for display.
-//! - Gray replicates to RGB; straight alpha composites over black
-//!   (premultiplied alpha already is over black, so it just drops).
-//! - Fixed-point (`I16`/`I32`), packed 5-6-5, CMYK, RGBE and N-channel
-//!   layouts are rejected: each needs an interpretation choice this viewer
-//!   refuses to make silently.
 
 // Index-driven pixel loops (a sample index also strides the source buffer) match
 // the codec's style; iterators would obscure the packing math. See the same

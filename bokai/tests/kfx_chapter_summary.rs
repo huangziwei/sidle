@@ -1,10 +1,4 @@
 //! Per-chapter reader metadata, derived from the IR rather than re-scanned.
-//!
-//! A reader needs three things about a chapter before it paints anything: how
-//! much reading it represents, whether it is a full-page image rather than
-//! prose, and which images to fetch. The IR answers all three structurally,
-//! and this pins the answers: a drift in the character count moves every
-//! progress readout in the book.
 
 mod common;
 

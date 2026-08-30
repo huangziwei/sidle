@@ -1,22 +1,12 @@
 //! Sparse semantic attributes for IR nodes.
 //!
 //! Most nodes don't have href, src, or alt attributes.
-//! Using HashMaps is more memory-efficient than `Option<String>` on every Node.
-//!
-//! String values are stored in a single contiguous buffer, with TextRange
-//! references into that buffer. This avoids per-attribute String allocations.
 
 use std::collections::HashMap;
 
 use super::node::{NodeId, TextRange};
 
 /// Sparse map for semantic attributes.
-///
-/// Stores attributes only for nodes that have them, saving memory
-/// compared to storing `Option<String>` on every node.
-///
-/// All string values are stored in a single buffer, with TextRange
-/// references. This eliminates per-attribute heap allocations.
 #[derive(Debug, Default, Clone)]
 pub struct SemanticMap {
     /// Contiguous buffer for all string attribute values.
@@ -49,28 +39,16 @@ pub struct SemanticMap {
     /// Whether a table cell is a header cell (th vs td).
     is_header_cell: HashMap<NodeId, bool>,
     /// KFX `render: inline` — an element demoted to inline flow (span) at
-    /// import because every descendant is inline-only. Emission keeps the
-    /// block attribute channels (id before class) and the epub→kfx
-    /// direction can re-emit the `render` field from it.
     render_inline: HashMap<NodeId, bool>,
     /// Programming language for code blocks.
     language: HashMap<NodeId, TextRange>,
     /// Original `class` attribute string (verbatim, space-separated). Used to
-    /// preserve source class identity through the EPUB → IR → KFX → EPUB
-    /// round-trip. The cascade resolves styling independently; this field is
-    /// purely a name hint for the KFX style symbol and the output `class`.
     class: HashMap<NodeId, TextRange>,
     /// The source's own element id for this node, when the format has such a
     /// namespace (a KFX `eid`). This is the identifier a reading device
     /// persists in an annotation — the same key [`crate::model::PositionMap`]
-    /// and [`crate::model::SourceText`] are indexed by — so carrying it on the
-    /// node is what lets a renderer mark up the element a stored handle names.
     source_element: HashMap<NodeId, i64>,
     /// Per-node inline style declarations (`"k: v; k2: v2"` — the
-    /// `style="…"` attribute form). Carries source styling that has no named
-    /// rule: a KFX content element's own properties, and the partitioned
-    /// halves of a wrapped block image. Normalized export promotes repeated
-    /// values to generated classes and emits the rest as `style` attributes.
     style: HashMap<NodeId, TextRange>,
 }
 
@@ -361,33 +339,6 @@ impl SemanticMap {
     // --- Generic access ---
 
     /// Get an attribute by name.
-    ///
-    /// This provides uniform access to semantic attributes, useful for
-    /// exporters that need to query multiple attributes dynamically.
-    ///
-    /// # Supported attribute names
-    ///
-    /// - `"href"` - Link target
-    /// - `"src"` - Image source
-    /// - `"alt"` - Alternative text
-    /// - `"id"` - Element ID
-    /// - `"title"` - Tooltip text
-    /// - `"lang"` - Language code
-    /// - `"epub:type"` - EPUB semantic type
-    /// - `"role"` - WAI-ARIA role
-    /// - `"datetime"` - Machine-readable date
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use bokai::model::{SemanticMap, NodeId};
-    ///
-    /// let mut semantics = SemanticMap::new();
-    /// let node = NodeId(1);
-    ///
-    /// semantics.set_attr(node, "href", "https://example.com");
-    /// assert_eq!(semantics.get_attr(node, "href"), Some("https://example.com"));
-    /// ```
     pub fn get_attr(&self, node: NodeId, name: &str) -> Option<&str> {
         match name {
             "href" => self.href(node),
@@ -406,18 +357,6 @@ impl SemanticMap {
     /// Set an attribute by name.
     ///
     /// Returns `true` if the attribute name was recognized, `false` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use bokai::model::{SemanticMap, NodeId};
-    ///
-    /// let mut semantics = SemanticMap::new();
-    /// let node = NodeId(1);
-    ///
-    /// assert!(semantics.set_attr(node, "alt", "A photo"));
-    /// assert!(!semantics.set_attr(node, "unknown", "value")); // Unrecognized
-    /// ```
     pub fn set_attr(&mut self, node: NodeId, name: &str, value: &str) -> bool {
         match name {
             "href" => {
@@ -490,20 +429,11 @@ impl SemanticMap {
     /// Resolve all `src` and `href` paths using the provided resolver function.
     ///
     /// This is used to canonicalize relative paths (e.g., `../images/photo.jpg`)
-    /// to absolute archive paths (e.g., `OEBPS/images/photo.jpg`).
-    ///
-    /// Note: This appends resolved values to the buffer (old values become
-    /// unreachable but buffer space is not reclaimed).
-    ///
-    /// # Arguments
-    ///
-    /// * `resolver` - A function that takes a path and returns the resolved path
     pub fn resolve_paths<F>(&mut self, resolver: F)
     where
         F: Fn(&str) -> String,
     {
         // Resolve src attributes (images)
-        // Collect updates first to avoid borrow conflicts
         let src_updates: Vec<_> = self
             .src
             .iter()
@@ -519,7 +449,6 @@ impl SemanticMap {
         }
 
         // Resolve href attributes (links)
-        // Note: Only resolve internal links, not external URLs
         let href_updates: Vec<_> = self
             .href
             .iter()

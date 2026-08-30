@@ -1,38 +1,4 @@
 //! Replace the cover image inside an existing KFX container, in place.
-//!
-//! Why this exists: a store KFX can ship the *wrong* cover. Verified on
-//! こちらあみ子 (ASIN B073J24TDK): `cover_image → e6 → resource/rsrc1JG` is a
-//! valid, intact link — but it points at a 1200×1600 "筑摩eBOOKS" publisher
-//! house-logo placeholder, not the book's art. The Kindle home tile and
-//! sleep-screen render whatever that resource holds, so a sideload shows the
-//! logo. After the cover-fetch flow pulls the true cover by ASIN, we swap it
-//! into the KFX too — the KFX-side parallel of [`crate`]'s EPUB cover swap.
-//!
-//! Mechanism: byte-passthrough re-serialize. We resolve the cover's
-//! `external_resource` ($164) and its backing `bcRawMedia` ($417) through the
-//! same resolver [`crate::formats::kfx::loader`] uses (so the *dynamic* doc-symbol
-//! `base_len` is correct — a fixed `KFX_SYMBOL_TABLE.len()` mis-resolves), then
-//! emit a fresh container in which only those two entities change and every
-//! other entity is copied through verbatim.
-//! [`serialize_container`](crate::formats::kfx::serialization::serialize_container) recomputes
-//! the index-table offsets and `kfxgen_payload_sha1`.
-//!
-//! The replacement is normalized through [`sanitize_for_kfx`] first: it strips
-//! EXIF (the KOA2 sleep-screen decoder rejects EXIF-tagged JPEGs and falls back
-//! to the auto title-card) and transcodes PNG/WebP → JFIF JPEG. We then update
-//! the resource's declared `resource_width`/`resource_height` to the real pixel
-//! dimensions and, if the slot was previously non-JPEG (e.g. JXR), flip its
-//! `format`/`mime` to JPEG.
-//!
-//! Loc-0 covers: some KFX declare no `cover_image` at all — they merely open on
-//! a full-page cover image, which the loader infers from the first section. For
-//! those, swapping the pixels isn't enough: the home tile / sleep screen resolve
-//! their art through `cover_image` metadata, which is missing. So when the cover
-//! wasn't declared, we also backfill the pointer into both metadata shapes
-//! (`book_metadata`/$490 `kindle_title_metadata` and the flat `metadata`/$258
-//! `$424`), keyed to the same resource — leaving the book declaring its cover
-//! exactly like any other. Books that already declare `cover_image` are left
-//! untouched.
 
 use crate::formats::kfx::container::{self, get_field, symbol_id_for_name};
 use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
@@ -45,10 +11,6 @@ use crate::image::jpeg::sanitize_for_kfx;
 /// Replace the cover image inside `kfx_bytes` with `new_image`, returning the
 /// rewritten container. `new_image` may be JPEG, PNG, or WebP; it's normalized
 /// to a sleep-screen-safe JFIF JPEG before embedding.
-///
-/// Errors (via [`KfxError::InvalidKfx`]) if the KFX declares no
-/// `cover_image`, if the declared cover can't be matched to a backing
-/// `bcRawMedia`, or if the replacement image's dimensions can't be read.
 pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, KfxError> {
     // 1. Resolve cover identity via the proven loader: correct dynamic
     //    base_len, cover_image extraction, and bcRawMedia keying all in one.
@@ -107,18 +69,10 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, KfxE
     let flip_format = original_format.as_deref() != Some("jpg");
 
     // A cover resolved by the loader but *not* declared by `cover_image`
-    // metadata is a "loc-0" cover: the book opens on a full-page cover image and
-    // the loader inferred it from the first section. Such a KFX has color pixels
-    // once we swap them, but the Kindle home tile and sleep screen resolve their
-    // art through `cover_image` metadata — which is absent — so they'd still show
-    // nothing. Backfill the pointer (into both the `$490` and `$258` shapes, as
-    // Amazon/calibre do) so the book declares its cover exactly like every other.
     let backfill_cover_meta = !metadata_declares_cover(&book);
 
     // 3. Rewrite the container through the shared edit harness: swap the two
     //    cover entities (and, for a loc-0 cover, backfill the metadata pointer);
-    //    the harness passes every other entity through byte-for-byte and
-    //    recomputes the index-table offsets + payload sha1.
     let jpg_sym = symbol_id_for_name("jpg").unwrap_or(285);
     let mut swapped_media = false;
     let out = edit_container(kfx_bytes, |e| {
@@ -156,9 +110,6 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, KfxE
 
     if !swapped_media {
         // The declared cover has no backing `bcRawMedia` — the whole container
-        // is image-less (its image data lives in a companion resource container
-        // that was never imported). There's nothing to swap; surface it so the
-        // caller can skip rather than emit a cover-onto-an-image-less-book.
         return Err(KfxError::InvalidKfx(format!(
             "cover bcRawMedia for {cover_location:?} not found (image-less container)"
         )));
@@ -179,9 +130,6 @@ fn external_resource_location(raw_entity: &[u8]) -> Option<String> {
 }
 
 /// True if the book already declares `cover_image` in either metadata shape:
-/// the `$258` (`$424`) field or a `kindle_title_metadata` `cover_image` key
-/// inside `book_metadata` ($490). When false, the cover was inferred from the
-/// first section and needs a pointer backfilled (see `replace_cover`).
 fn metadata_declares_cover(book: &loader::BookData) -> bool {
     if let Some(m) = book
         .by_type
@@ -320,9 +268,6 @@ fn add_cover_image_to_flat_metadata(parsed: &IonValue, cover_name_sym: u64) -> I
 }
 
 /// Rebuild an `external_resource` Ion value with updated dimensions (and,
-/// when `flip_format`, JPEG `format`/`mime`). Preserves the annotation wrapper
-/// and original field order; appends `resource_width`/`resource_height` if the
-/// source lacked them.
 fn rebuild_external_resource(
     parsed: &IonValue,
     w: u32,
@@ -443,7 +388,6 @@ mod tests {
     #[test]
     fn rebuild_updates_dims_and_flips_format() {
         // external_resource { format: <jxr sym>, mime: "image/jxr",
-        //   location: "resource/r", resource_width: 50, resource_height: 53 }
         let jxr_sym = symbol_id_for_name("jxr").unwrap_or(999);
         let original = IonValue::Struct(vec![
             (KfxSymbol::Format as u64, IonValue::Symbol(jxr_sym)),
@@ -615,7 +559,6 @@ mod tests {
     #[test]
     fn book_metadata_backfills_cover_image_into_title_category() {
         // book_metadata { categorised_metadata: [ {category:"kindle_title_metadata",
-        //   metadata:[{key:"title", value:"T"}]}, {category:"kindle_audit_metadata", ...} ] }
         let title_cat = IonValue::Struct(vec![
             (
                 KfxSymbol::Category as u64,

@@ -1,13 +1,4 @@
 //! Library folder layout.
-//!
-//! ```text
-//! ~/Library/Application Support/Sidle/
-//! ├── library.db
-//! └── books/<sha>/
-//!     ├── [Author] Title (Year).epub
-//!     ├── [Author] Title (Year).kfx
-//!     └── cover.jpg
-//! ```
 
 use std::path::{Path, PathBuf};
 
@@ -54,9 +45,6 @@ impl LibraryPaths {
     /// The active library root: the `config.json` pointer if set, else the
     /// state dir. `Err` for a malformed config, and for a pointer naming a root
     /// that does not exist — an unplugged external drive, a hand-edited path.
-    ///
-    /// The entry point for `bootstrap` and the LAN server's default branch.
-    /// Renames a lowercase `sidle` app-support dir first.
     pub fn resolve() -> anyhow::Result<Self> {
         Self::migrate_legacy_state_dir();
         Self::resolve_in(&Self::state_dir()?)
@@ -119,9 +107,6 @@ impl LibraryPaths {
     /// Rename a lowercase `sidle` app-support dir to `Sidle`. Book paths are
     /// stored root-relative, and the library resolves under either name. A
     /// case-only rename on case-insensitive APFS, a move elsewhere.
-    ///
-    /// Best-effort and idempotent: a no-op against a stored `Sidle`, and a
-    /// failure leaves the dir where it is.
     fn migrate_legacy_state_dir() {
         if let Some(base) = dirs::data_dir() {
             Self::migrate_legacy_state_dir_in(&base);
@@ -174,17 +159,12 @@ impl LibraryPaths {
     }
 
     /// Thumbnail sidecar: the small color JPEG derived from the cover at import
-    /// time and served to the Kindle picker (`/cover/{id}?thumb=1`). Re-encoded
-    /// to `.jpg` whatever the source cover's extension. See
-    /// [`crate::library::thumbnail`].
     pub fn cover_thumb(&self, sha: &str) -> PathBuf {
         self.book_dir(sha).join("cover.thumb.jpg")
     }
 
     /// Library-wide marker recording the thumbnail format version the boot
     /// backfill last produced. Lets a format change (e.g. grayscale → color)
-    /// force a one-time rebuild of every `cover.thumb.jpg`. See
-    /// [`crate::library::thumbnail::THUMB_FORMAT_VERSION`].
     pub fn cover_thumb_format(&self) -> PathBuf {
         self.root.join("cover-thumb.fmt")
     }
@@ -205,9 +185,6 @@ impl LibraryPaths {
     /// Where a release bundle unpacks: one mount-rooted tree per tag of one
     /// repo, holding however many apps that repo publishes together. A local
     /// source stays where its build left it and has no directory here.
-    ///
-    /// The caller is [`crate::library::apps::release`], which is where the
-    /// three components are made path-safe.
     pub fn app_release_dir(&self, owner: &str, repo: &str, tag: &str) -> PathBuf {
         self.root.join("apps").join(owner).join(repo).join(tag)
     }
@@ -263,9 +240,6 @@ impl LibraryPaths {
     }
 
     // ── Notebooks (Scribe handwriting) ──────────────────────────────────────
-    // Layout: `notebooks/<uuid>/{nbk, cover.png, pages/page-<n>.svg}`, keyed by
-    // the device `.notebooks/<uuid>` dir name. A notebook's identity is that
-    // uuid; its bytes change under edits.
 
     /// Per-notebook directory: raw `nbk` backup + cover + cached page SVGs.
     pub fn notebook_dir(&self, uuid: &str) -> PathBuf {
@@ -306,10 +280,6 @@ impl LibraryPaths {
     }
 
     // ── Misc device backup (the configured sync collections) ──────────────────
-    // Layout: `device-backup/<serial>/<collection-id>/…`, the files a Sync pulls
-    // off a Kindle, one subdir per collection in `device-sync.json`. See
-    // `device_backup::SyncCollections`. A filename repeats across devices
-    // (`sidle-native.log`); the `<serial>` segment separates them.
 
     /// Root holding every device's misc backup, one `<serial>/` subdir each.
     pub fn device_backup_dir(&self) -> PathBuf {
@@ -331,19 +301,11 @@ impl LibraryPaths {
     }
 
     /// Which device folders a Sync brings across, as edited in the app's
-    /// settings. Keyed off the active library root, as
-    /// [`device_dist`](Self::device_dist) is. Absent until the defaults are
-    /// edited; see
-    /// [`SyncCollections::load`](crate::library::device_backup::SyncCollections::load).
     pub fn device_sync_config(&self) -> PathBuf {
         self.root.join("device-sync.json")
     }
 
     // ── Handwritten ink on a sideloaded doc (PDOC) ──────────────────────────
-    // Layout: `books/<sha>/ink/<asin>/{nbk, <container>.overlay.svg,
-    // <container>.plain.svg}` — the raw nbk backup plus the per-page renders,
-    // keyed by the ink notebook's page-container id. Nested under the host
-    // book's `books/<sha>/`, which [`remove_sha`](Self::remove_sha) takes whole.
 
     /// Per-book ink directory for one ink notebook (one `asin`).
     pub fn book_ink_dir(&self, sha: &str, asin: &str) -> PathBuf {
@@ -399,10 +361,6 @@ fn sanitize_ink_id(id: &str) -> String {
 }
 
 /// A device serial as a single path segment for `device-backup/<serial>/`.
-/// [`sanitize_ink_id`] keeps the alphanumerics a serial holds in practice, and
-/// keeps `.` — an empty or all-dot result becomes `unknown-device`, bounding
-/// `..` as traversal. The WiFi push carries this serial verbatim from the
-/// request body.
 fn sanitize_device_id(serial: &str) -> String {
     let s = sanitize_ink_id(serial);
     if s.is_empty() || s.chars().all(|c| c == '.') {
@@ -418,21 +376,11 @@ fn sanitize_device_id(serial: &str) -> String {
 pub const SHA_INFIX_LEN: usize = 8;
 
 /// First [`SHA_INFIX_LEN`] hex chars of a KFX sha256.
-///
-/// Panics for `kfx_sha256.len() < SHA_INFIX_LEN`. Every caller reads
-/// `books.kfx_sha256` (64 hex chars) or short-circuits on `NULL`.
 pub fn sha_infix(kfx_sha256: &str) -> &str {
     &kfx_sha256[..SHA_INFIX_LEN]
 }
 
 /// Build the canonical on-device basename for a KFX: `<stem>.<sha8>.kfx`.
-///
-/// `<stem>` is the file_stem of `kfx_path`, the local library file under
-/// `books/<sha>/`, which makes the device-side name mirror the Mac-side one. A
-/// path with no usable stem yields `book-<sha8>`.
-///
-/// The USB push (`device::push::push_one`) and the LAN server's
-/// Content-Disposition header both name a file through here.
 pub fn kfx_device_filename(kfx_path: &str, kfx_sha256: &str) -> String {
     let stem = Path::new(kfx_path)
         .file_stem()
@@ -444,9 +392,6 @@ pub fn kfx_device_filename(kfx_path: &str, kfx_sha256: &str) -> String {
 }
 
 /// Parse the `<sha8>` out of an on-device filename matching the
-/// `<basename>.<sha8>.kfx` shape. Returns `None` for anything else —
-/// used both as a "is this ours?" gate (push/delete) and to look the
-/// matching library row back up (`device_list_ours`).
 pub fn parse_sha_infix(filename: &str) -> Option<String> {
     let stem = filename.strip_suffix(".kfx")?;
     let (_, sha) = stem.rsplit_once('.')?;
@@ -483,10 +428,6 @@ pub fn cover_ext_from(media_or_path: &str) -> &'static str {
 /// Build a filesystem-safe basename in the form `[Author] Title (Year)`.
 ///
 /// - Drops the `[Author] ` prefix if no author.
-/// - Drops the ` (Year)` suffix if no year can be extracted.
-/// - Falls back to `Untitled` for an empty title.
-/// - Strips characters that Finder/macOS reject and collapses whitespace.
-/// - Truncates to 180 chars, under the HFS+ filename limit.
 pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> String {
     let title = sanitize_segment(title);
     let title = if title.is_empty() {
@@ -518,9 +459,6 @@ pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> S
 }
 
 /// Make `s` safe to use as a single filesystem path segment: replace the
-/// characters Finder/macOS reject (and NUL) with `_`, turn control chars into
-/// spaces, and collapse runs of whitespace. Shared by [`format_basename`] and
-/// the library export (per-author subfolder names).
 pub fn sanitize_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

@@ -36,10 +36,6 @@ where
     }
 
     // Expand according to CSS shorthand rules:
-    // 1 value: all sides
-    // 2 values: top/bottom, left/right
-    // 3 values: top, left/right, bottom
-    // 4 values: top, right, bottom, left
     expand_shorthand_4(values)
 }
 

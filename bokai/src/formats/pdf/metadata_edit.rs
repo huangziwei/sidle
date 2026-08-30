@@ -1,38 +1,4 @@
 //! Surgical in-place metadata edit for a PDF's `/Info` dictionary.
-//!
-//! The PDF sibling of [`crate::formats::kfx::metadata_edit`] and
-//! [`crate::formats::epub::metadata_edit`], with the same contract across all three: a
-//! [`MetadataPatch`] of optional fields, where `None` leaves a field untouched
-//! (v1 sets, it does not clear) and an empty patch returns the input unchanged.
-//!
-//! The edit rides the [`PdfPackage`] harness, so it costs one appended `/Info`
-//! generation — the page content is never rewritten.
-//!
-//! ## Field mapping
-//!
-//! The editor's fields are format-neutral, and `/Info` (PDF 32000-1 §14.3.3)
-//! is a much thinner schema than an OPF's Dublin Core, so three fields map with
-//! a caveat:
-//!
-//! | patch field | `/Info` key | note |
-//! |---|---|---|
-//! | `title` | `/Title` | |
-//! | `authors` | `/Author` | `/Author` is one text string, so a multi-author list is joined with `", "` — the convention `probe_pdf` already reads back |
-//! | `publisher` | — | `/Info` has no publisher key; carried in XMP instead, so it is **ignored** here |
-//! | `date` | `/CreationDate` | converted to a PDF date string when it parses as `YYYY-MM-DD`; otherwise skipped |
-//! | `language` | — | not an `/Info` key (it's catalog `/Lang`); **ignored** here |
-//!
-//! Fields this cannot express are dropped rather than smuggled into a
-//! non-standard `/Info` key a reader would never look at. The library DB row
-//! remains the source of truth for those fields; the edit makes the values
-//! durable in the artifact for the fields PDF *has*.
-//!
-//! ## Scope (v1)
-//!
-//! `/Info` only, not XMP (`/Metadata`). A PDF carrying both can therefore end up
-//! with an XMP title disagreeing with the `/Info` title, and PDF 2.0 readers
-//! prefer XMP. This crate's own consumer (`probe_pdf`) reads `/Info`, so the
-//! edit is authoritative everywhere bokai reads it back. XMP is not synced.
 
 use lopdf::Object;
 
@@ -40,10 +6,6 @@ use super::doc::encode_pdf_string;
 use super::edit::PdfPackage;
 
 /// Which `/Info` fields to set. `None` leaves a field untouched.
-///
-/// Field-for-field parallel with the KFX and EPUB patches so the app layer can
-/// build one patch and dispatch by source format; see the module docs for the
-/// fields PDF's `/Info` cannot express.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataPatch {
     pub title: Option<String>,
@@ -61,20 +23,12 @@ pub struct MetadataPatch {
 
 impl MetadataPatch {
     /// True if the patch sets no field that `/Info` can represent — then
-    /// [`edit_metadata`] returns the input unchanged. Note a patch carrying only
-    /// `language`/`publisher` is "empty" here: neither has an `/Info` home, so
-    /// there is nothing to write.
     pub fn is_empty(&self) -> bool {
         self.title.is_none() && self.authors.is_none() && self.date.is_none()
     }
 }
 
 /// Apply `patch` to a PDF's `/Info`, returning the edited bytes.
-///
-/// The original bytes are preserved verbatim as a prefix; only a new `/Info`
-/// generation is appended. Returns the input unchanged for a patch with nothing
-/// `/Info` can hold. Errors if the bytes aren't a readable PDF, or if the PDF is
-/// encrypted (see [`PdfPackage::parse`]).
 pub fn edit_metadata(pdf_bytes: &[u8], patch: &MetadataPatch) -> std::io::Result<Vec<u8>> {
     if patch.is_empty() {
         return Ok(pdf_bytes.to_vec());
@@ -99,11 +53,6 @@ pub fn edit_metadata(pdf_bytes: &[u8], patch: &MetadataPatch) -> std::io::Result
 
 /// Convert an ISO-ish `YYYY-MM-DD` (optionally with a trailing time we ignore)
 /// into a PDF date string `D:YYYYMMDD000000Z` (PDF 32000-1 §7.9.4).
-///
-/// `None` for anything that isn't a plausible date. Callers hand dates in as
-/// free text, and writing an unparseable value into `/CreationDate` would
-/// produce a date field readers silently drop. Leaving the original is better
-/// than corrupting it.
 fn to_pdf_date(s: &str) -> Option<String> {
     let date = s.trim().get(..10)?;
     let mut parts = date.split('-');

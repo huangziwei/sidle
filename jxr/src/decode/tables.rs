@@ -1,11 +1,4 @@
 //! Huffman tables used by the JPEG-XR decoder.
-//!
-//! Direct port of the `HBIN` literal tables at the top of calibre's
-//! `jxr_image.py`. Each entry maps a bit-prefixed code (`hbin` encoding) to
-//! a value.
-//!
-//! Built lazily on first call via `OnceLock` since they're constant per
-//! process.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

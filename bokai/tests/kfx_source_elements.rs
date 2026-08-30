@@ -1,10 +1,4 @@
 //! Source element ids carried on IR nodes, per chapter.
-//!
-//! A reading device addresses text by element id, and a renderer has to mark up
-//! the element a stored `(element, offset)` handle names. The IR carries those
-//! ids structurally. If a chapter's list changes — different ids, different
-//! order, a different chapter holding an id — then "which page is this
-//! highlight on" changes with it, so the per-chapter lists are pinned.
 
 mod common;
 

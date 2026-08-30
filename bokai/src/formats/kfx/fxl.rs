@@ -1,12 +1,4 @@
 //! Fixed-layout signal derivation shared across the KFX family.
-//!
-//! [`book_signals`] unions the two places a book states the image-based
-//! fixed-layout capabilities (§12.1): the `content_features` ($585) keys
-//! `yj_*fixed_layout` / `yj_double_page_spread`, and the
-//! `kindle_capability_metadata` category of `book_metadata` ($490), which
-//! states the same two as values. [`page_leaves`] walks a page template to a
-//! section's pages, and [`read_px`] reads the `fixed_width`/`fixed_height`
-//! each states.
 
 use std::collections::HashMap;
 

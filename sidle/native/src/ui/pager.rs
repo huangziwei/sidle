@@ -1,20 +1,4 @@
 //! Bottom-strip toolbar.
-//!
-//! Always-visible 80px strip at the bottom of the panel with tap zones,
-//! left-to-right:
-//!
-//! - `Exit` — always shown, fixed-width left zone.
-//! - `Filter` — always shown, fixed-width zone; opens the filter & sort menu,
-//!   shows `(N)` when N facets are active.
-//! - `Source` — always shown, fixed-width zone; the library-switch button that
-//!   toggles between the LAN library and on-device DRM books. (Sync moved to a
-//!   round button in the top bar; this slot is its former home.)
-//! - `← Prev / N / Next →` — the remaining width, split in half: left half pages
-//!   back, right half pages forward (shown only when n_pages > 1). Touch nav is
-//!   essential on the Paperwhite, which has no bezel page buttons.
-//!
-//! Replaces the earlier hidden top-left-corner quit gesture, which was
-//! ambiguous with stray touch events near the panel edge.
 
 use crate::eink::fb::Framebuffer;
 use crate::ui::text::TextRenderer;
@@ -91,10 +75,6 @@ pub fn hit(
         return None;
     }
     // Split the NAV REGION (NAV_LEFT..xres) in half: left = Prev, right = Next.
-    // NOT `fb_xres / 2` (~632px), the whole *screen's* midpoint: it sits just
-    // left of NAV_LEFT (620) on the 1264px panel, which leaves Prev a ~12px
-    // sliver and drops every nav tap through to Next. Splitting the region
-    // itself gives two real halves on any panel width.
     let nav_mid = (NAV_LEFT + fb_xres) / 2;
     if tx < nav_mid {
         Some(PagerHit::Prev)
@@ -126,8 +106,6 @@ pub fn draw(
 
     // Filter/Back zone, right of Exit. Drilled into a series → "← Back" (reusing
     // the proven `←` glyph rather than a `‹` that may be absent from the font).
-    // At the top level → "Filter", with `(N)` when N facets are active so a
-    // filtered state is obvious; the active sort key/dir lives in the grid header.
     let filter_label = if drilled {
         "← Back".to_string()
     } else if filter_count > 0 {

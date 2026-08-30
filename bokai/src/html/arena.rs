@@ -1,7 +1,4 @@
 //! Arena-based DOM for HTML parsing.
-//!
-//! This module provides an efficient arena-allocated DOM tree that html5ever
-//! can parse into. The arena layout enables fast traversal and selector matching.
 
 use std::collections::HashMap;
 
@@ -87,7 +84,6 @@ impl ArenaNode {
 /// Arena-based DOM tree.
 ///
 /// All nodes are stored in a contiguous vector for cache-friendly traversal.
-/// Parent/child/sibling links use indices into this vector.
 pub struct ArenaDom {
     /// All nodes in the arena.
     nodes: Vec<ArenaNode>,

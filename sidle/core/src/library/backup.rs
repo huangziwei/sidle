@@ -1,29 +1,5 @@
 //! Library backup & restore — a single `.sidlebak` archive (a zip) of the whole
 //! library, restorable on this or another machine.
-//!
-//! Archive layout:
-//! ```text
-//! manifest.json              # format/version, counts, db_sha256 (integrity + schema gate)
-//! library.db                 # consistent VACUUM INTO snapshot (deflate)
-//! books/<sha>/...            # the whole tree, verbatim (store — already-compressed media)
-//! notebooks/<uuid>/...       # Scribe handwriting, same treatment
-//! <everything else>          # every other root entry, swept (see `excluded_from_archive`)
-//! ```
-//!
-//! `books/` and `notebooks/` are enumerated from the DB snapshot, so the archived
-//! file set matches the archived rows exactly. Everything else at the root is
-//! swept in by default and only a named exclusion list keeps anything out. An
-//! include list is the wrong default here: anything added to the root that
-//! nobody remembers to name leaves the archive silently, and the user finds out
-//! at restore.
-//!
-//! Two hazards drive the design: **H1** — a live WAL DB can't be copied
-//! file-by-file, so we snapshot with `VACUUM INTO` (shared with
-//! [`crate::library::relocate`]); **H5** — the running app holds an open
-//! `Connection`, so restore does restore-then-relaunch: it swaps files on disk
-//! and the command layer calls `app.restart()` so the next process opens them.
-//! Cross-root portability is free because book paths are stored root-relative —
-//! the restored DB resolves under whatever root it lands in.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -42,17 +18,6 @@ use crate::library::{db, import, relocate};
 const FORMAT_TAG: &str = "sidle-library-backup";
 /// Archive layout version (independent of the DB schema's `user_version`). Bump
 /// only if the archive *shape* changes; restore refuses a newer one.
-///
-/// v2: carries the `notebooks/<uuid>/` tree (Scribe handwriting). v1 archives
-/// hold only `library.db` + `books/`, so they have no notebook files in them at
-/// all. A v1 archive still restores into a v2 app — it simply has no
-/// `notebooks/` entries to extract.
-///
-/// v3: every other root entry is swept in too — `device-backup/` (what a Sync
-/// brings off the Kindle for the Files tab, which are files on disk and nowhere
-/// in the DB, so no earlier archive holds them), `device-sync.json`,
-/// `cover-thumb.fmt`, `.server-token`, and anything added later. An older archive
-/// restores into a v3 app unchanged; it simply has fewer entries to extract.
 const FORMAT_VERSION: u32 = 3;
 
 /// The archive's `manifest.json`: enough to validate integrity, gate the schema
@@ -88,11 +53,6 @@ pub struct Counts {
 }
 
 /// What becomes of the library a restore replaces.
-///
-/// The swap sets it aside either way — that is a rename, so it is instant and
-/// costs no space, and it means every original file is still intact if the move
-/// of the restored payload fails partway. This decides only what happens after
-/// that move succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviousLibrary {
     /// Leave it at `<root>.bak-<ts>` as the undo. Nothing removes it later, so
@@ -111,17 +71,10 @@ pub struct RestoreOutcome {
     pub annotations: i64,
     /// The set-aside library's directory, or `None` once it has been removed.
     /// This reports the disk, not the request — a [`PreviousLibrary::Discard`]
-    /// whose removal failed still names the directory, because the space is
-    /// still taken and the caller has something to say about it.
     pub safety_copy: Option<PathBuf>,
 }
 
 /// Take the consistent DB snapshot — the only step that needs the live
-/// `Connection` (`VACUUM INTO`, H1). Fast: the snapshot is just the metadata DB
-/// (tens of MB at most), not the `books/` tree. The caller holds the DB lock
-/// across only this, then releases it before the (potentially long) zip in
-/// [`create_archive`] — so a multi-GB backup never stalls the app's other DB
-/// users. The returned guard removes the temp file on drop.
 pub fn snapshot(conn: &Connection) -> Result<TempSnapshot> {
     let tmp = TempSnapshot::new()?;
     relocate::snapshot_db(conn, &tmp.path)?;
@@ -131,7 +84,6 @@ pub fn snapshot(conn: &Connection) -> Result<TempSnapshot> {
 /// Build the `.sidlebak` from a [`snapshot`] plus the on-disk `books/` tree — no
 /// live `Connection`, so the caller can drop the DB lock first. `db_user_version`
 /// is read from the live DB by the caller (under the same lock as the snapshot)
-/// and recorded for the restore-time schema gate. Returns the manifest.
 pub fn create_archive(
     snapshot: &TempSnapshot,
     books_dir: &Path,
@@ -152,9 +104,6 @@ pub fn create_archive(
 }
 
 /// Like [`create_archive`], but ticks `on_progress(dirs_done, dirs_total)` after
-/// each book/notebook directory is zipped — drives the footer "Backing up …"
-/// counter. Zipping the book tree is the long pole; the manifest + DB write
-/// ahead of it are quick.
 pub fn create_archive_with_progress(
     snapshot: &TempSnapshot,
     books_dir: &Path,
@@ -246,12 +195,6 @@ pub fn create_archive_with_progress(
     }
 
     // Everything else the root holds, at its own name: `device-backup/` above
-    // all — what a Sync brings off the Kindle for the Files tab, which exists
-    // only as files and would otherwise be in no backup at all — plus
-    // `device-sync.json`, `cover-thumb.fmt`, `.server-token`, and whatever lands
-    // there next. Deflated rather than stored: this is small and mostly text
-    // (logs, markers, a token), and the screenshots are the only
-    // already-compressed thing in it. v3.
     for path in &extras {
         let name = path
             .file_name()
@@ -293,16 +236,6 @@ pub fn create(
 }
 
 /// The shared front-half of any consumer of a `.sidlebak` (restore and merge):
-/// validate + version-gate the manifest BEFORE any disk mutation, extract into
-/// `staging`, and verify the extracted `library.db` checksum. Returns the
-/// manifest. On any failure after extraction the staging dir is cleared, so the
-/// caller's target is never touched. The gates run before extraction, so a
-/// foreign / forward-incompatible archive leaves no staging behind either.
-///
-/// Factored out so merge reuses the exact validation/extraction restore uses,
-/// rather than a parallel copy that could drift (the gate is security-relevant:
-/// zip-slip is handled in [`extract_all`], the schema gate refuses a
-/// forward-incompatible DB).
 pub(crate) fn stage_archive(
     src_zip: &Path,
     staging: &Path,
@@ -358,16 +291,6 @@ pub(crate) fn stage_archive(
 
 /// Restore a `.sidlebak` into `dest_root` (the current library root), replacing
 /// its contents. `app_user_version` is the running app's [`db::SCHEMA_VERSION`].
-///
-/// Validates the manifest and gates the schema BEFORE touching disk, extracts to
-/// a sibling staging dir, verifies the DB (checksum + opens as a sidle library
-/// with the manifest's book count), then swaps: everything the current root
-/// holds is moved aside to a `<root>.bak-<ts>` directory and the staged payload
-/// moved into place — renames only (staging + safety are siblings of
-/// `dest_root`, hence same volume). `previous` decides whether that set-aside
-/// library is then kept as the undo or deleted. `config.json` (if `dest_root` is
-/// the state dir) is the one thing left where it is. The caller relaunches
-/// afterward (H5).
 pub fn restore(
     src_zip: &Path,
     dest_root: &Path,
@@ -394,9 +317,6 @@ pub fn restore_with_progress(
     let manifest = stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
     // (3) Restore-specific verify: the staged DB opens as a sidle library with
-    //     the manifest's book count. Paths are already relative, so there
-    //     is nothing to rewrite. Failure clears staging, leaving the target
-    //     untouched.
     let staged_books = match relocate::validate_existing(&staging) {
         Ok(n) => n,
         Err(e) => {
@@ -414,13 +334,6 @@ pub fn restore_with_progress(
     }
 
     // (4) Swap. Move the current payload aside, then the staged payload into
-    //     place. The live app's open Connection points at the old library.db
-    //     inode (now under the set-aside dir); we relaunch right after, so the
-    //     next process opens the restored files.
-    //
-    //     Aside first even when the caller wants it gone: the move is a rename,
-    //     so it costs nothing, and it means a failure in the second move leaves
-    //     every original file intact rather than half-deleted.
     let safety = sibling(
         dest_root,
         &format!("bak-{}", Utc::now().format("%Y%m%d-%H%M%S")),
@@ -454,9 +367,6 @@ pub fn restore_with_progress(
 // ---------------------------------------------------------------------------
 
 /// A temp file holding the `VACUUM INTO` snapshot, removed on drop (success or
-/// error). The OS temp dir is always writable; we read the file twice (hash +
-/// zip) then discard it. Opaque to callers — produced by [`snapshot`], consumed
-/// by [`create_archive`].
 pub struct TempSnapshot {
     path: PathBuf,
 }
@@ -468,10 +378,6 @@ impl TempSnapshot {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         // A process-wide counter guarantees uniqueness even when two snapshots
-        // start within the same clock tick (parallel callers, or the test suite
-        // running many `create`s at once): `{nanos}` alone can collide, and a
-        // collision would let one `TempSnapshot`'s `Drop` delete a sibling's
-        // file mid-read.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = format!("sidle-backup-{}-{nanos}-{seq}.db", std::process::id());
@@ -496,10 +402,6 @@ impl Drop for TempSnapshot {
 /// Open the snapshot read-only and read book/annotation counts + the full sha
 /// list + the notebook uuid list, so the file set we archive matches the DB
 /// snapshot exactly.
-/// Root entries the archive leaves out, and the only reason anything is left
-/// out: the default is to carry it. An allow-list is what let this format ship
-/// twice without user data it should have had, so a tree nobody here has heard
-/// of is archived rather than dropped.
 fn excluded_from_archive(name: &str) -> bool {
     matches!(
         name,
@@ -524,8 +426,6 @@ fn excluded_from_archive(name: &str) -> bool {
 
 /// Every root entry [`excluded_from_archive`] does not name, sorted so the
 /// archive is deterministic. A root that is not there yet has nothing to sweep;
-/// a root that refuses to be listed fails the backup rather than quietly
-/// producing an archive missing everything this sweep exists to carry.
 fn root_extras(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let entries = match fs::read_dir(root) {
@@ -695,11 +595,6 @@ pub(crate) fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
 /// Move the library *payload* from `from` to `to` by rename — everything the
 /// directory holds except `config.json`, the root pointer, which stays behind
 /// when `from` is the state dir.
-///
-/// Everything, not a list of trees: the set-aside has to empty the root of the
-/// old library, or a swept entry that exists on both sides (`device-backup/` is
-/// the first) meets its counterpart when the restored payload moves in, and
-/// renaming a directory onto a non-empty one fails.
 fn move_payload(from: &Path, to: &Path) -> Result<()> {
     let entries = match fs::read_dir(from) {
         Ok(entries) => entries,
@@ -814,7 +709,6 @@ mod tests {
         // The swept remainder (v3). `device-backup/` is the case that motivated
         // it — screenshots and picker logs exist as files and are named nowhere
         // in the DB, so an inventory-driven archive could not see them at all.
-        // `cover-thumb.fmt` stands for the small root markers beside it.
         let shots = root.join("device-backup").join("G000").join("screenshots");
         fs::create_dir_all(&shots).unwrap();
         fs::write(shots.join("screenshot_1.png"), "png-bytes").unwrap();

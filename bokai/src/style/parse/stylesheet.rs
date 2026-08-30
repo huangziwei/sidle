@@ -21,9 +21,6 @@ pub struct Stylesheet {
 }
 
 /// A CSS rule with selectors and declarations.
-///
-/// Declarations are separated into normal and important vectors,
-/// following the lightningcss pattern for memory efficiency.
 #[derive(Debug, Clone)]
 pub struct CssRule {
     pub selectors: Vec<Selector<BokoSelectors>>,
@@ -105,12 +102,6 @@ impl Stylesheet {
 
     /// Rewrite every asset `url()` this stylesheet declares from the form the
     /// author wrote to whatever `resolve` returns.
-    ///
-    /// A CSS `url()` is relative to the stylesheet, not to the document that
-    /// links it, so only the caller that knows where the rules came from can
-    /// do this — the parser deliberately keeps the target verbatim. Callers
-    /// pass a resolver that canonicalizes into the archive's path space, the
-    /// same one image `src` attributes land in.
     pub fn resolve_asset_urls<F>(&mut self, mut resolve: F)
     where
         F: FnMut(&str) -> String,
@@ -130,9 +121,6 @@ impl Stylesheet {
 }
 
 /// Parse a bare declaration list — the contents of a `style=""` attribute.
-///
-/// Returns (normal, important) declarations. Parsing is lenient like
-/// `Stylesheet::parse`: invalid declarations are skipped.
 pub fn parse_declaration_list(css: &str) -> (Vec<Declaration>, Vec<Declaration>) {
     let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);

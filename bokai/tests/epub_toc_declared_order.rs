@@ -1,14 +1,5 @@
 //! A rendered package keeps the book's declared TOC order; a shipped container
 //! sorts it into spine order.
-//!
-//! The fixture is a publisher EPUB whose spine contradicts its own navigation
-//! (see `misordered_epub`). EPUB 3 wants a shipped `nav.xhtml` in reading order
-//! (epubcheck NAV-011), so the container sorts — but a renderer showing that
-//! sorted list puts chapter three after the appendices, which is neither what
-//! the source declares nor what any other reader of the same book displays.
-//!
-//! Repairing such a book is `epub_spine_reorder`'s subject; this is what a
-//! reader must show for as long as it is unrepaired.
 
 mod misordered_epub;
 

@@ -1,9 +1,4 @@
 //! What is on the device right now, and which library row it belongs to.
-//!
-//! `documents/Sidle/` IS the source of truth — there is no on-device manifest
-//! and no per-device table — so this scan always reflects exactly what the
-//! Kindle holds, including files the reader deleted through its own UI (which
-//! simply don't appear).
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -71,13 +66,6 @@ pub fn list_ours(conn: &Connection, transport: &dyn Transport) -> Result<Vec<Ent
 }
 
 /// The library row an on-device filename belongs to.
-///
-/// Primary match is the modern `<basename>.<sha8>.kfx` shape, by `kfx_sha256`
-/// prefix. On a miss, fall back to the stem: a desktop reconvert changes
-/// `kfx_sha256`, but the device filename is frozen at the old hash (the Kindle
-/// won't re-bind a renamed `.sdr`), so the basename is the only stable link —
-/// without it a reconverted book wrongly shows as "not in library". Legacy
-/// pushes (pre-sha8 naming) carry the row's kfx basename verbatim.
 fn resolve(conn: &Connection, filename: &str) -> Result<Option<db::BookRow>> {
     let Some(sha8) = parse_sha_infix(filename) else {
         return Ok(db::find_by_kfx_filename(conn, filename)?);

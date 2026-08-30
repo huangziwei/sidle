@@ -1,27 +1,5 @@
 //! Metadata round-trip validation — verify the OPF metadata fields the
 //! Kindle reader exposes survive into KFX.
-//!
-//! Source side: parse the OPF (`Metadata` struct from bokai's epub parser).
-//! KFX side: walk two entities:
-//!
-//! - **`metadata` ($258)** — has `reading_orders[*].page_progression_direction`.
-//! - **`book_metadata` ($490)** — has `categorised_metadata`, a list of
-//!   `{category, metadata: [{key, value}, ...]}` blobs. The Kindle library
-//!   service reads keys like `title`, `author`, `language`, `cover_image`.
-//!
-//! Round-trip rules:
-//!
-//! - `title` → KindleTitle.`title` (exact string match)
-//! - `language` → KindleTitle.`language`
-//! - `authors[0]` → KindleTitle.`author` (KFX only stores one; if source has
-//!   multiple, this validator checks the first survives — additional authors
-//!   are silently lost by design)
-//! - `cover_image` (path) → must produce a non-empty `cover_image` value
-//!   pointing at a resource_name (existence check only; the path
-//!   transformation is intentional)
-//! - `page_progression_direction` →
-//!   `metadata.reading_orders[0].page_progression_direction`
-//!   (`$rtl` / `$ltr` / omitted)
 
 use crate::formats::epub::structure::resolve_href;
 use std::collections::HashMap;
@@ -458,8 +436,6 @@ fn is_asin_identifier(scheme: &str) -> bool {
 }
 
 // ============================================================================
-// Source-side
-// ============================================================================
 
 #[derive(Debug, Default)]
 struct EpubMetadata {
@@ -872,8 +848,6 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
     Ok(buf)
 }
 
-// ============================================================================
-// KFX-side
 // ============================================================================
 
 #[derive(Debug, Default)]

@@ -1,12 +1,4 @@
 //! Minimal OPF parser tailored to the EPUB-3 standalone validator.
-//!
-//! Independent from [`crate::formats::epub::parse_opf`] by design (per
-//! `crate::validate` philosophy: a parser-side bug should surface in the
-//! validator instead of being silently mirrored). Captures the attributes
-//! the standalone validator needs that the full parser drops: `<item
-//! properties>`/`<item fallback>`, `<itemref linear>`, the package
-//! `unique-identifier`, `<dc:identifier>` ids, the `<spine toc>` NCX pointer,
-//! and `<guide>` references.
 
 use std::collections::HashSet;
 use std::io;
@@ -25,47 +17,22 @@ pub struct Package {
     /// The `id` of every `<dc:identifier>` in the metadata.
     pub identifier_ids: Vec<String>,
     /// The trimmed text of the `<dc:identifier>` whose `id` matches
-    /// [`Self::unique_identifier`] — the publication's unique identifier
-    /// *value* (what NCX-001 compares the NCX `dtb:uid` against). `None` if the
-    /// package declares no unique-identifier or no matching identifier element.
     pub unique_identifier_value: Option<String>,
     /// Every Dublin Core metadata element (`<dc:*>`) under `<metadata>`, in
-    /// document order. Drives the metadata-value checks (date, identifier UUID,
-    /// empty element, required title/language). [`Self::identifier_ids`] and
-    /// [`Self::unique_identifier_value`] are derived from this.
     pub metadata: Vec<DcMeta>,
     /// The `<spine toc>` attribute (a manifest id for the NCX), if present.
     pub spine_toc: Option<String>,
     /// The package element's `prefix` attribute (EPUB 3 vocabulary prefix
-    /// declarations), raw. Drives the undeclared-prefix check (OPF-028): a
-    /// property token whose prefix is neither reserved nor declared here is
-    /// undeclared.
     pub prefix_decl: Option<String>,
     /// The value of the publication-level (non-`refines`) `<meta
-    /// property="rendition:layout">`, if declared — `"pre-paginated"` means the
-    /// publication default is fixed-layout. Drives the fixed-layout resolution
-    /// that gates the FXL viewport check (HTM-046).
     pub rendition_layout: Option<String>,
     /// Every property token used by any package-document property attribute
-    /// (`<meta property>`/`scheme`, `<item properties>`, `<itemref properties>`,
-    /// `<link rel>`/`properties`), in document order. Drives the undeclared-prefix
-    /// check (OPF-028); a set-membership signal, so duplicates are harmless.
     pub property_tokens: Vec<String>,
     /// The `property` of every publication-level `<meta>` — one directly under
-    /// `<metadata>` with no `refines`, which is what states a fact about the
-    /// publication rather than refining another element. epubcheck keys its
-    /// publication-wide features (the media-overlay styling classes among them)
-    /// on exactly this set.
     pub publication_properties: HashSet<String>,
     /// Every property-bearing attribute in the package document, with the
-    /// context that decides its vocabulary. Drives the property rules
-    /// (OPF-012/025/026/027), which need to know *where* a token appeared —
-    /// unlike [`Self::property_tokens`], which only needs its prefix.
     pub property_attrs: Vec<PropertyAttr>,
     /// `(id, refined-id)` for every metadata expression that both carries an
-    /// `id` and refines another one. The refines graph must be acyclic
-    /// (OPF-065); only an expression with an `id` can take part in a cycle,
-    /// which is why an edge needs both halves.
     pub refines_edges: Vec<(String, String)>,
     /// Every `<meta property=…>` expression under `<metadata>`, with its text.
     /// The `<dc:*>` elements are [`Self::metadata`]; this is the other half of
@@ -77,10 +44,6 @@ pub struct Package {
     /// links). Drives the OPF link rules (OPF-089/093/094/095/098/067, RSC-029).
     pub links: Vec<OpfLink>,
     /// Every `<collection>` in the package document, flattened. A collection
-    /// groups resources under a *role* — index, preview, dictionary — and each
-    /// role has its own membership rules (OPF-071/075/076/078/081…084). Nesting
-    /// is flattened because every rule that recurses (only the index one does)
-    /// applies the same test at every depth.
     pub collections: Vec<Collection>,
     pub manifest: Vec<ManifestItem>,
     pub spine: Vec<SpineItem>,
@@ -180,9 +143,6 @@ pub struct ManifestItem {
 pub struct SpineItem {
     pub idref: String,
     /// `Some(true)` if `linear="yes"`, `Some(false)` if `linear="no"`, `None`
-    /// if attribute is absent. Per OPF 3.3 the default is `yes`, but we
-    /// preserve the distinction so the reachability rule only flags
-    /// explicitly-non-linear entries.
     pub linear: Option<bool>,
     /// Space-separated tokens from `properties=`. Empty if absent. Carries the
     /// per-spine-item `rendition:layout-*` override (fixed-layout resolution for
@@ -252,9 +212,6 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     });
                 }
                 // A metadata expression that refines another and can itself be
-                // refined is an edge in the refines graph (OPF-065). A leading
-                // `#` makes the value a same-document reference; epubcheck
-                // strips it and compares ids.
                 if in_metadata
                     && let (Some(id), Some(refines)) = (attr(&e, b"id"), attr(&e, b"refines"))
                 {
@@ -283,12 +240,6 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         hrefs: Vec::new(),
                     }),
                     // Capture `<meta>` property/scheme tokens for the undeclared-
-                    // prefix check (OPF-028), and open the expression so its text
-                    // accumulates until `End`. A self-closed `<meta/>` emits no
-                    // `End`, so it is closed by whatever `End` comes next — with
-                    // the empty value it correctly has, since the arms that
-                    // consume text run before this one only when a `<dc:*>` is
-                    // open.
                     b"meta" if in_metadata => {
                         for (key, context) in [
                             (b"property".as_slice(), super::vocab::Context::Meta),

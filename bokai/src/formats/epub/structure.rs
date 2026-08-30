@@ -1,12 +1,4 @@
 //! Where an EPUB's parts sit, as absolute zip paths.
-//!
-//! An EPUB writes every reference relative to whichever document makes it — the
-//! OPF's manifest, a nav doc's `<a href>`, a chapter's cross-link — while
-//! anything reasoning about the book as a whole needs one vocabulary in which
-//! two references to the same file compare equal. That vocabulary is the zip
-//! entry name, and this module is the translation into and out of it, plus the
-//! two reads that need it: the spine in reading order, and the links a document
-//! makes into it.
 
 use std::collections::HashSet;
 
@@ -16,10 +8,6 @@ use crate::model::TocEntry;
 use crate::util::{percent_decode, strip_tags};
 
 /// The spine in reading order, as `(absolute zip path, lowercase filename)`.
-///
-/// The filename is what a link is matched against — an href written from
-/// another directory reaches the same document by a different relative path,
-/// but never by a different name.
 pub(crate) fn spine_documents(opf: &OpfData, opf_base: &str) -> Vec<(String, String)> {
     opf.spine_ids
         .iter()
@@ -35,12 +23,6 @@ pub(crate) fn spine_documents(opf: &OpfData, opf_base: &str) -> Vec<(String, Str
 /// How many distinct spine documents a page must link to before it reads as a
 /// Contents page **for a section already known to be one** — a volume of a
 /// collection, a work inside an anthology.
-///
-/// Two, because at that point the section's extent is attested by something else
-/// (its own cover page, the entries around it) and the only question left is
-/// whether this page enumerates it; a volume of one story plus an afterword is
-/// ordinary. Finding a Contents page with no such attestation is a harder
-/// question and carries its own, higher, threshold.
 pub(crate) const MIN_SECTION_CONTENTS_LINKS: usize = 2;
 
 /// `(label, absolute href)` for every link this document makes to *another*
@@ -75,9 +57,6 @@ pub(crate) fn internal_links(
 
 /// The directory portion of a zip path, with a trailing `/` (empty at root) —
 /// the base that document's own relative references resolve against.
-///
-/// Zip entry names are always `/`-delimited, so this splits on `/` rather than
-/// going through `Path`, whose separator is platform-dependent.
 pub(crate) fn dir_of(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/"),
@@ -109,11 +88,6 @@ pub(crate) fn strip_fragment(href: &str) -> &str {
 
 /// Resolve `href` (relative to `base_dir`) to an absolute zip path, collapsing
 /// `.`/`..` and percent-decoding. A pure-fragment href resolves to itself.
-///
-/// Concatenating instead is the recurring bug this exists to prevent: an OPF in
-/// `OEBPS/` may reference `../nav.xhtml` at the archive root, and `OEBPS/` +
-/// `../nav.xhtml` names no zip entry at all. A `..` that would climb past the
-/// root is clamped there, so no href can address outside the archive.
 pub(crate) fn resolve_href(base_dir: &str, href: &str) -> String {
     let (path, frag) = split_fragment(href);
     if path.is_empty() {
@@ -135,11 +109,6 @@ pub(crate) fn resolve_href(base_dir: &str, href: &str) -> String {
 
 /// Resolve every entry's href against `base_dir`, recursively — the TOC in
 /// absolute zip paths, so its targets compare against spine and manifest.
-///
-/// `base_dir` is the directory of the *TOC document itself*, not the OPF's:
-/// an NCX or nav doc writes its hrefs relative to where it sits, and the two
-/// only coincide when they share a directory. An anchor-only href addresses
-/// that same document and is left alone.
 pub(crate) fn rebase_toc(entries: &[TocEntry], base_dir: &str) -> Vec<TocEntry> {
     entries
         .iter()

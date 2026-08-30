@@ -1,26 +1,5 @@
 //! TLS material for the LAN server: a private CA generated once, and a server
 //! leaf re-issued for whatever addresses the machine currently answers on.
-//!
-//! # Why a private CA rather than a public one
-//!
-//! The system is closed: one server, a handful of Kindles, and the desktop app.
-//! A publicly-trusted certificate would need a real domain, DNS-01 renewals
-//! every 90 days, and a device clock accurate enough to accept it after an
-//! arbitrarily long sleep. None of that buys anything here, because there is no
-//! third party who needs to verify us.
-//!
-//! Pinning our own CA is the stronger position, not the weaker one: the picker
-//! trusts exactly one root — this one — so no public CA can mint a certificate
-//! it will accept. The device client is built without the Mozilla root set
-//! compiled in at all, which makes that structural rather than a policy.
-//!
-//! # Why the leaf is re-issued rather than long-lived
-//!
-//! The picker reaches the server by address, and that address can move (DHCP).
-//! A leaf therefore carries the current address as a SAN and is re-issued when
-//! it changes. This adds no fragility that isn't already there: the same move
-//! already invalidates `HOST=` in the device's `server.conf`, and both are
-//! rewritten by the same deploy.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -34,9 +13,6 @@ use rcgen::{
 use super::LibraryPaths;
 
 /// How long the CA is good for. Long, because rotating it means re-deploying to
-/// every device — and unlike a public CA there is no revocation ecosystem whose
-/// expectations we have to meet. A regenerate action exists for the case where
-/// the key is believed compromised.
 const CA_VALID_YEARS: i32 = 10;
 
 /// How long a server leaf is good for. Shorter than the CA, but still long
@@ -59,8 +35,6 @@ pub fn ca_cert_pem(paths: &LibraryPaths) -> Result<String> {
 /// Generate the CA if it isn't there yet. Idempotent: an existing CA is left
 /// exactly as-is, because regenerating it would silently invalidate every
 /// device already carrying the old one.
-///
-/// Returns `true` if a CA was created by this call.
 pub fn ensure_ca(paths: &LibraryPaths) -> Result<bool> {
     if paths.ca_cert().exists() && paths.ca_key().exists() {
         return Ok(false);
@@ -79,10 +53,6 @@ pub fn ensure_ca(paths: &LibraryPaths) -> Result<bool> {
 /// Issue (or re-issue) the server leaf covering `addrs` — the addresses clients
 /// will actually connect to, as they appear in a URL. An entry that parses as an
 /// IP becomes an IP SAN; anything else becomes a DNS SAN.
-///
-/// Always writes, rather than checking whether the existing leaf already covers
-/// `addrs`: re-issuing is cheap, and "the cert on disk matches what we just
-/// asked for" is a much easier property to reason about than a staleness test.
 pub fn issue_server_cert(paths: &LibraryPaths, addrs: &[String]) -> Result<()> {
     anyhow::ensure!(
         !addrs.is_empty(),
@@ -153,10 +123,6 @@ fn san_for(addr: &str) -> Result<SanType> {
 
 /// Set the validity window: backdated per [`BACKDATE_DAYS`], expiring `years`
 /// from today.
-///
-/// Takes `&mut params` rather than returning the pair so this module never has
-/// to name rcgen's date type, which would mean a direct `time` dependency for
-/// nothing.
 fn set_validity(params: &mut CertificateParams, years: i32) {
     use chrono::Datelike as _;
 
@@ -220,10 +186,6 @@ mod tests {
 
     /// Both SAN kinds must land, so an IP today and a hostname (or a tailnet
     /// name) later work through one code path.
-    ///
-    /// That the leaf actually *chains* to the CA is proved where it matters, by
-    /// a real handshake in `sidle-server` — parsing the bytes here would only
-    /// restate what rcgen was asked to do.
     #[test]
     fn leaf_carries_both_ip_and_dns_sans() {
         let (_tmp, paths) = paths();

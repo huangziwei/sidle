@@ -1,9 +1,4 @@
 // Apps section: the programs that install to a Kindle's /mnt/us.
-//
-// Classic script loaded after library.js, exposing `window.Apps`
-// ({ refresh, show, hide, invalidate, setView }). List view is one row per app;
-// gallery view is one tile per app, carrying the art from its launcher.
-// Backend: commands/apps.rs, commands/device.rs.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);

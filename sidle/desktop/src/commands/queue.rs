@@ -32,17 +32,9 @@ pub async fn conversion_status(state: State<'_, AppState>) -> Result<Vec<JobRow>
 }
 
 /// Force re-convert a `done` book, or complete a failed/pending first import.
-/// EPUB→KFX interior plates are always full-color JXR now (grayscale retired) —
-/// the encoder auto-collapses genuinely-grayscale pages to `8bppGray`, so color
-/// costs nothing on B&W books and there's no mode to choose.
 #[tauri::command]
 pub async fn conversion_retry(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     // A re-convert of an already-`done` book (the "Force re-convert" action) is
-    // source→target ONLY: skip the import-time cover enrichment so the source
-    // KFX (and its `kfx_sha256`) is untouched — a re-stamp would change the
-    // on-device filename infix and break annotation-sync matching for a pushed
-    // book. Retrying a failed/pending conversion still enriches: it's completing
-    // the first import (the "Retry" action on an errored book).
     let was_done = {
         let conn = state.db.lock().await;
         let prior = db::get_book(&conn, book_id)

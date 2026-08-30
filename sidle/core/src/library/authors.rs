@@ -1,28 +1,4 @@
 //! Author-name normalization.
-//!
-//! Each book's author(s) live in the single `books.author` display column. Two
-//! facts make a naive `Vec<String>` ↔ string round-trip lossy, so this module
-//! owns the canonical form:
-//!
-//! 1. **Western catalogue names arrive surname-first.** KFX's lone `author`
-//!    field — and many EPUB `opf:file-as` forms — carry `"Kafka, Franz"`, where
-//!    the comma separates surname from given name. bokai passes these through
-//!    verbatim, so the comma is part of a *single* author's name.
-//! 2. **CJK OPFs pack multiple authors into one `<dc:creator>`** with the
-//!    ideographic comma `「、」` (`"村上春樹、夏目漱石"`).
-//!
-//! Joining authors with a plain ASCII comma is therefore
-//! ambiguous: once `"Kafka, Franz"` is joined and re-split it's indistinguishable
-//! from two authors. We resolve it by (a) flipping a Western `Surname, Given` to
-//! natural `Given Surname` so a single author never carries a comma, and (b)
-//! joining multiple authors with `" & "` (calibre/KFX's own convention), or with
-//! `「、」` for all-CJK lists. The ASCII comma is then never a separator, so every
-//! reader splits on `[&、]` only — never `,`.
-//!
-//! bokai's EPUB parser emits one entry per `<dc:creator>`, and its KFX importer
-//! splits the `author` field on `&` (calibre's join), so the author *count* is
-//! already structurally encoded before we get here; the only in-field separator
-//! left to unpack is `「、」`.
 
 /// Generational / honorific suffixes that follow a comma in `"Name, Suffix"`
 /// (e.g. `"Davis, Jr."`) — that's NOT a `Surname, Given` to flip. Compared
@@ -49,7 +25,6 @@ fn is_cjk(c: char) -> bool {
 /// Flip a Western `"Surname, Given"` display name to natural `"Given Surname"`.
 /// Left unchanged when the name has anything other than exactly one ASCII comma,
 /// contains a CJK character, or the post-comma part is a generational suffix.
-/// Interior/edge whitespace is collapsed in every case.
 pub fn normalize_display(name: &str) -> String {
     let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.matches(',').count() != 1 || collapsed.chars().any(is_cjk) {

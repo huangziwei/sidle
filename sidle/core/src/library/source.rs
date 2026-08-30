@@ -1,13 +1,4 @@
 //! The file a book's edits are made to, and how it is replaced safely.
-//!
-//! A book has one *source*: the artifact an edit is written into. For a
-//! KFX-sourced book that is the KFX the device reads; for an EPUB- or PDF-sourced
-//! book it is the EPUB/PDF, and the KFX is re-derived from it afterwards. Which
-//! one it is follows from the conversion direction the row records, so nothing
-//! has to be asked or guessed.
-//!
-//! Every write goes through [`commit`], which replaces the file atomically and
-//! keeps the book's device identity intact.
 
 use std::path::{Path, PathBuf};
 
@@ -18,11 +9,6 @@ use crate::library::db::{self, BookRow};
 use crate::library::import::sha256_of_file;
 
 /// The editable source a book carries.
-///
-/// Each arm takes a different write path: a KFX edit is a surgical rewrite of
-/// the reader/device file itself; an EPUB edit rewrites the OPF/nav/NCX source;
-/// a PDF edit appends an incremental update. EPUB and PDF then re-derive the KFX
-/// by reconvert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Kfx,
@@ -75,17 +61,6 @@ pub fn of(row: &BookRow) -> Result<(Source, String)> {
 }
 
 /// Write `new_bytes` over a book's source file, keeping its device identity.
-///
-/// A **KFX** source is the device's own file, so the row's `kfx_sha256` is
-/// re-recorded — `set_kfx_path_and_sha` COALESCEs, so the frozen identity (the
-/// `<sha8>` in the on-device filename, which each `.sdr` is bound to) survives
-/// the new bytes. An **EPUB/PDF** source derives the KFX instead, so nothing in
-/// the row changes here; the caller reconverts, and that path re-freezes
-/// `kfx_sha256` the same way.
-///
-/// The replace is atomic and reversible: back up, write a sibling temp, rename
-/// over the target, drop the backup once settled — and restore from the backup
-/// if the rename fails partway.
 pub fn commit(
     conn: &Connection,
     book_id: i64,

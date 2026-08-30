@@ -1,14 +1,5 @@
 //! Regression guard for the JPEG-XR **color** decode path (INT_YUV444 →
 //! OUT_RGB), which is load-bearing for the Sidle reader once color KFX exist.
-//!
-//! `color444_16x16_lossless.jxr` is a real **libjxr**-minted lossless 4:4:4
-//! color JXR (BSD reference encoder), produced from the deterministic image
-//! `expected_rgb()` below — a true external consumer, not a self-loop.
-//! Lossless 4:4:4 ⇒ the decode must be **bit-exact**.
-//!
-//! This locks in the fix to `decoder.rs`'s YUV444 plane-header read (it must
-//! consume the *two* 4-bit reserved fields = 8 bits; reading 4 desynced the
-//! whole codestream). The fixture is committed; this test needs only that.
 
 use jxr::decode::{container, decoder::Decoder};
 

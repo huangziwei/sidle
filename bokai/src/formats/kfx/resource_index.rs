@@ -1,10 +1,4 @@
 //! Image resource indexing shared by every KFX→EPUB route.
-//!
-//! One walk over a container's `external_resource` ($164) entities produces
-//! the canonical image list: KFX resource name, `bcRawMedia` location, final
-//! OEBPS filename, predicted post-transcode MIME type, declared pixel
-//! dimensions, and whether the bytes are JPEG-XR (transcoded to JPEG on
-//! export).
 
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;

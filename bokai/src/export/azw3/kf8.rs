@@ -187,9 +187,6 @@ impl Kf8Builder {
         self.link_counter = link_counter;
 
         // Rewrite CSS. `self.css_flows` was collected from `css_hrefs` in the
-        // same sorted order (see `collect_resources`), so zipping the two pairs
-        // each flow's content with its own href — needed to resolve relative
-        // `@import url(styleNNNN.css)` refs against `css_flow_map`.
         let rewritten_css: Vec<Vec<u8>> = self
             .css_flows
             .iter()
@@ -235,9 +232,6 @@ impl Kf8Builder {
 
         self.last_text_record = (self.records.len() - 1) as u16;
         // Insert a zero-padding record after text so the next (non-text)
-        // record starts at a 4-byte boundary in the rawml stream. Calibre
-        // does this in writer8/main.py:361-363 and bumps
-        // `first_non_text_record_idx` past the pad.
         let total_text_bytes: usize = self.records[1..=self.last_text_record as usize]
             .iter()
             .map(|r| r.len())
@@ -348,9 +342,6 @@ impl Kf8Builder {
         }
 
         // Write images. This is the last reader of `ctx.resources` (the
-        // build sequence ends with fdst/flis/record0, none of which touch
-        // it), so move each image's bytes out instead of cloning multi-MB
-        // payloads.
         for i in 0..self.image_hrefs.len() {
             if let Some(resource) = self.ctx.resources.get_mut(&self.image_hrefs[i]) {
                 self.records.push(std::mem::take(&mut resource.data));
@@ -457,11 +448,6 @@ impl Kf8Builder {
     }
 
     /// Append per-record Trailing Byte Sequences to every text record.
-    ///
-    /// Kindle uses TBS to map text positions to NCX entries; firmware versions
-    /// since at least Paperwhite 3 refuse to open books that declare TBS-style
-    /// `extra_data_flags` (0x02) but omit the actual trailers, or that declare
-    /// no TBS at all on multi-chapter books.
     pub(super) fn apply_trailing_byte_sequences(&mut self) {
         if self.ncx_entries.is_empty() || self.last_text_record == 0 {
             return;
@@ -496,10 +482,6 @@ impl Kf8Builder {
 
         // Each record currently looks like `[compressed_text..., 0x00]` where
         // the trailing `0x00` is the multibyte indicator (no UTF-8 overlap).
-        // The on-disk order Kindle expects is `[compressed][multibyte][tbs]`
-        // — readers strip TBS from the end first, then strip multibyte (see
-        // calibre `getRawML` and our own `strip_trailing_data`). So append
-        // TBS *after* the multibyte byte, not before.
         for (i, tbs) in tbs_data.into_iter().enumerate() {
             let rec_idx = i + 1;
             self.records[rec_idx].extend_from_slice(&tbs);
@@ -666,7 +648,6 @@ impl Kf8Builder {
         record0.extend_from_slice(&extra_data_flags.to_be_bytes());
 
         // KF8 indices (at MOBI offsets 0xF4–0x108):
-        //   0xF4 ncx, 0xF8 frag, 0xFC skel, 0x100 datp, 0x104 guide
         record0.extend_from_slice(&self.ncx_index.to_be_bytes());
         record0.extend_from_slice(&self.frag_index.to_be_bytes());
         record0.extend_from_slice(&self.skel_index.to_be_bytes());
@@ -686,9 +667,6 @@ impl Kf8Builder {
         record0.extend_from_slice(title_bytes);
 
         // Padding — calibre's MOBIHeader DSL ends with `padding = zeroes(8192)`
-        // (writer8/mobi.py:191). 8KB of trailing zeros is what Amazon's DTP
-        // service expects to find for in-place metadata edits; firmwares
-        // also scan this region during a sanity-check pass.
         let target_len = full_record_len + 8192;
         while record0.len() < target_len {
             record0.push(0);
@@ -707,9 +685,6 @@ impl Kf8Builder {
         }
 
         // Author pronunciation (517) — one per author, positional with the
-        // EXTH 100 authors above (Amazon JP yomigana). The KF8 reader pairs
-        // them by order and re-emits per-creator `file-as`; omitting them
-        // flattens the author sort keys on every round-trip.
         for sort in &self.ctx.metadata.author_sorts {
             records.push((517, sort.as_bytes().to_vec()));
         }
@@ -773,9 +748,6 @@ impl Kf8Builder {
             // EXTH 129 wants the resource record index as a base32 string
             // The thumbnail URI in EXTH 129 must base32-encode the *same*
             // value as EXTH 202 (thumbnail_offset). Calibre:
-            //   `kindle:embed:{to_base(thumbnail_offset, base=32, min_num_digits=4)}`
-            // Off by one and Kindle spins, resolving a resource that is not
-            // there for the home-screen thumbnail.
             let mut buf = [0u8; 4];
             write_base32_4(off as usize, &mut buf);
             let uri = format!(
@@ -794,11 +766,6 @@ impl Kf8Builder {
         }
 
         // ASIN (113) — pass through a real Amazon ASIN, else a deterministic
-        // synthesized id, via the shared `resolve_export_asin` (the same
-        // policy the KFX exporter uses, so both formats stamp one value a
-        // caller can predict).
-        // A hardcoded "EBOK000000" placeholder dropped the source ASIN on a
-        // kfx→azw3 round-trip; the importer promotes only real-looking ASINs.
         let asin = crate::formats::kfx::metadata::resolve_export_asin(&self.ctx.metadata)
             .unwrap_or_else(|| "EBOK000000".to_string());
         records.push((113, asin.into_bytes()));
@@ -818,10 +785,6 @@ impl Kf8Builder {
         }
 
         // Writing-mode hints (525 primary-writing-mode, 527 page-progression-
-        // direction). The KF8 reader emits 525 as the OPF
-        // `<meta name="primary-writing-mode">` and derives page pagination
-        // (rtl for any `-rl` mode) from it; without them a vertical-rl book
-        // round-trips as horizontal ltr. Amazon's own JP AZW3s carry both.
         if let Some(ref pwm) = self.ctx.metadata.primary_writing_mode {
             records.push((525, pwm.as_bytes().to_vec()));
         }
@@ -831,16 +794,11 @@ impl Kf8Builder {
 
         // KF8 housekeeping fields (calibre emits all of these on every book;
         // omitting them is correlated with Kindle refusing to open the file).
-        //   125 = num_of_resources
-        //   131 = kf8_unknown_count (always 0 in calibre)
         let num_resources = (self.image_hrefs.len() + self.font_hrefs.len()) as u32;
         records.push((125, num_resources.to_be_bytes().to_vec()));
         records.push((131, 0u32.to_be_bytes().to_vec()));
 
         // Creator software stamp (204–207) and kindlegen revision (535).
-        // Pretend to be kindlegen 2 — matches what working KF8 files in the
-        // wild advertise, and Kindle firmware uses these to route the file
-        // through the KF8 reader rather than legacy MOBI.
         for (code, val) in [(204u32, 201u32), (205, 2), (206, 9), (207, 0)] {
             records.push((code, val.to_be_bytes().to_vec()));
         }

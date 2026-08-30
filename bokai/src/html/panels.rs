@@ -1,7 +1,4 @@
 //! Author-drawn comic panels read out of a fixed-layout page's own markup: an
-//! `app-amzn-magnify` region per panel, and a target holding a window onto a
-//! magnified copy of the page. Each rect resolves against its CSS containing
-//! block — region and window against `viewport`, image against the window.
 
 use std::collections::HashMap;
 

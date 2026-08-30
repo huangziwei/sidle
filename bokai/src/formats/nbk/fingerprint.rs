@@ -1,13 +1,4 @@
 //! KDF SQLite "fingerprint" stripping.
-//!
-//! On-device Scribe `.nbk` files are SQLite databases with a 1024-byte
-//! *fingerprint* record spliced in at offset 1024 and repeating every 1 MB of
-//! payload (signature `\xfa\x50\x0a\x5f`). The fingerprint corrupts SQLite's
-//! page 1, so stock SQLite rejects the file with "malformed database schema"
-//! until the records are removed. This is intrinsic to the format, not a copy
-//! artifact — a clean file (no signature at offset 1024) passes through
-//! untouched. Verbatim port of kfxlib's `SQLiteFingerprintWrapper`
-//! (kfxlib's `kpf_container.py`).
 
 const SIGNATURE: [u8; 4] = [0xfa, 0x50, 0x0a, 0x5f];
 const OFFSET: usize = 1024;

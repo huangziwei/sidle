@@ -1,7 +1,4 @@
 //! Book-level link resolution.
-//!
-//! This module provides [`ResolvedLinks`], which resolves all internal `href` attributes
-//! in a book to their targets and builds reverse mappings for efficient lookup.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,35 +10,12 @@ use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NoteRole, Role};
 /// Book-level link resolution result with forward and reverse mappings.
 ///
 /// This struct is produced by `Book::resolve_links()` and provides:
-/// - Forward lookup: given a link node, find its target
-/// - Reverse lookup: given a target node, find all links pointing to it
-/// - Broken link detection: links that couldn't be resolved
-///
-/// # Example
-///
-/// ```ignore
-/// let mut book = Book::open("input.epub")?;
-/// let resolved = book.resolve_links()?;
-///
-/// // Forward lookup
-/// let link_node = GlobalNodeId::new(ChapterId(0), NodeId(5));
-/// if let Some(target) = resolved.get(link_node) {
-///     println!("Link points to {:?}", target);
-/// }
-///
-/// // Reverse lookup
-/// let target_node = GlobalNodeId::new(ChapterId(1), NodeId(23));
-/// if resolved.is_internal_target(target_node) {
-///     println!("Node is targeted by {} links", resolved.links_to(target_node).len());
-/// }
-/// ```
 #[derive(Debug, Default)]
 pub struct ResolvedLinks {
     /// Source link node → resolved target
     links: HashMap<GlobalNodeId, AnchorTarget>,
 
     /// Reverse: target node → source link nodes
-    /// Enables O(1) "is this node a link target?" during traversal
     internal_targets: HashMap<GlobalNodeId, Vec<GlobalNodeId>>,
 
     /// Reverse: chapter start → source link nodes
@@ -185,11 +159,6 @@ impl ResolvedLinksBuilder {
 /// Resolve all links in a book.
 ///
 /// This is the main resolution algorithm that:
-/// 1. Loads all chapters
-/// 2. Calls importer's index_anchors() to build format-specific anchor maps
-/// 3. Walks all chapters, finds Link nodes, resolves via importer
-/// 4. Builds reverse maps for efficient lookup
-/// 5. Fills the `NoteRole` map from the resolved topology
 pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Result<ResolvedLinks> {
     let mut builder = ResolvedLinksBuilder::new();
 

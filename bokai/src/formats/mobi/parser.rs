@@ -187,10 +187,6 @@ pub fn parse_fdst(data: &[u8]) -> io::Result<Vec<(usize, usize)>> {
 }
 
 /// Strip trailing multibyte extra data from text records.
-///
-/// MOBI text records can have trailing data appended. The extra_flags field
-/// indicates which types are present. We need to strip this data before
-/// decompression.
 pub fn strip_trailing_data(record: &[u8], flags: u16) -> &[u8] {
     if flags == 0 || record.is_empty() {
         return record;
@@ -199,7 +195,6 @@ pub fn strip_trailing_data(record: &[u8], flags: u16) -> &[u8] {
     let mut end = record.len();
 
     // Process trailing data entries based on flags (skip bit 0, handled separately)
-    // Iterate through bits 1-15 by right-shifting
     let mut shifted_flags = flags >> 1;
     while shifted_flags != 0 {
         if shifted_flags & 1 != 0 {
@@ -207,7 +202,6 @@ pub fn strip_trailing_data(record: &[u8], flags: u16) -> &[u8] {
                 break;
             }
             // Read variable-length size from end of record
-            // VWI format: read backward, low 7 bits are value, high bit SET means stop
             let mut size = 0usize;
             let mut shift = 0;
             let mut pos = end;
@@ -321,9 +315,6 @@ pub struct TocNode {
 /// Build hierarchical TOC from NCX entries.
 ///
 /// Takes a closure `href_fn` that generates the href for each NCX entry.
-/// This allows different importers to use their own href format:
-/// - MOBI6: `content.html#filepos{pos}`
-/// - KF8/AZW3: `part{file_number:04}.html`
 pub fn build_toc_from_ncx<F>(ncx: &[NcxEntry], mut href_fn: F) -> Vec<TocNode>
 where
     F: FnMut(&NcxEntry) -> String,
@@ -544,7 +535,6 @@ mod tests {
     #[test]
     fn test_strip_trailing_data_multibyte_overlap() {
         // Flag bit 0: multibyte overlap
-        // Last byte & 3 + 1 = overlap count
         let mut record = b"hello world".to_vec();
         record.push(0x02); // overlap = (2 & 3) + 1 = 3
 

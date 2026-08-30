@@ -1,15 +1,4 @@
 //! Display + touch orientation handling.
-//!
-//! The KOA2 framework rotates the screen 180° based on which side the
-//! page-turn bezel is on (accelerometer-driven). Our binary writes raw
-//! framebuffer pixels and reads raw evdev touch events — neither honors
-//! the framework's rotation. We detect the framework's current orientation
-//! at startup and apply a 180° transform to both fb writes and touch
-//! reads so the user-visible UI is right-side-up regardless of grip.
-//!
-//! Detection happens once, at startup. Mid-session rotation (the device
-//! flipped while sidle runs) is unsupported: the framework redraws over us and
-//! nothing here tracks the change.
 
 use std::process::Command;
 

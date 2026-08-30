@@ -78,9 +78,6 @@ pub fn time_now_iso8601_utc() -> String {
 
 /// Worker threads a parallel stage runs under a `max_workers` cap, where `0`
 /// asks for the platform's reported parallelism.
-///
-/// Each worker holds one job's working set: a decoded image, a chapter's DOM.
-/// The cap bounds a stage's peak memory as much as its CPU share.
 pub fn resolve_workers(max_workers: usize) -> usize {
     let platform = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -124,7 +121,6 @@ where
 }
 
 // Howard Hinnant's `civil_from_days`. Days are counted from 1970-01-01.
-// Reference: https://howardhinnant.github.io/date_algorithms.html
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -162,8 +158,6 @@ pub fn decode_text<'a>(bytes: &'a [u8], hint_encoding: Option<&str>) -> Cow<'a, 
     result
 }
 
-// ============================================================================
-// Image Dimension Extraction
 // ============================================================================
 
 /// `(width, height)` read from the header bytes of PNG, JPEG, GIF and JPEG-XR
@@ -248,13 +242,10 @@ fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 }
 
 // ============================================================================
-// Resource Format Detection
-// ============================================================================
 
 /// Detected resource format.
 ///
 /// This enum represents media formats commonly found in ebooks.
-/// Detection is done via file extension or magic bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaFormat {
     /// JPEG image
@@ -382,8 +373,6 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
 /// Strip invisible formatting characters used in ebooks.
 ///
 /// Removes:
-/// - U+00AD SOFT HYPHEN (hyphenation hints)
-/// - U+200B ZERO WIDTH SPACE (word-break hints)
 pub fn strip_ebook_chars(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -428,8 +417,6 @@ pub fn detect_mime_type(filename: &str, data: &[u8]) -> Option<&'static str> {
 }
 
 // ============================================================================
-// Date Utilities
-// ============================================================================
 
 /// The `YYYY-MM-DD` head of a timestamp, cut at the `T` of ISO 8601 or at the
 /// space of the SQL-ish form (`2014-12-14 23:00:00+00:00`). A bare date is
@@ -442,8 +429,6 @@ pub fn truncate_to_date(s: &str) -> String {
     }
 }
 
-// ============================================================================
-// Encoding Detection
 // ============================================================================
 
 /// The encoding name in `<?xml … encoding="…" ?>`, read from the first 100
@@ -475,8 +460,6 @@ pub fn extract_xml_encoding(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(&after_enc[value_start..value_end]).ok()
 }
 
-// ============================================================================
-// URI path helpers
 // ============================================================================
 
 /// Percent-decode a URI reference into the literal name a ZIP entry is stored
@@ -553,8 +536,6 @@ pub fn sanitize_href(href: &str) -> Option<String> {
     Some(out)
 }
 
-// ============================================================================
-// Tests
 // ============================================================================
 
 #[cfg(test)]

@@ -1,27 +1,4 @@
 // Shared list-view (data table) for every tab — the ONE implementation of
-// sortable headers, drag-to-reorder columns, drag-to-resize column widths, and
-// the right-click column-visibility menu. Books and Notes each instantiate one
-// (see library.js `booksTable`, notebooks.js `nbTable`); future tabs do too,
-// rather than re-inventing a table per tab.
-//
-// Per-section config supplies only what differs:
-//   - table:      the <table> element (must contain <colgroup>, <thead><tr>,
-//                 <tbody>; this fills them).
-//   - columns:    [{ key, label, sortable, render(item)->string|Node, align? }].
-//   - idOf(item), idAttr:  the row's numeric id + the dataset attr to stamp it on
-//                 (so the shared SelectionController can find rows).
-//   - configKey, widthsKey:  localStorage keys for this table's column
-//                 order/visibility and widths (kept per-tab).
-//   - getSort()/onSort(key):  SORT lives in the section (Books shares it with the
-//                 gallery), so the table only renders the indicator + reports clicks.
-//   - isSelected(id):  for the `.selected` row class (from the section's controller).
-//   - onRowClick/onRowDblClick/onRowContext(e?, item):  row interactions.
-//   - onChange():  re-render hook — called after a reorder / visibility change so
-//                 the section repaints with the new layout.
-//   - ctxMenu:    the shared #ctx-menu element (column-visibility menu).
-//
-// Column ORDER/VISIBILITY/WIDTHS are owned + persisted here. SORT and the DATA
-// are the section's.
 (function () {
   const REORDER_THRESHOLD = 4; // px a header drag must travel to become a reorder
   // How long after an inline editor opens a double-click still counts as "the
@@ -109,11 +86,6 @@
       }
 
       // Body. Preserve the row currently open in an inline editor across a
-      // background re-render (a conversion-status tick, say) so an open editor
-      // isn't destroyed mid-keystroke: its live <tr> — input, caret and focus
-      // intact — is spliced back in at its new position, other rows rebuild
-      // normally. A column change (which blurs+commits first) or the edited
-      // item leaving the view cancels the edit instead.
       if (this.editing && this.editing.visKey !== this._visKey(visible)) this._cancelEdit();
       const editId = this.editing ? this.editing.id : null;
       let keptEdit = false;
@@ -170,10 +142,6 @@
       }
       tr.addEventListener("click", (e) => {
         // Click-to-edit: on an already-selected row, a plain click on an
-        // editable cell opens an inline editor instead of re-selecting
-        // (Calibre-style). The first click on an unselected row just selects
-        // (canEditNow stays false until it's the sole selection); the second
-        // click of a double-click (detail > 1) is left for the reader.
         if (this._scheduleEdit(e, item)) return;
         this.cfg.onRowClick(e, item);
       });
@@ -213,12 +181,6 @@
     }
 
     // ── Inline cell editing ──────────────────────────────────────────────────
-    // Click a field on a selected row to edit it. Opt-in per column via
-    //   def.edit = { type: "text" | "select", get(item), options?(item) }
-    // The section supplies onCellEdit(item, key, value) (persist + re-render)
-    // and an optional canEditNow(id) (defaults to isSelected) gating the first
-    // click. table.js owns only the interaction + the editor widget — it has no
-    // idea what the values mean.
 
     _visKey(visible) {
       return (visible || this.columnConfig.filter((c) => c.visible)).map((c) => c.key).join(",");
@@ -286,9 +248,6 @@
       td.appendChild(input);
 
       // Commit when the user mouses down anywhere outside the field. Blur alone
-      // isn't enough: drag-source rows and the selection lasso preventDefault on
-      // mousedown, which suppresses the input's native blur. Capture phase so
-      // this runs before those handlers.
       const onDocDown = (ev) => {
         if (ev.target !== input && !input.contains(ev.target)) this._commitEdit();
       };

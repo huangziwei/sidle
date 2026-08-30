@@ -1,13 +1,4 @@
 //! The two navigation documents an EPUB ships, written from a chapter list.
-//!
-//! An EPUB 3 nav doc and an EPUB 2 NCX say the same thing in two vocabularies,
-//! and a book carries both so that old and new readers agree. Everything that
-//! writes a chapter list — repairing one in place, carving one for a volume of a
-//! collection — writes both, so both live here and neither route grows its own
-//! copy of the `playOrder` rule.
-//!
-//! Entry hrefs arrive as absolute zip paths and are rebased to the directory of
-//! the document being written.
 
 use std::collections::HashMap;
 
@@ -67,12 +58,6 @@ pub(crate) fn render_navmap(entries: &[TocEntry], base_dir: &str) -> String {
 }
 
 /// Numbering state for the NCX: element ids are unique per navPoint, while
-/// `playOrder` is assigned per unique content target, so two navPoints on the
-/// same target share one playOrder — the NCX 2005-1 rule epubcheck enforces as
-/// RSC-005 ("different playOrder values … that refer to the same target"). A
-/// book that lists one piece twice (a repeated 目次 row, or a parent whose
-/// first child starts at the same document) is ordinary, so this is not an edge
-/// case. The EPUB exporter's own NCX emitter carries the same rule.
 #[derive(Default)]
 struct NavOrder {
     next_id: usize,

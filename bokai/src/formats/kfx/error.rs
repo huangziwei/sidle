@@ -1,9 +1,4 @@
 //! Failure modes for reading and editing a KFX container.
-//!
-//! Covers the whole format-side surface: parsing a container ([`super::loader`]),
-//! rewriting one ([`super::container_edit`], [`super::metadata_edit`],
-//! [`super::cover_replace`], [`super::toc_repair`]), and decoding the images
-//! inside it ([`super::image_extract`], [`super::cover_extract`]).
 
 use std::io;
 

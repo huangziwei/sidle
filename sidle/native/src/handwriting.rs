@@ -1,23 +1,4 @@
 //! Find the Scribe's pen content on disk — the `.notebooks/` walk.
-//!
-//! Two different things live side by side in `/mnt/us/.notebooks/`, and telling
-//! them apart is this module's whole job:
-//!
-//! - `<content_id>!!PDOC!!notebook/nbk` — **ink**: strokes drawn on top of a
-//!   sideloaded book, which belong to that book. The library keys them by the
-//!   host book's `asin`.
-//! - `<uuid>/nbk` — a **standalone notebook**, a library entity of its own, with
-//!   its cover thumbnail in the sibling `thumbnails/<uuid>.png`.
-//!
-//! Everything else in there is the firmware's: `page_cache/`, `clipboard/`,
-//! `.backups/`, `.tmp/`, and the `!!EBOK!!` / cloud-`!!PDOC!!` notebooks for
-//! books that came from Amazon rather than from us.
-//!
-//! The desktop reaches this same directory over MTP; the picker just reads it,
-//! because on the device it is an ordinary path. What the picker does NOT do is
-//! decode: an `nbk` is a KDF SQLite file, and turning one into page renders is
-//! the library's work. This module only finds each one and hashes it, so the
-//! sync can ask the library what it already has and send nothing else.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -29,10 +10,6 @@ use sha2::{Digest, Sha256};
 const PDOC_SUFFIX: &str = "!!PDOC!!notebook";
 
 /// One `nbk` on the device: what names it, where it is, and what's in it.
-///
-/// The bytes are deliberately not held — hashing reads the file and lets it go,
-/// so a sync that turns out to have nothing to send never carries a notebook in
-/// memory. The push re-reads only what it's actually going to upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nbk {
     /// The host book's `asin` for ink, the notebook's `uuid` for a standalone —
@@ -52,9 +29,6 @@ pub struct Standalone {
     pub nbk: Nbk,
     pub cover: Option<PathBuf>,
     /// The `nbk`'s mtime as naive local ISO (`YYYY-MM-DDTHH:MM:SS`), the same
-    /// shape the desktop's device pull produces. Local because the picker runs
-    /// on the device, so this is the Kindle's own wall clock — exactly what
-    /// "last edited" should read as.
     pub updated_at: String,
 }
 
@@ -70,14 +44,6 @@ pub struct Scan {
 }
 
 /// Walk `.notebooks/` and classify every child.
-///
-/// `known_asins` is the library's set of baked content_ids; a `!!PDOC!!` dir is
-/// ours iff its id is in it. That test, not a shape test, is what separates our
-/// ink from Amazon's — a content_id is hex for some books and Crockford-base32
-/// for others, so the two are indistinguishable by looks.
-///
-/// A missing `.notebooks/` yields an empty scan: it means a Kindle with no pen,
-/// which is not an error.
 pub fn scan(root: &Path, known_asins: &HashSet<String>) -> Scan {
     let mut out = Scan::default();
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -173,27 +139,12 @@ fn mtime_iso(path: &Path) -> String {
 }
 
 /// `SystemTime` → `YYYY-MM-DDTHH:MM:SS` in the machine's local zone.
-///
-/// Via `localtime_r` rather than a hand-rolled civil-date conversion: it applies
-/// the device's own `TZ`, which is the point — this timestamp is meant to read
-/// as the clock the user saw when they wrote the page.
-///
-/// The seconds are held as an `i64` and passed by pointer instead of through
-/// `libc::time_t`. musl widened `time_t` to 64 bits in 1.2, but the `libc`
-/// crate still aliases the 32-bit form on this target — naming the alias would
-/// mean handing a 64-bit callee a half-width value. Passing the address of an
-/// `i64` is correct against either width on a little-endian target: a 64-bit
-/// `localtime_r` reads the whole value, a 32-bit one reads the low half, which
-/// is the same number until 2038.
 fn naive_local_iso(t: SystemTime) -> String {
     let secs: i64 = t
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
     // SAFETY: `localtime_r` writes into our own `tm` and is the reentrant form
-    // (no shared static). The pointer is to a live local, sized per the comment
-    // above. A null return means the value isn't representable, in which case
-    // `tm` stays zeroed and we render the epoch.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(std::ptr::from_ref(&secs).cast(), &mut tm) };
     format!(
@@ -346,10 +297,6 @@ mod tests {
     /// Past 2038 the seconds no longer fit in 32 bits, which is the whole reason
     /// the value is carried as an `i64` rather than through `libc::time_t`. A
     /// truncating conversion turns this into 1970-something.
-    ///
-    /// This runs on the host, where `time_t` is already 64-bit, so it proves the
-    /// Rust side doesn't narrow — not the device's C ABI, which the pointer pass
-    /// is what covers.
     #[test]
     fn naive_local_iso_survives_a_post_2038_timestamp() {
         let s = naive_local_iso(UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000));

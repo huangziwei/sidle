@@ -1,12 +1,6 @@
 //! TIFF-like JPEG-XR container writer — the inverse of
-//! [`crate::decode::container::parse`]. Wraps a WMPHOTO codestream
-//! in the minimal `II-BC-01` outer file with a single IFD describing one
-//! image (pixel format, dimensions, codestream pointer).
 
 /// Microsoft JXR pixel-format GUIDs (on-disk byte order). Match
-/// `decode::container::SUPPORTED_UUIDS`. The whole family shares the
-/// `24c3dd6f-034e-fe4b-b185-3d77768dc9xx` prefix — only the last byte
-/// varies (values verified against jxrencapp-minted files).
 pub mod pixel_format {
     const fn guid(last: u8) -> [u8; 16] {
         [
@@ -102,9 +96,6 @@ const TIFF_TYPE_FLOAT: u16 = 11;
 const RESOLUTION_96DPI: u32 = 0x42c0_0000; // 96.0f32.to_bits()
 
 /// Wrap `codestream` in a JXR TIFF container for a `width`×`height` image of
-/// the given `pixel_format` GUID. The IFD mirrors a real Amazon JXR's tag set
-/// and order exactly (clone-by-diff): pixel format, transformation, dims,
-/// resolution, image offset/byte-count.
 pub fn write_container(
     codestream: &[u8],
     width: u32,

@@ -1,41 +1,7 @@
 //! What kind of page a content document is, judged from its markup alone.
-//!
-//! A full-bleed plate is a structural marker in real books: it is how a cover is
-//! authored, and how each volume of a 合本版 or a boxed set announces itself.
-//! Three questions are asked of that shape, and they are not the same question,
-//! so they are three predicates here rather than one shared by callers who mean
-//! different things:
-//!
-//! - **Does a volume open here?** — [`opening_plate_source`]. The page opens on
-//!   a plate, and whatever follows it is the publisher's business: a title
-//!   plate, a dedication, the work's own copyright notice.
-//! - **Is this page nothing but plates?** — [`is_image_only_page`], for a caller
-//!   stepping over pages rather than landing on one. A page carrying text
-//!   carries content, and content belongs to whichever volume it was set in.
-//! - **Is this document nothing but the cover?** — [`single_image_source`],
-//!   which the EPUB exporter uses to drop a source cover page it is about to
-//!   emit a second time. One image, because a page carrying a title plate as
-//!   well is not a duplicate of anything and dropping it would lose the plate.
-//!
-//! Images count in both shapes throughout, raster (`<img src>`) and SVG-wrapped
-//! (`<image href>` / `xlink:href`), and text is judged on the body alone, so a
-//! `<head><title>` never counts against a page.
-//!
-//! One page is read for what it says rather than how it looks —
-//! [`states_own_rights`], the copyright notice a separately published book is
-//! bound with. That is a fact about publication, not about layout, and there is
-//! no shape it can be recognized by.
 
 /// The plate a page opens on — the source of its first image, when the body
 /// renders no text in front of it — or `None` for a page that opens on text.
-///
-/// This is what marks the start of a volume, and the plate is its cover: a book
-/// bound into a collection keeps the front matter it was published with, and
-/// that front matter opens on the cover. What comes after the plate is set
-/// however the publisher liked. Some run the cover alone on the page, some run
-/// the title plate behind it, and some carry straight on into the work's own
-/// copyright notice — all three are one book beginning, and only the plate in
-/// front is common to them.
 pub(crate) fn opening_plate_source(html: &str) -> Option<&str> {
     let body = body_of(html);
     let (at, src) = first_image(body)?;
@@ -72,20 +38,6 @@ const COPYRIGHT_REFERENCES: [&str; 4] = ["&copy;", "&#169;", "&#xa9;", "&#x00a9;
 const NOTICE_SPAN: usize = 48;
 
 /// Whether a page carries a work's own rights statement.
-///
-/// This is the one thing only a separately published book has. A part of a book
-/// has a title, a cover plate and chapters under it exactly as a book does, and
-/// nothing in its shape says which it is — but nobody sets a copyright notice at
-/// the head of chapter seven. So where a collection's volumes carry one each,
-/// that is the fact that they were published apart, stated by the publisher.
-///
-/// Read from the notice's own form rather than from any wording: the copyright
-/// sign, beside a four-digit year. The Berne convention fixed that form, and it
-/// is written the same in every language a book is set in — where the words
-/// around it ("all rights reserved", 「無断複製を禁じます」) are not. A sign
-/// with no year beside it is a credit line, not a notice: an illustrator's
-/// `© Christopher Michel` under a photograph says nothing about who published
-/// the book it is in.
 pub(crate) fn states_own_rights(html: &str) -> bool {
     // References are folded back into the sign first, so the scan below has one
     // thing to look for however the document happened to spell it.
@@ -185,9 +137,6 @@ mod tests {
     }
 
     /// A publisher is free to run a volume's cover and its title plate together
-    /// on one page. That is still a page of pictures, and the cover is the
-    /// picture it opens with — but it is not a document that holds nothing but
-    /// the cover, so the exporter must not read it as a duplicate of one.
     #[test]
     fn a_cover_run_together_with_a_title_plate_is_still_a_page_of_pictures() {
         let pair = "<html><body><div><img src=\"cover.jpg\"/></div>\
@@ -203,8 +152,6 @@ mod tests {
 
     /// The shape a Western collection sets a volume's opening on: the cover, the
     /// title plate, and then the work's own copyright notice, all one document.
-    /// A volume opens there; but the page carries text, so nothing may step back
-    /// over it as if it were a plate.
     #[test]
     fn a_plate_run_into_the_works_own_front_matter_still_opens_a_volume() {
         let html = "<html><body><figure><img src=\"Woolcover.jpg\"/></figure>\

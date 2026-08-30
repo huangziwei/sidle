@@ -8,16 +8,6 @@ use super::predicates::is_prunable_role;
 /// Remove empty containers in post-order (cascading).
 ///
 /// "Div soup" from old converters leaves empty containers:
-/// ```html
-/// <div class="clear"></div>
-/// <span id="ad-placeholder"></span>
-/// ```
-///
-/// Post-order traversal enables cascading:
-/// - `<div><span></span></div>`
-/// - Step 1: Visit span, it's empty, delete
-/// - Step 2: Visit div, now empty, delete
-/// - Result: Entire dead subtree vanishes
 pub fn prune_empty(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         prune_siblings(chapter, parent_id);
@@ -82,9 +72,6 @@ fn should_prune(chapter: &Chapter, node_id: NodeId) -> bool {
     }
 
     // An empty box still paints when it carries a style (margins, height,
-    // background — vertical-text spacer divs are exactly this shape), and a
-    // classed one is a stylesheet target with the same potential. Only a
-    // default-styled, classless empty container is truly dead.
     if node.style != crate::style::StyleId::DEFAULT {
         return false;
     }

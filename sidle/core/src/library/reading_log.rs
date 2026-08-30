@@ -1,46 +1,4 @@
 //! Recover reading sessions from a Kindle's own system logs.
-//!
-//! The device writes `/var/log/messages` and, at most once a day, gzips a
-//! snapshot of it into `system/logbackup/`. Those logs carry
-//! `ReadingTimerController` events — one per page turn, plus book open/close —
-//! which together are an unbiased, dated record of every reading session. The
-//! `.sdr` sidecars carry nothing comparable: their timer is a pair of running
-//! counters with no clock attached.
-//!
-//! Four properties of the source shape everything here:
-//!
-//! - **An event is not reliably named.** The `cvm` reader writes the event name
-//!   first: `Information::NextPage,<fields>`. The Corretto/KPP reader loses the
-//!   head of a payload to a `SyslogFormatter` "Argument Value Mismatch", leaving
-//!   the name mid-line after a `;` or absent altogether. What a line carries is
-//!   dependable; what it is called is not. See [`observation`].
-//! - **The book is redacted.** Every line reads `Title:<private>,Asin:<private>`
-//!   and no line anywhere carries a path. What each line *does* carry is the
-//!   book's last position, which identifies it against
-//!   [`super::extent`] — see [`super::db::books_with_last_position`].
-//! - **Dumps replay one another.** Each is a snapshot of the same rolling
-//!   buffer, so consecutive files overlap heavily; a real archive was 60%
-//!   duplicate lines. De-duplication is not tidiness, it is correctness: fed the
-//!   raw concatenation, a counter-delta reading of the log double-counts every
-//!   overlap and inflates the result several-fold.
-//! - **`TotalTime` is a running per-book counter, not session time.** It pairs
-//!   with `Total%`, the fraction of the book read, and survives across sessions.
-//!   A session's contribution is its *delta*.
-//!
-//! Times are device-local wall clock, taken from the syslog line prefix, which
-//! is the only clock a `ReadingTimerController` line carries — its payload holds
-//! counters and no absolute stamp. Local is the one this wants: reading at 23:00
-//! means 23:00 where the reader was, not 21:00 in Greenwich.
-//!
-//! The zone that clock is in comes from the `fastmetrics` records, whose
-//! `close_timestamp` and `action_start_time` are epoch milliseconds under the
-//! same local prefix — see [`utc_offset`]. A session records it, so a device
-//! carried across zones states which one each sitting was stamped in.
-//!
-//! So the day a session counts to, and the midnight a run is cut at, are the
-//! reader's own — never the host's, and never UTC, which west of Greenwich would
-//! move a late night's reading a day early and east of it a day late. Nothing
-//! downstream converts: the stamps stay the naive local strings written here.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -56,17 +14,6 @@ use super::job;
 const MARKER: &str = "ReadingTimerController";
 
 /// The `fastmetrics` records the reader shell emits beside [`MARKER`].
-///
-/// [`MARKER`] counts words and a WPM, and times only a book it can count words
-/// in. These come from the reader shell:
-/// `ereader_book_consume_content` spans a page with its `words_count`,
-/// `ereader_book_page_turn` and `ereader_book_linear_page_actions` name a turn,
-/// `ereader_open_book` and `ereader_close_book` bracket a book with its
-/// `book_category`, and `ereader_reader_latency_ops` and
-/// `ereader_reader_page_turn_latency_ops` carry a `cde_key`.
-///
-/// Bracketed: `ereader_open_book` is a prefix of
-/// `ereader_open_book_failure_backup`.
 pub const METRIC_MARKERS: [&str; 8] = [
     "SchemaName[ereader_open_book]",
     "SchemaName[ereader_close_book]",
@@ -80,16 +27,6 @@ pub const METRIC_MARKERS: [&str; 8] = [
 
 /// The tags on the lines that say whether the device was awake, the second
 /// family this reads.
-///
-/// They carry no reading and name no book. What they carry is whether the
-/// device was awake, which is the only bound available on a sitting the reading
-/// timer refused to count — see [`Awake`].
-///
-/// Two shapes, because one is not written everywhere. The metrics record is the
-/// `powerd` state machine transcribed whole, and a Kindle old enough not to emit
-/// it still fires the same transitions on LIPC — where `outOfScreenSaver` and
-/// `goingToScreenSaver` bracket exactly the `ACTIVE` state the record names.
-/// `suspending` closes a span the screensaver never got to.
 pub const POWER_MARKERS: [&str; 4] = [
     "ereader_powerd_state_change",
     "lipc:evts:name=outOfScreenSaver, origin=com.lab126.powerd",
@@ -98,15 +35,9 @@ pub const POWER_MARKERS: [&str; 4] = [
 ];
 
 /// A page event long enough to be idle rather than reading is still counted —
-/// the device's own counter is the authority — but a session is cut when two
-/// events are further apart than this, because the reader plainly left. Without
-/// it, opening a book in the morning and again at night reads as one session.
 const SESSION_GAP_SECS: i64 = 30 * 60;
 
 /// How far a session's opening counter may outrun the wall clock before it is
-/// rejected as belonging to some other book. `StoredBookData` states whole
-/// seconds, so a legitimate one can round a second past the clock; a minute
-/// clears that without admitting a stale value from another book.
 const SEED_SLACK_SECS: i64 = 60;
 
 /// What one [`import`] pass did.
@@ -128,18 +59,8 @@ pub struct Imported {
     pub added: usize,
     /// Sittings already held that this pass measured **further** — the same run,
     /// seen to a later point than the events available last time could reach.
-    ///
-    /// A sitting spans as many syncs as it takes to finish, and each one carries
-    /// it forward from where the last left it (see [`Resume`]). Counted apart
-    /// from `added` because the reader is told a different thing: not that a new
-    /// sitting appeared, but that the one they are in the middle of grew.
     pub extended: usize,
     /// Sessions that now name a book, counted across the whole table.
-    ///
-    /// This, not `added`, is what the reading log gained: a session on a book
-    /// the library does not hold is stored but counted nowhere. The two differ
-    /// in both directions — an archive can carry time on deleted books, and a
-    /// pass can name rows an earlier pass left unresolved.
     pub attributed: usize,
     /// True when the pass stopped early. Sessions stored before that point
     /// stay stored; re-running is safe and picks up the rest.
@@ -163,24 +84,8 @@ pub struct Session {
     pub words: i64,
     /// Seconds of counted reading per clock hour of the session's own day,
     /// ascending by hour, summing to exactly [`Self::seconds`].
-    ///
-    /// **This is evidence, not a derivation, and it exists only here.** The
-    /// device states its counter at each event, so the parser knows which hours
-    /// a sitting's reading actually fell in — and after this pass nobody will:
-    /// the events are never offered twice, and a stored session keeps only its
-    /// window and its total. Anything reconstructing hours from those two has to
-    /// assume the reading was spread evenly across the sitting, which is how an
-    /// hour spent on one chapter before midnight becomes an even smear over the
-    /// three hours the sitting happened to span.
     pub hours: Vec<(u8, i64)>,
     /// The book's running counter where this run began and where it was last
-    /// seen, in milliseconds — the two values [`Self::seconds`] is the difference
-    /// of, kept so a later pass can carry the run forward. `None` when no event
-    /// in the run stated a counter at all.
-    ///
-    /// Stored with the session because the events are never offered twice: a
-    /// sitting that outlives the sync it started in can only be continued by a
-    /// pass that knows where the last one stopped counting. See [`Resume`].
     pub start_counter_ms: Option<i64>,
     pub end_counter_ms: Option<i64>,
     /// The same two readings of the device's own word counter.
@@ -193,18 +98,10 @@ pub struct Session {
     /// record, which leaves `end_position` the only identity.
     pub asin: Option<String>,
     /// Seconds the reader's own clock stood ahead of UTC. See [`utc_offset`].
-    ///
-    /// `started_at` and `ended_at` are local wall clock and stay that way: a
-    /// reader who read at 23:00 read at 23:00 where they were. This is what
-    /// places that instant, for a reader who crossed a zone between sittings.
     pub tz_offset_s: Option<i64>,
 }
 
 /// How a session's seconds were arrived at, ranked best first.
-///
-/// Three regimes, and a reader is told which. A book `ReadingTimerController`
-/// declines to time yields no counter at all, and the two below it answer for
-/// exactly that content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Measure {
@@ -260,22 +157,6 @@ impl Measure {
 
 /// A sitting a device left open, handed back to the parser so the next batch of
 /// events continues it instead of starting over.
-///
-/// **A reader does not stop reading because a sync happened.** Events reach the
-/// library in batches — every Sync sends what the device has logged since the
-/// last one — and a sitting in progress is split across as many batches as it
-/// takes to finish. Parsed batch by batch in isolation, each piece becomes its
-/// own session: the sitting fragments, and the counter advance that fell
-/// *between* two batches is credited to neither, because a batch measures only
-/// the span of the counter it can see. A ten-minute stretch read between two
-/// syncs is exactly that case, and it is silently shed.
-///
-/// So the newest session stored for a device is read back and offered to the
-/// parser as the run already under way. Its own break rules then decide whether
-/// the next event belongs to it — same book, no half-hour gap, same day — and
-/// where it does, the session is measured from its original start to the newest
-/// event, hours and all. The result carries the same `started_at`, so it
-/// updates that row rather than adding one beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resume {
     pub started_at: String,
@@ -293,9 +174,6 @@ pub struct Resume {
     /// the whole distribution rather than an incremental slice of one.
     pub hours: Vec<(u8, i64)>,
     /// What the run has been credited so far, and how. A run with no counter
-    /// carries its length here alone, and the next batch adds to it — the power
-    /// records and page records covering the earlier stretch went with the
-    /// batch that measured them.
     pub seconds: i64,
     pub measure: Measure,
 }
@@ -303,11 +181,6 @@ pub struct Resume {
 impl Resume {
     /// The sitting `device_serial` left open, or `None` when the library holds
     /// no session for it that could still be running.
-    ///
-    /// "Could still be running" is not decided here — whether the reader came
-    /// back within the half hour, stayed in the same book, and stayed on the
-    /// same day is [`parse_sessions`]'s own judgement, made against the events
-    /// themselves. This only supplies the candidate.
     pub fn newest(conn: &Connection, device_serial: &str) -> rusqlite::Result<Option<Self>> {
         let Some(row) = db::newest_reading_session(conn, device_serial)? else {
             return Ok(None);
@@ -337,14 +210,8 @@ impl Resume {
 }
 
 // ---------------------------------------------------------------------------
-// Reading the archive
 
 /// The names of the log files an archive holds, without opening one.
-///
-/// Cheap enough to run before deciding anything: a directory walk and no I/O per
-/// file. A snapshot's name encodes the second it was written, so it identifies
-/// both the file and — once the library has read it once — the Kindle that wrote
-/// it (see [`db::dumps_owner`]).
 pub fn archive_names(paths: &[impl AsRef<Path>]) -> Vec<String> {
     paths
         .iter()
@@ -359,11 +226,6 @@ pub struct Scan {
     pub events: BTreeSet<String>,
     /// A device serial the library already knows, spotted verbatim somewhere in
     /// the raw text.
-    ///
-    /// Opportunistic and never load-bearing: the reading events themselves never
-    /// name a device, and whether anything else in the log does depends on what
-    /// is installed. Its value is as a **contradiction check** — an archive that
-    /// names one Kindle must not be filed under another.
     pub serial: Option<String>,
     /// Files opened and decoded.
     pub files: usize,
@@ -382,35 +244,6 @@ pub struct Scan {
 
 /// Collect the distinct event lines from every log file under `paths`, which may
 /// name plain-text logs, gzipped dumps, or directories of either.
-///
-/// A file whose name is in `seen` was read by an earlier import and is skipped
-/// without being opened — a log snapshot is immutable, so having read it once is
-/// a fact and re-reading it can only produce what is already stored.
-///
-/// A [`BTreeSet`] does the de-duplication and the ordering in one step: the
-/// `YYMMDD:HHMMSS` prefix sorts chronologically, so the result is a clean
-/// timeline regardless of what order the files were read in.
-///
-/// Decompression is deliberately lenient. Dumps are routinely truncated
-/// mid-write — a real archive had 5 of 31 fail `gzip -t`, including the newest —
-/// but a truncated file's intact prefix is perfectly good data, and heavy
-/// overlap between dumps usually supplies the lost tail anyway. Rejecting such a
-/// file would discard events for no gain.
-///
-/// Lenient about the data, strict about the claim: a short file's events are
-/// taken, but its name goes to `truncated` rather than `read`, so it is never
-/// recorded as done with. The two must not be conflated, because a `seen` entry
-/// is keyed by a name that never changes and is therefore permanent.
-///
-/// Usually the file will never grow: the device writes each snapshot once, on
-/// its own date, and never revisits it — in a real archive the short files were
-/// dates where `log_backup.sh` logged its trigger but never reached the prune
-/// step that follows a completed backup, so the Kindle left them short and
-/// always will. Re-reading such a file costs a few bytes and finds the same
-/// prefix, which is the right price. The case that justifies it is the other
-/// one: a file cut short in transfer, or read while the device was still
-/// writing it, is whole on the Kindle, and recording it as read would skip the
-/// good copy unopened for good.
 pub fn collect_events(
     paths: &[impl AsRef<Path>],
     seen: &std::collections::HashSet<String>,
@@ -528,16 +361,8 @@ fn read_maybe_gzip(path: &Path) -> Option<Decoded> {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
 
 /// Pull `name:<digits>` out of a line.
-///
-/// Anchored on the preceding separator so `TotalTime` cannot match inside a
-/// longer field name. Any of three will do: a field normally follows the comma
-/// after its neighbour, the first field of a line follows the `Information::`
-/// prefix, and the first field of a payload read on its own has nothing in front
-/// of it at all. Which field comes first is not fixed, because one firmware
-/// routinely writes a payload with its head cut off (see [`observation`]).
 fn field(line: &str, name: &str) -> Option<i64> {
     let needle = format!("{name}:");
     let bytes = line.as_bytes();
@@ -554,11 +379,6 @@ fn field(line: &str, name: &str) -> Option<i64> {
 
 /// The payloads a line carries, each `<Event>,<fields>` with the event name
 /// possibly missing.
-///
-/// Usually one. A line carries two when the head of the first was cut, leaving
-/// its tail in front of the `;` that begins the next. Fields have to be read
-/// from a single payload: each states its own positions, so reading across the
-/// boundary pairs one event's counter with another's book.
 fn payloads(line: &str) -> impl Iterator<Item = &str> {
     line.split_once("Information::")
         .map_or("", |(_, rest)| rest)
@@ -568,28 +388,6 @@ fn payloads(line: &str) -> impl Iterator<Item = &str> {
 
 /// The book's own end position within one payload, or `None` when the payload
 /// states only the chapter's.
-///
-/// A payload states `EndPos` twice — the book's, then the current chapter's —
-/// with the `NextTOCEntry…` group between them. What distinguishes them is which
-/// side of that group they fall on, not which comes first: a payload can arrive
-/// with its head cut away and the book's `EndPos` gone with it, leaving the
-/// chapter's leading a payload it does not describe. The whole group is the
-/// marker, not one field of it, because a cut lands anywhere.
-///
-/// Which is why the book's is the **last** `EndPos` before that group and not
-/// the first. A cut lands mid-payload, so a line can open with the *tail* of the
-/// payload before it — a chapter block, `NextTOCEntry` long gone — and the
-/// book's own block then sits second, still correctly ahead of this payload's
-/// group. Taking the first reads a chapter boundary as the book's identity, and
-/// since that boundary moves as the reader advances, the sitting is cut into a
-/// fresh run at every chapter and each fragment measures nothing.
-///
-/// Counted over three devices' archives: on uncut payloads the two readings are
-/// the same value — 19,753 of 19,753 on a Colorsoft, 2,155 of 2,155 on a KOA2 —
-/// so this is a no-op wherever the firmware writes a whole payload, and it is
-/// only the mangled ones it rescues (3 of 9 on a Scribe, 1 of 2,155 on the
-/// KOA2). With no group in the payload at all there is no marker to read, and
-/// the first is the best available guess.
 fn end_position(payload: &str) -> Option<i64> {
     const KEY: &str = "EndPos:YJPosition: ";
     let at = match payload.find("NextTOCEntry") {
@@ -614,17 +412,6 @@ fn book_position(line: &str) -> Option<i64> {
 }
 
 /// Every `(book fingerprint, point the reader stood at)` the events state.
-///
-/// The bridge from a log to a library, and the reason it is gathered from *every*
-/// line rather than from the sessions: a line states a position whether or not
-/// the parser can make a sitting out of it. `BookEndPosition` carries one and is
-/// no session's observation; a book opened and shut carries one and its session
-/// is discarded for having no duration. Both are the same evidence — a point that
-/// a `.yjr` sidecar also names is that book — and the log offers it once.
-///
-/// Read within one payload, never across: a line can carry two, and each states
-/// its own book, so pairing one payload's position with another's book files the
-/// reader in a book they were not in.
 fn positions_seen<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<(i64, Location)> {
     let mut out = Vec::new();
     for line in events {
@@ -641,11 +428,6 @@ fn positions_seen<'a>(events: impl IntoIterator<Item = &'a str>) -> Vec<(i64, Lo
 }
 
 /// A point in a book, as the device writes it.
-///
-/// Every position on a line reads `<handle>:<coordinate>`. The coordinate alone
-/// is a number two books can share; the handle carries the **source element
-/// id**, which is the book's own vocabulary. Together they are specific enough
-/// to identify a book by — see [`db::device_positions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Location {
     pub eid: i64,
@@ -683,12 +465,6 @@ fn location(payload: &str, name: &str) -> Option<Location> {
 
 /// True when the line names `event` as an event rather than merely containing
 /// the word.
-///
-/// An event is written `<sep><Event>,`, where `<sep>` is the `Information::`
-/// prefix or the `;` that terminates the payload before it. Requiring a
-/// separator is what stops `CloseBook` matching inside a field value, and
-/// accepting `;` is what finds an event that is not first on its line — which on
-/// one firmware is where most of them are.
 fn names(line: &str, event: &str) -> bool {
     let bytes = line.as_bytes();
     line.match_indices(event).any(|(at, _)| {
@@ -711,16 +487,6 @@ struct Observation {
 
 /// Read a line as an observation of some book's reading counter, or `None` when
 /// the line is not about a book.
-///
-/// A line qualifies on what it carries — a running counter beside a book's end
-/// position — rather than on being a named page event, because a mangled
-/// payload keeps its fields and loses its name. Only page events and closes
-/// carry `TotalTime`, so this selects the same lines on a log where every event
-/// *is* named, and recovers the rest on one where they are not.
-///
-/// The name is still read wherever it survives, because nothing else can say
-/// that a close ended the session or that an advance was forward rather than
-/// back.
 fn observation(line: &str) -> Option<Observation> {
     let page_turn = names(line, "NextPage");
     let closes = names(line, "CloseBook");
@@ -754,9 +520,6 @@ fn observation(line: &str) -> Option<Observation> {
 
 /// A book's reading counter at the instant it was opened, in milliseconds, from
 /// an `OpenBook` line's `StoredBookData`.
-///
-/// `TimeRead:9,229 sec.` — whole seconds, thousands-separated. `null` means a
-/// book with no history, which is a counter of zero, not an absent one.
 fn opened_at_counter(line: &str) -> Option<i64> {
     let rest = line.split_once("StoredBookData:")?.1;
     if rest.starts_with("null") {
@@ -781,10 +544,6 @@ struct Moment {
     /// Seconds into `day`.
     secs: i64,
     /// The same instant as a single running count of seconds.
-    ///
-    /// Elapsed time is measured on this and never on `secs`, which runs
-    /// backwards at midnight: subtracting there reads a whole night's absence as
-    /// no time at all.
     abs: i64,
     /// `YYYY-MM-DDTHH:MM:SS` — the form a session stores.
     at: String,
@@ -822,11 +581,6 @@ fn stamp(line: &str) -> Option<Moment> {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS` back to the `YYMMDD:HHMMSS` a syslog line starts with.
-///
-/// The inverse of [`stamp`], and the form a watermark travels in: the device
-/// compares it against raw log prefixes and dump filenames, both of which are
-/// this shape, so the comparison is a plain string ordering with no date
-/// arithmetic on a device that has no date library.
 pub fn log_stamp(iso: &str) -> Option<String> {
     let b = iso.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' {
@@ -848,10 +602,6 @@ pub fn log_stamp(iso: &str) -> Option<String> {
 
 /// The `YYMMDD:HHMMSS` a syslog line begins with, or `None` when it begins with
 /// something else.
-///
-/// The form a watermark travels in, read straight off a line rather than routed
-/// through a stored session: what a device may drop is decided by which lines
-/// this library holds, and a line is the thing that has to be named.
 pub fn log_line_stamp(line: &str) -> Option<String> {
     stamp(line).map(|_| line[..13].to_string())
 }
@@ -863,37 +613,6 @@ fn moment(iso: &str) -> Option<Moment> {
 }
 
 /// When the device was awake, as spans of absolute seconds.
-///
-/// **The fallback measure, and only ever a fallback.** The Kindle's reading
-/// timer is words-and-WPM driven, so a book it can count no words in — manga, a
-/// fixed-layout magazine — is never timed at all: no `TotalTime`, no
-/// `IntervalTime`, and the book's own info screen on the device reads zero.
-/// Every rule in this module measures a sitting as the span of a counter that,
-/// for such a book, does not exist.
-///
-/// What the log still states is when the device was awake. `powerd` writes a
-/// clean state machine — `ACTIVE`, then `SCREEN SAVER` once the reader stops
-/// touching it, then `READY TO SUSPEND`, `SUSPENDED`, `HIBERNATE` — so the time
-/// a book was open *and* the device `ACTIVE` is an upper bound on the reading
-/// done in it, and a tight one: measured from the last reading event to the end
-/// of an `ACTIVE` span over a 30-day archive, the screensaver follows within a
-/// median of 69 s and a p90 of 600 s. A book left open on a sleeping device
-/// contributes nothing; one abandoned awake overcounts by the idle timeout and
-/// no more.
-///
-/// That state machine reaches the log two ways — as a metrics record naming both
-/// states, and as the LIPC events `powerd` fires at the same instants — and a
-/// Kindle writes one, the other, or both. Reading only the record loses the
-/// bound entirely on firmware that does not emit it, which is not a quieter
-/// answer but a missing one: every sitting the timer refused there is dropped
-/// for measuring zero. See [`power_change`].
-///
-/// Checked against 154 sittings whose counter *is* known, the bound reads 1.13×
-/// the counted time at the median (p10 1.03), against 1.18× for unbounded wall
-/// clock. Deliberately without a per-interval cap: a 120 s cap scores better on
-/// that corpus only because its page turns are ~40 s apart, and against a
-/// magazine's five-minute cadence the same cap would report six minutes for a
-/// twenty-minute sitting.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Awake {
     spans: Vec<(i64, i64)>,
@@ -901,16 +620,6 @@ pub struct Awake {
 
 impl Awake {
     /// Read the power lines out of an event stream.
-    ///
-    /// A span opens where the device enters `ACTIVE` and closes at the next line
-    /// that leaves it. One still open at the end of the batch is dropped rather
-    /// than run to infinity: the device is awake *now*, the sitting it would
-    /// bound is still in progress, and a later batch carries its own close.
-    ///
-    /// One family of line at a time, the record preferred. A Kindle that writes
-    /// both writes them at the same second, and folding the two together lets a
-    /// leave arriving after its own enter within that second close a span before
-    /// it began — costing not the second but everything up to the next enter.
     pub fn from_events<'a>(events: impl IntoIterator<Item = &'a str>) -> Self {
         let changes: Vec<(Power, i64, Woke)> = events
             .into_iter()
@@ -951,9 +660,6 @@ impl Awake {
     }
 
     /// Whether any power line was seen at all. With none, a sitting the device
-    /// declined to count stays unmeasured rather than being credited the whole
-    /// wall clock — an unbounded guess is worse than the honest zero the device
-    /// itself reports.
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
@@ -976,12 +682,6 @@ const WORDLESS_FLOOR: f64 = 3.0;
 const WORDLESS_CEILING: f64 = 120.0;
 
 /// How much of a page's dwell counts as reading, in milliseconds.
-///
-/// The device's own rule, from `PageHeuristicsImpl` in
-/// `ReadingDataAggregatorService.jar`, defaults from `KFTResources`. Applied
-/// verbatim: it has a defined answer for a page carrying no words, which is
-/// exactly the content `ReadingTimerController` refuses, and matching it keeps
-/// these figures comparable with the ones the device shows for itself.
 fn dwell_ms(wpm: Option<f64>, words: i64, dwell_ms: i64) -> i64 {
     let secs = dwell_ms as f64 / 1000.0;
     match wpm {
@@ -1015,19 +715,6 @@ enum Woke {
 }
 
 /// Read a line as a change into or out of `ACTIVE`.
-///
-/// The record states both ends of the move, so it is read on both: entering
-/// `ACTIVE` opens a span and leaving it closes one. The LIPC event states only
-/// the move it is named for, and the pair that brackets `ACTIVE` is
-/// `outOfScreenSaver` / `goingToScreenSaver` — verified against a device that
-/// writes both, where every record naming `ACTIVE` on either side has its event
-/// in the same second and neither family has a transition the other lacks.
-/// `suspending` closes a span too, for a device that reaches sleep without
-/// passing the screensaver.
-///
-/// Not every wake is a wake to a reader: a Kindle rises from suspend on its own
-/// to sync, and says so with `wakeupFromSuspend` and `resuming` while staying in
-/// the screensaver. Neither opens a span.
 fn power_change(line: &str) -> Option<(Power, Woke)> {
     if line.contains(POWER_MARKERS[0]) {
         return match (
@@ -1069,11 +756,6 @@ fn field_num(line: &str, name: &str) -> Option<i64> {
 }
 
 /// What one `fastmetrics` record contributes to the run open around it.
-///
-/// The records name no book. They state a page and a turn for whatever the
-/// reader had open, which is the run [`parse_sessions`] is already tracking off
-/// the `ReadingTimerController` lines — and those lines still open and position
-/// a book the timer declines to count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Metric {
     /// `ereader_book_consume_content`: a page, with the words on it.
@@ -1092,15 +774,6 @@ enum Metric {
 pub const CATALOG_MARKER: &str = "SidleCatalog:";
 
 /// A book the device's content catalog names, as `(extent, key)`.
-///
-/// `extent` is `p_contentSize`, which equals `BookEndPosition.FromBook` to the
-/// digit and is therefore the same number a session is keyed by. `key` is
-/// `p_cdeKey` — `books.asin` for a Sidle sideload, `books.amazon_asin` for a
-/// store book.
-///
-/// This is what the two `cvm` firmwares have instead of [`cde_key`]: they
-/// redact the book on every reading line, and the reader shell that names it
-/// outright arrives with 5.19.
 fn catalog_row(line: &str) -> Option<(i64, &str)> {
     let rest = line.split_once(CATALOG_MARKER)?.1;
     let extent = rest.split_once("extent=")?.1;
@@ -1111,15 +784,6 @@ fn catalog_row(line: &str) -> Option<(i64, &str)> {
 }
 
 /// The `cde_key` a reader-shell record states for the book it is about.
-///
-/// The reading-timer lines redact the book on every one of them
-/// (`Title:<private>,Asin:<private>`), and these do not: the latency records
-/// name it outright, one per open, per close and per page turn. It is the
-/// catalog's own key — an Amazon ASIN for a store book, and for a sideload the
-/// content id Sidle bakes in, so it joins `books.amazon_asin` and `books.asin`
-/// respectively.
-///
-/// `N/A` is the reader shell's own filler for a book it has no key for.
 fn cde_key(line: &str) -> Option<&str> {
     if !METRIC_MARKERS.iter().any(|m| line.contains(m)) {
         return None;
@@ -1140,14 +804,6 @@ const OFFSET_STEP: i64 = 60;
 
 /// Seconds the device's local clock stands ahead of UTC, from a record stating
 /// an instant the line's own prefix also states.
-///
-/// The prefix is local wall clock and carries no zone; `close_timestamp` and
-/// `action_start_time` are epoch milliseconds. Their difference is the offset,
-/// exact to the second before rounding — a Colorsoft logging `close_timestamp`
-/// 1786882311101 under the prefix `260816:141151` is +02:00 on the nose.
-///
-/// The reading-timer lines state no absolute instant at all, so before these
-/// records nothing in a reading log said which zone its days were counted in.
 fn utc_offset(now: &Moment, line: &str) -> Option<i64> {
     if !METRIC_MARKERS.iter().any(|m| line.contains(m)) {
         return None;
@@ -1172,10 +828,6 @@ fn metric(line: &str) -> Option<Metric> {
     }
     if line.contains(METRIC_MARKERS[3]) || line.contains(METRIC_MARKERS[4]) {
         // The two records that carry an `action_id`: `ereader_book_page_turn`
-        // on one stack, naming `PrevPageTurnWithSWIPE`, and
-        // `ereader_book_linear_page_actions` on the other, naming
-        // `NextPageWithTap`. `ereader_content_point` beside them carries a
-        // `point_type` and no action.
         return match field_text(line, "action_id") {
             Some(a) if a.starts_with("Next") => Some(Metric::Forward),
             Some(a) if a.starts_with("Prev") => Some(Metric::Back),
@@ -1186,23 +838,6 @@ fn metric(line: &str) -> Option<Metric> {
 }
 
 /// Turn an ordered, de-duplicated event stream into sessions.
-///
-/// A session is a run of page events on one book. It ends when the book changes,
-/// when the reader closes it, when the gap to the next event exceeds
-/// [`SESSION_GAP_SECS`] — and at midnight, because every figure the log reports
-/// is grouped by the day a session began. Its duration is the span of the book's
-/// running `TotalTime` counter across the run — not the wall clock between first
-/// and last event, which would count the time the device sat asleep on an open
-/// page.
-///
-/// Midnight is the one break the reader did not make, and it is the only one
-/// where the interval that straddles it is **divided** rather than dropped: see
-/// [`Break`].
-///
-/// `resume` is the sitting the reader may still be in — the run these events
-/// continue rather than follow. Without it every batch of events starts a new
-/// run at its first line, which is only correct when the batch begins where the
-/// reading did; see [`Resume`].
 pub fn parse_sessions<'a>(
     events: impl IntoIterator<Item = &'a str>,
     resume: Option<&Resume>,
@@ -1353,16 +988,6 @@ enum Break {
     /// between is not reading anyone did on either side of the break.
     Left,
     /// Midnight, with the reader still reading. The reader broke nothing, so the
-    /// interval straddling the boundary is real reading time that belongs to
-    /// both days, and the run is cut *at* midnight with the counters
-    /// interpolated there: the day just ended keeps the share before, the day
-    /// beginning starts from the same value and keeps the share after.
-    ///
-    /// Cutting it like any other break would credit that interval to neither —
-    /// the device states a counter only at each event, so the advance across the
-    /// boundary falls between the two sessions and is lost. A reader who stops
-    /// shortly after midnight loses the whole of it, which is what makes a late
-    /// night look like an early evening that ended at 23:5x.
     Midnight(Start),
 }
 
@@ -1375,9 +1000,6 @@ struct Opened {
 /// Where a session begins: the counters it resumes from and the instant it
 /// started at. Either the `OpenBook` that vouched for them, or the midnight a
 /// run was cut at.
-///
-/// The counter is absent for a run in a book the device does not time. The
-/// instant is not: the reader opened it then whether or not anything counted.
 struct Start {
     counter_ms: Option<i64>,
     /// The word counter at that same instant, where it is known. An `OpenBook`
@@ -1390,11 +1012,6 @@ impl Opened {
     /// This open as a session start, or `None` when it cannot be vouched for.
     ///
     /// An open states no position, so it cannot prove which book it belongs to.
-    /// Two guards stand in: the counter must not already exceed the first
-    /// observation's, and the reading it would add must fit inside the wall
-    /// clock since the open, because counted reading time cannot outrun the
-    /// clock. A stale open from another book fails one or the other; a genuine
-    /// one clears both with room to spare.
     fn vouch(self, now: &Moment, first_total: Option<i64>) -> Option<Start> {
         let total = first_total?;
         let elapsed = now.abs.checked_sub(self.at.abs).filter(|e| *e >= 0)?;
@@ -1410,12 +1027,6 @@ impl Opened {
 
     /// This open as the instant a run began, for a run with no counter to
     /// vouch it against.
-    ///
-    /// The counter guards cannot be applied — there is nothing to compare — so
-    /// the day is all that stands between this and a stale open from another
-    /// book. That is enough here: the figure it produces is bounded by how long
-    /// the device was awake, so a start too early costs nothing where the
-    /// reader was not there.
     fn opened_run(&self, now: &Moment) -> Option<Start> {
         (self.at.day == now.day && self.at.abs <= now.abs).then(|| Start {
             counter_ms: None,
@@ -1427,11 +1038,6 @@ impl Opened {
 
 /// The share of a counter's advance that falls before a boundary inside the
 /// interval it was measured over, in proportion to the wall clock either side.
-///
-/// The device credits an interval in full at its far end, so this is the only
-/// thing the log says about where inside the interval the reading happened:
-/// evenly, which is also how [`super::db::reading_clock`] spreads a session
-/// across the hours it covers.
 fn share(advance: i64, elapsed: i64, before: i64) -> i64 {
     if elapsed <= 0 || advance <= 0 {
         return 0;
@@ -1465,9 +1071,6 @@ struct Open {
     began: Moment,
     carried_secs: i64,
     /// Forward turns from the `fastmetrics` records, counted apart from
-    /// `page_turns`. One stack names every turn on its
-    /// `ReadingTimerController` lines and the other names none, while both
-    /// write these — so adding the two together doubles a turn on the first.
     metric_turns: i64,
     /// Milliseconds of page dwell through [`dwell_ms`], and the page open at
     /// the far end of the interval each new page closes.
@@ -1486,12 +1089,6 @@ struct Open {
 
 impl Open {
     /// `start` is where the book was opened, where an `OpenBook` vouched for it
-    /// or where midnight cut the run before it. That is the session's true floor
-    /// in three senses: the first *logged* observation can sit minutes past the
-    /// open, so taking it as the floor discards the reading in between, reports a
-    /// sitting that took no time at all, and books what it does count to the
-    /// wrong hours. Without one, the first observation is the best available
-    /// start.
     fn new(end_position: i64, now: &Moment, start: Option<Start>) -> Self {
         let (time_lo, words_lo, from) = match start {
             Some(s) => (s.counter_ms, s.words, s.at),
@@ -1528,17 +1125,6 @@ impl Open {
 
     /// The run a previous batch of events left open, rebuilt from the session it
     /// was stored as.
-    ///
-    /// Everything a run needs is on the row: where it started on the clock and
-    /// on the counter, where it was last seen on both, and the hours booked so
-    /// far. Restored whole rather than as a fresh run anchored at the stored end,
-    /// so the session this produces carries the *original* `started_at` — that
-    /// being the identity the row is stored under — and reports the sitting's
-    /// whole length rather than the part of it this batch could see.
-    ///
-    /// `None` for a caller with no sitting to continue, which is the ordinary
-    /// case: a device syncing for the first time, or one whose last session
-    /// finished long ago.
     fn resume(resume: Option<&Resume>) -> Option<Self> {
         let r = resume?;
         let last = moment(&r.ended_at)?;
@@ -1594,12 +1180,6 @@ impl Open {
 
     /// Book an interval's counted reading against the clock hours it ran
     /// through, `from` and `to` being seconds into the day.
-    ///
-    /// Evenly across the interval, which is the whole of what the log says: the
-    /// device credits an interval in full at its far end and states nothing
-    /// about where inside it the reading fell. An interval is a page turn wide,
-    /// so that assumption spans minutes — where spreading a *session* spans
-    /// hours, and is the guess this exists to avoid.
     fn credit(hours_ms: &mut [i64; 24], from: i64, to: i64, advance_ms: i64) {
         if advance_ms <= 0 {
             return;
@@ -1652,10 +1232,6 @@ impl Open {
     /// Fold one `fastmetrics` record into the run.
     ///
     /// A page closes the interval the page before it opened, and [`dwell_ms`]
-    /// says how much of that interval counts. The run's end and its break rules
-    /// are the `ReadingTimerController` lines' to decide, so this moves neither
-    /// `last` nor `ended_at` and does not mark the run touched — a batch of
-    /// nothing but these records describes a book no line here has opened.
     fn observe_metric(&mut self, now: &Moment, m: &Metric, awake: &Awake) {
         match m {
             Metric::Forward => self.metric_turns += 1,
@@ -1722,9 +1298,6 @@ impl Open {
 
     /// Close the run at the midnight it was cut at, crediting this day the share
     /// of the unfinished interval that fell before the boundary.
-    ///
-    /// The stored end is one second short of the boundary, that being the last
-    /// instant this day has: reading recorded at `T00:00:00` is the next day's.
     fn finish_at(mut self, boundary: &Start) -> Session {
         // A midnight cut is only made where both sides state a counter, so this
         // boundary carries one.
@@ -1748,15 +1321,6 @@ impl Open {
     }
 
     /// The run as a session, under the best [`Measure`] its records support.
-    ///
-    /// [`Measure::Counted`] first: the device's own accounting, excluding the
-    /// pauses an awake reader takes. Where the counter never moved across the
-    /// whole run — the device declining to time a book it can count no words in
-    /// — [`Measure::Dwell`] measures the same run off the page records, and
-    /// [`Measure::Awake`] bounds it where those are absent too.
-    ///
-    /// A run with none of the three keeps the counter's zero. An unbounded wall
-    /// clock credits a book left open overnight with the night.
     fn finish(self, awake: &Awake) -> Session {
         let counted = (self.time_hi - self.time_lo.unwrap_or(self.time_hi)) / 1000;
         let dwell = self.dwell_total_ms / 1000;
@@ -1802,11 +1366,6 @@ impl Open {
 }
 
 /// Spread an estimated total evenly across the hours its window covers.
-///
-/// An estimate has no intervals behind it — that is what makes it an estimate —
-/// so there is nothing finer to place it by, and claiming otherwise would dress
-/// a guess as a measurement. Even spreading is the same assumption
-/// [`super::db::reading_clock`] already makes of a session it has to divide.
 fn spread(from: &Moment, to: &Moment, seconds: i64) -> Vec<(u8, i64)> {
     if seconds <= 0 {
         return Vec::new();
@@ -1835,13 +1394,6 @@ fn spread(from: &Moment, to: &Moment, seconds: i64) -> Vec<(u8, i64)> {
 
 /// The hours a session's milliseconds fall in, as whole seconds summing to
 /// exactly `seconds`.
-///
-/// Truncating each hour on its own would shed up to a second per hour, so a
-/// day's hours would quietly fall short of the day beside them. The running
-/// total is what gets truncated instead, which spends the error inside the
-/// session rather than losing it. A last correction covers the case the
-/// milliseconds cannot account for — a counter that ran backwards mid-run, say —
-/// because the two figures are shown side by side and must agree.
 fn hours_in_seconds(hours_ms: &[i64; 24], seconds: i64) -> Vec<(u8, i64)> {
     let mut out = Vec::new();
     let (mut running, mut placed) = (0, 0);
@@ -1866,24 +1418,6 @@ fn hours_in_seconds(hours_ms: &[i64; 24], seconds: i64) -> Vec<(u8, i64)> {
 
 /// Map each book's per-line fingerprint to the number that actually identifies
 /// it against the library.
-///
-/// The device states **two** different end-of-book constants. Page events repeat
-/// `EndPos`, the last *word* position — good for grouping, but a few positions
-/// short of the book's end. Only the occasional `BookEndPosition` event states
-/// `FromBook`, the last valid position, which is what
-/// [`super::db::books_with_last_position`] joins on. They are not
-/// interchangeable: one archive's book showed 148853 against a `FromBook` of
-/// 148859, so joining on the former silently matches nothing.
-///
-/// `BookEndPosition` fires on most book opens, so a corpus that contains a
-/// book's sessions almost always contains its mapping too; the first sighting
-/// wins, since two builds of one title differ in both numbers together.
-///
-/// "Most" is not "all", which is why the pending value is dropped at every
-/// `OpenBook`. A book that states no `BookEndPosition` would otherwise inherit
-/// whichever one was last seen and be filed as an entirely different book.
-/// Dropping it leaves such a book keyed by its own `EndPos`: unnamed until an
-/// archive shows its mapping, which is the answer that is at least true.
 fn frombook_map<'a>(
     events: impl IntoIterator<Item = &'a str>,
 ) -> std::collections::HashMap<i64, i64> {
@@ -1910,7 +1444,6 @@ fn frombook_map<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Import
 
 /// Which Kindle an archive belongs to, decided from the archive.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1929,13 +1462,6 @@ pub enum Origin {
 }
 
 /// Work out which Kindle wrote an archive **without opening a single file**.
-///
-/// Only the names are consulted, which is what makes this free and what makes it
-/// exact: a `log_backup_<YYMMDDHHMMSS>` is unique to the device-second that
-/// produced it, so a name the library has already read identifies its device
-/// outright. This is why an archive never has to be identified by hand twice —
-/// and why the first import of a genuinely new folder is the only moment the
-/// device has to come from somewhere else.
 pub fn identify(conn: &Connection, paths: &[impl AsRef<Path>]) -> rusqlite::Result<Origin> {
     let names = archive_names(paths);
     Ok(match db::dumps_owner(conn, &names)? {
@@ -1947,21 +1473,6 @@ pub fn identify(conn: &Connection, paths: &[impl AsRef<Path>]) -> rusqlite::Resu
 
 /// Read every log under `paths`, store the sessions, and attribute what can be
 /// attributed.
-///
-/// Re-importing the same archive costs almost nothing. Snapshots already read
-/// are recorded by name and skipped **unopened** — not decompressed and then
-/// found to be redundant, which is what the uniqueness index alone would do and
-/// what made a second pass over a 92 MB archive as slow as the first.
-///
-/// `device_serial` is the Kindle these logs came from. Callers that *know* — the
-/// device pushing its own — pass it; a host-side import of a copied folder should
-/// resolve it with [`identify`] rather than ask, because a person picking from a
-/// list will eventually pick wrong and the mistake is invisible afterwards.
-///
-/// If the archive names a device the library knows and it contradicts
-/// `device_serial`, the import stores nothing and reports
-/// [`Imported::conflict`]: filing one Kindle's reading under another is worse
-/// than not importing at all.
 pub fn import(
     conn: &Connection,
     paths: &[impl AsRef<Path>],
@@ -2013,23 +1524,6 @@ pub fn import(
 }
 
 /// Keep the raw lines a device pushed, under `<root>/reading-log/<serial>/`.
-///
-/// **The device's copy is not a backup once this exists — it is the only other
-/// copy, and it is deleted.** A Kindle archives what it logs and purges that
-/// archive at the watermark the library hands back; the watermark is per
-/// device, so a session stored for one book carries it past another book's
-/// events, and those events are then dropped by a device that believes they are
-/// safe here. What made them unstorable is rarely permanent — a book the parser
-/// could not measure today is one a better parser measures tomorrow — so the
-/// lines are kept whether or not they became a session.
-///
-/// Written in the same shape the device's own archive uses, one gzipped file
-/// per day, so [`import`] can read the folder back with no special case: the
-/// stored history and a fresh archive are the same thing.
-///
-/// A day's file is read, merged and rewritten rather than appended to, because
-/// a torn append corrupts history that was already safe. The rename is what
-/// publishes it.
 pub fn archive_pushed(
     root: &Path,
     device_serial: &str,
@@ -2062,20 +1556,6 @@ pub fn archive_pushed(
 
 /// Store already-collected event lines. The half of [`import`] that does not
 /// touch the filesystem.
-///
-/// Split out for the device push, which arrives as lines over HTTP rather than
-/// as files on disk: a Kindle reads its own logs and sends what is new, and the
-/// host runs **this same parser** over them. One implementation of the session
-/// rules — the counter deltas, the gap splitting, the two end-of-book constants
-/// — is the point; a second copy on the device would be the one that drifts.
-///
-/// `events` must be de-duplicated and chronological, which a [`BTreeSet`] of raw
-/// lines gives for free.
-///
-/// `resume` is the sitting these events may continue — see [`Resume`]. A caller
-/// holding a whole archive passes `None`, because the run's own earlier events
-/// are in `events`; a caller taking a device's newest events passes what the
-/// library already stored, because they are not.
 pub fn store_events(
     conn: &Connection,
     events: &BTreeSet<String>,
@@ -2216,12 +1696,6 @@ mod tests {
 
     /// The lines a device pushed survive whether or not the library could make
     /// a session of them, and come back through the ordinary import.
-    ///
-    /// The case this exists for: a device pushes two books' events, one of
-    /// which forms a session and one of which does not. The watermark the
-    /// device purges against is per device, so it moves past both, and the
-    /// device drops its own copy of both. What the parser could not use today
-    /// has to still be here tomorrow.
     #[test]
     fn pushed_lines_are_kept_whether_or_not_they_became_a_session() {
         let root = tempfile::tempdir().expect("temp dir");
@@ -2352,12 +1826,6 @@ mod tests {
 
     /// A sitting interrupted by a Sync is one sitting, not two, and none of its
     /// reading falls into the seam.
-    ///
-    /// This is the ordinary case, not an edge one: the reader taps Sync in the
-    /// middle of a book and carries on. The second batch of events holds only
-    /// what was logged after the first, so parsed on its own it starts a fresh
-    /// run at its first line — and the counter advance *between* the batches,
-    /// which is real reading, belongs to neither run and is dropped.
     #[test]
     fn a_sitting_interrupted_by_a_sync_keeps_its_start_and_all_of_its_time() {
         let first = [
@@ -2451,9 +1919,6 @@ mod tests {
 
     /// Events already folded into a run can arrive again — the dumps overlap by
     /// design — and must not be counted twice.
-    ///
-    /// They cannot be: every figure is read from the device's own absolute
-    /// counters, so a line already seen restates a value the run already holds.
     #[test]
     fn replayed_events_do_not_lengthen_the_run_they_are_already_in() {
         let all = [
@@ -2790,13 +2255,6 @@ mod tests {
     }
 
     /// Two Syncs in one sitting leave one row, holding all of it.
-    ///
-    /// The whole round trip: the first push stores a partial sitting, the second
-    /// reads it back as the run under way and measures the same sitting further.
-    /// A device never sends an event twice, so the second push carries only what
-    /// was logged after the first — and without the stored row to continue, the
-    /// sitting would be two rows and the reading between the pushes would be in
-    /// neither.
     #[test]
     fn a_second_sync_lengthens_the_sitting_instead_of_starting_another() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-resume-{}", std::process::id()));
@@ -2874,11 +2332,6 @@ mod tests {
     /// A sitting whose row has since been re-keyed is still the same sitting.
     ///
     /// A log line names the book by its last-word position;
-    /// [`db::resolve_reading_sessions`] moves the row to the book's last position
-    /// the moment an event states the pairing. The device knows nothing of that
-    /// and keeps sending the same fingerprint, so the run has to be offered back
-    /// under the name the events use — otherwise the next Sync reads the
-    /// continuation as a switch to a different book and files it separately.
     #[test]
     fn a_re_keyed_sitting_is_still_continued_by_the_events_that_name_it() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-rekey-{}", std::process::id()));
@@ -2932,12 +2385,6 @@ mod tests {
     }
 
     /// A sitting judged not worth a row must not take its evidence with it.
-    ///
-    /// The regression this guards is a one-line `continue`: skipping a session
-    /// with no measurable duration used to skip recording where the reader stood
-    /// in it, and a book opened and shut is precisely when the device states
-    /// that. The lines are offered once, so the loss was permanent and silent —
-    /// it showed up only as a session that could never be named.
     #[test]
     fn a_book_opened_and_shut_still_gives_up_where_the_reader_stood() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-points-{}", std::process::id()));
@@ -2977,10 +2424,6 @@ mod tests {
     }
 
     /// A catalog key names a book the position axis cannot.
-    ///
-    /// The library holds this title at `max_position` 999999, so no session
-    /// ending at 148213 joins it — a different build of the same book, which is
-    /// what the axis is right to refuse. The key settles it outright.
     #[test]
     fn a_catalog_key_names_a_book_whose_axis_does_not_match() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-asin-{}", std::process::id()));
@@ -3022,10 +2465,6 @@ mod tests {
     /// A catalog row names a book on a firmware that logs no key.
     ///
     /// The extent and key are a real pair off a KOA2's own `/var/local/cc.db`:
-    /// `p_contentSize` 416436 against `p_cdeKey`
-    /// `L7P5OOJTFVDRFUJ2OFMKCAP7JYEACNDZ`, the content id Sidle baked into that
-    /// book. The library here ends the title at a different position, which is
-    /// the case the axis is right to refuse.
     #[test]
     fn a_catalog_row_names_a_book_the_reading_lines_never_do() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-cat-{}", std::process::id()));
@@ -3222,11 +2661,6 @@ mod tests {
     }
 
     /// A truncated dump gives up its prefix but is **not** recorded as read.
-    ///
-    /// The two rules are load-bearing together. Snapshot names are immutable, so
-    /// recording a half-decoded file as read would skip it unopened forever —
-    /// including the complete copy pulled later under the same name. A real
-    /// 31-file archive had 5 truncated, so this is the common case, not a corner.
     #[test]
     fn a_truncated_dump_gives_up_its_prefix_without_counting_as_read() {
         use std::io::Write;

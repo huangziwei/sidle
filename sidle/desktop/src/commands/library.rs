@@ -18,9 +18,6 @@ use crate::state::AppState;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportResult {
     /// `needs_enqueue` is true when the row was inserted with a pending job —
-    /// either an EPUB-import awaiting EPUB→KFX, or a KFX-import awaiting
-    /// KFX→EPUB. False on an idempotent re-import where the other side was
-    /// already on disk.
     Imported {
         book: BookRow,
         needs_enqueue: bool,
@@ -41,9 +38,6 @@ pub async fn library_list(state: State<'_, AppState>) -> Result<Vec<BookRow>, St
 }
 
 /// A live tick from an import in flight. Keyed by the source path (there is no
-/// book row yet — that is the last thing an import does), with `index`/`total`
-/// placing this file in a multi-file drop. `fraction` and `label` mean what
-/// they do for a conversion: how full the bar is, and the step it is on.
 #[derive(Clone, Serialize)]
 struct ImportProgress<'a> {
     path: &'a str,
@@ -90,10 +84,6 @@ pub async fn library_import(
         let app_handle = app.clone();
 
         // Three phases, two of them short-lived under the database lock and the
-        // slow one — the azw3/mobi/aozora conversion, minutes on a big book —
-        // outside it entirely. Holding the app's one connection across that
-        // would stall every reader and every running conversion behind a single
-        // drop.
         let result = tokio::task::spawn_blocking(move || {
             let kind = import::detect_kind(&path)?;
             let identity = import::identify_file(&path)?;
@@ -105,9 +95,6 @@ pub async fn library_import(
             }
 
             // Every file opens with a tick, whatever its format: it names the
-            // file being worked on, and it clears what the file before it left
-            // on the bar — a fast `.epub` behind a slow `.azw3` would otherwise
-            // sit under the azw3's finished bar for as long as it took.
             emit_import_progress(&app_handle, &raw, index, file_count, 0.0, "");
 
             let pipeline = progress::import_pipeline(kind);
@@ -159,9 +146,6 @@ pub async fn library_import(
 /// Edit the metadata for one book. The editor modal always submits every
 /// field (it starts from the current row, the user edits in place), so the
 /// patch is a full replacement — no "no-op" semantics to manage.
-///
-/// Validation + canonicalization happens here; `db::update_metadata` writes
-/// the patch verbatim.
 #[tauri::command]
 pub async fn library_update_metadata(
     app: AppHandle,
@@ -173,10 +157,6 @@ pub async fn library_update_metadata(
 }
 
 /// Canonicalize, validate, persist, and file-rename a full metadata patch, then
-/// emit `library:row-updated` and return the refreshed row. Shared by the
-/// metadata modal (`library_update_metadata`) and the book editor's metadata
-/// panel (`editor_save_metadata`), which layers a surgical KFX write on top so
-/// the edit is durable in the artifact, not just the library row.
 pub(crate) async fn apply_metadata_patch(
     app: &AppHandle,
     state: &AppState,
@@ -200,11 +180,6 @@ pub fn library_romanize(text: String, language: String) -> String {
 }
 
 /// Set — or clear — a book's Amazon catalogue id, the colour-cover key.
-///
-/// Deliberately separate from `library_update_metadata` (the full-replacement
-/// patch): this value is not part of the book's description, it names an item in
-/// Amazon's catalogue, and it is validated rather than stored as typed. The
-/// rule, and why it is what it is, lives in `metadata::set_amazon_asin`.
 #[tauri::command]
 pub async fn library_set_asin(
     app: AppHandle,
@@ -221,9 +196,6 @@ pub async fn library_set_asin(
 }
 
 /// Open the user's browser to an Amazon search for this book, so they can find
-/// its real ASIN to paste into the editor. The marketplace is chosen from the
-/// book's language — the same language→store proxy `cover_fetch` uses to pick
-/// the cover locale. Scoped to the Kindle store (`i=digital-text`).
 #[tauri::command]
 pub async fn library_amazon_search(
     app: AppHandle,
@@ -253,9 +225,6 @@ pub async fn library_amazon_search(
 }
 
 /// Minimal `application/x-www-form-urlencoded` encoding for a search query, so
-/// we don't pull in a `url`/`urlencoding` crate for one call site. Spaces →
-/// `+`; RFC 3986 unreserved chars pass through; everything else (including all
-/// multi-byte UTF-8, e.g. CJK titles) is percent-encoded per byte.
 fn percent_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -272,12 +241,6 @@ fn percent_encode_query(s: &str) -> String {
 
 /// Bulk-edit metadata across many books. Sparse semantics: only the fields the
 /// user filled in change; tags are additive. See [`db::BulkMetadataPatch`].
-///
-/// Validates / normalizes once, then applies per book under a single DB lock.
-/// Unlike the single-book commands it does **not** emit `library:row-updated`
-/// per book — the gallery's subscriber re-renders on every event, so a bulk
-/// emit would mean one full render per book. The caller merges the returned
-/// Vec and renders once.
 #[tauri::command]
 pub async fn library_bulk_update_metadata(
     state: State<'_, AppState>,
@@ -291,9 +254,6 @@ pub async fn library_bulk_update_metadata(
 #[tauri::command]
 pub async fn library_remove(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     // Look up the sha first so we can delete the files BEFORE the row.
-    // If file deletion fails (Spotlight/Books.app holding a handle, perms),
-    // the row stays put so the user sees the failure in the gallery rather
-    // than ending up with an orphan `books/<sha>/` dir whose row is gone.
     let sha: Option<String> = {
         let conn = state.db.lock().await;
         db::get_book(&conn, book_id)
@@ -316,11 +276,6 @@ pub async fn library_remove(state: State<'_, AppState>, book_id: i64) -> Result<
 }
 
 /// Compact the library DB file (`VACUUM`), reclaiming the disk space freed by
-/// removals. Deleting a book frees its rows but not the file's pages (SQLite
-/// keeps them on a free-list), so the gallery calls this once per delete
-/// *operation* — after a single remove, and after a bulk remove finishes. A
-/// multi-select delete therefore pays one VACUUM, not one per book. Best-effort
-/// from the caller's side: a transient failure here doesn't undo the deletes.
 #[tauri::command]
 pub async fn library_compact(state: State<'_, AppState>) -> Result<(), String> {
     let conn = state.db.lock().await;
@@ -340,11 +295,6 @@ pub async fn library_open_in_finder(
             .and_then(|b| {
                 // Sidle is a KFX reader: the `.kfx` is the canonical book file;
                 // the `.epub` is a derived artifact the user may have deleted.
-                // Reveal the first candidate that actually EXISTS on disk (KFX
-                // first), so a stale DB path — e.g. an EPUB removed from the
-                // folder, or a KFX import whose EPUB hasn't converted yet —
-                // falls through to the file that's really there instead of
-                // failing to reveal anything.
                 [b.kfx_path, b.epub_path]
                     .into_iter()
                     .flatten()
@@ -436,9 +386,6 @@ pub async fn library_recrawl_cover(
 }
 
 /// Per-book progress for a bulk cover re-fetch, emitted as
-/// `library:recrawl-progress`. The run is one slow Amazon round-trip (plus an
-/// EPUB/KFX rewrite) per book, so without this the selection bar would look
-/// frozen for minutes on a large batch.
 #[derive(Clone, Serialize)]
 struct RecrawlProgress {
     done: usize,
@@ -457,8 +404,6 @@ pub struct RecrawlBulkSummary {
 
 /// Re-fetch covers for a set of books — the selection bar's "Re-fetch covers"
 /// action (and the multi-select / whole-series context menus). Sequential;
-/// emits `library:recrawl-progress` after each book. The frontend does a single
-/// `library_list` refresh when this returns rather than re-rendering per book.
 #[tauri::command]
 pub async fn library_recrawl_covers(
     app: AppHandle,
@@ -497,10 +442,6 @@ pub async fn library_recrawl_covers(
 }
 
 /// Replace the cover for one book from a user-picked image file.
-///
-/// Immediate-apply semantics: commits on file pick; the editor modal's Cancel
-/// doesn't undo this. The image format is sniffed from the bytes, so a `.png`
-/// mislabeled `.jpg` still lands correctly.
 #[tauri::command]
 pub async fn library_set_cover(
     app: AppHandle,
@@ -529,11 +470,6 @@ pub async fn library_set_cover(
 }
 
 /// Open the system file dialog filtered to images and return one path.
-///
-/// Used by the metadata editor's "Change cover…" button. The filter is a
-/// hint for the OS dialog; the actual format detection happens in
-/// `library_set_cover` via magic-byte sniff, so a file with a wrong
-/// extension still gets validated before write.
 #[tauri::command]
 pub async fn library_pick_image(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let (tx, rx) = oneshot::channel();
@@ -548,11 +484,6 @@ pub async fn library_pick_image(app: tauri::AppHandle) -> Result<Option<String>,
 }
 
 /// Open the system file dialog and return selected ebook paths.
-///
-/// Accepts EPUB, KFX, KFX-zip (the multi-container bundle Kindle DeDRM
-/// produces), and MOBI — the import pipeline dispatches on extension.
-/// Exposed from Rust because vanilla-JS (no bundler) can't import the
-/// dialog plugin's JS module.
 #[tauri::command]
 pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let (tx, rx) = oneshot::channel();
@@ -606,13 +537,6 @@ pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, Strin
 }
 
 /// Move the library to `dest`: snapshot + verify the DB there, relocate every
-/// other root entry — `books/`, `notebooks/`, `device-dist/`, `.server-token` —
-/// (rename when same-volume, else copy), repoint, delete the old remnants, and
-/// relaunch — nothing is left behind except the tiny `config.json` pointer in the
-/// app state dir. Refuses when a conversion is in flight (its
-/// output would be stranded), when `dest` is already the current root, or when
-/// `dest` is non-empty — except the default location, which always holds
-/// `config.json` and is refused only if it already contains a library.
 #[tauri::command]
 pub async fn library_relocate_move(
     app: AppHandle,
@@ -625,8 +549,6 @@ pub async fn library_relocate_move(
     }
     // The default location *is* the app state dir, which always holds
     // `config.json` (the root pointer) and so can never be literally empty.
-    // Moving back to it must therefore be allowed; we only refuse when it
-    // already holds a library we'd clobber. Any other destination must be empty.
     let state_dir = LibraryPaths::state_dir().map_err(|e| e.to_string())?;
     if dest == state_dir {
         if dest.join("library.db").exists() || dest.join("books").is_dir() {
@@ -714,12 +636,6 @@ pub async fn library_backup_pick_dest(app: AppHandle) -> Result<Option<String>, 
 }
 
 /// Per-unit progress for a long file operation (backup / restore / merge),
-/// emitted as `library:fileop-progress` so the footer shows "Backing up library
-/// — 62%" instead of going silent for the duration. `op` is the verb the
-/// frontend renders; `done`/`total` count archived dirs (backup) or extracted
-/// zip entries (restore / merge). The frontend clears the line when the command
-/// resolves — restore relaunches, so its final tick just vanishes with the old
-/// process.
 #[derive(Clone, Serialize)]
 struct FileopProgress {
     op: &'static str,
@@ -728,9 +644,6 @@ struct FileopProgress {
 }
 
 /// Write a full backup of the current library to `dest`. Holds the DB lock only
-/// for the consistent snapshot, then zips the `books/` tree lock-free so a large
-/// backup doesn't stall the app. Non-destructive — nothing here touches the live
-/// library, so no queue gate or relaunch is needed.
 #[tauri::command]
 pub async fn library_backup(
     app: AppHandle,
@@ -751,9 +664,6 @@ pub async fn library_backup(
     };
 
     // Zip on a blocking thread — lock-free (it reads only the snapshot file + the
-    // on-disk book tree) AND off the async runtime, so a large backup doesn't
-    // stall other commands or freeze the UI. The snapshot guard moves in and
-    // cleans up there.
     let manifest = tokio::task::spawn_blocking(move || {
         // Cap IPC chatter: emit only when the integer percentage changes (plus
         // the final tick). The book/notebook loop can run into the hundreds, and
@@ -809,15 +719,6 @@ pub async fn library_restore_pick_src(app: AppHandle) -> Result<Option<String>, 
 }
 
 /// Restore a `.sidlebak` over the current library, then relaunch. Refuses while
-/// a conversion is in flight (the swap would strand its output), validates +
-/// verifies before the swap (so a bad archive leaves the target untouched), then
-/// relaunches onto the restored files — the same restore-then-relaunch path as
-/// relocate (H5), since the live `Connection` can't be repointed in place.
-///
-/// `keep_previous` is the choice the confirm UI puts to the user: keep the
-/// replaced library at `<root>.bak-<timestamp>` as an undo, or delete it and get
-/// the space back. Either way the swap itself sets it aside first, so nothing is
-/// removed until the restored library is in place.
 #[tauri::command]
 pub async fn library_restore(
     app: AppHandle,
@@ -919,12 +820,6 @@ pub async fn library_merge_pick_src(app: AppHandle) -> Result<Option<String>, St
 }
 
 /// Merge a `.sidlebak`'s books, annotations, ink, and notebooks into the current
-/// library. **Additive** — only inserts rows + copies new files, never deletes or
-/// overwrites — so, unlike restore, there's no swap and no relaunch; the UI just
-/// re-lists. Validation + extraction + the (potentially large) file copy run on a
-/// blocking thread with no DB lock held; only the row transaction takes the lock,
-/// and it's metadata-only (fast). Duplicate books (same content sha) keep the
-/// newer side's metadata; everything else unions by its content key.
 #[tauri::command]
 pub async fn library_merge(
     app: AppHandle,

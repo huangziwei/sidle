@@ -1,13 +1,4 @@
 //! The native Kindle two-corner screenshot gesture, reimplemented for Sidle.
-//!
-//! On stock firmware a simultaneous opposite-corner tap captures the screen to
-//! a PNG. That recognizer never fires under Sidle: we hold an exclusive
-//! `EVIOCGRAB` on the touchscreen (see [`super::touch`]), so the framework —
-//! recognizer included — sees no touch events while we're foreground. So we
-//! recognize the gesture ourselves in `touch.rs` (it has the multi-touch state
-//! and the screen dimensions) and capture here. The capture itself is cheap:
-//! `Framebuffer`'s backing buffer already holds exactly what's on screen, so a
-//! screenshot is just encoding it (plus a white flash for the "got it" cue).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,14 +16,6 @@ const SCREENSHOT_DIR: &str = "/mnt/us/screenshots";
 const FLASH_MS: u64 = 120;
 
 /// Save the current screen to a timestamped PNG, flash white as feedback, then
-/// restore the screen. Returns the written path. No rotation is applied: the
-/// backing already holds the upright UI (we render identity and the compositor
-/// rotates the *display* to the grip), so the file matches what the user saw in
-/// either orientation — see [`Framebuffer::capture_png`].
-///
-/// Best-effort by construction: the white flash and restore run regardless of
-/// whether the encode succeeded, so a write failure never leaves the screen
-/// blanked. Callers log the result but should not treat an `Err` as fatal.
 pub fn capture(fb: &mut Framebuffer) -> Result<PathBuf> {
     let dir = Path::new(SCREENSHOT_DIR);
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;

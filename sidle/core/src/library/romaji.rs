@@ -1,31 +1,9 @@
 //! Romanization for the searchable `title_romaji`/`author_romaji` metadata and
 //! the picker's derived search key.
-//!
-//! Japanese → rōmaji (kakasi, kanji-aware), Chinese → tone-less pīnyīn,
-//! everything else → itself. Two surfaces:
-//!
-//! - [`romanize_field`] produces the **human-readable** romaji stored in the
-//!   editable `*_romaji` columns (spaces kept, lowercased) — generated at import
-//!   and correctable in the library modal.
-//! - [`search_key`] assembles those (curated) romaji with the auto-romanized
-//!   series/publisher/tags and the raw fields, then [`canon`]s the whole into
-//!   the space/punctuation-free, ASCII-folded string the device substring-matches.
-//!
-//! Why prefer a book's own *kana* reading over the engine: a Japanese book's
-//! `opf:file-as` / KFX `*_pronunciation` (surfaced by bokai as
-//! `Metadata.title_sort` / `author_sorts`) is the authoritative yomigana when
-//! it's actually phonetic. But a `file-as` is *sometimes* a kanji **sort form**
-//! (e.g. `森橋 ビンゴ`), which is no better than the raw text — so we only trust a
-//! reading that is [`is_kana_dominant`] and otherwise fall back to the engine.
 
 use unicode_normalization::UnicodeNormalization;
 
 /// Human-readable romaji for one metadata field (a title or an author line).
-///
-/// `reading` is the book's own yomi for this field when known (bokai's
-/// `title_sort` / `author_sorts`); it wins when it's phonetic kana. Output is
-/// lowercased with single-spaced words — the form stored in `title_romaji` /
-/// `author_romaji` and shown in the editor.
 pub fn romanize_field(text: &str, reading: Option<&str>, language: &str) -> String {
     collapse_ws(&romanize_raw(text, reading, language).to_lowercase())
 }
@@ -70,15 +48,6 @@ fn pinyin_of(text: &str) -> String {
 }
 
 /// The device match key: curated romaji (title/author) + auto-romanized
-/// series/publisher/tags + the raw fields, all [`canon`]'d into one
-/// space/punctuation-free lowercase ASCII string. Including the raw fields means
-/// English titles and embedded Latin runs (`"ONE HAND EDEN"`) match with no
-/// romanization at all.
-///
-/// `title_romaji` / `author_romaji` are the stored (possibly hand-corrected)
-/// values; when empty (a pre-backfill row, or a book in a language we generated
-/// nothing for) they fall back to a live [`romanize_field`] so search never goes
-/// blind on a book.
 #[allow(clippy::too_many_arguments)]
 pub fn search_key(
     title: &str,
@@ -126,12 +95,6 @@ pub fn search_key(
     }
 
     // Primary key: NFKD-folded (ä→a, é→e, ß→dropped). Also index the
-    // **digraph-expanded** Latin form (ä→ae, ö→oe, ü→ue, ß→ss, œ→oe, ø→oe) so a
-    // German/Nordic spelling matches both ways — `muller` *and* `mueller` find
-    // "Müller", and `strasse`/`oeuvre` aren't lost to dropped glyphs. Appended
-    // only when it actually differs (i.e. the text had such a character), so
-    // ASCII/CJK books carry no extra bytes. The on-screen keyboard types ASCII,
-    // so the query side needs no expansion.
     let joined = parts.join(" ");
     let mut key = canon(&joined);
     let expanded = canon(&expand_latin(&joined));
@@ -142,10 +105,6 @@ pub fn search_key(
 }
 
 /// Fold a string to the canonical match form: NFKD ASCII-fold (ō→o, é→e,
-/// fullwidth→half), lowercase, then keep only `[a-z0-9]`. Space- and
-/// punctuation-free so the on-screen keyboard needs neither: `murakami` and
-/// `murakamiharuki` both substring-hit `"murakami haruki"`. Applied to both the
-/// stored-key assembly and the typed query.
 pub fn canon(s: &str) -> String {
     s.nfkd()
         .filter(|c| !is_combining(*c))
@@ -155,11 +114,6 @@ pub fn canon(s: &str) -> String {
 }
 
 /// Expand the Latin letters whose conventional ASCII spelling is a **digraph**,
-/// not a single base letter — so they survive `canon` (which would otherwise
-/// fold `ä→a` and *drop* `ß`/`œ`/`ø` entirely, since those have no NFKD
-/// decomposition). German umlauts + eszett, the œ/æ ligatures, and the Nordic ø.
-/// Everything else passes through unchanged (its accent is handled by `canon`'s
-/// NFKD fold). Case is irrelevant — the result is lowercased by `canon`.
 fn expand_latin(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

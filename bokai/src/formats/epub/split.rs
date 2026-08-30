@@ -1,24 +1,5 @@
 //! Splitting a collection — a 合本版, a 全集, a boxed set — into the volumes it
 //! collects.
-//!
-//! A collection is N books shipped as one file: each volume keeps its own cover,
-//! its own Contents page and its own colophon, and only the container is shared.
-//! [`propose_cuts`] finds where one volume ends and the next begins, so the
-//! volumes can be published as the separate books they are.
-//!
-//! Detection reads the book's own navigation and nothing else. The repaired
-//! chapter list ([`super::toc_repair::propose_toc`]) already restores the levels
-//! a flattened TOC lost, so by the time the proposal is in hand a collection's
-//! volumes *are* its top-level entries; what remains is to tell them from the
-//! shared front and back matter listed beside them, which is what the evidence
-//! below does. A proposal is never written anywhere — the caller confirms the
-//! cuts, and renames and renumbers them, first.
-//!
-//! [`split`] then writes the volumes. It works at the zip layer rather than
-//! through the IR: content documents are copied across byte for byte, and only
-//! the three documents that describe the book — the OPF, the nav doc, the NCX —
-//! are written fresh for each volume. Nothing is re-rendered, so a volume reads
-//! exactly as its pages did inside the collection.
 
 use std::collections::{BTreeSet, HashSet};
 use std::io;
@@ -39,10 +20,6 @@ use crate::model::TocEntry;
 use crate::util::{decode_text, detect_mime_type, extract_xml_encoding, uuid_v5};
 
 /// Where one volume of a collection begins.
-///
-/// A volume's span runs to the next cut, and the last runs to the end of the
-/// spine, so the cuts tile everything after the collection's shared front
-/// matter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cut {
     /// Spine index of the volume's first document.
@@ -87,17 +64,6 @@ pub fn propose_cuts(epub_bytes: &[u8]) -> io::Result<Vec<Cut>> {
 }
 
 /// Write one EPUB per cut, in the same order.
-///
-/// `series`, when given, is the collection's name and goes into every volume
-/// identically — a library groups by that string, so it is decided once here
-/// rather than re-derived per volume. Each volume's position in it is
-/// [`Cut::number`].
-///
-/// Every volume is self-contained: its own spine range, the resources those
-/// documents reach and no others, a chapter list carved from the collection's,
-/// and its own identifier. A link into a document that ended up in a different
-/// volume keeps its text and loses its target — a dangling one would be a
-/// broken reference in every reader that checks.
 pub fn split(epub_bytes: &[u8], cuts: &[Cut], series: Option<&str>) -> io::Result<Vec<Vec<u8>>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -208,15 +174,6 @@ fn volume(
 
 /// The volume's chapter list: what the collection's own navigation said about
 /// this volume, plus what the volume evidences about itself.
-///
-/// The collection's list is almost never enough on its own. A collection that
-/// names its volumes and nothing else — the common shape — leaves each volume a
-/// chapter list of exactly one row, its own title, which is no more use to a
-/// reader than none. The volume's pages know better: its own Contents page, or
-/// its headings, name its chapters, and that is the same derivation
-/// [`super::toc_repair::propose_toc`] performs for a book with a deficient TOC.
-/// Neither source is dropped — a chapter the collection named survives even if
-/// the volume's own pages never mention it.
 fn volume_toc(volume: &EpubPackage, opf_path: &str, carved: Vec<TocEntry>) -> Vec<TocEntry> {
     let Ok(bytes) = volume.opf_bytes() else {
         return carved;
@@ -258,9 +215,6 @@ fn free_path(taken: &impl Fn(&str) -> bool, dir: &str, preferred: &str) -> Strin
 }
 
 /// The chapter list restricted to the documents this volume holds, nesting kept.
-/// An entry whose own target fell outside but whose children did not is dropped
-/// down to its children, so a volume never loses a chapter to a heading that
-/// belongs to its neighbour.
 fn carve(entries: &[TocEntry], kept: &HashSet<&str>) -> Vec<TocEntry> {
     let mut out = Vec::new();
     for entry in entries {
@@ -279,9 +233,6 @@ fn carve(entries: &[TocEntry], kept: &HashSet<&str>) -> Vec<TocEntry> {
 
 /// Every resource the volume's documents reach — images, stylesheets, and
 /// whatever those stylesheets reach in turn — as absolute zip paths.
-///
-/// Scoping this is load-bearing rather than tidy: unscoped, every volume of a
-/// collection carries the whole collection's artwork.
 fn reachable_resources(
     pkg: &EpubPackage,
     documents: &[String],
@@ -600,20 +551,6 @@ fn cuts(pkg: &EpubPackage, opf: &OpfData, opf_base: &str, toc: &[TocEntry]) -> V
 }
 
 /// Where each volume's own pages begin, as spine indices in reading order.
-///
-/// Almost always that is the document the chapter list names. The exception is
-/// a collection whose volumes open with a cover *and* name their own Contents
-/// page: a cover carries no text, so a chapter list has nothing to call it and
-/// points the entry at the page after it, leaving every cover outside every
-/// entry. Read literally, such a volume opens on its Contents page — and its
-/// cover becomes the last page of the volume before, or, for the first volume,
-/// stays behind with the collection.
-///
-/// Which cover goes where is asked once about the book, never per volume: one
-/// volume that happens to end on a picture is an illustration, and reading it
-/// as the next volume's cover would move a page out of the book it belongs to.
-/// A publisher that fronts its volumes this way does it for all of them, so the
-/// walk stands only if most volumes gain something by it.
 fn volume_first_documents(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -627,14 +564,6 @@ fn volume_first_documents(
         let floor = fronted.last().map_or(1, |&previous| previous + 1);
         let mut first = i;
         // Only a volume named by something other than a plate can be missing
-        // one. Where the chapter list already names a page opening on one it has
-        // named the volume's start, and the pages before it are the previous
-        // volume's however they look.
-        //
-        // What the walk steps back over is held to more than what it lands on: a
-        // page carrying any text carries content, and content belongs to the
-        // volume it was set in — only a page of nothing but plates is loose
-        // enough to move.
         if cover_page(pkg, &spine[i].0).is_none() {
             while first > floor && plates_only(pkg, &spine[first - 1].0) {
                 first -= 1;
@@ -668,13 +597,6 @@ fn span(
 
 /// The top-level chapter-list entries that open a spine document, one per
 /// document, **in reading order**. Never the book's own first document:
-/// whatever a collection opens with belongs to the collection, not to a volume
-/// inside it.
-///
-/// Reading order is the spine's, not the chapter list's: a declared TOC is free
-/// to name an entry out of order (and some do), while a volume is a contiguous
-/// run of the book. Where two entries name one document the first in the
-/// chapter list keeps the naming.
 fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candidate<'a>> {
     let mut out: Vec<Candidate<'a>> = Vec::new();
     for entry in toc {
@@ -695,31 +617,6 @@ fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candid
 }
 
 /// Which candidates are volume starts.
-///
-/// A volume announces itself either by the page it opens on or by what the
-/// chapter list calls it, and the four forms are not equally telling — each is
-/// read only where the one before it found nothing:
-///
-/// - **Its own cover** — a page of pictures. Strong, because in an ordinary
-///   book nothing but a cover looks like that; but the collection as a whole
-///   still has to hold up ([`reads_as_a_collection`]), since plenty of books are
-///   pictures from end to end.
-/// - **Its own Contents page** — a page listing what follows it. Weaker, because
-///   any chapter carrying a few cross-references looks the same from outside, so
-///   it is held to a stricter test ([`contents_page_starts`]).
-/// - **Its own rights notice** ([`rights_page_starts`]) — the copyright page the
-///   work was published under, for a collection that binds its volumes whole and
-///   lists all their chapters on one Contents page. Weaker again, because the
-///   collection states rights of its own too.
-/// - **What the list calls it** ([`named_as_a_series`]) — for the collections
-///   whose volumes open on none of the three: a text title page shows nothing,
-///   and a publisher who draws a volume's Contents page as a picture leaves no
-///   links to count. Weakest, because an ordinary novel's chapters are numbered
-///   and share a stem too, so it leans hardest on what each entry has under it.
-///
-/// The last two are held per entry to *having a volume under them*
-/// ([`carries_a_volume`]) — the page they key on says a book begins, and what
-/// says a book begins *here* is that the chapter list goes on naming this one.
 fn volume_starts(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -759,30 +656,10 @@ fn volume_starts(
 
 /// How many entries must carry rights of their own before the book reads as
 /// several publications bound together.
-///
-/// Three, and for the same reason a counted label needs three: two is the
-/// ordinary shape of *one* book. Every book states its rights once at the front,
-/// and a great many state them a second time at the back — the photo
-/// acknowledgements, the permissions, the list of illustrations, each crediting
-/// its sources by year. Measured over the library, that pair is what two rights
-/// notices almost always is. Three is where a second publication starts to be
-/// the simpler explanation, and it costs the two-volume set found by nothing
-/// else, which is the same price the label signal pays.
 const MIN_PUBLISHED_APART: usize = 3;
 
 /// The candidates whose own document states the rights the work was published
 /// under.
-///
-/// A copyright notice is the one thing only a separately published book has.
-/// Everything else about a volume — a title of its own, a cover plate, chapters
-/// under it — a part of a book has too, and no shape tells them apart; but
-/// nobody sets a copyright notice at the head of chapter seven. Where several
-/// entries of one book each carry one, the publisher has said in the only way
-/// there is that they were published apart.
-///
-/// The collection states rights of its own as well, which is why this is held to
-/// [`carries_a_volume`] by the caller: the collection's notice opens nothing but
-/// itself.
 fn rights_page_starts(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -799,22 +676,6 @@ fn rights_page_starts(
 /// The candidates the chapter list names as a series, with the numbers it
 /// states — read when neither the page a volume opens on nor a Contents page of
 /// its own told the volumes from the matter listed beside them.
-///
-/// Two ways a list names a series, and a collection uses one or the other:
-///
-/// - **A running count.** The labels share a stem and differ by a number that
-///   climbs: `BOOK 1: …`, `BOOK 2: …`. The stem is whatever precedes the first
-///   digit, so `第3巻` and `Vol. 3` read as readily as `BOOK 3` — and the number
-///   is stated rather than counted, which is worth keeping.
-/// - **The work's own name, repeated.** Each volume's label opens with the name
-///   the book gives itself and its own subtitle follows. Held to the book's
-///   `dc:title` rather than to a stem the labels merely share: twelve labels
-///   reading exactly `目次` share a stem too, and none of them is the work.
-///
-/// Both are then held to the same thing, per entry: an entry that names a
-/// volume has a volume under it ([`carries_a_volume`]). Labels alone would read
-/// an ordinary novel's chapters as a series — numbered, sharing a stem — and
-/// what separates them is that a chapter lists no chapters of its own.
 fn named_as_a_series(
     spine: &[(String, String)],
     candidates: &[Candidate<'_>],
@@ -823,9 +684,6 @@ fn named_as_a_series(
     authors: &[String],
 ) -> Vec<Start> {
     // A count of two is the commonest shape in publishing — every novel with a
-    // Book One and a Book Two — so a count has to reach three before it reads
-    // as a series. A work's name repeated needs no such margin: a book does not
-    // name its own halves after itself unless they were published that way.
     for (chosen, least) in [
         (counted_labels(candidates), 3),
         (title_bearing_labels(candidates, title, authors), 2),
@@ -860,11 +718,6 @@ fn entry_positions(toc: &[TocEntry], spine: &[(String, String)]) -> Vec<usize> {
 
 /// The starts with a volume under them: the chapter list names entries inside
 /// the span each one opens, beyond the start's own document.
-///
-/// This is what makes a label signal usable at all. A chapter is one document
-/// the list names once; a volume is a run of them the list names throughout.
-/// Dropping an entry only ever lengthens its neighbours' spans, so what
-/// survives one pass survives.
 fn carries_a_volume(
     spine: &[(String, String)],
     candidates: &[Candidate<'_>],
@@ -915,11 +768,6 @@ fn counted_labels(candidates: &[Candidate<'_>]) -> Vec<Start> {
 }
 
 /// The words a Latin-script label numbers *volumes* with. `part`, `chapter`,
-/// `section` and `act` are deliberately absent for exactly the reason 章 and 話
-/// are absent from [`VOLUME_COUNTERS`]: they number the divisions of one book,
-/// which is what a volume contains. This vocabulary is the whole of the
-/// signal's precision — a novel in four `PART n`s and a textbook in ten `第n章`s
-/// are otherwise shaped exactly like a ten-volume set.
 const VOLUME_WORDS: [&str; 3] = ["book", "volume", "vol"];
 
 /// What a label reads as a counted volume: the stem it counts from, and the
@@ -950,9 +798,6 @@ fn is_digit(c: char) -> bool {
 }
 
 /// Candidates whose labels open with the name the book gives itself.
-///
-/// The shortest stem that can name a work is four characters — below that a
-/// stem is an article or a particle, and every label starts with one.
 const MIN_WORK_NAME: usize = 4;
 
 fn title_bearing_labels(
@@ -967,9 +812,6 @@ fn title_bearing_labels(
             .count()
     };
     // The stem that names the most entries, not the longest one. A collection's
-    // own 目次 and 奥付 are labelled with the whole of its title — banner, volume
-    // count and all — which is a longer stem than the volumes carry and names
-    // two entries that are not volumes.
     let Some(stem) = candidates
         .iter()
         .filter_map(|c| title_borne_prefix(c.label, title))
@@ -987,9 +829,6 @@ fn title_bearing_labels(
 }
 
 /// Whether a stem is the author's name rather than the work's. A book titled
-/// for whoever wrote it — an interview collection, a companion volume — puts
-/// that name at the head of its own title and at the head of every section, and
-/// nothing about that is a series.
 fn names_the_author(stem: &str, authors: &[String]) -> bool {
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let stem = squash(stem);
@@ -998,12 +837,6 @@ fn names_the_author(stem: &str, authors: &[String]) -> bool {
 
 /// Whether `stem` picks out entries a reader could tell apart: at least two of
 /// them, each saying something of its own after it.
-///
-/// Volumes are distinguished by what follows the work's name — a subtitle, a
-/// number, an 上/下. An entry with nothing after it *is* the work rather than a
-/// volume of it, and two entries saying the same thing are one thing listed
-/// twice; both are what a book holding a story of its own name looks like from
-/// here.
 fn tells_volumes_apart(candidates: &[Candidate<'_>], stem: &str) -> bool {
     let mut rest: Vec<&str> = candidates
         .iter()
@@ -1016,11 +849,6 @@ fn tells_volumes_apart(candidates: &[Candidate<'_>], stem: &str) -> bool {
 }
 
 /// The longest prefix `label` shares with the name the book gives itself.
-///
-/// Shares with the *head* of the title, not found anywhere inside it. A work's
-/// name is what its title opens on; a noun from the middle of a title is a
-/// coincidence, and a book whose sections are all phrased around its subject
-/// will have several of them starting with that noun.
 fn title_borne_prefix<'a>(label: &'a str, title: &str) -> Option<&'a str> {
     let head = title_head(title);
     let mut longest = None;
@@ -1035,12 +863,6 @@ fn title_borne_prefix<'a>(label: &'a str, title: &str) -> Option<&'a str> {
 }
 
 /// Whether a stem is long enough to be a work's name.
-///
-/// Four characters, in a script that runs them together. A script that
-/// separates words needs two of them instead: four characters is one short
-/// word there, and the word a title opens on is as often an article or an
-/// interrogative — which every section of a book phrased as questions also
-/// opens on.
 fn names_a_work(name: &str) -> bool {
     if name.chars().count() < MIN_WORK_NAME {
         return false;
@@ -1079,15 +901,6 @@ fn title_head(title: &str) -> &str {
 
 /// Whether cover-shaped starts really divide a collection: most of them own a
 /// Contents page, somewhere in the span they open.
-///
-/// Whether a book is a collection is one question about the book, not one per
-/// candidate, and asking it per candidate gets it wrong in both directions. A
-/// fixed-layout title or an illustrated reference is a full-bleed image at every
-/// entry in its chapter list, and *none* of those spans names its own contents —
-/// so the shape means nothing there. A real collection's volumes do name theirs,
-/// but not always every one of them: a two-story volume needs no Contents page,
-/// and a publisher that draws one as a picture leaves no links to find. Once the
-/// collection holds up, that volume is a volume like its neighbours.
 fn reads_as_a_collection(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -1108,13 +921,6 @@ fn reads_as_a_collection(
 /// The candidates whose own document is a Contents page **for its own span** —
 /// every document it links to falls between it and the next entry the chapter
 /// list names.
-///
-/// Read literally, "links to several other documents" describes any chapter with
-/// endnotes or cross-references, which is most non-fiction. What makes a page a
-/// volume's Contents page is not that it links but *where*: it enumerates the
-/// volume it opens and reaches nothing outside it. That also settles the one
-/// page most like it — the collection's own Contents page reaches the volume
-/// starts, which lie well past the next entry.
 fn contents_page_starts(
     pkg: &EpubPackage,
     spine: &[(String, String)],
@@ -1192,18 +998,6 @@ fn reads(pkg: &EpubPackage, abs: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// The number to give the volume `label` names, following `previous`.
-///
-/// `stated` is a number the evidence that chose this volume already read off
-/// the label — [`named_as_a_series`] reads one to find the volumes at all — and
-/// it stands in for what [`volume_number`] would find. Both are labels stating
-/// their own number; which of them read it is not a difference worth keeping.
-///
-/// A label is believed only where it continues the numbering: an index that goes
-/// backwards is not this volume's place in the series, it is a number that
-/// happens to be in its title. A collection that runs its main line to
-/// twenty-seven and then ships side stories numbered from one again is counting
-/// two different things, and the volume's place in the collection is the one
-/// being asked for.
 fn number_after(
     previous: Option<&Cut>,
     label: &str,
@@ -1223,12 +1017,6 @@ fn number_after(
 }
 
 /// The volume number a label states, or `None` when it states none.
-///
-/// Two forms, and only two, because only these two *number* rather than name: a
-/// `第…巻` counter construction, and a number the label ends on. A numeral
-/// anywhere else belongs to the title — a book named for eight graves is the
-/// eighth of nothing, and a subtitled side story numbers the side stories rather
-/// than the collection.
 fn volume_number(label: &str) -> Option<f64> {
     counted_number(label).or_else(|| trailing_number(label))
 }
@@ -1484,11 +1272,6 @@ mod tests {
     }
 
     /// The same book, named one page later. A cover has no text to name it by,
-    /// so plenty of collections point each entry at the volume's Contents page
-    /// and leave the cover in front of it, named by nothing. The volume still
-    /// begins at its cover: taken at face value the first volume's cover would
-    /// stay with the collection and every other one would end up as the last
-    /// page of the volume before it.
     #[test]
     fn a_volume_named_by_its_contents_page_still_begins_at_its_cover() {
         let mut docs: Vec<Doc<'static>> = vec![
@@ -1527,10 +1310,6 @@ mod tests {
     }
 
     /// The walk back onto a cover is a fact about the collection, not about one
-    /// volume. A book whose volumes are named by their own cover already starts
-    /// them in the right place, and a picture at the end of one volume is that
-    /// volume's — a plate, a map, an afterword illustration — not the next
-    /// volume's cover.
     #[test]
     fn a_picture_ending_a_volume_is_not_the_next_volumes_cover() {
         let mut docs = collection_documents();
@@ -1552,10 +1331,6 @@ mod tests {
     }
 
     /// A publisher's own nesting is kept exactly as declared, order included —
-    /// and some declare an entry out of the book's order. A volume is still a
-    /// contiguous run of the book, so the spine's order is the one that decides
-    /// where one ends; reading the chapter list's would give a volume ending
-    /// before it starts.
     #[test]
     fn a_chapter_list_out_of_order_is_read_in_the_books_order() {
         let docs = collection_documents();
@@ -1656,11 +1431,6 @@ mod tests {
     }
 
     /// A boxed set the Western way: every volume keeps the copyright page it
-    /// was published under, run onto the same document as its cover plate, and
-    /// the set lists all their chapters on one Contents page of its own. No
-    /// volume owns a Contents page, and no volume's opening is a page of
-    /// pictures, so the rights notice is the only thing left saying where one
-    /// book ends and the next begins.
     #[test]
     fn a_boxed_set_cuts_where_each_work_states_its_own_rights() {
         let works = [

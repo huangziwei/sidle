@@ -1,27 +1,5 @@
 //! Compile a RELAX NG grammar written in the **XML syntax** (`.rng`) into the
 //! pattern model.
-//!
-//! The specification defines validation against a *simplified* syntax and gives
-//! the transformations that get there (§4). This module performs them while
-//! building, rather than as separate rewriting passes over a syntax tree:
-//!
-//! | § | transformation | done by |
-//! |---|---|---|
-//! | 4.1 | drop foreign-namespace annotations | `children` skips them |
-//! | 4.2 | `name`/`type`/`combine` whitespace | trimmed at each use |
-//! | 4.3 | `datatypeLibrary` is inherited | carried in `Ctx` |
-//! | 4.5–4.6 | `include` / `externalRef` | [`Resolver`] + `Compiler::grammar` |
-//! | 4.7–4.8 | `name` attribute → name class, `ns` inheritance | `Compiler::name_class` |
-//! | 4.9 | `div` is transparent | `children` flattens it |
-//! | 4.10 | *n*-ary elements become binary | `Compiler::fold` |
-//! | 4.11–4.13 | `mixed`/`optional`/`zeroOrMore` sugar | the arena's constructors |
-//! | 4.15 | `combine` on repeated `define`s | `Scope::add_define` |
-//! | 4.16 | nested `grammar`/`parentRef` | a `Scope` stack |
-//! | 4.17–4.18 | `notAllowed`/`empty` absorption | the arena's constructors |
-//!
-//! A `ref` may point forward or into a cycle, so every `define` gets a reserved
-//! [`PatternId`] before any body is compiled and is filled once its body is
-//! known — see [`Arena::reserve`](super::pattern::Arena::reserve).
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -56,10 +34,6 @@ impl Resolver for MapResolver<'_> {
 
 /// The XML syntax of a grammar file, translating it from the compact syntax
 /// first when its path says that is what it is.
-///
-/// Doing the dispatch here — rather than at each call site — is what lets a
-/// grammar in either syntax `include` one written in the other, which the
-/// vendored schemas do freely.
 fn xml_syntax<'a>(path: &str, source: &'a str) -> Result<Cow<'a, str>, CompileError> {
     match path.ends_with(".rnc") {
         true => Ok(Cow::Owned(super::rnc::translate(path, source)?)),
@@ -188,10 +162,6 @@ impl<'a, R: Resolver> Compiler<'a, R> {
                 self.arena.fill(slot, Pattern::Ref(combined));
             }
             // A `ref` to a name no `define` ever supplies leaves its reserved
-            // slot a `Hole`, which matches nothing — so the grammar would
-            // silently reject every document that reaches it. Catch it here,
-            // where it is a defect in the grammar or in this compiler, rather
-            // than at validation time where it looks like an invalid book.
             let scope = self.scopes.last().unwrap();
             let dangling: Vec<&String> = scope
                 .slots
@@ -453,9 +423,6 @@ impl<'a, R: Resolver> Compiler<'a, R> {
             }
             "value" => {
                 // §4.12: a `<value>` with no `type` is `token` in the *built-in*
-                // library, whatever `datatypeLibrary` is in scope — inheriting
-                // the surrounding XSD library here would compare the literal in
-                // the wrong value space.
                 let datatype = match attr(doc, node, "type") {
                     None => DatatypeName {
                         library: String::new(),
@@ -526,9 +493,6 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         // The content is every child except the leading name class — which §4.7
         // says is the *first* child, and only when there is no `name` attribute.
         // Dropping every name-class-looking child instead would swallow content:
-        // `choice` is both a name class and a pattern, so an element written
-        // `<element><name>a</name><choice>…</choice></element>` would lose its
-        // content and silently accept only the empty sequence.
         let mut kids: Vec<NodeId> = children(doc, node).collect();
         if attr(doc, node, "name").is_none() && !kids.is_empty() {
             kids.remove(0);
@@ -626,13 +590,6 @@ impl<'a, R: Resolver> Compiler<'a, R> {
     }
 
     /// §4.8: a `QName` resolves its prefix through the namespace declarations in
-    /// scope *in the schema document* — the name is written in an attribute
-    /// value, so the XML parser never expanded it. Without a prefix it takes
-    /// `unprefixed`, which [`unprefixed_ns`] decides.
-    ///
-    /// An unbound prefix leaves the name in no namespace, which simply matches
-    /// nothing: a schema that quotes a prefix it never declared is broken, and
-    /// that is the grammar author's defect, not a document's.
     fn qname(
         &mut self,
         doc: &Document,
@@ -723,12 +680,6 @@ fn is_attribute(doc: &Document, node: NodeId) -> bool {
 }
 
 /// The namespace an *unprefixed* name at `node` belongs to.
-///
-/// For an element name it is the inherited `ns` (§4.11). For an attribute name
-/// it is no namespace — an unprefixed attribute never takes the default
-/// namespace — *unless* the grammar says otherwise with an `ns` written on the
-/// name class itself or on the `<attribute>` that encloses it, which is how
-/// every real schema spells `xml:lang` without using a prefix.
 fn unprefixed_ns(doc: &Document, node: NodeId, ctx: &Ctx) -> Option<String> {
     let mut current = Some(node);
     while let Some(id) = current {
@@ -901,9 +852,6 @@ mod tests {
     }
 
     /// A prefixed `name="…"` is written in an *attribute value*, so the XML
-    /// parser never expanded it: its prefix resolves against the declarations in
-    /// scope in the grammar file, not against the inherited `ns`. `xml` is bound
-    /// everywhere without a declaration.
     #[test]
     fn a_prefixed_name_resolves_through_the_grammars_own_declarations() {
         let (mut arena, start) = compile(&[(

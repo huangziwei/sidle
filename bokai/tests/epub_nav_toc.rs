@@ -1,23 +1,6 @@
 //! EPUB 3 nav TOC handling across EPUB→KFX and back.
 //!
 //! Three failure modes seen on real retail EPUBs:
-//!
-//!  1. A book ships BOTH a full EPUB 3 nav doc and a stub EPUB 2 NCX (or vice
-//!     versa). The importer must validate against — and convert — the *richer*
-//!     of the two. Prefer the NCX unless it is empty and a 3-entry stub NCX
-//!     shadows a 7-entry nav, emptying the device TOC of every chapter.
-//!
-//!  2. A nested nav points at intra-chapter headings, but the content carries no
-//!     `<a href>` cross-references to those positions — so bokai's e2k KFX emits
-//!     no internal `$266` anchor for them. Reading that KFX back must still
-//!     produce one distinct, resolvable `#fragment` per entry; otherwise every
-//!     nested entry collapses to the top of its chapter file.
-//!
-//!  3. The whole chapter list hangs off one entry that points at the cover page
-//!     — what a collection's own list leaves behind in each volume it is split
-//!     into, and what plenty of light novels ship as their nav. The KFX export
-//!     drops a cover entry the source carries itself, and taking the subtree
-//!     with it left those books a one-row TOC reading "Cover".
 
 use std::io::{Cursor, Write};
 
@@ -150,9 +133,6 @@ fn nav_doc_wins_over_degenerate_ncx() {
 #[test]
 fn nested_nav_anchors_survive_the_epub_kfx_epub_round_trip() {
     // A single chapter with three scene headings, and a nested nav that targets
-    // each. No content `<a href>` points at the scenes, so bokai's e2k KFX emits
-    // no internal `$266` anchor for them — the exact case where reading the KFX
-    // back dropped the fragment and collapsed all three onto the chapter top.
     let opf = br#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -272,14 +252,6 @@ fn nested_nav_anchors_survive_the_epub_kfx_epub_round_trip() {
 
 /// A chapter list rooted at an entry that points at the cover page must survive
 /// the KFX export.
-///
-/// This is the shape every volume of a split collection has: the collection
-/// named the volume by its title and pointed that entry at the volume's own
-/// cover, so carving the volume out leaves its whole chapter list nested under
-/// one cover-targeting row. The exporter drops the source's own cover entry —
-/// it synthesizes the canonical one — and dropping the subtree with it left the
-/// volume with a table of contents of exactly one row, "Cover", on the device
-/// and in the reader alike.
 #[test]
 fn a_toc_rooted_at_the_cover_page_keeps_its_chapters_through_kfx() {
     let opf = br#"<?xml version="1.0" encoding="utf-8"?>

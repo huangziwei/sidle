@@ -1,10 +1,4 @@
 //! Describing a book's assets instead of loading them.
-//!
-//! A renderer that streams a book needs each asset's identity and size before
-//! any bytes arrive, and must not pay to decode the whole set at open. This
-//! pins that a described build names exactly the same assets as a loading one,
-//! carries the declared pixel sizes, and cannot be mistaken for something
-//! shippable.
 
 use std::io::Cursor;
 

@@ -255,10 +255,6 @@ pub struct ExthHeader {
     /// EXTH 123 — "comic" (double-page-spread manga) / "children".
     pub book_type: Option<String>,
     /// EXTH 501 — the Kindle catalogue's content type: `EBOK` (book), `PDOC`
-    /// (personal document), `MAGZ` (magazine), `NWPR` (newspaper), `FEED`
-    /// (blog). The library reads it to shelve the file and to stack back issues
-    /// of a periodical; it is one of the three independent signals that mark a
-    /// `.pobi` (with the MOBI header type and the hierarchical NCX).
     pub cde_type: Option<String>,
     /// EXTH 124 — "none" / "portrait" / "landscape" orientation lock.
     pub orientation_lock: Option<String>,
@@ -382,12 +378,6 @@ impl ExthHeader {
 /// Separate an EXTH-503 title from the series annotation the store embeds in
 /// it: `A Work 全20冊収録<A Series> (imprint)` → `("A Work 全20冊収録 (imprint)",
 /// Some("A Series"))`.
-///
-/// The annotation is how a Kindle store title states series membership — the
-/// format carries no field for it — and it is always written in ASCII angle
-/// brackets, which nothing else in a title uses: an edition marker in a
-/// Japanese title takes the fullwidth 〈…〉 or ＜…＞. A title without
-/// the annotation comes back unchanged and series-less.
 fn split_series_annotation(title: &str) -> (String, Option<String>) {
     let Some(open) = title.find('<') else {
         return (title.to_string(), None);

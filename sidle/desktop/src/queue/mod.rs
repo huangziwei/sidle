@@ -1,9 +1,4 @@
 //! Background conversion queue.
-//!
-//! A single dispatcher task owns the pending-job list and a `JoinSet` of
-//! in-flight conversions; it spawns up to `workers` blocking tasks at a time.
-//! Messages on the input channel come from `library_import`, `conversion_retry`,
-//! and `conversion_set_workers`.
 
 pub mod worker;
 
@@ -20,8 +15,6 @@ use crate::state::DbHandle;
 enum QueueMsg {
     /// `(book_id, reconvert)` — `reconvert` = forced re-run (source→target only,
     /// skip the import-time cover enrichment that mutates the source KFX).
-    /// EPUB→KFX interior plates are always encoded full-color (grayscale sources
-    /// auto-collapse to `8bppGray` in the encoder), so there's no color knob.
     Enqueue(i64, bool),
     SetWorkers(usize),
     Shutdown,
@@ -75,9 +68,6 @@ pub fn spawn(
     let (tx, rx) = mpsc::channel::<QueueMsg>(256);
     let workers = Arc::new(Mutex::new(initial_workers));
     // Use Tauri's runtime — Tauri's `setup` runs on the OS main thread, outside
-    // any tokio runtime context, so a bare `tokio::spawn` would panic with
-    // "there is no reactor running". `tauri::async_runtime::spawn` routes
-    // through Tauri's internal tokio runtime.
     tauri::async_runtime::spawn(dispatcher(
         app,
         db,
@@ -159,10 +149,6 @@ pub fn emit_status(app: &AppHandle, book_id: i64, status: &str, error: Option<&s
 }
 
 /// Emit a per-book conversion progress tick. `fraction` is a monotonic 0.0–1.0
-/// estimate — the worker maps bokai's per-phase reports through
-/// `progress_fraction` — and `label` is the human step shown beside the bar
-/// (e.g. "Encoding images"). Keyed by `book_id` so concurrent workers each
-/// drive their own row. Best-effort, like `emit_status`.
 pub fn emit_progress(app: &AppHandle, book_id: i64, fraction: f32, label: &str) {
     #[derive(serde::Serialize, Clone)]
     struct Evt<'a> {

@@ -8,18 +8,6 @@ use super::predicates::is_structural_container;
 /// Remove whitespace-only Text nodes that are structurally irrelevant.
 ///
 /// HTML parsers treat indentation between tags as Text nodes:
-/// ```html
-/// <div>
-///     <p>Text</p>
-///     \n    <-- This becomes a Node!
-/// </div>
-/// ```
-///
-/// These nodes waste memory and can cause ghost elements in TUI rendering.
-/// We delete them when:
-/// - Role is Text
-/// - Content is whitespace-only
-/// - Parent is a block container (not inline, not preformatted)
 pub fn vacuum(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         vacuum_siblings(chapter, parent_id);

@@ -1,27 +1,6 @@
 //! What Sidle copies off a Kindle besides books: a configurable list of
 //! **sync collections**, each one a folder on the device backed up into
 //! `device-backup/<serial>/<collection-id>/` under the library root.
-//!
-//! A collection says which device folders to scan, which filenames to take,
-//! whether to descend into subfolders, whether a second copy overwrites the
-//! first, and what the picker may delete from the device once the push landed.
-//! Screenshots and the picker's own logs are ordinary entries in that list
-//! ([`SyncCollections::defaults`]) rather than a special case, so adding a
-//! folder — a writing app's drafts, say — needs no new code on either side.
-//!
-//! The config is the library's, stored beside it as `device-sync.json`
-//! ([`LibraryPaths::device_sync_config`](crate::library::LibraryPaths::device_sync_config)).
-//! Three readers share it, so a file backed up over WiFi is byte-identical to
-//! one backed up over USB:
-//! - `sidle-server` serves it over `GET /sync/misc` and applies it to the
-//!   `POST /sync/misc` the on-device picker sends when the user taps **Sync** —
-//!   the primary path.
-//! - the desktop app's USB pull (`device::misc`), when a Kindle is plugged in.
-//! - the desktop app's settings editor, which is what writes the file.
-//!
-//! The picker holds only the copy it fetched, and mirrors the glob matching in
-//! its own crate — `sidle-native` cross-compiles for the device and does not
-//! depend on this one.
 
 use std::path::Path;
 
@@ -53,9 +32,6 @@ pub struct SyncCollection {
     /// Heading shown above this collection's files.
     pub label: String,
     /// Device folders to scan, relative to `/mnt/us`. `"."` (or `""`) is the
-    /// USB root. More than one when the same kind of file lands in different
-    /// places by firmware generation — stock screenshots are in `screenshots/`
-    /// on newer Kindles and loose in the root on a KOA2.
     pub dirs: Vec<String>,
     /// Filenames to back up, as [`glob_match`] patterns. Empty takes nothing.
     pub include: Vec<String>,
@@ -66,16 +42,9 @@ pub struct SyncCollection {
     #[serde(default)]
     pub update: UpdatePolicy,
     /// Delete the backed-up files off the Kindle once the push succeeded. For
-    /// scratch the device re-creates at will; the library holds the only copy
-    /// afterwards. Honoured by the picker's WiFi push only — the desktop's USB
-    /// pull never writes to a device.
     #[serde(default)]
     pub clear_device: bool,
     /// Filenames deleted off the Kindle after a successful push but never
-    /// uploaded — the firmware's `wininfo_screenshot_*.txt` companions, which
-    /// are worth clearing with the screenshot they describe and worth nothing
-    /// in the library. Same matching as [`include`](Self::include), same
-    /// picker-only reach as [`clear_device`](Self::clear_device).
     #[serde(default)]
     pub purge: Vec<String>,
 }
@@ -160,9 +129,6 @@ impl SyncCollections {
     }
 
     /// Read the library's config, falling back to [`defaults`](Self::defaults)
-    /// when the file isn't there yet. A file that exists but doesn't parse is
-    /// an error rather than a silent reset — it is hand-editable, and a typo
-    /// must not look like "you never configured anything".
     pub fn load(paths: &LibraryPaths) -> anyhow::Result<Self> {
         let path = paths.device_sync_config();
         let raw = match std::fs::read(&path) {
@@ -191,9 +157,6 @@ impl SyncCollections {
 }
 
 /// Case-insensitive glob over a bare filename, `*` being the only metacharacter
-/// (matching any run of characters, including none). Enough for the patterns a
-/// collection needs — `screenshot*`, `*.log`, `*`, `draft-*.md` — and small
-/// enough to mirror exactly in the picker, which can't link this crate.
 pub fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = name.to_lowercase().chars().collect();
@@ -223,9 +186,6 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 }
 
 /// Reduce a collection id to a single safe path component, or `None` when
-/// nothing usable is left (`..`, `/`, empty). The id names a directory under
-/// `device-backup/<serial>/`, so this is what keeps a hand-edited config — or a
-/// pushed one — inside the backup tree.
 pub fn sanitize_id(id: &str) -> Option<String> {
     let base = Path::new(id).file_name()?.to_str()?;
     if base.is_empty() || base == "." || base == ".." {
@@ -236,10 +196,6 @@ pub fn sanitize_id(id: &str) -> Option<String> {
 }
 
 /// Split a device-relative path (`2026/draft.md`) into safe components, or
-/// `None` if any component is unusable. Rejects absolute paths, `..`, and the
-/// names no collection backs up. This is the guard on a path a network client
-/// chose: the picker sends the file's path relative to its collection folder,
-/// and the server writes it under the backup dir.
 pub fn sanitize_rel_path(rel: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     for seg in rel.split(['/', '\\']) {
@@ -258,10 +214,6 @@ pub fn sanitize_rel_path(rel: &str) -> Option<Vec<String>> {
 }
 
 /// Store one file for `serial` under `device-backup/<serial>/<collection>/`,
-/// at `rel` beneath it. Empty `bytes` are skipped so a truncated source can't
-/// clobber a good prior backup, and [`UpdatePolicy::Once`] leaves an existing
-/// copy alone. Returns `Ok(true)` when a file was written, `Ok(false)` when
-/// skipped (including a rejected path).
 pub fn store_collection_file(
     paths: &LibraryPaths,
     serial: &str,
@@ -290,16 +242,6 @@ pub fn store_collection_file(
 }
 
 /// Move everything already stored for `old_id` to `new_id`, on every device.
-///
-/// A collection's id names the folder its files live in, so the id has to be
-/// free to change: the folder on the Kindle it reads from may be renamed, and
-/// what the user calls it certainly may. Renaming without this would strand the
-/// old folder under a name that exists nowhere else — the files still there, but
-/// filed under something the library no longer knows about.
-///
-/// Merges rather than fails when `new_id` already holds files, and never
-/// overwrites one that is already there. Returns how many devices moved
-/// anything. A no-op when the two ids are the same or either is unusable.
 pub fn rename_collection_storage(
     paths: &LibraryPaths,
     old_id: &str,
@@ -505,8 +447,6 @@ mod tests {
     /// Renaming a collection carries what it already synced. A collection's id
     /// names a real folder in the library, and the thing it is named after — the
     /// folder on the Kindle, or just what the user calls it — is free to change;
-    /// leaving the files behind under the old name is how a library grows
-    /// directories nothing refers to.
     #[test]
     fn renaming_a_collection_carries_its_files() {
         let tmp = tempfile::tempdir().unwrap();

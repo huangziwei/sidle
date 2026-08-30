@@ -1,11 +1,4 @@
 //! Tauri commands backing the Files tab — what a Sync brings off the Kindle
-//! besides books (see [`sidle_core::library::device::misc`]). Read-only surface
-//! over the on-disk `device-backup/<serial>/<collection>/` tree: list it, read a
-//! text file for the in-app viewer, reveal one in Finder, delete a local copy.
-//!
-//! Plus the two commands behind the settings editor, which is what makes the
-//! tab's groups the user's to choose: get and set the library's
-//! [`SyncCollections`].
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -71,13 +64,6 @@ fn mtime_iso(meta: &std::fs::Metadata) -> Option<String> {
 /// List every backed-up file across all devices, newest first, plus the groups
 /// to render them under. Cheap local-fs scan of
 /// `device-backup/<serial>/<collection>/`.
-///
-/// A collection dir with no entry in the config still gets a group, labelled by
-/// its bare id: removing a collection from the settings stops future syncs, and
-/// must not make what earlier ones already brought back invisible. For the same
-/// reason an unreadable config lists everything under its bare ids rather than
-/// failing — the settings editor is where that error belongs, and a typo in a
-/// hand-edited file must not empty the tab.
 #[tauri::command]
 pub async fn misc_list(state: State<'_, AppState>) -> Result<MiscListing, String> {
     let config = SyncCollections::load(&state.paths).unwrap_or(SyncCollections {
@@ -217,15 +203,6 @@ pub async fn misc_collections_get(state: State<'_, AppState>) -> Result<SyncColl
 /// Replace the library's sync-collection config. Takes effect on the next Sync:
 /// the picker fetches this list before it scans, and the desktop's own USB pull
 /// reads it directly.
-///
-/// `renames` carries `[old_id, new_id]` for every collection whose storage key
-/// changed in this edit, which only the editor can know — it is the one holding
-/// both the config it loaded and the one being saved. Each pair moves what that
-/// collection already synced, so a renamed collection keeps its files instead of
-/// leaving a directory behind under a name nothing refers to any more. Applied
-/// before the write, and a failed move is reported rather than silently losing
-/// the config change: the files stay under the old id, where the Files tab still
-/// lists them.
 #[tauri::command]
 pub async fn misc_collections_set(
     state: State<'_, AppState>,

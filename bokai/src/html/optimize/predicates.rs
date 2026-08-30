@@ -5,10 +5,6 @@ use crate::model::{Chapter, NodeId, Role};
 /// Check if a role is a structural container where inter-element whitespace is irrelevant.
 ///
 /// These are containers that should only contain other block elements, not raw text.
-/// Whitespace between their children is formatting noise (indentation, newlines).
-///
-/// Safe: Root, Container (div/section), Table, TableRow, Lists, Figure
-/// Unsafe: Paragraph (contains inline content), Heading, Inline, etc.
 pub fn is_structural_container(role: Option<Role>) -> bool {
     matches!(
         role,

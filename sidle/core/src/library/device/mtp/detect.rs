@@ -1,12 +1,4 @@
 //! Enumerate MTP-class Kindles over USB.
-//!
-//! `mtp_rs::MtpDevice::list_devices()` is sync and cheap for the common case
-//! (no devices, or devices with standard MTP class on the interface descriptor).
-//! Kindle Scribe and friends use a vendor-specific interface descriptor, which
-//! triggers mtp-rs's fallback path that briefly opens the USB device to inspect
-//! its configuration. That open doesn't claim any interface — it's a
-//! descriptor read — so the Kindle's UI doesn't react. Empirically this is
-//! fine to call at the monitor's 2-second cadence.
 
 use crate::library::device::{DeviceInfo, TransportKind};
 
@@ -26,22 +18,12 @@ pub fn detect() -> Option<DeviceInfo> {
     let dev = devices.into_iter().find(|d| d.vendor_id == AMAZON_VID)?;
 
     // Identity priority: USB serial number first (survives reconnection to a
-    // different port), location_id as fallback. Mass-storage's
-    // `ensure_device_id` writes a `.sidle/device_id` when the firmware doesn't
-    // expose a serial; the MTP equivalent would mean opening a session and
-    // writing to the device, which this probe does not do. The anon serial
-    // below falls back to `location_id`, so it holds only while the device
-    // stays on the same port.
     let serial = dev
         .serial_number
         .clone()
         .unwrap_or_else(|| format!("anon-mtp-{:x}", dev.location_id));
 
     // Prefer the USB product descriptor for a human-readable model. The MTP
-    // session's DeviceInfo.model often has the same string, sometimes more
-    // detailed, but reading it means opening a session — and detection runs
-    // before one exists. The descriptor is enough for "Kindle Scribe
-    // connected" on the tile.
     let model = match (&dev.manufacturer, &dev.product) {
         (Some(m), Some(p)) => Some(format!("{m} {p}")),
         (None, Some(p)) => Some(p.clone()),
@@ -71,9 +53,6 @@ mod tests {
 
     /// Without a real Kindle Scribe plugged into the test host this just
     /// confirms `detect()` doesn't panic and returns `None` cleanly.
-    /// `MtpDevice::list_devices` can either succeed-with-empty or error if
-    /// USB enumeration is restricted in this environment; both paths must
-    /// hand back `None` for the monitor to keep ticking.
     #[test]
     fn detect_returns_none_when_no_amazon_device() {
         let info = detect();

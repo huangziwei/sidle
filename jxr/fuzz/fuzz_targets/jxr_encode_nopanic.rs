@@ -1,11 +1,4 @@
 //! Encoder no-panic fuzz target: arbitrary — frequently INVALID — plane
-//! shapes and option values. The encoder must return `Ok` or `Err`, never
-//! panic; and anything it accepts must decode (an encoder that emits
-//! undecodable bytes on weird-but-accepted input is a bug).
-//!
-//! Like `jxr_encode_roundtrip`, run with overflow checks ON (the cargo-fuzz
-//! default): encode-side arithmetic processes caller-typed data, where any
-//! overflow is a real bug worth knowing about.
 
 #![no_main]
 

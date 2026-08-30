@@ -1,21 +1,4 @@
 //! Kindle Scribe handwritten-notebook (`.nbk`) decode → SVG.
-//!
-//! An `.nbk` is a KDF/KPF SQLite container (the same `fragments(id,
-//! payload_type, payload_value)` shape as KFX) whose Ion-binary payloads
-//! describe a vector-ink "note model" (`nmdl.*`). This module is the offline
-//! extraction core: de-fingerprint the SQLite, read fragments, resolve the
-//! per-file symbol table, walk pages → ink layers → strokes, and render each
-//! page to SVG.
-//!
-//! It sits beside [`super::kfx`] rather than inside it: sharing a container
-//! shape is not being the same format (`mobi` and `azw3` likewise share PalmDB
-//! and stay parallel). What is genuinely borrowed is the Ion parser and
-//! `KFX_SYMBOL_TABLE`; the KDF-SQLite read, the `nmdl` stroke decode, and
-//! stroke→SVG are this format's own.
-//!
-//! Ported from kfxlib (GPLv3, compatible with this crate's
-//! GPL-3.0-or-later). Gated behind the `nbk` feature: pulls `rusqlite`
-//! (bundled C SQLite, native-only).
 
 mod density;
 mod fingerprint;

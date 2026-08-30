@@ -1,12 +1,4 @@
 //! Shared input generator for the encoder fuzz targets.
-//!
-//! `draw_valid` produces inputs the encoder DOCUMENTS as accepted — every
-//! sample family the crate encodes (the full closed envelope) × the option
-//! surface (chroma, bands/trim, windowing, tiles, overlap, frequency,
-//! scaled, QPs, alpha, premultiplied, random `QpPlan`s) — together with the
-//! exactness expectation the public contract states for that combination.
-//! `draw_raw` produces arbitrary (frequently invalid) option/plane
-//! combinations for the no-panic target.
 
 // Shared between the fuzz binaries — each compiles its own copy and uses
 // half of it, so per-binary dead-code analysis is meaningless here.
@@ -130,11 +122,6 @@ pub enum Expect {
     /// the chroma/ink half-step floors).
     Bounded(i64),
     /// F32 at lossless QP: arbitrary patterns project onto the custom
-    /// float's representable set (lm13 grid; sub-floor magnitudes flush —
-    /// the documented sub-2⁻³⁶ reference divergence zone), so the strong
-    /// invariant is IDEMPOTENCE: the decoded planes re-encode and re-decode
-    /// bit-exactly (the README's "anything this crate's decoder produced is
-    /// already on that grid" promise).
     F32Idem,
     /// Only "decodes successfully + headers match" is promised.
     DecodeOnly,

@@ -1,11 +1,4 @@
 //! The matching automaton both dictionary forms compile to.
-//!
-//! A level is a set of Liang patterns arranged as a trie of byte transitions
-//! with fallback links, so one pass over a word finds every pattern that
-//! matches anywhere in it. Each state carries the digit string of the pattern
-//! that ends there, merged with the digit strings of every shorter pattern
-//! ending at the same place, which is what lets a match be read off the state
-//! alone rather than by walking the fallback chain at every byte.
 
 /// One state of a level's automaton.
 #[derive(Debug, Clone, Copy)]

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Vendored from foliate-js (https://github.com/johnfactotum/foliate-js),
 // Copyright (c) 2022 John Factotum. May be modified for sidle.
-// See ./LICENSE for the MIT terms.
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -42,7 +41,6 @@ const animate = (a, b, duration, ease, render) => new Promise(resolve => {
 })
 
 // collapsed range doesn't return client rects sometimes (or always?)
-// try make get a non-collapsed range or element
 const uncollapse = range => {
     if (!range?.collapsed) return range
     const { endOffset, endContainer } = range
@@ -84,7 +82,6 @@ const filter = SHOW_ELEMENT | SHOW_TEXT | SHOW_CDATA_SECTION
 // needed cause there seems to be a bug in `getBoundingClientRect()` in Firefox
 // where it fails to include rects that have zero width and non-zero height
 // (CSSOM spec says "rectangles [...] of which the height or width is not zero")
-// which makes the visible range include an extra space at column boundaries
 const getBoundingClientRect = target => {
     let top = Infinity, right = -Infinity, left = Infinity, bottom = -Infinity
     for (const rect of target.getClientRects()) {
@@ -107,11 +104,8 @@ const getVisibleRange = (doc, start, end, mapRect) => {
             // no need to check child nodes if it's completely out of view
             if (right < start || left > end) return FILTER_REJECT
             // elements must be completely in view to be considered visible
-            // because you can't specify offsets for elements
             if (left >= start && right <= end) return FILTER_ACCEPT
             // TODO: it should probably allow elements that do not contain text
-            // because they can exceed the whole viewport in both directions
-            // especially in scrolled mode
         } else {
             // ignore empty text nodes
             if (!node.nodeValue?.trim()) return FILTER_SKIP
@@ -247,7 +241,6 @@ class View {
             width: '100%', height: '100%',
         })
         // `allow-scripts` is needed for events because of WebKit bug
-        // https://bugs.webkit.org/show_bug.cgi?id=218086
         this.#iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts')
         this.#iframe.setAttribute('scrolling', 'no')
     }
@@ -274,9 +267,6 @@ class View {
                 this.#rtl = rtl
 
                 // The document just swapped in (about:blank → section). Any
-                // geometry applied before this (a ResizeObserver render racing
-                // the iframe load) styled the OLD document — drop the caches so
-                // the render below can't be skipped as "unchanged".
                 this.#layout = {}
                 this.#expandKey = undefined
                 this.#expandedSize = undefined
@@ -289,7 +279,6 @@ class View {
 
                 // the resize observer above doesn't work in Firefox
                 // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
-                // until the bug is fixed we can at least account for font load
                 doc.fonts.ready.then(() => this.expand())
 
                 resolve()
@@ -302,12 +291,6 @@ class View {
         // Same geometry → nothing to do. Re-applying identical column styles
         // still dirties style and forces a full re-layout of the section
         // (~200-900ms for a long ruby-annotated vertical chapter), and render()
-        // gets echoed by the host's ResizeObserver + explicit calls after
-        // attribute writes. Content-driven changes (images landing, font size)
-        // are handled by expand() via the body ResizeObserver, not here.
-        // `force` bypasses the skip for content-affecting style changes (the
-        // reader's font/spacing settings feed setImageSize's wrapper-chrome
-        // measurements, which px-identical geometry would otherwise cache).
         const last = this.#layout
         if (!force && ['flow', 'width', 'height', 'margin', 'gap', 'columnWidth']
             .every(k => last[k] === layout[k])) return
@@ -355,25 +338,6 @@ class View {
             'max-height': 'none', 'max-width': 'none',
             'min-height': 'none', 'min-width': 'none',
             // Line-box sizing at the column's overflow-hidden block edges.
-            // Upstream foliate uses `block glyphs replaced`, containing each
-            // line to its per-glyph INK — but that makes WebKit measure every
-            // glyph's bounds (it's the `glyphs` keyword that turns on the
-            // glyph-overflow pass), an O(glyphs) layout that stalls a large
-            // section: ~13× slower on a ruby-annotated vertical chapter
-            // (measured ~870ms → ~66ms at 100KB), seconds on a ~500KB
-            // horizontal one.
-            //   - Vertical CJK: drop it entirely. Ink stays inside the em box,
-            //     so the default (`block inline replaced`) is byte-identical
-            //     (every element rect equal, same page count) and fast.
-            //   - Horizontal: contain to the font's em box (`font`, from cached
-            //     ascent/descent) instead of per-glyph ink. At a book's default
-            //     line-height — often a tight 1.2 with no column block-padding —
-            //     that still keeps ascenders/descenders/diacritics, which live
-            //     within the font's own metrics, clear of the clip edge, but
-            //     prices it at font metrics rather than a per-glyph scan. Line
-            //     geometry is unchanged wherever the block line-height strut
-            //     already covers the em box (all normal body text); only
-            //     oversized inline runs shift, and by less than `glyphs` did.
             ...(vertical ? {} : { '-webkit-line-box-contain': 'block font replaced' }),
         })
         setStylesImportant(doc.body, {
@@ -389,40 +353,16 @@ class View {
         const doc = this.document
         // Layout geometry in physical px. Before the first layout these can be
         // 0/NaN — skip then (a later render() re-runs with real values).
-        // Scrolled flow carries no width/height and bails here too (sidle only
-        // uses flow=paginated).
         if (!(width > 0) || !(height > 0) || !(columnWidth > 0)) return
         // An image must fit ONE column box, not the page: on a two-column
-        // spread the page is twice the column's inline size, so a page-box cap
-        // lets a wide figure bleed across the gap under the neighbouring
-        // column's text. Cap the inline axis at the column width (trunc()
-        // matches the `column-width` columnize() sets; the realized column is
-        // never narrower) and the block axis at the page extent, which a
-        // column spans fully (columnize() pads the inline axis only, and the
-        // header/footer margins live outside #container).
         const vertical = this.#vertical
         const inlineCap = `${Math.trunc(columnWidth)}px`
         // The block axis is the one a column spans fully and along which content
         // fragments; its full extent is the page size on that axis.
         const blockExtent = vertical ? width : height
         // `[data-kfx-inline]` marks KFX render:inline glyph images (rare hanzi
-        // with no Unicode code point, sized to the font via `width:1em` so they
-        // scale with the reader's font-size). They flow within text and must
-        // NOT be treated like a block figure at all — no column caps, no
-        // `vertical-align: middle` (READER_CSS aligns them `text-bottom` to sit
-        // on the surrounding glyphs' em-box bottom). Leave them out entirely.
         const els = [...doc.body.querySelectorAll('img:not([data-kfx-inline]), svg, video')]
         // READ pass: the block-axis space each image's wrapper chain consumes
-        // (its own margins + every ancestor's margin/padding/border up to the
-        // multicol root). The block cap MUST leave room for it: an image pinned
-        // to the full column height inside a wrapper with a top/bottom margin —
-        // e.g. `.imagef { margin-top: 0.5em }` around a full-page illustration —
-        // is `margin` taller than the column, and since `break-inside: avoid`
-        // can't hold for a block taller than its fragmentainer, the image splits
-        // across the page break (one page full, a thin sliver on the next).
-        // Subtracting the chrome keeps image + wrapper within a single column.
-        // Batched before the writes so these getComputedStyle reads don't
-        // interleave with the style mutations below and thrash layout.
         const view = doc.defaultView
         const [a, b] = vertical ? ['Left', 'Right'] : ['Top', 'Bottom']
         const px = v => parseFloat(v) || 0
@@ -441,25 +381,6 @@ class View {
             const blockMax = `${Math.max(0, blockExtent - chrome[i])}px`
             setStylesImportant(el, {
                 // Both caps in definite px: a percentage cap resolves against
-                // the multicol container (the whole page, not the column box),
-                // and silently fails to resolve at all where the containing
-                // block has no definite size — e.g. full-page illustrations in
-                // `writing-mode: horizontal-tb` wrapper <div>s nested inside a
-                // vertical-rl body.
-                //
-                // An <img>'s own width/height CSS is left alone: KFX books size
-                // decorative art through their stylesheet (a `width: 6.25%`
-                // floated chapter glyph, a `width: 100%` image inside a
-                // `width: 20%` floated box), and a forced `width/height: auto`
-                // re-inflates those to intrinsic pixel size — a full-column
-                // arrow where a small glyph belongs, painting over the text
-                // beside its float box. bokai's converter never emits width/
-                // height ATTRIBUTES on <img>, so author CSS (or the `auto`
-                // initial value for unsized figures) is the whole story, and
-                // the max-* caps below still bound whatever it computes to.
-                // <svg>/<video> DO carry sizing attributes, which only
-                // `width/height: auto` can neutralise — keep the reset there
-                // so a single-axis cap doesn't distort them.
                 ...(el.localName === 'img' ? null : { 'width': 'auto', 'height': 'auto' }),
                 'max-width': vertical ? blockMax : inlineCap,
                 'max-height': vertical ? inlineCap : blockMax,
@@ -468,12 +389,6 @@ class View {
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
                 // A baseline-aligned inline image reserves the line's descent
-                // below it, so its line box is a few px TALLER than the image —
-                // enough to push a column-height figure over the edge and
-                // refragment it even after the cap above. Aligning it off the
-                // baseline drops that reserved descent; the line box collapses to
-                // the image height. (No effect on a block image, e.g. a
-                // text-free section's full-page art.)
                 'vertical-align': 'middle',
             })
         })
@@ -486,16 +401,12 @@ class View {
             const contentRect = this.#contentRange.getBoundingClientRect()
             const rootRect = documentElement.getBoundingClientRect()
             // offset caused by column break at the start of the page
-            // which seem to be supported only by WebKit and only for horizontal writing
             const contentStart = this.#vertical ? 0
                 : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left
             const contentSize = contentStart + contentRect[side]
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
             // Skip the size writes when nothing changed: writing identical
-            // values still dirties style and the next read then re-lays-out
-            // the whole section, so the body-ResizeObserver echo after each
-            // real expand would double every layout otherwise.
             const key = `col:${expandedSize}:${this.#size}`
             if (this.#expandKey !== key) {
                 this.#expandKey = key
@@ -526,9 +437,6 @@ class View {
             }
         }
         // Reposition + redraw the overlay on every expand, changed or not —
-        // a reflow can move content without changing the page count (font
-        // swap), and redraw's clean-layout rect reads are cheap. Only the
-        // view-size writes above are worth skipping.
         this.#placeOverlayer()
         this.onExpand()
     }
@@ -833,7 +741,6 @@ export class Paginator extends HTMLElement {
         this.#top.classList.toggle('vertical', vertical)
 
         // set background to `doc` background
-        // this is needed because the iframe does not fill the whole element
         this.#background.style.background = background
 
         const { width, height } = this.#container.getBoundingClientRect()
@@ -847,22 +754,6 @@ export class Paginator extends HTMLElement {
 
         const g = parseFloat(style.getPropertyValue('--_gap')) / 100
         // The gap will be a percentage of the #container, not the whole view.
-        // This means the outer padding will be bigger than the column gap. Let
-        // `a` be the gap percentage. The actual percentage for the column gap
-        // will be (1 - a) * a. Let us call this `b`.
-        //
-        // To make them the same, we start by shrinking the outer padding
-        // setting to `b`, but keep the column gap setting the same at `a`. Then
-        // the actual size for the column gap will be (1 - b) * a. Repeating the
-        // process again and again, we get the sequence
-        //     x₁ = (1 - b) * a
-        //     x₂ = (1 - x₁) * a
-        //     ...
-        // which converges to x = (1 - x) * a. Solving for x, x = a / (1 + a).
-        // So to make the spacing even, we must shrink the outer padding with
-        //     f(x) = x / (1 + x).
-        // But we want to keep the outer padding, and make the inner gap bigger.
-        // So we apply the inverse, f⁻¹ = -x / (x - 1) to the column gap.
         const gap = -g / (g - 1) * size
 
         const flow = this.getAttribute('flow')
@@ -1007,8 +898,6 @@ export class Paginator extends HTMLElement {
         if (this.scrolled) return
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
-        // at this point I'm basically throwing `requestAnimationFrame` at
-        // anything that doesn't work
         requestAnimationFrame(() => {
             if (globalThis.visualViewport.scale === 1)
                 this.snap(this.#touchState.vx, this.#touchState.vy)
@@ -1076,7 +965,6 @@ export class Paginator extends HTMLElement {
         // if anchor is an element or a range
         if (rects) {
             // when the start of the range is immediately after a hyphen in the
-            // previous column, there is an extra zero width rect in that column
             const rect = Array.from(rects)
                 .find(r => r.width > 0 && r.height > 0) || rects[0]
             if (!rect) return
@@ -1127,9 +1015,6 @@ export class Paginator extends HTMLElement {
         if (src) {
             // Drop the old view FIRST, then let the host set the incoming
             // section's layout attributes (margin / measure / column count)
-            // while no view is live: the attribute-triggered render()s no-op,
-            // and the new section's first columnize runs directly in its final
-            // geometry — one layout instead of one per attribute flip.
             this.#destroyView()
             this.dispatchEvent(new CustomEvent('prerender', { detail: { index } }))
             const view = this.#createView()

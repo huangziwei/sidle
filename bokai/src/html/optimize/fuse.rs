@@ -7,17 +7,6 @@ use super::pass::walk_bottom_up;
 /// Fuse adjacent lists of the same type.
 ///
 /// Converters often emit a separate `<ul>` for every `<li>`:
-/// ```html
-/// <ul><li>Item 1</li></ul>
-/// <ul><li>Item 2</li></ul>
-/// ```
-///
-/// This looks fine in browsers but breaks:
-/// - Ordered list numbering (resets each time)
-/// - Margins (double spacing between items)
-/// - Semantic structure
-///
-/// We fuse adjacent lists by moving children from the second list to the first.
 pub fn fuse_lists(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         fuse_list_siblings(chapter, parent_id);

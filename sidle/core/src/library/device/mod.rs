@@ -1,15 +1,4 @@
 //! Kindle device sync — discovery, transport-agnostic IO, push/delete/pull.
-//!
-//! - Push KFX to the device's `documents/Sidle/` directory. The filename
-//!   carries an `sha8` infix (`<basename>.<sha8>.kfx`), which identifies what
-//!   sidle put there from the directory alone.
-//! - Delete on-device by sha: scan `documents/Sidle/` for the matching
-//!   `*.<sha8>.kfx`, remove it plus the Kindle-created `.sdr/` next to it.
-//! - Pull `.kfx`/`.kfx-zip` from `/dedrm` and import (mass-storage only — a
-//!   device without a jailbreak has no `/dedrm` folder).
-//! - Send/remove over MTP for the Kindle Scribe and other 2024+ models.
-//!   Detection and IO sit behind the [`Transport`] trait, which keeps
-//!   push/delete/list transport-agnostic.
 
 use std::path::PathBuf;
 
@@ -37,9 +26,6 @@ pub use transport::{TEntry, TPath, Transport};
 /// What sidle knows about a connected Kindle.
 ///
 /// `transport` carries the variant-specific bits (mount path for mass-storage;
-/// USB bus/address + cached object roots for MTP). Common fields stay flat so
-/// the frontend's `device:status` listener can keep reading `serial`,
-/// `free_bytes`, etc. directly.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub serial: String,

@@ -1,17 +1,4 @@
 //! LAN self-update — pull the fleet's current bytes from sidle-server.
-//!
-//! `sidle-server` serves `<data-dir>/device-dist/` over `/device/...`. This is
-//! the device-side client: fetch the manifest, settle each file against the
-//! receipt, download what differs, verify its sha256, write it.
-//!
-//! A write is direct, or `<path>.new` for the two files sidle is executing. A
-//! manifest `path` is mount-relative, reaching `documents/` and every other
-//! app's directory.
-//!
-//! Triggered by the in-app **Update** button in the picker's search bar (inline
-//! in `main::run`), or by the `--update` recovery launch (`main::run_update`).
-//! The HTTP plumbing reuses `api::get_with_token`; the decide/verify/write
-//! logic here is pure `std`, host-testable in the `sidle_native` lib.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -193,13 +180,6 @@ pub fn settled_by_receipt(file: &DistFile, receipt: Option<&FileReceipt>) -> boo
 
 /// What to do with `file`, given the bytes on the device and what sidle
 /// recorded writing there.
-///
-/// A device copy matching neither is kept: it carries an edit made here. With
-/// no receipt entry sidle has never written this path, and this update starts
-/// the record.
-///
-/// `self_build_ts` non-zero applies the downgrade guard. Callers pass it only
-/// for [`PICKER_ID`], the one app whose files this binary is executing.
 pub fn decide(
     on_device: Option<&[u8]>,
     file: &DistFile,
@@ -246,10 +226,6 @@ pub fn with_dot_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// Write verified `bytes` for `file` under `mount`, and return where they
 /// landed.
-///
-/// [`Apply::Direct`] lands on the path itself; [`Apply::Staged`] lands on
-/// `<path>.new`. Both pass through `<path>.download` and a `rename(2)` inside
-/// the one `/mnt/us` mount.
 pub fn write_file(mount: &Path, file: &DistFile, bytes: &[u8]) -> anyhow::Result<PathBuf> {
     let dest = mount.join(&file.path);
     if let Some(parent) = dest.parent() {
@@ -267,10 +243,6 @@ pub fn write_file(mount: &Path, file: &DistFile, bytes: &[u8]) -> anyhow::Result
 }
 
 /// Fetch the manifest and bring `mount` up to it.
-///
-/// Per file: settle against the receipt → read the device copy → [`decide`] →
-/// [`InUse`] → download → verify → write. A file that fails any of those joins
-/// [`UpdateReport::failed`], and the pull continues at the next.
 pub fn run_pull(
     agent: &ureq::Agent,
     cfg: &ServerConfig,

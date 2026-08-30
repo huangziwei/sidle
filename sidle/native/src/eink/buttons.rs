@@ -1,23 +1,6 @@
 //! evdev page-button reader (KOA2 bezel buttons).
 //!
 //! The page-turn buttons are a *separate* input device from the touchscreen.
-//! On the KOA2 they're `gpio-keys` (probed via `/proc/bus/input/devices`),
-//! emitting `EV_KEY` with `KEY_PAGEUP` (104) and `KEY_PAGEDOWN` (109) — the two
-//! bits in that device's `KEY=2100` capability mask.
-//!
-//! We open it and `EVIOCGRAB` it for the same reason `touch.rs` grabs the
-//! touchscreen: once grabbed, the stock framework no longer sees the press, so
-//! it stops repainting the native library over our gallery. Without the grab
-//! the picker UI tears on every button press.
-//!
-//! **Safety:** the device is matched by exact `Name="gpio-keys"`, never "any
-//! key device". The power button(s) are *separate* devices — `snvs-powerkey`
-//! and `max77796-key`, both `KEY_POWER` — and grabbing those would lock the
-//! user out of power-off. `gpio-keys` carries only the two page codes, so the
-//! grab is surgical.
-//!
-//! Wire format matches `touch.rs`: 16-byte records on this 32-bit kernel,
-//! `type@8-9 code@10-11 value@12-15` (native-endian).
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -34,15 +17,9 @@ const KEY_PAGEDOWN: u16 = 109;
 const EVENT_BYTES: usize = 16;
 
 // Same EVIOCGRAB as touch.rs — _IOW('E', 0x90, int) = 0x40044590. The call
-// sites cast with `as _` because `libc::ioctl`'s request arg differs by target
-// (`c_int` on the Kindle's armv7 Linux, `c_ulong` on the desktop host); the
-// value fits both.
 const EVIOCGRAB: libc::c_int = 0x40044590;
 
 /// Which bezel button fired. Hardware-confirmed KOA2 mapping: top button
-/// (`KEY_PAGEUP`) → `Next`, bottom button (`KEY_PAGEDOWN`) → `Prev` — top pages
-/// forward, matching how the user reads. See the keycode match in
-/// [`Buttons::read_one`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageButton {
     Prev,
@@ -93,8 +70,6 @@ impl Buttons {
 
     /// Read one event record. The caller polls first, so a record is available
     /// and this won't block. Returns `Some` only on a key *press* (`value==1`)
-    /// of a mapped page key; `None` for releases, autorepeat (`value==2`),
-    /// `SYN`, or any unmapped key — so a press fires exactly one page turn.
     pub fn read_one(&mut self) -> Result<Option<PageButton>> {
         let mut buf = [0u8; EVENT_BYTES];
         self.file
@@ -106,9 +81,6 @@ impl Buttons {
         if type_ == EV_KEY && value == 1 {
             let btn = match code {
                 // Hardware-confirmed on KOA2: the *top* button emits
-                // KEY_PAGEUP and the *bottom* emits KEY_PAGEDOWN, and the user
-                // reads top = forward. So top/PAGEUP → Next, bottom/PAGEDOWN →
-                // Prev (the opposite of the keycodes' literal names).
                 KEY_PAGEUP => Some(PageButton::Next),
                 KEY_PAGEDOWN => Some(PageButton::Prev),
                 _ => None,
@@ -137,8 +109,6 @@ impl Drop for Buttons {
 
 /// Locate the bezel page-button device by exact `Name="gpio-keys"` in
 /// `/proc/bus/input/devices`, returning its `/dev/input/eventN` path.
-/// `Ok(None)` if absent. Deliberately strict on the name — see the safety note
-/// in the module docs (never grab the power-key devices).
 fn find_button_device() -> Result<Option<PathBuf>> {
     let raw = std::fs::read_to_string("/proc/bus/input/devices")
         .context("read /proc/bus/input/devices")?;

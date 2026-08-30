@@ -1,23 +1,4 @@
 //! Converting must not add a redundant cover page.
-//!
-//! The raw passthrough route synthesizes an SVG `cover.xhtml` from the cover
-//! image whenever metadata names one. A source that already ships its own cover
-//! page (an SVG wrapper of the same image — e.g. a calibre-lineage EPUB's
-//! `titlepage.xhtml`) must have that page reused, not a second `cover.xhtml`
-//! synthesized on top; otherwise the reader opens on a cover and pages forward
-//! into an identical one.
-//!
-//! The cover page is identified by the OPF guide's single `type="cover"`
-//! reference — what a reader opens on — not by any in-page marker. Synthesis is
-//! confirmed by the presence of the `cover.xhtml` bokai writes only when it
-//! builds one. (A book may legitimately also carry the cover image again as a
-//! content page; that is source content, not a second designated cover, so it
-//! is not what this guards.)
-//!
-//! The two fixtures cover both branches: the EPUB ships its own cover page (so
-//! synthesis must be skipped), the AZW3 does not (so synthesis must still
-//! happen). A fix that silently stopped emitting covers would fail the AZW3
-//! branch.
 
 use std::io::Cursor;
 

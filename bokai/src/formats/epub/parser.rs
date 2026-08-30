@@ -14,9 +14,6 @@ use crate::model::{
 pub struct OpfData {
     pub metadata: Metadata,
     /// The `<package version>` string as declared (`"3.0"`, `"2.0"`, …); empty
-    /// when the package declares none. Callers that must not change a book's
-    /// version — a TOC repair synthesizing a missing nav document, say — read it
-    /// to know which document the book is entitled to.
     pub version: String,
     /// Maps manifest id -> (href, media_type)
     pub manifest: HashMap<String, (String, String)>,
@@ -29,10 +26,6 @@ pub struct OpfData {
     /// EPUB 3 nav document href (has properties="nav")
     pub nav_href: Option<String>,
     /// The `<dc:identifier>` that `<package unique-identifier>` designates as
-    /// *the* book identifier — not necessarily the first one, and the value an
-    /// NCX's `dtb:uid` has to match. `Metadata::identifier` is a different
-    /// question ("an identifier for this book"), and books that carry an ASIN
-    /// and a calibre id beside their UUID answer the two differently.
     pub unique_identifier: Option<String>,
 }
 
@@ -90,11 +83,6 @@ struct Refinement {
 }
 
 /// Last-resort cover detection for OPFs that declare neither the EPUB 3
-/// `properties="cover-image"` nor the EPUB 2 `<meta name="cover">`: many
-/// converters (e.g. ScribdMpubToEpubConverter) give the cover image a manifest
-/// item whose id is literally `cover`. Match that and the `cover-image` /
-/// `coverimage` spellings, on an image item only: the cover *page*
-/// (`id="coverpage"`, an XHTML document) is not the picture.
 fn fallback_cover_by_id(manifest: &HashMap<String, ManifestItem>) -> Option<&ManifestItem> {
     manifest.iter().find_map(|(id, item)| {
         let id = id.to_ascii_lowercase();
@@ -127,7 +115,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     // `<package unique-identifier="…">` names which `<dc:identifier>` is the
     // book's, and every identifier seen by its own `id`, so the two can be
     // resolved against each other once the metadata block closes.
-    // `<package version>` — which EPUB version the package declares itself to be.
     let mut version = String::new();
     let mut unique_identifier_ref: Option<String> = None;
     let mut identifiers_by_id: HashMap<String, String> = HashMap::new();
@@ -178,9 +165,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         current_element = Some(String::from_utf8_lossy(local).to_string());
                         buf_text.clear();
                         // The `id` attribute, plus `opf:scheme` / `scheme` on
-                        // `<dc:identifier>`: calibre and KFX-derived EPUBs
-                        // emit `<dc:identifier opf:scheme="ASIN">`, which
-                        // routes into `Metadata::asin`.
                         current_element_id = None;
                         current_identifier_scheme = None;
                         current_file_as = None;
@@ -422,7 +406,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         }
 
                         // EPUB3 meta with property but no content - value is in text
-                        // EPUB3 empty meta with content attribute
                         if let Some(ref prop) = property {
                             if let Some(ref r) = refines {
                                 // This is a refinement
@@ -541,8 +524,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             // Route by scheme: ASIN / MOBI-ASIN go into the
                             // dedicated field; everything else fills the
                             // generic identifier (first one wins).
-                            // EPUB 2 carries the scheme as `opf:scheme="ASIN"`,
-                            // EPUB 3 as `id="asin"`. Recover from either.
                             let is_asin = current_identifier_scheme.as_deref().is_some_and(|s| {
                                 s.eq_ignore_ascii_case("ASIN")
                                     || s.eq_ignore_ascii_case("MOBI-ASIN")
@@ -588,9 +569,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     );
 
     // Compact the per-creator slots: trailing creators without a sort key
-    // are simply not covered (a 1-entry vec = the EPUB-2 "first creator
-    // only" convention); an interior gap gets the author's own name so the
-    // remaining entries keep their positional meaning.
     while author_sort_slots.last().is_some_and(Option::is_none) {
         author_sort_slots.pop();
     }
@@ -615,9 +593,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
         metadata.cover_image = Some(item.href.clone());
     } else if let Some(item) = fallback_cover_by_id(&manifest) {
         // Neither the EPUB 3 `cover-image` property nor the EPUB 2
-        // `<meta name="cover">` was present — fall back to the near-universal
-        // convention of a manifest item whose id is literally `cover`. See
-        // [`fallback_cover_by_id`].
         metadata.cover_image = Some(item.href.clone());
     }
 
@@ -659,9 +634,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
 }
 
 /// Handle a top-level meta property (no refines attribute).
-/// Parse a fixed-layout viewport string into `(width, height)`. Accepts both
-/// the EBPAJ form `width=1444, height=2048` and the KF8 `original-resolution`
-/// form `1444x2048`.
 fn parse_viewport(value: &str) -> Option<(u32, u32)> {
     let v = value.trim();
     if let Some((w, h)) = v.split_once('x').or_else(|| v.split_once('X'))
@@ -749,9 +721,6 @@ fn handle_meta_property(
 }
 
 /// Apply collected refinements to their target elements.
-/// `author_sort_slots` is the per-creator sort-key vec parallel to
-/// `metadata.authors`; creator `file-as` refinements land in the refined
-/// creator's slot (winning over an EPUB-2 `opf:file-as` attribute).
 fn apply_refinements(
     metadata: &mut Metadata,
     author_sort_slots: &mut [Option<String>],
@@ -843,10 +812,6 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
     // mobiunpack-generated NCX/nav embed unescaped `<`/`>` in titles, e.g.
-    // `<text>業物語 <物語> (講談社ＢＯＸ)</text>` — invalid XML. With end-name
-    // checking on, the stray `<物語>` open makes the following `</text>` a
-    // mismatch and quick_xml aborts, dropping the whole TOC through
-    // `read_toc`'s `.ok()?`. Off, the stray tag is ignored and navMap parses.
     reader.config_mut().check_end_names = false;
 
     struct NavPointState {
@@ -957,27 +922,11 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
 }
 
 /// Parse the TOC from an EPUB 3 nav document.
-///
-/// EPUB 3 publishes its TOC inside `<nav epub:type="toc">` as nested `<ol><li><a>...`,
-/// mirroring NCX's `<navMap>/<navPoint>` shape. Both kadokawa/EBPAJ-style
-/// EPUBs and calibre's EPUB 3 output drop NCX entirely and ship only this
-/// nav doc; `parse_ncx` returns nothing on those, and the KFX export's
-/// `book_navigation` fragment comes from here.
-///
-/// Nested `<ol>`s become `children` on the parent entry. An empty `<a>`
-/// (no href) or an entry without any anchor is skipped, keeping the implicit
-/// `<h1>Navigation</h1>` label out of the rows.
 pub fn parse_nav_toc(content: &str) -> io::Result<Vec<TocEntry>> {
     parse_nav_ol(content, "toc")
 }
 
 /// Parse the page-list from an EPUB 3 nav document.
-///
-/// EPUB 3 records physical page breaks in `<nav epub:type="page-list">` as a
-/// flat `<ol><li><a href="…">N</a></li>…` — each entry maps a printed page
-/// number (the anchor label) to a content location (`href`, optionally a
-/// `#page_N` fragment). The same `<ol>` shape as the TOC, through the same
-/// parser; page lists never nest, and the result is a flat `Vec`.
 pub fn parse_nav_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
     parse_nav_ol(content, "page-list")
 }
@@ -998,9 +947,6 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
     let mut nav_depth = 0u32;
 
     // The TOC tree is built bottom-up: each <li> pushes a frame, its
-    // child <ol> contributes to that frame's children, then the </li>
-    // closes it and folds back into the parent frame's children. The
-    // outermost frame collects the top-level entries.
     struct ListItem {
         href: Option<String>,
         label: String,
@@ -1121,9 +1067,6 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
 }
 
 /// Parse EPUB 3 nav document landmarks.
-///
-/// Landmarks are in a `<nav epub:type="landmarks">` element containing
-/// an ordered list of anchor elements with epub:type attributes.
 pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
@@ -1231,12 +1174,6 @@ pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
 }
 
 /// Parse EPUB 2.0 `<guide>` references in an OPF document.
-///
-/// Source: EPUB 2.0.1, §2.6. `<guide>` contains `<reference type="..."
-/// href="..." title="..."/>` entries that map to EPUB 3 landmarks. A
-/// fallback for an OPF listing no EPUB 3 nav doc, or a nav doc with no
-/// `<nav epub:type="landmarks">` section — the shape calibre's KFX plugin
-/// emits.
 pub fn parse_opf_guide(content: &str) -> io::Result<Vec<Landmark>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);

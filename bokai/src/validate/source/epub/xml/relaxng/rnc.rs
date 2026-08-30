@@ -1,23 +1,5 @@
 //! Translate a RELAX NG grammar written in the **compact syntax** (`.rnc`) into
 //! the XML syntax that [`super::rng`] compiles.
-//!
-//! Every grammar epubcheck ships for EPUB 3 is compact — the package document,
-//! the content documents, the navigation document, media overlays, the OCF
-//! files, and the whole HTML5 module set behind them — so without reading it
-//! there is no EPUB 3 validation at all.
-//!
-//! The two syntaxes describe exactly the same schema language; the compact one
-//! adds only notation (infix `,`/`&`/`|` for group/interleave/choice, postfix
-//! `?`/`*`/`+`, prefix declarations in place of `xmlns`). Translating instead of
-//! compiling directly keeps **one** compiler and therefore one set of semantics:
-//! a rule about `include` overriding, `combine`, or datatype inheritance cannot
-//! drift between the two syntaxes, because only [`super::rng`] implements it.
-//!
-//! The output is deliberately *fully explicit* — every name carries its own `ns`
-//! and every datatype its own `datatypeLibrary` — so no prefix binding survives
-//! the translation and nothing downstream has to know the compact syntax exists.
-//! The one thing left implicit is a namespace the file does not declare, which
-//! must stay inherited from whatever `include`s it (`inherit`, below).
 
 use std::collections::HashMap;
 
@@ -751,9 +733,6 @@ impl<'a> Parser<'a> {
                 ))
             }
             // An unprefixed name. On an element it takes the default namespace —
-            // left implicit when the file does not declare one, so that whatever
-            // includes it can supply it. On an attribute it is always in no
-            // namespace, which `ns=""` states outright.
             Tok::Name(local) | Tok::Escaped(local) => {
                 let ns = if is_attribute {
                     " ns=\"\"".to_string()
@@ -993,13 +972,6 @@ mod tests {
             ),
         ]);
         // `mod.rnc` declares no namespace of its own, so `inherit = svg` puts
-        // its `graphic` in the SVG namespace. The *override* is written in
-        // `main.rnc`, so its unprefixed name takes `main.rnc`'s default
-        // namespace — `inherit` governs the included file, not the text that
-        // overrides it. (The XML syntax reads the other way round, because `ns`
-        // on `<include>` is inherited by the overriding `<define>`s too; the
-        // translation is what keeps the two apart, by making every name in a
-        // file that declares a namespace carry it outright.)
         assert!(valid(
             &mut arena,
             start,

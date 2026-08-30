@@ -1,27 +1,4 @@
 //! Build the `.yjr` a device should be holding for a book.
-//!
-//! The reverse of [`super::ingest`]: that reads a Kindle's sidecar into the
-//! library, this turns the library's annotations back into sidecar bytes. Both
-//! transports (USB and the LAN picker) compose through here, so there is one
-//! answer to "what should the device's file look like" regardless of how it
-//! gets there.
-//!
-//! Three rules shape the output:
-//!
-//! - **Additive.** The device's own file is read and Sidle's annotations are
-//!   merged into it. Records the device holds and Sidle doesn't are left alone,
-//!   and so is every non-annotation record — `font.prefs`, `ReaderMetrics`, and
-//!   whatever else a firmware version keeps. A sidecar is the device's file that
-//!   we contribute to, not ours to author.
-//! - **Anchored on the pushed KFX.** A device resolves an annotation by
-//!   `(element, offset)` and orders it by a linear position on the book's own
-//!   scale, so the positions written here come from the very KFX that was
-//!   sideloaded ([`super::anchor::BookIndex`]). Positions off any other build of
-//!   the book would sort wrongly on the device.
-//! - **Nothing invented.** An annotation with no anchor, or of a kind whose slot
-//!   in the file is unknown, is skipped rather than guessed at. Handwritten ink
-//!   is never pushed: it is device-authored by nature and Sidle cannot originate
-//!   it.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -48,20 +25,6 @@ pub struct Composed {
 
 /// Compose the sidecar for `book_id` from `current` (the device's file, absent
 /// if the book has none yet).
-///
-/// `colors` says whether the target device understands highlight colours; see
-/// [`device_uses_colors`]. A device that doesn't must not be sent one.
-///
-/// `Ok(None)` when the device already holds everything — the caller writes
-/// nothing, which keeps a sync that changes nothing from touching the device at
-/// all — and also when the device's own file can't be read.
-///
-/// **An unreadable sidecar is never overwritten.** Composing fresh over it would
-/// replace every record the device holds — its own highlights, and the reader
-/// state we have no model for — with just our rows. A file we cannot parse is
-/// one we understand least, which makes it the last thing that should be
-/// rewritten from scratch. The library keeps its copy regardless, so nothing is
-/// stranded by declining; the device's own next write repairs the file.
 pub fn compose(
     conn: &Connection,
     book_id: i64,
@@ -83,9 +46,6 @@ pub fn compose(
 
     let added = store.merge_annotations(&records);
     // A colour-capable device needs one on every highlight, including records
-    // already in its file — a colourless one there is stuck, since the thing it
-    // has lost is the ability to be selected and acted on. Repairing it is the
-    // only route back, and it converges: once filled, later syncs find nothing.
     let repaired = if colors {
         store.fill_missing_highlight_colors(DEFAULT_COLOR)
     } else {
@@ -117,35 +77,6 @@ pub struct Outgoing {
 }
 
 /// Decide what to write back to a device, from the sidecars just collected off it.
-///
-/// ## Losing to the device's own flush
-///
-/// A Kindle keeps the open book's reader state in memory and rewrites both its
-/// sidecars when it resumes — silently overwriting anything put there in the
-/// meantime. The write isn't rejected, it simply loses, with no error and no
-/// trace.
-///
-/// Every book is still offered, including the one just read. The alternative —
-/// holding back the most recently read book — sounds safer and is in fact the
-/// worst possible rule: the book a user just highlighted in is *always* the one
-/// they read most recently, so the one book the feature exists for would be the
-/// only one never written.
-///
-/// Losing that race is cheap, because nothing about this push is destructive.
-/// Sidle holds the durable copy either way; [`compose`] merges into whatever the
-/// device currently has rather than replacing it; and the write is checkpointed
-/// in `yjr_sync`, so a sync that finds the device's file changed underneath
-/// simply composes and offers it again. The cost of a lost write is one round
-/// trip, and it heals itself without the user knowing there was a race.
-///
-/// A `.sdr` with neither sidecar is skipped: the filename embeds a
-/// device-specific infix, and guessing it would litter the device with files no
-/// Kindle would ever read.
-///
-/// `index_for` supplies a book's anchoring index. It is a parameter rather than
-/// a lookup here because building one reads and parses the book's whole KFX:
-/// keeping that out of the planner leaves these decisions testable, and lets a
-/// caller that already has an index in hand reuse it.
 pub fn plan(
     conn: &Connection,
     collected: &[CollectedYjr],
@@ -180,21 +111,6 @@ pub fn plan(
 
 /// Whether this device understands highlight colours, judged by whether it has
 /// ever written one.
-///
-/// **A colour sent to a device that has no colours is not ignored — it is fatal
-/// to the whole file.** A monochrome Kindle's highlight record carries five
-/// values and its parser has no slot for a sixth: on meeting one it rejects the
-/// entire sidecar, renames it aside as `.bad_file`, and starts a new empty one.
-/// Every highlight in that book vanishes from the device. Learned by doing it to
-/// a real Oasis, 2026-08-08.
-///
-/// So the test is what the device itself writes, read off the sidecars it just
-/// handed us. A colour-capable Kindle names a colour on *every* highlight it
-/// makes, including the default yellow, so a single coloured record anywhere on
-/// the device settles it. A device holding no highlights at all reads as
-/// monochrome, which is the safe way to be wrong: the colour is dropped and the
-/// highlight still lands, where the opposite mistake costs the user their
-/// annotations.
 fn device_uses_colors(collected: &[CollectedYjr]) -> bool {
     collected
         .iter()
@@ -272,24 +188,6 @@ fn to_record(row: &AnnotationRow, index: &BookIndex, colors: bool) -> Option<Ann
 }
 
 /// The colour value to write for one record, if any.
-///
-/// The two device families want opposite things, and getting either wrong is
-/// visible on the device:
-///
-/// - **Monochrome**: no colour value, ever. Its parser has no slot for one and
-///   rejects the whole sidecar on meeting it, losing every highlight in the book.
-/// - **Colour-capable**: a colour on every highlight, including one Sidle has
-///   none recorded for. Such a device names a colour on everything it marks, and
-///   a highlight record without one displays but cannot be *selected* — no
-///   toolbar, so it can't be recoloured, annotated or deleted on the device.
-///   Observed on a Colorsoft, 2026-08-09.
-///
-/// A row with no colour is one captured on a monochrome device, where the user
-/// never chose one; [`DEFAULT_COLOR`] is what a Kindle marks with by default, so
-/// it is the least surprising thing to give the passage.
-///
-/// Only highlights. A note carries no colour on a colour-capable device either —
-/// it is read through the highlight it hangs on.
 fn color_for(row: &AnnotationRow, kind: &Kind, colors: bool) -> Option<String> {
     if !colors {
         return None;
@@ -567,9 +465,6 @@ mod tests {
     }
 
     /// The incident this rule exists for: a colour written to a monochrome
-    /// Kindle is not ignored, it invalidates the entire sidecar. The device
-    /// quarantines the file as `.bad_file` and starts an empty one, so every
-    /// highlight in that book disappears from the device.
     #[test]
     fn a_monochrome_device_is_never_sent_a_colour() {
         let conn = mem_db();
@@ -606,9 +501,6 @@ mod tests {
     }
 
     /// The repair path. A colourless highlight already sitting in the device's
-    /// file is exactly the one the user cannot fix themselves — being unable to
-    /// select it is the whole symptom — so writing future records correctly is
-    /// not enough on its own.
     #[test]
     fn a_colourless_highlight_already_on_the_device_is_repaired() {
         let conn = mem_db();
@@ -653,11 +545,6 @@ mod tests {
     }
 
     /// The mirror of the monochrome rule, and the second half of getting colour
-    /// right: a colour-capable device wants a colour on *every* highlight. One
-    /// written without it displays on the device but cannot be selected — no
-    /// toolbar, so it can't be recoloured, annotated or deleted there. A row
-    /// captured on a monochrome Kindle has no colour recorded, and that is
-    /// exactly the row this would strand.
     #[test]
     fn a_colour_device_gets_a_colour_on_every_highlight() {
         let conn = mem_db();
@@ -778,9 +665,6 @@ mod tests {
     }
 
     /// The book the device read most recently is the one the user was just
-    /// highlighting in, so it is the one that most needs writing. Holding it
-    /// back to dodge the device's flush would disable the feature exactly where
-    /// it is wanted; a lost write is retried on the next sync instead.
     #[test]
     fn the_book_the_device_read_last_is_written_like_any_other() {
         let conn = mem_db();
@@ -894,9 +778,6 @@ mod tests {
     }
 
     /// A highlight's capture date is the device's, and has to survive the trip
-    /// through the library back onto another device. Stamping it with the sync
-    /// time instead would tell the second Kindle every annotation was made the
-    /// day it was plugged in.
     #[test]
     fn the_devices_capture_date_survives_import_and_push() {
         use crate::library::ingest;
@@ -942,10 +823,6 @@ mod tests {
     }
 
     /// A mark made in Sidle, pushed to a device and read back off it, must stay
-    /// one row. The reader writes a bookmark as a bare point — no end anchor, no
-    /// covered text — while a device writes the point twice and the importer
-    /// previews the containing element. Three shapes of the same mark, and
-    /// identity has to see through all of them.
     #[test]
     fn a_native_bookmark_survives_a_round_trip_as_one_row() {
         use crate::library::ingest;

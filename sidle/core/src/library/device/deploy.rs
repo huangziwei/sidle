@@ -1,38 +1,4 @@
 //! On-device app deploy — pushes every app in the fleet onto a jailbroken
-//! Kindle over a cable: the picker (its armv7 binary, launcher wrapper, KUAL
-//! metadata, the `documents/Sidle.sh` tile, a freshly rendered
-//! `etc/server.conf` and the CA at `etc/ca.pem`), and whatever else is
-//! registered.
-//!
-//! The file list comes from [`crate::library::apps::DevicePlan`], which walks
-//! every app's mount-rooted tree. A file joins the deploy by sitting in a tree
-//! at the path it lands on.
-//!
-//! Two slots are in no tree: `etc/server.conf` is rendered per install, and
-//! `etc/ca.pem` is copied from the library root. That CA is the picker's only
-//! trust anchor — the device client compiles in no public root set.
-//!
-//! [`decide`] settles each path against the install receipt ([`super::receipt`])
-//! ahead of the device's bytes. A path whose source hashes to the receipt's
-//! entry is done, unread. A path whose device copy matches neither the source
-//! nor the receipt is [`DeployFileState::Diverged`] and is kept; `force`
-//! compares bytes and overwrites.
-//!
-//! `documents/Sidle.sh` is a jailbreak-hotfix scriptlet the library indexes as
-//! a tile, and tapping it runs `extensions/sidle/bin/sidle.sh`. KUAL does not
-//! run on this firmware; `config.xml` and `menu.json` are inert there.
-//!
-//! [`install_all`] is idempotent — content-hash equal means skip.
-//! `etc/server.conf` is rendered on every push, carrying a rotated
-//! `.server-token` across.
-//!
-//! A cable push writes every path directly: nothing on the device is executing
-//! while it is mounted. Any `.new` a LAN pull staged is deleted, ahead of the
-//! launcher swapping a stale binary over the fresh one at the next launch.
-//!
-//! Transport-agnostic: everything below drives the [`Transport`] trait, one
-//! deploy over a mass-storage mount (KOA2) and MTP (Colorsoft). Callers refuse
-//! a device without a jailbreak's `/extensions/` layout.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -64,14 +30,6 @@ const PICKER_ID: &str = "sidle";
 const PICKER_BINARY_REL: &str = "extensions/sidle/bin/sidle";
 
 /// The tree that ships with the desktop app: the `device/` mirror in a dev
-/// checkout, the staged resources in a packaged one. It holds the picker and
-/// bokai, and it is what [`crate::library::apps::plan`] composes with every
-/// registered app.
-///
-/// `binary_path` is where the cross-compiled picker lands — `target/` on the
-/// dev path, under a different name from the desktop app's own `sidle`.
-/// [`Self::stage_binary`] puts it in the mirror at the path it installs to.
-/// Both are resolved at app startup and re-evaluated per status query.
 #[derive(Debug, Clone)]
 pub struct DeploySource {
     pub mount_dir: PathBuf,
@@ -96,12 +54,6 @@ impl DeploySource {
     }
 
     /// A packaged build's on-device assets ride as Tauri bundle resources.
-    /// build.sh stages them under `Contents/Resources/resources/device/`, the
-    /// same mount mirror `from_workspace_root` points at, cross-compiled picker
-    /// included.
-    ///
-    /// `res_dir` is `app.path().resource_dir()`. `binary_path` is the mirror's
-    /// own copy, which leaves [`Self::stage_binary`] with nothing to move.
     pub fn from_resource_root(res_dir: &Path) -> Self {
         let staged = res_dir.join("resources").join("device");
         Self {
@@ -117,15 +69,6 @@ impl DeploySource {
 
     /// Copy the cross-built picker into the mirror when `target/`'s copy is
     /// newer, putting current bytes at the path they install to.
-    ///
-    /// The picker is the one file in the fleet a build leaves outside the tree
-    /// that ships it. Every other app's `build.sh` writes to its mount path
-    /// directly. The `.build-ts` sidecar rides along: the device compares that
-    /// value against the one compiled into the binary.
-    ///
-    /// A packaged build points `binary_path` at the mirror's own copy, leaving
-    /// this with nothing to move. A missing source binary is the "not built
-    /// yet" case [`compute_status`] reports from the plan.
     pub fn stage_binary(&self) -> Result<()> {
         let dest = self.mirrored_binary();
         if dest == self.binary_path {
@@ -152,10 +95,6 @@ impl DeploySource {
     }
 
     /// Build time (unix seconds) of `binary_path`, read from the
-    /// `<binary_path>.build-ts` sidecar `build.sh` writes beside the
-    /// cross-built picker. Feeds the manifest's `built_at`, the device's
-    /// downgrade guard. `0` with no sidecar, which leaves the device on its
-    /// sha-only check.
     pub fn build_ts(&self) -> u64 {
         let mut sidecar = self.binary_path.clone().into_os_string();
         sidecar.push(".build-ts");
@@ -255,10 +194,6 @@ pub enum DeployOverall {
 }
 
 /// One app's state on the connected device, rolled up from its files.
-///
-/// The Apps tab reads this: a row says `Installed 0.3.0` from
-/// `installed_version`, and `Update` from an `overall` naming a file that
-/// differs.
 #[derive(Debug, Clone, Serialize)]
 pub struct AppDeployStatus {
     pub id: String,
@@ -288,10 +223,6 @@ pub struct DeployStatus {
     /// renders a relative timestamp off it.
     pub binary_mtime_ms: Option<u64>,
     /// mtime of the newest source file under `sidle/native/src/`.
-    /// Surfaces "your binary is older than your source" *before* the
-    /// user clicks anything — staleness against the device is one
-    /// thing, but if your binary is also pre-dating your code edits
-    /// you'd push a no-op.
     pub native_source_mtime_ms: Option<u64>,
 }
 
@@ -310,7 +241,6 @@ pub enum DeployFileInstallResult {
     /// Nothing to write: the bytes for this slot could not be produced. Only
     /// `etc/server.conf` reaches it, with no LAN address or no server token.
     /// The device copy was never compared, which separates it from `Skipped`;
-    /// nothing went wrong, which separates it from `Failed`.
     SourceMissing { device_path: String },
     /// Write failed. The rest of the install continues, leaving a recoverable
     /// state.
@@ -327,8 +257,6 @@ enum Source {
     File(PathBuf),
     /// Bytes computed live. `None` says the inputs to compute them are
     /// unavailable, and the slot reports [`DeployFileState::SourceMissing`]
-    /// while the deploy carries on. Only `etc/server.conf` needs it; every
-    /// other slot is independent of the LAN address.
     Rendered(Option<String>),
 }
 
@@ -359,10 +287,6 @@ fn plain(device_rel: &str, source: Source) -> Slot {
 
 /// Every file this push writes: the composed tree, plus the two slots whose
 /// bytes are per-install.
-///
-/// A slot's `apply` is carried and not acted on. Over a cable nothing on the
-/// device is executing, and a `staged` path is written directly — see
-/// [`install_all`], which also clears any `.new` a LAN pull left behind.
 fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> Vec<Slot> {
     let mut out: Vec<Slot> = plan
         .files
@@ -378,9 +302,6 @@ fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> 
     // neither of them.
     if plan.app(PICKER_ID).is_some() {
         // The CA lives in the library root, in no tree. It is the one root the
-        // picker pins — the device client compiles in no public root set — and
-        // a device without it completes no handshake. The caller guarantees the
-        // file exists.
         out.push(plain(
             "extensions/sidle/etc/ca.pem",
             Source::File(ca_cert.to_path_buf()),
@@ -422,12 +343,6 @@ fn device_sha(transport: &dyn Transport, path: &TPath) -> Result<String> {
 }
 
 /// What is on the device, one directory listing at a time.
-///
-/// Every decision starts with "is it there, and how big" — a listing answers
-/// that for a whole directory at once, where an `exists` per path is a round
-/// trip per path. Over MTP that is the difference between one request and a
-/// hundred, and the size it also yields is often enough to settle a file
-/// without reading a byte of it.
 #[derive(Default)]
 struct DeviceIndex {
     /// Parent directory to its files' sizes. A directory that could not be
@@ -460,14 +375,6 @@ impl DeviceIndex {
 }
 
 /// Where the device stands on one path.
-///
-/// Reads as little as the answer needs. The receipt says what sidle last wrote
-/// there: a source hashing to it is settled by the listing alone. A path that
-/// moved is pulled off the device, to tell an update apart from an edit.
-///
-/// `force` throws the receipt away and compares bytes, which is both how a
-/// diverged file gets overwritten and how a receipt that has drifted out of
-/// step with the device is corrected.
 fn decide(
     transport: &dyn Transport,
     index: &mut DeviceIndex,
@@ -540,14 +447,6 @@ fn source_digest(slot: &Slot, digests: &mut DigestCache) -> Result<Option<FileDi
 /// Compute the per-file staleness given a source layout, a rendered
 /// server.conf, and the connected device's [`Transport`] (mass-storage volume
 /// or MTP — the deploy is identical over either).
-///
-/// `conf` is `None` when its inputs are unavailable (no routable LAN address,
-/// or no server token): the `etc/server.conf` slot reports
-/// [`DeployFileState::SourceMissing`], every other slot is checked, and the
-/// status matches what [`install_all`] pushes.
-///
-/// Does no writes, no network. Reads the source side off the host filesystem
-/// and the device side through `transport`.
 pub fn compute_status(
     plan: &DevicePlan,
     source: &DeploySource,
@@ -602,10 +501,6 @@ pub fn compute_status(
 }
 
 /// Group the per-file states by the app that owns each path.
-///
-/// The two per-install slots (`etc/ca.pem`, `etc/server.conf`) are in no tree,
-/// and [`DevicePlan::owner_of`] does not know them. Both sit under the picker,
-/// the app whose install renders them.
 fn roll_up_per_app(
     plan: &DevicePlan,
     files: &[DeployFileStatus],
@@ -738,22 +633,6 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 }
 
 /// Install every slot, and record what landed.
-///
-/// Each file is written unless the device holds those bytes, or holds bytes
-/// nobody here put there — see [`decide`]. A failure is recorded per file and
-/// the rest continue, leaving a state the next click recovers.
-///
-/// `force` overwrites a device copy sidle did not write, comparing bytes
-/// against the source. It is the way past a file changed on the device, and the
-/// repair for a receipt out of step with what is there.
-///
-/// `on_progress` fires once per file with its outcome. The Tauri command wires
-/// it to `device-app:install-progress`; tests pass `|_| {}`.
-///
-/// `conf` is `None` when `etc/server.conf` has no bytes to render — that slot
-/// reports [`DeployFileInstallResult::SourceMissing`] and every other slot is
-/// written. A device on a network that carries no LAN address is the device
-/// that needs the cable.
 pub fn install_all(
     plan: &DevicePlan,
     conf: Option<&ServerConfRender>,
@@ -823,9 +702,6 @@ pub fn install_all(
 }
 
 /// Install one slot, and say what the receipt should record for it.
-///
-/// A `None` receipt leaves the prior entry standing: this push wrote nothing at
-/// that path, and the record of what sidle last wrote there holds.
 fn install_one(
     transport: &dyn Transport,
     index: &mut DeviceIndex,
@@ -913,9 +789,6 @@ pub struct UninstallReport {
 
 /// Take one app off the device: its extension directory, its tile, and its
 /// record in the receipt.
-///
-/// The app is `extensions/<id>/**` plus the one `documents/*.sh` that launches
-/// it. Nothing else in `documents/` is touched.
 pub fn uninstall(tree: &AppTree, transport: &dyn Transport) -> Result<UninstallReport> {
     let id = tree.app.id.clone();
     let mut removed = Vec::new();
@@ -976,13 +849,6 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Detect the IPv4 address sidle-server is reachable at from the LAN.
-///
-/// The "no-packet" UDP trick: `bind` + `connect` to a public-internet address,
-/// then read `local_addr()`. The kernel picks the interface it routes through,
-/// and no packet is sent.
-///
-/// `None` with no routable interface. A caller falls back to the HOST in the
-/// on-device server.conf, or asks.
 pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     // A TEST-NET-3 address (RFC 5737): guaranteed unreachable, and it tells a
@@ -1408,10 +1274,6 @@ mod tests {
     }
 
     /// The CA has to arrive, byte-identical, from outside the `device/` mirror.
-    ///
-    /// The picker pins this root and carries no public root set. A push that
-    /// skipped or corrupted it leaves a device that completes no handshake,
-    /// under a report of success.
     #[test]
     fn install_pushes_the_ca_the_picker_pins() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1458,7 +1320,6 @@ mod tests {
         )
         .unwrap();
         // extensions/sidle/{bin/sidle, bin/sidle.sh, config.xml, menu.json,
-        // etc/server.conf, etc/ca.pem} + documents/Sidle.sh
         assert_eq!(events, 7);
     }
 
@@ -1540,9 +1401,6 @@ mod tests {
     }
 
     /// The rule the receipt exists for. A user sets `[device] name` on the
-    /// Kindle; the app then ships a new default for the same file. The push
-    /// wants to write and must not: the device's bytes exist nowhere else, and
-    /// no repo had to remember to mark the file for that to hold.
     #[test]
     fn a_file_changed_on_the_device_is_kept_when_the_source_moves_on() {
         let tmp = tempfile::tempdir().unwrap();

@@ -1,10 +1,4 @@
 //! Which files a process on this device is running.
-//!
-//! FAT keeps no inode alive behind a replaced directory entry, and `sh` reads a
-//! script by offset: a file cannot be rewritten while something executes it.
-//! The two paths sidle itself runs are written as `<path>.new` for the process
-//! one level up to swap in. Every other app's files are plain writes, and
-//! [`InUse`] is what says whether one of them is in use.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

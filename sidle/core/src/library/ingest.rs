@@ -1,19 +1,4 @@
 //! Annotation ingest: turn parsed device sources into linked DB rows.
-//!
-//! The device scan + file IO live in the Tauri command; this module is the pure
-//! logic, unit-testable against an in-memory DB:
-//!   - [`match_book_id`] — device title → library `book_id` (T0/T1);
-//!   - [`import_yjr`] — resolve `.yjr` handles (via [`anchor`]) and insert,
-//!     idempotently (dedup hash);
-//!   - [`relink_unmatched`] — re-link any orphaned annotation rows once their
-//!     book is (re-)added;
-//!   - [`export_book_markdown`] / [`export_book_json`] — durability dumps.
-//!
-//! Only books sideloaded via Sidle (`documents/Sidle/*.sdr/*.yjr`) are ingested:
-//! text is recovered from the library's own readable KFX via the `eid→text`
-//! map. `My Clippings.txt` is deliberately NOT consulted — it would conflate
-//! Sidle books with Amazon-store ones (the file is a single global log on the
-//! device) and its locations are coarser than the `.yjr` anchors anyway.
 
 use std::path::{Path, PathBuf};
 
@@ -56,9 +41,6 @@ impl ImportStats {
 // ---------------------------------------------------------------------------
 
 /// Normalise a title for comparison: strip the BOM and zero-width marks, collapse
-/// internal whitespace, and trim. (Unicode NFC is a deferred refinement; in
-/// practice both sides originate from the same book metadata, so byte-level
-/// composition already agrees.)
 pub fn normalize_title(s: &str) -> String {
     let cleaned: String = s
         .chars()
@@ -92,18 +74,11 @@ fn match_key(title: &str) -> String {
 }
 
 /// The `book_key` an annotation's [`annotation_dedup_hash`] is salted with —
-/// exposed so the reader's native-annotation create path derives the SAME key
-/// from a library book's title that device imports use, making a passage
-/// highlighted both natively and on the Kindle hash identically.
 pub fn book_match_key(title: &str) -> String {
     match_key(title)
 }
 
 /// Match a device title to a library `book_id`.
-///
-/// T0: equality of [`match_key`] (normalised, trailing ASCII paren removed on
-/// both sides). T1 (fallback): also strip a trailing ` - <author>` suffix from
-/// the wanted title, so `…春- (ファミ通文庫)` matches at T0 before T1 ever fires.
 pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<i64>> {
     let books = db::list_books(conn)?;
     let candidates: Vec<(i64, String)> =
@@ -127,26 +102,6 @@ pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<
 // ---------------------------------------------------------------------------
 
 /// The canonical content identity for an annotation, shared by the device-import
-/// path ([`dedup_hash`]) and native (Sidle-created) annotations, so the same
-/// passage highlighted both on a Kindle and in Sidle hashes identically (→ one
-/// row). Keyed on book + kind + anchor + text + note body — NO timestamp, NO
-/// device id, NO source — so identity is content + anchor only. The byte sequence
-/// (each part NUL-terminated) is load-bearing; do not reorder.
-///
-/// **The linear position is deliberately absent.** It is *derived* from the
-/// anchor, which is already hashed here, and the two origins measure it on
-/// different scales — a device import stores the raw pid off the anchor handle,
-/// while the reader stores whatever axis its rendering route defined. Salting
-/// identity with it made one passage highlighted both ways hash twice, so a
-/// highlight pushed to a Kindle came back as a second row. The anchor is the
-/// identity; the position is a display coordinate.
-///
-/// **A bookmark is hashed on its start alone**, for the same reason. It marks a
-/// point, and the two values past that point are derived rather than marked: a
-/// device repeats the start as its end, and the importer fills `text` with a
-/// preview of the containing element. The reader, which has neither, writes an
-/// empty end and no text — so one bookmark made in Sidle hashed differently once
-/// it had been to a Kindle and back, and landed as a second row.
 #[allow(clippy::too_many_arguments)]
 pub fn annotation_dedup_hash(
     book_key: &str,
@@ -185,9 +140,6 @@ pub fn annotation_dedup_hash(
 }
 
 /// Stable identity for a device-resolved annotation, so re-importing the same
-/// device state is a no-op. Thin wrapper over [`annotation_dedup_hash`] (the
-/// shared codec) — extending a highlight (new end anchor) is correctly a *new*
-/// record, mirroring the device.
 fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
     annotation_dedup_hash(
         book_key,
@@ -208,7 +160,6 @@ fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
 /// Resolve and insert one book's `.yjr` annotations. `book_id` is `None` when the
 /// device book isn't in the library yet — the rows land as orphans carrying their
 /// precise anchors, and [`relink_unmatched`] links them once the book is added.
-/// `clip_title`/`clip_author` are stored so an orphan can be relinked by title.
 #[allow(clippy::too_many_arguments)]
 pub fn import_yjr(
     conn: &Connection,
@@ -227,10 +178,6 @@ pub fn import_yjr(
 
     for ann in annotations {
         // Handwritten ink is routed to the ink path ([`crate::library::ink`]),
-        // never the text `annotations` table: it covers no text, so a row here
-        // would surface as a bodyless junk entry in the sidebar. The `.yjr`
-        // carries the host-page anchor + the nbk page-container id, which the ink
-        // importer consumes directly.
         if matches!(ann.kind, Kind::Handwritten(_)) {
             continue;
         }
@@ -278,9 +225,6 @@ pub fn import_yjr(
         } else {
             stats.duplicate += 1;
             // A row that predates this stamp being kept has none. Fill it from
-            // the device, which still holds it — narrow by construction: it only
-            // ever fills an absent value, so a date already recorded (a device's
-            // own, or one the user set) is never overwritten.
             if let Some(iso) = added_at.as_deref() {
                 db::fill_missing_added_at(conn, &hash, iso)?;
             }
@@ -289,9 +233,6 @@ pub fn import_yjr(
     }
 
     // Record this device's asserted set for the book — provenance only; it never
-    // deletes a backup row (Sidle is the durable backup, so a delete on the
-    // device keeps its Sidle copy). Only when both device and book are known — a
-    // deviceless import carries no per-device identity.
     if let (Some(serial), Some(bid)) = (device_serial, book_id) {
         db::record_device_book_presence(conn, serial, bid, &current_hashes, now)?;
     }
@@ -307,10 +248,6 @@ fn epoch_ms_to_iso(ms: i64) -> Option<String> {
 
 /// Re-link orphan annotations (`book_id IS NULL`) whose `clip_title` now matches
 /// a library book. Run after every import and after a book is added/edited.
-/// Returns the number of rows linked. Steady-state no-op: the production paths
-/// (`.yjr` import, native create) always set `book_id` at insert time. The
-/// safety net catches rows that got `book_id` set to NULL by `ON DELETE SET
-/// NULL` when their book was removed, and re-links them if the book reappears.
 pub fn relink_unmatched(conn: &Connection) -> rusqlite::Result<usize> {
     let orphans = db::list_unlinked_annotations(conn)?;
     let mut linked = 0;
@@ -380,9 +317,6 @@ pub struct DeviceImportReport {
     /// Of those, how many matched a library book (by `kfx_sha256` infix).
     pub matched: usize,
     /// `.sdr` names with a `.yjr` but no library match — skipped (no readable
-    /// KFX to resolve text). Should normally be empty: `documents/Sidle/`
-    /// only holds books Sidle itself sideloaded, so a stray entry here means a
-    /// library row was removed without its on-device counterpart.
     pub unmatched: Vec<String>,
     /// Matched books whose `.yjr` was byte-identical to the last import, so the
     /// (expensive) text-index rebuild + re-parse was skipped entirely.
@@ -403,9 +337,6 @@ pub struct DeviceImportReport {
     /// Ink notebooks skipped because their `nbk` was unchanged since last sync.
     pub ink_unchanged: usize,
     /// Files backed up off the device this sync that the library had never seen
-    /// (a screenshot, say) → `device-backup/<serial>/<collection>/`. Populated
-    /// by the app layer's `device::misc::backup_device_misc`; 0 on the pure-core
-    /// import paths.
     pub misc_new: usize,
     /// Files re-copied off the device this sync because they may have grown (a
     /// log). Refreshed on every sync, so unlike
@@ -419,14 +350,6 @@ pub struct DeviceImportReport {
 }
 
 /// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
-/// directory name (which carries the `kfx_sha256` infix that matches it to a
-/// library book). Bytes are read on the device side — `std::fs` for
-/// mass-storage, MTP `GetObject` for Scribe-class — so [`import_collected`]
-/// stays transport-agnostic and the device-IO half can live wherever the
-/// transport does (the app's `device` module). At least one of the two is
-/// present (a `.sdr` with neither is a pagination cache, not collected):
-/// `.yjr` carries annotations, `.yjf` the last-read position — and a book read
-/// without highlighting has a `.yjf` but no `.yjr`.
 #[derive(Clone)]
 pub struct CollectedYjr {
     pub sdr_name: String,
@@ -444,12 +367,6 @@ pub struct CollectedYjr {
 }
 
 /// Match a device `.sdr` directory name to a library book.
-///
-/// Prefers the exact identity — the `.sdr`'s `<sha8>` infix is the library
-/// `kfx_sha256` the Kindle bound the sidecar to — and falls back to the stem
-/// when that has drifted, which a desktop reconvert causes: the device filename
-/// is frozen (a Kindle won't re-bind a renamed `.sdr`), so the stem is the only
-/// stable link for a book fixed after it was pulled.
 pub fn match_collected_book(
     conn: &Connection,
     sdr_name: &str,
@@ -467,12 +384,6 @@ pub fn match_collected_book(
 }
 
 /// Import device annotations a caller has already pulled off the device: match
-/// each `.yjr` to a library book by its `.sdr` `kfx_sha256` infix, skip the ones
-/// whose bytes are unchanged since last import, and resolve highlight text from
-/// the library's own readable KFX. This is the pure DB + parse half shared by
-/// both transports; the device-side scan lives in the caller —
-/// [`import_from_device`] is the mass-storage `std::fs` scanner, and the app
-/// has a `Transport`-based one (`collect_device_yjr`) for MTP (Scribe).
 pub fn import_collected(
     conn: &Connection,
     collected: Vec<CollectedYjr>,
@@ -483,9 +394,6 @@ pub fn import_collected(
 }
 
 /// As [`import_collected`], but reports per-book progress via `on_book(current,
-/// total, label)` so the app's MTP sync can drive the status bar (the LAN server
-/// and tests call the no-op [`import_collected`]). `label` is the book title when
-/// matched, else the `.sdr` stem; `current`/`total` count the collected `.sdr`s.
 pub fn import_collected_with_progress(
     conn: &Connection,
     collected: Vec<CollectedYjr>,
@@ -504,12 +412,6 @@ pub fn import_collected_with_progress(
             ..
         } = item;
         // Prefer the exact identity: the `.sdr`'s `<sha8>` infix is the library
-        // `kfx_sha256` the Kindle bound this sidecar to. Fall back to the stem
-        // (`<basename>`) when the infix has drifted — a desktop reconvert changes
-        // `kfx_sha256`, but the device filename is frozen (the Kindle won't
-        // re-bind a renamed `.sdr`), so the stem is the only stable link for a
-        // book fixed after it was pulled. Without this, every reconverted book's
-        // highlights + reading position strand as "unmatched".
         let book = match_collected_book(conn, &sdr_name)?;
 
         // Name what's syncing now — before the costly text-index build below.
@@ -520,11 +422,6 @@ pub fn import_collected_with_progress(
         on_book(i + 1, total, &label);
 
         // Last-read position (`.yjf` `lpr`) — stored for every matched book on
-        // EVERY sync, before the unchanged-`.yjr` skip below: position moves
-        // independently of highlights (you can read on without highlighting), so
-        // gating it on the `.yjr` would freeze it. Cheap and idempotent — a handle
-        // decode + single-row upsert, no text index. Lands in the `(book_id,
-        // 'device')` row; never auto-applied (it's a Resume jump target).
         if let (Some(book), Some(yjf)) = (book.as_ref(), yjf_bytes.as_ref())
             && let Some(h) = super::yjr::position(yjf, "lpr")
         {
@@ -552,10 +449,6 @@ pub fn import_collected_with_progress(
         report.matched += 1;
 
         // Cheap skip before the expensive `build_index` (which parses the full
-        // library KFX): if this device's on-device `.yjr` is byte-for-byte what
-        // we imported last time, there's nothing new to add. The bytes are
-        // already in hand (the `.yjr` is tiny — KB), so this is just a hash +
-        // compare. Keyed per device.
         let yjr_sha = super::import::sha256_of_bytes(&yjr_bytes);
         if db::get_yjr_sync_sha(conn, device_serial, book.id)
             .context("read yjr sync checkpoint")?
@@ -593,13 +486,6 @@ pub fn import_collected_with_progress(
 /// Scan a mounted Kindle (`device_root` = the volume, e.g. `/Volumes/Kindle`)
 /// and import its annotations — the mass-storage `std::fs` collector for
 /// [`import_collected`].
-///
-/// Only `documents/Sidle/` is scanned: those `.sdr` dirs are named
-/// `<stem>.<8hex>.sdr` where `<8hex>` is the library `kfx_sha256` prefix, so each
-/// matches its library book exactly — and the text index is built from the
-/// library's own readable KFX, not the device file. `documents/Downloads/Items01/`
-/// is deliberately ignored (DRM'd Amazon KFX can't be read), as is the global
-/// `My Clippings.txt` (would conflate Amazon-store books with Sidle's).
 pub fn import_from_device(
     conn: &Connection,
     device_root: &Path,
@@ -650,11 +536,6 @@ pub fn import_from_device(
 }
 
 /// The `.sdr` dir's stem: the `<basename>` with the `.sdr` suffix and the
-/// trailing `.<sha-infix>` dropped (`"Linear Models with R.86607ef9.sdr"` →
-/// `"Linear Models with R"`). Doubles as the human label on the sync status
-/// line when a book hasn't been matched to a title yet, and as the stable key
-/// for the stem fallback in [`import_collected_with_progress`] — a reconvert
-/// changes the infix but never the basename.
 fn sdr_stem(sdr_name: &str) -> String {
     let stem = sdr_name.strip_suffix(".sdr").unwrap_or(sdr_name);
     match stem.rsplit_once('.') {
@@ -692,8 +573,6 @@ fn find_sidecar(sdr_dir: &Path, suffix: &str) -> Option<PathBuf> {
 /// A [`BookIndex`] over the library's readable KFX, or an empty one when the
 /// path is missing/unreadable — annotations still import with their anchors
 /// (text backfillable once the KFX exists).
-/// A book's anchoring index, read from the library's own KFX. Shared with the
-/// push path, which needs the same positions it resolves imports against.
 pub fn book_index(kfx_path: Option<&str>) -> BookIndex {
     kfx_path
         .and_then(|p| std::fs::read(p).ok())
@@ -815,9 +694,6 @@ mod tests {
     #[test]
     fn native_and_device_dedup_hash_agree() {
         // The shared codec (the native create path uses `annotation_dedup_hash`)
-        // and the device wrapper (`dedup_hash`) must produce the SAME hash for the
-        // same book + kind + anchor + text + note — so a passage highlighted both
-        // in Sidle and on a Kindle dedups to one row.
         let r = Resolved {
             kind: Kind::Highlight,
             eid_start: Some(1254),
@@ -848,9 +724,6 @@ mod tests {
     }
 
     /// The round trip that broke: a highlight made in Sidle, pushed to a Kindle,
-    /// and re-imported comes back with the *device's* linear scale rather than
-    /// the reader's. Identity must not notice — the anchor is the same passage,
-    /// so it is the same annotation and must not land as a second row.
     #[test]
     fn identity_ignores_the_linear_scale() {
         let anchored = |loc: Option<i64>| Resolved {
@@ -1054,9 +927,6 @@ mod tests {
     }
 
     /// Ink covers no text, so a row here would surface as a bodyless junk entry
-    /// in the sidebar. Both record names a device writes must be routed away —
-    /// ink drawn over book content is `handwritten_on_content_note`, and that
-    /// name reaching the text table is how three such rows got there.
     #[test]
     fn handwritten_notes_are_not_stored_as_text_annotations() {
         for name in ["handwritten_note", "handwritten_on_content_note"] {
@@ -1132,9 +1002,6 @@ mod tests {
     }
 
     /// A second connect with an unchanged `.yjr` is skipped wholesale — no
-    /// re-parse, no re-insert — by the per-book content-hash checkpoint. (The
-    /// `dedup_hash` already made re-import a no-op at the DB layer; this avoids
-    /// the expensive text-index rebuild that precedes it.)
     #[test]
     fn device_import_skips_unchanged_yjr() {
         let yjr = device_yjr(&[Annotation {

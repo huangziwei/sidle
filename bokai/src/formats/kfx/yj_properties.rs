@@ -1,9 +1,6 @@
 //! KFX style → CSS property translation: the property table, value
 //! translation, `writing-mode` emission, and the block-image wrapper
 //! partition. `KfxImporter` resolves named `$157` styles through it.
-//!
-//! `style_schema.rs` holds the export-direction table; a property here has a
-//! counterpart there.
 
 #![allow(non_snake_case)]
 

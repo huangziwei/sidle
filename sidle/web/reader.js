@@ -1,9 +1,4 @@
 // reader.js — the built-in reader coordinator. Replaces foliate's view.js with
-// a thin layer over the vendored paginator: open a library book (KFX→DOM via
-// the `reader_open` Tauri command), paginate it, and surface imported
-// annotations — highlights painted in place, notes with a note cue + popover,
-// bookmarks as margin markers and a jump-list. Exposed as `window.sidleReader`
-// so the (classic-script) library.js can drive it across the module boundary.
 
 import "./foliate-kfx/paginator.js"; // defines <foliate-paginator>
 import { Overlayer } from "./foliate-kfx/overlayer.js";
@@ -66,14 +61,6 @@ function readSavedProgressMode() {
 }
 
 // ---- deferred image loader --------------------------------------------------
-// `reader_open` returns an image *manifest* (dto.images) instead of inline
-// bytes; this engine streams the bytes in: the reading-position window first,
-// then the rest in the background, `RES_CHUNK` images per `reader_fetch_
-// resources` call. Arrived images become blob URLs in `urls`; a page/section
-// that needs a specific image immediately awaits `resLoaderRequire`, which
-// fetches it right away (jumping the background queue). When every image has
-// been attempted the backend store is released — the webview's blobs are the
-// only copy needed until close.
 
 let resLoader = null; // per-open loader state (both reflowable and FXL modes)
 
@@ -172,12 +159,6 @@ function stopResLoader(st) {
 }
 
 // ---- deferred section loader ------------------------------------------------
-// A large text book's open DTO ships section HTML only for the resume window
-// (`html: null` elsewhere); this streams the rest via `reader_fetch_sections`
-// — same shape as the image loader, but the payloads are already-built
-// strings (no transcode), so it drains in a few round trips. Arrived HTML
-// lands straight in `dto.sections[i].html`, which is what the kfx-book
-// section loaders read.
 
 let secLoader = null; // per-open section-stream state (large reflowable books)
 
@@ -294,11 +275,6 @@ function updateBufferedIndicator() {
 const view = () => $("#reader-view");
 
 // ---- top bar auto-hide ------------------------------------------------------
-// While reading, the top bar fades away after a few idle seconds and comes back
-// when you click the top of the page. It keeps its layout slot the whole time
-// (see styles.css), so this never resizes the stage. It won't fade out while the
-// pointer is over it or while a panel/popover it opened is showing, so it can't
-// vanish mid-interaction.
 const TOPBAR_HIDE_DELAY = 3000; // ms idle before the bar fades out
 let topbarHideTimer = null;
 let topbarHovered = false;
@@ -348,9 +324,6 @@ function revealTopbar() {
 }
 
 // Named Kindle highlight colors → CSS. Published with its resolver on
-// `window.sidleReader` (see the export at the foot of the file) so anything
-// listing annotations outside the reader colors them the way they are painted,
-// rather than keeping a second palette that could drift from this one.
 const COLORS = { yellow: "#f4d03f", blue: "#5dade2", pink: "#ec7fa9", orange: "#e59866" };
 const NOTE_CUE = "#b5651d"; // edge line marking a highlight that carries a note
 const BOOKMARK_COLOR = "#e07b39";
@@ -440,11 +413,6 @@ function subRange(doc, el, from, to) {
 }
 
 // Client rects for an annotation, computed PER `data-eid` element. A single
-// Range spanning several block elements makes getClientRects fill the blank tail
-// of each element's short last line (it's a continuous selection), which paints
-// the highlight onto the whitespace up to the line end. Splitting per element —
-// each sub-range ending at its own element's text — stops the band at the text.
-// Returns [] when the annotation isn't in this section.
 function annotationRects(doc, ann) {
   if (ann.eid_start == null) return [];
   if (readerMode === "pdf") return pdfAnnotationRects(ann);
@@ -470,13 +438,6 @@ function annotationRects(doc, ann) {
 }
 
 // PDF highlight/search rects, computed from the text-layer **spans' own boxes**
-// (`getBoundingClientRect`) rather than a text Range's `getClientRects`. Each
-// span is positioned + sized to its KFX run box, which the renderer aligns to
-// the page image; the Range path instead returns the transparent fallback font's
-// line box, which drifts (notably downward) from the run box. The first/last run
-// is clipped horizontally by char-offset proportion — the transparent text isn't
-// glyph-for-glyph with the image, so proportional is the closest fit. Spans are
-// queried in DOM order (= reading order), so the start→end walk is monotonic.
 function pdfAnnotationRects(ann) {
   if (ann.eid_start == null) return [];
   const all = [...document.querySelectorAll(".reader-pdf-text [data-eid]")];
@@ -547,9 +508,6 @@ function paintAnnotations(doc, overlayer) {
 // ---- create / edit / delete native annotations -----------------------------
 // Reverse of the paint path: a DOM selection → (eid, offset) → a stored 'sidle'
 // annotation. A floating toolbar offers highlight colors + Note on selection;
-// clicking a native highlight/note opens an editable popover (textarea + color +
-// Save/Delete); a topbar button toggles a page bookmark. Imported ('yjr')
-// annotations stay read-only (the device sync owns them).
 
 // Build 4 color swatches into `container`; the `current` COLORS key (or null) is
 // marked active; `onPick(name)` fires on click.
@@ -672,10 +630,6 @@ function annotationAt(doc, x, y) {
 
 function onDocClick(e, doc) {
   // In-content hyperlink → spine navigation. The paginator does no link
-  // handling, and a relative href can't resolve inside the section's blob: URL,
-  // so internal links would otherwise be dead. Route cross-section links
-  // (cN.xhtml#frag) through the same resolver the TOC panel uses; leave
-  // same-page (#frag) and external links to the iframe's native handling.
   const a = e.target?.closest?.("a[href]");
   if (a) {
     const href = a.getAttribute("href");
@@ -685,9 +639,6 @@ function onDocClick(e, doc) {
       return;
     }
     // External link (http/https/mailto) → hand to the OS default browser/mail
-    // client instead of letting the iframe navigate to it, which would render
-    // the page inside the reader. Same-page (#frag) and relative resource hrefs
-    // fall through to the iframe's native handling.
     if (isExternalHref(href)) {
       e.preventDefault();
       openExternalHref(href);
@@ -712,9 +663,6 @@ function onDocClick(e, doc) {
 }
 
 // Classify an in-content href as external (handed to the OS browser) vs internal
-// (resolved within the book). A scheme-ful absolute URL (http/https/mailto) is
-// external; a same-page "#frag" or a relative resource href is not — `new URL`
-// with no base throws on a relative href, which we treat as internal.
 function isExternalHref(href) {
   if (!href || href.startsWith("#")) return false;
   let url;
@@ -761,10 +709,6 @@ function notesFor(ann) {
 
 // Editor for an annotation: quote + textarea + color swatches + Save/Delete.
 // `px`/`py` are already in the parent document's coordinate space.
-//
-// Clicking a note that belongs to a highlight edits it through its highlight,
-// so the popover always shows the marked passage rather than a bare anchor —
-// the note a Kindle writes covers no text of its own.
 function openAnnotationEditor(ann, px, py) {
   const pop = $("#reader-note-popover");
   if (!pop) return;
@@ -829,10 +773,6 @@ function renderEditorNotes() {
 
 // Persist the editor: a non-empty body promotes a highlight to a note (and an
 // emptied note demotes back to a highlight) — the backend recomputes the hash.
-// Persist the editor. The colour belongs to the annotation; the body belongs to
-// a note row of its own, written at the annotation's span. Nothing here rewrites
-// the annotation's kind — a highlight stays a highlight for its whole life, so
-// its identity never moves and a device record for it keeps matching.
 async function saveEditor() {
   if (!editingAnn || bookId == null) return;
   const body = ($("#reader-note-edit")?.value || "").trim();
@@ -1031,8 +971,6 @@ async function jumpToPosition(pos) {
 
 // The Resume targets in menu order — Sidle's own spot first (the common case),
 // then each Kindle's imported position. Each is present only if it has an eid;
-// device rows are labeled by a short serial tail when more than one device has
-// synced this book (so two Kindles are distinguishable).
 function resumeTargets() {
   const out = [];
   if (sidleResume?.eid != null) out.push({ label: "Sidle", pos: sidleResume });
@@ -1118,11 +1056,6 @@ function annotationRow(ann) {
   // The row's own body, then every note attached to it. A highlight may carry
   // several — one written here, others added on the Kindle — and they belong
   // under the passage they annotate, not as separate entries in the list.
-  //
-  // An attached note obeys "Show hidden" like any other row. It has no row of
-  // its own to carry a Hide button, so it can only be hidden while standing
-  // alone and then enclosed by a later highlight — printing it here regardless
-  // would make hiding it silently stop meaning anything.
   const attached = notesFor(ann).filter((n) => showHidden || !n.hidden);
   for (const text of [ann.note_body, ...attached.map((n) => n.note_body)]) {
     if (!text) continue;
@@ -1461,9 +1394,6 @@ async function jumpToSearchMatch(m, i) {
   // Mark this match as the selected one BEFORE repainting + jumping, so:
   //   - every loaded overlayer redraws this i in the selected color (and any
   //     previously-selected i goes back to the base color);
-  //   - the panel row gets the .selected class;
-  //   - the new section, when it loads, also paints this i selected
-  //     (paintOneSearchMatch reads `selectedSearchIndex` at paint time).
   selectedSearchIndex = i;
   for (const { doc, overlayer } of overlays) paintSearchMatches(doc, overlayer);
   renderSearchPanel();
@@ -1549,10 +1479,6 @@ function hideSearchPanel() {
 // Resolve a TOC href ("c5.xhtml#frag") to a section index + optional fragment.
 // The TOC and the sections come out of one `EpubPackage`, whose `toc` hrefs name
 // its `documents` — the same list `book.hrefs` mirrors — so `indexOf` matches.
-// That is a contract, not a coincidence: the package also carries a *container*
-// view of the same navigation (inside nav.xhtml/toc.ncx) where the cover section
-// is remapped onto a synthesized `cover.xhtml` that exists only in a zip. An
-// href from that view lands here as index -1.
 function tocTarget(href) {
   const [path, frag] = String(href || "").split("#");
   const index = book?.hrefs?.indexOf(path) ?? -1;
@@ -1600,17 +1526,6 @@ function renderTocPanel() {
 }
 
 // Highlight the TOC entry we're currently reading: the one whose target is the
-// last we've passed in READING order — the nearest section at or before the
-// current one, not the last such row in the list. The TOC is in the book's
-// declared order, which a publisher is free to write against the grain of its
-// own spine (a collection whose spine sorts by filename lists chapter nine
-// after the appendices), so list order is not section order. WITHIN a section
-// that holds several entries — e.g. a chapter split into scenes, all sharing one
-// `cN.xhtml` — section granularity can't tell them apart, so we resolve each
-// same-section entry's `#fragment` to its element and compare document order
-// against the page's top node: an entry is behind us unless its target sits
-// after the top of the page. `top` (the visible range's start) and the entry
-// elements live in the same loaded section doc, so this needs no position map.
 function markTocActive(currentIndex, doc, range) {
   if (typeof currentIndex !== "number" || !tocEntries.length) return;
   const top = range?.startContainer || null;
@@ -1629,11 +1544,6 @@ function markTocActive(currentIndex, doc, range) {
         const el = doc.getElementById(e.frag);
         // `el.compareDocumentPosition(top)` has the PRECEDING bit set when `top`
         // comes before `el` — i.e. this entry's target is still ahead of us.
-        // An ancestor ALSO sets PRECEDING (spec: a container precedes its
-        // contents), but a range starting at a container of the anchor — e.g.
-        // the body fallback when nothing on the page is cleanly visible — says
-        // nothing about being before the anchor, so require a strict
-        // precedes: PRECEDING without CONTAINS.
         if (el) {
           const pos = el.compareDocumentPosition(top);
           if (
@@ -1677,8 +1587,6 @@ function positionedFor(doc) {
     // While the deferred location map is still synthesizing (locByEid empty),
     // keep every [data-eid] element with a null loc — the EID half of the
     // page anchor (live position, bookmarks) must work from the first paint.
-    // The per-doc caches are rebuilt when the map arrives (open() resets
-    // positionedByDoc).
     const hasLocs = !!locByEid && locByEid.size > 0;
     arr = [...doc.querySelectorAll("[data-eid]")]
       .map((el) => ({ el, loc: locByEid?.get(Number(el.getAttribute("data-eid"))) ?? null }))
@@ -1689,9 +1597,6 @@ function positionedFor(doc) {
 }
 
 // Anchor at the top of the current page: the last positioned [data-eid] element
-// at or before the visible range's start, with its Location and eid. The loc
-// feeds the progress readout; the eid is what the Sidle-native position saves
-// and restores (the same `data-eid` anchoring a highlight uses).
 function pageAnchor(doc, range) {
   const arr = positionedFor(doc);
   if (!arr.length) return { loc: null, eid: null };
@@ -1754,10 +1659,6 @@ function savePace() {
 }
 
 // Fold one page-turn into the per-book `readSpeed` (EMA, seeded by the FIRST
-// sample so it's purely the user's measured pace — no language guess). Rejects
-// outliers like the device's `timer.average.calculator.outliers`: only forward
-// sequential reading counts — skip backward/jumps (non-positive or implausibly
-// large chars), quick flips (<1.5s), and idle gaps (>5min).
 function sampleReadingSpeed(charPos) {
   const now = Date.now();
   if (lastTurnTime != null && lastCharPos != null) {
@@ -1842,9 +1743,6 @@ function cycleProgressMode() {
 // ---- go to Location --------------------------------------------------------
 
 // Jump to reader "Location" N — the same number shown in the readout and on the
-// Kindle. Inverts the eid→loc map: the last indexed element at or before N (a
-// location spans ~110 pids, so this lands inside the target location). The
-// relocate that follows refreshes the readout.
 async function jumpToLocation(n) {
   if (readerMode !== "reflowable" || !locByEid || !locByEid.size) return;
   const idx = [...locByEid.entries()]
@@ -1926,11 +1824,6 @@ const FONT_STACKS = {
 const LINE_HEIGHTS = { auto: 0, tight: 1.35, normal: 1.6, relaxed: 1.9, loose: 2.2 };
 const WEIGHTS = { "": 0, light: 300, normal: 400, medium: 500, semibold: 600 };
 // Margin presets, adaptive to writing mode (applied in `applyLayout`): the
-// control adds whitespace at the line ends — TOP/BOTTOM for vertical text,
-// LEFT/RIGHT for horizontal — the same logical axis, rotated. Vertical varies
-// the block (top/bottom) margin in px; horizontal varies a single column's width
-// in px (the leftover is the left/right margin). "normal" reproduces the old
-// vertical layout.
 const VMARGIN = { narrow: 24, normal: 48, wide: 112 }; // vertical top/bottom margin px
 const HMEASURE = { narrow: 940, normal: 760, wide: 560 }; // horizontal column width px
 
@@ -1993,12 +1886,6 @@ function mix(a, b, t) {
 // layout so the image fills the page instead of shrinking into a text column.)
 
 // The CSS injected into each section iframe via the paginator's `setStyles`. It
-// lands in the last <style> of the head, so `!important` here beats the book's
-// own synthesized stylesheet. font-size rides the root because bokai emits text
-// sizes in rem/% (root-relative) — one anchor scales everything, like Kindle's
-// slider. At DEFAULT settings it emits a white background, a non-important #111
-// body color and no font-size/family override, which leaves the book rendering
-// on its own styling; only changed fields override.
 function buildSectionCss(s) {
   const customFg = s.fg.toLowerCase() !== DEFAULT_STYLE.fg;
   const out = [
@@ -2022,9 +1909,6 @@ function buildSectionCss(s) {
 }
 
 // Tint the reader chrome (gutter, bars, panels) to the page colors so a sepia or
-// dark page doesn't sit framed by white UI. At DEFAULT colors we set nothing —
-// the CSS `--reader-*` defaults (the original warm-light palette) stay, so the
-// chrome is identical to before. Custom colors derive coherent fg→bg blends.
 function applyChrome(s) {
   const v = view();
   if (!v) return;
@@ -2056,10 +1940,6 @@ function applyChrome(s) {
 const HUGE_MEASURE = 100000; // forces a single full-width column for image pages
 
 // Set the paginator's layout attributes for `index`'s mode. Text pages use the
-// user's margin preset (= the original 720/48/7%/2-col defaults at the default
-// setting). Image-only pages (cover) go full-bleed: zero margin/gap, one column,
-// unbounded measure — so the image fits the whole page, no frame. Skips redundant
-// work unless `force` (used when a settings change must re-apply the same mode).
 function applyLayout(index, force) {
   if (!paginator || !styleSettings) return;
   const mode = imageSections.has(index) ? "image" : "text";
@@ -2082,15 +1962,6 @@ function applyLayout(index, force) {
       // Block (top/bottom) margin from the preset. For the measure (= column
       // height), branch on the page's orientation — matching the paginator's own
       // container-query rule (`#top.vertical` in `@container (portrait)`):
-      //   - LANDSCAPE: one tall column. Leave the measure UNCAPPED so content
-      //     fills the page height and the `margin` attribute is the *actual*
-      //     top/bottom margin, not just a floor.
-      //   - PORTRAIT with columns=auto: two STACKED columns. Cap the measure at
-      //     (pageH - 2*margin) / 2 so max-height = cap * 2 ≈ pageH - 2*margin
-      //     (margin honored exactly) AND ceil(avail/cap) = 2 so the divisor
-      //     formula picks two columns. (Uncapped would yield ceil≈1 → one col.)
-      //   - PORTRAIT with columns=1: same as Single — max-column-count=1 forces
-      //     one column regardless of orientation, so leave the measure uncapped.
       const vm = VMARGIN[styleSettings.margin] ?? VMARGIN.normal;
       const rect = paginator.getBoundingClientRect();
       const portrait = rect.height > rect.width;
@@ -2111,9 +1982,6 @@ function applyLayout(index, force) {
   // The block-`margin` attribute only re-paginates via a ResizeObserver, which
   // can miss; force it so a vertical top/bottom-margin change always takes hold.
   // (No-op before the first section loads — render() bails without a view.)
-  // `force` rides through to the view so a settings change re-lays-out even
-  // when the resolved geometry is unchanged (image caps depend on font
-  // metrics); mode flips leave it false and let the geometry diff decide.
   paginator.render?.(force === true);
 }
 
@@ -2357,20 +2225,8 @@ function onKey(e) {
 // ---- open / close ---------------------------------------------------------
 
 // ---- PDF (fixed-layout) mode ----------------------------------------------
-//
-// A PDF-backed book renders server-side via PDFKit (`reader_pdf_page`) as a page
-// image, with the KFX text layer laid over it as transparent, selectable
-// `data-eid` spans — so select / highlight / bookmark / search work exactly as
-// the reflowable reader (the page image is the backdrop, the spans host the same
-// eid-anchored overlay machinery). An image-only / scanned page has no spans:
-// it shows the image with page-level bookmarking only. We reuse the topbar / TOC
-// / status chrome; reading position rides the same `reading_position` model,
-// anchored to a page's representative eid so it maps back to a page.
 
 // Search has nothing to find on an image-only book, so it's hidden there;
-// bookmark + annotations apply to both. (`#reader-style` carries the spread +
-// night-mode controls.) Computed per book in `openPdf` from whether any page
-// carries a text layer.
 const PDF_NO_TEXT_HIDDEN = ["#reader-search"];
 
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
@@ -2378,11 +2234,6 @@ let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 // PDF display settings — a per-book reading preference, persisted under a key that
 // appends the open document's id, exactly like the reflowable `styleSettings`.
 // `spread`: auto | single | double; `invert`: night mode (invert the page image);
-// `cover`: in double mode, show page 0 as a standalone cover (else pair from 0);
-// `merge`: in double mode, butt the two facing pages together with no gutter so a
-// cross-page panel reads as one image (manga / comics) — off keeps the gutter,
-// which suits scanned text PDFs. `zoom` is per-open (reset to fit on every open).
-// Reloaded per book in openPdf / openNotebook; defaults until then.
 const PDF_STYLE_KEY = "sidle.reader.pdf-style"; // base; the open document id is appended
 const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, cover: true, merge: false };
 // The gutter (px) between two facing pages in a double spread; 0 when the pages
@@ -2432,17 +2283,10 @@ function pdfStep() {
   return pdfSpreadMode() === "double" ? 2 : 1;
 }
 // First page of the spread that contains `p`. In double mode pages pair up; the
-// "Cover page" option (default) keeps the cover (page 0) standalone and pairs the
-// rest odd-aligned — cover → 1·2 → 3·4 …, like a physical book's facing pages —
-// while turning it off pairs from page 0 — 0·1 → 2·3 …. Single mode: `p`.
 function pdfSpreadStart(p) {
   if (p <= 0) return 0;
   if (pdfSpreadMode() !== "double") return p;
   // Fixed-layout KFX: pair from the explicit `page-spread-left/right` properties,
-  // not page parity — a section that emits a single page (cover, standalone
-  // illustration) must not drift every later spread by one. The trailing side
-  // ends a pair, so its boundary is the previous page; a leading or single page
-  // starts its own.
   if (pdf.kfxImages) {
     const trailing = pdf.ppd === "rtl" ? "page-spread-left" : "page-spread-right";
     return pdf.pages[p]?.spread === trailing ? p - 1 : p;
@@ -2506,10 +2350,6 @@ async function openPdf(id, openDto, anns, positions) {
   );
 
   // One spread = up to two pages (left/right) in a flex host. Each page is a
-  // positioned wrapper: the rendered <img> backdrop + a text layer of selectable
-  // spans over it. Persistent elements (content swapped per turn) avoid a decode
-  // flash. A single viewport-fixed overlay paints highlights/bookmarks/search,
-  // so its SVG coordinates match the spans' `getClientRects()` directly.
   const host = document.createElement("div");
   host.className = "reader-pdf-spread";
   // RTL (Japanese/manga): the spread renders right-to-left (lower page on the
@@ -2620,12 +2460,6 @@ async function openPdf(id, openDto, anns, positions) {
 }
 
 // Open an image-based fixed-layout KFX (manga / comic) in the spread reader.
-// Reuses the ENTIRE PDF spread machinery — RTL facing-page pairing, responsive
-// single/double, navigation, progress, bookmarks, TOC, resize, zoom, night mode
-// — so `readerMode` is "pdf". The only difference from a real PDF: each page
-// image is a static blob URL extracted from the KFX section's `<img>` (carried in
-// `pdf.kfxImages`), which `pdfFetchPage` returns directly instead of rendering on
-// demand. Spread pairing uses the section `page-spread-left/right` properties.
 async function openFxl(id, openDto, anns, positions) {
   readerMode = "pdf";
   bookId = id;
@@ -2650,9 +2484,6 @@ async function openFxl(id, openDto, anns, positions) {
   }
 
   // Per page (= per spine section): image href (backend-scanned manifest),
-  // viewport size, spread side, and the structural eids (so a bookmark /
-  // last-read resolves to its page). FXL sections always ship html inline
-  // (tiny scaffolds), so the eid scan stays local.
   const eidsOf = (html) => {
     const out = [];
     const re = /data-eid="(\d+)"/g;
@@ -2699,10 +2530,6 @@ async function openFxl(id, openDto, anns, positions) {
   );
 
   // Stream the page images in: the resume window first (the "back 1%, forward
-  // 2%" priority), then forward to the end, then the front-of-book stub. Each
-  // arrival fills its page slot; the spread renderer awaits the specific page
-  // it needs via `pdfFetchPage` → `resLoaderRequire` (queue-jumping), so the
-  // first spread shows as soon as its 1–2 images land.
   resLoader = startResLoader(
     id,
     openDto.images,
@@ -2815,9 +2642,6 @@ async function openFxl(id, openDto, anns, positions) {
 }
 
 // FXL fetch priority: the user's resume window — back max(2, 1%) pages,
-// forward max(4, 2%) — then forward to the end, then the front-of-book stub
-// (reading-direction bias). Page indices are logical reading order, so this
-// is RTL-agnostic. Returns hrefs for the loader queue.
 function fxlPriorityHrefs(srcs, start, count) {
   const back = Math.max(2, Math.ceil(count * 0.01));
   const fwd = Math.max(4, Math.ceil(count * 0.02));
@@ -2830,10 +2654,6 @@ function fxlPriorityHrefs(srcs, start, count) {
 }
 
 // eid → page index for a PDF book: every word's eid and every page's structural
-// eids (image/container/page_template) map to that page. First page wins, so an
-// eid shared structurally resolves to its earliest page. Backs annotation /
-// search / resume → page navigation, including image-only pages (whose bookmark
-// anchors to a page eid that has no word).
 function buildPdfEidIndex(pages) {
   const map = new Map();
   pages.forEach((p, i) => {
@@ -2851,10 +2671,6 @@ function clearPdfOverlay() {
   pdf.overlayer?.element.remove();
   const ov = new Overlayer();
   // The Overlayer sets `position:absolute; width:100%` inline; override to a
-  // viewport-fixed box so its SVG user-coords match the spans' viewport
-  // `getClientRects()` directly. Inline (beats any class). Below topbar/panels
-  // (z 1100), above the page image; pointer-transparent so selection reaches
-  // the spans.
   Object.assign(ov.element.style, {
     position: "fixed",
     inset: "0",
@@ -2945,9 +2761,6 @@ function pdfGoTo(i) {
 }
 
 // Render the current spread — instant when it's already cached (the prefetched
-// common case), else debounced. Holding the page-turn key then flips through
-// cached pages smoothly and coalesces past the cache to the page you land on,
-// so renders don't pile onto the PDFKit render backend.
 function pdfScheduleRender() {
   clearTimeout(pdf.renderTimer);
   // Fixed-layout KFX images are already in memory — render now, no debounce.
@@ -2964,9 +2777,6 @@ function pdfScheduleRender() {
 }
 
 // Render width to request for a page: fit it to the stage height, but in a
-// `half` (double-page) layout also cap to half the stage width so the spread
-// fits. At device resolution, capped (so a huge HiDPI window doesn't ask for an
-// absurd bitmap) and quantized to 50px so layout jitter doesn't bust the cache.
 function pdfRenderWidth(page, half) {
   const stage = $("#reader-stage");
   const sw = stage?.clientWidth || 1200;
@@ -2998,7 +2808,6 @@ function pdfFetchPage(page, width) {
   // Fixed-layout KFX: the page image is a blob URL streamed in by the resource
   // loader — return it directly when it's landed, else await that page's
   // fetch (queue-jumping the background stream). No resolution cache;
-  // `width` is irrelevant (the blob is the full-size page).
   if (pdf?.kfxImages) {
     const hit = pdf.kfxImages[page];
     if (hit) return Promise.resolve(hit);
@@ -3034,9 +2843,6 @@ function pdfFetchPage(page, width) {
 }
 
 // The displayed size (CSS px) of a page in the current spread: fit to the stage
-// height, capped to its width share (half the stage in a double spread). Matches
-// the contained-image box exactly, so the wrapper holds the image *and* the text
-// layer with no letterboxing — spans positioned by page-fraction then align.
 function pdfDisplaySize(page, half) {
   const stage = $("#reader-stage");
   const sw = (stage?.clientWidth || 1200) - 16; // paginator-host padding (8×2)
@@ -3061,9 +2867,6 @@ function sizePdfPage(wrap, page, half) {
 }
 
 // Lay a page's KFX text layer over its image as transparent, selectable spans:
-// each run absolutely positioned by its page-fraction box, the text scaled
-// horizontally (scaleX) to fill the run width so selection + highlight rects
-// track the underlying glyphs. Empty for an image-only page.
 function renderPdfTextLayer(textEl, page) {
   textEl.replaceChildren();
   const words = pdf.pages[page]?.words;
@@ -3094,10 +2897,6 @@ function renderPdfTextLayer(textEl, page) {
 }
 
 // Lay a page's handwritten-ink SVG(s) over its image, under the text layer.
-// Async (the cached overlay SVG is fetched once per page) and token-guarded so a
-// superseded turn never paints stale ink. A no-ink page — or ink toggled off —
-// clears the layer. The inner SVG (canvas-unit viewBox) is stretched to the page
-// box: the device maps its drawing surface onto the page rectangle.
 async function renderPdfInkLayer(inkEl, page, token) {
   if (!inkEl) return;
   inkEl.replaceChildren();
@@ -3165,11 +2964,6 @@ function repaintPdfOverlay() {
 }
 
 // Paint a corner marker at the top-right of each bookmarked page in the spread —
-// the Kindle's bookmark-ribbon convention, applied to every PDF bookmark
-// (native or imported) so they're consistent. A bookmark's anchor eid resolves
-// only to its *page* here (not a text range), matching how a fixed-layout
-// bookmark reads on the device. Same `ann-<id>` key as the reflowable painter,
-// so a removed bookmark clears with the fresh overlayer.
 function paintPdfPageBookmarks(ov) {
   for (const ann of annotations) {
     if (ann.hidden || ann.kind !== "bookmark" || ann.eid_start == null) continue;
@@ -3182,10 +2976,6 @@ function paintPdfPageBookmarks(ov) {
 }
 
 // Render the current spread (1 or 2 pages by the spread mode), then warm the
-// next + previous spread so a turn is immediate. The page wrapper(s) + text
-// layer(s) are placed synchronously (so selection + the overlay are live before
-// the image arrives); both <img> srcs swap **together** when fetched — so a
-// two-page turn updates as one frame, never left-then-right.
 async function pdfRenderCurrent() {
   if (!pdf) return;
   const token = ++pdf.token;
@@ -3465,8 +3255,6 @@ function syncZoomControl() {
 
 // Night mode = CSS-invert the page (white→black) on the spread host (PDF) or the
 // paginator host (notebook, where the class survives page turns). No re-render.
-// (Zoom is applied by the page-sizing math — pdfDisplaySize / nbkDisplaySize — not
-// here, so it scales the box uniformly and the viewport scrolls.)
 function applyPdfStyle() {
   if (pdf) pdf.host.classList.toggle("invert", !!pdfStyle.invert);
   else if (nbk) $("#reader-paginator-host")?.classList.toggle("invert", !!pdfStyle.invert);
@@ -3484,9 +3272,6 @@ function setPdfSpread(v) {
 }
 
 // Toggle the standalone cover (page 0 alone, then odd-aligned pairs) vs pairing
-// from page 0. PDF-only — the notebook always pairs from 0 — and a no-op unless
-// the current spread is double; pdfRenderCurrent re-snaps `pdf.page` to the new
-// boundary so a turn from either alignment lands cleanly.
 function setPdfCover(on) {
   pdfStyle.cover = !!on;
   savePdfStyle();
@@ -3497,9 +3282,6 @@ function setPdfCover(on) {
 }
 
 // Butt the two facing pages together with no gutter (manga cross-page spreads)
-// vs the default gutter (scanned text PDFs). Re-renders because the page-sizing
-// budget changes with the gutter; a no-op visually unless the current spread is
-// double (the `.merged` class is gated on `half` in pdfRenderCurrent).
 function setPdfMerge(on) {
   pdfStyle.merge = !!on;
   savePdfStyle();
@@ -3527,10 +3309,6 @@ function setPdfInk(on) {
 
 let zoomCommitTimer = null;
 // Shared fixed-layout zoom (PDF + notebook), clamped to [1, 3]. Resizes the visible
-// page(s) immediately and cheaply — no SVG re-parse (notebook) or raster re-fetch
-// (PDF) — so slider drags and trackpad pinches stay smooth. The notebook is vector,
-// so the resize is already crisp; the PDF raster just scales until a debounced
-// re-render redraws it crisply at the settled zoom.
 function setPdfZoom(z, anchor) {
   const old = pdfStyle.zoom || 1;
   const next = Math.max(PDF_ZOOM_MIN, Math.min(PDF_ZOOM_MAX, Math.round((z || 1) * 100) / 100));
@@ -3588,18 +3366,6 @@ function handleZoomKey(e) {
 }
 
 // ---- notebook (handwritten Scribe) mode -----------------------------------
-//
-// A Scribe notebook is a fixed-layout handwritten page: one inline SVG per page
-// (`notebook_page_svg`), with no text / search / annotations / reflow. It rides
-// the same reader shell as a book — the PDF pattern taken one step further — so
-// it inherits the topbar + auto-hide, footer progress, nav zones, `--reader-*`
-// tokens, and Esc-peel keyboard skeleton for free. The page SVG carries its own
-// viewBox and self-sizes (`.reader-notebook-page`), so there's no raster pipeline
-// and no JS sizing: the renderer is simpler than the PDF's.
-//
-// Everything a handwritten page can't act on, hidden: it has no TOC, nothing to
-// bookmark, no text to search and nothing to annotate. Aa / display settings is
-// deliberately absent from the list — a notebook honours it.
 const NOTEBOOK_HIDDEN = [
   "#reader-toc",
   "#reader-bookmark",
@@ -3678,10 +3444,6 @@ function closeNotebook() {
 }
 
 // Render the spread at page `i` (clamped): one page, or two side by side in double
-// mode. SVGs are cached and the next spread prefetched, so a turn is usually
-// instant. Token-guarded: a slow fetch for a page you've already left can't paint
-// over the current one. The page SVG is viewBox-only and self-sizes via CSS
-// (`.reader-notebook-page`), reusing the PDF `.reader-pdf-spread` host + gutter.
 async function nbkShowPage(i) {
   if (!nbk || nbk.pageCount === 0) return;
   i = clampPage(i, nbk.pageCount);
@@ -3781,9 +3543,6 @@ function nbkStep() {
 }
 
 // Display size (CSS px) of one notebook page: fit to the stage height, capped to
-// its width share (half in a double spread), then × zoom. Mirrors pdfDisplaySize —
-// the SVG is sized explicitly (not CSS-contained) so zoom enlarges the box and the
-// viewport scrolls. Aspect is the page's viewBox W/H, so the SVG fills with no gap.
 function nbkDisplaySize(aspect, half) {
   const stage = $("#reader-stage");
   const sw = (stage?.clientWidth || 1200) - 16; // paginator-host padding (8×2)
@@ -3948,12 +3707,6 @@ function isNotebookOpen() {
 }
 
 // Reflowable fetch priority: the resume section's images (±1 section — the
-// reflowable analogue of "back 1%, forward 2%"), then the remaining sections
-// in spine order. Per-section hrefs come from the backend manifest, so this
-// works whether or not a section's HTML shipped inline; the resume section
-// always ships inline (the backend windows around the same saved position),
-// so the needle scan only has to look at inline sections. Images no section
-// references trail in manifest order, appended by the loader (which dedupes).
 function reflowPriorityHrefs(dto, resumeEid) {
   const perSection = dto.sections.map((s) => s.image_hrefs || []);
   let idx = 0;
@@ -4088,26 +3841,12 @@ async function open(id) {
   $("#reader-paginator-host").replaceChildren(paginator);
 
   // Apply the incoming section's layout mode (full-bleed image vs text) while
-  // the paginator has no live view — the attribute writes are free then, and
-  // the section's first columnize runs directly in its final geometry instead
-  // of laying out in the outgoing section's mode and re-rendering on relocate
-  // (which cost several full re-layouts per section entry; seconds on a long
-  // vertical chapter). The relocate handler's applyLayout stays as a safety
-  // net and no-ops when the mode already matches.
   paginator.addEventListener("prerender", ({ detail }) => applyLayout(detail.index));
   paginator.addEventListener("create-overlayer", ({ detail: { doc, attach } }) => {
     const overlayer = new Overlayer();
     attach(overlayer);
     overlays.push({ doc, overlayer });
     // Catch up on any deferred images that landed in the gap between this
-    // section's load() (which reserved placeholders) and this event. The
-    // background patch (patchLiveSectionImages on each resource chunk) only
-    // sweeps docs already in `overlays`; a fast-arriving image — e.g. the cover
-    // on first open — could land before create-overlayer pushed this doc, so
-    // that sweep would miss it and no later chunk re-includes the href. Without
-    // this the image sits on its placeholder until a page-turn-and-back forces
-    // a fresh load(). The doc is in `overlays` now, so anything still in flight
-    // is covered by the chunk sweep.
     if (resLoader) patchPendingImages(doc, resLoader.resolve);
     paintAnnotations(doc, overlayer);
     // If a search is active when a new section first paints, paint its matches
@@ -4118,16 +3857,8 @@ async function open(id) {
     // Text selected in the section → offer the highlight/note toolbar.
     doc.addEventListener("mouseup", () => onSelection(doc));
     // The paginator focuses the section iframe after navigating (`focusView`),
-    // so arrow/space keydowns land in the iframe document, not the parent — the
-    // parent-document listener alone goes deaf until you click out, and the
-    // arrows stop turning pages. Listen on each section's doc too.
     doc.addEventListener("keydown", onKey, true);
     // Kill the native context menu inside the section iframe — its only items
-    // are the useless "Open Frame in New Window" and a Reload that boots you
-    // back to the library. Book content isn't editable and selection is handled
-    // by our own toolbar (mouseup above), so suppress it unconditionally. The
-    // parent-document suppressor in library.js can't reach here: contextmenu
-    // events don't bubble out of an iframe to the host document.
     doc.addEventListener("contextmenu", (e) => e.preventDefault());
   });
   paginator.addEventListener("relocate", ({ detail }) => {
@@ -4265,10 +3996,6 @@ async function close() {
 function wire() {
   $("#reader-close")?.addEventListener("click", () => close());
   // Top bar auto-hide: hovering the top edge brings it back (if faded) and pauses
-  // the fade; leaving re-arms it. A click on the dormant (faded) bar also brings
-  // it back — the capture-phase click + stopPropagation keeps that revealing click
-  // (or a tap, where there's no hover) from also firing the invisible button under
-  // the cursor, so it can't accidentally hit the ← close button and drop you out.
   const topbar = topbarEl();
   if (topbar) {
     topbar.addEventListener("mouseenter", () => {
@@ -4356,10 +4083,6 @@ function wire() {
   $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
   $("#rps-zoom")?.addEventListener("input", (e) => setPdfZoom(parseFloat(e.target.value)));
   // Trackpad pinch-zoom for fixed-layout modes. macOS WebKit fires the proprietary
-  // gesture* events with a cumulative `scale`; other engines surface a pinch as
-  // ctrl+wheel. Both feed the shared zoom. preventDefault stops the webview's own
-  // magnification / page-zoom; a plain (no-ctrl) wheel is left alone so a zoomed
-  // page still scrolls.
   const fixedLayout = () => readerMode === "pdf" || readerMode === "notebook";
   const stageEl = $("#reader-stage");
   let pinchBase = 0; // zoom captured at gesturestart; >0 while a pinch is active
@@ -4405,11 +4128,6 @@ function wire() {
       el.addEventListener("change", onStyleInput);
     });
   // Re-apply layout whenever the reading area changes size. Vertical 2-col mode
-  // keys off the paginator's live aspect ratio + height; fixed-layout modes re-fit
-  // the spread (auto single/double) AND repaint the viewport-fixed overlay, whose
-  // highlight/bookmark/search coords come from the spans' getClientRects and would
-  // otherwise stay pinned to the old spread position. rAF coalesces bursts into one
-  // apply per frame.
   let resizeTick = null;
   const scheduleReaderResize = () => {
     if (resizeTick) cancelAnimationFrame(resizeTick);
@@ -4422,12 +4140,6 @@ function wire() {
   };
   window.addEventListener("resize", scheduleReaderResize);
   // A side panel (TOC / annotations / search) opening or closing resizes the stage
-  // WITHOUT a window `resize`, so the fixed-layout overlay would keep stale coords
-  // and drift off the re-centered spread (the ink layer is a child of the page
-  // wrapper and reflows for free; the reflowable paginator has its own internal
-  // ResizeObserver). Observe the stage so any size change — window, panel, drag —
-  // re-fits and repaints. Fires once on observe (harmless: guarded + idempotent).
-  // (`stageEl` is the same element the pinch-zoom handlers above bound to.)
   if (stageEl && typeof ResizeObserver !== "undefined")
     new ResizeObserver(scheduleReaderResize).observe(stageEl);
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
@@ -4480,9 +4192,6 @@ if (document.readyState === "loading") {
 }
 
 // The palette goes out alongside the resolver because a caller listing
-// annotations needs both: the color to swatch a row with, and whether a stored
-// name is one the device writes — a highlight is labelled "Yellow highlight"
-// only when the device said yellow, never by echoing a raw value back.
 window.sidleReader = {
   open,
   close,

@@ -1,15 +1,4 @@
 //! Keep a book's on-disk filenames in sync with its (edited) metadata.
-//!
-//! Import names every file `[Author] Title (Year).<ext>` via
-//! [`format_basename`]. When the user later edits the title/author/year in the
-//! metadata modal, the DB row moves but the files keep their old names — so the
-//! library folder drifts from what the gallery shows, and a forced re-convert
-//! derives the *old* basename from the stale source stem. This module renames
-//! the `epub`/`kfx`/`pdf` files to match the current metadata.
-//!
-//! Covers and thumbnails are sha-named (`cover.jpg`), never basename-named, so
-//! they never move. A rename doesn't touch bytes, so `kfx_sha256` is unchanged
-//! and the on-device filename infix (and annotation-sync matching) stays valid.
 
 use std::path::Path;
 

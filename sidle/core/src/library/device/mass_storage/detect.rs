@@ -66,9 +66,6 @@ fn inspect(mount: &Path) -> Option<DeviceInfo> {
     let version_path = mount.join("system").join("version.txt");
     let raw = std::fs::read_to_string(&version_path).ok()?;
     // version.txt is the Kindle-only marker + firmware/model line; it carries
-    // NO serial. The serial lives in the USB `iSerial` descriptor (read via
-    // nusb), with the persisted `.sidle/device_id` and then an anon id as
-    // fallbacks if USB enumeration is unavailable.
     let serial = usb_kindle_serial()
         .or_else(|| ensure_device_id(mount))
         .unwrap_or_else(|| anon_serial(mount));
@@ -88,9 +85,6 @@ fn inspect(mount: &Path) -> Option<DeviceInfo> {
 }
 
 /// Read or create `<kindle>/.sidle/device_id`. We use this as a stable
-/// per-device identity when the firmware's `version.txt` doesn't include
-/// `S/N:` (the case on Paperwhite 11+ and similar). Generated once per
-/// Kindle; survives firmware updates because it lives on the data partition.
 fn ensure_device_id(mount: &Path) -> Option<String> {
     let dir = mount.join(".sidle");
     let id_path = dir.join("device_id");
@@ -135,15 +129,6 @@ fn anon_serial(mount: &Path) -> String {
 }
 
 /// The Kindle's real serial, read from its USB `iSerial` descriptor — the same
-/// identity Amazon exposes over MTP, and the only on-device source (it is NOT in
-/// `system/version.txt`). `nusb::list_devices` enumerates without opening the
-/// device, so the serial comes straight from the cached descriptor.
-///
-/// Filters to Amazon (VID 0x1949). With one Kindle attached that's
-/// unambiguous; with two (a KOA2 *and* a Scribe), the mounted mass-storage one
-/// is the device presenting a Mass Storage interface, so we prefer that to
-/// avoid reading the Scribe's serial for the mounted volume. `None` if USB
-/// enumeration is unavailable or no Amazon device is present.
 fn usb_kindle_serial() -> Option<String> {
     let amazon: Vec<nusb::DeviceInfo> = nusb::list_devices()
         .wait()

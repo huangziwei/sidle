@@ -1,32 +1,6 @@
 //! Surgical TOC repair for a KFX container: derive a chapter list from the
 //! book's own in-book Contents page and overwrite a deficient/front-matter
 //! `nav_container` toc with it, in place.
-//!
-//! [`propose_toc`] reads the chapter list off the book's Contents page (the same
-//! page [`bokai validate toc`](crate::validate::source::toc) reads as ground
-//! truth); [`set_toc`] writes a caller-supplied list into the toc container;
-//! [`repair_toc`] is the two composed. The write rebuilds the toc
-//! `nav_container`'s `entries` via the container edit harness
-//! ([`edit_container`]): the toc container keeps its `nav_type` and
-//! `nav_container_name` symbol and every other fragment passes through verbatim,
-//! so **no doc-symbol growth is needed** — the one primitive the harness lacks.
-//!
-//! Because the KFX *is* the reader/device file, repairing it fixes the nav any
-//! app renders straight from the KFX; re-importing then re-derives the EPUB nav
-//! from the corrected source. One source edit, both surfaces.
-//!
-//! ⚠️ Device strictness: the offline reader is more permissive than a Kindle on
-//! nav. A repaired container must still clear the offline entity differ and a
-//! device round-trip before it's trusted on-device.
-//! The nav-unit shape here mirrors bokai's proven `pdf_to_kfx` toc export exactly
-//! (`representation:{label}` + `target_position:{id, offset:0}`).
-//!
-//! v1 scope: the book must already carry a `book_navigation` fragment (every
-//! reflowable KFX does). A deficient toc container is overwritten in place; when
-//! none exists, a fresh inline toc container is added, reusing the system `toc`
-//! symbol ($212) for its name — so no doc-symbol growth is needed. A book with no
-//! `book_navigation` at all, and the fixed-layout referenced-container shape, are
-//! not yet handled.
 
 use std::collections::{HashMap, HashSet};
 
@@ -48,9 +22,6 @@ use crate::model::LandmarkType;
 use crate::model::toc_shape::{TocNode, merge_by_document_order, nest_by_label_indent};
 
 /// One chapter in an edited TOC. `eid` is the target element's `$155 id`; the
-/// target offset is always written as 0 — the Kindle TOC convention (a jump
-/// lands on the chapter-start element, and a non-zero offset can wedge the
-/// firmware). Nesting is supported for sub-chapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocEntry {
     pub label: String,
@@ -92,10 +63,6 @@ impl TocNode for TocEntry {
 /// Overwrite the KFX's toc `nav_container` entries with `entries` — or, when the
 /// book declares no toc container, synthesize a fresh inline one in its
 /// `book_navigation`. In place.
-///
-/// Errors (via [`KfxError::InvalidKfx`]) if `entries` is empty, if the bytes
-/// aren't a KFX container, or if the book has no `book_navigation` at all to
-/// attach a toc to (creating one from scratch is not yet supported).
 pub fn set_toc(kfx_bytes: &[u8], entries: &[TocEntry]) -> Result<Vec<u8>, KfxError> {
     if entries.is_empty() {
         return Err(KfxError::InvalidKfx(
@@ -132,11 +99,6 @@ pub fn set_toc(kfx_bytes: &[u8], entries: &[TocEntry]) -> Result<Vec<u8>, KfxErr
 }
 
 /// Add a fresh inline toc `nav_container` to the book's existing
-/// `book_navigation` ($389) — the no-existing-toc case that most chapterless
-/// books hit. The container reuses the system `toc` symbol ($212) for both its
-/// `nav_type` and `nav_container_name`, so no doc-symbol growth is needed; every
-/// other fragment (and reading order) passes through untouched. Errors if the
-/// book has no `book_navigation` to attach to.
 fn synthesize_toc(
     kfx_bytes: &[u8],
     book: &BookData,
@@ -443,35 +405,20 @@ fn replace_container_entries(container: &IonValue, new_entries: &[IonValue]) -> 
 // ---------------------------------------------------------------------------
 
 /// Minimum distinct chapter links for a storyline to open a Contents page
-/// (below this, a stray forward link or two is just noise). Mirrors the TOC
-/// validator's evidence gate, so the proposer only fires on the pages the
-/// detector reads as ground truth.
 const MIN_CONTENTS_LINKS: usize = 5;
 
 /// Minimum links for a storyline *continuing* an already-found Contents page
-/// ([`contents_page_entries`]). Lower than [`MIN_CONTENTS_LINKS`], which has to
-/// tell a Contents page from noise across a whole book: here the run is already
-/// attested by the storyline before it, and a page's last fragment holding two
-/// remaining chapters is ordinary.
 const MIN_CONTINUATION_LINKS: usize = 2;
 
 /// Derive a chapter list for [`set_toc`] from the book's own structure: the TOC
 /// it already declares, plus whatever its in-book Contents page knows that the
 /// declaration doesn't, nested to the depth its labels evidence.
-///
-/// Every declared entry survives — a proposal is something the user is offered
-/// in place of what they have, so it may add chapters and add structure but may
-/// never drop an entry the reader can navigate by today. Empty only when the
-/// book declares no TOC *and* no page carries enough links to trust.
 pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     Ok(propose_from_book(&book))
 }
 
 /// One-call TOC repair: derive the chapter list ([`propose_toc`]) and write it
-/// with [`set_toc`] (overwriting a deficient toc container, or synthesizing one
-/// when the book has none). Errors if nothing could be derived, or if the book
-/// has no `book_navigation` to attach to.
 pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let entries = propose_from_book(&book);
@@ -482,8 +429,6 @@ pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
     }
     // Since the proposal starts from the declared TOC, a book with nothing to
     // add and no structure to restore proposes exactly what it already has.
-    // Writing that back is not a repair — say so, rather than report a fix that
-    // changed nothing.
     if entries == declared_entries(&book) {
         return Err(KfxError::InvalidKfx(
             "the declared TOC already lists everything the book evidences".into(),
@@ -495,12 +440,6 @@ pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
 /// Build the proposal from a loaded container: merge the declared TOC with the
 /// in-book Contents page in reading order, then restore the levels the labels
 /// evidence.
-///
-/// The cover and the Contents page itself are deliberately *not* added from the
-/// book's landmarks. A reader's chapter list reaches them because the renderer
-/// composes the landmarks into its own view (see `bokai::export::build_package`),
-/// exactly as a Kindle does — writing them into the toc container as well would
-/// list them twice for every book whose publisher already put them there.
 fn propose_from_book(book: &BookData) -> Vec<TocEntry> {
     let order = document_order(book);
     let declared = declared_entries(book);
@@ -510,12 +449,6 @@ fn propose_from_book(book: &BookData) -> Vec<TocEntry> {
 }
 
 /// Where every element sits in the book, walked from the first reading order's
-/// sections and each section's page templates (which follow `story_name` into
-/// the storylines they render), so the scale covers exactly what a reader
-/// scrolls through.
-///
-/// The first placement wins for an id reachable from more than one template —
-/// portrait and landscape variants render the same storyline.
 #[derive(Default)]
 struct DocumentOrder {
     /// `eid →` its ordinal across the whole book.
@@ -590,24 +523,6 @@ fn declared_nav_unit(entry: &IonValue) -> Option<TocEntry> {
 }
 
 /// The chapter list on the book's own in-book Contents page.
-///
-/// A Contents page is a *run* of storylines, not one storyline: a long list is
-/// split across several, and taking only the densest returns whichever fragment
-/// happens to be biggest — the middle of the list, missing both ends. So the
-/// densest qualifying storyline seeds the run (the one a `toc` landmark marks,
-/// when present) and the run grows through its neighbours in reading order for
-/// as long as they keep looking like a Contents page.
-///
-/// "Looking like a Contents page" is link *density* plus nearness in the book,
-/// not link count. Nearly every line of a Contents page is a link, while a
-/// chapter with footnotes has a handful among its prose; and the fragments of
-/// one page share a section, while another work's own Contents page — which
-/// looks exactly as link-dense — sits many sections away. Together they keep the
-/// run from swallowing either the chapter that follows the page or the rest of
-/// an anthology's per-work Contents pages, which are a level of structure this
-/// has no way to place.
-///
-/// Entries come back in document order, deduped by target.
 fn contents_page_entries(book: &BookData, order: &DocumentOrder) -> Vec<TocEntry> {
     let anchors = extract_anchors(book);
     let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) else {
@@ -623,9 +538,6 @@ fn contents_page_entries(book: &BookData, order: &DocumentOrder) -> Vec<TocEntry
             continue;
         }
         // Where the storyline *is*, not where it points: a Contents page links
-        // forward into the chapters, so its targets' positions would sort it
-        // among them and make every page in the book look adjacent to the
-        // Contents page.
         let mut ids = HashSet::new();
         collect_ids(storyline, &mut ids);
         page.at = ids
@@ -714,9 +626,6 @@ impl ContentsPage {
     }
 
     /// Enough of a Contents page to continue `page`, and near enough in the book
-    /// to be the same page. The fragments of one page share a section or spill
-    /// into the next; a per-work Contents page deeper in an anthology is just as
-    /// link-dense but sections away.
     fn continues(&self, page: &ContentsPage) -> bool {
         self.links.len() >= MIN_CONTINUATION_LINKS
             && self.is_link_dense()
@@ -728,14 +637,6 @@ impl ContentsPage {
 }
 
 /// Walk a storyline tree in document order, recording `(display_text,
-/// target_eid)` for every internal `link_to` — both element-level links (`$179`
-/// on the element) and inline style-event runs (`$142` events each carrying
-/// `$179`) — and, alongside them, how many elements carry text and how many
-/// carry a link, which is what tells a Contents page from a chapter.
-///
-/// A run's text is the char-slice `[offset, offset+length)` of the element's
-/// `$145` text; an element-level link uses the element's full text. Links whose
-/// anchor resolves to no internal position (external URIs) are skipped.
 fn collect_chapter_links(
     value: &IonValue,
     book: &BookData,
@@ -876,9 +777,6 @@ fn clean_label(raw: &str) -> String {
 }
 
 /// Collapse `(label, eid)` pairs to one [`TocEntry`] per distinct target eid,
-/// keeping document order and the first label seen for each eid. `set_toc` writes
-/// every target at offset 0, so two links to different offsets of one element are
-/// indistinguishable in the result and fold into a single entry.
 fn dedup_entries(links: Vec<(String, i64)>) -> Vec<TocEntry> {
     let mut seen: HashSet<i64> = HashSet::new();
     let mut out = Vec::new();
@@ -972,9 +870,6 @@ mod tests {
     }
 
     /// End-to-end: overwrite the fixture's toc with a real chapter list, then
-    /// prove the rewritten container re-loads, the reader's toc extractor sees
-    /// the new entries, the TOC validator now passes, and it still converts to
-    /// EPUB.
     #[cfg(feature = "validate")]
     #[test]
     fn set_toc_rewrites_and_validates_ok() {
@@ -1090,9 +985,6 @@ mod tests {
     }
 
     /// End-to-end on a book that genuinely needs the repair: strip the declared
-    /// TOC, and `repair_toc` rebuilds it from the in-book Contents page. The
-    /// result re-loads, is no longer SUSPECT, and still converts to EPUB. A
-    /// no-op if this fixture ships no Contents page to rebuild from.
     #[cfg(feature = "validate")]
     #[test]
     fn repair_rebuilds_a_stripped_toc_from_the_contents_page() {
@@ -1133,9 +1025,6 @@ mod tests {
     }
 
     /// The invariant every caller leans on: whatever else the proposal does, it
-    /// never drops an entry the book already declares. A proposal is offered in
-    /// place of what the reader has today, so losing one would make the "repair"
-    /// a regression.
     #[test]
     fn a_proposal_never_loses_a_declared_entry() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -1168,9 +1057,6 @@ mod tests {
     }
 
     /// The synthesize path's core: given a `book_navigation` holding only a
-    /// landmarks container, `add_toc_container` prepends an inline toc container
-    /// (the system `toc` symbol for both `nav_type` and `nav_container_name`) and
-    /// leaves the landmarks one in place.
     #[test]
     fn add_toc_container_prepends_inline_toc() {
         let landmarks = IonValue::Annotated(

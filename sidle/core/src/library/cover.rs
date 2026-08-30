@@ -1,15 +1,4 @@
 //! Putting a cover everywhere a book keeps one.
-//!
-//! A book's cover lives in four places, and they have to agree: the sidecar the
-//! gallery renders, the picker thumbnail derived from it, the image embedded in
-//! the EPUB (what an external reader shows), and the image embedded in the KFX
-//! (what the Kindle's home tile and sleep screen render). Whether the bytes come
-//! from Amazon's catalogue or from a file the user picked, the same four writes
-//! follow — so they live here once.
-//!
-//! Everything past the sidecar is best-effort: the sidecar is authoritative for
-//! sidle's own UI, so a failed EPUB or KFX embed is logged and the cover still
-//! counts as changed.
 
 use std::path::Path;
 
@@ -34,10 +23,6 @@ pub enum Outcome {
 }
 
 /// Re-fetch one book's colour cover from Amazon and install it.
-///
-/// The catalogue ASIN is the only value `/images/P/` answers to; a book carrying
-/// only bokai's fabricated 32-char id has nothing to fetch with, which is
-/// [`Outcome::NoAsin`] rather than a failure.
 pub fn refetch(conn: &Connection, paths: &LibraryPaths, book: &BookRow) -> Outcome {
     let Some(asin) = book.amazon_asin.as_deref() else {
         return Outcome::NoAsin;
@@ -130,10 +115,6 @@ pub fn install(
     }
 
     // And into the KFX — that's the copy pushed to the Kindle, and its embedded
-    // cover drives the home tile / sleep-screen art. Rewriting it changes the
-    // bytes, but `kfx_sha256` is the book's frozen identity (the on-device
-    // filename infix), so `set_kfx_path_and_sha` preserves it: the new-cover KFX
-    // reaches the device under the same, stable filename.
     if let Some(kfx) = book.kfx_path.as_deref()
         && let Some(new_sha) = swap_or_insert_kfx_cover(book, kfx, bytes, tag)
     {
@@ -146,10 +127,6 @@ pub fn install(
 }
 
 /// Embed `bytes` as the KFX cover, returning the new sha256 (for `kfx_sha256`)
-/// or `None` on failure. Prefers an in-place swap; if the KFX declares no cover
-/// (an EPUB import whose source EPUB had none), `ensure_cover` has already
-/// inserted a cover into that EPUB, so we reconvert the KFX from it — giving the
-/// on-device tile / sleep-screen a real cover.
 pub fn swap_or_insert_kfx_cover(
     book: &BookRow,
     kfx: &str,
@@ -161,10 +138,6 @@ pub fn swap_or_insert_kfx_cover(
         Ok(sha) => Some(sha),
         Err(e) => {
             // The KFX may be rebuilt from its EPUB only when the EPUB is the
-            // SOURCE (`kind == "epub_to_kfx"`). Conversion runs source→target
-            // only, never the reverse: a KFX-sourced book's KFX is authoritative
-            // and must never be regenerated from its derived EPUB. So a swap
-            // failure on a KFX-sourced book is just logged, not "healed".
             let epub_is_source = book.kind.as_deref() == Some("epub_to_kfx");
             let Some(epub) = book.epub_path.as_deref().filter(|_| epub_is_source) else {
                 eprintln!(

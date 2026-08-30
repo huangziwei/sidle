@@ -1,11 +1,4 @@
 //! CSS declarations, typed and raw.
-//!
-//! [`Declaration`] is the typed "fat enum" the cascade consumes; its parse
-//! dispatch lives here, with the actual parsing functions in the `parse/`
-//! submodules. [`CssDecl`] is its raw string-level sibling: an ordered
-//! property/value list for code that assembles or rewrites CSS as text
-//! without interpreting it (KFX style conversion, export stylesheet
-//! assembly).
 
 use cssparser::Parser;
 
@@ -37,7 +30,6 @@ use super::properties::*;
 /// A parsed CSS declaration (property: value).
 ///
 /// This "fat enum" combines property identity and value in one type.
-/// Each variant corresponds to a CSS property and contains its parsed value.
 #[derive(Debug, Clone)]
 pub enum Declaration {
     // Colors
@@ -162,13 +154,6 @@ pub enum Declaration {
     BorderSpacing(Length),
 
     /// CSS-wide keyword (`inherit` | `initial` | `unset` | `revert`) — the
-    /// property name is captured for diagnostics but the cascade no-ops on
-    /// this variant. For inherited properties this matches CSS spec (the
-    /// inherited value already flows through `inherit_from_parent`). For
-    /// non-inherited properties an explicit `inherit` is meant to copy the
-    /// parent's value, which we don't implement yet — `margin: inherit` etc.
-    /// won't behave per spec, but that case is vanishingly rare in real
-    /// EPUBs (none of the reference books use it).
     UniversalKeyword {
         property: String,
         keyword: UniversalKeyword,
@@ -186,10 +171,6 @@ pub enum UniversalKeyword {
 
 impl Declaration {
     /// Parse a CSS declaration from a property name and value parser.
-    ///
-    /// Returns a Vec of declarations. For most properties this is a single declaration,
-    /// but shorthands like `margin`, `border`, etc. expand to multiple declarations.
-    /// Returns an empty Vec if the property is unknown or the value fails to parse.
     pub fn parse(name: &str, input: &mut Parser<'_, '_>) -> Vec<Self> {
         // Try shorthand properties first (they expand to multiple declarations)
         if let Some(decls) = Self::parse_shorthand(name, input) {
@@ -383,12 +364,6 @@ impl Declaration {
             "text-emphasis-style" | "-webkit-text-emphasis-style"
             | "-epub-text-emphasis-style"
             // The `text-emphasis` shorthand sets style (+ optional color). Aozora
-            // EPUBs (and most real ones) write the style-only form — `filled
-            // sesame`, `open circle`, … — whose value is identical to the
-            // longhand, so reuse the same parser. Without these arms the very
-            // common 圏点 (emphasis dots) are dropped at CSS-parse time and no
-            // `text_emphasis_style` reaches the KFX. A trailing color is
-            // ignored (rare); `text-emphasis: "<str>"` is left for the longhand.
             | "text-emphasis" | "-webkit-text-emphasis" | "-epub-text-emphasis" => {
                 parse_text_emphasis_style(input).map(Self::TextEmphasisStyle)
             }

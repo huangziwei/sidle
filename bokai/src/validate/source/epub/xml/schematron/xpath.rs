@@ -1,16 +1,4 @@
 //! The XPath subset epubcheck's Schematron assertions are written in.
-//!
-//! Every `<rule context>`, `<assert test>`, `<report test>`, `<let value>` and
-//! `<value-of select>` in the vendored `.sch` files is an XPath 2.0 expression,
-//! evaluated by Saxon in epubcheck. This evaluates the same expressions against
-//! [`Document`] — the constructs those 3500 lines actually use, and no more.
-//!
-//! What that comes to: the forward and reverse axes, name and kind tests,
-//! predicates, the comparison and boolean operators, `some`/`every … satisfies`,
-//! variables, and about two dozen functions. Anything outside it is a
-//! [`XPathError`] at parse time rather than a wrong answer at evaluation time —
-//! an assertion that cannot be evaluated must produce no finding at all, since a
-//! guessed verdict on a book is worse than a missing one.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -765,13 +753,6 @@ impl XPath {
 
     /// Reinterpret the expression as an XSLT **match pattern**, which is what a
     /// Schematron `<rule context>` is.
-    ///
-    /// A pattern says which nodes a rule applies to, not where to look from:
-    /// `h:a` matches every `<a>` in the document, and `opf:package/opf:metadata`
-    /// every `<metadata>` whose parent is a `<package>`. Evaluated as an
-    /// ordinary path from the document node, the first would select only a root
-    /// `<a>` and the second nothing at all. Rooting each relative branch at
-    /// `descendant-or-self::node()` turns one into the other.
     pub fn into_match_pattern(mut self) -> XPath {
         fn root(expr: &mut Expr) {
             match expr {
@@ -804,12 +785,6 @@ pub struct Context<'a> {
     pub position: usize,
     pub size: usize,
     /// `<let>` bindings and quantified variables.
-    ///
-    /// Each value is shared, not owned: a context is copied for every item a
-    /// step visits, and `epub-xhtml-30.sch` binds `$id-set` to `//*[@id]` —
-    /// every id in the document. Copying *that* per visited node is how one
-    /// chapter came to take seven minutes to validate. A binding is only
-    /// materialized where an expression actually reads it.
     pub vars: Bindings,
     /// Schematron's `current()` — the node the enclosing rule matched, which a
     /// predicate's `.` no longer refers to.
@@ -1204,9 +1179,6 @@ fn effective_boolean(seq: &[Item], doc: &Document) -> Result<bool, XPathError> {
         [Item::Num(n)] => *n != 0.0 && !n.is_nan(),
         [Item::Node(_)] => true,
         // A sequence of more than one item is true iff it starts with a node;
-        // anything else is a type error in XPath, but here it can only come
-        // from a schema doing something this port does not model, and a `false`
-        // verdict is the one that cannot invent a finding.
         [first, ..] => matches!(first, Item::Node(_)) || !string_value(first, doc).is_empty(),
     })
 }
@@ -1312,13 +1284,6 @@ fn atom_equal(a: &Item, b: &Item, doc: &Document) -> bool {
 /// Compile and cache a regular expression. The same handful of patterns are
 /// evaluated once per matching element in a book, so compiling each time would
 /// dominate the cost of validating a large content document.
-///
-/// `flags` is XPath 2.0's optional flags argument (`i` case-insensitive, `m`
-/// multi-line, `s` dot-matches-all, `x` ignore whitespace), spelled as the
-/// inline group the regex crate takes. Dropping it would make
-/// `matches(…, 'text/html;\s*charset=utf-8', 'i')` — a real rule in the EPUB 3
-/// content-document assertions — reject the uppercase spelling every second
-/// book uses.
 fn regex_for(pattern: &str, flags: &str) -> Result<&'static Regex, XPathError> {
     use std::sync::Mutex;
     static CACHE: OnceLock<Mutex<HashMap<String, &'static Regex>>> = OnceLock::new();
@@ -1668,9 +1633,6 @@ mod tests {
     }
 
     /// The optional flags argument of the three regular-expression functions.
-    /// Dropping it turns the EPUB 3 content-document rule
-    /// `matches(…,'text/html;\s*charset=utf-8','i')` into a case-sensitive
-    /// test, which rejects the uppercase `charset=UTF-8` half the world writes.
     #[test]
     fn regular_expression_flags_are_honoured() {
         assert!(truth(

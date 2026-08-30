@@ -1,10 +1,4 @@
 //! Tauri command for the built-in reader: KFX → renderable DOM.
-//!
-//! `reader_open` looks up a book's KFX path, runs bokai's KFX→DOM front half
-//! (with `data-eid` stamping so annotations can anchor), and returns the
-//! sections + resources + TOC + metadata the webview reader needs. Resources
-//! (images, `style.css`) are base64-encoded for the JSON IPC boundary; the
-//! frontend rebuilds blobs from them.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -53,9 +47,6 @@ pub struct ReaderResourceDto {
 }
 
 /// Manifest entry for an image the frontend fetches on demand via
-/// [`reader_fetch_resources`] — no bytes at open time, so a 100MB manga's
-/// `reader_open` payload is kilobytes. `width`/`height` (when the KFX carries
-/// them) let the reader reserve layout space before the pixels arrive.
 #[derive(Debug, Serialize)]
 pub struct ReaderImageDto {
     pub href: String,
@@ -73,9 +64,6 @@ pub struct ReaderTocDto {
 }
 
 /// What `reader_open` returns: either today's reflowable HTML book or a
-/// fixed-layout PDF-backed book. Serialized internally-tagged, so the frontend
-/// branches on `mode` (`"reflowable"` | `"pdf"`) and the reflowable variant
-/// still exposes its fields at the top level (no change for that path).
 #[derive(Debug, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReaderOpen {
@@ -105,10 +93,6 @@ pub struct ReaderPdfDto {
 }
 
 /// One PDF page's display size in points plus its selectable text layer: the
-/// per-run words to overlay as transparent `data-eid` spans, and every eid
-/// anchored on the page (so the reader maps an annotation / last-read eid to
-/// its page — including image-only pages, where a bookmark anchors to a page
-/// eid that has no word).
 #[derive(Debug, Serialize)]
 pub struct ReaderPdfPageDto {
     pub width: f32,
@@ -188,10 +172,6 @@ fn map_toc(points: Vec<sidle_core::reader::ReaderTocEntry>) -> Vec<ReaderTocDto>
 }
 
 /// Total section-HTML bytes above which a reflowable book's open DTO is
-/// windowed: only the resume neighbourhood (±1 / +2 sections) ships inline,
-/// the rest streams via [`reader_fetch_sections`]. Below it (and always for
-/// fixed layout, whose scaffold HTML is tiny) everything ships — zero
-/// follow-up round trips, zero behavior change for small books.
 const SECTION_WINDOW_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// The open DTO plus the store-side pieces a lazy open leaves behind.
@@ -206,9 +186,6 @@ struct BuiltReaderOpen {
 }
 
 /// Build the reader-open DTO, windowing large reflowable books around the
-/// resume position (`resume_eid` = the saved Sidle spot, resolved to its
-/// section; window matches the frontend's fetch priority: back 1 section,
-/// forward 2).
 fn build_reader_open(
     b: sidle_core::reader::ReaderBook,
     resume_eid: Option<i64>,
@@ -287,19 +264,9 @@ fn build_reader_open(
 }
 
 /// Open a library book for the reader. A PDF-backed (container) book opens in
-/// the fixed-layout PDF view (`mode: "pdf"`, pages rendered on demand by
-/// [`reader_pdf_page`]); everything else takes the reflowable KFX→DOM path
-/// (`mode: "reflowable"`) with image bytes deferred: the DTO carries an image
-/// *manifest* and the parsed book goes into `reader_image_cache`, from which
-/// [`reader_fetch_resources`] transcodes images as the frontend asks for them
-/// (reading-position window first, rest in the background). This is what makes
-/// opening a 100MB+ manga instant instead of a 10s all-pages JXR transcode.
 #[tauri::command]
 pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
     // Snapshot the paths + display metadata + saved Sidle position under the
-    // lock, then release it before the CPU-bound parse/render (which can take
-    // a beat on a large book). The resume eid picks the section window a
-    // large text book ships inline.
     let (kfx_path, pdf_path, title, author, ppd, resume_eid) = {
         let conn = state.db.lock().await;
         let row = db::get_book(&conn, book_id)
@@ -327,14 +294,6 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
 
         // PDF-backed? Serve the fixed-layout view entirely from the KFX. A single
-        // container load yields each page's box size + selectable text layer
-        // (words/eids) AND the outline + page labels — `pdf_to_kfx` bakes the
-        // `page_list` and `toc` into the KFX `book_navigation`, so we no longer
-        // run `probe_pdf` (a full lopdf parse of the *embedded* PDF that cost
-        // seconds on a large book and ran on every open). The embedded PDF is
-        // touched only later, one page at a time, by `reader_pdf_page`. (Verified
-        // offline: this reproduces probe's outline/labels/sizes for every library
-        // PDF.)
         if pdf_path.is_some() || bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
             let rd = bokai::formats::kfx::pdf_pages::read_pages(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
@@ -406,11 +365,6 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
 }
 
 /// Fetch a batch of deferred images for the open book: each href from the
-/// `reader_open` manifest → actual mime + base64 bytes (JXR pages transcode
-/// to JPEG here, in parallel). The frontend drives priority: the spread /
-/// sections around the reading position come first, the rest stream in the
-/// background a chunk at a time. Hrefs that fail (or aren't in the manifest)
-/// are omitted from the reply — the frontend logs and moves on.
 #[tauri::command]
 pub async fn reader_fetch_resources(
     state: State<'_, AppState>,
@@ -442,9 +396,6 @@ pub struct ReaderSectionChunkDto {
 }
 
 /// Stream built section HTML for a windowed open (large text book): the DTO
-/// shipped `html: null` for these, the store holds the full build. Pure
-/// memcpy of already-built strings — no recompute. Unknown indices are
-/// skipped.
 #[tauri::command]
 pub async fn reader_fetch_sections(
     state: State<'_, AppState>,
@@ -480,7 +431,6 @@ pub async fn reader_eid_section(
 /// Drop the open book's fetch store. Called by the frontend on reader close
 /// and once everything deferred has been delivered (the webview holds the
 /// data from then on; the parsed KFX raw media serves no further purpose).
-/// Idempotent; a stale call for a different book is a no-op.
 #[tauri::command]
 pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     evict_reader(&state, book_id).await;
@@ -488,10 +438,6 @@ pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<
 }
 
 /// Drop the open book's cached reader state (fetch store + search index) if it's
-/// for `book_id`. The plain-`&AppState` core of [`reader_release`], so the book
-/// editor can evict a just-edited book after a surgical write — the next
-/// `reader_open` then re-parses the new bytes instead of serving the stale
-/// cache.
 pub(crate) async fn evict_reader(state: &AppState, book_id: i64) {
     {
         let mut store = state.reader_store.lock().await;
@@ -524,8 +470,6 @@ async fn reader_store_entry(
 
 /// Render one page of a PDF-backed book to a JPEG, scaled to `width` device
 /// pixels wide, returned base64 (data-URL payload) for the fixed-layout viewer.
-/// Stateless: re-resolves the PDF bytes each call (sidecar, else extracted from
-/// the KFX). Rendered via macOS PDFKit (the system PDF engine); ~tens of ms.
 #[tauri::command]
 pub async fn reader_pdf_page(
     state: State<'_, AppState>,
@@ -706,19 +650,10 @@ pub struct AnnotationDto {
     /// `"yjr"` | `"clippings"` — provenance.
     pub source: String,
     /// When the device says the annotation was made (ISO-8601), when it kept a
-    /// stamp. The only dated evidence of *when* a passage was marked, which is
-    /// what dates it on a page that lists a book's annotations rather than
-    /// painting them. `None` on a row that predates the stamp being stored —
-    /// never a guess from the import time.
     pub added_at: Option<String>,
     /// Reversible "hidden from the reader" flag (kept in the backup).
     pub hidden: bool,
     /// For a `note`, the id of the highlight it annotates, when one encloses it.
-    ///
-    /// A Kindle stores a highlight and its note as two records and groups them
-    /// by span; Sidle does the same, so the reader paints the highlight and
-    /// shows the note against it rather than painting the note as its own mark.
-    /// `None` on a highlight, and on a note that stands alone.
     pub attached_to: Option<i64>,
 }
 
@@ -774,10 +709,6 @@ pub async fn annotations_for_book(
 }
 
 /// One stored last-read position. `source` = `"sidle"` (the reader's own) or
-/// `"device"`; for a device row, `device_serial` is the Kindle's serial so the
-/// reader can label/distinguish multiple devices. The anchor is an `(eid,
-/// offset)` pair, resolved to a DOM element exactly like an annotation;
-/// `linear_pos` is the human "Location" for the menu label.
 #[derive(Debug, Serialize)]
 pub struct ReadingPositionDto {
     pub eid: Option<i64>,
@@ -830,8 +761,6 @@ pub async fn reading_position_set(
 /// One search hit. `off_end` is the **inclusive** last-char index of the match
 /// (matches the annotation `(eid_start, off_start, eid_end, off_end)` convention,
 /// so JS `rangeFor`'s end-inclusive `+1` walk paints the correct characters).
-/// `preview_*` is a three-piece split for the UI — render before + match + after,
-/// usually with `match` highlighted.
 #[derive(Debug, Serialize)]
 pub struct SearchMatchDto {
     pub eid: i64,
@@ -859,11 +788,6 @@ impl From<sidle_core::library::anchor::SearchMatch> for SearchMatchDto {
 
 /// In-book full-text search. v1 = strict char match, ASCII case-insensitive,
 /// intra-eid only — see [`BookIndex::search`](sidle_core::library::anchor::BookIndex::search).
-///
-/// Reuses a per-session index cache (one entry, keyed by `book_id`):
-/// the first search per book parses the KFX once on the blocking pool (same
-/// cost as `reader_open`); subsequent searches are pure `HashMap` walks.
-/// Switching to a different `book_id` rebuilds.
 #[tauri::command]
 pub async fn book_search(
     state: State<'_, AppState>,
@@ -924,17 +848,8 @@ pub async fn book_search(
 
 // ---------------------------------------------------------------------------
 // Native annotations (T0): create / edit / delete the reader's own annotations.
-// Stored with `source='sidle'`. The anchor `(eid, offset)` comes from the
-// webview's reverse resolution of a DOM selection (foliate-kfx `anchorFromRange`);
-// the highlight `text` is the base-text slice the webview extracted (ruby-free,
-// matching the offset semantics), so the stored text re-paints exactly.
-// ---------------------------------------------------------------------------
 
 /// Create a native annotation. Salts the **shared** content dedup hash with the
-/// book's title key, so a passage highlighted both in Sidle and on a Kindle
-/// collapses to one row. `insert_annotation` is `ON CONFLICT DO NOTHING`, so on a
-/// hash collision (the passage already exists) we return the row already present
-/// rather than erroring. Returns the stored row so the webview gets its real id.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn annotation_create(
@@ -1002,9 +917,6 @@ pub async fn annotation_create(
 }
 
 /// Edit a native annotation's `kind` / `note_body` / `color` (e.g. promote a
-/// highlight to a note, recolor, retype). The content hash folds in kind + note
-/// body, so it's recomputed (salted with the same book key) and moved with the
-/// edit. Returns the refreshed row.
 #[tauri::command]
 pub async fn annotation_update(
     state: State<'_, AppState>,
@@ -1050,17 +962,6 @@ pub async fn annotation_update(
 }
 
 /// Write the note attached to `highlight_id`, creating, replacing or removing it.
-///
-/// The note is a row of its own at the highlight's span — the shape a device
-/// accepts and the one it hands back — so the highlight is never rewritten and
-/// its identity never moves. That is what makes this safe on an imported
-/// highlight: editing the highlight row itself would change its content hash,
-/// and the device's unchanged record would re-import as a duplicate on the next
-/// sync.
-///
-/// An empty `body` removes the note. `note_id` names the note being replaced
-/// when the highlight already carries one; leaving it `None` adds another, which
-/// is how a highlight comes to hold several — exactly as a Kindle allows.
 #[tauri::command]
 pub async fn annotation_set_note(
     state: State<'_, AppState>,
@@ -1142,12 +1043,6 @@ pub async fn annotation_delete(state: State<'_, AppState>, id: i64) -> Result<()
 }
 
 /// Hand an external book link off to the OS default handler (browser / mail
-/// client) instead of letting the reader's content iframe navigate to it — which
-/// would render the page inside the reader. The reader's click handler calls this
-/// for absolute `http`/`https`/`mailto` hrefs in book content. The scheme guard
-/// is defense-in-depth: a backstop against a content href with a surprising
-/// scheme (`file:`, `javascript:`, …) reaching the opener even if the JS-side
-/// classifier is ever loosened.
 #[tauri::command]
 pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
     let lower = url.trim_start().to_ascii_lowercase();

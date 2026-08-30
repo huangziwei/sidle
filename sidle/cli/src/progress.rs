@@ -1,14 +1,4 @@
 //! A one-line progress bar for a sweep over many books.
-//!
-//! A sweep prints one line per finished book, which reads well in a log and
-//! badly on a terminal running two thousand of them. [`Bar`] replaces those
-//! lines with a single line that rewrites itself: how many are done, how fast,
-//! how long is left. A failure goes through [`Bar::note`], which puts it on
-//! stderr and redraws the bar under it.
-//!
-//! The bar draws only when stdout is a terminal. Redirected to a file, or
-//! under `--json`, [`Bar::enabled`] is false: the counts add up, nothing is
-//! painted, and the caller prints its own per-book lines.
 
 use std::io::Write;
 use std::sync::Mutex;

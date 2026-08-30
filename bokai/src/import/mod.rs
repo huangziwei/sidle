@@ -1,8 +1,6 @@
 //! Format importers for reading ebook files.
 //!
 //! The `Importer` trait defines a two-track interface:
-//! - **Track 1 (Normalization)**: Parse content into IR for rendering
-//! - **Track 2 (Raw Access)**: Provide raw bytes for high-fidelity conversion
 
 mod azw3;
 mod epub;
@@ -55,12 +53,6 @@ pub struct SpineEntry {
 }
 
 /// One asset described without loading it.
-///
-/// A renderer that streams a book needs to reserve layout space and choose a
-/// fetch order before any bytes arrive — and for a format whose images need
-/// decoding (KFX ships JPEG-XR), loading the whole set up front is the
-/// difference between opening a large book instantly and waiting out a
-/// full-book transcode. Sources that declare dimensions answer this for free.
 #[derive(Debug, Clone)]
 pub struct AssetInfo {
     /// Path as [`Importer::load_asset`] takes it.
@@ -75,10 +67,6 @@ pub struct AssetInfo {
 }
 
 /// A source format's contribution to the normalized stylesheet: every named
-/// style converted to CSS declarations (unpruned — the export pass prunes its
-/// own working copies), plus the doc-level layout facts the stylesheet
-/// header needs. Produced by [`Importer::stylesheet_program`]; `None` from
-/// an importer means the format ships its own CSS assets.
 #[derive(Debug, Default)]
 pub struct CssProgram {
     /// Raw source style name → converted declarations. A node whose
@@ -86,10 +74,6 @@ pub struct CssProgram {
     /// sanitized class attribute in synthesized XHTML.
     pub named: HashMap<String, CssDecl>,
     /// Raw source style name → the state-conditional rules that style carries,
-    /// as `(pseudo-class, declarations)`. A source whose styling depends on
-    /// element state (a hyperlink's visited/unvisited colors) cannot fold
-    /// those declarations into `named`, which holds one unconditional rule
-    /// per name; they emit as extra `.name:<pseudo>` rules.
     pub pseudo: HashMap<String, Vec<(String, CssDecl)>>,
     /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
     pub writing_mode: String,
@@ -100,8 +84,6 @@ pub struct CssProgram {
 /// Polymorphic interface for format-specific backends.
 ///
 /// Implementors provide access to book content via two tracks:
-/// - Normalized access (IR) for rendering
-/// - Raw access (bytes) for high-fidelity conversion
 pub trait Importer: Send + Sync {
     // --- Lifecycle ---
 
@@ -127,12 +109,6 @@ pub trait Importer: Send + Sync {
     /// Load a chapter as normalized IR.
     ///
     /// The default implementation:
-    /// 1. Loads raw HTML via `load_raw()`
-    /// 2. Extracts linked stylesheets and inline styles
-    /// 3. Loads and parses linked CSS via `load_asset()`
-    /// 4. Compiles HTML + CSS to IR via `compile_html()`
-    ///
-    /// Implementations may override for format-specific optimizations.
     fn load_chapter(&mut self, id: ChapterId) -> std::io::Result<Chapter> {
         // Load raw HTML
         let html_bytes = self.load_raw(id)?;
@@ -180,7 +156,6 @@ pub trait Importer: Send + Sync {
         let mut chapter = compile_dom(&dom, &stylesheets);
 
         // Post-process: Resolve relative paths in semantic attributes (src, href)
-        // This canonicalizes paths like "../images/photo.jpg" to "OEBPS/images/photo.jpg"
         if let Some(base_path) = self.source_id(id) {
             resolve_semantic_paths(&mut chapter, base_path);
         }
@@ -189,9 +164,6 @@ pub trait Importer: Send + Sync {
     }
 
     /// Load several chapters, one result per input id. Implementations
-    /// whose per-chapter builds are independent may parallelize (KFX builds
-    /// storyline IR across all cores here); the default is a serial
-    /// `load_chapter` map.
     fn load_chapters(&mut self, ids: &[ChapterId]) -> Vec<std::io::Result<Chapter>> {
         ids.iter().map(|id| self.load_chapter(*id)).collect()
     }
@@ -207,9 +179,6 @@ pub trait Importer: Send + Sync {
     fn source_id(&self, id: ChapterId) -> Option<&str>;
 
     /// The document `<title>` for a spine chapter. Defaults to the source id;
-    /// importers whose spine entries are finer-grained than their source's
-    /// naming unit override it (a fixed-layout page is titled by its owning
-    /// section, not its per-page file stem).
     fn chapter_title(&self, id: ChapterId) -> Option<&str> {
         self.source_id(id)
     }
@@ -226,28 +195,16 @@ pub trait Importer: Send + Sync {
     fn load_asset(&mut self, path: &Path) -> std::io::Result<Vec<u8>>;
 
     /// Load several assets, one result per input path. Implementations may
-    /// parallelize expensive per-asset work (KFX transcodes JPEG-XR images
-    /// to JPEG across all cores here); the default is a serial
-    /// [`Self::load_asset`] loop.
     fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<std::io::Result<Vec<u8>>> {
         paths.iter().map(|p| self.load_asset(p)).collect()
     }
 
     /// The authoritative asset list for a normalized EPUB export, in
-    /// manifest order — or `None` when the importer has no such notion and
-    /// the exporter should fall back to the assets the normalized content
-    /// references. KFX returns its canonical image set (all images, cover
-    /// included; fonts stay out of the package until the CSS pass emits the
-    /// `@font-face` rules that would reference them).
     fn bundled_assets(&self) -> Option<Vec<PathBuf>> {
         None
     }
 
     /// [`Self::bundled_assets`] with each entry's predicted media type and
-    /// declared pixel size, for a consumer that wants to describe the assets
-    /// before paying to load them (see [`AssetInfo`]). `None` when the
-    /// importer has no authoritative bundle; the order matches
-    /// `bundled_assets`.
     fn asset_manifest(&mut self) -> Option<Vec<AssetInfo>> {
         None
     }
@@ -264,13 +221,6 @@ pub trait Importer: Send + Sync {
     }
 
     /// Collect all @font-face definitions from CSS files.
-    ///
-    /// Parses all CSS assets and extracts @font-face rules that map font family
-    /// names to font files. The returned font-faces have their `src` paths
-    /// resolved to canonical paths within the book archive.
-    ///
-    /// KFX export builds its font entities from these, linking a font-family
-    /// name to a resource location.
     fn font_faces(&mut self) -> Vec<FontFace> {
         let mut font_faces = Vec::new();
 
@@ -304,12 +254,6 @@ pub trait Importer: Send + Sync {
     }
 
     /// The book's reading-position scale, when the source defines one.
-    ///
-    /// Physically-addressed formats ship an element→coordinate map and the
-    /// location boundaries a device counts to display "Loc N of M"; see
-    /// [`PositionMap`]. Structurally-addressed formats (EPUB) define no such
-    /// scale — their readers synthesize progress from the spine, which is the
-    /// consumer's policy, not a fact in the file — so the default is `None`.
     fn position_map(&mut self) -> Option<PositionMap> {
         None
     }
@@ -317,11 +261,6 @@ pub trait Importer: Send + Sync {
     /// The source's own base text, keyed by the same element ids
     /// [`Self::position_map`] places — the substrate a physically-addressed
     /// annotation slices to recover the words it covers. See [`SourceText`].
-    ///
-    /// Costs a walk of the book's whole text, so it is separate from the
-    /// position scale: a reader that only needs "Loc N of M" never pays for
-    /// it. `None` for formats that address text structurally, which have no
-    /// such element namespace.
     fn source_text(&mut self) -> Option<SourceText> {
         None
     }
@@ -329,7 +268,6 @@ pub trait Importer: Send + Sync {
     /// Whether this importer requires normalized export for HTML-based formats.
     ///
     /// Returns true for binary formats (KFX) where load_raw returns non-HTML data.
-    /// Exporters should use IR-based output when this returns true.
     fn requires_normalized_export(&self) -> bool {
         false
     }
@@ -337,22 +275,12 @@ pub trait Importer: Send + Sync {
     // --- Link Resolution ---
 
     /// Index all anchor targets after chapters are loaded.
-    ///
-    /// One call carries every loaded chapter, from which an importer builds
-    /// its format-specific anchor map. The default builds the path#id →
-    /// `GlobalNodeId` map EPUB-style linking resolves against.
-    ///
-    /// KFX anchor entities and AZW3 fragment ids each get their own override.
     fn index_anchors(&mut self, _chapters: &[(ChapterId, Arc<Chapter>)]) {
         // Default: no-op. Path-based resolution in resolve_href() handles EPUB.
         // Format-specific importers override to build their anchor maps.
     }
 
     /// Resolve TOC href fragments after chapters are loaded.
-    ///
-    /// Runs after `index_anchors`, filling the fragment identifiers a TOC
-    /// entry was built without (AZW3/MOBI). The default does nothing: EPUB
-    /// and KFX hrefs arrive complete.
     fn resolve_toc(&mut self) {
         // Default: no-op. EPUB and KFX have correct TOC hrefs from source.
     }
@@ -361,9 +289,6 @@ pub trait Importer: Send + Sync {
     fn toc_mut(&mut self) -> &mut [TocEntry];
 
     /// Physical page-break list (EPUB 3 `<nav epub:type="page-list">`), mapping
-    /// printed page numbers to content locations. Same `TocEntry` shape as the
-    /// TOC but always flat. Default empty — only formats that carry an explicit
-    /// page list (EPUB) override this; everything else has no page numbers.
     fn page_list(&self) -> &[TocEntry] {
         &[]
     }
@@ -377,10 +302,6 @@ pub trait Importer: Send + Sync {
     /// Resolve an href to its target.
     ///
     /// Handles format-specific href parsing and resolution.
-    /// Returns `None` if the href cannot be resolved (broken link).
-    ///
-    /// The default implementation only handles external URLs.
-    /// Importers should override to handle internal links.
     fn resolve_href(&self, _from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         let href = href.trim();
 
@@ -397,28 +318,12 @@ pub trait Importer: Send + Sync {
     }
 
     /// Resolve a navigation href (TOC / page-list / landmarks) to its target.
-    ///
-    /// Same as [`Self::resolve_href`] but, for a `path#fragment` whose file is a
-    /// real chapter yet whose fragment is dead, lands on the chapter start. An
-    /// in-text link keeps [`Self::resolve_href`]'s strict resolution.
-    ///
-    /// The default delegates to the strict resolver (importers with path-based
-    /// resolution override it).
     fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         self.resolve_href(from_chapter, href)
     }
 
     /// The fragment id a navigation href should carry in normalized export,
     /// plus whether that id was actually stamped into a loaded chapter.
-    ///
-    /// KFX nav targets are `#eid[:offset]` position placeholders; the anchor
-    /// registered at the position names the html id (`a85J`, `toc-148-0`, …)
-    /// that content stamping emits. TOC and guide entries append the fragment
-    /// whenever an anchor is registered; the page list additionally requires
-    /// it stamped (a page break on an anchored chapter start registers a name
-    /// content never stamps). Only meaningful after `index_anchors`.
-    /// Default `None`: formats whose nav hrefs are real `path#fragment`
-    /// strings don't split resolution this way.
     fn nav_fragment(&self, _href: &str) -> Option<(String, bool)> {
         None
     }
@@ -426,13 +331,6 @@ pub trait Importer: Send + Sync {
     /// The source's named-style program for normalized export: every named
     /// style converted to CSS declarations, plus the doc-level writing mode
     /// and fixed-layout flag the stylesheet header needs.
-    ///
-    /// When this returns `Some`, normalized export synthesizes `style.css`
-    /// from it and class attributes come from each node's `semantics.class`
-    /// (names sanitized to CSS-safe class names, gated on the named
-    /// declaration being non-empty), not the interned computed-style
-    /// pool. Default `None`: formats that ship their own CSS assets, or
-    /// whose classes carry no stylesheet of their own.
     fn stylesheet_program(&mut self) -> Option<CssProgram> {
         None
     }
@@ -477,8 +375,6 @@ pub fn viewport_meta(html: &str) -> Option<(u32, u32)> {
 }
 
 /// Helper for path-based href resolution (used by EPUB, AZW3, MOBI).
-///
-/// Handles EPUB-style paths: `path#fragment`, `#fragment`, `path`
 pub fn resolve_path_based_href(
     from_path: &str,
     href: &str,
@@ -514,10 +410,6 @@ pub fn resolve_path_based_href(
     };
 
     // Collapse `.` / `..` so a href like `OEBPS/Text/../Text/Ch01.xhtml`
-    // matches the normalized spine path `OEBPS/Text/Ch01.xhtml`. Nav docs (and
-    // in-text links) that live in a subdirectory routinely author hrefs with
-    // `..` back up to a sibling folder; without normalization every such href
-    // misses the chapter/anchor maps (which are keyed by canonical paths).
     let normalized_path = normalize_components(Path::new(raw_path));
     let normalized_path = normalized_path.to_string_lossy();
     let path: &str = &normalized_path;
@@ -544,11 +436,6 @@ pub fn resolve_path_based_href(
 }
 
 /// Resolve a relative path against a base path.
-///
-/// For example, if base is "OEBPS/text/ch01.xhtml" and relative is "../styles/main.css",
-/// the result is "OEBPS/styles/main.css".
-///
-/// Fragment-only paths (e.g., "#anchor") are resolved to "base#anchor".
 fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
     // Hierarchical URLs (http://, https://, …) are not archive paths — leave
     // them untouched. Scheme-only URIs like mailto:/data: are filtered out by
@@ -583,10 +470,6 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
 }
 
 /// Collapse `.` and `..` components in a path. `PathBuf::join` appends
-/// literally, so `OEBPS/Styles`.join(`../Styles/x.css`) yields
-/// `OEBPS/Styles/../Styles/x.css` — which does not match canonical EPUB zip
-/// entries. This walks the components and folds them, matching the URL-style
-/// resolution every consumer of zip keys needs.
 pub(crate) fn normalize_components(p: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in p.components() {
@@ -610,13 +493,6 @@ pub(crate) fn normalize_components(p: &Path) -> PathBuf {
 }
 
 /// Resolve relative paths in a chapter's semantic attributes.
-///
-/// This canonicalizes paths like `../images/photo.jpg` relative to the
-/// chapter's source path (e.g., `OEBPS/text/ch1.html`) to absolute archive
-/// paths (e.g., `OEBPS/images/photo.jpg`).
-/// Canonicalize one CSS `url()` target into the archive's path space, so a
-/// background image is keyed exactly like an `<img src>` pointing at the same
-/// file. External URLs and data URIs are not archive paths and pass through.
 fn resolve_asset_url(base_path: &str, url: &str) -> String {
     if url.contains("://") || url.starts_with("data:") {
         return url.to_string();

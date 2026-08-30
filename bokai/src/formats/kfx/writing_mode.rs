@@ -1,8 +1,6 @@
 //! Book-level writing-mode derivation shared by every KFX reader.
 //!
 //! `document_data`'s `writing_mode` field states the book's axis.
-//! [`majority_vertical_mode`] recovers an axis from the book's own `$style`
-//! pool for the containers that omit the field.
 
 use std::collections::HashMap;
 
@@ -22,11 +20,6 @@ pub fn normalize_writing_mode(name: &str) -> &str {
 
 /// The vertical writing mode (`"vertical-rl"` / `"vertical-lr"`) `styles`
 /// predominantly declare, or `None` when horizontal text dominates.
-///
-/// The majority runs over **every** style, not over the styles naming a mode:
-/// `horizontal_tb` is the CSS initial value that a horizontal style declares
-/// nowhere, and a count over explicit declarations alone lets one vertical
-/// passage outvote a horizontal book.
 pub fn majority_vertical_mode<'a>(
     styles: impl Iterator<Item = &'a IonValue>,
     symbols: &SymbolTable,

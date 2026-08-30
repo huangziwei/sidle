@@ -20,11 +20,9 @@ use sidle_core::library::device::dist;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
-/// The app's one connection, lent out a moment at a time.
-///
-/// Device sync spends minutes in USB IO between short bursts of database work
-/// and must not hold the connection across them; it takes a [`db::Access`] and
-/// borrows through it. `blocking_lock` puts every borrow on a blocking task.
+/// The app's one connection, lent out a moment at a time. Device sync borrows
+/// through a [`db::Access`]; `blocking_lock` puts every borrow on a blocking
+/// task.
 pub struct Borrowed<'a>(pub &'a DbHandle);
 
 impl db::Access for Borrowed<'_> {
@@ -33,13 +31,9 @@ impl db::Access for Borrowed<'_> {
     }
 }
 
-/// Long-lived, shared on-device IO handle. Opened once per device-connect by
-/// the monitor and cleared on disconnect; every Tauri command and the
-/// on-connect sync borrow this same `Arc<dyn Transport>`.
-///
-/// An MTP-class Kindle exposes a single USB session: a second `open_transport`
-/// races the first one's bulk transfers for an `exclusive_access` error.
-/// `MtpTransport`'s storage mutex serializes the borrowers inside that session.
+/// One `Arc<dyn Transport>` per device-connect, cleared on disconnect. An
+/// MTP-class Kindle exposes a single USB session, which a second
+/// `open_transport` enters for an `exclusive_access` error.
 pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
 /// Single-entry cache for the reader's search index, keyed by `book_id`. The
@@ -58,10 +52,9 @@ pub struct ReaderStoreEntry {
     pub eid_to_section: std::collections::HashMap<i64, usize>,
 }
 
-/// Single-entry store backing the open book's on-demand fetches
-/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_eid_section`),
-/// filled by `reader_open` and dropped by `reader_release`. Keyed by `book_id`;
-/// opening another book replaces it.
+/// Single-entry store behind `reader_fetch_resources`, `reader_fetch_sections`
+/// and `reader_eid_section`. `reader_open` fills it, `reader_release` drops it,
+/// and `book_id` keys it.
 pub type ReaderStoreCache = Arc<Mutex<Option<(i64, Arc<ReaderStoreEntry>)>>>;
 
 /// Default to all available cores. Conversion is CPU-bound, and the OS
@@ -184,13 +177,9 @@ impl AppState {
             });
         }
 
-        // The position axis of every book missing one, which the Reading Log
-        // attributes a Kindle's sessions against. The conversion worker fills
-        // it as books arrive; this is the catch-up.
-        //
-        // Off `bootstrap`'s body: an unindexed library is minutes of container
-        // parsing. One book at a time, parsed off the lock, with the connection
-        // taken to store each answer.
+        // The position axis of every book missing one, off `bootstrap`'s body:
+        // an unindexed library is minutes of container parsing. One book at a
+        // time, parsed off the lock, the connection taken per answer.
         {
             let db = db.clone();
             tauri::async_runtime::spawn(async move {

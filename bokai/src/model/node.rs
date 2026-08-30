@@ -14,17 +14,6 @@ impl NodeId {
 /// Semantic role of a node (independent of source element).
 ///
 /// This is a simplified role system focused on structural semantics.
-/// Visual styling (bold, italic, font-size) is handled by `ComputedStyle`.
-/// Semantic attributes (href, src, alt, epub:type) are in `SemanticMap`.
-///
-/// Design principle: Roles map to structural document concepts:
-/// - Text (leaf text content)
-/// - Paragraph (block-level text container)
-/// - Heading(level) (h1-h6)
-/// - Link, Image
-/// - List(kind), ListItem
-/// - BlockQuote
-/// - Table, TableRow, TableCell
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Role {
     /// Leaf text content node containing actual string data.
@@ -56,11 +45,6 @@ pub enum Role {
     /// and must precede the row sections in a table's child list.
     ColumnGroup,
     /// One column-geometry entry (`<col>`) — a leaf carrying the column's
-    /// width as its style and, in `SemanticMap::col_span`, how many columns
-    /// it describes (HTML spells that `span` on a `<col>`). This is the only
-    /// place a table states its proportions; without it a grid the source
-    /// laid out in fixed fractions renders at whatever widths the content
-    /// happens to want.
     Column,
     /// Table header section (`<thead>`).
     TableHead,

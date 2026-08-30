@@ -1,10 +1,4 @@
 //! EPUB format support — parsing plus the surgical source-edit primitives.
-//!
-//! `parser` is read-only (OPF/NCX/nav) and `structure` resolves what it returns
-//! to absolute zip paths. [`edit`] adds the shared zip edit harness
-//! ([`EpubPackage`]) that the source editor writes through, and
-//! [`image_extract`] is its first read-only consumer. `opf_meta` holds
-//! OPF metadata value vocabulary shared by import and export.
 
 pub mod edit;
 pub mod image_extract;

@@ -1,22 +1,4 @@
 //! HTML to IR compiler pipeline.
-//!
-//! This module transforms HTML content with CSS stylesheets into the
-//! normalized IR (Intermediate Representation) format.
-//!
-//! # Example
-//!
-//! ```
-//! use bokai::html::{compile_html, Stylesheet, Origin};
-//!
-//! let html = "<html><body><p>Hello, World!</p></body></html>";
-//! let css = "p { color: blue; }";
-//!
-//! let author_css = Stylesheet::parse(css);
-//! let chapter = compile_html(html, &[(author_css, Origin::Author)]);
-//!
-//! // The chapter now contains normalized IR nodes
-//! assert!(chapter.node_count() > 1);
-//! ```
 
 mod arena;
 pub mod element_ref;
@@ -60,15 +42,6 @@ fn looks_like_xhtml(html: &str) -> bool {
 }
 
 /// Parse HTML/XHTML into an ArenaDom.
-///
-/// Uses xml5ever for XHTML content (detected by `<?xml` or `xmlns=` in the
-/// first 500 bytes), falling back to html5ever for plain HTML. This correctly
-/// handles self-closing tags like `<script/>` which are valid in XHTML but
-/// cause content loss with HTML5 parsing.
-///
-/// Exposed to the importer hot path (`Importer::load_chapter`) so a chapter is
-/// parsed exactly once and the DOM shared by stylesheet discovery
-/// ([`extract_stylesheets_from_dom`]) and IR compilation ([`compile_dom`]).
 pub(crate) fn parse_dom(html: &str) -> ArenaDom {
     if looks_like_xhtml(html) {
         let sink = ArenaSink::new();
@@ -98,37 +71,11 @@ pub(crate) fn parse_dom(html: &str) -> ArenaDom {
 /// Compile HTML content to IR.
 ///
 /// This is the main entry point for the compiler pipeline.
-/// Automatically detects XHTML and uses the appropriate parser.
-///
-/// # Arguments
-///
-/// * `html` - The HTML content to parse
-/// * `stylesheets` - Author stylesheets with their origins (user-agent stylesheet is added automatically)
-///
-/// # Returns
-///
-/// A `Chapter` containing the normalized content tree.
-///
-/// # Example
-///
-/// ```
-/// use bokai::html::{compile_html, Stylesheet, Origin};
-///
-/// let html = "<p class='intro'>Welcome!</p>";
-/// let css = ".intro { font-weight: bold; }";
-///
-/// let author = Stylesheet::parse(css);
-/// let chapter = compile_html(html, &[(author, Origin::Author)]);
-/// ```
 pub fn compile_html(html: &str, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     compile_dom(&parse_dom(html), author_stylesheets)
 }
 
 /// Compile an already-parsed DOM to IR.
-///
-/// The core of [`compile_html`] without the parse step, so the importer hot
-/// path can parse each chapter once and reuse the DOM for both stylesheet
-/// discovery and IR compilation (see [`parse_dom`]).
 pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     // Build complete stylesheet list with UA defaults
     let ua = transform::user_agent_stylesheet();
@@ -147,10 +94,6 @@ pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Ori
 }
 
 /// Compile HTML bytes to IR.
-///
-/// Convenience wrapper that handles byte-to-string conversion with proper
-/// encoding detection. Supports UTF-8, Windows-1252, and other encodings
-/// via the XML declaration.
 pub fn compile_html_bytes(html: &[u8], author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     // Extract encoding from XML declaration if present
     let hint_encoding = crate::util::extract_xml_encoding(html);
@@ -162,18 +105,11 @@ pub fn compile_html_bytes(html: &[u8], author_stylesheets: &[(Stylesheet, Origin
 }
 
 /// Extract stylesheet links and inline styles from HTML.
-///
-/// Returns a list of (href, media) tuples for linked stylesheets,
-/// and a list of inline CSS content.
 pub fn extract_stylesheets(html: &str) -> (Vec<String>, Vec<String>) {
     extract_stylesheets_from_dom(&parse_dom(html))
 }
 
 /// Extract stylesheet references from an already-parsed DOM.
-///
-/// The core of [`extract_stylesheets`] without the parse step, so the importer
-/// hot path can parse each chapter once and reuse the DOM for both stylesheet
-/// discovery and IR compilation (see [`parse_dom`]).
 pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<String>) {
     let mut linked = Vec::new();
     let mut inline = Vec::new();
@@ -225,38 +161,6 @@ pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<
 }
 
 /// Resolve a relative path against a base path logically (no filesystem access).
-///
-/// This is used to canonicalize paths like `../images/photo.jpg` relative to
-/// a chapter file like `OEBPS/text/ch1.html` into an absolute archive path
-/// like `OEBPS/images/photo.jpg`.
-///
-/// # Arguments
-///
-/// * `base` - The base file path (e.g., `OEBPS/text/ch1.html`)
-/// * `rel` - The relative path to resolve (e.g., `../images/photo.jpg`)
-///
-/// # Returns
-///
-/// The resolved path as a string, normalized with forward slashes.
-///
-/// # Examples
-///
-/// ```
-/// use bokai::html::resolve_path;
-///
-/// assert_eq!(
-///     resolve_path("OEBPS/text/ch1.html", "../images/logo.png"),
-///     "OEBPS/images/logo.png"
-/// );
-/// assert_eq!(
-///     resolve_path("OEBPS/content.html", "images/photo.jpg"),
-///     "OEBPS/images/photo.jpg"
-/// );
-/// assert_eq!(
-///     resolve_path("ch1.html", "/images/absolute.png"),
-///     "images/absolute.png"
-/// );
-/// ```
 pub fn resolve_path(base: &str, rel: &str) -> String {
     use std::path::{Component, Path};
 
@@ -425,10 +329,6 @@ mod tests {
     #[test]
     fn test_optimizer_merges_sibling_text_nodes() {
         // The optimizer merges adjacent sibling Text nodes with the same style.
-        // Note: <b>A</b><b>B</b> creates separate Inline containers, so those
-        // Text nodes are NOT siblings and won't be merged. This tests the case
-        // where Text nodes are actual siblings (e.g., from text interspersed
-        // with inline elements that get stripped).
 
         // Direct test of the optimizer unit tests cover the merge logic.
         // This integration test verifies the optimizer runs without corrupting

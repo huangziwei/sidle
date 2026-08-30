@@ -1,13 +1,4 @@
 //! A publisher EPUB whose spine contradicts its own navigation.
-//!
-//! Modelled on 金庸『雪山飛狐（全集）』(遠流 2014), where the spine is the manifest
-//! in lexicographic order: volume one's colophon (`v1-9`) sorts ahead of volume
-//! two's first file and lands mid-book, and the chapter whose filename carries
-//! no `-N` (`v2`) sorts behind all of its own siblings and lands last. The
-//! navigation is correct, because a human wrote it.
-//!
-//! Shared by the tests that read this defect from either end: what a renderer
-//! should show for such a book, and what repairing it should do.
 
 // Each test binary compiles the whole module and uses a different part of it.
 #![allow(dead_code)]

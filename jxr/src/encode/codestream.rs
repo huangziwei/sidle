@@ -1,11 +1,6 @@
 //! WMPHOTO codestream framing writer (encode side): spatial mode, single
 //! tile, no overlap, derived windowing (`windowing_flag = 0`), ALL_BANDS,
 //! `8bppGray` or `24bppRGB`, uniform per-band QP.
-//!
-//! Each writer mirrors the corresponding decoder reader in
-//! `decode::decoder` field-for-field, so the decoder parses exactly what we
-//! emit. The DC *value* coding (`mb_dc`) lives in [`super::coeff`]; this module
-//! is the surrounding header/tile frame.
 
 use super::bitstream::BitWriter;
 use crate::decode::consts::*;
@@ -13,11 +8,6 @@ use crate::decode::consts::*;
 /// `image_header` for a `width`×`height` image with the given `output_clr_fmt`
 /// (`OUT_YONLY` for grayscale, `OUT_RGB` for color). Mirrors
 /// `Decoder::image_header`. `width`/`height` are the true (unpadded) dims;
-/// `windowing_flag = 0` makes the decoder derive the 16-aligned padding and crop
-/// back to these. `alpha_image_plane` declares the in-codestream alpha plane
-/// (T.832 "alpha image plane"; per-MB interleaved — what JxrEncApp calls
-/// *interleaved* alpha, `-a 3`); `premultiplied_alpha` is the matching
-/// property bit (8.3.17: a property, not a different coding).
 pub fn write_image_header(
     bw: &mut BitWriter,
     width: u32,
@@ -38,9 +28,6 @@ pub fn write_image_header(
 }
 
 /// [`write_image_header`] with `trim_flexbits` (1–15 sets the flag; the 4-bit
-/// trim value itself is emitted in the spatial tile's flex plane header) and
-/// AUTOMATIC long-header selection: dims beyond the 16-bit short-header range
-/// switch `short_header_flag` off and emit 32-bit dims.
 #[allow(clippy::too_many_arguments)]
 pub fn write_image_header_ext(
     bw: &mut BitWriter,
@@ -59,10 +46,6 @@ pub fn write_image_header_ext(
 }
 
 /// Every `image_header` degree of freedom the encoder supports, in one spec
-/// so the emission lives in a single writer that mirrors
-/// `Decoder::image_header` field-for-field. [`ImageHeaderSpec::new`] is the
-/// classic frame (single tile, spatial order, no overlap, derived windowing);
-/// drivers override fields from there.
 #[derive(Clone, Debug)]
 pub struct ImageHeaderSpec {
     /// Window (output) dims — what the decoder crops to and the container
@@ -80,8 +63,6 @@ pub struct ImageHeaderSpec {
     /// Explicit window margins (top, left, bottom, right), each < 64, with
     /// `top + height + bottom` and `left + width + right` 16-aligned.
     /// Non-zero top/left ⇒ `windowing_flag = 1` and all four are emitted;
-    /// otherwise the flag stays 0 and bottom/right must equal the
-    /// decoder-derived 16-alignment pads (asserted).
     pub margins: (u32, u32, u32, u32),
     /// Tile column widths / row heights in MB units — EVERY tile including
     /// the last (the writer drops the last entry; the decoder re-derives it).
@@ -229,9 +210,6 @@ pub fn write_depth_plane_fields(bw: &mut BitWriter, d: &super::convert::Depth) {
 }
 
 /// The general single-component (`INT_YONLY`) plane header: any
-/// `bands_present` × `scaled_flag`, uniform QPs, any output depth. The LP/HP
-/// QP blocks shrink with the band set exactly as
-/// `Decoder::image_plane_header` reads them.
 pub fn write_image_plane_header_gray_bands(
     bw: &mut BitWriter,
     bands: u8,
@@ -262,12 +240,6 @@ pub fn write_image_plane_header_gray_bands(
 }
 
 /// `image_plane_header` for the **color** (`INT_YUV444`, 3-component) plane with
-/// **ALL_BANDS** (DC + LP + HP + flexbits) and uniform per-band quantizers shared
-/// across components (`COMP_UNIFORM`). Mirrors `Decoder::image_plane_header` for
-/// YUV444 + `QP::read`, including the **two** 4-bit reserved fields (8 bits) the
-/// spec mandates for YUV_444 (the field whose absence-by-one-nibble was the
-/// Track-6.0 decoder bug). `scaled_flag = 0` (matches grayscale; lossy still
-/// spec-valid). Ends byte-aligned.
 pub fn write_image_plane_header_color_allbands(
     bw: &mut BitWriter,
     dc_quant: u8,
@@ -278,16 +250,6 @@ pub fn write_image_plane_header_color_allbands(
 }
 
 /// `image_plane_header` for a 3-component YUV plane of any sampling
-/// (`INT_YUV444`/`INT_YUV422`/`INT_YUV420`) and any `bands_present`, with
-/// uniform per-band `COMP_UNIFORM` quantizers. Mirrors
-/// `Decoder::image_plane_header` field-for-field. The format-specific block
-/// after `bands_present` is 8 zero bits in every case: YUV444 = two 4-bit
-/// reserved fields; YUV420 = reserved_e(1) + chroma_centering_x(3) +
-/// reserved_g(1) + chroma_centering_y(3); YUV422 = reserved_e(1) +
-/// centering_x(3) + reserved_h(4) — and we always declare centering 0/0
-/// (co-sited with even luma, the only values libjxr writes and exactly what
-/// the even-centered downsample filter produces). `scaled_flag = 0`. Ends
-/// byte-aligned.
 pub fn write_image_plane_header_yuv(
     bw: &mut BitWriter,
     int_fmt: u8,
@@ -331,10 +293,6 @@ pub fn write_image_plane_header_yuv_scaled(
 }
 
 /// [`write_image_plane_header_yuv_scaled`] over a full [`super::quant::QpPlan`]:
-/// each band's `image_plane_uniform` flag is set iff the plan keeps that band
-/// at one image-wide QP set (single tile entry, single set) — otherwise the
-/// flag is 0 and every tile's `*_tile_plane_header` carries the band's sets
-/// ([`emit_codestream`]'s `tile_headers` hook).
 pub fn write_image_plane_header_yuv_plan(
     bw: &mut BitWriter,
     int_fmt: u8,
@@ -375,14 +333,6 @@ pub fn write_image_plane_header_yuv_plan(
 }
 
 /// `image_plane_header` for a multi-component per-channel plane
-/// (`INT_YUVK`, 4 components; `INT_NCOMPONENT`, 3–16): any `bands_present` ×
-/// `scaled_flag` × depth, uniform QPs with `COMP_UNIFORM`/`COMP_SEPARATE`
-/// emission (component 0 = `qp`, all others = `chroma_qp` — the only
-/// component shapes this writer emits; `COMP_INDEPENDENT` for > 3
-/// components would need per-component bytes the public surface doesn't
-/// carry). Field order mirrors `Decoder::image_plane_header`: the
-/// NCOMPONENT format-specific block is 4-bit `nc − 1` + 4 reserved bits
-/// (or the 15 ⊕ 12-bit extension at exactly 16); YUVK has none.
 #[allow(clippy::too_many_arguments)]
 pub fn write_image_plane_header_multi(
     bw: &mut BitWriter,
@@ -430,9 +380,6 @@ pub fn write_image_plane_header_multi(
 }
 
 /// One band's QP sets, general form — mirrors `QP::read(nc, num_qps, …)`:
-/// per set, a 2-bit `component_mode` (when `nc > 1`) derived from the byte
-/// pattern, then the mode's QP bytes. Single-component planes carry bare
-/// bytes (no mode bits).
 pub fn write_band_qp(bw: &mut BitWriter, sets: &[super::quant::BandQp], nc: usize) {
     for q in sets {
         let [y, u, v] = q.0;
@@ -487,10 +434,6 @@ pub fn write_vlw_esc(bw: &mut BitWriter, value: u64) {
 }
 
 /// Where one macroblock's band sections are written: a single writer
-/// (SPATIAL order — bands interleaved per MB inside one tile packet) or one
-/// writer per band (FREQUENCY order — the same sections routed into per-band
-/// tile packets; T.832 coded_tiles reads each band packet with the identical
-/// per-MB section sequence, so routing is the only difference).
 pub enum Sink<'a> {
     Spatial(&'a mut BitWriter),
     Frequency {
@@ -529,10 +472,6 @@ impl Sink<'_> {
 }
 
 /// One encodable image plane from the tile driver's point of view: reset the
-/// per-tile entropy/prediction state ([`Self::begin_tile`] — the decoder's
-/// `initialize_context`), then emit MBs at GLOBAL grid coordinates. The
-/// composite (primary + alpha) implementation interleaves both planes per MB,
-/// exactly as `Decoder::coded_tiles` reads them.
 pub trait TileEncode {
     /// Start a tile whose first MB is `(first_mbx, first_mby)` and which is
     /// `tile_w` MBs wide: fresh entropy models / VLC tables / scans, and
@@ -544,17 +483,6 @@ pub trait TileEncode {
 }
 
 /// Assemble a complete WMPHOTO codestream: image header (`spec`), plane
-/// headers (`write_plane_headers`), index table when required, the
-/// `subsequent_bytes` field (0), then the byte-aligned tile packets in the
-/// decoder's row-major tile order. SPATIAL = one packet per tile
-/// (`common_tile_header` + the 4-bit `trim_flexbits` flex header value when
-/// set + the tile's MBs, bands interleaved per MB). FREQUENCY
-/// (`spec.frequency_mode`) = `num_bands` packets per tile in DC/LP/HP/FLEX
-/// order, each with its own `common_tile_header` (the trim value sits in the
-/// FLEX packet — its flex tile plane header), the same MB raster per packet.
-///
-/// Single tile spatial reproduces the classic byte layout exactly (no index
-/// table, same alignment points).
 pub fn emit_codestream(
     spec: &ImageHeaderSpec,
     write_plane_headers: impl FnOnce(&mut BitWriter),
@@ -612,11 +540,6 @@ pub fn emit_codestream(
                 packets.push(tw.finish());
             } else {
                 // One writer per band; each PRESENT packet opens with its own
-                // common_tile_header. Absent trailing bands receive no bits
-                // (the per-MB sections are gated by `bands_present`) and
-                // their writers are simply not pushed. The decoder reads this
-                // tile's packets consecutively in DC/LP/HP/FLEX order (its
-                // `coded_tiles` band loop), so they concatenate in that order.
                 let [mut dcw, mut lpw, mut hpw, mut fxw] = [
                     BitWriter::new(),
                     BitWriter::new(),

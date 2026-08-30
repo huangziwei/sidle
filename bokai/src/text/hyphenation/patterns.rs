@@ -1,32 +1,6 @@
 //! The text dictionary form: a Liang pattern set as written, which is what
 //! `libhyphen` distributes as `hyph_<language>.dic` and what TeX distributes as
 //! a bare pattern list.
-//!
-//! # Layout
-//!
-//! The first line names the character set. Every line after it is one of:
-//!
-//! | line | meaning |
-//! |---|---|
-//! | `LEFTHYPHENMIN n`, `RIGHTHYPHENMIN n` | characters a break must leave on each side of itself |
-//! | `COMPOUNDLEFTHYPHENMIN n`, `COMPOUNDRIGHTHYPHENMIN n` | the same, for a part of a word that already breaks |
-//! | `NOHYPHEN a,b,c` | sequences that forbid a break next to them |
-//! | `NEXTLEVEL` | ends the compound level; the patterns of the language follow |
-//! | `%…` | a comment |
-//! | anything else | a pattern: letters carrying digits, `.` anchoring to a word edge |
-//!
-//! A file that never says `NEXTLEVEL` is patterns alone, and the compound
-//! level that finds the breaks a word already carries is generated for it.
-//!
-//! # Building the automaton
-//!
-//! Patterns go into a trie of byte transitions. A state's fallback is the
-//! longest proper suffix of its own pattern that is also a state, so a walk
-//! that runs out of transitions resumes at the longest still-matching suffix
-//! rather than at the root. Because a match is read off the state alone, each
-//! state's digit string absorbs the digit strings of its fallback chain — the
-//! shorter patterns that end in the same place — merged digit by digit from
-//! the right, keeping the larger of each pair.
 
 use std::collections::VecDeque;
 
@@ -34,9 +8,6 @@ use super::HyphenationError;
 use super::automaton::{Level, State};
 
 /// The level that finds the breaks a word already carries, generated for a
-/// dictionary that declares patterns alone. Each mark a word contains is a
-/// place it may break, and `NOHYPHEN` keeps a soft hyphen from being printed
-/// against a mark that is already visible.
 const COMPOUND_LEVEL: &str = "\
 NOHYPHEN ',–,’,-
 1-1

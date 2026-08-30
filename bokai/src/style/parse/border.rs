@@ -1,7 +1,4 @@
 //! Border parsing with BorderSide abstraction.
-//!
-//! This module consolidates the four nearly-identical border side parsers
-//! into a single generic implementation.
 
 use cssparser::Parser;
 
@@ -143,10 +140,6 @@ pub(crate) fn parse_border_shorthand(input: &mut Parser<'_, '_>) -> Vec<Declarat
     }
 
     // A shorthand sets every longhand it controls, so an omitted style takes
-    // its initial value rather than staying undeclared. That distinction is
-    // the whole point on an `<hr>`: `border: 0` is the commonest way to hide
-    // one, and it names no style at all — read as silence it would leave the
-    // renderer free to draw its own default rule.
     let style = Some(style.unwrap_or(BorderStyle::None));
 
     let mut decls = Vec::with_capacity(12);

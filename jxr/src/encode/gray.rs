@@ -1,7 +1,4 @@
 //! Grayscale codestream-body encoder: DC + LP + HP (ALL_BANDS), spatial mode,
-//! single tile, no overlap, uniform QP = 0 → **lossless for any grayscale
-//! image**. Mirrors the decoder's `mb_dc` + `mb_lp` + `mb_cbphp` + `mb_hp_flex`
-//! per-macroblock sequence, reusing its `AdaptiveVLC` / `AdaptiveScan` state.
 
 use super::quant::{QpSet, quantize};
 use super::{codestream, coeff, container, hp, transform};
@@ -13,12 +10,6 @@ const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA
 
 /// One single-component (`INT_YONLY`) image plane: quantized coefficients plus
 /// adaptive entropy state, encodable one macroblock at a time.
-///
-/// The per-MB granularity is what planar alpha (4a) composes on: an alpha
-/// plane is YONLY by spec and per-MB **interleaved** with the primary plane in
-/// the codestream, each plane carrying its own model/VLC/scan/CBPHP state — so
-/// primary-gray and alpha are two instances of this struct sharing one
-/// `BitWriter`.
 pub(super) struct YOnlyPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
@@ -51,12 +42,6 @@ pub(super) struct YOnlyPlane {
 
 impl YOnlyPlane {
     /// Pad pre-bias `luma` ([`super::convert`] already centered it — and,
-    /// when `scaled`, pre-shifted it) to the 16-aligned MB grid (edge
-    /// replication; the decoder crops back to the true dims, which the
-    /// header carries), placing the image at `(top, left) = window` —
-    /// `(0, 0)` is the classic `windowing_flag = 0` derived padding.
-    /// Forward-transform every MB, quantize per band, and initialize the
-    /// adaptive entropy state. This is the alpha image plane's constructor.
     pub(super) fn new(
         luma: &[i32],
         w: u32,
@@ -93,15 +78,6 @@ impl YOnlyPlane {
     }
 
     /// [`Self::new`] over an already-centered, already-padded `i32` plane
-    /// (`pw × ph`, both 16-aligned) — the entry the YONLY-from-color path
-    /// uses: the Y plane of `rgb_to_yuv444` is centered but can exceed the
-    /// u8 range for saturated colors (the decoder clips on output) — with
-    /// overlap filtering: the staged
-    /// forward pipeline — sample-domain PRE-filter (overlap ≥ 1) → per-block
-    /// stage-1 DCT → block-DC-domain PRE-filter (overlap == 2) → stage-2 DCT
-    /// → quantization — the exact reverse of the decoder's
-    /// `sample_reconstruction`. `left_mb`/`top_mb` are tile boundaries in MB
-    /// units (`len == ntiles + 1`); overlap filters cross soft-tile edges.
     pub(super) fn from_centered_padded_ovl(
         plane: &[i32],
         pw: usize,
@@ -222,9 +198,6 @@ impl YOnlyPlane {
     }
 
     /// Start a tile at `(first_mbx, first_mby)`, `tile_w` MBs wide: fresh
-    /// entropy state, exactly the constructor's init — the encoder mirror of
-    /// the decoder's `initialize_context` (which re-inits every band's
-    /// models/VLC tables/scans at each tile's first MB).
     pub(super) fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
         self.tile_origin = (first_mbx, first_mby);
         self.tile_w = tile_w;
@@ -246,9 +219,6 @@ impl YOnlyPlane {
     }
 
     /// Emit one macroblock's DC + LP + HP(+flex) bits, updating this plane's
-    /// adaptive state exactly as the decoder's per-MB readers do. Band
-    /// sections route through the [`codestream::Sink`] (one writer in
-    /// spatial order; per-band writers in frequency order).
     pub(super) fn encode_mb(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
         let c = self.dclp[mbx][mby];
         // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
@@ -417,12 +387,6 @@ impl codestream::TileEncode for YOnlyPlane {
 }
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
-/// `bands_present` (the plane header and per-MB sections shrink together),
-/// `trim_flexbits` (image-header flag + the 4-bit tile value; the flex
-/// emission drops the low `trim` bits), explicit window margins
-/// (`window = (top, left)`; `(0, 0)` = classic derived windowing), and a
-/// tile grid (`tiles = (column widths, row heights)` in MB units covering
-/// the padded grid; empty = single tile).
 #[allow(clippy::too_many_arguments)]
 pub fn encode_grayscale_options(
     luma: &[u8],
@@ -456,9 +420,6 @@ pub fn encode_grayscale_options(
 }
 
 /// Depth-general grayscale driver: `luma` is already forward-converted to
-/// the pre-bias domain ([`super::convert`] — bias subtracted, scaled shift
-/// applied, deep shift_bits shed), `depth` rides into the image + plane
-/// headers, `guid` into the container.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_gray_prebias(
     luma: &[i32],

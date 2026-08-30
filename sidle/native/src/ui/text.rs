@@ -1,21 +1,4 @@
 //! Text rasterization onto the framebuffer.
-//!
-//! Glyphs come from a fallback chain over the faces the device already ships
-//! (see [`crate::font`]), outlined one at a time at a fixed size via
-//! ab_glyph. The rasterizer reports per-pixel coverage; we threshold it to
-//! 1-bit because eink's DU waveform is B/W and antialiased gray smears on the
-//! panel. Coverage above 96/255 becomes a black pixel, below stays white.
-//! Crisp at small sizes; would need GC16 + dithering for true grayscale text.
-//!
-//! A character no face in the chain has draws a deliberate hollow box.
-//! Handing it to the rasterizer instead blits the font's own `.notdef`,
-//! whose hairline outline mostly falls *under* the coverage threshold — what
-//! reaches the panel is a bar and two stray dots, which reads as data
-//! corruption rather than as a missing glyph.
-//!
-//! Glyphs are cached per (codepoint, px, face) because rasterization isn't
-//! free and CJK titles repeat characters often. The face belongs in the key:
-//! two faces rasterize the same codepoint to different shapes.
 
 use std::collections::HashMap;
 
@@ -28,11 +11,6 @@ use crate::font::{self, FontChain};
 const COVERAGE_THRESHOLD: u8 = 96;
 
 /// One rasterized glyph: where it sits relative to the pen, and its coverage.
-///
-/// Offsets are what the blit needs and nothing more — `left` from the pen's x,
-/// `top` from the baseline and growing *downward*, matching the rasterizer's
-/// screen-space convention. A glyph with no outline (a space) keeps its
-/// advance and carries an empty bitmap.
 struct Raster {
     advance: f32,
     left: i32,
@@ -77,9 +55,6 @@ impl TextRenderer {
 
     /// Total advance width of `s` at the current px. Used by the overlay
     /// to center text inside the banner.
-    ///
-    /// Resolves faces exactly the way [`TextRenderer::draw`] does, over the
-    /// same string, so a measured width is the width that gets drawn.
     pub fn measure_width(&mut self, s: &str) -> u32 {
         self.measure_width_in(font::Script::Unknown, s)
     }
@@ -111,11 +86,6 @@ impl TextRenderer {
     }
 
     /// Word-wrap `text` to fit `max_width` per line, then clamp to at most
-    /// `max_lines`, ellipsizing the dropped tail. Latin titles wrap at
-    /// whitespace; CJK titles (no spaces) fall through to char-level wrap
-    /// so they pack densely without overflowing the box. Thin font-backed
-    /// wrapper over [`crate::wrap::wrap_and_clamp`]; shared by the cover
-    /// placeholder and the diagnostics panel.
     pub fn wrap_and_clamp(&mut self, text: &str, max_width: u32, max_lines: usize) -> Vec<String> {
         self.wrap_and_clamp_in(font::Script::Unknown, text, max_width, max_lines)
     }
@@ -137,9 +107,6 @@ impl TextRenderer {
 
 impl TextRenderer {
     /// Draw `s` starting at baseline (x, y_baseline). Returns the
-    /// advanced X. `inverted=true` swaps colors (white-on-black) so the
-    /// caller can highlight a tapped row by painting the row's background
-    /// black first and calling with `inverted=true`.
     pub fn draw(
         &mut self,
         fb: &mut Framebuffer,
@@ -153,12 +120,6 @@ impl TextRenderer {
 
     /// [`TextRenderer::draw`] for text whose language is known — a book title
     /// from a tagged book, rather than the picker's own chrome.
-    ///
-    /// The hint decides which face is *tried* first, not which one draws:
-    /// coverage still has the last word, so a book tagged with the wrong
-    /// language gets the wrong regional shapes but never a missing glyph.
-    /// Without it, a Traditional Chinese title silently keeps the Japanese
-    /// face — which covers it, so nothing looks broken enough to notice.
     pub fn draw_in(
         &mut self,
         script: font::Script,
@@ -206,11 +167,6 @@ impl TextRenderer {
 }
 
 /// Outline `ch` from `font` at `px` and collect its coverage.
-///
-/// The rasterizer works in screen space — y grows downward from the baseline —
-/// so the bounds it reports are already the offsets the blit wants. A
-/// character with no outline at all (a space, or a glyph defined as blank)
-/// still has an advance, and returns an empty bitmap rather than nothing.
 fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
     let id = font.glyph_id(ch);
     let advance = font.as_scaled(px).h_advance(id);
@@ -247,9 +203,6 @@ fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
 }
 
 /// Advance of the missing-glyph mark: an ideograph's share of the line, so a
-/// run of unmappable characters keeps the text's rhythm. Shared by
-/// [`TextRenderer::measure_width`] and [`TextRenderer::draw`] so a line is
-/// measured at the width it will be drawn at.
 fn missing_advance(px: f32) -> u32 {
     (px * 0.72).round().max(6.0) as u32
 }

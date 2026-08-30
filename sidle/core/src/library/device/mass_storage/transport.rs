@@ -1,8 +1,4 @@
 //! `Transport` over a mounted Kindle volume.
-//!
-//! Plain `std::fs` under the hood. Atomic writes go through `<dest>.partial` +
-//! `rename`, deletes succeed silently on `NotFound`, and listing returns `[]`
-//! when the parent dir is absent.
 
 use std::ffi::CString;
 use std::io::{Read, Write};
@@ -79,13 +75,6 @@ impl Transport for MassStorageTransport {
         }
         let tmp = with_partial_suffix(&dest_full);
         // Plain read/write rather than `std::fs::copy`. On macOS, copy uses
-        // `fcopyfile(COPYFILE_ALL)` which carries extended attributes — and
-        // on FAT/exFAT (every Kindle's storage) the kernel materializes
-        // those xattrs as a hidden `._<filename>` AppleDouble companion
-        // next to the real file. Those companions parse as a valid `.<sha>.kfx`
-        // and show up as duplicate rows in our scan. read/write copies bytes
-        // only, no metadata, no AppleDouble. We loop in 256 KiB chunks (rather
-        // than `std::io::copy`) so we can tick `on_progress` as the bytes land.
         {
             let mut src = std::fs::File::open(src_local)
                 .with_context(|| format!("open {}", src_local.display()))?;
@@ -95,13 +84,6 @@ impl Transport for MassStorageTransport {
             let mut buf = vec![0u8; 256 * 1024];
             let mut done = 0u64;
             // Force the page cache out to the device every few MiB and report
-            // progress only AFTER the flush, so `done` reflects bytes actually
-            // ON the Kindle. Without this, a plain write loop fills the OS
-            // write-back cache in milliseconds (the bar hits 100% instantly),
-            // then `sync_all` blocks for ~20s pushing a 70 MB file to a slow USB
-            // volume. `sync_data` per interval blocks for that interval's device
-            // write, pacing the loop to the real transfer. 4 MiB trades progress
-            // granularity against fsync cost.
             const FLUSH_EVERY: u64 = 4 * 1024 * 1024;
             let mut since_sync = 0u64;
             on_progress(0, total);

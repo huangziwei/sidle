@@ -1,13 +1,4 @@
 // Notes section: Scribe handwritten-notebook grid/list + paged SVG viewer.
-//
-// Classic script loaded AFTER library.js. Self-contained IIFE that exposes
-// `window.Notebooks` ({ refresh, show, hide, importDevice, setView, … }); library.js's
-// Books/Notes toggle drives it, and its Gallery/List toggle calls setView().
-// Multi-select (click / cmd / shift) + bulk remove mirror the Books side, with
-// a dedicated #notebook-selection-bar. Reuses the global `window.api` (IPC +
-// fileUrl) and `window.showToast` when present. Backend: commands/notebook.rs —
-// notebook_list / notebook_page_svg / notebook_thumbnail / notebook_rename /
-// notebook_remove / notebook_import_folder.
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
@@ -24,9 +15,6 @@
   };
 
   // The Notes section's multi-select — the SAME SelectionController the Books
-  // section uses (library.js), so click / cmd / shift / lasso / select-all all
-  // behave identically. library.js's #main mousedown + keydown handlers route to
-  // this via window.Notebooks.selection() when Notes is the active section.
   const sel = new window.SelectionController({
     idAttr: "notebookId",
     orderedIds: () => nb.list.map((n) => n.id),
@@ -45,9 +33,6 @@
   });
 
   // The Notes list view uses the SAME shared TableView as Books (table.js): its
-  // columns become sortable, drag-to-reorder, and resizable, with order + widths
-  // persisted — no bespoke notebook table. Sort lives in nb.sort (applied to the
-  // grid too), so the table only renders the indicator + reports header clicks.
   const NOTEBOOK_COLUMNS = [
     { key: "title", label: "Title", sortable: true, render: (n) => nbTitle(n) },
     { key: "pages", label: "Pages", sortable: true, render: (n) => String(n.page_count) },
@@ -87,11 +72,6 @@
   let importing = false;
 
   // Local wall-clock as "YYYY-MM-DD HH:MM" (24-hour, minute precision) — drives
-  // the "Updated" column (on-device Date Modified) and the legacy-row title
-  // fallback in nbTitle. New rows' default titles are this same format frozen
-  // server-side at first import (db::default_notebook_title). Built explicitly
-  // rather than via toLocaleString so the format is fixed (no locale-dependent
-  // ordering or AM/PM).
   function fmtDate(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -103,9 +83,6 @@
 
   // A notebook's display name. Scribe titles are cloud-only, so the title now
   // defaults (server-side, frozen at first import) to the on-device datetime.
-  // A legacy row may still hold the old literal "Notebook" sentinel until its
-  // next import backfills it — show its on-device datetime so it reads
-  // consistently with new notebooks instead of all reading "Notebook".
   function nbTitle(n) {
     const t = (n.title || "").trim();
     if (t && t !== "Notebook") return t;
@@ -267,8 +244,6 @@
 
   // ── Selection bar + bulk remove ─────────────────────────────────────────────
   // The selection MECHANICS (click / cmd / shift / lasso / select-all / clear)
-  // are the shared `sel` controller; only the bar's content and the bulk-remove
-  // action are notebook-specific.
 
   function selectedNotebooks() {
     return nb.list.filter((n) => sel.has(n.id));
@@ -311,8 +286,6 @@
 
   // Export each notebook in `notebooks` to a multi-page PDF in a chosen folder
   // (one <title>.pdf per notebook — notebooks have no author, so it's flat).
-  // Pages render from the import-time SVG cache; the library doesn't change, so
-  // no refresh. Notebooks with no pages are skipped.
   async function exportPdf(notebooks) {
     const items = notebooks.filter((n) => n.page_count > 0);
     if (items.length === 0) {
@@ -385,9 +358,6 @@
   }
 
   // ── Context menu (rename / remove) ──────────────────────────────────────────
-  // Reuses the shared #ctx-menu element. library.js's own openContextMenu wires
-  // a one-shot close-on-click only when IT opens the menu, so we register our
-  // own dismissers here.
 
   function openMenu(x, y, n) {
     const menu = q("#ctx-menu");
@@ -479,9 +449,6 @@
   }
 
   // Inline rename: swap the shown title for an input (no native prompt dialog).
-  // The label lives in whichever view is active — the gallery card's ".meta .t",
-  // or the list row's title cell (`td[data-col="title"]`). Looking only in the
-  // grid makes rename silently no-op in list view.
   function startRename(n) {
     const target =
       q(`#notes-grid .notebook-card[data-notebook-id="${n.id}"] .meta .t`) ||
@@ -547,9 +514,6 @@
   // ── Import ──────────────────────────────────────────────────────────────────
 
   // Default path (the toolbar + empty-state buttons): pull notebooks straight
-  // off the connected Kindle over MTP. Each notebook's on-device Date Modified
-  // becomes its `updated_at`. The pull + decode is slow over USB, so the button
-  // shows live "Importing N/M…" progress (see the listener in wire()).
   async function importDevice() {
     if (importing) return; // already running — ignore a double click
     importing = true;
@@ -611,10 +575,6 @@
 
   // ── Open in the reader ───────────────────────────────────────────────────────
   // The paged SVG viewer renders inside the shared reader shell (#reader-view)
-  // as a third content mode, exactly like a PDF —
-  // see reader.js `openNotebook`. We just hand it a small descriptor (resolving
-  // the title here, since the title fallback is ours), mirroring how library.js
-  // opens a book via `sidleReader.open(id)`.
   function openNotebook(n) {
     window.sidleReader?.openNotebook?.({
       id: n.id,
@@ -639,9 +599,6 @@
     }
 
     // Selection bar. The selection mechanics (click / lasso / Esc / Cmd-A /
-    // empty-click) come from the shared controller, driven by library.js's #main
-    // + document handlers when Notes is active — only these two buttons are
-    // notebook-specific.
     const selDelete = q("#nb-sel-delete");
     if (selDelete) {
       selDelete.addEventListener("click", () => {

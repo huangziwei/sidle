@@ -1,7 +1,4 @@
 //! MSB-first bit writer — the encode-side mirror of the decoder's
-//! [`crate::decode::misc::Deserializer`] bit reader. Anything
-//! written here reads back identically via `Deserializer::unpack_bits` /
-//! `huff` (proven in tests).
 
 /// Accumulates bits MSB-first and flushes whole bytes as they fill. `cur`
 /// holds `nbits` pending bits in its low positions (always `< 8` between

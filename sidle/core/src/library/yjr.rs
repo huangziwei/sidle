@@ -1,25 +1,10 @@
 //! Reading a Kindle's `.sdr` sidecars into the shapes the library works in.
-//!
-//! The container and its reader-data vocabulary — annotation records, anchors,
-//! colours, positions — belong to the format and live in
-//! [`bokai::formats::krds`]; this module is only the library's seam onto it:
-//! read a file, be forgiving about a sidecar that doesn't parse, and hand back
-//! the records. Annotation *meaning* — which book they belong to, what text
-//! they cover, how they dedup — is [`super::anchor`] and [`super::ingest`].
-//!
-//! Both sidecars are the same format: the `.yjr` holds annotations, the `.yjf`
-//! the last-read position ([`position`]).
 
 use std::path::Path;
 
 pub use bokai::formats::krds::{Anchor, Annotation, Kind, Object, Store, Value};
 
 /// Annotation records in a `.yjr`.
-///
-/// A sidecar that doesn't parse yields no annotations rather than an error: a
-/// device file is something we found, not something we control, and one
-/// unreadable book must never fail a whole-library sync. The bytes are left
-/// untouched either way, so nothing is lost — a later read can try again.
 pub fn parse(bytes: &[u8]) -> Vec<Annotation> {
     match Store::parse(bytes) {
         Ok(store) => store.annotations(),

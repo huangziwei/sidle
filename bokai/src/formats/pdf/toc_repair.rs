@@ -1,40 +1,5 @@
 //! Write a PDF's document outline (`/Outlines`) — the bookmark tree a viewer
 //! shows as the table of contents.
-//!
-//! The PDF side of "add/repair a TOC", and the format where the need is most
-//! acute: a scanned or LaTeX-produced book routinely ships with no outline at
-//! all, so there is nothing to navigate by.
-//!
-//! [`set_toc`] is the writer. It rides the [`PdfPackage`] harness, so adding a
-//! table of contents to a 65 MB scan appends a few hundred bytes and leaves
-//! every page stream byte-identical.
-//!
-//! ## Shape of the thing being written
-//!
-//! An outline (PDF 32000-1 §12.3.3) is a doubly-linked tree hung off the
-//! catalog: a root (`/Type /Outlines`) pointing at `/First`/`/Last` children,
-//! each item carrying `/Title`, `/Parent`, `/Prev`/`/Next` siblings, its own
-//! `/First`/`/Last`, and a `/Dest`. We emit `/Dest [page /Fit]` — the explicit
-//! form, which needs no name tree and is what [`crate::import::pdf`]'s reader
-//! resolves first. Targets are page objects, which an incremental update never
-//! moves, so this is a low-risk write: no offset can go stale.
-//!
-//! Every node is emitted **open** (positive `/Count`), because a TOC that has to
-//! be expanded to be seen defeats the point of adding one.
-//!
-//! ## Scope (v1)
-//!
-//! The **writer** only — it takes a caller-supplied tree (the editor's TOC
-//! panel, hand-authored). There is deliberately no `propose_toc` yet: unlike
-//! KFX and EPUB, whose proposers mine an in-book Contents page's link cluster, a
-//! PDF that lacks an outline usually has no links at all, so the only signal is
-//! the text layer (`render::extract_pdf_text`). That heuristic is its own piece
-//! of work and is not smuggled in here.
-//!
-//! An existing outline is **replaced**, not merged: the root object is reused
-//! (so anything else referencing it stays valid) and re-pointed at the new
-//! items. The old item objects stay in the file, unreferenced — an incremental
-//! update never deletes, and an orphaned object costs only its bytes.
 
 use std::io;
 
@@ -50,14 +15,6 @@ use crate::formats::pdf::structure::PdfOutlineItem;
 const MAX_DEPTH: usize = 32;
 
 /// Overwrite a PDF's document outline with `entries`, returning the edited bytes.
-///
-/// Each item's `page_index` is 0-based into the document's page order. The
-/// original bytes are preserved verbatim as a prefix; only the outline objects
-/// and (when the PDF had none) the catalog are appended.
-///
-/// Errors if the bytes aren't a readable PDF, the PDF is encrypted (see
-/// [`PdfPackage::parse`]), `entries` is empty, an entry targets a page the
-/// document doesn't have, or the tree nests deeper than 32.
 pub fn set_toc(pdf_bytes: &[u8], entries: &[PdfOutlineItem]) -> io::Result<Vec<u8>> {
     if entries.is_empty() {
         return Err(io::Error::new(
@@ -149,9 +106,6 @@ fn reserve<'a>(pkg: &mut PdfPackage, items: &'a [PdfOutlineItem]) -> Vec<Node<'a
 }
 
 /// The outline root to write into: the catalog's existing `/Outlines` when it
-/// resolves to a dictionary (reused, so any other reference to it stays valid),
-/// otherwise a fresh object. The bool is true when the caller must wire it into
-/// the catalog.
 fn outline_root(pkg: &mut PdfPackage) -> io::Result<(ObjectId, bool)> {
     let catalog_id = pkg.catalog_id()?;
     let existing = pkg

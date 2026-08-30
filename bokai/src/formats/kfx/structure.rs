@@ -1,9 +1,4 @@
 //! Queries over a book's fragment graph.
-//!
-//! Small readers for facts that live across fragments rather than in any one
-//! entity, usable without standing up a whole conversion pipeline. The text
-//! walks take a [`ContentSource`] so they work either against a fully loaded
-//! [`BookData`] or against a reader that parses one entity at a time.
 
 use std::collections::HashMap;
 
@@ -23,10 +18,6 @@ pub fn lookup_fragment<'b>(
 }
 
 /// The book's reading orders, each as its list of section names.
-///
-/// `$538 document_data` is consulted first and `$258 metadata` second, since a
-/// container may carry the orders in either; the first fragment type that
-/// yields any order wins.
 pub fn reading_orders(book: &BookData) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     for type_id in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
@@ -68,10 +59,6 @@ pub fn reading_orders(book: &BookData) -> Vec<Vec<String>> {
 }
 
 /// Every `$155 id` reachable from a page_template, in walk order.
-///
-/// `$176 story_name` references are followed into their `$259 storyline`
-/// fragment (cycle-guarded), which is how a page's template reaches the
-/// elements its storyline actually holds.
 pub fn collect_element_ids(template: &IonValue, book: &BookData, out: &mut Vec<i64>) {
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     walk_element_ids(template, book, &mut visited, out);
@@ -112,7 +99,6 @@ fn walk_element_ids(
 /// Layout hints + heading level from a named `$157 style` entity, resolved out
 /// of `book.by_type[$157]` (see
 /// [`style_fields_layout_hints`](super::yj_properties::style_fields_layout_hints)
-/// for the field semantics). Empty when the name doesn't resolve.
 pub fn style_layout_hints_for(style_name: &str, book: &BookData) -> (Vec<String>, Option<String>) {
     let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) else {
         return (Vec::new(), None);
@@ -127,12 +113,6 @@ pub fn style_layout_hints_for(style_name: &str, book: &BookData) -> (Vec<String>
 }
 
 /// How a `$145 content` reference reaches the string it names.
-///
-/// A reference takes the form `{name, $403: index}` and points at entry
-/// `index` of content entity `name`. Callers differ in how they reach that
-/// entity — a loaded [`BookData`] holds every one in memory, while a reader
-/// working off the container's entity index parses one on demand — so the
-/// lookup is supplied rather than assumed.
 pub trait ContentSource {
     /// The symbol table the reference's `name` field resolves through.
     fn symbols(&self) -> &crate::formats::kfx::container::SymbolTable;
@@ -187,9 +167,6 @@ pub fn resolve_content_text(value: &IonValue, book: &BookData) -> String {
 
 /// Recursively walk a storyline fragment. Every struct that carries a
 /// `$155 id` and a `$145 content` reference contributes `eid → base text`;
-/// `$146 content_list` children are recursed into. `$176 story_name`
-/// references are *not* followed — each referenced story is its own
-/// `$259 storyline` fragment and is walked at the top level instead.
 pub fn collect_eid_text(
     value: &IonValue,
     source: &impl ContentSource,
@@ -220,10 +197,6 @@ pub fn collect_eid_text(
 }
 
 /// The book's whole `eid → base text` map, walked from every storyline.
-///
-/// "Base text" is the element's own `$145 content`, with nothing added: this is
-/// the substrate device anchors address, so a `(eid, offset)` pair indexes into
-/// exactly this string.
 pub fn eid_text_map(book: &BookData) -> HashMap<i64, String> {
     let mut out = HashMap::new();
     if let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) {

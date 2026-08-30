@@ -1,20 +1,6 @@
 //! Forward color transform for the encoder's **color** mode (`ColorMode::Color`).
 //!
 //! JPEG-XR's color path is `RGB → internal YUV (YCoCg-like) → per-plane PCT`.
-//! [`rgb_to_yuv444`] is the **exact integer inverse** of the decoder's
-//! `decode::decoder::yuv444_to_rgb` lifting (which is the
-//! spec / libjxr `strInvTransform`). Because every step is integer lifting, the
-//! pair is a perfect bijection — lossless 4:4:4 color round-trips bit-exactly.
-//!
-//! Bias: the decoder applies the YUV→RGB lifting on the reconstructed
-//! coefficients and *then* adds `1<<(bd-1)` (128 for BD8) to land in `[0,255]`.
-//! So the forward direction subtracts the bias from the input RGB **first**, runs
-//! [`rgb_to_yuv444`] on the centered values, and feeds the resulting Y/U/V planes
-//! into the same per-plane forward transform grayscale uses (no further −128).
-//!
-//! The emission path is 4:4:4 (full-resolution chroma). 4:2:0/4:2:2 (4b, in
-//! progress) downsample the centered U/V planes AFTER the color transform —
-//! the libjxr pipeline order — via [`downsample_h`]/[`downsample_v`].
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;
@@ -39,7 +25,6 @@ const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA
 #[inline]
 pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
     // Invert, in reverse order, the decoder's lifting
-    //   t = -U;  G = Y − ⌊t/2⌋;  R = t + G − ⌈V/2⌉;  B = V + R
     let v = b - r; // from B = V + R
     let temp_t = r - g + ceil_div2(v); // from R = t + G − ⌈V/2⌉
     let u = -temp_t; // t = −U
@@ -48,9 +33,6 @@ pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
 }
 
 /// Pad one u8 plane to a 16-aligned grid with edge replication (as `gray.rs`),
-/// the image content placed at `(top, left)` — all four margins replicate the
-/// nearest edge (corners replicate the corner sample). `(0, 0)` is the classic
-/// derived-windowing placement.
 fn pad_plane(
     src: &[i32],
     wu: usize,
@@ -71,10 +53,6 @@ fn pad_plane(
 }
 
 /// libjxr's `DF_ODD` 5-tap chroma decimation filter: `[1,4,6,4,1]/16` with
-/// round-half-up, centered on the EVEN sample (`d2`) — so the surviving chroma
-/// samples are co-sited with even luma positions, matching the
-/// `chroma_centering_x/y = 0` the plane header declares (the only values
-/// libjxr ever writes, `strenc.c:1299`).
 #[inline]
 fn df_odd(d0: i32, d1: i32, d2: i32, d3: i32, d4: i32) -> i32 {
     (((d1 + d2 + d3) << 2) + (d2 << 1) + d0 + d4 + 8) >> 4
@@ -145,13 +123,6 @@ pub fn downsample_v(src: &[i32], w: usize, h: usize) -> Vec<i32> {
 }
 
 /// One 3-component YUV image plane (`INT_YUV444`, or subsampled
-/// `INT_YUV422`/`INT_YUV420`): per-component quantized coefficients plus the
-/// YUV adaptive entropy state, encodable one macroblock at a time. Mirror of
-/// [`super::gray::YOnlyPlane`] for the color path; a color+alpha image (4a)
-/// is a `ColorPlane` and a `YOnlyPlane` per-MB interleaved on one
-/// `BitWriter`. For subsampled chroma the per-component buffers use a PREFIX
-/// of the 444-sized arrays (chroma MB = 4 blocks / 4 dclp slots for 420,
-/// 8/8 for 422 — the decoder's fixed-stride `MB_BUF_PER_COMP` layout).
 pub(super) struct ColorPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
@@ -222,12 +193,6 @@ impl ColorPlane {
     }
 
     /// [`Self::new`] generalized over chroma sampling and `bands_present`:
-    /// for `INT_YUV422`/`INT_YUV420` the centered U/V planes are decimated
-    /// AFTER the color transform (libjxr pipeline order) and chroma MBs run
-    /// through the 4-/8-block forward transforms with the transposed-domain
-    /// dclp extraction (T420/T422 — the decoder's write-back tables, read
-    /// backwards). `window = (top, left)` places the image inside the padded
-    /// grid for explicit windowing (`(0, 0)` = classic derived padding).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_fmt(
         r: &[i32],
@@ -246,9 +211,6 @@ impl ColorPlane {
         plan: Option<&super::quant::QpPlan>,
     ) -> Self {
         // The quantization plan: per-tile QP sets + per-MB LP/HP set indices.
-        // `None` = the classic single uniform set from `qp`. Factors come
-        // from the decoder's `quant_map` per (component, scaled, band) — the
-        // MODE- and COMPONENT-dependent map.
         let owned_plan;
         let plan = match plan {
             Some(p) => p,
@@ -297,10 +259,6 @@ impl ColorPlane {
         let (mbw, mbh) = (pw / 16, ph / 16);
 
         // Pad the pre-bias RGB ([`super::convert`] already centered/shifted
-        // it — for scaled planes the 3 extra fraction bits enter BEFORE the
-        // color lifting, mirroring the decoder's unscale-after-inverse-
-        // lifting order), then forward color transform per pixel → 3
-        // centered YUV planes.
         let (rp, gp, bp) = (
             pad_plane(r, wu, hu, pw, ph, top, left),
             pad_plane(g, wu, hu, pw, ph, top, left),
@@ -604,9 +562,6 @@ impl ColorPlane {
     }
 
     /// Start a tile at `(first_mbx, first_mby)`, `tile_w` MBs wide: fresh
-    /// entropy state, exactly the constructor's init — the encoder mirror of
-    /// the decoder's `initialize_context` (which re-inits every band's
-    /// models/VLC tables/scans/CBP counters at each tile's first MB).
     pub(super) fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
         self.tile_origin = (first_mbx, first_mby);
         self.tile_w = tile_w;
@@ -638,7 +593,6 @@ impl ColorPlane {
     /// Emit one macroblock's DC + LP + HP(+flex) bits for all 3 components,
     /// updating this plane's adaptive state exactly as the decoder's per-MB
     /// YUV444 readers do.
-    /// This MB's LP QP-set index (0 when no DQUANT map).
     fn lp_idx_at(&self, mbx: usize, mby: usize) -> usize {
         self.lp_idx_map
             .get(mby * self.mbw + mbx)
@@ -660,9 +614,6 @@ impl ColorPlane {
         let (is_left, is_top) = (mbxt == 0, mbyt == 0);
 
         // Per-MB QP-set indices (DQUANT) — the decoder reads them before any
-        // band payload (`lp_tile_mb_qp`/`hp_tile_mb_qp`): in spatial order
-        // they land right here before DC; in frequency order each lands in
-        // its band's packet just before this MB's payload.
         if self.bands != DCONLY && self.num_lp_qps > 1 {
             codestream::write_qp_index(sink.lp(), self.lp_idx_at(mbx, mby), self.num_lp_qps);
         }
@@ -800,11 +751,6 @@ impl ColorPlane {
                     }
                 } else {
                     // Table 133, 422 chroma (decoder.rs:1196-1218): LEFT predicts
-                    // ours {4,1,5}; TOP: j4←top[4], j2←top[6], j6←own FINAL j2
-                    // (the decoder adds top[6] to j2 BEFORE chaining j2 into j6,
-                    // so the j6 residual is against the final j2 value); the
-                    // MBDCMode==TOP special chains j6←j2 even with LP
-                    // prediction off.
                     if lp_mode == PREDICT_FROM_LEFT && matches!(j, 4 | 1 | 5) {
                         self.dclp[mbx - 1][mby][comp][j]
                     } else if lp_mode == PREDICT_FROM_TOP {
@@ -946,9 +892,6 @@ impl ColorPlane {
                 }
             }
             // n = 1: ONE joint U/V block with the FIXED interleaved order
-            // (Table 53; decoder.rs:1084-1103): coded position k carries
-            // component (k&1)+1, coefficient REMAP_ARR[(k>>1)+offset] in our
-            // transposed storage. No adaptive-scan participation.
             const REMAP_ARR: [usize; 7] = [4, 1, 2, 3, 5, 6, 7];
             let (offset, count, i_location) = if self.fmt == INT_YUV420 {
                 (1usize, 6usize, 10usize)
@@ -1070,13 +1013,6 @@ impl codestream::TileEncode for AlphaPair<'_> {
 /// Encode an RGB image (3 planes, each `w*h` row-major) as a **color** JPEG-XR
 /// (`24bppRGB` / `INT_YUV444 → OUT_RGB`), ALL_BANDS (DC + LP + HP + flexbits).
 /// Lossless 4:4:4 round-trips bit-exactly; `QP > 0` is lossy.
-///
-/// Mirrors the decoder's YUV444 paths per macroblock: a `val_dc_yuv` symbol for
-/// the DC abs-flags, per-component DC residuals with chroma models/tables and
-/// 3-component-weighted prediction; `cbplp_yuv1_444` (with the count-escape
-/// state) + per-component LP run-level via `encode_block` over a **shared**
-/// adaptive scan with luma/chroma index tables, + LP refinement; YUV
-/// `mb_cbphp` + per-component HP run-level + flex.
 pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
     let conv = super::convert::u8_prebias;
     let (rp, gp, bp) = (conv(r, false), conv(g, false), conv(b, false));
@@ -1111,7 +1047,6 @@ pub(super) fn window_margins(w: u32, h: u32, window: (u32, u32)) -> (u32, u32, u
 /// [`encode_color_scaled`] plus `trim_flexbits` (image-header flag + the
 /// 4-bit spatial-tile value + truncated flex emission) and explicit window
 /// margins (`window = (top, left)`; `(0, 0)` = classic derived windowing).
-/// The full internal option surface for the 3-plane color path.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_color_options(
     r: &[u8],
@@ -1155,10 +1090,6 @@ pub fn encode_color_options(
 }
 
 /// Depth-general 3-plane color driver: `r`/`g`/`b` already forward-converted
-/// to the pre-bias domain ([`super::convert`]), `depth` carried into the
-/// image + plane headers, `guid` into the container. `out_clr_fmt` is
-/// `OUT_RGB` for everything except the RGBE path (`OUT_RGBE` — same
-/// 3-component YUV444 internal coding, different output formatting).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_color_prebias(
     r: &[i32],
@@ -1254,19 +1185,6 @@ pub(super) fn encode_color_prebias(
 }
 
 /// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
-/// a T.832 **alpha image plane**: `32bppBGRA` (or `32bppPBGRA` when
-/// `premultiplied`) container, `INT_YUV444` primary plane + `INT_YONLY` alpha
-/// plane with its **own** uniform per-band QPs (`alpha_qp`), per-MB
-/// interleaved exactly as the decoder reads them (`tile_mb(plane0)` then
-/// `tile_mb(plane1)` per MB). Lossless QPs on both planes round-trip all four
-/// channels bit-exactly.
-///
-/// This is what JxrEncApp calls *interleaved* alpha (`-a 3`, in-codestream
-/// plane; its `-a 2` "planar" is the separate-container-codestream variant,
-/// which is a different, container-level feature).
-/// The primary plane may be 444 or subsampled (`fmt`); the alpha plane is
-/// always YONLY. Subsampled chroma is lossy by construction; 444 lossless
-/// round-trips all four channels bit-exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_color_alpha(
     r: &[u8],
@@ -1321,14 +1239,6 @@ pub fn encode_color_alpha(
 }
 
 /// Depth-general RGB+alpha driver ([`encode_color_alpha`] over pre-bias
-/// planes): `depth` rides into the image header and BOTH plane headers (the
-/// alpha plane carries its own `shift_bits`/float fields). The alpha plane's
-/// `scaled_flag` follows the image's (the reference encoder couples them;
-/// scaled lossless YONLY stays bit-exact) while its QPs stay independent
-/// (`alpha_qp`). `chroma_qp` quantizes the PRIMARY plane's chroma separately
-/// (`COMP_SEPARATE`), exactly as on the 3-plane path; the alpha plane is
-/// YONLY and unaffected. `overlap_mode` is an image-header field, so it
-/// applies to the alpha plane's reconstruction too — filter it identically.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_color_alpha_prebias(
     r: &[i32],
@@ -1410,10 +1320,6 @@ pub(super) fn encode_color_alpha_prebias(
 }
 
 /// Encode an RGB image as **internal YONLY** with `OUT_RGB` output (the
-/// JxrEncApp `-d 0` analog): the forward color transform's luma is coded as a
-/// single plane and the decoder replicates it into R=G=B on output. The
-/// container stays `24bppRGB`. Gray sources (R=G=B) round-trip exactly —
-/// their luma IS the gray value; color sources reconstruct as luma.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_yonly_from_color(
     r: &[u8],
@@ -1516,9 +1422,6 @@ pub(super) fn encode_yonly_prebias(
 }
 
 /// HP-band adaptive state for the color path — multi-component analogue of
-/// [`hp::HpState`]: 2-model `model_hp`, **chroma-split** index tables (lum+chr),
-/// shared abs tables, shared hor/ver scans, shared `num_cbphp`/`num_blk_cbphp`,
-/// and a `CBPHPModel` with two `chroma_flag` slots.
 struct ColorHpState {
     model: coeff::ColorModel,
     first: [AdaptiveVLC; 2], // [lum, chr]
@@ -1611,16 +1514,6 @@ fn unpredict_cascade_422(mut c: i32) -> i32 {
 }
 
 /// Encode the three components' `mb_cbphp` (per-block HP coded-block
-/// patterns: 16-bit luma/444, 8-bit 422 chroma, 4-bit 420 chroma) — inverse
-/// of the YUV `mb_cbphp` reader + `pred_cbphp_444/422/420`. First unpredict
-/// each component (cascade + neighbour bit per `chroma_flag` state; chroma
-/// model counts scale ×2 (422) / ×4 (420) to the 16-block frame) and update
-/// the CBPHP model, then emit the interleaved structure: `num_cbphp` over the
-/// four block-groups, and per present group a `num_blk_cbphp` carrying the
-/// luma nibble plus (via the `i_val≥6` escape) `chr_cbphp`/`val_inc` and the
-/// chroma parts — nibbles via `num_ch_blk`+refine for 444, a `chr_cbphp`
-/// pair-pattern symbol for 422, and nothing further for 420 (the 0x10/0x20
-/// flags ARE the per-group single-block chroma bits).
 #[allow(clippy::too_many_arguments)]
 fn encode_color_cbphp(
     bw: &mut BitWriter,
@@ -1793,10 +1686,6 @@ fn encode_color_cbphp(
 }
 
 /// Encode the HP band of one macroblock for all 3 components — inverse of
-/// `mb_cbphp` + `mb_hp_flex` + `hp_transform_coefficient_decoding`. `bufs` are
-/// the per-component forward `mb_buffer`s (HP quantized at within-block
-/// positions); `lp` the per-component DC+LP levels (for the shared HP pred
-/// mode). Returns each component's `mb_cbphp` for neighbour prediction.
 #[allow(clippy::too_many_arguments)]
 fn encode_color_hp_mb(
     sink: &mut codestream::Sink,
@@ -1857,8 +1746,6 @@ fn encode_color_hp_mb(
         }
         // Within-MB HP prediction (Table 136). Luma/444 blocks use the
         // permuted 16-block layout (TOP: blk−1 within columns; LEFT: blk−4);
-        // 42x chroma blocks are raster-indexed 2-wide, so TOP predicts from
-        // blk−2 and LEFT from blk−1 (the decoder's blkId lists/strides).
         if mode == PREDICT_FROM_TOP {
             if !chroma_42x {
                 for &blk in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
@@ -2053,19 +1940,12 @@ mod tests {
             self.0
         }
         /// A well-distributed byte from the LCG's **high** bits. (The low 8 bits
-        /// have period 256, so `next() % 256` aliases when plane sizes are a
-        /// multiple of 256 — making R/G/B identical and chroma zero. High bits
-        /// have full period, so the three channels genuinely differ → the chroma
-        /// HP/LP path is actually exercised.)
         fn byte(&mut self) -> u8 {
             (self.next() >> 32) as u8
         }
     }
 
     /// `DF_ODD` filter arithmetic + boundary reflection, pinned against
-    /// hand-computed values (filter = [1,4,6,4,1]/16 round-half-up on the
-    /// even-centered window; left edge reflects src[-k]→src[k], right edge
-    /// src[m+k]→src[m-k] — `strenc.c` `downsampleUV` boundary behavior).
     #[test]
     fn downsample_filter_and_boundaries() {
         // Constant plane → constant (taps sum to 16).
@@ -2103,9 +1983,6 @@ mod tests {
     }
 
     /// The gate: the decoder's real `yuv444_to_rgb` must invert our forward
-    /// exactly, for every RGB triple. Pure integer lifting ⇒ bit-exact, no
-    /// tolerance. Tests against the *actual decode function* (shared source), so
-    /// this can't pass by both sides sharing the same bug.
     #[test]
     fn forward_inverts_decoder_exactly() {
         // Exhaustive over a centered cube that covers BD8's pre-bias range
@@ -2175,10 +2052,6 @@ mod tests {
 
     /// 4b Stage A gate: whole-image constant color at 420/422 **DCONLY**
     /// round-trips END-TO-END exactly (constant chroma survives decimation;
-    /// the decoder's centering upsample of a constant is that constant),
-    /// across 1-MB, multi-MB, and non-aligned sizes — exercising the 42x
-    /// plane header, chroma MB transforms, chroma DC prediction (iScale +
-    /// rounding) and the Table-116 model dispatch on real grids.
     #[test]
     fn roundtrip_constant_color_42x_dconly() {
         for &fmt in &[INT_YUV420, INT_YUV422] {
@@ -2209,11 +2082,6 @@ mod tests {
     }
 
     /// 4b Stage B gate (in-crate half): zero-HP **luma** detail over CONSTANT
-    /// chroma at 420/422 **NOHIGHPASS** is end-to-end exact — the luma LP path
-    /// runs fully inside the 42x MB structure (cbplp_yuv1_42x, the
-    /// iFullPlanes=2 raw width, refinement order), while constant chroma
-    /// survives decimation/upsampling exactly. Chroma LP *values* are gated
-    /// externally via JxrDecApp (decimation is lossy end-to-end).
     #[test]
     fn roundtrip_zero_hp_luma_42x_nohighpass() {
         let mut r = Lcg2(0x42b5_7a6e_0042_b57a);
@@ -2264,10 +2132,6 @@ mod tests {
     }
 
     /// 4b Stage C gate (in-crate half): arbitrary **luma** detail over
-    /// CONSTANT chroma at 420/422 **ALL_BANDS** lossless is end-to-end exact —
-    /// the full luma DC+LP+HP+flex path runs inside the 42x MB structure
-    /// (CBPHP chroma arms see all-zero patterns but the group/escape coding
-    /// still runs), and constant chroma survives decimation exactly.
     #[test]
     fn roundtrip_gray_content_42x_allbands() {
         let mut r = Lcg(0xc0a1_e5ce_0042_c0a1);
@@ -2423,8 +2287,6 @@ mod tests {
     /// 4b Stage D: scaled arithmetic. Gray content (zero chroma — halving of
     /// zero is exact) at scaled q1 is end-to-end exact for every sampling:
     /// the luma path is `<<3` in, `(v+bias<<3+3)>>3` out, exactly invertible.
-    /// Arbitrary content decodes to shape (chroma half-step is lossy by
-    /// design; JxrDecApp readback exactness is the harness gate).
     #[test]
     fn scaled_arithmetic_roundtrips() {
         let mut r = Lcg(0x5ca1_ed00_5ca1_ed00);
@@ -2479,9 +2341,6 @@ mod tests {
     }
 
     /// 4b Stage B structural check: arbitrary content at 420/422 NOHIGHPASS
-    /// (lossless + lossy QPs) yields streams our decoder parses to the right
-    /// shape — a desync in the joint-chroma LP coding shows up here as a
-    /// decode error. Pixel exactness is the harness's JxrDecApp gate.
     #[test]
     fn subsampled_nohighpass_streams_decode() {
         let mut r = Lcg(0x4242_0042_4242_0042);
@@ -2569,9 +2428,6 @@ mod tests {
     }
 
     /// The real goal: ANY color image round-trips **exactly** (ALL_BANDS,
-    /// lossless 4:4:4). Exercises the full HP band — `mb_cbphp` YUV coding,
-    /// per-component run-level + flex, chroma tables, shared scans — on top of
-    /// DC + LP, across multi-MB grids.
     #[test]
     fn roundtrip_arbitrary_color_allbands_lossless() {
         let mut r = Lcg(0x4242_a5a5_1234_5678);
@@ -2608,9 +2464,6 @@ mod tests {
     }
 
     /// Lossy color is a fixpoint: a decoded image is already on the quant grid,
-    /// so re-encoding yields a byte-identical JXR (encode∘decode∘encode). Holds
-    /// iff the forward color transform + per-band quant invert the decoder
-    /// exactly. Mid-range pixels + aligned sizes avoid clamp/padding perturbation.
     #[test]
     fn lossy_color_roundtrip_is_a_fixpoint() {
         let mut r = Lcg(0x1357_9bdf_2468_ace0);
@@ -2759,8 +2612,6 @@ mod tests {
     /// NOHIGHPASS is lossless for **zero-HP** content: synthesize per-MB Y/U/V
     /// blocks with LP energy but no HP, map them to in-gamut RGB (the encoder's
     /// `fwd_color` recovers the exact YUV), and confirm a bit-exact round-trip.
-    /// Exercises `cbplp_yuv1_444` + per-component LP run-level + chroma tables +
-    /// shared scan + LP prediction + refinement.
     #[test]
     fn roundtrip_zero_hp_color_nohighpass() {
         let mut r = Lcg2(0x7e57_c01a_dead_beef);

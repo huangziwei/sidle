@@ -1,22 +1,4 @@
 //! Turning a collection in the library into the series it collects.
-//!
-//! A 合本版 / 全集 / boxed set is N books shipped as one file. bokai knows where
-//! those volumes divide and how to write each one as a self-contained EPUB; what
-//! is left over is the product's half of the job, which is this module:
-//!
-//!   propose → the user confirms the name and the numbers → write the volumes →
-//!   import each → the omnibus joins the series it was split into.
-//!
-//! Every volume enters through the ordinary import, so it earns its own
-//! `epub_to_kfx` job, cover, thumbnail, romaji and dedupe with no extra
-//! plumbing. Grouping is by the exact `series_name` string, so the name is
-//! decided once — here — and written identically into every volume rather than
-//! re-derived per book.
-//!
-//! Nothing about the proposal is trusted. The series name is guessed from a
-//! title that states it in prose, and a store's own volume numbering is wrong
-//! often enough that a machine reading of it is a suggestion; both are a filled-
-//! in form the user corrects before anything is written.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -101,13 +83,6 @@ pub struct VolumeOutcome {
 
 /// Propose how to split a collection: where the volumes divide, what to call
 /// each one, and what to call the series they form.
-///
-/// An empty volume list means the book evidences no collection — which is the
-/// answer for every ordinary book, and not an error.
-///
-/// A book that already knows its series — one whose source declared it, which
-/// the import kept — is taken at its word; only a book that doesn't has a name
-/// read out of its title.
 pub fn propose(epub_bytes: &[u8], omnibus: &BookRow) -> Result<SplitPlan> {
     let cuts = split::propose_cuts(epub_bytes).context("read the collection's volumes")?;
     let declared = omnibus
@@ -124,11 +99,6 @@ pub fn propose(epub_bytes: &[u8], omnibus: &BookRow) -> Result<SplitPlan> {
 }
 
 /// Carve the collection into the volumes the plan describes, as EPUB bytes.
-///
-/// The slow half of a split, and it touches nothing: no library, no database,
-/// no disk beyond reading the collection. Callers run it before taking any lock
-/// — a 90 MB collection takes long enough that holding the library shut for the
-/// duration would stall every conversion running beside it.
 pub fn carve_volumes(omnibus: &BookRow, plan: &SplitPlan) -> Result<Vec<Vec<u8>>> {
     let series = plan.series_name.trim();
     if series.is_empty() {
@@ -154,11 +124,6 @@ pub fn carve_volumes(omnibus: &BookRow, plan: &SplitPlan) -> Result<Vec<Vec<u8>>
 }
 
 /// Import each carved volume, then put the omnibus in the series alongside them.
-///
-/// `volumes` is what [`carve_volumes`] returned for this same plan, in the same
-/// order. `progress` is called before each import with its zero-based index and
-/// title. A volume that fails is reported and the rest still run — one bad
-/// volume out of thirteen should not cost the other twelve.
 pub fn add_volumes(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
@@ -252,12 +217,6 @@ fn import_volume(
 }
 
 /// The series name a collection's title states, with the words that describe
-/// the *bundle* taken out — the 合本版 banner, the volume count, the span of
-/// volumes inside, the publisher's imprint. What remains is the work itself,
-/// which is what the volumes should be grouped under.
-///
-/// A title that is nothing but those words is left alone rather than reduced to
-/// nothing: the user gets something to edit instead of an empty field.
 pub fn series_name_from_title(title: &str) -> String {
     let stripped = tidy(&strip_bundle_words(&strip_bracketed(title)));
     if stripped.is_empty() {
@@ -268,9 +227,6 @@ pub fn series_name_from_title(title: &str) -> String {
 }
 
 /// Bracketed groups that describe the bundle rather than the work: the 【合本版】
-/// banner, the （上下） / （第１部～第３部） span of what is inside, and the
-/// publisher's imprint the store appends. Every other group is left where it is
-/// — a title may legitimately carry one.
 fn strip_bracketed(title: &str) -> String {
     const PAIRS: [(char, char); 8] = [
         ('【', '】'),

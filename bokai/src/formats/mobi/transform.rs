@@ -34,15 +34,6 @@ enum RefKind {
 /// Transform kindle: references in HTML to standard EPUB-style paths.
 ///
 /// Converts:
-/// - `kindle:flow:XXXX` → `styles/styleNNNN.css`
-/// - `kindle:pos:fid:XXXX:off:YYYY` → `partNNNN.html#id` or `partNNNN.html`
-/// - `kindle:embed:XXXX` → `images/image_NNNN.ext`
-///
-/// `embed_paths` maps a resource index to the asset path the importer
-/// actually extracted (extension from the record's magic bytes). An embed
-/// URL's own `?mime=` is the publisher's claim about that record and can
-/// disagree with the bytes, so the map wins where it has an entry — same
-/// resolution [`rewrite_kindle_embed_in_css`] uses on the CSS side.
 pub fn transform_kindle_refs(
     html: &[u8],
     elems: &[DivElement],
@@ -190,10 +181,6 @@ fn resolve_pos_fid(
         return (elem.file_number as usize, None);
     }
     // Reassembled chunk start + off (KindleUnpack's `getIDTag`): `raw_text`
-    // is the reassembled flow (chunks spliced into their skeletons), and
-    // `reassembled_pos` is where this chunk's content lands there. Resolving
-    // against the on-disk `[skeleton][chunk]` flow instead makes the backward
-    // walk from a chunk-start land on the skeleton's tail element.
     let file_num = elem.file_number as usize;
     let target_pos = elem.reassembled_pos + offset as u32;
     let anchor = find_nearest_id_kind(raw_text, target_pos as usize, file_num, file_starts);
@@ -211,17 +198,6 @@ fn format_anchor_name(val: &str, is_aid: bool) -> String {
 }
 
 /// Collect the set of `aid` attribute values that are link targets.
-///
-/// KF8 stamps kindlegen's `aid` attribute on skeleton elements; internal
-/// links (`kindle:pos:fid:XXXX:off:YYYY`) resolve to the nearest `id`,
-/// `name`, or `aid` attribute. When the nearest is an `aid`, the emitted
-/// href fragment is `#aid-{value}` — so that element must keep an
-/// `id="aid-{value}"` in the output or the link dangles. This scans every
-/// pos:fid reference in `scan_text` (the whole decompressed text, so links
-/// inside auxiliary flows count too) plus the NCX TOC byte positions in
-/// `extra_positions` (`(byte_pos, file_num)` pairs — `resolve_toc` runs the
-/// same nearest-attribute lookup), and returns the aid values those targets
-/// resolve to. Mirrors calibre's `linked_aids` (mobi8.py).
 pub fn collect_linked_aids(
     scan_text: &[u8],
     resolve_text: &[u8],
@@ -276,17 +252,6 @@ pub fn find_nearest_id_fast(
 /// Resolve a `kindle:pos:fid` byte position (in the reassembled flow:
 /// `reassembled_pos + off`) to the owning element's anchor, returning
 /// `(value, came_from_aid)`.
-///
-/// Mirrors KindleUnpack's `getIDTag`: walk backward tag by tag from `pos` to
-/// the opening tag that owns the position, and return its anchor — preferring
-/// a real `id` (then `name`) over the transient kindlegen `aid`. The
-/// preference is what keeps this consistent with
-/// [`strip_kindle_attributes_fast`]: an element that already carries an `id`
-/// keeps it (a second `id` would be malformed XML), so a link into that
-/// element must resolve to the existing `id`, not to an `aid-…` that never
-/// gets injected. Elements with only an `aid` resolve to `aid-{value}` and the
-/// stripper injects the matching `id`. Walking stops at `<body>` (→ `None`,
-/// i.e. link to the top of the file).
 fn find_nearest_id_kind(
     raw_text: &[u8],
     pos: usize,
@@ -360,9 +325,6 @@ fn extract_tag_anchor(tag: &[u8]) -> Option<(String, bool)> {
 }
 
 /// Read a single-/double-quoted attribute value from a tag's bytes. The
-/// leading space in the needle (` name=`) prevents matching a longer
-/// attribute name (`data-name=`). Returns `None` for a missing, unquoted,
-/// empty, or non-id-charset value.
 fn attr_value_in_tag(tag: &[u8], attr_name: &[u8]) -> Option<String> {
     let mut needle = Vec::with_capacity(attr_name.len() + 2);
     needle.push(b' ');
@@ -389,21 +351,6 @@ fn attr_value_in_tag(tag: &[u8], attr_name: &[u8]) -> Option<String> {
 }
 
 /// Inline SVG flow content into `<img src="kindle:flow:NNNN..."/>` references.
-///
-/// KF8 illustration / full-page-art pages embed their SVG content in
-/// auxiliary flows and reference it from the body XHTML via
-/// `<img src="kindle:flow:NNNN?mime=image/svg+xml"/>`. The flow itself
-/// contains `<svg viewBox="..."><image xlink:href="kindle:embed:NN"/></svg>`
-/// wrapping a raster image. Calibre's `mobi8.py` handles this by inlining
-/// the SVG bytes where the `<img>` tag was — see
-/// calibre's MOBI input `reader/mobi8.py` around the
-/// `image_tag_pattern.search(from_svg)` branch.
-///
-/// Must run BEFORE `transform_kindle_refs`: the inlined SVG content
-/// contains `kindle:embed:NNNN` references that the regular transform
-/// rewrites to `images/image_NNNN.ext`. Once this pass has run, every
-/// remaining `kindle:flow:` reference is a CSS link (in `<link>` tags)
-/// and the regular transform handles it.
 pub fn inline_svg_flows(
     html: &[u8],
     flow_table: &[(usize, usize)],
@@ -462,9 +409,6 @@ pub fn inline_svg_flows(
         let flow_num = parse_base32(&html[num_start..num_end]);
 
         // Locate `<svg` within the flow content. Inline from there to the
-        // flow's end (mirrors calibre `mobi8.py`'s `flowpart[start:]`
-        // slice — strips any leading `<?xml-stylesheet ...?>` PI that KF8
-        // prepends, since those aren't valid mid-XHTML).
         let svg_range = flow_table.get(flow_num).and_then(|&(start, end)| {
             let end = end.min(decompressed_text.len());
             if start > end {
@@ -485,9 +429,6 @@ pub fn inline_svg_flows(
             pos = tag_end;
         } else {
             // Flow missing, not SVG, or out of range — leave the tag alone.
-            // `transform_kindle_refs` will rewrite the URL to a CSS path,
-            // which produces a broken `<img src="...css">` — preferred to
-            // silently dropping the content.
             output.extend_from_slice(&html[pos..tag_end]);
             pos = tag_end;
         }
@@ -498,20 +439,6 @@ pub fn inline_svg_flows(
 }
 
 /// Strip Amazon-specific attributes from HTML.
-///
-/// Removes: aid="...", data-AmznRemoved..., data-AmznPageBreak="..."
-/// Rewrite `kindle:flow:NNNN?...` URLs inside a CSS file to sibling-relative
-/// `styleNNNN.css` paths.
-///
-/// Native Amazon AZW3 stylesheets often chain-load each other with
-/// `@import url(kindle:flow:0001?mime=text/css);`. Bokai emits the flow-table
-/// CSS verbatim, which preserves these unresolvable URLs — Apple Books
-/// silently drops the import and the chained rules (writing-mode among them)
-/// never load. Calibre-exported AZW3s don't have this defect because calibre
-/// pre-resolves imports during its EPUB → AZW3 stage.
-///
-/// Sibling-relative output (`style0000.css` rather than `styles/style0000.css`)
-/// because the CSS file is itself already inside `styles/` in the EPUB zip.
 pub fn rewrite_kindle_flow_in_css(css: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(css.len());
     let mut pos = 0;
@@ -559,19 +486,6 @@ pub fn rewrite_kindle_flow_in_css(css: &[u8]) -> Vec<u8> {
 }
 
 /// Ensure the `<html>` root tag carries both `xml:lang` and `lang` attributes.
-///
-/// Calibre's AZW3 exporter scrubs `xml:lang` from the source HTML and leaves
-/// only `lang=`, which makes count-level diffs against the original publisher
-/// EPUB show a per-spine-doc xml:lang deficit (every chapter is `-1`). EPUB 3
-/// recommends both — XHTML processors honor `xml:lang`, HTML5 processors
-/// honor `lang`. Emitting both is universally compatible.
-///
-/// Behavior:
-/// - Has both: untouched.
-/// - Has only `lang=`: adds `xml:lang=` with the same value.
-/// - Has only `xml:lang=`: adds `lang=` with the same value.
-/// - Has neither: adds both with `default_lang` (skipped when empty).
-/// - No `<html` tag at all: input returned unchanged.
 pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
     let Some(tag_start) = memmem::find(html, b"<html") else {
         return html.to_vec();
@@ -584,9 +498,6 @@ pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
     let attrs = &html[after_html..tag_end];
 
     // A repeated `lang`/`xml:lang` is malformed XML (epubcheck RSC-016
-    // fatal, which kills all content checks for the file). An already-converted
-    // book can arrive carrying the dup, so keep only the first occurrence of
-    // each before filling in gaps.
     let mut lang_spans = attr_spans(attrs, b"lang");
     let mut xml_lang_spans = attr_spans(attrs, b"xml:lang");
     if lang_spans.len() > 1 || xml_lang_spans.len() > 1 {
@@ -692,16 +603,6 @@ pub(super) fn attr_spans(attrs: &[u8], name: &[u8]) -> Vec<(usize, usize)> {
 }
 
 /// Escape ampersands that do not begin a character or entity reference.
-///
-/// MOBI6 text carries literal ampersands — `“Pranks & Fails,”`, `A. T. & T.` —
-/// which HTML4 tolerates and XML does not (`entity or character reference not
-/// closed` — epubcheck RSC-016). A bare `&` becomes `&amp;`; anything already
-/// well-formed (`&amp;`, `&#x25A0;`, `&#8212;`) is left exactly as written, so
-/// nothing is double-escaped and no existing reference is disturbed.
-///
-/// Comments, CDATA sections and processing instructions are copied whole: an
-/// `&` inside them needs no escaping, and the XML parser never reads them as
-/// markup.
 pub fn escape_bare_ampersands(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -724,9 +625,6 @@ pub fn escape_bare_ampersands(html: &[u8]) -> Vec<u8> {
 }
 
 /// End offset of a comment / CDATA / processing-instruction span opening at
-/// `pos`, or `None` when nothing of the kind starts there. An unterminated
-/// span runs to end of input — the same recovery an XML parser has no choice
-/// about.
 fn verbatim_span(html: &[u8], pos: usize) -> Option<usize> {
     const SPANS: [(&[u8], &[u8]); 3] = [(b"<!--", b"-->"), (b"<![CDATA[", b"]]>"), (b"<?", b"?>")];
     let rest = &html[pos..];
@@ -742,10 +640,6 @@ fn verbatim_span(html: &[u8], pos: usize) -> Option<usize> {
 
 /// Does `s` begin a syntactically well-formed XML character or entity
 /// reference — `&#1234;`, `&#x25A0;`, or `&name;`?
-///
-/// Syntax only. Whether a named reference is *declared* is the document's
-/// problem, not this function's: preserving an undeclared `&nbsp;` keeps the
-/// source's bytes, while rewriting it to `&amp;nbsp;` would corrupt the text.
 fn starts_reference(s: &[u8]) -> bool {
     let Some(body) = s.strip_prefix(b"&") else {
         return false;
@@ -771,20 +665,6 @@ fn starts_reference(s: &[u8]) -> bool {
 }
 
 /// Lowercase every element name, on opening and closing tags alike.
-///
-/// MOBI6 bodies are HTML4 tag soup, where element casing is free and pairs do
-/// not have to agree: kindlegen output routinely writes `<h2 …>…</H2>` and
-/// `<img …> </IMG>`. An HTML parser folds the case and never notices. An XML
-/// parser does not, so copying those bytes into an `.xhtml` chapter yields a
-/// document that is not well-formed (`expected </h2>, but </H2> was found` —
-/// epubcheck RSC-016), which a strict reader reports as a broken chapter.
-///
-/// Only the name is touched. Attribute names, attribute values, text content,
-/// and everything that is not an element — `<!DOCTYPE …>`, comments, CDATA,
-/// processing instructions — pass through byte for byte. A `<` that does not
-/// open a real tag is text (`X<Y`, `a < b`) and is left alone: the whole point
-/// is to make the markup parseable, so corrupting content to get there would
-/// defeat it.
 pub fn lowercase_tag_names(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -835,17 +715,6 @@ pub fn lowercase_tag_names(html: &[u8]) -> Vec<u8> {
 }
 
 /// Convert legacy MOBI6 block-layout attributes to inline CSS.
-///
-/// Kindlegen's MOBI6 paragraph model puts layout in attributes —
-/// `<p height="1em" width="0pt" align="justify">` — which are invalid in
-/// XHTML5 (epubcheck RSC-005) and silently ignored by EPUB readers, losing
-/// the source's paragraph spacing/indent/justification. Mapping (per the
-/// MOBI periodical format docs and calibre's reader): `height` →
-/// `margin-top`, `width` → `text-indent` (paragraphs only), `align` →
-/// `text-align`, merged into any existing `style` attribute. Applies to
-/// `<p>`, `<div>`, `<blockquote>` and `<h1>`–`<h6>` — periodical article
-/// headings are written `<h2 align="center">`, which is the same legacy
-/// attribute on a different element; unit-less values get `px`.
 pub fn convert_legacy_block_attrs(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -935,9 +804,6 @@ fn convert_block_tag(tag: &[u8]) -> Vec<u8> {
         ] {
             for (s, e) in attr_spans(attrs, attr) {
                 // The attribute is invalid XHTML on any of these tags, so it
-                // is always dropped; the CSS translation is emitted only
-                // where the kindlegen semantics are known (`width` =
-                // paragraph indent).
                 let value = if paragraphs_only && !is_para {
                     None
                 } else {
@@ -973,10 +839,6 @@ fn convert_block_tag(tag: &[u8]) -> Vec<u8> {
 /// Reassemble one open tag from its parts: `open` (the `<` and element name),
 /// the attributes minus `drop_spans`, `decls` merged into the `style`
 /// attribute, and the original `/>` or `>`.
-///
-/// Shared by the attribute translation in [`convert_block_tag`] and the element
-/// renaming in [`convert_obsolete_elements`], which differ only in whether
-/// `open` carries the source's own name or a replacement.
 fn rebuild_tag(
     open: &[u8],
     attrs: &[u8],
@@ -1034,18 +896,6 @@ fn rebuild_tag(
 
 /// Replace HTML4 presentational elements and MOBI's periodical-only elements
 /// with EPUB3-valid equivalents, translating what they expressed into CSS.
-///
-/// | source | becomes | |
-/// |:--|:--|:--|
-/// | `<font size color face>` | `<span style>` | obsolete in HTML5 |
-/// | `<center>` | `<div style="text-align: center">` | obsolete in HTML5 |
-/// | `<block>` | `<div>` | MOBI periodical article wrapper |
-/// | `<articlename>`, `<contributor>` | `<span>` | MOBI periodical inline |
-///
-/// All five are unknown to the EPUB3 content model, so each costs an
-/// `RSC-005`; the periodical ones are not HTML at any version. Renaming keeps
-/// the tree shape and the text, which is all any of them carry beyond the
-/// styling translated here.
 pub fn convert_obsolete_elements(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -1149,10 +999,6 @@ fn rewrite_obsolete_tag(tag: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The CSS `font-size` an HTML4 `<font size>` names.
-///
-/// Per the HTML Standard's rendering rules: absolute sizes 1–7 map onto the
-/// seven absolute-size keywords, and a signed value is relative to the default
-/// size 3, clamped into range.
 fn font_size_keyword(raw: &str) -> Option<&'static str> {
     const SIZES: [&str; 7] = [
         "x-small",
@@ -1177,7 +1023,6 @@ fn font_size_keyword(raw: &str) -> Option<&'static str> {
 /// Find `attr="value"` (or `attr='value'`) inside an attribute byte slice and
 /// return the value. Looks for the attribute name preceded by ASCII
 /// whitespace OR appearing at the start of the slice — avoids matching e.g.
-/// `xml:lang` when searching for `lang`.
 pub(super) fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     let (start, end) = attr_spans(attrs, name).into_iter().next()?;
     let span = &attrs[start..end];
@@ -1190,19 +1035,6 @@ pub(super) fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a
 
 /// Drop `<link>` elements whose `href` escapes the package root (contains
 /// `..`).
-///
-/// KF8 books converted from Aozora HTML carry a verbatim
-/// `<link rel="alternate stylesheet" href="../styles/aNNNNN_h.css" title="横組">`
-/// for the horizontal writing-mode variant — a reference to a stylesheet that
-/// was never embedded as a flow. calibre passes it through and its reader just
-/// ignores the dangling *alternate* sheet, but in bokai's flat EPUB layout the
-/// parts and `styles/` are siblings under the OPF root, so a `..` href both
-/// points at a missing file and climbs out of the container: two EPUB-3
-/// violations that make a strict consumer (Apple Books, the downstream
-/// `epub_to_kfx` job, our own `validate::source::epub`) reject the book. The
-/// `kindle:flow:` sheets are rewritten to sibling `styles/styleNNNN.css`
-/// paths, so no stylesheet bokai actually emits needs `..` — dropping these
-/// dangling links is safe and loses nothing a reader would have applied.
 pub fn strip_root_escaping_links(html: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -1264,12 +1096,6 @@ fn is_root_escaping_link(tag: &[u8]) -> bool {
 }
 
 /// Drop `href`s on `<a>` elements that point at raster images.
-///
-/// kindlegen's in-book TOC sometimes links its "Cover" row straight at the
-/// cover JPEG (`kindle:embed:…`, which [`transform_kindle_refs`] rewrites to
-/// `images/image_NNNN.jpg`). EPUB 3 forbids hyperlinks to non-content
-/// documents (epubcheck RSC-010) and every downstream consumer drops the
-/// link anyway — keep the label, lose the href.
 pub fn unlink_image_anchors(html: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -1317,11 +1143,6 @@ fn drop_image_href(tag: &[u8]) -> Vec<u8> {
 }
 
 /// Rewrite `kindle:embed:XXXX(?mime=…)` URLs in CSS to stylesheet-relative
-/// asset paths via the embed-index → path map the importer built from its
-/// discovered assets (fonts and images alike). Stylesheets live in
-/// `styles/`, so every rewritten path gets a `../` prefix. Refs whose index
-/// isn't in the map are left verbatim — [`strip_kindle_embed_font_faces`]
-/// runs after this pass and drops the `@font-face` rules that still dangle.
 pub fn rewrite_kindle_embed_in_css(
     css: &[u8],
     paths: &std::collections::HashMap<usize, String>,
@@ -1375,9 +1196,6 @@ pub fn rewrite_kindle_embed_in_css(
 }
 
 /// Drop `@font-face` rules whose `src` references a `kindle:embed:` resource
-/// that [`rewrite_kindle_embed_in_css`] could not resolve to an extracted
-/// asset. A dangling URL would fail epubcheck (RSC-008/OPF-014); dropping the
-/// whole rule lets the `font-family` fall back down its declared stack.
 pub fn strip_kindle_embed_font_faces(css: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(css.len());
     let mut pos = 0;
@@ -1404,10 +1222,6 @@ pub fn strip_kindle_embed_font_faces(css: &[u8]) -> Vec<u8> {
 }
 
 /// Strip Amazon-specific attributes (`aid`, `data-Amzn*`) from every tag —
-/// except link-target aids: an `aid` whose value is in `linked_aids` (some
-/// `kindle:pos:fid` link resolves to it) is rewritten to `id="aid-{value}"`
-/// so the `#aid-{value}` hrefs [`transform_kindle_refs`] emits actually
-/// resolve. Pass an empty set to strip unconditionally.
 pub fn strip_kindle_attributes_fast(
     html: &[u8],
     linked_aids: &std::collections::HashSet<String>,
@@ -1517,10 +1331,6 @@ fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec
                 }
             }
             // A linked aid becomes the element's id — `transform_kindle_refs`
-            // emits hrefs pointing at `#aid-{value}`. Skipped when the tag
-            // already carries an id (a second id attribute would be malformed
-            // XML), so that rare link stays unresolved rather than breaking
-            // the document.
             if attr_name == b"aid"
                 && !injected_id
                 && let Ok(val) = std::str::from_utf8(value)
@@ -1577,9 +1387,6 @@ fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec
 }
 
 /// Whether a raw tag slice carries a real `id` attribute. Attribute-walk,
-/// not substring search — ` aid=` and tab/newline separators must not fool
-/// it, since a false negative here would inject a second id attribute
-/// (malformed XML) in `clean_tag`.
 fn tag_has_id_attr(tag: &[u8]) -> bool {
     let mut i = 1; // past '<'
     while i < tag.len()
@@ -1634,10 +1441,6 @@ fn ensure_img_alt(tag: &[u8]) -> Vec<u8> {
     }
 
     // Insert `alt=""` before the closing punctuation. For self-closing
-    // `<img …/>` the alt must go *before* the slash; inserting it between
-    // the `/` and `>` produces `<img …/ alt="">`, which Apple Books rejects
-    // as "attributes construct error". A naive `rposition('/' or '>')`
-    // returns the `>` index and lands the alt in that broken slot.
     let insert_pos = if tag.ends_with(b"/>") {
         tag.len() - 2
     } else if tag.ends_with(b">") {
@@ -1745,10 +1548,6 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
     #[test]
     fn test_lang_as_first_attribute_is_found() {
         // `<html lang=… xml:lang=…>` with lang as the FIRST attribute: the
-        // old candidate walk never looked at the first attribute (the attrs
-        // slice starts with the separator space), returned None for `lang`,
-        // and appended a duplicate — an XML well-formedness error (epubcheck
-        // RSC-016) on every retail AZW3 whose html tag leads with lang.
         let html = b"<html lang=\"en-US\" xml:lang=\"en-US\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head></html>";
         assert_eq!(ensure_html_lang_dual(html, "en"), html);
     }
@@ -1797,10 +1596,6 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
     #[test]
     fn test_find_nearest_id_prefers_enclosing_id() {
         // pos:fid resolution walks back to the element owning the (on-disk)
-        // position and returns its anchor, preferring a real id/name over the
-        // transient kindlegen aid — so a link into an already-id'd element
-        // resolves to the surviving id, not an aid-… the stripper won't
-        // re-inject onto an id'd tag.
         let raw = b"<html><head></head><body ><div class=\"main\" aid=\"AA\">\
 <p id=\"para\" aid=\"BB\">text</p><h1 aid=\"CC\">head</h1></div></body></html>";
         let file_starts = [(0u32, 0u32)];
@@ -2093,7 +1888,6 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
         // A real Amazon 合本版 declares `mime=image/png` on a record whose
         // bytes are JPEG; naming the href from the query left it pointing at
         // an `images/image_0200.png` the exporter never wrote (RSC-007).
-        // `0069` is base32 201 — the 1-based id of resource index 200.
         let html = b"<image xlink:href=\"kindle:embed:0069?mime=image/png\"/>\
 <img src=\"kindle:embed:0002?mime=image/jpeg\"/>";
         let paths: HashMap<usize, String> =
@@ -2143,9 +1937,6 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
         let first_p = memmem::find(html, b"<p aid=\"AA\"").unwrap() as u32;
         let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
         // `reassembled_pos` is where the chunk's content lands in the
-        // reassembled flow; here the body is a single flat block (no skeleton/
-        // chunk split), so it equals the byte position. An `off` of 0 lands on
-        // the opening tag.
         let elem = |reassembled_pos: u32| DivElement {
             insert_pos: reassembled_pos,
             toc_text: None,

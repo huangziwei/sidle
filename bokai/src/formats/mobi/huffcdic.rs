@@ -1,7 +1,6 @@
 //! HUFF/CDIC decompression for MOBI files
 //!
 //! Some MOBI files use Huffman compression instead of PalmDOC LZ77.
-//! This module handles the HUFF (Huffman table) and CDIC (dictionary) records.
 
 use std::io;
 
@@ -16,9 +15,6 @@ enum DictEntry {
 /// HUFF/CDIC decompressor
 pub struct HuffCdicReader {
     /// dict1: 256 entries of (codelen, term, maxcode). `maxcode` is held in
-    /// `u64` because the canonical `((maxcode + 1) << (32 - codelen)) - 1` math
-    /// exceeds 32 bits (calibre/KindleUnpack compute it in arbitrary-precision
-    /// ints).
     dict1: Vec<(u8, bool, u64)>,
     /// mincode indexed by code length `0..=32` (33 entries: a codelen-0
     /// sentinel plus calibre's `(0,) + dict2[0::2]` layout).
@@ -97,19 +93,6 @@ impl HuffCdicReader {
 
         // Build mincode/maxcode indexed by code length 0..=32 (33 entries).
         // Faithful port of calibre's `huffcdic.Reader.load_huff`:
-        //
-        //     dict2 = struct.unpack_from('>64L', huff, off2)   # 32 (min,max) pairs
-        //     for codelen, mincode in enumerate((0,) + dict2[0::2]):
-        //         self.mincode += (mincode << (32 - codelen),)
-        //     for codelen, maxcode in enumerate((0,) + dict2[1::2]):
-        //         self.maxcode += (((maxcode + 1) << (32 - codelen)) - 1,)
-        //
-        // The prepended `(0,)` is a codelen-0 sentinel, so the dict2 pair used
-        // for code length `k` (k>=1) is pair `k-1`, NOT pair `k`. A prior
-        // rewrite dropped the sentinel and indexed pair `k` — an off-by-one
-        // that left most codes correct but mis-thresholded the rest, splicing
-        // wrong dictionary phrases into the text. All math is u64; with codelen
-        // 1..=32 the shift is 0..=31, so nothing overflows.
         self.mincode.push(0); // codelen 0: 0 << 32
         self.maxcode.push((1u64 << 32) - 1); // codelen 0: ((0 + 1) << 32) - 1
         for codelen in 1u32..=32 {
@@ -320,8 +303,6 @@ mod tests {
         huff[12..16].copy_from_slice(&off2.to_be_bytes());
 
         // Table 1: 256 entries. All uniform 8-bit, term=true.
-        // Entry = (maxcode_raw << 8) | 0x80 | codelen
-        //       = (255 << 8) | 0x80 | 8 = 0x0000FF88
         let entry = 0x0000FF88u32;
         for _ in 0..256 {
             huff.extend_from_slice(&entry.to_be_bytes());
@@ -352,7 +333,6 @@ mod tests {
 
         // Offset table: 4 entries x 2 bytes = 8 bytes
         // Entry data starts at offset 8 (relative to byte 16)
-        // Each entry is 3 bytes: u16 length_flags + 1 byte data
         let offset_table_size = 4 * 2; // 8
         for i in 0..4u16 {
             let offset = offset_table_size as u16 + i * 3;
