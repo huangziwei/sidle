@@ -187,6 +187,88 @@
     if (!q("#reading-log").hidden) refresh();
   }
 
+  // `handleKey` takes the reading log's bare keys, returning true where the key is
+  // consumed. library.js routes here before its own bare keys.
+  function handleKey(e) {
+    if (!q("#rl-sort-popover").hidden) {
+      if (e.key !== "Escape") return false;
+      closeSort();
+      return true;
+    }
+    switch (e.key) {
+      case "r":
+      case "R":
+        refresh();
+        return true;
+      case "f":
+      case "F":
+        return press("#rl-finished");
+      case "b":
+      case "B":
+        return cycleSeg("#rl-bucket-seg", "bucket", state.bucket);
+      case "c":
+      case "C":
+        return cycleSeg("#rl-cal-seg", "cal", state.calView);
+      case "s":
+      case "S":
+        return press("#rl-sort-button");
+      case "ArrowLeft":
+        return stepNav(-1);
+      case "ArrowRight":
+        return stepNav(1);
+      case "Backspace":
+        if (!state.book) return false;
+        closeBook();
+        return true;
+      case "Escape":
+        if (state.book) {
+          closeBook();
+          return true;
+        }
+        if (!state.day) return false;
+        state.day = null;
+        render();
+        return true;
+    }
+    return false;
+  }
+
+  // `press` clicks the element at `sel`. A hidden or disabled `el` consumes the key and
+  // clicks nothing.
+  function press(sel) {
+    const el = q(sel);
+    if (!el.disabled && el.offsetParent !== null) el.click();
+    return true;
+  }
+
+  // `cycleSeg` clicks the `.seg-btn` after `current`, wrapping at the end.
+  function cycleSeg(sel, key, current) {
+    const seg = q(sel);
+    if (seg.offsetParent === null) return true;
+    const btns = [...seg.querySelectorAll(`.seg-btn[data-${key}]`)];
+    const i = btns.findIndex((b) => b.dataset[key] === current);
+    btns[(i + 1) % btns.length]?.click();
+    return true;
+  }
+
+  // `stepNav` picks the nav pair the page carries: a book's months, the month calendar,
+  // else the year.
+  function stepNav(dir) {
+    const pair = state.book
+      ? ["#rl-prev", "#rl-next"]
+      : state.calView === "month"
+        ? ["#rl-cal-prev", "#rl-cal-next"]
+        : ["#rl-year-prev", "#rl-year-next"];
+    return press(pair[dir < 0 ? 0 : 1]);
+  }
+
+  // `closeBook` restores `state.overviewScroll` once `render` rebuilds the overview.
+  function closeBook() {
+    state.book = null;
+    render();
+    scroller().scrollTop = state.overviewScroll;
+  }
+
   // ── Overview ───────────────────────────────────────────────────────────────
 
   function render() {
@@ -1607,13 +1689,7 @@
         closeSort();
       }
     });
-    q("#rl-back").addEventListener("click", () => {
-      state.book = null;
-      render();
-      // The grid keeps its height until `renderScope`'s reply lands, and a
-      // card's height is its cover's aspect ratio. The offset restores here.
-      scroller().scrollTop = state.overviewScroll;
-    });
+    q("#rl-back").addEventListener("click", closeBook);
     for (const sel of ["#rl-prev", "#rl-next"]) {
       q(sel).addEventListener("click", (e) => {
         const target = e.currentTarget.dataset.target;
@@ -1678,5 +1754,5 @@
     init();
   }
 
-  window.ReadingLog = { refresh, show, hide, invalidate };
+  window.ReadingLog = { refresh, show, hide, invalidate, handleKey };
 })();

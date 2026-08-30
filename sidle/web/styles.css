@@ -4456,8 +4456,8 @@ kbd {
   overflow-y: auto;
 }
 
-/* `.rl-nav` heads #rl-heatmap and a book's calendar. `.rl-nav-fixed` hides
-   the arrow pair. */
+/* `.rl-nav` heads #rl-heatmap and a book's calendar. `.rl-nav-fixed` hides the
+   `.rl-step` arrows, leaving every other control in the header visible. */
 .rl-nav {
   display: flex;
   align-items: center;
@@ -4469,7 +4469,7 @@ kbd {
 }
 
 .rl-nav .btn[disabled] { opacity: 0.3; cursor: default; }
-.rl-nav-fixed .btn { display: none; }
+.rl-nav-fixed .rl-step { display: none; }
 
 /* No width cap: a serial is the label, and a truncated serial identifies
    nothing. */

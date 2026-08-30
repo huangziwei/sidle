@@ -28,7 +28,8 @@ const state = {
     tags: new Set(),
     formats: new Set(), // "EPUB" | "PDF" (+ "KFX" in source mode) — see formatFacetMode
   },
-  // How the Format facet classifies each book. "companion" (default) = the
+  // How the Format facet classifies each book: "companion" is the non-KFX file it has,
+  // "source" the format it was imported from.
   formatFacetMode: "companion", // "companion" | "source"
   search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
@@ -37,25 +38,27 @@ const state = {
   // Column order, visibility and widths for the list view live in the shared
   // TableView (`booksTable`), under "columnConfig"/"columnWidths".
   convProgress: {},
-  // Book ids whose conversion failed since the failure report was last
-  // dismissed, so a batch of failures reads as one list. Cleared by
-  // `hideErrorReport`; the books keep their `error` regardless.
+  // Book ids whose conversion failed since the failure report was last dismissed, a
+  // batch of failures reading as one list. Cleared by `hideErrorReport`; the books keep
+  // their `error`.
   convFailures: [],
   // When non-null, an autopull from /dedrm is in progress. `{ done, total }`
   // — surfaced in the status bar and used by renderQueue to know it shouldn't
   // clobber the autopull line with the queue summary.
   autopull: null,
-  // When non-null, a foreground import (user-initiated drop / add) is in
+  // When non-null, a foreground import (a drop or an Add) is running, and carries its
+  // label.
   importing: null,
-  // The in-flight send-to-Kindle batch: one task per book, surfaced in the
+  // The in-flight send-to-Kindle batch: one task per book, surfaced in the queue
+  // drawer.
   sendQueue: [],
-  // When non-null, a long library file op (backup / restore / merge) is in
+  // When non-null, a long library file op (backup / restore / merge) is running.
   fileop: null,
   // When non-null, books are being removed from the Kindle. `{ done, total,
   deleting: null,
-  // True while a Kindle annotation sync (auto-on-connect or manual) is
-  // running. Surfaced in the status bar; lower priority than importing /
-  // autopull so a book pull's progress isn't hidden behind it.
+  // True while a Kindle annotation sync (auto-on-connect or manual) is running.
+  // Surfaced in the status bar below importing and autopull, which keep a book pull's
+  // progress in view.
   annotationSync: false,
   // When non-null, the title of a book currently being opened in the reader.
   // Top priority in the status bar — it's the most immediate user action — and
@@ -68,12 +71,13 @@ const state = {
   focusAnchorKey: null,
 };
 
-// The Books section's multi-select. The Notes section owns a second instance of
+// The Books section's multi-select. The Notes section owns a second SelectionController
+// of its own.
 const booksSelection = new window.SelectionController({
   idAttr: "bookId",
-  // The selectable books currently on screen, in display order — so shift-range
-  // and select-all scope to what's shown. Flat = all sorted books (unchanged);
-  // grouped top level = standalone books only (collections aren't selectable);
+  // The selectable books on screen, in display order: shift-range and select-all scope
+  // to what shows. Flat lists every sorted book; the grouped top level lists standalone
+  // books alone, leaving a collection unselectable.
   orderedIds: () => displayedSelectableBookIds(),
   // The selectable elements on the visible surface. In List view the grouped
   // top level is the series index, where only standalone (`.book-row`) rows are
@@ -98,13 +102,12 @@ const booksSelection = new window.SelectionController({
   },
 });
 
-// The selection controller for the currently active section. The lasso +
-// keyboard handlers in wireSelection() are written against this, so they're
-// section-agnostic.
+// The selection controller for the active section. The lasso and keyboard handlers in
+// wireSelection() are written against this, and stay section-agnostic.
 function activeController() {
-  // The Kindle page, the Files tab and the Reading Log have no selectable items —
-  // return no controller so the lasso and the Esc/Cmd-A handlers (which bail on
-  // a null controller) stay inert there.
+  // The Kindle page, the Files tab and the Reading Log have no selectable items and
+  // return no controller. The lasso and the Esc/Cmd-A handlers bail on a null
+  // controller, staying inert there.
   if (state.section === "device" || state.section === "misc" || state.section === "reading") {
     return null;
   }
@@ -130,7 +133,7 @@ const SORT_KEYS = [
 
 const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags", "formats"];
 
-// Display names for the canonical language codes the backend harmonizes to
+// Display names for the canonical language codes the backend harmonizes to.
 const LANGUAGE_NAMES = {
   en: "English",
   ja: "日本語",
@@ -173,9 +176,9 @@ function languageName(code) {
   return LANGUAGE_NAMES[c] || c;
 }
 
-// The label shown for a facet *value* in the filter dropdown and pill. The
-// stored value stays the canonical code (so filtering/matching is unchanged);
-// only the language facet maps its codes to display names.
+// The label shown for a facet *value* in the filter dropdown and pill. The stored value
+// stays the canonical code that filtering matches on; the language facet alone maps its
+// codes to display names.
 function facetOptionLabel(facet, value) {
   return facet === "language" ? languageName(value) : value;
 }
@@ -196,9 +199,9 @@ const BOOK_COLUMNS = [
   { key: "on_kindle",    label: "On Kindle",  sortable: true,  render: (b) => onKindleContent(b) },
 ];
 
-// Options for the Language cell's inline <select>: a blank ("—") plus the same
-// code→name set the cell renders. A stored code that isn't listed is added by
-// the editor itself so opening it never changes the value (see _openEditor).
+// Options for the Language cell's inline <select>: a blank ("—") plus the code→name set
+// the cell renders. The editor adds a stored code the list omits, and opening it leaves
+// the value alone (see _openEditor).
 function languageOptions() {
   return [
     { value: "", label: "—" },
@@ -228,8 +231,8 @@ function onKindleContent(b) {
   return span;
 }
 
-// The Books list view. Sort lives in `state.sort` (shared with the gallery), so
-// the table only renders the indicator + reports header clicks via onSort.
+// The Books list view. Sort lives in `state.sort`, shared with the gallery; the table
+// renders the indicator and reports header clicks through onSort.
 const booksTable = new window.TableView({
   table: document.querySelector("#list table"),
   columns: BOOK_COLUMNS,
@@ -309,7 +312,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
-  // Grouping default flipped to "series" (2026-06). Read from a NEW key so the
+  // Grouping defaults to "series" (2026-06). `groupMode` is the key read; the line
+  // below drops the abandoned `group` key.
   const group = localStorage.getItem("groupMode");
   if (group === "none" || group === "series") state.group = group;
   localStorage.removeItem("group"); // drop the abandoned pre-flip key
@@ -411,7 +415,7 @@ async function onAddClick() {
 
 function setView(v) {
   state.view = v;
-  // render() builds the active surface (the other view's DOM is cleared each
+  // render() builds the active surface; the other view's DOM is cleared on each pass.
   render();
   persistPreferences();
 }
@@ -419,9 +423,9 @@ function setView(v) {
 function applyView() {
   const books = state.section === "books";
   const mode = displayMode(); // 'flat' | 'grouped' | 'series' (books-only)
-  // Content visibility is driven by `.view.active { display: block }`, an author
-  // rule that OVERRIDES the `hidden` attribute (`[hidden]` is only a UA rule), so
-  // the `active` class — not `hidden` — is what actually shows/hides a section.
+  // Content visibility is driven by `.view.active { display: block }`, an author rule
+  // that OVERRIDES the `hidden` attribute (`[hidden]` is a UA rule). The `active`
+  // class, never `hidden`, shows and hides a section.
   const galleryActive = books && state.view === "gallery";
   // In List view the grouped TOP level shows the lightweight series index
   // (#series-list); flat and drilled-into-a-series both use the book table.
@@ -444,13 +448,13 @@ function applyView() {
   $("#gallery").hidden = !galleryActive;
   $("#list").hidden = !listActive;
   $("#series-list").hidden = !seriesIndexActive;
-  // The Gallery/List toggle drives the Notes section too; hand the choice off
-  // so notebooks.js can swap its grid/table. No-op while Notes isn't visible.
+  // The Gallery/List toggle drives the Notes section too, handing the choice to
+  // notebooks.js for its grid/table swap. A no-op while Notes is hidden.
   if (window.Notebooks) window.Notebooks.setView(state.view);
   if (window.Apps) window.Apps.setView(state.view);
-  // Re-apply the keyboard focus ring to its tile: applyView runs on every render
-  // AND on a bare view switch (which rebuilds no DOM), so this keeps the cursor
-  // visible across both — and across the gallery/list DOM, which both persist.
+  // Re-apply the keyboard focus ring to its tile. applyView runs on every render and on
+  // a bare view switch that rebuilds no DOM, keeping the cursor visible across both,
+  // and across the gallery and list DOM.
   paintFocus();
 }
 
@@ -465,12 +469,13 @@ function setGroup(g) {
   render();
 }
 
-// The library section to fall back to when leaving the Kindle page (the pill
-// toggles device ⇄ here). Any section but 'device', which is the one place the
-// pill can be pressed from and so can never be the way back.
+// The library section to fall back to when leaving the Kindle page; the pill toggles
+// device ⇄ here. Any section but 'device', the one place the pill is pressed from and
+// never the way back.
 let lastLibrarySection = "books";
 
-// One scroll container (#main) holds every section, and swapping which one is
+// One scroll container (#main) holds every section, and swapping which one is shown
+// carries its offset here, keyed by page.
 const scrollMarks = new Map();
 
 // Which page the scroller is showing. Inside Books a series drill-in is its own
@@ -489,7 +494,8 @@ function restoreScroll(key) {
   $("#main").scrollTop = scrollMarks.get(key) || 0;
 }
 
-// Top-level Books / Notes / Files / Kindle split. Books and Notes share the
+// Top-level Books / Notes / Files / Kindle split. Books and Notes share the gallery and
+// list surfaces; the others bring their own.
 function setSection(s) {
   // Re-picking the open section is no navigation, and leaves the scroller where
   // the reader put it.
@@ -502,8 +508,8 @@ function setSection(s) {
     lastLibrarySection = s;
     localStorage.setItem("section", s);
   }
-  // Leaving Books (for Notes or the Kindle page) drops the book selection so the
-  // Books selection bar doesn't linger over the other surface.
+  // Leaving Books, for Notes or the Kindle page, drops the book selection, and the
+  // Books selection bar clears off the other surface.
   if (s !== "books") clearSelection();
   applySection();
   if (window.Notebooks) {
@@ -523,15 +529,16 @@ function setSection(s) {
     else window.Apps.hide();
   }
   if (s === "device") {
-    // Entering the Kindle page: re-pull device / deploy / LAN state. Lives here
-    // (not the pill handler) so the `\` shortcut refreshes too.
+    // Entering the Kindle page: re-pull device / deploy / LAN state. It lives here,
+    // outside the pill handler, and the `\` shortcut refreshes too.
     refreshDevicePage();
   } else if (s === "books") {
-    // Re-render the book views on return. A device refresh (a Kindle connect, or
+    // Re-render the book views on return: a device refresh reaches rows the Kindle page
+    // left stale.
     render();
   }
-  // Last, so the arriving section's content — and therefore its height — is in
-  // place before the offset is applied.
+  // Last: the arriving section's content, and its height, are in place before the
+  // offset applies.
   if (moving) restoreScroll(scrollKey());
 }
 
@@ -557,8 +564,8 @@ function applySection() {
   $("#section-notes").setAttribute("aria-selected", String(notes));
   $("#section-misc").setAttribute("aria-selected", String(misc));
   $("#section-apps").setAttribute("aria-selected", String(apps));
-  // Reading Log is a plain toggle button, not a tab in that list, so it carries
-  // `aria-pressed`; `aria-selected` is only meaningful on a `role="tab"`.
+  // Reading Log is a plain toggle button outside that list, and carries `aria-pressed`;
+  // `aria-selected` is meaningful on a `role="tab"` alone.
   $("#section-reading").classList.toggle("active", reading);
   $("#section-reading").setAttribute("aria-pressed", String(reading));
   // The pill doubles as the Kindle-page tab — mark it active there.
@@ -566,9 +573,9 @@ function applySection() {
   // Add… (Books only) and Import (Notes only); both gone elsewhere.
   $("#btn-add").hidden = !books;
   $("#btn-notes-import").hidden = !notes;
-  // Notes keeps the Gallery/List toggle + separators; the Kindle page and Files
-  // hide the view toggle and both toolbar separators (the section↔view one and
-  // #view-sep) so the toolbar-group collapses to just the section tabs.
+  // Notes keeps the Gallery/List toggle and separators. The Kindle page and Files hide
+  // the view toggle and both toolbar separators (the section↔view one and #view-sep),
+  // collapsing the toolbar-group to the section tabs.
   $("#filter-bar").hidden = unfiltered;
   const search = document.querySelector(".filter-search");
   if (search) search.hidden = unfiltered;
@@ -598,9 +605,9 @@ function applySection() {
 // Drag and drop
 // ---------------------------------------------------------------------------
 
-// True while an in-flight OS drag carries at least one image file. Latched on
-// `enter` (the only phase before `drop` that reports paths) so `over` can light
-// up the cover drop target without re-sniffing.
+// True while an in-flight OS drag carries at least one image file. Latched on `enter`,
+// the one phase before `drop` that reports paths, and `over` lights the cover drop
+// target without re-sniffing.
 let dragHasImage = false;
 
 // The cover preview element while it accepts a dropped image, with the
@@ -628,9 +635,9 @@ function wireDragDrop() {
       if (t === "enter") dragHasImage = (payload.paths || []).some(isImagePath);
       if ((t === "enter" || t === "over") && dragHasImage) {
         veil.hidden = true; // keep the editor focused; no full-screen veil
-        // Arm the preview regardless of cursor position: the drop is accepted
-        // anywhere on the open editor, so the lit target truthfully says "this
-        // image becomes the cover" (and dodges window-vs-webview coord skew).
+        // Arm the preview at any cursor position: the drop is accepted anywhere on the
+        // open editor, and the lit target says "this image becomes the cover", dodging
+        // window-vs-webview coord skew.
         coverBox.classList.add("drag-over");
         return;
       }
@@ -669,7 +676,8 @@ function wireDragDrop() {
           // PDF → wrapped into a fixed-layout PDOC KFX for the Scribe (the
           // device renders the PDF; the pen draws over it).
           lower.endsWith(".pdf") ||
-          // Plain .zip is accepted silently so an Aozora Bunko archive can
+          // Plain .zip is accepted: an Aozora Bunko archive arrives under that
+          // extension.
           lower.endsWith(".zip")
         );
       });
@@ -688,8 +696,8 @@ function wireDragDrop() {
 
 const BOOK_DRAG_THRESHOLD = 4; // px a mousedown must travel before it's a drag
 
-// The series tile currently lit as the drop target, so we can clear it as the
-// cursor moves off. Reset to null when no drag is in flight.
+// The series tile lit as the drop target, cleared as the cursor moves off. Reset to
+// null with no drag in flight.
 let seriesDropTargetEl = null;
 
 // Wire a book tile/row as a drag source. `book` is its library row.
@@ -892,7 +900,8 @@ function showImportErrorReport(failures) {
   );
 }
 
-// Why a conversion failed, with its Retry one click away. Reached from the
+// Why a conversion failed, with its Retry one click away. Reached from the persistent
+// failure report.
 function showConversionErrorReport(bookIds) {
   const books = bookIds
     .map((id) => state.books.find((b) => b.id === id))
@@ -921,7 +930,7 @@ function clearImportStatus() {
 function showImportFailure() {
   state.importing = { message: "Import failed", failed: true };
   render();
-  // Linger briefly so the user notices, then fall back to queue summary.
+  // Lingers a beat, then falls back to the queue summary.
   setTimeout(() => {
     if (state.importing && state.importing.failed) {
       state.importing = null;
@@ -935,8 +944,8 @@ function importInitialMessage(paths) {
   return `Importing ${paths.length} file${paths.length === 1 ? "" : "s"}…`;
 }
 
-// What to call the format at `path` while it's being imported. The extension is
-// all we have — the backend dispatches on it too.
+// What to call the format at `path` while it imports. The extension is the whole of the
+// evidence, and the backend dispatches on it too.
 function importFormatName(path) {
   const lower = (path || "").toLowerCase();
   if (lower.endsWith(".zip")) return "Aozora zip";
@@ -998,7 +1007,7 @@ async function refresh() {
 
 function setSent(rows) {
   state.sent = rows || [];
-  // Only `sent` rows have a full sha256 we can intersect with the local
+  // Only `sent` rows carry a full sha256 to intersect with the local library.
   state.sentSet = new Set(
     state.sent.filter((r) => r.kind === "sent").map((r) => r.sha256),
   );
@@ -1058,7 +1067,8 @@ function render() {
   renderSelectionBar();
   paintSeriesSelection(); // re-mark selected collections on the rebuilt tiles
   updateSendUnsentButton();
-  // The empty-state messages are wired to whether the *visible* set is
+  // `#gallery-empty`, `#list-empty` and `#series-list-empty` hide at a `count` above
+  // zero.
   $("#gallery-empty").hidden = count > 0;
   $("#list-empty").hidden = count > 0;
   $("#series-list-empty").hidden = count > 0;
@@ -1071,7 +1081,8 @@ function render() {
   }
 }
 
-// Natural-order string collation: digit runs compare as numbers, so "Vol 2"
+// Natural-order string collation: a digit run compares as a number, ordering "Vol 2"
+// ahead of "Vol 10".
 const naturalCollator = new Intl.Collator(undefined, { numeric: true });
 function naturalCompare(a, b) {
   return naturalCollator.compare(a, b);
@@ -1102,7 +1113,8 @@ function sortValue(b, key) {
 function seriesSortKey(b) {
   const name = b.series_name?.trim();
   if (!name) return null;
-  // Scale by 10000 so sub-volumes down to four decimals (5.1, 5.25, …) sort
+  // Scaled by 10000: a sub-volume down to four decimals (5.1, 5.25, …) keeps its place
+  // in the padded key.
   const rawIdx =
     b.series_index != null && Number.isFinite(b.series_index)
       ? Math.round(b.series_index * 10000)
@@ -1146,8 +1158,8 @@ function bySeriesIndex(a, b) {
   const bn = bi != null && Number.isFinite(bi);
   if (an && bn && ai !== bi) return ai - bi;
   if (an !== bn) return an ? -1 : 1;
-  // No (or equal) series index: fall back to the title in natural order, so
-  // "Vol 1 … Vol 9, Vol 10, Vol 11" lines up without a hand-entered index.
+  // No series index, or an equal one, falls back to the title in natural order, lining
+  // "Vol 1 … Vol 9, Vol 10, Vol 11" up without a hand-entered index.
   return naturalCompare(a.title || "", b.title || "");
 }
 
@@ -1178,8 +1190,8 @@ function groupBySeries(sortedVisible) {
   return out;
 }
 
-// The selectable books currently on screen, in display order. Collections are
-// never selectable, so the grouped top level yields only standalone books.
+// The selectable books on screen, in display order. A collection is never selectable,
+// and the grouped top level yields standalone books alone.
 function displayedSelectableBookIds() {
   const visible = sortedBooks(visibleBooks(state.books));
   const mode = displayMode();
@@ -1247,9 +1259,9 @@ function extractFacetValues(book, facet) {
     case "tags":
       return book.tags?.length ? book.tags : ["—"];
     case "formats":
-      // Two classifications, chosen by state.formatFacetMode:
-      //  - "companion": the non-KFX file this book has (EPUB|PDF). KFX is
-      //    universal, so it's never an option here.
+      // `state.formatFacetMode` chooses the classification: "source" is the format the
+      // book was imported from, "companion" the non-KFX file it has (EPUB|PDF). KFX is
+      // universal and is no companion option.
       return [
         (state.formatFacetMode === "source" ? sourceFormat(book) : nonKfxFormat(book)).toUpperCase(),
       ];
@@ -1297,9 +1309,11 @@ function searchTerms() {
 function matchesSearch(book, terms) {
   const { raw, q } = terms;
   if (!raw) return true;
-  // (1) Romaji-aware match. Fold the query the same way the backend folded each
+  // (1) Romaji-aware match against `search_key`, which the backend folded the same way
+  // `canon` folds the query.
   if (q && book.search_key && book.search_key.includes(q)) return true;
-  // (2) Raw native-text match. `canon` strips CJK to nothing, so it can't match a
+  // (2) Raw native-text match. `canon` strips CJK to nothing and matches no CJK title;
+  // the raw fields below carry it.
   const hay = [
     book.title,
     book.author,
@@ -1333,7 +1347,8 @@ function facetOptions(facet) {
       counts.set(v, (counts.get(v) || 0) + 1);
     }
   }
-  // Always include this pill's currently-selected values, even if the
+  // Always include this pill's selected values, at a count of 0, and a selection stays
+  // visible in its own dropdown.
   for (const v of state.filters[facet]) {
     if (!counts.has(v)) counts.set(v, 0);
   }
@@ -1436,8 +1451,8 @@ function renderGalleryGrouped(entries) {
   }
 }
 
-// A series collection tile (navigate-only: click drills in). It's a
-// `.series-card`, NOT a `.book-card`, so the SelectionController skips it.
+// A series collection tile; a click drills in. It is a `.series-card`, NOT a
+// `.book-card`, and the SelectionController skips it.
 function seriesCard(entry) {
   const ordered = [...entry.books].sort(bySeriesIndex);
   const lead = ordered.find((b) => coverUrlFor(b)) || ordered[0];
@@ -1473,9 +1488,9 @@ function seriesCard(entry) {
   badge.textContent = String(n);
   stack.appendChild(badge);
 
-  // Overflow menu (2×3 dots, bottom-right) — opens the same series context menu
-  // as a right-click. stopPropagation so the dots don't also drill into the
-  // series via the card's click handler.
+  // Overflow menu (2×3 dots, bottom-right) — opens the series context menu a
+  // right-click gives. stopPropagation keeps the dots from also drilling in through the
+  // card's click handler.
   const menuBtn = document.createElement("button");
   menuBtn.type = "button";
   menuBtn.className = "series-menu";
@@ -1603,9 +1618,9 @@ function metaBadges(b) {
   const wrap = document.createElement("div");
   wrap.className = "meta-badges";
 
-  // The side that the import wrote directly is always "done". The other
-  // side (whichever direction the background job runs) carries the row's
-  // status. `b.kind` tells us which side that is.
+  // The side the import wrote directly is always "done". The other side, whichever
+  // direction the background job runs, carries the row's status. `b.kind` names that
+  // side.
   wrap.appendChild(formatBadge(nonKfxFormat(b), b, /*compact=*/ true));
   wrap.appendChild(formatBadge("kfx", b, /*compact=*/ true));
 
@@ -1698,9 +1713,8 @@ function formatBadge(format, b, compact) {
   span.textContent = formatLabel(format, status, compact);
   span.title = formatTooltip(format, status, b);
   if (status === "error") {
-    // Show why before offering the retry: a click that silently re-ran the
-    // conversion gave no way to read the reason, so the same failure just
-    // repeated.
+    // Show why before offering the retry: a click that silently re-ran the conversion
+    // left the reason unreadable and repeated the same failure.
     span.addEventListener("click", (e) => {
       e.stopPropagation();
       showConversionErrorReport([b.id]);
@@ -1744,7 +1758,8 @@ function subscribeStatus() {
       if (!state.convFailures.includes(book_id)) state.convFailures.push(book_id);
       showConversionErrorReport(state.convFailures);
     }
-    // When a conversion finishes, re-pull rows to pick up kfx_path — and the
+    // A finished conversion re-pulls rows for `kfx_path`; every other status repaints
+    // what is in hand.
     if (status === "done") {
       refresh();
     } else {
@@ -1761,14 +1776,14 @@ function subscribeStatus() {
   });
 }
 
-// Build the URL we hand to <img src=…>. Returns null when the book has no
+// Build the URL handed to <img src=…>. Returns null for a book with no cover on disk.
 function coverUrlFor(b, { thumb = false } = {}) {
   if (!b) return null;
   const path = (thumb && b.cover_thumb_path) || b.cover_path;
   if (!path) return null;
   const base = window.api.fileUrl(path);
   if (!base) return null;
-  // Per-book cache token = the served image's mtime (`cover_rev`, from the
+  // Per-book cache token: the served image's mtime, `cover_rev`, appended as `?v=`.
   return `${base}?v=${b.cover_rev || 0}`;
 }
 
@@ -1877,8 +1892,8 @@ async function sendBooks(bookIds) {
   const btn = $("#btn-send-unsent");
   btn.disabled = true;
   sendInFlight = true;
-  // Seed one queue task per book up front so they all appear in the queue
-  // drawer immediately (like conversions), then transition as events land.
+  // Seed one queue task per book up front, and they all appear in the queue drawer at
+  // once, like conversions, transitioning as events land.
   state.sendQueue = bookIds.map((id) => {
     const b = state.books.find((x) => x.id === id);
     return {
@@ -1953,9 +1968,9 @@ function subscribeDeviceStatus() {
 
 // ----- Kindle page: apps live in the Apps tab ---------------------------------
 
-// The Apps tab is the only place an app is installed, updated, removed or
-// added. What stays on the Kindle page is the device itself. A connect or
-// disconnect changes every app row's device state, so it reaches the tab here.
+// The Apps tab is the only place an app is installed, updated, removed or added. The
+// Kindle page keeps the device itself. A connect or disconnect changes every app row's
+// device state, reaching the tab here.
 function invalidateApps() {
   window.Apps?.invalidate();
 }
@@ -1987,8 +2002,8 @@ function updateDeviceUI(info) {
     const restoreBtn = $("#btn-restore-annotations");
     if (restoreBtn) restoreBtn.disabled = false;
     $("#device-model").textContent = info.model || "Kindle";
-    // MTP fills firmware in via the on-connect session refresh, so it shows
-    // "—" for the first beat then updates — same as free space.
+    // MTP fills firmware in through the on-connect session refresh, showing "—" for the
+    // first beat and updating after, as free space does.
     $("#device-firmware").textContent = info.firmware || "—";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
@@ -1996,8 +2011,8 @@ function updateDeviceUI(info) {
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
-    // MTP devices need exclusive USB session access, so any other app
-    // currently talking to the Kindle (Image Capture, OpenMTP, Calibre)
+    // MTP devices need exclusive USB session access, and any other app talking to the
+    // Kindle (Image Capture, OpenMTP, Calibre) holds it.
     if (info.transport === "mtp") {
       tip.textContent =
         "MTP device. Quit Image Capture, OpenMTP, or Calibre if a push fails — only one app can hold the USB session at a time.";
@@ -2006,8 +2021,8 @@ function updateDeviceUI(info) {
       tip.hidden = true;
       tip.textContent = "";
     }
-    // Always load sent state when device connects so the list-view "On Kindle"
-    // column reflects reality without the user having to open the Kindle page.
+    // Always load sent state when a device connects, and the list-view "On Kindle"
+    // column reflects the device without a visit to the Kindle page.
     refreshDeviceList();
     invalidateApps();
   } else {
@@ -2104,8 +2119,8 @@ function deviceRow(r) {
     title.textContent = r.title || r.filename;
     title.title = r.filename;
   } else {
-    // orphan — no local library entry. Show the filename minus the sha8
-    // infix so the user sees something recognizable.
+    // orphan — no local library entry. Shows the filename minus the sha8 infix, leaving
+    // something recognizable on screen.
     const display = r.filename.replace(/\.[0-9a-f]{8}\.kfx$/i, ".kfx");
     title.textContent = display;
     title.title = r.filename;
@@ -2118,9 +2133,9 @@ function deviceRow(r) {
   del.textContent = "×";
   del.addEventListener("click", (e) => {
     e.stopPropagation();
-    // The popup row always carries the exact filename — delete by name,
-    // no sha translation. The backend verifies the `.<sha8>.kfx` shape
-    // before touching anything so a stale UI can't drive arbitrary deletes.
+    // The popup row carries the exact filename — delete by name, with no sha
+    // translation. The backend verifies the `.<sha8>.kfx` shape before touching
+    // anything, and a stale UI drives no arbitrary delete.
     const label = r.kind === "sent"
       ? r.title || r.filename
       : r.filename;
@@ -2167,9 +2182,9 @@ async function deleteFromDevice(filenames, titles) {
     return;
   }
   let results = [];
-  // Light the status bar before the first round trip: the backend deletes one
-  // file at a time over MTP, so a large batch spends minutes in here and the
-  // grid can't be re-read until it ends.
+  // Light the status bar before the first round trip: the backend deletes one file at a
+  // time over MTP, a large batch spends minutes in here, and the grid re-reads once it
+  // ends.
   state.deleting = { done: 0, total: filenames.length, title: titles[0] || "" };
   renderQueue();
   try {
@@ -2207,7 +2222,8 @@ async function ejectDevice() {
   }
 }
 
-// Status-bar feedback for a device orphan import. The backend's read is the
+// Status-bar feedback for a device orphan import. `importBase` holds the label its
+// byte-progress ticks append to.
 let importBase = null;
 
 function setImportStatus(label) {
@@ -2320,9 +2336,9 @@ function subscribePullProgress() {
     renderQueue();
   });
 
-  // One per file removed from the Kindle. Gated on `state.deleting` so a stray
-  // event can't resurrect the line after the batch resolves — same idiom as
-  // `importBase` above.
+  // One per file removed from the Kindle. Gated on `state.deleting`, which holds a
+  // stray event from resurrecting the line after the batch resolves — the idiom
+  // `importBase` above uses.
   window.api.listen("device:delete-progress", (e) => {
     const r = e.payload;
     if (!r || !state.deleting) return;
@@ -2334,9 +2350,8 @@ function subscribePullProgress() {
     renderQueue();
   });
 
-  // Status-bar progress counter. The backend emits this once on autopull
-  // start (`done: 0`) and once per book completed thereafter, so the pull does
-  // not read as a freeze with nothing rendering until it finishes.
+  // Status-bar progress counter. The backend emits this once on autopull start (`done:
+  // 0`) and once per book completed after, and the pull renders throughout.
   window.api.listen("device:autopull-progress", (e) => {
     const p = e.payload;
     if (!p) return;
@@ -2423,9 +2438,9 @@ async function syncAnnotations() {
   }
 }
 
-// "Restore from device" — re-import everything the Kindle holds and UNDO
-// Sidle-side deletions (so an accidental delete is recoverable). Two-click
-// confirm, since it reverses deletions: first click arms, second runs.
+// "Restore from device" — re-import everything the Kindle holds and UNDO Sidle-side
+// deletions, recovering an accidental delete. Two-click confirm, reversing deletions:
+// the first click arms, the second runs.
 async function restoreFromDevice() {
   const btn = $("#btn-restore-annotations");
   if (!btn || btn.disabled) return;
@@ -2543,7 +2558,7 @@ function renderQueue() {
 
   const ul = $("#queue-list");
   ul.innerHTML = "";
-  // The running import sits at the top, the newest thing in
+  // The running import sits at the top of the queue drawer.
   const importRow = state.importing?.label ? importQueueRow() : null;
   if (importRow) ul.appendChild(importRow);
   // A delete batch outranks the conversion queue for the same reason an import
@@ -2577,8 +2592,8 @@ function renderStatusSummary(active) {
   //   1. foreground import (state.importing) — user-initiated drop / add
   //   2. autopull from Kindle's /dedrm folder (state.autopull)
   if (state.opening) {
-    // The user just double-clicked a book; a large KFX can take a beat to load,
-    // so name the one being opened (cleared by openReader once it's up).
+    // A double-clicked book: a large KFX takes a beat to load, and this names the one
+    // opening. openReader clears it once the reader is up.
     summary.textContent = `Opening ${state.opening}…`;
     toggle.classList.add("active");
   } else if (state.importing) {
@@ -2864,7 +2879,7 @@ function convFillPct(prog) {
   return Math.round(Math.min(1, Math.max(0, prog?.fraction ?? 0)) * 100);
 }
 
-// Patch one queue row's fill + status text in place for a progress tick, so the
+// Patch one queue row's fill and status text in place for a progress tick.
 function updateQueueRowProgress(bookId) {
   const li = document.querySelector(`#queue-list li[data-book-id="${bookId}"]`);
   if (!li) return false;
@@ -2919,7 +2934,7 @@ const BOOK_ACTIONS = [
     run: (c) => openEditor(c.book),
   },
   {
-    // Splitting reads the EPUB side, so it's offered as soon as that side
+    // Splitting reads the EPUB side, and is offered once that side is ready.
     id: "split",
     group: "modify",
     scopes: ["book"],
@@ -2966,9 +2981,8 @@ const BOOK_ACTIONS = [
     id: "recrawl",
     group: "rebuild",
     scopes: ["book", "books", "series"],
-    // The color cover is fetched by catalogue id, so a book without one has
-    // nothing to fetch with — `asin` is the file's own identity and names no
-    // catalogue item.
+    // The color cover is fetched by catalogue id, and a book without one has nothing to
+    // fetch with — `asin` is the file's own identity and names no catalogue item.
     eligible: (b) => Boolean(b.amazon_asin) && looksLikeRealAsin(b.amazon_asin),
     label: (c) =>
       ActionMenu.counted(c.items.length > 1 ? "Re-fetch covers" : "Re-fetch cover", c),
@@ -2979,9 +2993,9 @@ const BOOK_ACTIONS = [
       c.eligible.length === 1 ? recrawlCover(c.eligible[0]) : recrawlCovers(c.eligible),
   },
   {
-    // Always full color — the JXR encoder auto-collapses genuinely-grayscale
-    // pages to `8bppGray`, so color is a strict superset with no size cost on
-    // B&W books. There's no grayscale/color choice to offer.
+    // Always full color. The JXR encoder auto-collapses a genuinely-grayscale page to
+    // `8bppGray`, making color a strict superset at no size cost on B&W books. There is
+    // no grayscale/color choice to offer.
     id: "reconvert",
     group: "rebuild",
     scopes: ["book", "books", "series"],
@@ -3030,9 +3044,8 @@ function openSeriesContextMenu(x, y, entry) {
   ActionMenu.open(x, y, BOOK_ACTIONS, {
     kind: "series",
     series: entry.name,
-    // EVERY book in the series from the full library — not just the post-filter
-    // members this tile happens to show — so a series rename / author fix never
-    // splits the series by touching only a filtered fragment.
+    // EVERY book in the series from the full library, past the post-filter members this
+    // tile shows, and a series rename or author fix reaches the whole series.
     items: membersOfSeries(state.books, entry.name),
   });
 }
@@ -3049,12 +3062,12 @@ const EXPORT_FORMATS = [
   ["txt", "TXT"],
 ];
 
-// Whether `b`'s `fmt` file is present and finished converting, so it can be
+// Whether `b`'s `fmt` file is present and converted, ready for an action to offer it.
 function hasFormatReady(b, fmt) {
   if (fmt === "kfx") return formatStatusFor("kfx", b) === "done";
-  // TXT is generated from whatever content side is ready — KFX (universal) or
-  // EPUB (preferred when present). It's never a stored companion file, so it
-  // becomes available as soon as the imported side exists.
+  // TXT is generated from whichever content side is ready — KFX (universal) or EPUB
+  // (preferred when present). It is a stored companion file nowhere, and lands with the
+  // imported side.
   if (fmt === "txt") {
     return (
       formatStatusFor("kfx", b) === "done" ||
@@ -3155,9 +3168,9 @@ function toggleSeriesSelection(name) {
   booksSelection.applyVisuals();
 }
 
-// Mark a collection tile / index-row `.selected` when every one of its visible
-// members is in the selection — so a cmd-selected series reads as a unit, like a
-// book card. Called on every selection change and after each render.
+// Mark a collection tile or index-row `.selected` when every visible member is in the
+// selection, and a cmd-selected series reads as a unit, like a book card. Called on
+// every selection change and after each render.
 function paintSeriesSelection() {
   const els = $$("#gallery-grid .series-card, #series-list tbody tr[data-series]");
   if (!els.length) return;
@@ -3177,8 +3190,8 @@ function wireSelection() {
   // The bar's action buttons are rendered, not wired — see renderSelectionBar.
   // Clear isn't an action on the books, it's an action on the bar itself.
   $("#sel-clear").addEventListener("click", clearSelection);
-  // How many actions fit on the bar depends on how wide the window is, so a
-  // resize re-renders it; what doesn't fit moves under More…, never disappears.
+  // How many actions fit on the bar follows the window width, and a resize re-renders
+  // it. What overflows moves under More…, and disappears nowhere.
   window.addEventListener("resize", renderSelectionBar);
 
   // Lasso and click-to-clear on the empty area of main. mousedown separates a
@@ -3218,8 +3231,8 @@ function onMainMouseDown(e) {
   ctrl.beginLasso(e);
 }
 
-// Thin wrappers so the book card/row handlers read naturally; the logic is the
-// shared controller's. Notes wires its cards straight to its own controller.
+// Thin wrappers for the book card and row handlers; the logic is the shared
+// controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
   // A drag that releases back on its origin tile fires a trailing click; swallow
   const dragged = e.target.closest(".just-dragged");
@@ -3259,8 +3272,8 @@ function focusableEls() {
   return $$("#list tbody tr");
 }
 
-// Every focusable element across BOTH the gallery and list DOM (both persist),
-// so the focus ring is correct after a view switch — used only for painting.
+// Every focusable element across BOTH the gallery and list DOM, which both persist,
+// keeping the focus ring correct after a view switch. Used for painting alone.
 function allFocusableEls() {
   return [
     ...$$("#gallery-grid .book-card, #gallery-grid .series-card"),
@@ -3432,7 +3445,14 @@ function onLibraryKeydown(e) {
     return;
   }
 
-  if (inField || mod) return; // below: bare keys only, never while typing
+  if (inField || mod) return; // `inField` and `mod` hold the cases below to bare keys
+
+  // `window.ReadingLog.handleKey` takes the reading log's bare keys before the section
+  // and view keys below.
+  if (state.section === "reading" && window.ReadingLog?.handleKey(e)) {
+    e.preventDefault();
+    return;
+  }
 
   const books = state.section === "books";
   switch (e.key) {
@@ -3500,7 +3520,7 @@ function handleBooksNavKey(e) {
   }
 }
 
-// The selection bar is a view of BOOK_ACTIONS on the current selection — the
+// The selection bar is a view of BOOK_ACTIONS over the current selection.
 function renderSelectionBar() {
   const bar = $("#selection-bar");
   const n = booksSelection.count();
@@ -3520,8 +3540,8 @@ function renderSelectionBar() {
   ActionMenu.renderBar($("#selection-actions"), BOOK_ACTIONS, ctx);
 }
 
-// Delete every one of `books` from the attached Kindle. The device is addressed
-// by FILENAME, so a book whose `sent` row can't name its file is skipped.
+// Delete every one of `books` from the attached Kindle. The device is addressed by
+// FILENAME, and a book whose `sent` row names no file is skipped.
 async function unsendBooks(books) {
   const filenameOf = new Map(
     state.sent.filter((r) => r.kind === "sent").map((r) => [r.sha256, r.filename]),
@@ -3555,9 +3575,9 @@ async function retryConvertAll(books) {
   if (ok) showToast(`re-converting ${ok} book${ok === 1 ? "" : "s"}…`);
 }
 
-// Re-fetch color covers for every book in `books`. The backend runs them
-// sequentially — one Amazon round-trip + EPUB/KFX cover rewrite per book — and
-// streams `library:recrawl-progress`; we refresh the gallery once at the end.
+// Re-fetch color covers for every book in `books`. The backend runs them one at a time
+// — an Amazon round-trip plus an EPUB/KFX cover rewrite per book — and streams
+// `library:recrawl-progress`; the gallery refreshes at the end.
 let recrawlInFlight = false;
 async function recrawlCovers(books) {
   if (recrawlInFlight) return;
@@ -3591,9 +3611,9 @@ async function recrawlCovers(books) {
     if (prog) prog.hidden = true;
   }
 
-  // Covers landed at the same sidecar paths, so each <img> src is unchanged;
-  // re-pulling rows brings the fresh per-book `cover_rev` (new mtimes), whose
-  // `?v=` change forces the browser to reload exactly the recrawled tiles.
+  // Covers land at the same sidecar paths, leaving each <img> src unchanged. Re-pulling
+  // rows brings the fresh per-book `cover_rev` (new mtimes), whose `?v=` change reloads
+  // the recrawled tiles alone.
   await refresh();
   const parts = [`${summary.updated} updated`];
   if (summary.failed) parts.push(`${summary.failed} no cover`);
@@ -3601,8 +3621,8 @@ async function recrawlCovers(books) {
   showToast(parts.join(" · "), summary.updated === 0);
 }
 
-// Progress for a bulk cover re-fetch, shown inline in the selection bar so a
-// multi-minute run doesn't look frozen.
+// Progress for a bulk cover re-fetch, inline in the selection bar, where a multi-minute
+// run reads as live.
 function subscribeRecrawlProgress() {
   window.api.listen("library:recrawl-progress", (e) => {
     const r = e?.payload;
@@ -3646,9 +3666,9 @@ async function removeBooks(books) {
   await refresh();
 }
 
-// Reclaim DB file space freed by deletions (VACUUM). Best-effort: a transient
-// failure shouldn't surface as a delete error, so we only log it. Called once
-// per delete operation — see removeBooks.
+// Reclaim DB file space freed by deletions (VACUUM). Best-effort: a transient failure
+// logs and surfaces as no delete error. Called once per delete operation — see
+// removeBooks.
 async function compactLibrary() {
   try {
     await window.api.invoke("library_compact");
@@ -3669,12 +3689,12 @@ async function openInFinder(bookId) {
   }
 }
 
-// Open a book in the built-in reader. `reader.js` (an ES module) installs
-// `window.sidleReader`; it loads after this classic script, so it's always
-// present by the time a card is clicked.
+// Open a book in the built-in reader. `reader.js`, an ES module, installs
+// `window.sidleReader`; it loads after this classic script and is present by the time a
+// card is clicked.
 let openReqSeq = 0;
-// Open the Calibre-style book editor (window.sidleEditor). KFX- and EPUB-source
-// books; the caller gates the menu item so this is reached only for those.
+// Open the Calibre-style book editor (window.sidleEditor) for KFX- and EPUB-source
+// books. The caller gates the menu item, and this is reached for those alone.
 function openEditor(b) {
   if (!window.sidleEditor) {
     showToast("editor not ready", true);
@@ -3702,7 +3722,8 @@ async function openReader(b) {
   }
 }
 
-// Queue a re-convert: a forced re-convert of a `done` book, or completing a
+// Queue a re-convert through `conversion_retry`: a forced pass over a `done` book, or a
+// second run at a failed one.
 async function retryConvert(bookId) {
   try {
     await window.api.invoke("conversion_retry", { bookId });
@@ -3780,8 +3801,8 @@ async function openSettings() {
   resetRelocateConfirm();
   $("#settings-status").hidden = true;
   $("#settings-modal").hidden = false;
-  // The Kindle-folders rows are misc.js's — load them fresh each open so they
-  // show what's on disk, not what a cancelled edit left behind.
+  // The Kindle-folders rows are misc.js's — loaded fresh on each open, showing what is
+  // on disk past what a cancelled edit left behind.
   window.Misc?.editCollections?.();
   try {
     const loc = await window.api.invoke("library_location");
@@ -3848,8 +3869,8 @@ async function confirmRelocate(keepPrevious) {
     } else {
       await window.api.invoke("library_relocate_use", { dir: dest });
     }
-    // On success the app restarts and this webview reloads, so we normally
-    // never reach here.
+    // On success the app restarts and this webview reloads, reaching here in the
+    // failure case.
     setSettingsStatus("Restarting…");
   } catch (e) {
     $("#settings-confirm-ok").disabled = false;
@@ -3893,7 +3914,8 @@ async function doBackup() {
   }
 }
 
-// Restore IS destructive and restarts, so it routes through the shared confirm
+// `pickRestore` is destructive and restarts, routing through the confirm flow
+// `relocatePending` drives.
 async function pickRestore() {
   const src = await window.api.invoke("library_restore_pick_src");
   if (!src) return;
@@ -4102,9 +4124,9 @@ function openFilterDropdown(facet, anchorPill) {
   const dd = $("#filter-dropdown");
   dd.hidden = false;
   dd.querySelector(".filter-dropdown-search").value = "";
-  // The source/companion mode toggle is a Format-only control: show it only for
-  // that facet, and sync its checked state to the current mode. Set before
-  // positioning so the popover measures its true height.
+  // The source/companion mode toggle is a Format-only control: shown for that facet,
+  // with its checked state synced to the current mode. Set before positioning, which
+  // measures the popover's true height.
   const modeWrap = dd.querySelector(".filter-dropdown-mode");
   modeWrap.hidden = facet !== "formats";
   dd.querySelector(".filter-dropdown-mode-cb").checked =
@@ -4130,8 +4152,8 @@ function renderDropdownOptions(facet) {
 
   const needle = dropdownSearch.trim().toLowerCase();
   const all = facetOptions(facet);
-  // Match against both the code and its display label, so typing "english"
-  // finds the "en" option (whose visible label is "English").
+  // Match against both the code and its display label: typing "english" finds the "en"
+  // option, whose visible label is "English".
   const filtered = needle
     ? all.filter(
         ([v]) =>
@@ -4200,7 +4222,7 @@ function renderSortControl() {
   $("#sort-button .sort-label").textContent = `Sort: ${label}`;
   $("#sort-button .sort-dir").textContent = state.sort.asc ? "↑" : "↓";
 
-  // Populate the popover key list. Rebuild each time so .active is fresh.
+  // Populate the popover key list. Rebuilt each time, with .active fresh.
   const list = $("#sort-key-list");
   list.innerHTML = "";
   for (const [key, name] of SORT_KEYS) {
@@ -4256,9 +4278,9 @@ let metadataBook = null;
 // and single modes are mutually exclusive (one is always null).
 let metadataBulk = null;
 
-// Mirror of cover_fetch::looks_like_real_amazon_asin: a real Amazon ASIN is 10
-// chars, uppercase letters + digits. A synthesized file identity is 32-char, so
-// length + charset distinguishes them.
+// Mirror of cover_fetch::looks_like_real_amazon_asin: a real Amazon ASIN is 10 chars,
+// uppercase letters and digits. A synthesized file identity is 32 chars, and length
+// plus charset separates them.
 function looksLikeRealAsin(s) {
   return /^[A-Z0-9]{10}$/.test(s);
 }
@@ -4279,14 +4301,14 @@ function wireMetadataModal() {
     btn.addEventListener("click", onRomajiRegen);
   }
 
-  // Snapshot each input's placeholder so bulk mode can swap to "Leave
-  // unchanged" and single mode can restore the original hint.
+  // Snapshot each input's placeholder: bulk mode swaps to "Leave unchanged", and single
+  // mode restores the original hint.
   for (const el of $("#metadata-form").querySelectorAll("input")) {
     el.dataset.ph = el.placeholder || "";
   }
 
-  // Esc closes; Cmd/Ctrl+Enter submits. Scoped to the modal element so
-  // it doesn't fight the global selection/context-menu shortcuts.
+  // Esc closes; Cmd/Ctrl+Enter submits. Scoped to the modal element, clear of the
+  // global selection and context-menu shortcuts.
   $("#metadata-modal").addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.stopPropagation();
@@ -4342,9 +4364,9 @@ function openMetadataModal(arg, opts = {}) {
     // Every editable field starts empty → "leave unchanged".
     for (const name of BULK_FIELDS) form[name].value = "";
     setBulkPlaceholders(true);
-    // Title + the identifiers + romaji are per-book-unique → hidden in bulk;
-    // disable them so they're exempt from native required-validation and aren't
-    // read on submit, and empty the one that only ever displays.
+    // Title, the identifiers and romaji are per-book-unique and hide in bulk. Disabling
+    // them exempts them from native required-validation and keeps them off the submit;
+    // the display-only one empties.
     form.title.disabled = true;
     form.amazon_asin.disabled = true;
     form.content_id.value = "";
@@ -4383,8 +4405,8 @@ function openMetadataModal(arg, opts = {}) {
     book.series_index != null && Number.isFinite(book.series_index)
       ? String(book.series_index)
       : "";
-  // Tags display as comma-joined; canonicalization happens on the
-  // backend so case + duplicates clean themselves up on save.
+  // Tags display as comma-joined. Canonicalization happens on the backend, and case and
+  // duplicates clean themselves up on save.
   form.tags.value = (book.tags || []).join(", ");
   // Two identifiers, and only one of them is the user's. `amazon_asin` names an
   // item in Amazon's catalogue and does nothing but fetch the color cover;
@@ -4506,8 +4528,8 @@ async function submitMetadataForm() {
       tagsRaw === ""
         ? []
         : tagsRaw.split(/[,、]/).map((s) => s.trim()).filter(Boolean),
-    // Editable search romaji. A blank field self-heals on the backend
-    // (re-rendered from title/author), so clearing it regenerates.
+    // Editable search romaji. A blank field self-heals on the backend, re-rendered from
+    // title and author, and clearing it regenerates.
     title_romaji: form.title_romaji.value.trim(),
     author_romaji: form.author_romaji.value.trim(),
   };
@@ -4532,8 +4554,8 @@ async function submitMetadataForm() {
     return;
   }
 
-  // Reading layout (writing mode + page direction) is only honoured once it's
-  // baked into a fresh KFX, so a change kicks off a force-reconvert after save.
+  // Reading layout (writing mode + page direction) is honoured once baked into a fresh
+  // KFX, and a change kicks off a force-reconvert after save.
   const layoutChanged =
     (form.reading_layout.value || "") !== readingLayoutValue(metadataBook);
   const bookId = metadataBook.id;
@@ -4562,7 +4584,8 @@ async function submitMetadataForm() {
   }
 }
 
-// Bulk mode: build a sparse patch from only the fields the user filled in
+// Bulk mode: build a sparse patch from the filled-in fields alone, leaving every blank
+// field untouched across the batch.
 async function submitBulkMetadataForm() {
   const books = metadataBulk;
   if (!books || books.length === 0) return;
@@ -4683,7 +4706,7 @@ async function onCoverRefetchClick() {
     showToast("Enter a real 10-character ASIN first.", true);
     return;
   }
-  // Save the ASIN first (if changed) so the backend recrawl reads it.
+  // Save a changed ASIN first, and the backend recrawl reads it.
   if (asin !== (metadataBook.amazon_asin || "")) {
     try {
       const row = await window.api.invoke("library_set_asin", {
@@ -4715,8 +4738,8 @@ async function onCoverRefetchClick() {
     showToast(`cover fetch failed: ${result.error}`, true);
     return;
   }
-  // updated — re-pull rows so this book's fresh `cover_rev` busts its gallery
-  // tile, then re-point `metadataBook` and repaint the open modal preview.
+  // updated — re-pull rows, and this book's fresh `cover_rev` busts its gallery tile.
+  // Then `metadataBook` re-points and the open modal preview repaints.
   await refresh();
   const idx = state.books.findIndex((b) => b.id === metadataBook.id);
   if (idx !== -1) metadataBook = state.books[idx];
@@ -4725,8 +4748,8 @@ async function onCoverRefetchClick() {
   showToast(`cover updated: ${metadataBook.title}`);
 }
 
-// "Search Amazon ↗": open the browser to a marketplace search so the user can
-// find the real ASIN to paste. The backend picks the domain from language.
+// "Search Amazon ↗": open the browser to a marketplace search, where the real ASIN can
+// be found and pasted. The backend picks the domain from language.
 async function onAsinSearchClick() {
   if (!metadataBook) return;
   try {
@@ -4931,8 +4954,7 @@ function closeSplitModal() {
 function wireSplitModal() {
   $("#split-cancel").addEventListener("click", closeSplitModal);
   $("#split-submit").addEventListener("click", submitSplit);
-  // Delegated so the row list can be rebuilt on every open without stacking
-  // listeners on the tbody.
+  // Delegated: the row list rebuilds on every open, stacking no listeners on the tbody.
   $("#split-rows").addEventListener("change", updateSplitFootnote);
   $("#split-modal .modal-backdrop").addEventListener("click", () => {
     // A split in flight must not be dismissed out from under itself.
@@ -5054,9 +5076,8 @@ function subscribeLibraryRowUpdated() {
   window.api.listen("library:row-updated", (e) => {
     if (!e?.payload) return;
     mergeBookRow(e.payload);
-    // If the modal is open on this book, refresh the cover preview so a
-    // backend-driven update (e.g. a future bulk recrawl) keeps the UI in
-    // sync.
+    // A modal open on this book refreshes its cover preview, and a backend-driven
+    // update (a future bulk recrawl) keeps the UI in step.
     if (metadataBook && metadataBook.id === e.payload.id) {
       metadataBook = e.payload;
       renderCoverPreview(metadataBook);

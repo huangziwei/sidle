@@ -283,15 +283,15 @@
                 <!-- One year at a time. The arrows step to the next year that has
                      reading in it, and are hidden when there is only one. -->
                 <header id="rl-year-nav" class="rl-nav">
-                  <button id="rl-year-prev" class="btn btn-quiet"
-                          aria-label="Previous year">‹</button>
+                  <button id="rl-year-prev" class="btn btn-quiet rl-step"
+                          aria-label="Previous year" aria-keyshortcuts="ArrowLeft">‹</button>
                   <strong id="rl-year-label"></strong>
-                  <button id="rl-year-next" class="btn btn-quiet"
-                          aria-label="Next year">›</button>
+                  <button id="rl-year-next" class="btn btn-quiet rl-step"
+                          aria-label="Next year" aria-keyshortcuts="ArrowRight">›</button>
                   <span id="rl-year-total" class="rl-muted"></span>
                   <!-- Selects #rl-heatmap or #rl-monthcal. -->
                   <div class="seg rl-cal-seg" id="rl-cal-seg" role="tablist"
-                       aria-label="Calendar view">
+                       aria-label="Calendar view" aria-keyshortcuts="c">
                     <button class="seg-btn active" data-cal="year" role="tab" aria-selected="true"
                             title="Every day of the year, shaded by how long you read">Year</button>
                     <button class="seg-btn" data-cal="month" role="tab" aria-selected="false"
@@ -299,18 +299,20 @@
                   </div>
                   <!-- Re-reads what #rl-heatmap draws. -->
                   <button id="rl-refresh" class="btn btn-quiet rl-refresh"
-                          title="Re-read the reading log from the library"
-                          aria-label="Refresh">↻</button>
+                          title="Re-read the reading log from the library (R)"
+                          aria-label="Refresh" aria-keyshortcuts="r">↻</button>
                 </header>
                 <!-- Steps between the months of the year that have reading. -->
                 <header id="rl-cal-nav" class="rl-nav rl-cal-nav" hidden>
-                  <button id="rl-cal-prev" class="btn btn-quiet"
+                  <button id="rl-cal-prev" class="btn btn-quiet rl-step"
                           aria-label="Previous month">‹</button>
                   <strong id="rl-cal-label"></strong>
-                  <button id="rl-cal-next" class="btn btn-quiet"
+                  <button id="rl-cal-next" class="btn btn-quiet rl-step"
                           aria-label="Next month">›</button>
                 </header>
-                <div id="rl-heatmap" class="rl-heatmap" role="img"
+                <!-- renderHeatmap fills this with focusable day cells, which
+                     `role="img"` hides from assistive technology. -->
+                <div id="rl-heatmap" class="rl-heatmap" role="group"
                      aria-label="Reading time per day"></div>
                 <div id="rl-monthcal" class="rl-monthcal" hidden></div>
                 <div class="rl-legend" id="rl-legend">
@@ -364,12 +366,13 @@
                        mark names the book finished. `.btn-quiet` like #rl-day-clear
                        beside it. -->
                   <button type="button" id="rl-finished" class="btn btn-quiet" aria-pressed="false"
-                          title="Only books read to the end or marked finished">Finished</button>
+                          aria-keyshortcuts="f"
+                          title="Only books read to the end or marked finished (F)">Finished</button>
                   <!-- How finely the year is cut up. The same books throughout,
                        each band carrying its own figures. Hidden while a single
                        day is selected. -->
                   <div class="seg rl-bucket-seg" id="rl-bucket-seg" role="tablist"
-                       aria-label="Group the year by">
+                       aria-label="Group the year by" aria-keyshortcuts="b">
                     <button class="seg-btn active" data-bucket="year" role="tab" aria-selected="true"
                             title="The whole year in one grid">Year</button>
                     <button class="seg-btn" data-bucket="month" role="tab" aria-selected="false"
@@ -443,9 +446,9 @@
                 <!-- Bounded by this book's own reading: no arrow leads to a month
                      it was never opened in. -->
                 <header id="rl-month-nav" class="rl-month-head rl-nav">
-                  <button id="rl-prev" class="btn btn-quiet" aria-label="Previous month">‹</button>
+                  <button id="rl-prev" class="btn btn-quiet rl-step" aria-label="Previous month">‹</button>
                   <strong id="rl-month-label"></strong>
-                  <button id="rl-next" class="btn btn-quiet" aria-label="Next month">›</button>
+                  <button id="rl-next" class="btn btn-quiet rl-step" aria-label="Next month">›</button>
                 </header>
                 <div id="rl-month-grid" class="rl-month-grid"></div>
               </div>
@@ -880,6 +883,21 @@
               <dt><kbd>[</kbd> <kbd>]</kbd> <kbd>\</kbd></dt><dd>Books / Notes / Kindle</dd>
               <dt><kbd>⌘</kbd><kbd>,</kbd></dt><dd>Settings</dd>
               <dt><kbd>?</kbd></dt><dd>This help</dd>
+            </dl>
+          </section>
+          <!-- readinglog.js `handleKey` owns these, and takes them before the
+               keys above. -->
+          <section>
+            <h3>Reading Log</h3>
+            <dl>
+              <dt><kbd>R</kbd></dt><dd>Refresh</dd>
+              <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Previous / next year</dd>
+              <dt><kbd>C</kbd></dt><dd>Heatmap / month calendar</dd>
+              <dt><kbd>B</kbd></dt><dd>Band by year / month / day</dd>
+              <dt><kbd>F</kbd></dt><dd>Finished books only</dd>
+              <dt><kbd>S</kbd></dt><dd>Sort</dd>
+              <dt><kbd>Esc</kbd></dt><dd>Clear the day, or leave a book</dd>
+              <dt><kbd>⌫</kbd></dt><dd>Back to the overview</dd>
             </dl>
           </section>
         </div>
