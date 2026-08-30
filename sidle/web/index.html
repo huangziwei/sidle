@@ -260,33 +260,18 @@
           <header class="rl-head">
             <div id="rl-stats" class="rl-stats"></div>
             <div class="rl-head-actions">
-              <!-- No device picker. Which Kindle an archive came from is decided
-                   from the archive itself, or from the one that is plugged in. -->
               <button id="rl-refresh" class="btn btn-quiet"
                       title="Re-read the reading log from the library">Refresh</button>
-              <button id="rl-import" class="btn"
-                      title="Read logbackup files copied off a Kindle">Import…</button>
             </div>
           </header>
-
-          <!-- Import progress. The first run indexes every book's position axis
-               (minutes on a large library), so this is never a spinner: a real
-               fraction, the step it is on, and a way out. -->
-          <div id="rl-progress" class="rl-progress" hidden>
-            <div class="rl-progress-row">
-              <progress id="rl-progress-bar" max="1" value="0"></progress>
-              <button id="rl-cancel" class="btn">Cancel</button>
-            </div>
-            <div id="rl-progress-label" class="rl-muted"></div>
-          </div>
 
           <div id="rl-empty" class="empty" hidden>
             <p>No reading log yet.</p>
             <p class="empty-hint">
               Your Kindle keeps a dated record of every reading session in its own
-              system logs, under <code>system/logbackup/</code>. Copy that folder
-              off the device and import it here — roughly the last month or two of
-              reading comes back at once.
+              system logs, under <code>system/logbackup/</code>. The Sidle app on
+              the device reads that folder and sends it here on its next sync —
+              roughly the last month or two of reading arrives at once.
             </p>
           </div>
 

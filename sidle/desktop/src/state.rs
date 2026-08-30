@@ -88,10 +88,6 @@ pub struct AppState {
     pub reader_search_cache: ReaderSearchCache,
     /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
     pub reader_store: ReaderStoreCache,
-    /// Raised to ask an in-flight reading-log import to stop at its next safe
-    /// point. One import runs at a time, under the DB lock, and clears the flag
-    /// before it starts.
-    pub reading_log_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Walk up from `CARGO_MANIFEST_DIR` to the first `Cargo.toml` declaring
@@ -300,7 +296,6 @@ impl AppState {
             device_app_source,
             reader_search_cache: Arc::new(Mutex::new(None)),
             reader_store: Arc::new(Mutex::new(None)),
-            reading_log_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }

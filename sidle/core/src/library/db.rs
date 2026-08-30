@@ -2968,6 +2968,36 @@ pub fn reading_books(
     rows.collect()
 }
 
+/// How many books ever read [`is_finished`] holds for. The rows fold through
+/// it, keeping one rule for what finished means.
+pub fn reading_finished_count(conn: &Connection) -> rusqlite::Result<i64> {
+    let mut stmt = conn.prepare(
+        r#"SELECT b.max_position, b.finished_at,
+                  (SELECT MAX(rp.linear_pos) FROM reading_position rp
+                    WHERE rp.book_id = b.id)
+             FROM books b
+            WHERE b.id IN (SELECT DISTINCT book_id FROM reading_sessions
+                            WHERE book_id IS NOT NULL)"#,
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let max_position: Option<i64> = r.get(0)?;
+        let finished_at: Option<String> = r.get(1)?;
+        let linear_pos: Option<i64> = r.get(2)?;
+        let fraction = match (linear_pos, max_position) {
+            (Some(pos), Some(max)) => progress_fraction(pos, max),
+            _ => None,
+        };
+        Ok(is_finished(fraction, finished_at.as_deref()))
+    })?;
+    let mut n = 0;
+    for done in rows {
+        if done? {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// How many distinct books have ever been read. A count, not a list: the
 /// headline figure needs no titles and no cover stats.
 pub fn reading_book_count(conn: &Connection) -> rusqlite::Result<i64> {
@@ -5080,6 +5110,40 @@ mod tests {
         // `linear_pos` beyond `max_position`.
         assert_eq!(super::progress_fraction(147665, 147652), Some(1.0));
         assert_eq!(super::progress_fraction(-5, 100), Some(0.0));
+    }
+
+    #[test]
+    fn the_finished_count_takes_both_routes() {
+        let conn = fresh_db();
+        // A distinct start per book: `reading_sessions` ignores a duplicate row.
+        let mut hour = 9;
+        let mut read = |sha: &str, title: &str| {
+            let id = insert_minimal(&conn, sha, title);
+            let from = format!("{hour:02}:00:00");
+            let to = format!("{hour:02}:30:00");
+            insert_reading_session(&conn, &sitting("2026-08-11", &from, &to, 1800, id)).unwrap();
+            hour += 1;
+            id
+        };
+        // `done` sits at the end of its axis.
+        let done = read("sha-c1", "Done");
+        set_max_position(&conn, done, Some(1000)).unwrap();
+        set_reading_position(&conn, done, Some(9), Some(0), Some(1000), "device", "G").unwrap();
+        // `marked` sits short of it, carrying a mark.
+        let marked = read("sha-c2", "Marked");
+        set_max_position(&conn, marked, Some(1000)).unwrap();
+        set_reading_position(&conn, marked, Some(9), Some(0), Some(620), "device", "G").unwrap();
+        set_book_finished(&conn, marked, true).unwrap();
+        // `open` sits short of it, carrying none.
+        let open = read("sha-c3", "Open");
+        set_max_position(&conn, open, Some(1000)).unwrap();
+        set_reading_position(&conn, open, Some(9), Some(0), Some(620), "device", "G").unwrap();
+
+        assert_eq!(reading_book_count(&conn).unwrap(), 3);
+        assert_eq!(reading_finished_count(&conn).unwrap(), 2);
+        // `set_book_finished` off drops `marked` back out.
+        set_book_finished(&conn, marked, false).unwrap();
+        assert_eq!(reading_finished_count(&conn).unwrap(), 1);
     }
 
     #[test]

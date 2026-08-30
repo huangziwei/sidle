@@ -173,7 +173,7 @@
   // ── Public surface ─────────────────────────────────────────────────────────
 
   async function refresh() {
-    // `doImport`, `doPurge` and `nameBook` all reach `refresh`; `calRows` is
+    // `doPurge` and `nameBook` both reach `refresh`; `calRows` is
     // dropped for every one of them.
     state.calRows.clear();
     state.calShapes.clear();
@@ -290,6 +290,7 @@
       statTile(`${o.current_streak}d`, "streak", "Consecutive days up to today, all time"),
       statTile(`${o.longest_streak}d`, "longest streak", "All time"),
       statTile(o.books_total, "books", "Distinct books ever read"),
+      statTile(o.finished_total, "finished", "Read to the end, or marked finished"),
     ];
     q("#rl-stats").innerHTML = tiles.join("");
   }
@@ -1575,30 +1576,6 @@
 
   // Named steps, so the label says what is happening rather than just ticking.
   // "index" is the long one and the one that needs explaining: it is not
-  // reading the logs at all, it is measuring the library so the logs can be
-  // matched against it.
-  const PHASE_LABEL = {
-    index: "Indexing library",
-    read: "Reading logs",
-    store: "Saving sessions",
-  };
-
-  function showProgress(on) {
-    q("#rl-progress").hidden = !on;
-    q("#rl-import").disabled = on;
-    if (!on) {
-      q("#rl-progress-bar").value = 0;
-      q("#rl-progress-label").textContent = "";
-    }
-  }
-
-  function onProgress(p) {
-    q("#rl-progress-bar").value = p.fraction || 0;
-    const step = PHASE_LABEL[p.phase] || p.phase;
-    const count = p.total ? ` ${p.done + 1} / ${p.total}` : "";
-    q("#rl-progress-label").textContent = `${step}${count} — ${p.label}`;
-  }
-
   // Erasing the whole log is not undoable, and mostly not recoverable either: a
   // Kindle sends only what is newer than the newest session stored, so what it
   // has already pushed it will not push again. The dialog says so and states
@@ -1632,66 +1609,6 @@
     }
   }
 
-  async function doImport() {
-    let paths;
-    try {
-      paths = await api.invoke("reading_log_pick_folders");
-    } catch (e) {
-      toast(`could not open the folder picker: ${e}`, true);
-      return;
-    }
-    if (!paths || !paths.length) return;
-
-    showProgress(true);
-    try {
-      const r = await api.invoke("reading_log_import", { paths });
-      // Appended to a success line rather than replacing one: a short file still
-      // yields its prefix, so the import worked *and* something was incomplete.
-      // Deliberately not "re-import to fix" — the usual cause is a backup the
-      // Kindle itself never finished writing, which no re-import repairs. The
-      // overlap between dumps normally covers the loss; saying so would be a
-      // promise, and this is a note.
-      const cut = r.truncated
-        ? ` · ${r.truncated} file${r.truncated > 1 ? "s were" : " was"} incomplete on the Kindle`
-        : "";
-      if (r.conflict) {
-        // The archive names a Kindle other than the one it was being filed
-        // under. Nothing was stored — misfiled reading is indistinguishable
-        // from correct reading once it is in.
-        toast(`these logs are from ${r.conflict} — nothing imported`, true);
-      } else if (r.cancelled) {
-        // Both phases commit as they go, so a cancel keeps its work — say so,
-        // or the user re-runs from scratch expecting to have lost it.
-        toast("import stopped — what finished was kept, run it again to continue");
-      } else if (!r.files && r.skipped) {
-        // Every file was recognised and skipped unopened. Saying so is the
-        // difference between "nothing happened" and "there was nothing to do".
-        toast(`already imported — all ${r.skipped} files skipped`);
-      } else if (!r.events) {
-        toast("no reading events in those files — is this a logbackup folder?", true);
-      } else if (!r.added) {
-        toast(`already imported: ${r.sessions} sessions in ${r.files} files${cut}`);
-      } else if (!r.attributed) {
-        // Everything found is on books the library doesn't hold, so nothing was
-        // counted — say so, or a successful import looks like a broken page.
-        toast(`${r.added} sessions found, none on books in the library`, true);
-      } else {
-        // `attributed`, not `added`: time on a missing book is stored inert and
-        // appears nowhere, so counting it here would promise rows that never show.
-        const orphans = Math.max(0, r.added - r.attributed);
-        const tail = orphans ? ` · ${orphans} on books not in the library` : "";
-        const reused = r.skipped ? `, ${r.skipped} already imported` : "";
-        toast(`${r.attributed} sessions added from ${r.files} files${reused}${tail}${cut}`);
-      }
-      invalidate();
-      await refresh();
-    } catch (e) {
-      toast(`import failed: ${e}`, true);
-    } finally {
-      showProgress(false);
-    }
-  }
-
   // ── Wiring ─────────────────────────────────────────────────────────────────
 
   function init() {
@@ -1701,23 +1618,7 @@
       state.finishedOnly = !state.finishedOnly;
       renderScope();
     });
-    q("#rl-import").addEventListener("click", doImport);
     q("#rl-purge").addEventListener("click", doPurge);
-    q("#rl-cancel").addEventListener("click", async () => {
-      const btn = q("#rl-cancel");
-      btn.disabled = true;
-      btn.textContent = "Stopping…";
-      try {
-        await api.invoke("reading_log_cancel");
-      } catch (e) {
-        toast(`could not cancel: ${e}`, true);
-      }
-      // The import's own `finally` hides the panel; restore the button for the
-      // next run either way.
-      btn.disabled = false;
-      btn.textContent = "Cancel";
-    });
-    api.listen("reading-log:import-progress", (e) => onProgress(e.payload));
     // Both navigations read their destination off the button, which the
     // renderer set from the data — so an arrow can only ever go somewhere that
     // exists, and a disabled one has nothing to go to.

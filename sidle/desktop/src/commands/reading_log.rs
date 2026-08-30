@@ -1,16 +1,13 @@
 //! Tauri commands backing the "Reading Log" page — reading time recovered from
 //! a Kindle's own system logs (see [`sidle_core::library::reading_log`]).
 //!
-//! Read-only over `reading_sessions`, plus the one write: importing an archive
-//! of `logbackup` dumps the user points at. Import is always user-initiated —
-//! the logs can live anywhere on disk, and the first pass has to index the whole
-//! library's position axes, which takes minutes and must never happen behind a
-//! library open.
+//! Read-only over `reading_sessions`, apart from `books.finished_at` and the
+//! attribution a tie settles.
 
 use serde::Serialize;
 use tauri::State;
 
-use sidle_core::library::{db, extent, job, reading_log};
+use sidle_core::library::db;
 
 use crate::state::AppState;
 
@@ -41,6 +38,8 @@ pub struct ReadingOverview {
     /// Distinct books ever read — the headline count, which stays all-time
     /// while the grid below it follows the selected window.
     pub books_total: i64,
+    /// Of `books_total`, how many [`db::is_finished`] holds for.
+    pub finished_total: i64,
     pub total_seconds: i64,
     /// Days with any reading at all — the denominator behind "you read on N of
     /// the last M days".
@@ -111,6 +110,7 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
     // history is a few thousand rows at most.
     let days = db::reading_days(&conn, ALL_TIME.0, ALL_TIME.1).map_err(|e| e.to_string())?;
     let books_total = db::reading_book_count(&conn).map_err(|e| e.to_string())?;
+    let finished_total = db::reading_finished_count(&conn).map_err(|e| e.to_string())?;
     let clock = db::reading_clock(&conn).map_err(|e| e.to_string())?;
 
     let total_seconds = days.iter().map(|(_, s)| s).sum();
@@ -123,6 +123,7 @@ pub async fn reading_log_overview(state: State<'_, AppState>) -> Result<ReadingO
             .map(|(day, seconds)| ReadingDay { day, seconds })
             .collect(),
         books_total,
+        finished_total,
         total_seconds,
         longest_streak,
         current_streak,
@@ -281,166 +282,6 @@ pub async fn reading_log_attribute(
 pub async fn reading_log_clear(state: State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().await;
     db::clear_reading_log(&conn).map_err(|e| e.to_string())
-}
-
-/// A live tick from an import in flight. `phase` is the machine name of the
-/// step (`index` → `read` → `store`); `fraction` spans the whole job, not the
-/// phase, so the bar only ever moves forward.
-#[derive(Clone, Serialize)]
-struct ImportProgress<'a> {
-    phase: &'a str,
-    done: usize,
-    total: usize,
-    fraction: f32,
-    label: &'a str,
-}
-
-/// Where each phase sits on the overall bar.
-///
-/// Indexing dominates a first import — thousands of KFX parses against a
-/// two-second log read — so it takes almost the whole bar. On every later run it
-/// has nothing to do and skips past instantly, which reads correctly as "the
-/// slow part is already done".
-fn phase_band(phase: &str) -> (f32, f32) {
-    match phase {
-        "index" => (0.00, 0.85),
-        "read" => (0.85, 0.95),
-        _ => (0.95, 1.00),
-    }
-}
-
-/// Import `logbackup` dumps the user picked, then attribute what can be
-/// attributed.
-///
-/// The extent index is built first because attribution is meaningless without
-/// it, and this route lands a bulk of history at once — an unindexed library
-/// would take all of it unattributed. That is the slow half — minutes across a
-/// large library on the first run, nothing on every run after — which is why
-/// this reports progress, takes a cancel, and runs off the async runtime's
-/// worker: it is CPU-bound work holding the DB lock, and blocking a runtime
-/// thread with it would stall every other command.
-///
-/// It is not how the column normally gets filled. This import is a warm start
-/// for a library with a backlog of archives to pull in, which most never have;
-/// the everyday filling happens as books are converted and in the background
-/// sweep at app start (see [`extent`]).
-#[tauri::command]
-pub async fn reading_log_import(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-) -> Result<reading_log::Imported, String> {
-    use std::ops::ControlFlow;
-    use std::sync::atomic::Ordering;
-    use tauri::Emitter;
-
-    let cancel = state.reading_log_cancel.clone();
-    // Clear first: a cancel left over from a previous run must not kill this one
-    // before it starts.
-    cancel.store(false, Ordering::Relaxed);
-    // Nobody is asked which Kindle this is. The archive says so itself when it
-    // has been imported before, and otherwise the plugged-in device does — a
-    // person choosing from a list of serials will eventually choose wrong, and
-    // reading filed under the wrong Kindle looks exactly like reading filed
-    // correctly.
-    let live = state.device.lock().await.clone();
-    let serial = {
-        let conn = state.db.lock().await;
-        let origin = reading_log::identify(&conn, &paths).map_err(|e| e.to_string())?;
-        match origin {
-            reading_log::Origin::Recorded(s) => s,
-            reading_log::Origin::Mixed(several) => {
-                return Err(format!(
-                    "these files come from more than one Kindle ({}). Import each \
-                     device's logs from its own folder.",
-                    several.join(", ")
-                ));
-            }
-            reading_log::Origin::Unrecognised => match live.as_ref().map(|d| d.serial.clone()) {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    return Err(
-                        "connect the Kindle these logs came from, then import — Sidle \
-                         records which device wrote them so it only has to be plugged in once."
-                            .to_string(),
-                    );
-                }
-            },
-        }
-    };
-    // The handle, not a guard: the lock is taken *inside* the blocking task, so
-    // this whole job — minutes of KFX parsing on its first run — never occupies
-    // an async worker thread, and `reading_log_cancel` stays answerable
-    // throughout.
-    let db = state.db.clone();
-
-    tokio::task::spawn_blocking(move || {
-        let conn = db.blocking_lock();
-        let mut watch = |r: job::Report<'_>| {
-            if cancel.load(Ordering::Relaxed) {
-                return ControlFlow::Break(());
-            }
-            let (lo, hi) = phase_band(r.phase);
-            let fraction = lo + (hi - lo) * r.fraction().unwrap_or(0.0);
-            let _ = app.emit(
-                "reading-log:import-progress",
-                ImportProgress {
-                    phase: r.phase,
-                    done: r.done,
-                    total: r.total,
-                    fraction,
-                    label: r.label,
-                },
-            );
-            ControlFlow::Continue(())
-        };
-
-        let filled = extent::backfill(&conn, &mut watch).map_err(|e| e.to_string())?;
-        if filled.cancelled {
-            // The index is resumable, so what it managed is kept and nothing is
-            // imported yet — the next run continues from here.
-            return Ok(reading_log::Imported {
-                cancelled: true,
-                ..Default::default()
-            });
-        }
-        reading_log::import(&conn, &paths, &serial, &mut watch).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("import task failed: {e}"))?
-}
-
-/// Ask the running import to stop. Safe at any moment: both phases commit as
-/// they go, so cancelling keeps whatever was already done and a later run
-/// resumes rather than restarting.
-#[tauri::command]
-pub async fn reading_log_cancel(state: State<'_, AppState>) -> Result<(), String> {
-    state
-        .reading_log_cancel
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
-}
-
-/// Ask for the folders holding `logbackup` dumps.
-///
-/// A folder picker rather than a file one: `logbackup` is a directory of daily
-/// dumps and pointing at it is the natural gesture — [`reading_log_import`]
-/// walks whatever it is given. Lives in Rust for the same reason
-/// `library_pick_folder` does: vanilla JS cannot import the dialog plugin's
-/// module.
-#[tauri::command]
-pub async fn reading_log_pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folders(move |paths| {
-        let _ = tx.send(paths);
-    });
-    let picked = rx.await.map_err(|e| e.to_string())?;
-    Ok(picked
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| p.to_string())
-        .collect())
 }
 
 /// Longest and current run of consecutive days, from an ascending list of
