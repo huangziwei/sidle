@@ -1159,8 +1159,7 @@ button {
   cursor: not-allowed;
 }
 
-/* Set apart from the actions it sits beside, holding a destructive button away from
-   the button you meant to press. */
+/* Set apart from the actions beside it by `margin-left`. */
 .selection-bar .sel-danger {
   color: var(--accent);
   margin-left: 12px;
@@ -4594,9 +4593,8 @@ kbd {
   min-height: 133px;
 }
 
-/* Hour of the day as bars sharing the width and growing from the baseline, with
-   `--v` the fraction of the busiest hour. The height is a fixed length: every
-   bar is a percentage of it and resolves against a definite height. */
+/* Hour of the day as bars sharing the width and growing from the baseline.
+   `--v` is the fraction of the busiest hour, against a fixed `height`. */
 .rl-bars {
   display: flex;
   align-items: flex-end;
@@ -4748,9 +4746,7 @@ kbd {
   }
 }
 
-/* Keeps to the bottom edge: when the clock beside it is the taller panel, the
-   slack belongs between the calendar and the legend — a key hanging directly
-   under the calendar with empty panel below it reads as a layout accident. */
+/* Sits on the panel's bottom edge, `margin-top: auto` taking the slack. */
 .rl-legend {
   display: flex;
   align-items: center;
@@ -4907,8 +4903,8 @@ kbd {
 }
 
 /* ── The day timeline ────────────────────────────────────────────────────────
-   .rl-tl-plot is the 24-hour width. .rl-tl-block takes left and width as a
-   percentage of the day and paints nothing; .rl-tl-open and .rl-tl-read do. */
+   .rl-tl-plot is the 24-hour width; .rl-tl-block takes left and width as a
+   percentage of the day. */
 .rl-timeline {
   margin-top: 22px;
   padding: 14px;
@@ -4944,32 +4940,11 @@ kbd {
   top: 0;
   height: 20px;
   min-width: 3px;
-  cursor: pointer;
-}
-
-/* .rl-tl-open: a 2px --border-strong track across the whole .rl-tl-block. */
-.rl-tl-open {
-  position: absolute;
-  top: 9px;
-  right: 0;
-  left: 0;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--border-strong);
-}
-
-/* .rl-tl-read: --read wide, from the left edge of .rl-tl-block. */
-.rl-tl-read {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: var(--read);
-  min-width: 2px;
-  height: 20px;
   padding: 0 5px;
   border-radius: 3px;
   background: var(--fill);
   color: var(--ink);
+  cursor: pointer;
   font-size: 10px;
   font-weight: 500;
   line-height: 20px;
@@ -5348,8 +5323,7 @@ kbd {
   letter-spacing: 0.04em;
 }
 
-/* No `background` here. Every real cell carries an `.rl-l0`–`.rl-l4` class of
-   the same specificity, and those level classes are what colour a day. */
+/* No `background`: `.rl-l0`–`.rl-l4` carry it at the same specificity. */
 .rl-mday {
   display: flex;
   flex-direction: column;
@@ -5380,9 +5354,8 @@ kbd {
   max-width: 78ch;
 }
 
-/* The coloured edge is the colour of the mark in the book, set per row from the
-   reader's palette. A bookmark or a lone note falls back to the ordinary
-   border. */
+/* `border-left-color` is set per row from `noteColor`. A bookmark or a lone
+   note keeps the `--border` edge. */
 .rl-note {
   padding: 10px 14px;
   background: var(--surface);

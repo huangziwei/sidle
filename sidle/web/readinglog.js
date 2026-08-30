@@ -1,5 +1,5 @@
 // Reading Log: what was read on which day, and for how long. An IIFE exposing
-// `window.ReadingLog` ({ refresh, show, hide, invalidate }), over
+// `window.ReadingLog` ({ refresh, show, hide, invalidate, handleKey }), over
 // commands/reading_log.rs and `annotations_for_book`.
 (function () {
   const api = window.api;
@@ -30,8 +30,7 @@
     overviewScroll: 0, // where the overview was left when a book was opened
   };
 
-  // Every section shares one scroll container. The drill-in parks the
-  // overview's offset and starts the book at its top; going back restores it.
+  // `#main`, the one scroll container every section shares.
   const scroller = () => q("#main");
 
   function toast(msg, isError = false) {
@@ -41,8 +40,7 @@
 
   // ── Formatting ─────────────────────────────────────────────────────────────
 
-  // Durations read as "4h 12m" / "37m" / "2m". The underlying counter carries
-  // no second-level precision.
+  // Durations as "4h 12m" / "37m" / "2m".
   function fmtDuration(secs) {
     if (!secs || secs < 60) return "<1m";
     const h = Math.floor(secs / 3600);
@@ -52,8 +50,7 @@
     return `${m}m`;
   }
 
-  // A "~" on a figure the Kindle's reading timer did not produce. The timer
-  // runs on words, leaving manga and fixed-layout magazines at zero.
+  // A "~" on a figure `dwell_seconds` or `awake_seconds` contributed to.
   // `dwell_seconds` is a measurement, `awake_seconds` a bound.
   function estimateMark(e) {
     const dwell = e.dwell_seconds || 0;
@@ -80,9 +77,7 @@
     return "read";
   }
 
-  // Word counts come straight off the device's own `TotalWords` counter, which
-  // is why they can be shown at all — and why they, not any page figure, are the
-  // measure of how much of a book was read.
+  // Word counts from the device's own `TotalWords` counter.
   function fmtWords(n) {
     if (!n) return "0";
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
@@ -90,8 +85,7 @@
     return String(n);
   }
 
-  // "Aug 9" — enough to place a book in the year at a glance. Takes a full
-  // timestamp or a bare day; only the date part is ever used.
+  // "Aug 9", from a full timestamp or a bare day.
   function shortDay(iso) {
     const d = parseDay((iso || "").slice(0, 10));
     return d ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
@@ -116,8 +110,8 @@
     });
   }
 
-  // `YYYY-MM-DD` → local Date, built component-wise. `new Date(iso)` parses a
-  // bare date as UTC and lands on the previous day west of Greenwich.
+  // `YYYY-MM-DD` → local Date, built component-wise. `new Date(iso)` reads a
+  // bare date as UTC.
   function parseDay(iso) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
     return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
@@ -128,8 +122,7 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
-  // Rows here are built as HTML strings. Anything from the library is escaped: a title
-  // is whatever the book's metadata said.
+  // Escapes text interpolated into the HTML strings this file builds.
   function esc(s) {
     return String(s == null ? "" : s).replace(
       /[&<>"']/g,
@@ -164,8 +157,7 @@
     state.calRows.clear();
     state.calShapes.clear();
     try {
-      // Two halves of one picture: what the library named on its own, and the
-      // ties it left. The second appears in no total on the page.
+      // `overview` and `ambiguous`: the named reading, and the ties.
       [state.overview, state.ambiguous] = await Promise.all([
         api.invoke("reading_log_overview"),
         api.invoke("reading_log_ambiguous"),
@@ -287,8 +279,7 @@
     q("#rl-overview").hidden = !!state.book;
     q("#rl-book").hidden = !state.book;
     if (state.book) return renderBook();
-    // Before the early return below: a library whose reading is *all* tied has
-    // no days to draw, and that is the library that most needs to see this.
+    // `days` is empty for a library whose reading is all tied.
     renderAmbiguous();
     if (!has) {
       q("#rl-stats").innerHTML = "";
@@ -342,8 +333,8 @@
     return `<div class="rl-stat"${t}><b>${value}</b><span>${label}</span></div>`;
   }
 
-  // The first three tiles read `state.year`. The rest are all-time, each
-  // naming its window in its `title`.
+  // The first three tiles read `state.year`. The rest name their window in
+  // their `title`.
   function renderStats(o) {
     const days = daysOfYear(o, state.year);
     const secs = days.reduce((a, d) => a + d.seconds, 0);
@@ -360,8 +351,7 @@
     q("#rl-stats").innerHTML = tiles.join("");
   }
 
-  // The arrows step to the next year with reading. A single year of history
-  // hides the pair.
+  // The arrows step to the next year in `years`.
   function renderYearNav(o, years) {
     const i = years.indexOf(state.year);
     const prev = i > 0 ? years[i - 1] : null;
@@ -374,8 +364,7 @@
     q("#rl-year-total").textContent = secs ? fmtDuration(secs) : "";
   }
 
-  // A navigation arrow, disabled and unlabelled with nothing that way. `target`
-  // sits on the element for the click handler to read.
+  // A navigation arrow. `target` sits on the element for the click handler.
   function setStep(sel, target, title) {
     const btn = q(sel);
     btn.disabled = target === null;
@@ -383,8 +372,7 @@
     btn.title = target === null ? "" : title(target);
   }
 
-  // Scaled by the busiest day, holding the range across 20 minutes and 4 hours
-  // a day alike.
+  // Scaled by the busiest day in `days`.
   function levelScale(days) {
     const peak = Math.max(...days.map((d) => d.seconds), 1);
     return (secs) => {
@@ -394,15 +382,14 @@
     };
   }
 
-  // One column per week, Sunday at the top, from a fixed start. Padding the
-  // leading days holds the weekday rows aligned.
+  // One column per week, Sunday at the top, from a fixed start.
   function renderHeatmap(o) {
     const totals = new Map(o.days.map((d) => [d.day, d.seconds]));
     const end = new Date(state.year, 11, 31);
     let start = new Date(state.year, 0, 1);
     start = new Date(start.getFullYear(), start.getMonth(), start.getDate() - start.getDay());
 
-    // Across all years: a quiet year keeps its own place on the five shades.
+    // `levelScale` over every year.
     const level = levelScale(o.days);
 
     const cols = [];
@@ -412,16 +399,14 @@
       const week = [];
       for (let i = 0; i < 7; i++) {
         const cur = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i);
-        // A week can start in December and run into January; only the days
-        // inside the year being shown belong to this grid.
+        // Only the days inside `state.year` belong to this grid.
         if (cur > end || cur.getFullYear() !== state.year) {
           week.push(`<i class="rl-cell rl-pad"></i>`);
           continue;
         }
         const key = dayKey(cur);
         const secs = totals.get(key) || 0;
-        // Only a day with reading is clickable. An empty one filters the grid
-        // to nothing.
+        // `data-day` sits only on a day with reading.
         const hit = secs ? ` data-day="${key}" role="button" tabindex="0"` : "";
         const sel = key === state.day ? " rl-sel" : "";
         week.push(
@@ -668,10 +653,12 @@
   }
 
   // ── The day timeline ───────────────────────────────────────────────────────
-  // The sittings of `state.day` on one 24-hour axis. `.rl-tl-read` is `seconds`
-  // wide; `.rl-tl-open` spans `started_at` to `ended_at` behind it.
+  // The sittings of `state.day` on one 24-hour axis. A block runs `seconds`
+  // from `started_at`. `ended_at` reaches the block's `title` and nothing else.
 
   const DAY_SECS = 86400;
+  // Seconds held clear after a block in `packLanes`.
+  const LANE_GAP_SECS = 60;
 
   // Seconds into the day, from a `YYYY-MM-DDTHH:MM:SS` stamp.
   function clockSecs(iso) {
@@ -679,21 +666,19 @@
     return +iso.slice(11, 13) * 3600 + +iso.slice(14, 16) * 60 + +iso.slice(17, 19);
   }
 
-  // `[start, end]` of `s` in seconds of `day`. An `ended_at` outside `day`, or
-  // below `started_at`, reads as `DAY_SECS`. The span floors at 60 seconds.
-  function sessionSpan(s, day) {
+  // `[start, end]` of `s`'s reading in seconds of its day: `seconds` from
+  // `started_at`, ending at `DAY_SECS` at the latest.
+  function sessionSpan(s) {
     const from = clockSecs(s.started_at);
     if (from == null) return null;
-    let to = clockSecs(s.ended_at);
-    if (to == null || s.ended_at.slice(0, 10) !== day || to < from) to = DAY_SECS;
-    return [from, Math.max(to, from + 60)];
+    return [from, Math.min(DAY_SECS, from + Math.max(s.seconds, 0))];
   }
 
   // Packs sittings into rows where no two overlap, earliest first.
   function packLanes(spans) {
     const lanes = [];
     for (const item of spans) {
-      let lane = lanes.find((l) => l[l.length - 1].span[1] <= item.span[0]);
+      let lane = lanes.find((l) => l[l.length - 1].span[1] + LANE_GAP_SECS <= item.span[0]);
       if (!lane) {
         lane = [];
         lanes.push(lane);
@@ -720,7 +705,7 @@
     if (token !== state.tlPending) return;
 
     const spans = rows
-      .map((s) => ({ s, span: sessionSpan(s, day) }))
+      .map((s) => ({ s, span: sessionSpan(s) }))
       .filter((x) => x.span)
       .sort((a, b) => a.span[0] - b.span[0]);
     const counted = rows.reduce((a, s) => a + s.seconds, 0);
@@ -734,19 +719,15 @@
     const pct = (v) => `${((v / DAY_SECS) * 100).toFixed(3)}%`;
     const lanes = packLanes(spans)
       .map((lane) => {
-        const blocks = lane.map(({ s, span }) => {
-          const width = span[1] - span[0];
-          const read = Math.min(s.seconds, width);
-          return (
+        const blocks = lane.map(
+          ({ s, span }) =>
             `<span class="rl-tl-block" data-book="${s.book_id}" role="button" tabindex="0" ` +
-            `style="left:${pct(span[0])}; width:${pct(width)}; ` +
-            `--fill:${bookFill(s.book_id)}; --ink:${bookInk(s.book_id)}; ` +
-            `--read:${((read / width) * 100).toFixed(3)}%" ` +
+            `style="left:${pct(span[0])}; width:${pct(span[1] - span[0])}; ` +
+            `--fill:${bookFill(s.book_id)}; --ink:${bookInk(s.book_id)}" ` +
             `title="${esc(s.title)}\n${s.started_at.slice(11, 16)}–${s.ended_at.slice(11, 16)}` +
             ` open · ${fmtDuration(s.seconds)} ${measureVerb(s.measure)}">` +
-            `<i class="rl-tl-open"></i><b class="rl-tl-read">${esc(s.title)}</b></span>`
-          );
-        });
+            `${esc(s.title)}</span>`,
+        );
         return `<div class="rl-tl-lane">${blocks.join("")}</div>`;
       })
       .join("");
@@ -855,16 +836,13 @@
     }
   }
 
-  // "23:00–24:00" — an hour is a span, and labelling a bar `23` alone invites
-  // reading it as an instant.
+  // "23:00–24:00" for hour 23.
   function hourSpan(h) {
     const p = (n) => String(n).padStart(2, "0");
     return `${p(h)}:00–${p(h + 1)}:00`;
   }
 
-  // The year's hours as bars. Heights are a fraction of the busiest hour rather
-  // than of a fixed scale, for the same reason the heatmap shades that way: the
-  // shape of a day is the point, not how it compares to somebody else's.
+  // The year's hours as bars, each a fraction of the busiest hour.
   function clockBars(cells) {
     const hours = clockRows(cells, () => "").get("") || new Array(24).fill(0);
     const peak = Math.max(...hours, 1);
@@ -890,17 +868,15 @@
     ];
   }
 
-  // Hour of the day against the weekday, or against the month: 24 columns on the
-  // heatmap's own five-step ramp. A cell here and a square there mean the same kind of
-  // thing.
+  // Hour of the day against the weekday, or against the month: 24 columns on
+  // the heatmap's own five-step ramp.
   function clockGrid(cells, view) {
     const byWeek = view === "week";
     const rows = clockRows(cells, (c) => (byWeek ? c.dow : c.month));
     const order = byWeek ? [...rows.keys()].sort((a, b) => a - b) : monthSpan(rows);
     const label = (k) => (byWeek ? DOW[k] : MONTHS[+k.slice(5, 7) - 1]);
 
-    // Scaled across the whole grid, not per row: a quiet month must look quiet
-    // beside a busy one, which is the entire point of the month view.
+    // `levelScale` over every cell of the grid, not per row.
     const peak = Math.max(...[...rows.values()].flat(), 1);
     const level = (secs) => {
       if (!secs) return 0;
@@ -944,8 +920,7 @@
     ];
   }
 
-  // Every month from the first read to the last, gaps included. The book page's
-  // calendar arrows follow the same rule.
+  // Every month from the first read to the last, gaps included.
   function monthSpan(rows) {
     const keys = [...rows.keys()].sort();
     const [lo, hi] = [+keys[0].slice(5, 7), +keys[keys.length - 1].slice(5, 7)];
@@ -955,8 +930,7 @@
     return out;
   }
 
-  // "Most at Tue 22:00–23:00 · 4h 12m" — the figure behind the tallest bar, in
-  // one line.
+  // "Most at Tue 22:00–23:00 · 4h 12m" — the figure behind the tallest bar.
   function peakNote(pairs) {
     let best = null;
     for (const [label, secs] of pairs) {
@@ -966,8 +940,7 @@
   }
 
   // The gallery's cover markup. `coverUrlFor` (library.js) holds the
-  // thumb-vs-full choice and the cache-busting token. Split in two: the book
-  // page owns its frame element and fills it.
+  // thumb-vs-full choice and the cache-busting token.
   function coverInner(url, title) {
     return url
       ? `<img src="${esc(url)}" alt="" loading="lazy" draggable="false">`
@@ -994,8 +967,8 @@
     );
   }
 
-  // What the grid can be ordered by. Every one is a column of the aggregate, ordered in
-  // SQL, matching the figures on the cards.
+  // What the grid can be ordered by. Every one is a column of the aggregate,
+  // ordered in SQL.
   const SORT_KEYS = [
     ["last", "Last read", "Most recently read first"],
     ["seconds", "Reading time", "Longest first"],
@@ -1003,9 +976,8 @@
     ["words", "Words", "Most words read first"],
   ];
 
-  // The grid shows what the heatmap shows: the whole year, or one clicked day.
-  // Its figures come from a windowed query, and the month/day bands come from
-  // the query too — a book read across three months has three sets of figures.
+  // The grid follows the heatmap: the whole year, or one clicked day. Figures
+  // and the month/day bands both come from the windowed query.
   async function renderScope() {
     const day = state.day;
     const [from, to] = day ? [day, day] : [`${state.year}-01-01`, `${state.year}-12-31`];
@@ -1016,7 +988,7 @@
     renderBucketControl();
     renderSortControl();
 
-    // A later click must win, however the replies happen to arrive back.
+    // `state.gridPending` drops the reply of a superseded click.
     const token = ++state.scope;
     let rows = [];
     try {
@@ -1042,8 +1014,7 @@
       : state.finishedOnly
         ? "nothing finished"
         : "nothing read";
-    // A band per day sits every card under its own date, and the cards say the
-    // time of day.
+      // A band per day, with the time of day on the cards.
     const daily = !!day || bucket === "day";
     const banded = bucket === "month" || bucket === "day";
     const list = q("#rl-book-list");
@@ -1051,8 +1022,8 @@
     list.innerHTML = banded ? bandsHtml(rows, bucket, daily) : cardsHtml(rows, daily);
   }
 
-  // A day's cards say when the sitting began; a year's say when the book was
-  // last open, which the default order sorts on.
+  // A day's cards carry `started_at`; a year's carry `last_read_at`, which the
+  // default order sorts on.
   function cardsHtml(rows, daily) {
     return rows
       .map((r) =>
@@ -1066,8 +1037,7 @@
       .join("");
   }
 
-  // Rows come back grouped in the asked-for direction, and one pass keeps that
-  // order.
+  // Rows come back grouped in the asked-for direction, and one pass keeps that order.
   function bandsHtml(rows, bucket, daily) {
     const out = [];
     for (let i = 0; i < rows.length; ) {
@@ -1150,9 +1120,7 @@
     q("#rl-ambiguous-list").innerHTML = groups.map(groupRow).join("");
   }
 
-  // "8m · 2 sessions · Jun 22 – Jun 23". Not an identification — nothing here
-  // identifies a book — but the reading being claimed, which is what the choice
-  // below it is about.
+  // "8m · 2 sessions · Jun 22 – Jun 23" — the reading a tie is claiming.
   function groupFacts(g) {
     const span =
       shortDay(g.first_at) === shortDay(g.last_at)
@@ -1167,8 +1135,7 @@
     return parts.join(" · ");
   }
 
-  // The candidates are the whole of the question, and sit on the row from the start —
-  // nothing to expand, no step between seeing the tie and settling it.
+  // The candidates sit on the row from the start.
   function groupRow(g) {
     const cands = g.candidates || [];
     return (
@@ -1181,9 +1148,8 @@
     );
   }
 
-  // A candidate: the cover at a size you can recognise a book by, its title and
-  // author under it. The cover is the point — two same-length books are told
-  // apart by looking, not by reading a figure.
+  // A candidate: the cover at a size a book is recognisable at, its title and
+  // author under it.
   function bookOption(b) {
     const url = coverUrlFor(b, { thumb: true });
     return (
@@ -1196,8 +1162,7 @@
     );
   }
 
-  // Settle one: the row goes, the reading belongs to that book, and the page
-  // reloads with the totals, the heatmap and the grid all changed.
+  // Settles one tie and reloads the page.
   async function nameBook(position, bookId) {
     const group = state.ambiguous.find((g) => g.end_position === position);
     const book = (group?.candidates || []).find((b) => b.id === bookId);
@@ -1218,13 +1183,11 @@
   // ── One book ───────────────────────────────────────────────────────────────
 
   async function openBook(bookId) {
-    // Read at the click, not after the reply: this is where the list was when
-    // the card the user pressed was on screen.
+    // `state.overviewScroll` is read at the click, ahead of the reply.
     const from = scroller().scrollTop;
     try {
-      // The annotations come from the reader's own query, holding this page and
-      // the reader's sidebar to one answer. A failure there is reported and
-      // leaves the reading history drawn.
+      // `annotations_for_book` is the reader's own query. A failure is reported
+      // and leaves the reading history drawn.
       let failed = false;
       const [data, notes] = await Promise.all([
         api.invoke("reading_log_book", { bookId }),
@@ -1248,8 +1211,7 @@
   }
 
   // Into the book from the cover, through the gallery's `openReader`
-  // (library.js), which says "Opening …" in the status bar on a slow KFX load.
-  // The reader is a full overlay and closing it returns here.
+  // (library.js).
   function openInReader() {
     const { id, entry } = state.book || {};
     if (!entry) return;
@@ -1266,8 +1228,7 @@
     box.innerHTML = entry ? coverInner(cover, entry.title) : "";
 
     if (entry) {
-      // The cover opens the book, carrying the affordance while an entry sits
-      // behind it. The click and key handlers match on the same `role`.
+      // `role` on the cover, matched by the click and key handlers.
       box.setAttribute("role", "button");
       box.setAttribute("tabindex", "0");
       box.setAttribute("aria-label", `Open ${entry.title} in the reader`);
@@ -1275,7 +1236,7 @@
 
       const span = spanDays(days);
       const perDay = days.length ? Math.round(entry.seconds / days.length) : 0;
-      // Pace comes from the device's own word counts, never page geometry.
+      // Pace from the device's own word counts.
       const wpm = entry.seconds > 0 ? Math.round((entry.words * 60) / entry.seconds) : 0;
       q("#rl-book-stats").innerHTML = [
         factHtml("Total", `${esc(fmtDuration(entry.seconds))}${estimateMark(entry)}`),
@@ -1285,8 +1246,8 @@
         fact("Sessions", entry.sessions),
         fact("Words", fmtWords(entry.words)),
         wpm ? fact("Words / min", wpm) : "",
-        // Deliberately not called "pages": a converted book has no pagination,
-        // and this counts forward taps at whatever font size the device was on.
+      // `page_turns` counts forward taps at whatever font size the device was
+      // on, and is not a page count.
         fact(
           "Page turns",
           entry.page_turns,
@@ -1295,8 +1256,7 @@
         fact("First read", shortDay(entry.first_at)),
         fact("Last read", shortDay(entry.last_at)),
         ...paceFacts(entry, days),
-        // Blank for sessions imported before Sidle was told which Kindle wrote
-        // them; a row saying nothing beats a row inventing a device.
+        // Blank where `device_serial` is unset.
         entry.devices.length ? fact("Read on", entry.devices.join(", ")) : "",
       ].join("");
     } else {
@@ -1365,9 +1325,7 @@
     renderFinishMark();
   }
 
-  // Time left and a finish date at this book's measured pace, absent without a
-  // position and at the end. `paceFacts` scales by `(1 - frac) / frac`, and
-  // PACE_FLOOR is the fraction its projection needs.
+  // The `readFraction` floor `paceFacts` projects from.
   const PACE_FLOOR = 0.05;
 
   function paceFacts(entry, days) {
@@ -1398,15 +1356,12 @@
     return out;
   }
 
-  // One figure as a label/value row. A vertical list beside the calendar reads
-  // better than a strip of boxes across the top, and scales as figures are
-  // added without pushing anything off the edge.
+  // One figure as a label/value row.
   function fact(label, value, hint) {
     return factHtml(label, esc(value), hint);
   }
 
-  // The same, for a value that carries markup of its own — a figure with the
-  // estimate mark on it, say.
+  // The same, for a value carrying markup of its own.
   function factHtml(label, valueHtml, hint) {
     const t = hint ? ` title="${esc(hint)}"` : "";
     return `<div class="rl-fact"${t}><dt>${esc(label)}</dt><dd>${valueHtml}</dd></div>`;
@@ -1419,8 +1374,7 @@
     return Math.round((b - a) / 86400000) + 1;
   }
 
-  // Months as a single ordinal: "the month before" is arithmetic and the bounds compare
-  // without date objects.
+  // Months as a single ordinal, comparable without date objects.
   function monthIndex(y, m) {
     return y * 12 + m;
   }
@@ -1429,9 +1383,8 @@
     return new Date(Math.floor(i / 12), i % 12, 1);
   }
 
-  // The calendar goes no further than the book's own reading. Unlike the year
-  // arrows it steps one month at a time and does not skip: a gap between two
-  // reading months is itself worth seeing.
+  // The calendar reaches no further than `months`, one month at a time,
+  // skipping none.
   function monthBounds(days) {
     const idx = days.map((d) => {
       const p = parseDay(d.day);
@@ -1460,15 +1413,13 @@
     const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
     const lead = first.getDay();
     const len = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
-    // This book's own busiest day sets the scale, and its calendar shades the way the
-    // year heatmap does — a day read is a day that looks read.
+    // `levelScale` over this book's own `days`.
     const level = levelScale(days);
 
     const cells = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
       (d) => `<span class="rl-mday-head">${d}</span>`,
     );
-    // Lead-in blanks carry no level class, which is the whole difference
-    // between "before the month started" and "a day with no reading".
+    // A lead-in blank carries no level class; a day with no reading carries `rl-l0`.
     for (let i = 0; i < lead; i++) cells.push(`<span class="rl-mday"></span>`);
     for (let day = 1; day <= len; day++) {
       const key = dayKey(new Date(anchor.getFullYear(), anchor.getMonth(), day));
@@ -1483,18 +1434,15 @@
 
   // ── Highlights and notes ───────────────────────────────────────────────────
   // The passages in reading order, each note under the passage it annotates.
-  // The reader owns editing.
 
-  // The edge colour of a row, resolved by the reader, including the yellow it
-  // gives a colourless highlight. Only a hex value passes on: `color` arrives
-  // from a device-written file and lands in a `style` attribute.
+  // The edge colour of a row, through `window.sidleReader.highlightColor`.
+  // Only a hex value passes into the `style` attribute.
   function noteColor(name) {
     const css = window.sidleReader?.highlightColor?.(name);
     return /^#[0-9a-f]{3,8}$/i.test(css || "") ? css : null;
   }
 
-  // "Yellow highlight", naming the colour the device named. A literal or
-  // missing colour reads as a plain "Highlight".
+  // "Yellow highlight". A literal or missing `color` reads as "Highlight".
   function noteKind(a) {
     if (a.kind === "highlight") {
       const named = a.color && window.sidleReader?.highlightColors?.[a.color];
@@ -1505,8 +1453,7 @@
     return a.kind;
   }
 
-  // When the Kindle says the mark was made, carrying the year outside this one.
-  // A row imported without the stamp reads blank.
+  // `added_at` from the Kindle, carrying the year outside this one, else blank.
   function noteWhen(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -1519,9 +1466,8 @@
     });
   }
 
-  // The notes written against one highlight, which can carry several, under the
-  // passage. A hidden one is left out, and the count beside the heading holds
-  // it.
+  // The notes against one highlight, under the passage. A hidden one is left
+  // out of the list and held in the count.
   function notesOn(a) {
     return state.notes.filter((n) => n.attached_to === a.id && !n.hidden);
   }
@@ -1534,8 +1480,7 @@
       const n = rows.filter((a) => a.kind === kind).length;
       if (n) parts.push(`${n} ${kind}${n === 1 ? "" : "s"}`);
     }
-    // Hidden rows are curated out of the reader and out of here, with the count
-    // above holding them.
+    // `hidden` rows are counted here and drawn nowhere.
     if (hidden) parts.push(`${hidden} hidden`);
     return parts.join(" · ");
   }
@@ -1550,8 +1495,7 @@
       `<li class="rl-note rl-note-${esc(a.kind)}"${style}>` +
       `<div class="rl-note-head"><span class="rl-note-kind">${esc(noteKind(a))}</span>` +
       `<span>${esc(when)}</span></div>` +
-      // A bookmark marks a place and quotes nothing, as does a highlight whose text the
-      // sidecar left unresolved. Neither draws a quote.
+      // A bookmark quotes nothing, as does a highlight whose `text` is empty.
       (a.text ? `<p class="rl-note-text">${esc(a.text)}</p>` : "") +
       bodies.map((b) => `<div class="rl-note-body">${esc(b)}</div>`).join("") +
       `</li>`
@@ -1560,19 +1504,18 @@
 
   function renderNotes() {
     const rows = state.notes.filter((a) => !a.hidden);
-    // A note attached to a highlight is drawn inside that highlight's row, never as a
-    // row of its own.
+    // A row with `attached_to` set is drawn inside that highlight's row.
     const listed = rows.filter((a) => a.attached_to == null);
     const hidden = state.notes.length - rows.length;
     q("#rl-notes-count").textContent = noteCounts(rows, hidden);
-    // The hint belongs to a book with no highlights at all; a book whose every
-    // mark is hidden carries them. A failed query leaves the section blank.
+    // `#rl-notes-empty` shows for a book with no rows at all. `state.notesFailed`
+    // leaves the section blank.
     q("#rl-notes-empty").hidden = state.notes.length > 0 || state.notesFailed;
     q("#rl-notes-list").innerHTML = listed.map(noteRow).join("");
   }
 
-  // Erasing the whole log is undoable nowhere: a Kindle sends only what is
-  // newer than the newest session stored. The dialog states what goes.
+  // A Kindle sends only what is newer than the newest session stored. The
+  // dialog states what goes.
   async function doPurge() {
     const o = state.overview;
     const what = o
@@ -1612,9 +1555,8 @@
       renderScope();
     });
     q("#rl-purge").addEventListener("click", doPurge);
-    // Both navigations read their destination off the button, which the renderer set
-    // from the data. An arrow leads somewhere that exists, and a disabled one has
-    // nothing to go to.
+    // Both navigations read `target` off the button, which the renderer set
+    // from the data.
     for (const sel of ["#rl-year-prev", "#rl-year-next"]) {
       q(sel).addEventListener("click", (e) => {
         const target = e.currentTarget.dataset.target;
@@ -1646,8 +1588,7 @@
       });
     }
 
-    // Year / Month / Day. The window holds; the query cuts it more finely. The heatmap
-    // and the totals above stay put.
+    // Year / Month / Day: `state.bucket` alone, cutting the same window.
     q("#rl-bucket-seg").addEventListener("click", (e) => {
       const btn = e.target.closest(".seg-btn[data-bucket]");
       if (!btn || btn.dataset.bucket === state.bucket) return;
@@ -1655,8 +1596,7 @@
       renderScope();
     });
 
-    // Hour / Week / Month: three cuts of one cube in hand, redrawing the panel
-    // and asking the backend nothing.
+    // Hour / Week / Month: three cuts of the cube in hand.
     q("#rl-clock-seg").addEventListener("click", (e) => {
       const btn = e.target.closest(".seg-btn[data-clock]");
       if (!btn || btn.dataset.clock === state.clockView) return;
@@ -1664,8 +1604,7 @@
       if (state.overview) renderClock(state.overview);
     });
 
-    // Sort: the gallery's control over reading figures, re-running the scope
-    // query alone.
+    // Sort: re-runs the scope query alone.
     q("#rl-sort-button").addEventListener("click", () => {
       const pop = q("#rl-sort-popover");
       if (!pop.hidden) return closeSort();
@@ -1705,8 +1644,7 @@
       });
     }
 
-    // One delegated handler for the whole page. The heatmap and both lists
-    // re-render wholesale, leaking any per-element listener.
+    // One delegated `click` handler for `#reading-log`.
     q("#reading-log").addEventListener("click", (e) => {
       // Matched before `.rl-cal-cell`, which a bar overlaps.
       const span = e.target.closest(".rl-cal-span[data-book], .rl-tl-block[data-book]");
@@ -1727,15 +1665,13 @@
         openBook(Number(row.dataset.book));
         return;
       }
-      // `[role]` beside the id: the renderer sets it on a cover with a book
-      // behind it.
+      // `[role]` beside the id: set on a cover with a book behind it.
       if (e.target.closest("#rl-book-cover[role]")) {
         openInReader();
         return;
       }
 
-      // Settling a tie: which candidate was clicked, in which row — the row
-      // carries the position that is the group's whole identity.
+      // Settling a tie: the clicked candidate, and the row's `data-position`.
       const tie = e.target.closest(".rl-ambiguous-row[data-position]");
       const pick = e.target.closest(".rl-pick-book[data-book]");
       if (tie && pick) nameBook(Number(tie.dataset.position), Number(pick.dataset.book));
