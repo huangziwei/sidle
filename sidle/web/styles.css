@@ -124,9 +124,9 @@ button {
   border-radius: 6px;
   overflow: hidden;
 }
-/* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`,
-   so `$("#view-seg").hidden = true` (Misc + Kindle pages, which have no
-   Gallery/List) wouldn't hide it. Restore it — same fix as .filter-bar/.seg peers. */
+/* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`.
+   This restores it for `$("#view-seg").hidden = true` on the Misc and Kindle pages,
+   which have no Gallery/List. */
 .seg[hidden] {
   display: none;
 }
@@ -213,7 +213,7 @@ button {
 }
 
 .pill.active:hover {
-  /* Slightly darken on hover so the active state remains legible. */
+  /* Darkened on hover, holding the active state legible. */
   filter: brightness(0.95);
 }
 
@@ -222,8 +222,7 @@ button {
 }
 
 .pill .pill-label {
-  /* No layout adjustments — span just lets us swap text without
-     blowing away pill-clear children. */
+  /* No layout adjustments — the span swaps text and holds the pill-clear children. */
 }
 
 .pill-clear {
@@ -343,9 +342,8 @@ button {
   flex: 0 0 auto;
 }
 
-/* Selected-but-excluded by cross-facet filters — italicized hint that
-   "this is filtered out by another pill" so the user understands why
-   the count is 0. */
+/* Selected-but-excluded by cross-facet filters — an italicized hint against a count
+   of 0. */
 .filter-dropdown-list li.zero .opt-label,
 .filter-dropdown-list li.zero .opt-count {
   font-style: italic;
@@ -1161,8 +1159,8 @@ button {
   cursor: not-allowed;
 }
 
-/* Set apart from the actions it sits beside, so a destructive button is never
-   the one next to the button you meant to press. */
+/* Set apart from the actions it sits beside, holding a destructive button away from
+   the button you meant to press. */
 .selection-bar .sel-danger {
   color: var(--accent);
   margin-left: 12px;
@@ -1213,8 +1211,8 @@ button {
 }
 
 /* Keyboard focus cursor — a ring distinct from the selection outline (an inset
-   accent border), so a focused tile reads clearly whether or not it's also
-   selected. Box-shadow coexists with the outline and overrides the hover shadow. */
+   accent border), reading on a selected tile and an unselected one. Box-shadow
+   coexists with the outline and overrides the hover shadow. */
 .book-card.focused,
 .series-card.focused {
   box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
@@ -1289,7 +1287,7 @@ kbd {
 }
 
 .cover.has-image {
-  /* Slightly dimmer than the card surface so letterbox bars read as "frame" */
+  /* Dimmer than the card surface, reading letterbox bars as "frame". */
   background: var(--bg);
 }
 
@@ -1429,8 +1427,8 @@ kbd {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
-/* Overflow menu — a 2×3 dot grid, bottom-right, opens the series context menu.
-   Each dot carries a faint halo so it reads over dark cover corners too. */
+/* Overflow menu — a 2×3 dot grid, bottom-right, opens the series context menu. Each
+   dot carries a faint halo, reading over dark cover corners. */
 .series-menu {
   position: absolute;
   right: 5px;
@@ -1465,9 +1463,9 @@ kbd {
   }
 }
 
-/* Series drill-in breadcrumb. The explicit `[hidden]` rule out-specifies the
-   base display so toggling the attribute actually hides it (same gotcha as
-   `.view` — an author `display` overrides the UA `[hidden]` rule). */
+/* Series drill-in breadcrumb. The explicit `[hidden]` rule out-specifies the base
+   display, and toggling the attribute hides it (as with `.view` — an author
+   `display` overrides the UA `[hidden]` rule). */
 .series-crumb {
   display: flex;
   align-items: center;
@@ -1634,17 +1632,17 @@ kbd {
   -webkit-user-select: text;
 }
 
-/* Click-to-edit affordance: once a row is selected, its editable cells show a
-   text cursor and a faint inset outline on hover so it's clear they're live.
-   (An inset box-shadow — not a border — so the row height never shifts.) */
+/* Click-to-edit affordance: a selected row shows a text cursor and a faint inset
+   outline on hover over its editable cells. An inset box-shadow, never a border,
+   holds the row height. */
 .book-table tbody tr.selected td.editable:hover {
   cursor: text;
   box-shadow: inset 0 0 0 1px var(--border-strong);
   border-radius: 4px;
 }
 
-/* The inline editor swapped into a cell while editing (see table.js). Fills the
-   cell and pulls its own padding back into the cell's so the row doesn't jump. */
+/* The inline editor swapped into a cell while editing (see table.js). Fills the cell
+   and pulls its own padding back into the cell's, holding the row height. */
 .book-table td .cell-editor {
   width: 100%;
   box-sizing: border-box;
@@ -1706,9 +1704,9 @@ kbd {
   text-overflow: ellipsis;
 }
 
-/* Drag a book onto a series tile to file it there. Mouse-based for the same
-   reason as the column drag above (the webview blocks the native drag API), so
-   the ghost and highlights are ours. See library.js wireBookDragSource. */
+/* Drag a book onto a series tile to file it there. Mouse-based like the column drag
+   above; the webview blocks the native drag API, and this styles the ghost and
+   highlights. See library.js wireBookDragSource. */
 .book-drag-ghost {
   position: fixed;
   pointer-events: none;
@@ -1724,7 +1722,7 @@ kbd {
   white-space: nowrap;
 }
 
-/* The book tile/row in motion dims so the ghost reads as the thing being moved. */
+/* The book tile/row in motion dims, and the ghost reads as the thing being moved. */
 .book-card.drag-source,
 #series-list tbody tr.drag-source {
   opacity: 0.45;
@@ -2349,8 +2347,8 @@ kbd {
   display: none;
 }
 
-/* The file's own identity is shown, not edited: it reads as a value, but stays
-   selectable so it can be copied into a search or a device path. */
+/* The file's own identity is shown, not edited: it reads as a value and stays
+   selectable for a copy into a search or a device path. */
 .metadata-fields .field input[name="content_id"] {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -2505,8 +2503,8 @@ kbd {
   border-color: var(--accent);
 }
 
-/* A number nothing in the book stated — counted on from the volume before, so
-   it is the one to check. */
+/* A number nothing in the book stated — counted on from the volume before, and the
+   one to check. */
 .split-table input.counted {
   color: #d4a957;
 }
@@ -2780,7 +2778,7 @@ kbd {
   --reader-border: #e2ddd4; /* hairlines */
   --reader-muted: #5a544b; /* secondary text */
   /* The whole reading area is the page color, edge to edge — no separate gutter
-     band, so the page extends to the window's ends as one color. */
+     band, the page reaching the window's ends as one color. */
   background: var(--reader-bg);
   --overlayer-highlight-opacity: 0.3;
   --overlayer-highlight-blend-mode: multiply;
@@ -2846,7 +2844,7 @@ kbd {
 .reader-stage {
   flex: 1 1 auto;
   min-height: 0;
-  min-width: 0; /* shrink in the flex row so the panel fits beside it */
+  min-width: 0; /* shrink in the flex row, fitting the panel beside it */
   position: relative;
   background: var(--reader-bg);
 }
@@ -2875,7 +2873,8 @@ kbd {
   align-items: center;
   justify-content: center;
   gap: 0;
-  flex: 0 0 auto; /* size to the (explicitly sized) pages so the viewport scrolls when zoomed */
+  /* size to the (explicitly sized) pages, and the viewport scrolls when zoomed */
+  flex: 0 0 auto;
 }
 .reader-pdf-spread.double {
   gap: 12px; /* the gutter between two facing pages */
@@ -2895,9 +2894,8 @@ kbd {
 .reader-pdf-spread.rtl.double {
   flex-direction: row-reverse;
 }
-/* Each page is a positioned wrapper sized (in reader.js) to the displayed image
-   box, so the <img> backdrop and the selectable text overlay share one
-   coordinate system. */
+/* Each page is a positioned wrapper sized (in reader.js) to the displayed image box.
+   The <img> backdrop and the selectable text overlay share one coordinate system. */
 .reader-pdf-page {
   position: relative;
   flex: 0 0 auto;
@@ -2966,9 +2964,9 @@ kbd {
   background: #fff;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
 }
-/* Night mode: invert the page (white → black, dark strokes → light). Toggled on
-   the host (not the per-page svg) so it survives page turns — mirrors how
-   .reader-pdf-spread.invert drives the PDF ink overlay. */
+/* Night mode: invert the page (white → black, dark strokes → light). Toggled on the
+   host, never the per-page svg, and it survives page turns — mirroring
+   .reader-pdf-spread.invert over the PDF ink overlay. */
 .reader-paginator-host.invert .reader-notebook-page {
   filter: invert(1) hue-rotate(180deg);
 }
@@ -3271,9 +3269,9 @@ kbd {
   line-height: 1.5;
 }
 .search-row:hover { background: var(--reader-gutter); }
-/* The row the user last clicked — paired with the painted match also flipping
-   to deep-orange, so it's clear which on-page hit was jumped to. Uses an inset
-   box-shadow as a left-edge bar so the row's text doesn't shift. */
+/* The last-clicked row, paired with the painted match flipping to deep-orange,
+   naming the on-page hit jumped to. An inset box-shadow draws the left-edge bar and
+   holds the row's text. */
 .search-row-selected {
   background: rgba(255, 87, 34, 0.10);
   box-shadow: inset 3px 0 0 #ff5722;
@@ -3393,9 +3391,9 @@ kbd {
   border-style: dashed;
 }
 
-/* Native annotations (T0): the page-bookmark toggle, the on-selection toolbar,
-   and the editable note popover. All tinted with the --reader-* chrome vars so
-   they retint with the page theme. */
+/* Native annotations (T0): the page-bookmark toggle, the on-selection toolbar, and
+   the editable note popover. All tinted with the --reader-* chrome vars, retinting
+   with the page theme. */
 
 /* Page-bookmark toggle in the topbar — orange flag when the page is bookmarked. */
 #reader-bookmark.is-active { color: #e07b39; }
@@ -3588,17 +3586,17 @@ kbd {
 .settings-panel {
   max-width: 460px;
 }
-/* The base `.modal-body` is a 2-column grid (the metadata editor's cover +
-   fields); the settings body is a single column. It also flexes/shrinks so the
-   pinned confirm+status region below it keeps its room. */
+/* The base `.modal-body` is a 2-column grid (the metadata editor's cover + fields);
+   the settings body is a single column. It flexes and shrinks, leaving the pinned
+   confirm+status region below it its room. */
 .settings-panel .modal-body {
   display: block;
   flex: 1 1 auto;
   min-height: 0;
 }
-/* Confirm + status sit here, outside the scroll area and just above the footer,
-   so a pending confirmation is never lost below the fold. Collapses to nothing
-   when both children are hidden; grows a separated, padded bar when either shows. */
+/* Confirm + status sit here, outside the scroll area and above the footer, holding a
+   pending confirmation above the fold. Collapses to nothing when both children are
+   hidden; grows a separated, padded bar when either shows. */
 .settings-pinned {
   display: flex;
   flex-direction: column;
@@ -3652,7 +3650,7 @@ kbd {
   border-left: 4px solid var(--accent);
   border-radius: var(--radius);
   background: var(--accent-soft);
-  /* A brief pop so the prompt catches the eye the moment it appears. */
+  /* A brief pop as the prompt appears. */
   animation: settings-confirm-pop 220ms ease-out;
 }
 @keyframes settings-confirm-pop {
@@ -3698,9 +3696,9 @@ kbd {
   color: var(--accent);
 }
 
-/* One editable Kindle folder in the settings list (the rows misc.js builds).
-   Text fields wrap across rows, checkboxes take a row of their own, and Remove
-   pins top-right in reserved padding so it never overlaps a field. */
+/* One editable Kindle folder in the settings list (the rows misc.js builds). Text
+   fields wrap across rows, checkboxes take a row of their own, and Remove pins
+   top-right in reserved padding, clear of every field. */
 .settings-collections {
   display: flex;
   flex-direction: column;
@@ -3817,8 +3815,8 @@ kbd {
 
 /* ── Files tab: one group per synced Kindle folder ──────────────────────────── */
 
-/* Within a group, images come first as a thumbnail grid and everything else
-   follows as a list, so a folder of both reads as one section. */
+/* Within a group, images come first as a thumbnail grid and everything else follows
+   as a list, a folder of both reading as one section. */
 .misc-group {
   margin-bottom: 28px;
 }
@@ -3851,7 +3849,7 @@ kbd {
   font-size: 13px;
 }
 
-/* Screenshot thumbnail grid. Kindle screens are portrait, so tiles are tall. */
+/* Screenshot thumbnail grid. Kindle screens are portrait, and tiles are tall. */
 .misc-shots-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -4283,8 +4281,8 @@ kbd {
   border: 1px solid transparent;
   overflow-wrap: anywhere;
 }
-/* A document no table-of-contents entry names — shown by filename, and set back
-   so the chapters it sits between stay the thing you read down the list. */
+/* A document no table-of-contents entry names — shown by filename, set back from the
+   chapters it sits between. */
 .spine-unnamed {
   color: var(--muted);
   font-size: 12px;
@@ -4559,17 +4557,17 @@ kbd {
   border-radius: var(--radius);
 }
 
-/* The author `display: flex` above shadows the UA `[hidden]{display:none}`, so
-   `q(".rl-clock-wrap").hidden = true` (a year whose sessions all predate the
-   timestamps) wouldn't hide it. Restore it — same fix as .seg/.error-report. */
+/* The author `display: flex` above shadows the UA `[hidden]{display:none}`. This
+   restores it for `q(".rl-clock-wrap").hidden = true` on a year whose sessions all
+   predate the timestamps. */
 .rl-clock-wrap[hidden] {
   display: none;
 }
 
 .rl-heatmap-wrap { overflow-x: auto; }
 
-/* Same header rhythm as the year nav opposite, so the two panels' titles sit on
-   one line across the page. */
+/* Same header rhythm as the year nav opposite, holding the two panels' titles on one
+   line across the page. */
 .rl-clock-head { gap: 10px; }
 .rl-clock-head .rl-muted { font-size: 12px; }
 .rl-clock-seg { margin-left: auto; background: var(--bg); }
@@ -4673,8 +4671,8 @@ kbd {
 .rl-weeks { display: flex; gap: 3px; }
 .rl-week { display: flex; flex-direction: column; gap: 3px; }
 
-/* Weekday gutter and month strip are laid out on the same 13px rhythm as the
-   cells so the labels line up with the rows and columns they name. */
+/* Weekday gutter and month strip are laid out on the same 13px rhythm as the cells,
+   and the labels line up with the rows and columns they name. */
 .rl-dows {
   display: flex;
   flex-direction: column;
@@ -5270,9 +5268,9 @@ kbd {
   margin-bottom: 10px;
 }
 
-/* The cover opens the book, so it lifts under the pointer the way a gallery card
-   does. Keyed on `role`, which the renderer sets only when there is a book to
-   open — an empty frame stays a frame. */
+/* The cover opens the book, lifting under the pointer the way a gallery card does.
+   Keyed on `role`, which the renderer sets for a book to open — an empty frame stays
+   a frame. */
 #rl-book-cover[role="button"] {
   cursor: pointer;
   transition: transform 80ms ease, box-shadow 80ms ease;
@@ -5292,8 +5290,8 @@ kbd {
 .rl-book-name { font-size: 15px; line-height: 1.35; }
 .rl-book-side .rl-muted { font-size: 12px; }
 
-/* Figures as label/value rows down the side. Values are right-aligned on
-   tabular numerals so they compare vertically at a glance. */
+/* Figures as label/value rows down the side. Values are right-aligned on tabular
+   numerals, comparing vertically down the column. */
 .rl-facts {
   margin: 14px 0 0;
   padding: 0;
@@ -5518,8 +5516,8 @@ kbd {
 
 .rl-pick-cover .cover-placeholder { font-size: 9px; padding: 6px; line-height: 1.2; }
 
-/* Two books of the same length are often two volumes of one series, so the
-   titles are the tiebreak and must not be cut off at a word. */
+/* Two books of the same length are often two volumes of one series. The titles are
+   the tiebreak, uncut at a word. */
 .rl-pick-book .t { font-size: 12px; line-height: 1.35; }
 .rl-pick-book .a { font-size: 11px; line-height: 1.3; color: var(--muted); }
 

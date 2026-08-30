@@ -9,9 +9,9 @@
   <body>
     <header class="toolbar">
       <div class="toolbar-group">
-        <!-- Reading Log is a page of its own, not a third way to look at the
-             library, so it sits outside the Books/Notes/Files tablist and
-             carries its own state — the mirror of the Kindle pill on the right. -->
+        <!-- Reading Log is a page of its own, outside the Books/Notes/Files tablist
+             and carrying its own state — the mirror of the Kindle pill on the
+             right. -->
         <button type="button" id="section-reading" class="section-pill"
                 title="What you read and for how long, recovered from your Kindle's own logs">Reading Log</button>
         <div class="toolbar-sep" aria-hidden="true"></div>
@@ -360,9 +360,9 @@
                 <strong id="rl-books-title"></strong>
                 <span id="rl-books-total" class="rl-muted"></span>
                 <div class="rl-group-actions">
-                  <!-- `db::is_finished`: the axis reached its end, or the
-                       book page mark says so. `.btn-quiet` like
-                       #rl-day-clear beside it. -->
+                  <!-- `db::is_finished`: the axis reached its end, or the book page
+                       mark names the book finished. `.btn-quiet` like #rl-day-clear
+                       beside it. -->
                   <button type="button" id="rl-finished" class="btn btn-quiet" aria-pressed="false"
                           title="Only books read to the end or marked finished">Finished</button>
                   <!-- How finely the year is cut up. The same books throughout,
@@ -435,9 +435,9 @@
                       aria-pressed="false">Mark finished</button>
               <dl id="rl-book-stats" class="rl-facts"></dl>
             </aside>
-            <!-- When it was read, then what was marked while reading it: both
-                 are records of this book, so they share the wide column and the
-                 identity beside them serves both. -->
+            <!-- When it was read, then what was marked while reading it. Both
+                 records of this book share the wide column, with the identity
+                 beside them. -->
             <div class="rl-book-main">
               <div class="rl-month">
                 <!-- Bounded by this book's own reading: no arrow leads to a month

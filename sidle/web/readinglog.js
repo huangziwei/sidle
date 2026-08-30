@@ -120,8 +120,8 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
-  // Rows here are built as HTML strings, so anything from the library has to be
-  // escaped: a title is whatever the book's metadata said.
+  // Rows here are built as HTML strings. Anything from the library is escaped: a title
+  // is whatever the book's metadata said.
   function esc(s) {
     return String(s == null ? "" : s).replace(
       /[&<>"']/g,
@@ -317,7 +317,7 @@
 
     const cols = [];
     const months = [];
-    // `d` walks a week at a time by mutation, so the binding itself never moves.
+    // `d` walks a week at a time by mutation, and the binding itself never moves.
     for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
       const week = [];
       for (let i = 0; i < 7; i++) {
@@ -803,8 +803,8 @@
   }
 
   // Hour of the day against the weekday, or against the month: 24 columns on the
-  // heatmap's own five-step ramp, so a cell here and a square there mean the
-  // same kind of thing.
+  // heatmap's own five-step ramp. A cell here and a square there mean the same kind of
+  // thing.
   function clockGrid(cells, view) {
     const byWeek = view === "week";
     const rows = clockRows(cells, (c) => (byWeek ? c.dow : c.month));
@@ -891,7 +891,7 @@
     return `<div class="cover${url ? " has-image" : ""}">${coverInner(url, e.title)}</div>`;
   }
 
-  // Every card is a book in the library, so every card opens its book page.
+  // Every card is a book in the library, and every card opens its book page.
   function entryCard(e, sub) {
     return (
       `<div class="book-card rl-card" data-book="${e.book_id}" role="button" tabindex="0" ` +
@@ -906,8 +906,8 @@
     );
   }
 
-  // What the grid can be ordered by. Every one is a column of the aggregate, so
-  // the ordering happens in SQL and matches the figures on the cards.
+  // What the grid can be ordered by. Every one is a column of the aggregate, ordered in
+  // SQL, matching the figures on the cards.
   const SORT_KEYS = [
     ["last", "Last read", "Most recently read first"],
     ["seconds", "Reading time", "Longest first"],
@@ -999,8 +999,7 @@
     return out.join("");
   }
 
-  // "August", or "August 9" — the year is in the header above every band, so
-  // repeating it on each one says nothing.
+  // "August", or "August 9". The header above every band carries the year.
   function bandLabel(key, bucket) {
     const d = parseDay(bucket === "month" ? `${key}-01` : key);
     if (!d) return key;
@@ -1080,9 +1079,8 @@
     return parts.join(" · ");
   }
 
-  // The candidates are the whole of the question, so they are on the row from
-  // the start — there is nothing to expand and no step between seeing the tie
-  // and settling it.
+  // The candidates are the whole of the question, and sit on the row from the start —
+  // nothing to expand, no step between seeing the tie and settling it.
   function groupRow(g) {
     const cands = g.candidates || [];
     return (
@@ -1333,8 +1331,8 @@
     return Math.round((b - a) / 86400000) + 1;
   }
 
-  // Months as a single ordinal, so "the month before" is arithmetic and the
-  // bounds compare without date objects.
+  // Months as a single ordinal: "the month before" is arithmetic and the bounds compare
+  // without date objects.
   function monthIndex(y, m) {
     return y * 12 + m;
   }
@@ -1374,8 +1372,8 @@
     const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
     const lead = first.getDay();
     const len = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
-    // This book's own busiest day sets the scale, so its calendar shades the
-    // same way the year heatmap does — a day read is a day that looks read.
+    // This book's own busiest day sets the scale, and its calendar shades the way the
+    // year heatmap does — a day read is a day that looks read.
     const level = levelScale(days);
 
     const cells = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
@@ -1464,8 +1462,8 @@
       `<li class="rl-note rl-note-${esc(a.kind)}"${style}>` +
       `<div class="rl-note-head"><span class="rl-note-kind">${esc(noteKind(a))}</span>` +
       `<span>${esc(when)}</span></div>` +
-      // A bookmark marks a place and quotes nothing; so does a highlight whose
-      // text the sidecar could not resolve. Either way there is no quote to draw.
+      // A bookmark marks a place and quotes nothing, as does a highlight whose text the
+      // sidecar left unresolved. Neither draws a quote.
       (a.text ? `<p class="rl-note-text">${esc(a.text)}</p>` : "") +
       bodies.map((b) => `<div class="rl-note-body">${esc(b)}</div>`).join("") +
       `</li>`
@@ -1474,8 +1472,8 @@
 
   function renderNotes() {
     const rows = state.notes.filter((a) => !a.hidden);
-    // A note attached to a highlight is drawn inside that highlight's row, so it
-    // is not also a row of its own.
+    // A note attached to a highlight is drawn inside that highlight's row, never as a
+    // row of its own.
     const listed = rows.filter((a) => a.attached_to == null);
     const hidden = state.notes.length - rows.length;
     q("#rl-notes-count").textContent = noteCounts(rows, hidden);
@@ -1526,9 +1524,9 @@
       renderScope();
     });
     q("#rl-purge").addEventListener("click", doPurge);
-    // Both navigations read their destination off the button, which the
-    // renderer set from the data — so an arrow can only ever go somewhere that
-    // exists, and a disabled one has nothing to go to.
+    // Both navigations read their destination off the button, which the renderer set
+    // from the data. An arrow leads somewhere that exists, and a disabled one has
+    // nothing to go to.
     for (const sel of ["#rl-year-prev", "#rl-year-next"]) {
       q(sel).addEventListener("click", (e) => {
         const target = e.currentTarget.dataset.target;
@@ -1560,8 +1558,8 @@
       });
     }
 
-    // Year / Month / Day. The window does not change — only how finely the
-    // query cuts it — so the heatmap and the totals above stay put.
+    // Year / Month / Day. The window holds; the query cuts it more finely. The heatmap
+    // and the totals above stay put.
     q("#rl-bucket-seg").addEventListener("click", (e) => {
       const btn = e.target.closest(".seg-btn[data-bucket]");
       if (!btn || btn.dataset.bucket === state.bucket) return;
