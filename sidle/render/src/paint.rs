@@ -1,0 +1,527 @@
+//! Painting: a laid-out chapter onto a pixel buffer.
+//!
+//! [`Painter::paint`] reads a [`Fragment`] tree and never the document, at
+//! any `scale`. A glyph is painted as a filled outline, upright or turned on
+//! its side for a vertical line.
+
+use std::collections::HashMap;
+
+use ab_glyph::{Font as _, OutlineCurve};
+use bokai::style::Color;
+use tiny_skia::{
+    FillRule, FilterQuality, IntSize, Mask, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint,
+    Transform,
+};
+
+use crate::font::{FaceId, Fonts};
+use crate::fragment::{Border, Content, Fragment, GlyphRun, Orientation};
+use crate::geom::Rect;
+use crate::resource::Resources;
+
+/// Draws fragment trees, caching the glyph outlines it builds.
+pub struct Painter<'a> {
+    fonts: &'a Fonts,
+    resources: &'a dyn Resources,
+    outlines: HashMap<(FaceId, u16), Option<tiny_skia::Path>>,
+    images: HashMap<String, Option<Pixmap>>,
+}
+
+impl<'a> Painter<'a> {
+    pub fn new(fonts: &'a Fonts, resources: &'a dyn Resources) -> Self {
+        Self {
+            fonts,
+            resources,
+            outlines: HashMap::new(),
+            images: HashMap::new(),
+        }
+    }
+
+    /// Draw the part of `tree` that falls inside `window` — a region in
+    /// chapter coordinates — onto `target`, placing `window`'s top-left
+    /// corner at `origin` in CSS pixels. Anything outside the window is
+    /// skipped: a page shows nothing of the page after it.
+    ///
+    /// `scale` is buffer pixels per dot. A 2× display draws the same page at
+    /// the same size in twice the pixels.
+    ///
+    /// Composites onto `target`. The page's own background is the caller's
+    /// to fill.
+    pub fn paint(
+        &mut self,
+        tree: &Fragment,
+        window: Rect,
+        origin: (f32, f32),
+        scale: f32,
+        target: &mut PixmapMut<'_>,
+    ) {
+        let view = Transform::from_translate(origin.0 - window.x, origin.1 - window.y)
+            .post_scale(scale, scale);
+        // Anything straddling the window's edge is cut at it.
+        let clip = window_mask(window, origin, scale, target);
+        let clip = clip.as_ref();
+
+        // Backgrounds and borders first; text sits on top of them.
+        for fragment in tree.walk() {
+            if !fragment.rect.intersects(&window) {
+                continue;
+            }
+            if let Some(color) = fragment.background {
+                fill_clipped(fragment.rect, color, view, clip, target);
+            }
+            if let Some(border) = &fragment.border {
+                self.border(fragment.rect, border, view, clip, target);
+            }
+        }
+
+        for fragment in tree.walk() {
+            if !fragment.rect.intersects(&window) {
+                continue;
+            }
+            match &fragment.content {
+                Content::Empty => {}
+                Content::Glyphs(run) => self.glyphs(fragment.rect, run, view, clip, target),
+                Content::Image(src) => self.image(fragment.rect, src, view, clip, target),
+            }
+        }
+    }
+
+    fn border(
+        &self,
+        rect: Rect,
+        border: &Border,
+        view: Transform,
+        clip: Clip<'_>,
+        target: &mut PixmapMut<'_>,
+    ) {
+        let widths = border.widths;
+        if let (Some(color), true) = (border.top, widths.top > 0.0) {
+            fill_clipped(
+                Rect::new(rect.x, rect.y, rect.width, widths.top),
+                color,
+                view,
+                clip,
+                target,
+            );
+        }
+        if let (Some(color), true) = (border.bottom, widths.bottom > 0.0) {
+            fill_clipped(
+                Rect::new(
+                    rect.x,
+                    rect.bottom() - widths.bottom,
+                    rect.width,
+                    widths.bottom,
+                ),
+                color,
+                view,
+                clip,
+                target,
+            );
+        }
+        if let (Some(color), true) = (border.left, widths.left > 0.0) {
+            fill_clipped(
+                Rect::new(rect.x, rect.y, widths.left, rect.height),
+                color,
+                view,
+                clip,
+                target,
+            );
+        }
+        if let (Some(color), true) = (border.right, widths.right > 0.0) {
+            fill_clipped(
+                Rect::new(
+                    rect.right() - widths.right,
+                    rect.y,
+                    widths.right,
+                    rect.height,
+                ),
+                color,
+                view,
+                clip,
+                target,
+            );
+        }
+    }
+
+    fn glyphs(
+        &mut self,
+        rect: Rect,
+        run: &GlyphRun,
+        view: Transform,
+        clip: Clip<'_>,
+        target: &mut PixmapMut<'_>,
+    ) {
+        let unit = run.size / self.fonts.face(run.face).units_per_em();
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
+        paint.set_color_rgba8(run.color.r, run.color.g, run.color.b, run.color.a);
+
+        for glyph in &run.glyphs {
+            // `along` runs down the line and `across` out from its baseline,
+            // so the three orientations differ only in which way those two
+            // map onto the page.
+            let placement = match run.orientation {
+                Orientation::Horizontal => Transform::from_translate(
+                    rect.x + glyph.along,
+                    rect.y + run.baseline + glyph.across,
+                )
+                .pre_scale(unit, -unit),
+                Orientation::Upright => Transform::from_translate(
+                    rect.x + run.baseline + glyph.across,
+                    rect.y + glyph.along,
+                )
+                .pre_scale(unit, -unit),
+                // A quarter turn clockwise puts the tops of the letters
+                // towards the right of a vertical line.
+                Orientation::Sideways => Transform::from_translate(
+                    rect.x + run.baseline + glyph.across,
+                    rect.y + glyph.along,
+                )
+                .pre_rotate(90.0)
+                .pre_scale(unit, -unit),
+            };
+            let Some(path) = self.outline(run.face, glyph.id) else {
+                continue;
+            };
+            let transform = placement.post_concat(view);
+            target.fill_path(path, &paint, FillRule::Winding, transform, clip);
+        }
+
+        self.rules(rect, run, view, clip, target);
+    }
+
+    /// Underline and strike-through, drawn across the whole run.
+    fn rules(
+        &self,
+        rect: Rect,
+        run: &GlyphRun,
+        view: Transform,
+        clip: Clip<'_>,
+        target: &mut PixmapMut<'_>,
+    ) {
+        if !run.underline && !run.line_through {
+            return;
+        }
+        let thickness = (run.size / 16.0).max(1.0);
+        let along = |offset: f32| match run.orientation {
+            Orientation::Horizontal => Rect::new(
+                rect.x,
+                rect.y + run.baseline + offset,
+                rect.width,
+                thickness,
+            ),
+            _ => Rect::new(
+                rect.x + run.baseline + offset,
+                rect.y,
+                thickness,
+                rect.height,
+            ),
+        };
+        if run.underline {
+            fill_clipped(along(run.size * 0.1), run.color, view, clip, target);
+        }
+        if run.line_through {
+            fill_clipped(along(-run.size * 0.3), run.color, view, clip, target);
+        }
+    }
+
+    /// A glyph's outline as a path in font units, y up.
+    fn outline(&mut self, face: FaceId, glyph: u16) -> Option<&tiny_skia::Path> {
+        let loaded = self.fonts.face(face);
+        self.outlines
+            .entry((face, glyph))
+            .or_insert_with(|| build_outline(loaded.outline(), glyph))
+            .as_ref()
+    }
+
+    fn image(
+        &mut self,
+        rect: Rect,
+        src: &str,
+        view: Transform,
+        clip: Clip<'_>,
+        target: &mut PixmapMut<'_>,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let resources = self.resources;
+        let pixmap = self
+            .images
+            .entry(src.to_string())
+            .or_insert_with(|| decode(resources, src));
+        let Some(pixmap) = pixmap else { return };
+
+        let scale_x = rect.width / pixmap.width() as f32;
+        let scale_y = rect.height / pixmap.height() as f32;
+        let placement = Transform::from_translate(rect.x, rect.y).pre_scale(scale_x, scale_y);
+        target.draw_pixmap(
+            0,
+            0,
+            pixmap.as_ref(),
+            &PixmapPaint {
+                quality: FilterQuality::Bilinear,
+                ..Default::default()
+            },
+            placement.post_concat(view),
+            clip,
+        );
+    }
+}
+
+/// What a page may draw into, in device pixels. `None` draws everywhere.
+pub type Clip<'a> = Option<&'a Mask>;
+
+/// Fill one rectangle, given in the coordinates `view` maps from.
+pub fn fill(rect: Rect, color: Color, view: Transform, target: &mut PixmapMut<'_>) {
+    fill_clipped(rect, color, view, None, target);
+}
+
+fn fill_clipped(
+    rect: Rect,
+    color: Color,
+    view: Transform,
+    clip: Clip<'_>,
+    target: &mut PixmapMut<'_>,
+) {
+    let Some(path) = rectangle(rect) else {
+        return;
+    };
+    let mut paint = Paint {
+        anti_alias: false,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    target.fill_path(&path, &paint, FillRule::Winding, view, clip);
+}
+
+/// A mask covering just the page's content area, in device pixels.
+fn window_mask(
+    window: Rect,
+    origin: (f32, f32),
+    scale: f32,
+    target: &PixmapMut<'_>,
+) -> Option<Mask> {
+    let area = Rect::new(
+        origin.0 * scale,
+        origin.1 * scale,
+        window.width * scale,
+        window.height * scale,
+    );
+    // A window covering the whole buffer masks nothing off.
+    if area.x <= 0.0
+        && area.y <= 0.0
+        && area.right() >= target.width() as f32
+        && area.bottom() >= target.height() as f32
+    {
+        return None;
+    }
+    let mut mask = Mask::new(target.width(), target.height())?;
+    mask.fill_path(
+        &rectangle(area)?,
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    Some(mask)
+}
+
+/// Stroke one rectangle's outline, `width` wide in the same coordinates.
+pub fn outline(rect: Rect, color: Color, width: f32, view: Transform, target: &mut PixmapMut<'_>) {
+    let Some(path) = rectangle(rect) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    let stroke = tiny_skia::Stroke {
+        width,
+        ..Default::default()
+    };
+    target.stroke_path(&path, &paint, &stroke, view, None);
+}
+
+/// A rectangle as a path. `None` for one with no area.
+fn rectangle(rect: Rect) -> Option<tiny_skia::Path> {
+    let bounds = tiny_skia::Rect::from_xywh(rect.x, rect.y, rect.width, rect.height)?;
+    let mut builder = PathBuilder::new();
+    builder.push_rect(bounds);
+    builder.finish()
+}
+
+/// A glyph's contours as one path, in font units with y up.
+///
+/// The curves arrive as a flat list with no contour boundaries marked. A
+/// contour ends wherever the next curve does not begin where the last one
+/// finished, which keeps a letter's counters out of its outline.
+fn build_outline(font: &ab_glyph::FontRef<'static>, glyph: u16) -> Option<tiny_skia::Path> {
+    let outline = font.outline(ab_glyph::GlyphId(glyph))?;
+    let mut builder = PathBuilder::new();
+    let mut cursor: Option<ab_glyph::Point> = None;
+
+    for curve in &outline.curves {
+        let (from, to) = match *curve {
+            OutlineCurve::Line(from, to) => (from, to),
+            OutlineCurve::Quad(from, _, to) => (from, to),
+            OutlineCurve::Cubic(from, _, _, to) => (from, to),
+        };
+        if cursor != Some(from) {
+            if cursor.is_some() {
+                builder.close();
+            }
+            builder.move_to(from.x, from.y);
+        }
+        match *curve {
+            OutlineCurve::Line(_, to) => builder.line_to(to.x, to.y),
+            OutlineCurve::Quad(_, control, to) => builder.quad_to(control.x, control.y, to.x, to.y),
+            OutlineCurve::Cubic(_, first, second, to) => {
+                builder.cubic_to(first.x, first.y, second.x, second.y, to.x, to.y)
+            }
+        }
+        cursor = Some(to);
+    }
+    if cursor.is_some() {
+        builder.close();
+    }
+    builder.finish()
+}
+
+/// Decode a resource into a premultiplied pixmap, which is what tiny-skia
+/// composites from.
+fn decode(resources: &dyn Resources, src: &str) -> Option<Pixmap> {
+    let bitmap = resources.image_bitmap(src)?;
+    let size = IntSize::from_wh(bitmap.width, bitmap.height)?;
+    let mut data = Vec::with_capacity(bitmap.rgba.len());
+    for pixel in bitmap.rgba.chunks_exact(4) {
+        let alpha = pixel[3] as u32;
+        data.push((pixel[0] as u32 * alpha / 255) as u8);
+        data.push((pixel[1] as u32 * alpha / 255) as u8);
+        data.push((pixel[2] as u32 * alpha / 255) as u8);
+        data.push(pixel[3]);
+    }
+    Pixmap::from_vec(data, size)
+}
+
+#[cfg(test)]
+mod tests {
+    use bokai::model::{NodeId, Role};
+
+    use super::*;
+
+    const RED: Color = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+
+    fn block(x: f32, y: f32, w: f32, h: f32) -> Fragment {
+        let mut fragment = Fragment::new(NodeId(1), Role::Paragraph, Rect::new(x, y, w, h));
+        fragment.background = Some(RED);
+        fragment
+    }
+
+    fn painter() -> (Fonts, crate::resource::Unknown) {
+        (Fonts::empty(), crate::resource::Unknown)
+    }
+
+    #[test]
+    fn a_declared_background_reaches_the_buffer() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+
+        painter.paint(
+            &block(0.0, 0.0, 10.0, 10.0),
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            (0.0, 0.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        assert_eq!(pixmap.pixel(5, 5).unwrap().red(), 255);
+    }
+
+    #[test]
+    fn a_box_scrolled_past_paints_nothing() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+
+        painter.paint(
+            &block(0.0, 0.0, 10.0, 10.0),
+            Rect::new(0.0, 20.0, 10.0, 10.0),
+            (0.0, 0.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        assert_eq!(pixmap.pixel(5, 5).unwrap().alpha(), 0);
+    }
+
+    #[test]
+    fn scrolling_moves_a_box_up_by_the_scroll_distance() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(10, 20).unwrap();
+
+        painter.paint(
+            &block(0.0, 10.0, 10.0, 10.0),
+            Rect::new(0.0, 10.0, 10.0, 20.0),
+            (0.0, 0.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        assert_eq!(pixmap.pixel(5, 0).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(5, 15).unwrap().alpha(), 0);
+    }
+
+    #[test]
+    fn a_zero_height_box_paints_nothing_instead_of_panicking() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+
+        painter.paint(
+            &block(0.0, 0.0, 10.0, 0.0),
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            (0.0, 0.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        assert_eq!(pixmap.pixel(5, 0).unwrap().alpha(), 0);
+    }
+
+    #[test]
+    fn a_border_draws_on_all_four_sides() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+        let mut fragment = Fragment::new(NodeId(1), Role::Rule, Rect::new(0.0, 0.0, 10.0, 10.0));
+        fragment.background = None;
+        fragment.border = Some(Border {
+            widths: crate::geom::Edges::new(2.0, 2.0, 2.0, 2.0),
+            top: Some(RED),
+            right: Some(RED),
+            bottom: Some(RED),
+            left: Some(RED),
+        });
+
+        painter.paint(
+            &fragment,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            (0.0, 0.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        assert_eq!(pixmap.pixel(5, 0).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(5, 9).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(0, 5).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(9, 5).unwrap().red(), 255);
+        // The middle is inside the border, and nothing filled it.
+        assert_eq!(pixmap.pixel(5, 5).unwrap().alpha(), 0);
+    }
+}

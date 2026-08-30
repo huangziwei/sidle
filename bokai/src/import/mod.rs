@@ -27,9 +27,8 @@ use crate::model::{
 };
 use crate::style::CssDecl;
 
-// Chapter identity is IR vocabulary, not an import-side concept: the format
-// layer and the exporters name it too, so it lives in `model` and is re-exported
-// here for the importer-facing paths.
+// Chapter identity is IR vocabulary: the format layer and the exporters name
+// it too. It lives in `model` and is re-exported here.
 pub use crate::model::ChapterId;
 
 /// Entry in the reading order (spine).
@@ -334,6 +333,16 @@ pub trait Importer: Send + Sync {
     fn stylesheet_program(&mut self) -> Option<CssProgram> {
         None
     }
+
+    /// The axis the document states it is written along.
+    ///
+    /// A format that carries the writing mode per element leaves this at the
+    /// initial value and lets the cascade answer per box. One that states it
+    /// once for the whole book, as KFX does in `document_data.writing_mode`,
+    /// answers here.
+    fn writing_mode(&mut self) -> crate::style::WritingMode {
+        crate::style::WritingMode::HorizontalTb
+    }
 }
 
 /// `(width, height)` from `html`'s `<meta name="viewport" content="width=1800,
@@ -444,9 +453,9 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
         return PathBuf::from(relative);
     }
 
-    // The href/src is a URI reference; percent-decode it so it matches the
-    // archive's literal (decoded) zip entry names. `base` is a decoded archive
-    // path; the joined result stays in decoded space.
+    // The href/src is a URI reference. Percent-decoding it matches the
+    // archive's literal zip entry names; `base` is a decoded archive path,
+    // and the joined result stays in decoded space.
     let relative = crate::util::percent_decode(relative);
     let relative = relative.as_str();
 
@@ -936,7 +945,7 @@ mod viewport_tests {
     /// cut keeps the slice on a character boundary.
     #[test]
     fn a_multibyte_head_does_not_split() {
-        let pad = "そ".repeat(2000);
+        let pad = "ã".repeat(2000);
         assert_eq!(viewport_meta(&pad), None);
         let doc = format!(r#"<meta name="viewport" content="width=10, height=20"/>{pad}"#);
         assert_eq!(viewport_meta(&doc), Some((10, 20)));

@@ -17,6 +17,18 @@ pub enum KfxToken {
     StartSpan(SpanStart),
     /// End of an inline style span
     EndSpan,
+    /// A styled text run that is its own element in the parent's inline flow.
+    InlineElement(InlineElement),
+}
+
+/// A text run carried as a `render: inline` element inside its parent's
+/// `content_list`, with its own style, id and content entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineElement {
+    /// The run's text, which becomes its own content entry.
+    pub text: String,
+    /// KFX style symbol the run carries.
+    pub style_symbol: u64,
 }
 
 /// Information about an element start.
@@ -78,7 +90,7 @@ pub struct ElementStart {
 /// One column-geometry entry of a table's `column_format`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ColumnFormat {
-    /// The column's geometry properties, already in KFX terms — in practice
+    /// The column's geometry properties, in KFX terms — in practice
     /// a `width` and its sizing box.
     pub fields: Vec<(u64, crate::formats::kfx::style_schema::KfxValue)>,
     /// `$118 column_span` — how many columns this entry describes.

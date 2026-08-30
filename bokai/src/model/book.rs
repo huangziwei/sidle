@@ -199,8 +199,8 @@ impl OrientationLock {
 }
 
 /// A rectangle on a fixed-layout page, as fractions of the page box: `0.0` is
-/// its left/top edge and `1.0` its right/bottom. A magnified view's image runs
-/// negative and past `1.0`, so the fields are signed.
+/// its left/top edge and `1.0` its right/bottom. The fields are signed: a
+/// magnified view's image runs negative and past `1.0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PanelRect {
     pub left: f32,
@@ -543,6 +543,20 @@ impl Book {
         })
     }
 
+    /// Create a Book over an [`Importer`] the caller built.
+    ///
+    /// [`Book::open_format`] and [`Book::from_vec`] pick a backend for a
+    /// [`Format`] this crate carries; this one takes any [`Importer`].
+    pub fn from_importer(backend: Box<dyn Importer>) -> Self {
+        Self {
+            backend,
+            ir_cache: Arc::new(RwLock::new(HashMap::new())),
+            meta_override: None,
+            image_color_mode: jxr::ColorMode::Color,
+            max_workers: 0,
+        }
+    }
+
     /// Book metadata. Returns the [override][Book::set_metadata_override] when
     /// one has been installed, else the backend's parsed metadata.
     pub fn metadata(&self) -> &Metadata {
@@ -811,6 +825,12 @@ impl Book {
     /// [`crate::import::Importer::stylesheet_program`].
     pub(crate) fn stylesheet_program(&mut self) -> Option<crate::import::CssProgram> {
         self.backend.stylesheet_program()
+    }
+
+    /// The axis the book states it is written along. See
+    /// [`crate::import::Importer::writing_mode`].
+    pub fn writing_mode(&mut self) -> crate::style::WritingMode {
+        self.backend.writing_mode()
     }
 
     /// Load an asset by path.

@@ -1,0 +1,911 @@
+//! Block layout: boxes stacked along the block axis.
+//!
+//! Everything here is measured logically — an inline size along the line, a
+//! block size across it — and turned into rectangles once, at the end. A
+//! vertical Japanese page and a horizontal English one are then the same
+//! stack of boxes, differing only in the final conversion.
+//!
+//! Each block takes the inline size its container offers, less its own
+//! margins, borders and padding, and takes its block size from what it
+//! contains. Adjacent margins add. Inline children go
+//! to [`crate::inline`], which breaks them into lines.
+
+use std::sync::LazyLock;
+
+use bokai::model::{Chapter, NodeId, Role};
+use bokai::style::{
+    BorderStyle, BoxSizing, Color, ComputedStyle, Display, Length, ListStyleType,
+    ROOT_FONT_SIZE_PX, TextAlign, WritingMode,
+};
+use bokai::text::hyphenation::{self, Hyphenator};
+
+use crate::font::Fonts;
+use crate::fragment::{Border, Content, Fragment, GlyphRun};
+use crate::geom::{Axis, Edges, LogicalEdges, Rect, Size};
+use crate::inline::{self, Inline, Item, TextStyle};
+use crate::resource::Resources;
+use crate::units::Metrics;
+
+/// The area a chapter is laid out into.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Viewport {
+    /// The whole page, margins included, in device dots.
+    pub size: Size,
+    /// Blank border the text does not enter.
+    pub margins: Edges,
+    /// Font size `rem` resolves against, in dots.
+    pub root_font_size: f32,
+    /// The book's language, which chooses the hyphenation dictionary.
+    pub language: Option<String>,
+    /// How a value the source declared becomes a dot. The source format
+    /// decides it, and the caller that opened the book states it.
+    pub metrics: Metrics,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            size: Size::new(600.0, 800.0),
+            margins: Edges::new(48.0, 40.0, 48.0, 40.0),
+            root_font_size: ROOT_FONT_SIZE_PX,
+            language: None,
+            metrics: Metrics::default(),
+        }
+    }
+}
+
+impl Viewport {
+    pub fn new(width: f32, height: f32) -> Self {
+        Self {
+            size: Size::new(width, height),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_margins(mut self, margins: Edges) -> Self {
+        self.margins = margins;
+        self
+    }
+
+    pub fn with_language(mut self, language: Option<String>) -> Self {
+        self.language = language;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// The page less its margins, as an inline extent and a block extent —
+    /// the line length text has to fill, and how far a page stacks.
+    pub fn content(&self, axis: Axis) -> (f32, f32) {
+        let margins = axis.logical_edges(self.margins);
+        (
+            (axis.inline_of(self.size) - margins.inline()).max(1.0),
+            (axis.block_of(self.size) - margins.block()).max(1.0),
+        )
+    }
+}
+
+/// Everything layout needs besides the chapter itself.
+pub struct Layout<'a> {
+    pub viewport: Viewport,
+    pub fonts: &'a mut Fonts,
+    pub resources: &'a dyn Resources,
+    /// The axis the book states it is written along. A chapter whose own
+    /// styles declare an axis overrides it.
+    pub axis: Axis,
+}
+
+/// A laid-out chapter.
+pub struct Page {
+    /// The outermost box, spanning the whole chapter — which pagination
+    /// later cuts into pages.
+    pub root: Fragment,
+    /// The direction it was written along, which is what tells a reader
+    /// which edge to start at and which way to turn pages.
+    pub axis: Axis,
+    /// How far the chapter reaches along that direction.
+    pub block_extent: f32,
+}
+
+impl Layout<'_> {
+    /// Lay a chapter out.
+    pub fn chapter(&mut self, chapter: &Chapter) -> Page {
+        let axis = axis_of(chapter).unwrap_or(self.axis);
+        let (inline_size, page_block) = self.viewport.content(axis);
+        let language = self.viewport.language.as_deref().unwrap_or("");
+        let mut flow = Flow {
+            chapter,
+            fonts: self.fonts,
+            resources: self.resources,
+            root_font_size: self.viewport.root_font_size,
+            metrics: self.viewport.metrics,
+            axis,
+            page_block,
+            hyphenator: hyphenation::for_language(language),
+        };
+
+        let inherited = Inherited {
+            font_size: self.viewport.root_font_size,
+            line_height: self.viewport.root_font_size * NORMAL_LINE_HEIGHT,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            align: TextAlign::Start,
+        };
+        let mut root = flow
+            .block(chapter.root(), 0.0, 0.0, inline_size, inherited)
+            .fragment;
+
+        // A vertical page measures its blocks back from the far edge. The
+        // conversion takes the chapter's whole block extent.
+        let page_block = root.rect.height + root.rect.y;
+        to_physical(&mut root, axis, page_block);
+        Page {
+            root,
+            axis,
+            block_extent: page_block,
+        }
+    }
+}
+
+/// `line-height: normal`, as a multiple of the font size.
+const NORMAL_LINE_HEIGHT: f32 = 1.2;
+
+/// CSS's size for a replaced box whose own proportions are unknown.
+const DEFAULT_OBJECT: Size = Size {
+    width: 300.0,
+    height: 150.0,
+};
+
+/// The axis a chapter declares for itself, or `None` where it declares
+/// nothing and the book's own default stands.
+///
+/// `horizontal-tb` is the CSS initial value: a style carrying it may have
+/// declared it or said nothing. Only a vertical mode is a statement.
+fn axis_of(chapter: &Chapter) -> Option<Axis> {
+    for id in 0..chapter.node_count() {
+        let node = NodeId(id as u32);
+        match style_of(chapter, node).writing_mode {
+            WritingMode::VerticalRl => return Some(Axis::VerticalRl),
+            WritingMode::VerticalLr => return Some(Axis::VerticalLr),
+            WritingMode::HorizontalTb => {}
+        }
+    }
+    None
+}
+
+static INITIAL_STYLE: LazyLock<ComputedStyle> = LazyLock::new(ComputedStyle::default);
+
+fn style_of(chapter: &Chapter, node: NodeId) -> &ComputedStyle {
+    chapter
+        .node(node)
+        .and_then(|n| chapter.styles.get(n.style))
+        .unwrap_or(&INITIAL_STYLE)
+}
+
+fn role_of(chapter: &Chapter, node: NodeId) -> Role {
+    chapter.node(node).map_or(Role::Container, |n| n.role)
+}
+
+/// Style a box takes from its parent where it declares none of its own.
+#[derive(Debug, Clone, Copy)]
+struct Inherited {
+    font_size: f32,
+    line_height: f32,
+    color: Color,
+    align: TextAlign,
+}
+
+/// A laid-out box and the block extent it claims, its own margins included.
+struct Laid {
+    fragment: Fragment,
+    outer: f32,
+}
+
+struct Flow<'a, 'f> {
+    chapter: &'a Chapter,
+    fonts: &'f mut Fonts,
+    resources: &'a dyn Resources,
+    root_font_size: f32,
+    metrics: Metrics,
+    axis: Axis,
+    /// How far a page reaches along the block axis, which is the most a
+    /// picture may take.
+    page_block: f32,
+    hyphenator: Option<&'static Hyphenator>,
+}
+
+impl<'a> Flow<'a, '_> {
+    /// Lay out one block-level node whose margin box starts at
+    /// `(inline, block)`.
+    fn block(
+        &mut self,
+        node: NodeId,
+        inline: f32,
+        block: f32,
+        available: f32,
+        parent: Inherited,
+    ) -> Laid {
+        let chapter = self.chapter;
+        let style = style_of(chapter, node);
+        let role = role_of(chapter, node);
+        let inherited = self.inherit(parent, style);
+
+        let margin = self.logical(
+            [
+                style.margin_top,
+                style.margin_right,
+                style.margin_bottom,
+                style.margin_left,
+            ],
+            available,
+            inherited,
+        );
+        let padding = self.logical(
+            [
+                style.padding_top,
+                style.padding_right,
+                style.padding_bottom,
+                style.padding_left,
+            ],
+            available,
+            inherited,
+        );
+        let border = self.border(style, available, inherited);
+        let frame = LogicalEdges {
+            block_start: padding.block_start + border.widths_logical(self.axis).block_start,
+            block_end: padding.block_end + border.widths_logical(self.axis).block_end,
+            inline_start: padding.inline_start + border.widths_logical(self.axis).inline_start,
+            inline_end: padding.inline_end + border.widths_logical(self.axis).inline_end,
+        };
+
+        let outer_inline = (available - margin.inline()).max(0.0);
+        let content_inline = match self.declared_inline(style, available, inherited) {
+            Some(declared) if style.box_sizing == BoxSizing::BorderBox => {
+                (declared - frame.inline()).max(0.0)
+            }
+            Some(declared) => declared.max(0.0),
+            None => (outer_inline - frame.inline()).max(0.0),
+        };
+
+        let content_inline_origin = inline + margin.inline_start + frame.inline_start;
+        let content_block_origin = block + margin.block_start + frame.block_start;
+
+        let mut children = Vec::new();
+        let mut content_block = self.children(
+            node,
+            content_inline_origin,
+            content_block_origin,
+            content_inline,
+            inherited,
+            style,
+            &mut children,
+        );
+
+        if let Some(declared) = self.declared_block(style, available, inherited) {
+            content_block = if style.box_sizing == BoxSizing::BorderBox {
+                (declared - frame.block()).max(0.0)
+            } else {
+                declared.max(0.0)
+            };
+        }
+
+        let rect = Rect::new(
+            inline + margin.inline_start,
+            block + margin.block_start,
+            content_inline + frame.inline(),
+            content_block + frame.block(),
+        );
+        let mut fragment = Fragment::new(node, role, rect);
+        fragment.background = style.background_color;
+        fragment.border = border.is_visible().then_some(border);
+        fragment.children = children;
+
+        Laid {
+            outer: margin.block() + rect.height,
+            fragment,
+        }
+    }
+
+    /// Lay out a node's children into its content box, returning the block
+    /// extent they took.
+    #[allow(clippy::too_many_arguments)]
+    fn children(
+        &mut self,
+        node: NodeId,
+        inline: f32,
+        block: f32,
+        available: f32,
+        inherited: Inherited,
+        style: &ComputedStyle,
+        out: &mut Vec<Fragment>,
+    ) -> f32 {
+        let chapter = self.chapter;
+        let mut cursor = block;
+        let mut items: Vec<Item<'a>> = Vec::new();
+
+        if role_of(chapter, node) == Role::ListItem {
+            self.marker(node, inherited, &mut items);
+        }
+
+        for child in chapter.children(node) {
+            let role = role_of(chapter, child);
+            let child_style = style_of(chapter, child);
+            if !produces_a_box(role) || child_style.display == Display::None {
+                continue;
+            }
+
+            if is_block_level(role, child_style.display) {
+                cursor += self.flush(&mut items, inline, cursor, available, inherited, style, out);
+                let laid = self.block(child, inline, cursor, available, inherited);
+                cursor += laid.outer;
+                out.push(laid.fragment);
+            } else {
+                self.collect(child, available, inherited, &mut items);
+            }
+        }
+
+        cursor += self.flush(&mut items, inline, cursor, available, inherited, style, out);
+        cursor - block
+    }
+
+    /// Break the inline items gathered into lines and place them.
+    #[allow(clippy::too_many_arguments)]
+    fn flush(
+        &mut self,
+        items: &mut Vec<Item<'a>>,
+        inline: f32,
+        block: f32,
+        available: f32,
+        inherited: Inherited,
+        style: &ComputedStyle,
+        out: &mut Vec<Fragment>,
+    ) -> f32 {
+        if items.is_empty() {
+            return 0.0;
+        }
+        let gathered = std::mem::take(items);
+        let indent = self
+            .length(style.text_indent, available, inherited)
+            .unwrap_or(0.0);
+        let mut lines = Inline {
+            fonts: self.fonts,
+            axis: self.axis,
+            hyphenator: self.hyphenator,
+        }
+        .lay_out(
+            &gathered,
+            available,
+            indent,
+            inherited.align,
+            inherited.line_height,
+        );
+
+        for fragment in &mut lines.fragments {
+            fragment.translate(inline, block);
+        }
+        out.append(&mut lines.fragments);
+        lines.block_size
+    }
+
+    /// Gather an inline subtree into items.
+    fn collect(
+        &mut self,
+        node: NodeId,
+        available: f32,
+        parent: Inherited,
+        out: &mut Vec<Item<'a>>,
+    ) {
+        let chapter = self.chapter;
+        let style = style_of(chapter, node);
+        if style.display == Display::None {
+            return;
+        }
+        let role = role_of(chapter, node);
+        let inherited = self.inherit(parent, style);
+
+        match role {
+            Role::Text => {
+                let Some(entry) = chapter.node(node) else {
+                    return;
+                };
+                let raw = chapter.text(entry.text);
+                if raw.is_empty() {
+                    return;
+                }
+                let preserve = inline::preserves_spaces(style.white_space);
+                let text = if preserve {
+                    raw.to_string()
+                } else {
+                    inline::collapse(raw)
+                };
+                out.push(Item::Text {
+                    source: node,
+                    style: self.text_style(style, inherited, preserve),
+                    text,
+                });
+            }
+            Role::Break => out.push(Item::Break { source: node }),
+            Role::Ruby => {
+                if let Some(item) = self.ruby(node, inherited) {
+                    out.push(item);
+                    return;
+                }
+            }
+            Role::Image => {
+                let size = self.replaced_size(node, style, available, inherited);
+                out.push(Item::Replaced {
+                    source: node,
+                    inline_size: self.axis.inline_of(size),
+                    block_size: self.axis.block_of(size),
+                    src: chapter.semantics.src(node).unwrap_or_default().to_string(),
+                    background: style.background_color,
+                });
+            }
+            _ => {}
+        }
+
+        for child in chapter.children(node) {
+            self.collect(child, available, inherited, out);
+        }
+    }
+
+    /// A ruby group: the base text and the annotation set beside it. `None`
+    /// where the group carries no annotation, which leaves the base to be
+    /// collected as ordinary text.
+    fn ruby(&mut self, node: NodeId, parent: Inherited) -> Option<Item<'a>> {
+        let chapter = self.chapter;
+        let style = style_of(chapter, node);
+        let inherited = self.inherit(parent, style);
+
+        let mut base = String::new();
+        let mut annotation = String::new();
+        let mut annotation_node = None;
+        for child in chapter.children(node) {
+            if role_of(chapter, child) == Role::RubyText {
+                annotation_node.get_or_insert(child);
+                gather_text(chapter, child, &mut annotation);
+            } else {
+                gather_text(chapter, child, &mut base);
+            }
+        }
+        let annotation_node = annotation_node?;
+        if annotation.trim().is_empty() || base.is_empty() {
+            return None;
+        }
+
+        let annotation_style = style_of(chapter, annotation_node);
+        let mut marks = self.inherit(inherited, annotation_style);
+        // `rt` with no declared size is set at half its parent's.
+        if annotation_style.font_size == Length::Auto {
+            marks.font_size = inherited.font_size / 2.0;
+            marks.line_height = marks.font_size * NORMAL_LINE_HEIGHT;
+        }
+
+        Some(Item::Ruby {
+            source: node,
+            style: self.text_style(style, inherited, false),
+            base: inline::collapse(&base),
+            annotation_style: self.text_style(annotation_style, marks, false),
+            annotation: inline::collapse(&annotation),
+        })
+    }
+
+    /// A list item's bullet or number, as the first thing on its line.
+    fn marker(&mut self, node: NodeId, inherited: Inherited, out: &mut Vec<Item<'a>>) {
+        let chapter = self.chapter;
+        let style = style_of(chapter, node);
+        let kind = list_style_of(chapter, node);
+        let Some(text) = marker_text(kind, || ordinal(chapter, node)) else {
+            return;
+        };
+        out.push(Item::Text {
+            source: node,
+            style: self.text_style(style, inherited, false),
+            text,
+        });
+    }
+
+    fn text_style(
+        &self,
+        style: &'a ComputedStyle,
+        inherited: Inherited,
+        preserve_spaces: bool,
+    ) -> TextStyle<'a> {
+        TextStyle {
+            computed: style,
+            font_size: inherited.font_size,
+            line_height: inherited.line_height,
+            color: style.color.unwrap_or(inherited.color),
+            letter_spacing: self
+                .length(style.letter_spacing, 0.0, inherited)
+                .unwrap_or(0.0),
+            underline: style.text_decoration_underline,
+            line_through: style.text_decoration_line_through,
+            preserve_spaces,
+        }
+    }
+
+    /// The used size of a replaced box: what the document declares, else what
+    /// the resource measures, else CSS's size for an object of unknown
+    /// proportions. Scaled down to `available`, keeping its proportions.
+    fn replaced_size(
+        &self,
+        node: NodeId,
+        style: &ComputedStyle,
+        available: f32,
+        inherited: Inherited,
+    ) -> Size {
+        let intrinsic = self
+            .chapter
+            .semantics
+            .src(node)
+            .and_then(|src| self.resources.image_size(src))
+            .map(|size| {
+                Size::new(
+                    self.metrics.image_px(size.width),
+                    self.metrics.image_px(size.height),
+                )
+            });
+        let unknown = Size::new(
+            self.metrics.css_px(DEFAULT_OBJECT.width),
+            self.metrics.css_px(DEFAULT_OBJECT.height),
+        );
+        let ratio = intrinsic
+            .filter(|size| size.height > 0.0)
+            .map(|size| size.width / size.height);
+        let declared_w = self.length(style.width, available, inherited);
+        let declared_h = self.length(style.height, available, inherited);
+
+        let (mut width, mut height) = match (declared_w, declared_h) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (
+                w,
+                ratio.map_or_else(
+                    || intrinsic.map_or(unknown.height, |size| size.height),
+                    |r| w / r,
+                ),
+            ),
+            (None, Some(h)) => (
+                ratio.map_or_else(
+                    || intrinsic.map_or(unknown.width, |size| size.width),
+                    |r| h * r,
+                ),
+                h,
+            ),
+            (None, None) => {
+                let size = intrinsic.unwrap_or(unknown);
+                (size.width, size.height)
+            }
+        };
+
+        if let Some(max) = self.length(style.max_width, available, inherited)
+            && width > max
+            && width > 0.0
+        {
+            height *= max / width;
+            width = max;
+        }
+
+        // The page is the last constraint on both axes: a picture wider or
+        // taller than it is scaled down to fit.
+        let (inline, block) = if self.axis.is_vertical() {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        let fit = [
+            (available / inline, inline > available),
+            (self.page_block / block, block > self.page_block),
+        ]
+        .into_iter()
+        .filter(|(ratio, over)| *over && ratio.is_finite() && *ratio > 0.0)
+        .map(|(ratio, _)| ratio)
+        .fold(1.0f32, f32::min);
+        width *= fit;
+        height *= fit;
+
+        Size::new(width.max(0.0), height.max(0.0))
+    }
+
+    /// The context a node passes to its children: its own declarations where
+    /// it made them, its parent's where it did not.
+    fn inherit(&self, parent: Inherited, style: &ComputedStyle) -> Inherited {
+        let font_size = self
+            .length(style.font_size, parent.font_size, parent)
+            .unwrap_or(parent.font_size);
+        let line_height = match style.line_height {
+            // `normal` scales with the font size in effect.
+            Length::Auto if font_size == parent.font_size => parent.line_height,
+            Length::Auto => font_size * NORMAL_LINE_HEIGHT,
+            // A bare number — `line-height: 1.5` — is stored as a multiple.
+            Length::Em(factor) => font_size * factor,
+            Length::Percent(percent) => font_size * percent / 100.0,
+            declared => self
+                .length(declared, font_size, parent)
+                .unwrap_or(font_size * NORMAL_LINE_HEIGHT),
+        };
+
+        Inherited {
+            font_size,
+            line_height,
+            color: style.color.unwrap_or(parent.color),
+            // `start` is what a style carries when the source declared no
+            // alignment, and takes `parent.align`.
+            align: match style.text_align {
+                TextAlign::Start => parent.align,
+                declared => declared,
+            },
+        }
+    }
+
+    /// The inline size a style declares, which is `width` on a horizontal
+    /// page and `height` on a vertical one — both are physical properties.
+    fn declared_inline(
+        &self,
+        style: &ComputedStyle,
+        available: f32,
+        inherited: Inherited,
+    ) -> Option<f32> {
+        let declared = if self.axis.is_vertical() {
+            style.height
+        } else {
+            style.width
+        };
+        self.length(declared, available, inherited)
+    }
+
+    fn declared_block(
+        &self,
+        style: &ComputedStyle,
+        available: f32,
+        inherited: Inherited,
+    ) -> Option<f32> {
+        let declared = if self.axis.is_vertical() {
+            style.width
+        } else {
+            style.height
+        };
+        self.length(declared, available, inherited)
+    }
+
+    fn border(&self, style: &ComputedStyle, available: f32, inherited: Inherited) -> Border {
+        let side = |width: Length, kind: BorderStyle, color: Option<Color>| {
+            if matches!(kind, BorderStyle::None | BorderStyle::Unset) {
+                return (0.0, None);
+            }
+            let width = self.length(width, available, inherited).unwrap_or(0.0);
+            (width, Some(color.unwrap_or(inherited.color)))
+        };
+        let (top, top_color) = side(
+            style.border_width_top,
+            style.border_style_top,
+            style.border_color_top,
+        );
+        let (right, right_color) = side(
+            style.border_width_right,
+            style.border_style_right,
+            style.border_color_right,
+        );
+        let (bottom, bottom_color) = side(
+            style.border_width_bottom,
+            style.border_style_bottom,
+            style.border_color_bottom,
+        );
+        let (left, left_color) = side(
+            style.border_width_left,
+            style.border_style_left,
+            style.border_color_left,
+        );
+
+        Border {
+            widths: Edges::new(top, right, bottom, left),
+            top: top_color,
+            right: right_color,
+            bottom: bottom_color,
+            left: left_color,
+        }
+    }
+
+    fn logical(&self, sides: [Length; 4], available: f32, inherited: Inherited) -> LogicalEdges {
+        let [top, right, bottom, left] =
+            sides.map(|side| self.length(side, available, inherited).unwrap_or(0.0));
+        self.axis
+            .logical_edges(Edges::new(top, right, bottom, left))
+    }
+
+    /// Resolve a length to device dots, or `None` where the source declared
+    /// `auto`. Percentages resolve against `available`, which for every
+    /// box-model property is the containing block's inline size — its block
+    /// size included, per CSS.
+    ///
+    /// `Px` is the IR's only absolute unit and converts through
+    /// [`Metrics::length`]. `Em`, `Rem` and `Percent` scale a value that is
+    /// in dots.
+    fn length(&self, value: Length, available: f32, inherited: Inherited) -> Option<f32> {
+        match value {
+            Length::Auto => None,
+            Length::Px(px) => Some(self.metrics.length(px)),
+            Length::Em(em) => Some(em * inherited.font_size),
+            Length::Rem(rem) => Some(rem * self.root_font_size),
+            Length::Percent(percent) => Some(available * percent / 100.0),
+        }
+    }
+}
+
+impl Border {
+    /// The border widths read along the writing axis.
+    fn widths_logical(&self, axis: Axis) -> LogicalEdges {
+        axis.logical_edges(self.widths)
+    }
+}
+
+/// Append the text of every [`Role::Text`] node under `node`.
+fn gather_text(chapter: &Chapter, node: NodeId, out: &mut String) {
+    if let Some(entry) = chapter.node(node)
+        && entry.role == Role::Text
+    {
+        out.push_str(chapter.text(entry.text));
+    }
+    for child in chapter.children(node) {
+        gather_text(chapter, child, out);
+    }
+}
+
+/// Whether a node lays out at all. Table column geometry describes the
+/// columns' widths and occupies no box.
+fn produces_a_box(role: Role) -> bool {
+    !matches!(role, Role::ColumnGroup | Role::Column)
+}
+
+/// Whether a node establishes a block box.
+fn is_block_level(role: Role, display: Display) -> bool {
+    match display {
+        Display::None | Display::Inline | Display::InlineBlock => false,
+        Display::ListItem | Display::TableCell | Display::TableRow => true,
+        // `block` is also what a style carries when the source declared no
+        // display at all. The role decides.
+        Display::Block => !matches!(
+            role,
+            Role::Text
+                | Role::Inline
+                | Role::Link
+                | Role::Image
+                | Role::Break
+                | Role::Ruby
+                | Role::RubyText
+        ),
+    }
+}
+
+/// The marker a list item takes, `None` where the list draws none.
+fn marker_text(kind: ListStyleType, ordinal: impl Fn() -> u32) -> Option<String> {
+    Some(match kind {
+        ListStyleType::None => return None,
+        ListStyleType::Disc => "• ".to_string(),
+        ListStyleType::Circle => "◦ ".to_string(),
+        ListStyleType::Square => "▪ ".to_string(),
+        ListStyleType::Decimal => format!("{}. ", ordinal()),
+        ListStyleType::LowerAlpha => format!("{}. ", alphabetic(ordinal(), 'a')),
+        ListStyleType::UpperAlpha => format!("{}. ", alphabetic(ordinal(), 'A')),
+        ListStyleType::LowerRoman => format!("{}. ", roman(ordinal()).to_lowercase()),
+        ListStyleType::UpperRoman => format!("{}. ", roman(ordinal())),
+    })
+}
+
+/// Where a list item sits in its list, counting from the list's own start.
+fn ordinal(chapter: &Chapter, node: NodeId) -> u32 {
+    if let Some(stated) = chapter.semantics.list_start(node) {
+        return stated;
+    }
+    let Some(parent) = chapter.node(node).and_then(|n| n.parent) else {
+        return 1;
+    };
+    let start = chapter.semantics.list_start(parent).unwrap_or(1);
+    let mut seen = 0;
+    for sibling in chapter.children(parent) {
+        if sibling == node {
+            break;
+        }
+        if role_of(chapter, sibling) == Role::ListItem {
+            seen += 1;
+        }
+    }
+    start + seen
+}
+
+/// The marker style in force for an item — its own if it states one, else
+/// the list's.
+fn list_style_of(chapter: &Chapter, node: NodeId) -> ListStyleType {
+    let own = style_of(chapter, node).list_style_type;
+    if own != ListStyleType::Disc {
+        return own;
+    }
+    match chapter.node(node).and_then(|n| n.parent) {
+        Some(parent) if role_of(chapter, parent) == Role::OrderedList => {
+            let stated = style_of(chapter, parent).list_style_type;
+            if stated == ListStyleType::Disc {
+                ListStyleType::Decimal
+            } else {
+                stated
+            }
+        }
+        Some(parent) => style_of(chapter, parent).list_style_type,
+        None => own,
+    }
+}
+
+/// `a`, `b`, … `z`, `aa`, `ab`, … from a 1-based ordinal.
+fn alphabetic(mut n: u32, first: char) -> String {
+    if n == 0 {
+        return first.to_string();
+    }
+    let mut out = String::new();
+    while n > 0 {
+        n -= 1;
+        out.insert(0, char::from(first as u8 + (n % 26) as u8));
+        n /= 26;
+    }
+    out
+}
+
+/// Roman numerals from a 1-based ordinal.
+fn roman(n: u32) -> String {
+    const VALUES: [(u32, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut n = n.max(1);
+    let mut out = String::new();
+    for (value, numeral) in VALUES {
+        while n >= value {
+            out.push_str(numeral);
+            n -= value;
+        }
+    }
+    out
+}
+
+/// Turn a tree of logical rectangles into physical ones.
+fn to_physical(fragment: &mut Fragment, axis: Axis, page_block: f32) {
+    let logical = fragment.rect;
+    fragment.rect = axis.rect(
+        logical.x,
+        logical.y,
+        logical.width,
+        logical.height,
+        page_block,
+    );
+    if let Content::Glyphs(run) = &mut fragment.content {
+        run.baseline = physical_baseline(run, axis, logical.height);
+    }
+    for child in &mut fragment.children {
+        to_physical(child, axis, page_block);
+    }
+}
+
+/// A baseline measured from the fragment's block-start edge, restated as a
+/// distance from its top or left.
+fn physical_baseline(run: &GlyphRun, axis: Axis, block_size: f32) -> f32 {
+    match axis {
+        Axis::HorizontalTb | Axis::VerticalLr => run.baseline,
+        Axis::VerticalRl => block_size - run.baseline,
+    }
+}

@@ -106,7 +106,7 @@ impl Dom {
 
     /// Move `src`'s attributes, text, and children onto `dst`, leaving `src`
     /// empty and detached. `dst` keeps its own tag and node id — for adopting
-    /// a built element into a node other code already holds a reference to.
+    /// a built element into a node another reference points at.
     pub fn move_into(&mut self, src: NodeId, dst: NodeId) {
         if src == dst {
             return;
@@ -360,13 +360,16 @@ pub fn is_inline_only(dom: &Dom, id: NodeId) -> bool {
     dom.get(id).children.iter().all(|&c| is_inline_only(dom, c))
 }
 
-/// Strip every `<span>` whose attribute list is empty (or carries only an
-/// empty `class=""`), inlining its text and children into the parent.
-/// Mirrors calibre's `consolidate_html` span pass (epub_output.py).
-pub fn strip_empty_spans(dom: &mut Dom) {
-    // Snapshot ids to iterate; the strip mutates parent.children but we
-    // walk via a stable id list. Repeat until a pass produces zero strips,
-    // since a stripped span may unwrap a nested empty span.
+/// Strip every `<span>` that carries no styling: no meaningful attribute, no
+/// entry in `element_classes` and none in `element_styles`. Its text and
+/// children inline into the parent.
+pub fn strip_empty_spans(
+    dom: &mut Dom,
+    element_classes: &HashMap<NodeId, Vec<String>>,
+    element_styles: &HashMap<NodeId, CssDecl>,
+) {
+    // The id list is stable while the strip mutates `parent.children`. Passes
+    // repeat to zero: a stripped span can unwrap a nested empty one.
     loop {
         let mut stripped_any = false;
         for id in 0..dom.len() {
@@ -374,7 +377,7 @@ pub fn strip_empty_spans(dom: &mut Dom) {
             if elem.tag != "span" {
                 continue;
             }
-            // "Empty" = no attrs, OR only attrs that are noise (empty class).
+            // An empty `class` counts as no attribute.
             let has_meaningful_attr = elem.attrs.iter().any(|(k, v)| {
                 if k == "class" {
                     !v.trim().is_empty()
@@ -383,6 +386,13 @@ pub fn strip_empty_spans(dom: &mut Dom) {
                 }
             });
             if has_meaningful_attr {
+                continue;
+            }
+            let styled_later = element_classes
+                .get(&id)
+                .is_some_and(|classes| classes.iter().any(|c| !c.trim().is_empty()))
+                || element_styles.get(&id).is_some_and(|decl| !decl.is_empty());
+            if styled_later {
                 continue;
             }
             let Some(parent_id) = elem.parent else {
@@ -451,7 +461,7 @@ pub fn strip_empty_spans(dom: &mut Dom) {
             }
 
             // Orphan the stripped span (leave the node in the arena —
-            // node ids are stable; nothing references it from a parent now).
+            // node ids are stable; no parent references it).
             dom.get_mut(id).parent = None;
             dom.get_mut(id).children.clear();
             stripped_any = true;
@@ -569,7 +579,7 @@ pub fn consolidate_part(
     element_styles: &HashMap<NodeId, CssDecl>,
     element_layout_hints: &LayoutHints,
 ) {
-    strip_empty_spans(dom);
+    strip_empty_spans(dom, element_classes, element_styles);
     collapse_redundant_divs(dom, element_classes, element_styles, element_layout_hints);
 
     // First pass: compute (has_block_desc, has_text_desc) per node.
@@ -741,5 +751,39 @@ pub fn finalize_attrs(
         if !decl.is_empty() {
             dom.get_mut(*id).set("style", decl.to_inline());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A span whose only styling is an `element_classes` entry.
+    #[test]
+    fn a_span_styled_only_through_the_pending_class_map_survives() {
+        let mut dom = Dom::new_xhtml();
+        let p = dom.sub_element(dom.root, "p");
+        let span = dom.sub_element(p, "span");
+        dom.get_mut(span).text = Some("30".to_string());
+
+        let mut classes: HashMap<NodeId, Vec<String>> = HashMap::new();
+        classes.insert(span, vec!["s2".to_string()]);
+        strip_empty_spans(&mut dom, &classes, &HashMap::new());
+
+        assert_eq!(dom.get(p).children, vec![span]);
+        assert_eq!(dom.get(span).tag, "span");
+    }
+
+    #[test]
+    fn a_span_styled_nowhere_is_stripped() {
+        let mut dom = Dom::new_xhtml();
+        let p = dom.sub_element(dom.root, "p");
+        let span = dom.sub_element(p, "span");
+        dom.get_mut(span).text = Some("30".to_string());
+
+        strip_empty_spans(&mut dom, &HashMap::new(), &HashMap::new());
+
+        assert!(dom.get(p).children.is_empty());
+        assert_eq!(dom.get(p).text.as_deref(), Some("30"));
     }
 }

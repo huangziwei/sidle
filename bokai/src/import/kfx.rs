@@ -570,6 +570,16 @@ impl Importer for KfxImporter {
             fixed_layout: self.metadata.fixed_layout,
         })
     }
+
+    /// `document_data.writing_mode`, resolved at open. A `-rl` horizontal mode
+    /// is a page-progression value and lays out as `horizontal-tb`.
+    fn writing_mode(&mut self) -> crate::style::WritingMode {
+        match self.css_writing_mode.as_str() {
+            "vertical-rl" => crate::style::WritingMode::VerticalRl,
+            "vertical-lr" => crate::style::WritingMode::VerticalLr,
+            _ => crate::style::WritingMode::HorizontalTb,
+        }
+    }
 }
 
 impl KfxImporter {
@@ -1655,8 +1665,8 @@ impl KfxImporter {
         // The content walk alternates its spread pairing from the value ahead
         // of the explicit reading-order override.
         self.content_ppd = ppd.clone();
-        // `$default` defers to the reader, i.e. to the heuristics above —
-        // only a concrete direction overrides them.
+        // `$default` defers to the heuristics above. Only a concrete
+        // direction overrides them.
         if let Some(explicit) = self
             .metadata
             .page_progression_direction

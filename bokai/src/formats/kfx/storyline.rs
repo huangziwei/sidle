@@ -6,7 +6,7 @@ use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::schema::{SemanticTarget, schema};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::formats::kfx::tokens::{
-    ColumnFormat, ContentRef, ElementStart, KfxToken, SpanStart, TokenStream,
+    ColumnFormat, ContentRef, ElementStart, InlineElement, KfxToken, SpanStart, TokenStream,
 };
 use crate::formats::kfx::transforms::ImportContext;
 use crate::formats::kfx::yj_properties::{
@@ -908,12 +908,14 @@ where
             KfxToken::StartSpan(_) | KfxToken::EndSpan => {
                 // Style events are handled via ElementStart.style_events
             }
+            KfxToken::InlineElement(_) => {
+                // Emitted only on export.
+            }
         }
     }
 
-    // Offset anchors (`(eid, offset > 0)`): locate each offset inside the
-    // element's finished subtree and stamp a zero-length span there, which
-    // lands a mid-paragraph nav target (`…#page-911-2`) on its exact position.
+    // Offset anchors (`(eid, offset > 0)`): each offset locates a position in
+    // the element's finished subtree, and takes a zero-length span there.
     if let Some(table) = anchor_table {
         stamp_offset_anchors(&mut chapter, &eid_nodes, table, &interleave_roots);
     }
@@ -1842,6 +1844,40 @@ fn is_short_ascii_digit_run(text: &str) -> bool {
     matches!(text.len(), 1 | 2) && text.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Emit a text run of a vertical document, each tate-chu-yoko (縦中横)
+/// candidate inside it as its own inline element carrying the combine style
+/// [`ExportContext::register_tatechuyoko_style`] registers. The text around
+/// them stays in the parent's own flow.
+fn emit_text_with_tatechuyoko(text: &str, ctx: &mut ExportContext, stream: &mut TokenStream) {
+    let bytes = text.as_bytes();
+    let mut plain_from = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if !bytes[at].is_ascii_digit() {
+            at += 1;
+            continue;
+        }
+        let mut end = at;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if is_short_ascii_digit_run(&text[at..end]) {
+            if plain_from < at {
+                stream.push(KfxToken::Text(text[plain_from..at].to_string()));
+            }
+            stream.push(KfxToken::InlineElement(InlineElement {
+                text: text[at..end].to_string(),
+                style_symbol: ctx.register_tatechuyoko_style(),
+            }));
+            plain_from = end;
+        }
+        at = end;
+    }
+    if plain_from < bytes.len() {
+        stream.push(KfxToken::Text(text[plain_from..].to_string()));
+    }
+}
+
 /// True for a role that flattens into its parent's inline text run with no
 /// KFX structure of its own: `Text` and `Break` become characters, `Link`,
 /// `Inline` and `Ruby` become style_events.
@@ -1909,16 +1945,8 @@ fn walk_node_for_export(
         if !node.text.is_empty() {
             let text = chapter.text(node.text);
             if !text.is_empty() {
-                if ctx.is_vertical_document() && is_short_ascii_digit_run(text) {
-                    // Tate-chu-yoko (縦中横): a standalone short digit run goes
-                    // upright in one cell, in the inline `text_combine` span
-                    // `register_tatechuyoko_style` registers.
-                    let combine = ctx.register_tatechuyoko_style();
-                    let mut span = SpanStart::new(Role::Inline, 0, 0);
-                    span.style_symbol = Some(combine);
-                    stream.push(KfxToken::StartSpan(span));
-                    stream.push(KfxToken::Text(text.to_string()));
-                    stream.push(KfxToken::EndSpan);
+                if ctx.is_vertical_document() {
+                    emit_text_with_tatechuyoko(text, ctx, stream);
                 } else {
                     stream.push(KfxToken::Text(text.to_string()));
                 }
@@ -2429,6 +2457,28 @@ fn emit_flattened_segments(
                 walk_node_for_export(chapter, node_id, sch, ctx, stream);
             }
             FlatSegment::Text { text, state } => {
+                // A run whose own style turns its box (tate-chu-yoko) becomes
+                // an element in the parent's flow.
+                if state.link_to.is_none()
+                    && state.ruby_annotation.is_none()
+                    && ctx.is_vertical_document()
+                    && let Some(style_id) = state.style
+                    && chapter.styles.get(style_id).is_some_and(|s| {
+                        s.text_combine_upright == crate::style::TextCombineUpright::All
+                    })
+                {
+                    let style_symbol = ctx.register_style_id_with_hint(
+                        style_id,
+                        &chapter.styles,
+                        state.class_hint.as_deref(),
+                    );
+                    stream.push(KfxToken::InlineElement(InlineElement {
+                        text,
+                        style_symbol,
+                    }));
+                    continue;
+                }
+
                 let needs_style_event = state.link_to.is_some()
                     || state.style.is_some()
                     || state.ruby_annotation.is_some();
@@ -2499,10 +2549,16 @@ fn emit_flattened_segments(
                     span.node_id = state.node_id;
 
                     stream.push(KfxToken::StartSpan(span));
-                    stream.push(KfxToken::Text(text));
+                    if ctx.is_vertical_document() {
+                        emit_text_with_tatechuyoko(&text, ctx, stream);
+                    } else {
+                        stream.push(KfxToken::Text(text));
+                    }
                     stream.push(KfxToken::EndSpan);
+                } else if ctx.is_vertical_document() {
+                    emit_text_with_tatechuyoko(&text, ctx, stream);
                 } else {
-                    // Plain text, no style event needed
+                    // Plain text.
                     stream.push(KfxToken::Text(text));
                 }
             }
@@ -3033,6 +3089,35 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     }
                 }
             }
+            KfxToken::InlineElement(inline) => {
+                let id = ctx.fragment_ids.next_id();
+                ctx.record_content_id(id);
+                let (index, _) = ctx.append_text(&inline.text);
+                let chars = inline.text.chars().count();
+                ctx.record_content_length(id, chars);
+
+                let mut fields = vec![
+                    (sym!(Id), IonValue::Int(id as i64)),
+                    (
+                        sym!(WordBoundaryList),
+                        IonValue::List(vec![IonValue::Int(0), IonValue::Int(chars as i64)]),
+                    ),
+                ];
+                fields.push((sym!(Render), IonValue::Symbol(KfxSymbol::Inline as u64)));
+                fields.push((sym!(Style), IonValue::Symbol(inline.style_symbol)));
+                fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Text as u64)));
+                fields.push((
+                    sym!(Content),
+                    IonValue::Struct(vec![
+                        (sym!(Name), IonValue::Symbol(ctx.current_content_name)),
+                        (sym!(Index), IonValue::Int(index as i64)),
+                    ]),
+                ));
+
+                if let Some(current) = stack.last_mut() {
+                    current.absorb_inline_element(IonValue::Struct(fields));
+                }
+            }
         }
     }
 
@@ -3075,10 +3160,10 @@ struct IonBuilder {
     /// interleaved with `render: inline` image structs. Non-empty once an
     /// inline image splits the element's text, which `build` emits from.
     inline_runs: Vec<IonValue>,
-    /// Count of images absorbed into `inline_runs`. Each occupies one
-    /// character position in the style_event offset space, and `build`
-    /// subtracts the count from the recorded length.
-    inline_image_count: usize,
+    /// Positions of `inline_runs` that belong to a nested element, one apiece.
+    /// They hold their place in the style_event offset space, and `build`
+    /// subtracts them from the recorded length.
+    inline_foreign_chars: usize,
     /// True when this element is a plain (non-wrapped) image — lets
     /// EndElement route it into a text-bearing parent's inline runs.
     is_image: bool,
@@ -3096,7 +3181,7 @@ impl IonBuilder {
             is_inner_wrapper_text: false,
             outer_container_id: None,
             inline_runs: Vec::new(),
-            inline_image_count: 0,
+            inline_foreign_chars: 0,
             is_image: false,
         }
     }
@@ -3112,7 +3197,7 @@ impl IonBuilder {
             is_inner_wrapper_text: false,
             outer_container_id: None,
             inline_runs: Vec::new(),
-            inline_image_count: 0,
+            inline_foreign_chars: 0,
             is_image: false,
         }
     }
@@ -3150,22 +3235,29 @@ impl IonBuilder {
         !self.inline_runs.is_empty() || self.accumulated_text.chars().any(|c| c != '\u{200B}')
     }
 
-    /// Absorb an image struct into the inline interleave: flush the pending
-    /// text as a bare `content_list` string, append the image under
-    /// `render: inline`, and advance the offset space by one character.
-    fn absorb_inline_image(&mut self, mut image: IonValue) {
+    /// Absorb a nested element into the inline interleave: flush the pending
+    /// text as a bare `content_list` string and append the element. It holds
+    /// one character position of the parent's style-event offset space
+    /// whatever its own content is.
+    fn absorb_inline_element(&mut self, element: IonValue) {
         if !self.accumulated_text.is_empty() {
             let run = std::mem::take(&mut self.accumulated_text);
             self.inline_runs.push(IonValue::String(run));
         }
+        self.inline_runs.push(element);
+        self.inline_foreign_chars += 1;
+        self.accumulated_char_count += 1;
+    }
+
+    /// Absorb an image struct into the inline interleave, stamping
+    /// `render: inline` on a struct without one.
+    fn absorb_inline_image(&mut self, mut image: IonValue) {
         if let IonValue::Struct(ref mut fields) = image
             && !fields.iter().any(|(id, _)| *id == sym!(Render))
         {
             fields.push((sym!(Render), IonValue::Symbol(KfxSymbol::Inline as u64)));
         }
-        self.inline_runs.push(image);
-        self.inline_image_count += 1;
-        self.accumulated_char_count += 1;
+        self.absorb_inline_element(image);
     }
 
     /// Get the current accumulated text length in characters.
@@ -3230,7 +3322,7 @@ impl IonBuilder {
             if let Some(container_id) = self.container_id {
                 ctx.record_content_length(
                     container_id,
-                    self.accumulated_char_count - self.inline_image_count,
+                    self.accumulated_char_count - self.inline_foreign_chars,
                 );
             }
 
@@ -3342,8 +3434,44 @@ mod tests {
         assert!(!is_short_ascii_digit_run("1999"));
         assert!(!is_short_ascii_digit_run("1a"));
         assert!(!is_short_ascii_digit_run(""));
-        assert!(!is_short_ascii_digit_run("一")); // CJK numeral, already upright
+        assert!(!is_short_ascii_digit_run("一")); // CJK numeral, upright in a vertical line
         assert!(!is_short_ascii_digit_run(" 1")); // stray whitespace disqualifies
+    }
+
+    #[test]
+    fn a_digit_run_inside_a_vertical_line_becomes_its_own_element() {
+        let mut ctx = ExportContext::new();
+        ctx.document_writing_mode = KfxSymbol::VerticalRl;
+        let mut stream = TokenStream::new();
+        emit_text_with_tatechuyoko("平成30年に、10人が来た。", &mut ctx, &mut stream);
+
+        let shape: Vec<&str> = stream
+            .iter()
+            .map(|token| match token {
+                KfxToken::Text(t) => t.as_str(),
+                KfxToken::InlineElement(e) => e.text.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(shape, ["平成", "30", "年に、", "10", "人が来た。"]);
+        assert_eq!(
+            stream
+                .iter()
+                .filter(|t| matches!(t, KfxToken::InlineElement(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_run_too_long_to_combine_stays_in_the_line() {
+        let mut ctx = ExportContext::new();
+        ctx.document_writing_mode = KfxSymbol::VerticalRl;
+        let mut stream = TokenStream::new();
+        emit_text_with_tatechuyoko("平成100年", &mut ctx, &mut stream);
+
+        assert_eq!(stream.len(), 1);
+        assert!(matches!(stream.iter().next(), Some(KfxToken::Text(t)) if t == "平成100年"));
     }
 
     #[test]

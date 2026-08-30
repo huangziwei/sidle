@@ -6,6 +6,7 @@ members = [
     "sidle/cli",
     "sidle/core",
     "sidle/native",
+    "sidle/render",
     "sidle/server",
     "sidle/desktop",
 ]

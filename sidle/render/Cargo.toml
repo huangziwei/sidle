@@ -1,0 +1,72 @@
+[package]
+name = "sidle-render"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+description = "Sidle's native renderer: a styled book laid out into positioned boxes, and painted."
+publish = false
+
+[features]
+default = ["raster"]
+# Turn a laid-out page into pixels. Separable because a consumer that only
+# wants box geometry — pagination, hit testing, an annotation anchor — needs
+# no rasterizer.
+raster = ["dep:tiny-skia"]
+# The device's own layout of a page, read back from a `_element.txt`
+# capture, to score a page against. Separable because the product lays pages
+# out and never reads one back.
+oracle = []
+# Books that isolate one layout question each, authored here and exported
+# through bokai. Separable for the same reason as `oracle`.
+probe = []
+# The development harness: a window that lays out a book and shows the
+# result. The desktop build costs minutes; this opens in seconds, which is
+# the only way to iterate on layout.
+view = ["raster", "dep:winit", "dep:softbuffer"]
+
+[dependencies]
+# The styled document tree this lays out. `default-features = false` drops
+# bokai's CLI feature, whose argument parsing and Ion reader are no use here.
+bokai = { path = "../../bokai", default-features = false }
+
+# Shaping — a HarfBuzz port, so the same glyph selection, kerning and
+# positioning the device gets from FreeType + ICU.
+rustybuzz = "0.20"
+# Glyph outlines and their rasterization. Holding one CJK face costs 24 MB
+# here against fontdue's 308.
+ab_glyph = "0.2"
+# Face discovery: the host's installed families, queried by name.
+fontdb = { version = "0.23", default-features = false, features = ["fs", "memmap", "fontconfig"] }
+# UAX #14 break opportunities, the base the CJK rules refine.
+unicode-linebreak = "0.1"
+# Image decoding for the resources a book carries: KFX transcodes its
+# JPEG-XR to JPEG, EPUB ships any of the rest.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+# A Skia subset — paths, fills, strokes, gradients, blends, clips — matching
+# what the device paints through. Already in the tree via resvg.
+tiny-skia = { version = "0.12", optional = true }
+
+# Harness only: a window and a buffer to blit into, nothing more.
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+
+[[bin]]
+name = "sidle-render-view"
+path = "src/bin/view.rs"
+required-features = ["view"]
+
+[[bin]]
+name = "sidle-render-probe"
+path = "src/bin/probe.rs"
+required-features = ["probe"]
+
+[[bin]]
+name = "sidle-render-capture"
+path = "src/bin/capture.rs"
+required-features = ["oracle"]
+
+[[bin]]
+name = "sidle-render-script"
+path = "src/bin/script.rs"
+required-features = ["probe"]

@@ -699,7 +699,8 @@ fn build_style_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
     // `dominant_writing_mode_from_ir`; the ingest pipeline compares each style's
     // `writing_mode` against it.
 
-    // Normalise per-paragraph line-height to `lh` ratios over a 1.2 em baseline
+    // Normalise per-paragraph line-height to `lh` ratios against the book's
+    // own dominant em value, which a reader draws at its own line height.
     ctx.style_registry.normalize_line_heights_to_lh();
 
     // Drain the registry into Ion fragments, stamping the book's content

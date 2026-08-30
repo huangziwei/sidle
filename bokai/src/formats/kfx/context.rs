@@ -1150,7 +1150,7 @@ impl ExportContext {
 
     /// Register the bare tate-chu-yoko (縦中横) style and return its symbol. It
     /// carries `text_combine_upright: all`; `finalize_tatechuyoko` completes it.
-    /// Applied as an INLINE span, Amazon's `render: inline`.
+    /// The style applies to a nested `render: inline` element.
     pub fn register_tatechuyoko_style(&mut self) -> u64 {
         let s = crate::style::ComputedStyle {
             text_combine_upright: crate::style::TextCombineUpright::All,
@@ -1434,9 +1434,8 @@ impl ExportContext {
     }
 }
 
-/// Complete a tate-chu-yoko (縦中横) style: Amazon pairs `text_combine: all`
-/// with `writing_mode: horizontal_tb` + `character_width: auto`. The schema
-/// suppresses the first and has no rule for the second; both are set here.
+/// Complete a tate-chu-yoko (縦中横) style: `text_combine: all` takes
+/// `writing_mode: horizontal_tb`, `character_width: auto` and no `language`.
 fn finalize_tatechuyoko(kfx_style: &mut crate::formats::kfx::style_registry::ComputedStyle) {
     use crate::formats::kfx::style_schema::KfxValue;
     if matches!(
@@ -1448,6 +1447,7 @@ fn finalize_tatechuyoko(kfx_style: &mut crate::formats::kfx::style_registry::Com
             KfxValue::Symbol(KfxSymbol::HorizontalTb),
         );
         kfx_style.set(KfxSymbol::CharacterWidth, KfxValue::Symbol(KfxSymbol::Auto));
+        kfx_style.unset(KfxSymbol::Language);
     }
 }
 

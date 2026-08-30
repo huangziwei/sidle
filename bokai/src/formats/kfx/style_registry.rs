@@ -41,6 +41,11 @@ impl ComputedStyle {
             .map(|(_, v)| v)
     }
 
+    /// Drop a property from this style.
+    pub fn unset(&mut self, symbol: KfxSymbol) {
+        self.properties.retain(|(s, _)| *s != symbol);
+    }
+
     /// Check if the style is empty.
     pub fn is_empty(&self) -> bool {
         self.properties.is_empty()
@@ -324,8 +329,15 @@ impl StyleRegistry {
         drained.sort_by_key(|(style_id, _, _, _, _)| *style_id);
         for (_style_id, name_symbol, name, style, _uses) in drained {
             let mut ion = style.to_ion(name_symbol);
+            // A style carrying `text_combine` states no `language`: the run
+            // takes its font and orientation from the text around it.
+            let turns_the_box = style.get(KfxSymbol::TextCombine).is_some();
             if !language.is_empty()
+                && !turns_the_box
                 && let IonValue::Struct(fields) = &mut ion
+                && !fields
+                    .iter()
+                    .any(|(symbol, _)| *symbol == KfxSymbol::Language as u64)
             {
                 fields.push((
                     KfxSymbol::Language as u64,
