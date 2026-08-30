@@ -72,6 +72,14 @@
     return `<span class="rl-estimate" title="${esc(title)}">~</span>`;
   }
 
+  // `measure` as the word a block's `title` carries. See
+  // `library::reading_log::Measure`.
+  function measureVerb(measure) {
+    if (measure === "awake") return "awake with the book open";
+    if (measure === "dwell") return "read, timed page by page";
+    return "read";
+  }
+
   // Word counts come straight off the device's own `TotalWords` counter, which
   // is why they can be shown at all — and why they, not any page figure, are the
   // measure of how much of a book was read.
@@ -660,8 +668,8 @@
   }
 
   // ── The day timeline ───────────────────────────────────────────────────────
-  // The sittings of `state.day` on one 24-hour axis. A block spans
-  // `[started_at, ended_at]`; the fill inside it is `seconds`.
+  // The sittings of `state.day` on one 24-hour axis. `.rl-tl-read` is `seconds`
+  // wide; `.rl-tl-open` spans `started_at` to `ended_at` behind it.
 
   const DAY_SECS = 86400;
 
@@ -671,8 +679,8 @@
     return +iso.slice(11, 13) * 3600 + +iso.slice(14, 16) * 60 + +iso.slice(17, 19);
   }
 
-  // `[start, end]` of one sitting in seconds of `day`, clipped to it. An end
-  // before its start ran past midnight and stops at the day's edge.
+  // `[start, end]` of `s` in seconds of `day`. An `ended_at` outside `day`, or
+  // below `started_at`, reads as `DAY_SECS`. The span floors at 60 seconds.
   function sessionSpan(s, day) {
     const from = clockSecs(s.started_at);
     if (from == null) return null;
@@ -728,17 +736,15 @@
       .map((lane) => {
         const blocks = lane.map(({ s, span }) => {
           const width = span[1] - span[0];
-          // `seconds` is counted reading and never exceeds the window it is
-          // drawn in.
-          const fill = Math.min(1, s.seconds / width);
+          const read = Math.min(s.seconds, width);
           return (
             `<span class="rl-tl-block" data-book="${s.book_id}" role="button" tabindex="0" ` +
             `style="left:${pct(span[0])}; width:${pct(width)}; ` +
             `--fill:${bookFill(s.book_id)}; --ink:${bookInk(s.book_id)}; ` +
-            `--read:${(fill * 100).toFixed(1)}%" ` +
+            `--read:${((read / width) * 100).toFixed(3)}%" ` +
             `title="${esc(s.title)}\n${s.started_at.slice(11, 16)}–${s.ended_at.slice(11, 16)}` +
-            ` · ${fmtDuration(s.seconds)} read">` +
-            `<i class="rl-tl-read"></i><b>${esc(s.title)}</b></span>`
+            ` open · ${fmtDuration(s.seconds)} ${measureVerb(s.measure)}">` +
+            `<i class="rl-tl-open"></i><b class="rl-tl-read">${esc(s.title)}</b></span>`
           );
         });
         return `<div class="rl-tl-lane">${blocks.join("")}</div>`;

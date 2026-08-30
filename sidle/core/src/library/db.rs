@@ -83,7 +83,7 @@ pub struct BookRow {
     /// reading `COALESCE(updated_at, imported_at)`.
     pub updated_at: String,
     /// Human-readable romaji of the title, rendered yomigana-aware at import and
-    /// correctable by hand. The picker's [`search_key`] folds it in, and
+    /// correctable by hand. [`Self::search_key`] folds it in, and
     /// `COALESCE(…, '')` reads a NULL row as `""`.
     pub title_romaji: String,
     /// Human-readable romaji of the author line. See [`Self::title_romaji`].
@@ -96,7 +96,7 @@ pub struct BookRow {
 
 /// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Backups
 /// record it, and restore refuses an archive stamped past the running app.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// A borrowable handle to the library database. A device sync borrows it a
 /// moment at a time between USB transfers, leaving the window's share of the
@@ -858,13 +858,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("DELETE FROM reading_log_dumps", [])?;
     }
 
-    // v19: sessions stored before the parser cut a run at midnight.
+    // v19: `split_sessions_at_midnight` over rows whose `started_at` and
+    // `ended_at` fall on two days.
     if from_version < 19 {
         split_sessions_at_midnight(conn)?;
     }
 
-    // Stamp the schema version. migrate() always brings the DB up to the
-    // latest schema, so set the current marker; backups gate restores on it.
+    // v25: `widen_windows_to_their_reading` over rows whose `seconds` exceed
+    // `ended_at` minus `started_at`.
+    if from_version < 25 {
+        widen_windows_to_their_reading(conn)?;
+    }
+
+    // `user_version` carries `SCHEMA_VERSION`; `backup` gates a restore on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
     Ok(())
@@ -979,7 +985,9 @@ fn repair_colors_read_as_notes(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Recompute every annotation's `dedup_hash` under the current identity rule and
+/// Recompute every `annotations` row's `dedup_hash` through
+/// [`super::ingest::annotation_dedup_hash`], keeping the lowest `id` per hash
+/// and deleting the rest with their `annotation_device` rows.
 fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
     struct Row {
         id: i64,
@@ -1180,7 +1188,7 @@ pub fn find_by_kfx_filename(
     .optional()
 }
 
-/// Look up the book whose `kfx_path` leaf is `<stem>.kfx` — the fallback for an
+/// The book whose `kfx_path` leaf is `<stem>.kfx`.
 pub fn find_by_kfx_basename(conn: &Connection, stem: &str) -> rusqlite::Result<Option<BookRow>> {
     let root = conn_root(conn);
     let pattern = format!("%/{}.kfx", like_escape(stem));
@@ -1332,7 +1340,7 @@ pub fn set_max_position(
     Ok(())
 }
 
-/// Books whose axis ends exactly where a device says the book's last position
+/// Book ids whose `max_position` is `last_position` plus one.
 pub fn books_with_last_position(
     conn: &Connection,
     last_position: i64,
@@ -1726,7 +1734,57 @@ fn split_sessions_at_midnight(conn: &Connection) -> rusqlite::Result<usize> {
     Ok(split)
 }
 
-/// Where one Kindle says it left each book, keyed by the point itself — the
+/// Set `ended_at` to `started_at` plus `seconds` on every `reading_sessions`
+/// row whose `seconds` exceed `ended_at` minus `started_at`, capped at the last
+/// second of the row's `day`. Every other column keeps its value.
+fn widen_windows_to_their_reading(conn: &Connection) -> rusqlite::Result<usize> {
+    let fmt = "%Y-%m-%dT%H:%M:%S";
+    let mut stmt = conn.prepare(
+        "SELECT id, day, started_at, ended_at, seconds FROM reading_sessions WHERE seconds > 0",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut widened = 0;
+    for (id, day, started_at, ended_at, seconds) in rows {
+        let (Ok(from), Ok(to)) = (
+            chrono::NaiveDateTime::parse_from_str(&started_at, fmt),
+            chrono::NaiveDateTime::parse_from_str(&ended_at, fmt),
+        ) else {
+            continue;
+        };
+        if (to - from).num_seconds() >= seconds {
+            continue;
+        }
+        let end = (from + chrono::Duration::seconds(seconds))
+            .format(fmt)
+            .to_string()
+            .min(format!("{day}T23:59:59"));
+        if end <= ended_at {
+            continue;
+        }
+        conn.execute(
+            "UPDATE reading_sessions SET ended_at = ?1 WHERE id = ?2",
+            params![end, id],
+        )?;
+        widened += 1;
+    }
+    Ok(widened)
+}
+
+/// `book_id` per `Point`, over the `reading_position` rows whose `source` is
+/// `device` and whose `eid`, `offset` and `linear_pos` are all set. A `Point`
+/// two books claim is dropped.
 pub fn device_positions(
     conn: &Connection,
 ) -> rusqlite::Result<std::collections::HashMap<Point, i64>> {
@@ -1834,7 +1892,8 @@ pub fn record_log_asin(conn: &Connection, end_position: i64, asin: &str) -> rusq
     Ok(())
 }
 
-/// The book a fingerprint's catalog keys name, where exactly one is a book the
+/// The sole `books` row matching `end_position`'s `reading_log_asins` keys on
+/// `asin` or `amazon_asin`. `None` for none and for more than one.
 fn book_named_by_log_asin(conn: &Connection, end_position: i64) -> rusqlite::Result<Option<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT b.id
@@ -2676,7 +2735,7 @@ pub fn set_job_status(
     Ok(())
 }
 
-/// Set the KFX path, and **mint** its content hash only if the row doesn't
+/// Set `books.kfx_path` for `book_id`, and `kfx_sha256` where it is NULL.
 pub fn set_kfx_path_and_sha(
     conn: &Connection,
     book_id: i64,
@@ -2691,7 +2750,7 @@ pub fn set_kfx_path_and_sha(
     Ok(())
 }
 
-/// Bootstrap-time fixup. Returns `(book_id, kfx_path)` pairs for rows
+/// `(id, kfx_path)` for `books` rows holding a `kfx_path` and no `kfx_sha256`.
 pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
     let root = conn_root(conn);
     let mut stmt = conn.prepare(
@@ -2707,7 +2766,7 @@ pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, St
     rows.collect()
 }
 
-/// Find rows with a `kfx_path` but no `asin`. Bootstrap reads each KFX's
+/// `(id, kfx_path)` for `books` rows holding a `kfx_path` and no `asin`.
 pub fn books_missing_asin(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
     let root = conn_root(conn);
     let mut stmt = conn.prepare(
@@ -2752,7 +2811,7 @@ pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusq
     Ok(())
 }
 
-/// Stamp the identifier bokai's KFX export wrote into the produced file —
+/// Set `books.asin` for `book_id`. See [`BookRow::asin`].
 pub fn set_asin(conn: &Connection, book_id: i64, asin: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE books SET asin = ?1 WHERE id = ?2",
@@ -2789,9 +2848,7 @@ pub fn set_source_format(
     Ok(())
 }
 
-/// Stamp a book's metadata `updated_at` (v7). Two callers: the ASIN-edit command
-/// (a user curation, but it routes through the mechanical-safe [`set_asin`],
-/// which bootstrap/worker also call, so the bump can't live *inside* `set_asin`);
+/// Set `books.updated_at` for `book_id`.
 pub fn set_book_updated_at(
     conn: &Connection,
     book_id: i64,
@@ -2804,7 +2861,7 @@ pub fn set_book_updated_at(
     Ok(())
 }
 
-/// Return the id of another book (≠ `except_id`) holding
+/// The id of a `books` row holding `amazon_asin`, other than `except_id`.
 pub fn book_id_with_amazon_asin(
     conn: &Connection,
     asin: &str,
@@ -2830,14 +2887,14 @@ pub fn book_id_by_asin(conn: &Connection, asin: &str) -> rusqlite::Result<Option
     .optional()
 }
 
-/// Every non-empty `books.asin` (the baked content_id). The ink collector uses
+/// Every non-empty `books.asin`.
 pub fn book_asins(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT asin FROM books WHERE asin IS NOT NULL AND asin != ''")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect()
 }
 
-/// Full-form metadata patch sent by the editor modal. Every field is
+/// Every editable column of a `books` row, as one whole value.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct MetadataPatch {
     pub title: String,
@@ -2847,7 +2904,8 @@ pub struct MetadataPatch {
     /// the generated KFX's reading order; a change triggers a force-reconvert.
     #[serde(default)]
     pub ppd: Option<String>,
-    /// Reading layout / writing mode: `horizontal-lr` | `horizontal-rl` |
+    /// `horizontal-lr` | `horizontal-rl` | `vertical-rl` | `vertical-lr` |
+    /// `None`. See [`BookRow::writing_mode`].
     #[serde(default)]
     pub writing_mode: Option<String>,
     pub publisher: Option<String>,
@@ -2855,7 +2913,7 @@ pub struct MetadataPatch {
     pub series_name: Option<String>,
     pub series_index: Option<f64>,
     pub tags: Vec<String>,
-    /// Editable romaji of the title/author (see [`super::romaji`]). The command
+    /// Editable romaji of `title` and `author`. See [`super::romaji`].
     #[serde(default)]
     pub title_romaji: String,
     #[serde(default)]
@@ -3141,7 +3199,7 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     WHERE b.id = ?1
 "#;
 
-/// A position in a series is held by one book: the volume numbered 3 of a
+/// One book per `(series_name, series_index)` pair.
 const SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
@@ -3194,9 +3252,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
     LIMIT 1
 "#;
 
-/// The served cover image for a book — the color thumbnail if it's been
-/// generated, else the full-res cover — as `(thumbnail path, ms mtime)`. One
-/// `metadata` stat yields both the thumb's existence (→ the gallery prefers it)
+/// `(cover_thumb(sha), its mtime)` where that file exists, otherwise
+/// `(None, cover_path`'s mtime)`.
 fn served_cover(root: Option<&Path>, sha: &str, cover_path: Option<&str>) -> (Option<String>, i64) {
     if let Some(r) = root {
         let thumb = super::LibraryPaths {
@@ -3229,7 +3286,7 @@ fn mtime_millis(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-/// Millisecond mtime of the file at `path`, or 0 if it can't be stat'd. The
+/// Millisecond mtime of the file at `path`, or 0 for an unreadable one.
 pub fn path_mtime_millis(path: &str) -> i64 {
     std::fs::metadata(path)
         .ok()
@@ -3371,7 +3428,8 @@ pub fn get_notebook_by_uuid(
     .optional()
 }
 
-/// A notebook's default title: its first-import on-device "Date Modified"
+/// `updated_at` as `%Y-%m-%d %H:%M` in the local zone, falling back to its own
+/// first 16 characters with the `T` replaced.
 fn default_notebook_title(updated_at: &str) -> String {
     use chrono::{DateTime, Local, NaiveDateTime};
     if let Ok(dt) = DateTime::parse_from_rfc3339(updated_at) {
@@ -3434,7 +3492,8 @@ pub fn backfill_notebook_updated_at(
     Ok(())
 }
 
-/// Upgrade a notebook on the literal-'Notebook' or empty title to
+/// Set [`default_notebook_title`] on the `notebooks` row `uuid`, where its
+/// `title` is `'Notebook'` or empty.
 pub fn backfill_notebook_default_title(
     conn: &Connection,
     uuid: &str,
@@ -3610,7 +3669,8 @@ pub fn list_unlinked_book_ink(conn: &Connection) -> rusqlite::Result<Vec<BookInk
     stmt.query_map([], row_to_book_ink)?.collect()
 }
 
-/// Carry every ink row keyed on `old_key` over to `new_key`, for when a book's
+/// Move `book_ink`, `book_ink_device` and `ink_sync` rows from `old_key` to
+/// `new_key`.
 pub fn relink_ink(conn: &Connection, old_key: &str, new_key: &str) -> rusqlite::Result<()> {
     if old_key.is_empty() || old_key == new_key {
         return Ok(());
@@ -3660,7 +3720,7 @@ pub fn ink_sync_shas(
     rows.collect()
 }
 
-/// Every stored notebook's `(uuid, nbk_sha256)`, skipping rows whose sha
+/// `(uuid, nbk_sha256)` for every `notebooks` row whose `nbk_sha256` is set.
 pub fn notebook_shas(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt =
         conn.prepare("SELECT uuid, nbk_sha256 FROM notebooks WHERE nbk_sha256 IS NOT NULL")?;
@@ -3686,7 +3746,8 @@ pub fn set_ink_sync_sha(
     Ok(())
 }
 
-/// Record one device's ink-page presence for `asin`: which `container_id`s the
+/// Upsert a `book_ink_device` row per `current_containers` entry under
+/// `(asin, device_serial)`, and delete that pair's rows outside the list.
 pub fn record_ink_device_presence(
     conn: &Connection,
     device_serial: &str,
@@ -3927,7 +3988,8 @@ pub fn get_annotation_by_hash(
     .optional()
 }
 
-/// Update a native annotation's editable fields (`kind`, `note_body`, `color`)
+/// Set `kind`, `note_body`, `color` and `dedup_hash` on the `annotations` row
+/// `id`.
 pub fn update_annotation(
     conn: &Connection,
     id: i64,
@@ -3943,7 +4005,8 @@ pub fn update_annotation(
     )
 }
 
-/// Delete one annotation by id, also dropping any device-presence rows for its
+/// Delete the `annotations` row `id` and the `annotation_device` rows on its
+/// `dedup_hash`.
 pub fn delete_annotation(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     // Read the hash first so the presence side table can be cleaned to match.
     let hash: Option<String> = conn
@@ -3980,7 +4043,8 @@ pub struct ReadingPosition {
     pub updated_at: String,
 }
 
-/// A book's stored last-read positions: the one Sidle-native row (`source='sidle'`,
+/// Every `reading_position` row for `book_id`, one per `(source,
+/// device_serial)`.
 pub fn list_reading_positions(
     conn: &Connection,
     book_id: i64,
@@ -4003,9 +4067,8 @@ pub fn list_reading_positions(
     rows.collect()
 }
 
-/// Upsert one of a book's last-read positions, keyed by `(book_id, source,
-/// device_serial)`, which holds the Sidle-native row and each device's row
-/// apart. Pass `device_serial = ""` for the Sidle-native (`source="sidle"`)
+/// Upsert a `reading_position` row on `(book_id, source, device_serial)`.
+/// `source` `"sidle"` takes `device_serial` `""`.
 pub fn set_reading_position(
     conn: &Connection,
     book_id: i64,
@@ -4037,7 +4100,7 @@ pub fn set_reading_position(
     Ok(())
 }
 
-/// The content hash of the `.yjr` last imported for `(device_serial, book_id)`,
+/// `yjr_sync.yjr_sha` for `(device_serial, book_id)`.
 pub fn get_yjr_sync_sha(
     conn: &Connection,
     device_serial: &str,
@@ -4177,7 +4240,8 @@ pub fn delete_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<(S
     Ok(key)
 }
 
-/// Record one device's annotation presence for a book: which `dedup_hash`es the
+/// Upsert an `annotation_device` row per `current_hashes` entry under
+/// `(device_serial, book_id)`, and delete that pair's rows outside the list.
 pub fn record_device_book_presence(
     conn: &Connection,
     device_serial: &str,
@@ -5552,7 +5616,8 @@ mod tests {
         assert!(!apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply"));
     }
 
-    /// Path portability: paths are stored root-relative, resolved to
+    /// `epub_path` stores relative and reads back absolute, across a `root`
+    /// that moves.
     #[test]
     fn paths_stored_relative_resolved_absolute_and_migrated() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5656,7 +5721,8 @@ mod tests {
         );
     }
 
-    /// `relativize_for_store` must relativize a managed path even when it was
+    /// `relativize_for_store` cuts a managed path at its deepest `books` or
+    /// `notebooks` component, under any `root`.
     #[test]
     fn relativize_handles_foreign_and_legacy_roots() {
         let live = Path::new("/Users/x/Documents/Sidle");
@@ -5838,7 +5904,8 @@ mod tests {
         assert_eq!(by_eid[&4].note_body.as_deref(), Some("blue"));
     }
 
-    /// One passage, recorded twice under the pre-v12 rule, the two origins
+    /// Two `annotations` rows on one passage, differing only in `loc_start`,
+    /// `loc_end` and `linear_pos`, become one.
     #[test]
     fn migrate_v12_collapses_annotations_that_differed_only_by_position() {
         let conn = fresh_db();
@@ -6014,7 +6081,8 @@ mod tests {
         assert_eq!(present, 1, "the device's presence record survives intact");
     }
 
-    /// The measured case: a highlight annotated in Sidle was stored as one
+    /// A `kind` `note` row carrying a `note_body` over the same span as a
+    /// device `highlight` becomes the two rows, keeping the device's.
     #[test]
     fn migrate_v13_splits_a_fused_note_and_absorbs_the_devices_highlight() {
         let conn = fresh_db();
@@ -6113,7 +6181,8 @@ mod tests {
         assert_eq!(list_annotations_for_book(&conn, book).unwrap().len(), 2);
     }
 
-    /// The same split with nothing synced back yet: the highlight has to be
+    /// The same split with no device `highlight` present mints one and keeps
+    /// the `note`.
     #[test]
     fn migrate_v13_mints_the_missing_highlight_without_losing_the_note() {
         let conn = fresh_db();
@@ -6900,6 +6969,94 @@ mod tests {
         conn.pragma_update(None, "user_version", 18).unwrap();
         migrate(&conn).unwrap();
         assert_eq!(stored_sessions(&conn).len(), 2);
+    }
+
+    #[test]
+    fn v25_widens_a_window_narrower_than_the_reading_it_counts() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-v25", "A book");
+        // `seconds` 1562 against an `ended_at` five seconds past `started_at`.
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-29T20:05:07".into(),
+                ended_at: "2026-08-29T20:05:12".into(),
+                book_id: Some(book),
+                seconds: 1562,
+                measure: crate::library::reading_log::Measure::Dwell,
+                ..session("2026-08-29", 1, 1562)
+            },
+        )
+        .unwrap();
+        // `seconds` 1200 against an `ended_at` 2400 seconds past `started_at`.
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-29T21:00:00".into(),
+                ended_at: "2026-08-29T21:40:00".into(),
+                book_id: Some(book),
+                seconds: 1200,
+                ..session("2026-08-29", 2, 1200)
+            },
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 24).unwrap();
+        migrate(&conn).unwrap();
+
+        assert_eq!(
+            stored_sessions(&conn),
+            vec![
+                (
+                    "2026-08-29".into(),
+                    "2026-08-29T20:05:07".into(),
+                    "2026-08-29T20:31:09".into(),
+                    1562
+                ),
+                (
+                    "2026-08-29".into(),
+                    "2026-08-29T21:00:00".into(),
+                    "2026-08-29T21:40:00".into(),
+                    1200
+                ),
+            ],
+        );
+
+        // A second `migrate` leaves `ended_at` at 20:31:09.
+        conn.pragma_update(None, "user_version", 24).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(
+            stored_sessions(&conn)[0].2,
+            "2026-08-29T20:31:09".to_string()
+        );
+    }
+
+    #[test]
+    fn v25_keeps_a_widened_window_inside_its_own_day() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-v25-midnight", "A book");
+        insert_reading_session(
+            &conn,
+            &ReadingSession {
+                started_at: "2026-08-29T23:50:00".into(),
+                ended_at: "2026-08-29T23:50:04".into(),
+                book_id: Some(book),
+                seconds: 1200,
+                measure: crate::library::reading_log::Measure::Dwell,
+                ..session("2026-08-29", 1, 1200)
+            },
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 24).unwrap();
+        migrate(&conn).unwrap();
+
+        // `ended_at` stops at `day`'s last second, short of `started_at` plus
+        // `seconds`.
+        assert_eq!(
+            stored_sessions(&conn)[0].2,
+            "2026-08-29T23:59:59".to_string()
+        );
     }
 
     #[test]

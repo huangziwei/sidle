@@ -186,7 +186,31 @@ fn a_page_turned_before_the_run_opens_is_not_lost() {
     assert_eq!(out[0].seconds, 60, "11:21:00 to 11:22:00");
 }
 
-/// The dwell never displaces a figure the device counted.
+/// `page` records after the last `WORDLESS` line carry `ended_at` with them.
+#[test]
+fn a_page_record_after_the_last_timer_line_carries_the_window_with_it() {
+    let late = [page("260814:113300", 0), page("260814:113400", 0)];
+    let mut all: Vec<&str> = WORDLESS
+        .iter()
+        .chain(POWER)
+        .copied()
+        .chain(late.iter().map(String::as_str))
+        .collect();
+    all.sort();
+    let out = parse_sessions(all, None);
+
+    assert_eq!(out.len(), 1);
+    let s = &out[0];
+    assert_eq!(s.started_at, "2026-08-14T11:20:35");
+    assert_eq!(
+        s.ended_at, "2026-08-14T11:34:00",
+        "the last page record, not the 11:32:40 timer line before it"
+    );
+    assert_eq!(s.measure, Measure::Dwell);
+    assert_eq!(s.seconds, 60, "11:33:00 to 11:34:00");
+}
+
+/// `page` records leave `Measure::Counted` and its `seconds` unchanged.
 #[test]
 fn a_counted_sitting_is_untouched_by_the_page_records() {
     let pages = [page("260811:073000", 300), page("260811:073500", 300)];

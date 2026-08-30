@@ -34,10 +34,10 @@ pub const POWER_MARKERS: [&str; 4] = [
     "lipc:evts:name=suspending, origin=com.lab126.powerd",
 ];
 
-/// A page event long enough to be idle rather than reading is still counted —
+/// Seconds between two events breaking the open run in [`parse_sessions`].
 const SESSION_GAP_SECS: i64 = 30 * 60;
 
-/// How far a session's opening counter may outrun the wall clock before it is
+/// Seconds an `OpenBook` counter may run past the wall clock in [`Opened`].
 const SEED_SLACK_SECS: i64 = 60;
 
 /// What one [`import`] pass did.
@@ -86,6 +86,7 @@ pub struct Session {
     /// ascending by hour, summing to exactly [`Self::seconds`].
     pub hours: Vec<(u8, i64)>,
     /// The book's running counter where this run began and where it was last
+    /// seen.
     pub start_counter_ms: Option<i64>,
     pub end_counter_ms: Option<i64>,
     /// The same two readings of the device's own word counter.
@@ -173,7 +174,7 @@ pub struct Resume {
     /// The hours already booked against the run, so a continued session rebuilds
     /// the whole distribution rather than an incremental slice of one.
     pub hours: Vec<(u8, i64)>,
-    /// What the run has been credited so far, and how. A run with no counter
+    /// What the run has been credited so far, and how.
     pub seconds: i64,
     pub measure: Measure,
 }
@@ -659,7 +660,7 @@ impl Awake {
             .sum()
     }
 
-    /// Whether any power line was seen at all. With none, a sitting the device
+    /// Whether `spans` holds any power line's span.
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
@@ -987,7 +988,7 @@ enum Break {
     /// seen and the next one starts from scratch — whatever the counter did in
     /// between is not reading anyone did on either side of the break.
     Left,
-    /// Midnight, with the reader still reading. The reader broke nothing, so the
+    /// Midnight inside a run. `Start` carries the counters interpolated there.
     Midnight(Start),
 }
 
@@ -1070,7 +1071,7 @@ struct Open {
     /// [`Awake`].
     began: Moment,
     carried_secs: i64,
-    /// Forward turns from the `fastmetrics` records, counted apart from
+    /// Forward turns from the `fastmetrics` records, apart from `page_turns`.
     metric_turns: i64,
     /// Milliseconds of page dwell through [`dwell_ms`], and the page open at
     /// the far end of the interval each new page closes.
@@ -1088,7 +1089,7 @@ struct Open {
 }
 
 impl Open {
-    /// `start` is where the book was opened, where an `OpenBook` vouched for it
+    /// `start` is where the book was opened; `None` leaves `now` as `started_at`.
     fn new(end_position: i64, now: &Moment, start: Option<Start>) -> Self {
         let (time_lo, words_lo, from) = match start {
             Some(s) => (s.counter_ms, s.words, s.at),
@@ -1231,8 +1232,15 @@ impl Open {
 
     /// Fold one `fastmetrics` record into the run.
     ///
-    /// A page closes the interval the page before it opened, and [`dwell_ms`]
+    /// [`Metric::Page`] closes the interval the page before it opened, and
+    /// [`dwell_ms`] gives the share of that interval counting as reading.
     fn observe_metric(&mut self, now: &Moment, m: &Metric, awake: &Awake) {
+        // `touched` and `ended_at` follow any `m` on `ended_at`'s own day. A
+        // later day is left to [`Break::Midnight`], at the next observation.
+        self.touched = true;
+        if now.at > self.ended_at && now.day == self.ended_at[..10] {
+            self.ended_at = now.at.clone();
+        }
         match m {
             Metric::Forward => self.metric_turns += 1,
             Metric::Back => {}
@@ -2329,9 +2337,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A sitting whose row has since been re-keyed is still the same sitting.
-    ///
-    /// A log line names the book by its last-word position;
+    /// `store_events` extends a row stored under `end_position` 148213 from
+    /// `page` lines naming 148207.
     #[test]
     fn a_re_keyed_sitting_is_still_continued_by_the_events_that_name_it() {
         let dir = std::env::temp_dir().join(format!("sidle-rl-rekey-{}", std::process::id()));
