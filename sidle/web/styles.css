@@ -4458,24 +4458,8 @@ kbd {
   overflow-y: auto;
 }
 
-.rl-head {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
-
-.rl-head-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* Step-through navigation: the year above the heatmap, the month on a book's
-   calendar. An arrow with nothing that way is disabled, and `.rl-nav-fixed`
-   hides the pair at one step. */
+/* `.rl-nav` heads #rl-heatmap and a book's calendar. `.rl-nav-fixed` hides
+   the arrow pair. */
 .rl-nav {
   display: flex;
   align-items: center;
@@ -4502,23 +4486,21 @@ kbd {
 
 .rl-muted { color: var(--muted); }
 
-/* Headline figures, with tabular numerals holding the row steady across a
-   re-render. The tiles share the page's full width at `1fr` each. */
+/* `nowrap` holds every `.rl-stat` on one line at any tile count. */
 .rl-stats {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 
-@media (max-width: 900px) {
-  .rl-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-
+/* `min-width` fits the widest `.rl-stat b` ("102h 54m") whole; `max-width`
+   sizes a tile to its content on a full-screen window. */
 .rl-stat {
-  min-width: 0;
-  padding: 9px 13px;
+  flex: 1 1 0;
+  min-width: 90px;
+  max-width: 150px;
+  padding: 7px 11px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -4526,15 +4508,22 @@ kbd {
 
 .rl-stat b {
   display: block;
-  font-size: 19px;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
+/* `text-overflow` on `.rl-stat span` alone; `.rl-stat b` holds its full
+   figure at `min-width`. */
 .rl-stat span {
-  font-size: 11px;
+  display: block;
+  font-size: 10px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Heatmap, and the clock beside it ────────────────────────────────────── */
@@ -4794,6 +4783,16 @@ kbd {
 .rl-cal-seg .seg-btn { padding: 3px 10px; font-size: 12px; color: var(--fg); }
 .rl-cal-seg .seg-btn:hover { background: var(--surface); }
 .rl-cal-seg .seg-btn.active { background: var(--accent); color: #fff; }
+
+/* `.rl-refresh` squares its glyph to the height of the `.rl-cal-seg` before
+   it. */
+.rl-refresh {
+  padding: 0;
+  width: 24px;
+  line-height: 24px;
+  font-size: 14px;
+  border-radius: 6px;
+}
 
 /* Sits under #rl-year-nav. */
 .rl-cal-nav { margin-top: 8px; }

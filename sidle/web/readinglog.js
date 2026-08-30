@@ -162,12 +162,13 @@
         api.invoke("reading_log_overview"),
         api.invoke("reading_log_ambiguous"),
       ]);
+      state.loaded = true;
     } catch (e) {
+      // `state.loaded` is false on a throw, and `show()` calls `refresh()`.
       toast(`failed to load reading log: ${e}`, true);
       state.overview = null;
       state.ambiguous = [];
     }
-    state.loaded = true;
     render();
   }
 
@@ -251,8 +252,8 @@
     return `<div class="rl-stat"${t}><b>${value}</b><span>${label}</span></div>`;
   }
 
-  // The first three tiles cover `state.year`, matching the calendar and the
-  // grid. The last three are all-time and say so.
+  // The first three tiles read `state.year`. The rest are all-time, each
+  // naming its window in its `title`.
   function renderStats(o) {
     const days = daysOfYear(o, state.year);
     const secs = days.reduce((a, d) => a + d.seconds, 0);
