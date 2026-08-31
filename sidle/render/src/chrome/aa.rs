@@ -50,7 +50,7 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, reading: &Reading<
 
     match chrome.pane {
         AaPane::Tab => match chrome.tab {
-            AaTab::Themes => themes(chrome, canvas, &page),
+            AaTab::Themes => themes(chrome, canvas, &page, reading),
             AaTab::Font => font(chrome, canvas, &page, reading),
             AaTab::Layout => layout(chrome, canvas, &page, reading),
             AaTab::More => more(chrome, canvas, &page, reading),
@@ -164,7 +164,7 @@ fn heading(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32
     top + BODY * unit
 }
 
-fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page) {
+fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
     let unit = page.unit;
     let theme = canvas.theme;
     let dark = chrome.dark;
@@ -199,15 +199,8 @@ fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page) {
     canvas.rule(page.left, page.right, page.at(62.0), 2.0 * unit, theme.ink);
 
     // The theme in hand, then the three `Preset::OFFERED` names.
-    tile(
-        chrome,
-        canvas,
-        page,
-        0,
-        "Custom",
-        Some("Current Theme"),
-        None,
-    );
+    let held = reading.settings.matches(reading.panel);
+    tile(chrome, canvas, page, 0, "Custom", held.is_none(), None);
     for (n, preset) in Preset::OFFERED.into_iter().enumerate() {
         tile(
             chrome,
@@ -215,7 +208,7 @@ fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page) {
             page,
             n + 1,
             preset.label(),
-            None,
+            held == Some(preset),
             Some(preset),
         );
     }
@@ -254,7 +247,7 @@ fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page) {
     );
 }
 
-/// One theme tile: a ruled page in a box, its name beside it, and a check
+/// One theme tile: a ruled page in a box, its name beside it, and the tick
 /// where it is the theme in hand.
 fn tile(
     chrome: &mut Chrome,
@@ -262,7 +255,7 @@ fn tile(
     page: &Page,
     slot: usize,
     name: &str,
-    tag: Option<&str>,
+    held: bool,
     preset: Option<Preset>,
 ) {
     let unit = page.unit;
@@ -298,32 +291,35 @@ fn tile(
                 theme.ink,
                 2.0 * art,
             );
+            let size = A_SIZE * art;
+            let top = y + A_BASELINE * art - canvas.baseline_of(size, false);
             canvas.text(
                 "A",
-                26.0 * art,
+                size,
                 theme.ink,
                 false,
-                (inside.0 + TILE.0 * art / 2.0, inside.1 + 8.0 * art),
+                (inside.0 + TILE.0 * art / 2.0, top),
                 Align::Center,
             );
         }
     }
 
-    if tag.is_some() {
-        check(canvas, (x + 2.0 * unit, y - 6.0 * unit), 22.0 * unit);
+    if held {
+        canvas.polygon(&bite(), (x, y), art, theme.page);
+        canvas.polygon(&TICK, (x, y), art, theme.ink);
     }
     let box_ = 61.0 * art;
     canvas.text(
         name,
         34.0 * unit,
         theme.ink,
-        tag.is_some(),
+        held,
         (x + box_ + 16.0 * art, y + 16.0 * art),
         Align::Left,
     );
-    if let Some(tag) = tag {
+    if held {
         canvas.text(
-            tag,
+            "Current Theme",
             30.0 * unit,
             theme.faint,
             false,
@@ -339,27 +335,15 @@ fn tile(
     }
 }
 
-/// A tick, drawn as two strokes meeting at the foot.
-fn check(canvas: &mut Canvas<'_, '_>, at: (f32, f32), size: f32) {
+/// The [`TICK`] in the middle of `box_`, as large as it fits.
+fn check(canvas: &mut Canvas<'_, '_>, box_: Rect) {
     let ink = canvas.theme.ink;
-    let weight = size * 0.16;
-    let steps = (size * 0.4) as usize;
-    for step in 0..steps.max(1) {
-        let t = step as f32;
-        canvas.fill(
-            Rect::new(at.0 + t, at.1 + size * 0.4 + t, weight, weight),
-            ink,
-        );
-        canvas.fill(
-            Rect::new(
-                at.0 + size * 0.4 + t,
-                at.1 + size * 0.8 - t * 1.6,
-                weight,
-                weight,
-            ),
-            ink,
-        );
-    }
+    let art = (box_.width / TICK_BOX.0).min(box_.height / TICK_BOX.1);
+    let at = (
+        box_.x + (box_.width - TICK_BOX.0 * art) / 2.0,
+        box_.y + (box_.height - TICK_BOX.1 * art) / 2.0,
+    );
+    canvas.polygon(&TICK, at, art, ink);
 }
 
 fn font(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
@@ -674,6 +658,41 @@ const PLATE: (f32, f32) = (78.0, 44.0);
 /// A theme tile's plate, inside a touch box of 61 by 61.
 const TILE: (f32, f32) = (41.0, 41.0);
 
+/// The tick a chosen control carries, as its own artwork states it, and the
+/// box that artwork draws it in.
+const TICK: [(f32, f32); 6] = [
+    (25.159, 0.0),
+    (9.818, 16.129),
+    (1.841, 7.742),
+    (0.0, 9.677),
+    (9.818, 20.0),
+    (27.0, 1.935),
+];
+
+/// The `A` a tile with no ruled page of its own carries: the size its
+/// artwork sets, and where that artwork puts its baseline in the box of 61.
+const A_SIZE: f32 = 27.0;
+const A_BASELINE: f32 = 40.0;
+
+/// The box `TICK` is drawn in, and the arc it clears a plate's corner
+/// along: centre, then radius.
+const TICK_BOX: (f32, f32) = (27.0, 20.0);
+const TICK_BITE: ((f32, f32), f32) = ((26.0, 25.0), 16.5);
+
+/// The corner a tick clears, in the tile's box of 61: the arc from the
+/// plate's top edge round to its left side, closed at the corner itself.
+fn bite() -> Vec<(f32, f32)> {
+    let ((cx, cy), radius) = TICK_BITE;
+    let mut corner: Vec<(f32, f32)> = (0..=8)
+        .map(|step| {
+            let turn = (-90.0 - step as f32 * 90.0 / 8.0f32).to_radians();
+            (cx + radius * turn.cos(), cy + radius * turn.sin())
+        })
+        .collect();
+    corner.push((PADDING - 1.0, PADDING - 1.0));
+    corner
+}
+
 const MARGIN_ART: [&[(f32, f32, f32)]; 3] = [
     &[
         (6.0, 72.0, 10.5),
@@ -954,11 +973,7 @@ fn toggle(
     );
     canvas.round_stroke(box_, 4.0 * unit, theme.ink, 3.0 * unit);
     if on {
-        check(
-            canvas,
-            (box_.x + 8.0 * unit, box_.y + 4.0 * unit),
-            28.0 * unit,
-        );
+        check(canvas, box_.inset_by(9.0 * unit));
     }
     chrome.add(
         Rect::new(page.left, y - 12.0 * unit, page.width(), 60.0 * unit),

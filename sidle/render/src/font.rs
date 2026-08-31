@@ -159,6 +159,21 @@ impl Fonts {
         &self.faces[id.0 as usize]
     }
 
+    /// Whether any of `families` names a face of the host's carrying
+    /// `sample`.
+    pub fn carries(&mut self, families: &[String], sample: char) -> bool {
+        for name in families {
+            let Some(id) = self.query(name, 400, false) else {
+                continue;
+            };
+            let Some(face) = self.load(id) else { continue };
+            if self.faces[face.0 as usize].covers(sample) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// A face for `style` and `ch`, `None` on an empty catalogue.
     pub fn select(&mut self, style: &ComputedStyle, ch: char) -> Option<FaceId> {
         let script = Script::of(ch);

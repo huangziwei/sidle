@@ -16,11 +16,13 @@ pub enum Align {
     Right,
 }
 
-/// A shaped string: what to paint, and how wide it came out.
+/// A shaped string: what to paint, how wide it came out, and how far its
+/// baseline sits below its top.
 pub struct Line {
     pub fragments: Vec<Fragment>,
     pub width: f32,
     pub height: f32,
+    pub baseline: f32,
 }
 
 /// Shape `text` at `size` in `color`, on one line.
@@ -54,9 +56,20 @@ pub fn lay(fonts: &mut Fonts, text: &str, size: f32, color: Color, bold: bool) -
     let (_, width) = inline.measure(&items);
     let laid = inline.lay_out(&items, width.max(1.0), 0.0, TextAlign::Start, size * 1.3);
 
+    let baseline = laid
+        .fragments
+        .iter()
+        .flat_map(|fragment| fragment.walk())
+        .find_map(|fragment| match &fragment.content {
+            crate::fragment::Content::Glyphs(run) => Some(fragment.rect.y + run.baseline),
+            _ => None,
+        })
+        .unwrap_or(size);
+
     Line {
         width,
         height: laid.block_size.max(size * 1.3),
+        baseline,
         fragments: laid.fragments,
     }
 }

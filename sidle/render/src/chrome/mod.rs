@@ -78,6 +78,8 @@ pub enum Action {
     Reveal(bool),
     /// Which page of the chapter the scrubber stands at.
     Scrub(usize),
+    /// The page a preview stands for, which the reader opens.
+    GoToPage(usize),
     /// Whether the scrubber shows nine pages at once.
     Grid(bool),
     /// The chapter before this one, or the one after it.
@@ -248,6 +250,11 @@ impl Chrome {
     /// Forget the controls the last draw pass placed.
     pub fn begin(&mut self) {
         self.hits.clear();
+    }
+
+    /// The controls the last draw pass placed.
+    pub fn hits(&self) -> &[Hit] {
+        &self.hits
     }
 
     pub fn add(&mut self, rect: Rect, action: Action) {
@@ -490,6 +497,12 @@ impl Canvas<'_, '_> {
             text::Align::Right => at.0 - width,
         };
         Rect::new(left, at.1, width, height)
+    }
+
+    /// How far a line of `size` carries its baseline below its own top.
+    pub fn baseline_of(&mut self, size: f32, bold: bool) -> f32 {
+        let ink = self.theme.ink;
+        text::lay(self.fonts, "A", size, ink, bold).baseline
     }
 
     /// How wide `content` sets at `size`.

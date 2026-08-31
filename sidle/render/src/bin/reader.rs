@@ -61,6 +61,20 @@ const ROWS_A_LEAP: f32 = 5.0;
 /// Amazon's own iOS reader sets Japanese in. `--serif` and `--cjk` name others.
 const SERIF: [&str; 3] = ["Iowan Old Style", "Charter", "Georgia"];
 const MINCHO: [&str; 3] = ["Hiragino Mincho ProN", "Hiragino Mincho Pro", "YuMincho"];
+const GOTHIC: [&str; 3] = ["Hiragino Sans", "Hiragino Kaku Gothic ProN", "YuGothic"];
+
+/// The host faces the reading font `family` is set in, best first. A name the
+/// host has a face for stands for itself.
+fn faces_for(family: &str, script: FaceScript) -> Vec<String> {
+    let stand_ins: &[&str] = match (family, script) {
+        ("Publisher Font", FaceScript::Cjk) => &MINCHO,
+        ("Publisher Font" | "Bookerly" | "Caecilia", _) => &SERIF,
+        ("Mincho" | "Song", _) => &MINCHO,
+        ("Gothic" | "Hei", _) => &GOTHIC,
+        _ => return vec![family.to_string()],
+    };
+    stand_ins.iter().map(|name| (*name).to_string()).collect()
+}
 
 #[derive(Default)]
 struct Options {
@@ -83,6 +97,10 @@ struct Options {
     tab: AaTab,
     /// How many rows down the open list stands.
     scroll: f32,
+    /// Whether a shot lists the controls it placed.
+    hits: bool,
+    /// Whether the page and the chrome are drawn dark.
+    dark: bool,
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -107,9 +125,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--shot" => options.shot = Some(PathBuf::from(value()?)),
             "--reveal" => options.reveal = true,
             "--grid" => options.grid = true,
+            "--dark" => options.dark = true,
             "--open" => options.open = named_overlay(&value()?)?,
             "--tab" => options.tab = named_tab(&value()?)?,
             "--scroll" => options.scroll = value()?.parse()?,
+            "--hits" => options.hits = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -190,9 +210,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(|| device.unwrap_or_default().panel());
     let numbered = !book.page_list().is_empty();
+    // A family is offered where `faces_for` names a face carrying `sample`.
+    let script = match Script::of(&language) {
+        Script::Cjk => FaceScript::Cjk,
+        _ => FaceScript::Latin,
+    };
+    let sample = match script {
+        FaceScript::Cjk => '日',
+        FaceScript::Latin => 'A',
+    };
     let families: Vec<String> = reading_families(&language)
         .iter()
         .map(|name| (*name).to_string())
+        .filter(|name| fonts.carries(&faces_for(name, script), sample))
         .collect();
 
     let mut settings = Settings::default_for(&in_force);
@@ -236,12 +266,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Some(path) = options.shot {
         reader.page = options.page;
+        reader.chrome.at = options.page;
         reader.chrome.revealed = options.reveal;
         reader.chrome.grid = options.grid;
+        reader.chrome.dark = options.dark;
         reader.chrome.overlay = options.open;
         reader.chrome.tab = options.tab;
         reader.chrome.scroll = options.scroll * reader.scroll_step();
         reader.shot(&path)?;
+        if options.hits {
+            for hit in reader.chrome.hits() {
+                let rect = hit.rect;
+                println!(
+                    "{:>7.1} {:>7.1} {:>7.1} {:>7.1}  {:?}",
+                    rect.x, rect.y, rect.width, rect.height, hit.action
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -749,6 +790,11 @@ impl Reader {
             }
             Action::Scrub(page) => {
                 self.chrome.at = page;
+                self.request_redraw();
+            }
+            Action::GoToPage(page) => {
+                self.chrome.overlay = Overlay::None;
+                self.chrome.at = page;
                 self.page = page;
                 self.sheet = None;
                 self.request_redraw();
@@ -764,6 +810,7 @@ impl Reader {
                 self.chrome.overlay = overlay;
                 self.chrome.pane = AaPane::Tab;
                 self.chrome.scroll = 0.0;
+                self.chrome.at = self.page;
                 self.request_redraw();
             }
             Action::Close => {
@@ -848,7 +895,7 @@ impl Reader {
     fn leaves(&mut self) -> Vec<(Pixmap, i64, usize)> {
         let panel = self.panel_for().size;
         let (grid, at) = (self.chrome.grid, self.chrome.at);
-        let theme = self.chrome.theme();
+        let dark = self.chrome.dark;
         let Some(laid) = &self.laid else {
             return Vec::new();
         };
@@ -868,12 +915,7 @@ impl Reader {
             ) else {
                 continue;
             };
-            sheet.fill(tiny_skia::Color::from_rgba8(
-                theme.page.r,
-                theme.page.g,
-                theme.page.b,
-                0xff,
-            ));
+            sheet.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
             Painter::cached(&self.fonts, &self.resources, &mut self.cache).paint(
                 &laid.root,
                 laid.pages.window(page),
@@ -881,6 +923,9 @@ impl Reader {
                 scale,
                 &mut sheet.as_mut(),
             );
+            if dark {
+                turn_inside_out(&mut sheet);
+            }
             out.push((sheet, laid.locations.get(page).copied().unwrap_or(0), page));
         }
         out
@@ -917,14 +962,16 @@ impl Reader {
 
     /// Point the reading settings at the family the font list chose.
     fn apply_family(&mut self) {
-        let Some(family) = self.families.get(self.settings.family) else {
+        let Some(family) = self.families.get(self.settings.family).cloned() else {
             return;
         };
         let script = match Script::of(&self.language) {
             Script::Cjk => FaceScript::Cjk,
             _ => FaceScript::Latin,
         };
-        self.fonts.reading_family(script, &[family.as_str()]);
+        let faces = faces_for(&family, script);
+        let named: Vec<&str> = faces.iter().map(String::as_str).collect();
+        self.fonts.reading_family(script, &named);
     }
 
     fn restyle(&mut self, change: impl FnOnce(&mut Settings)) {
@@ -1022,12 +1069,7 @@ impl Reader {
                 panel.size.width.max(1.0) as u32,
                 panel.size.height.max(1.0) as u32,
             )?;
-            sheet.fill(tiny_skia::Color::from_rgba8(
-                theme.page.r,
-                theme.page.g,
-                theme.page.b,
-                0xff,
-            ));
+            sheet.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
             if let Some(laid) = &self.laid {
                 Painter::cached(&self.fonts, &self.resources, &mut self.cache).paint(
                     &laid.root,
@@ -1036,6 +1078,9 @@ impl Reader {
                     1.0,
                     &mut sheet.as_mut(),
                 );
+            }
+            if self.chrome.dark {
+                turn_inside_out(&mut sheet);
             }
             self.sheet = Some((sheet, key));
         }
@@ -1391,6 +1436,21 @@ impl ApplicationHandler for Reader {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Turn a page's ink and ground inside out, which is what a dark page is.
+fn turn_inside_out(sheet: &mut Pixmap) {
+    for pixel in sheet.pixels_mut() {
+        let alpha = pixel.alpha();
+        if let Some(turned) = tiny_skia::PremultipliedColorU8::from_rgba(
+            alpha - pixel.red(),
+            alpha - pixel.green(),
+            alpha - pixel.blue(),
+            alpha,
+        ) {
+            *pixel = turned;
         }
     }
 }

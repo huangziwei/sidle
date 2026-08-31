@@ -71,6 +71,8 @@ fn preview(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, scrub: &Scrub<'_>, 
     );
     canvas.fill(card, theme.page);
     canvas.stroke(card, theme.ink, 4.0 * unit);
+    // The page shown is the page opened.
+    chrome.add(card, Action::GoToPage(leaf.page));
     // The page, clear of the band its location is stated in.
     canvas.picture(
         Rect::new(
@@ -160,7 +162,7 @@ fn grid(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, scrub: &Scrub<'_>, foo
             (box_.x + box_.width / 2.0, box_.y + 6.0 * unit),
             Align::Center,
         );
-        chrome.add(cell, Action::Scrub(leaf.page));
+        chrome.add(cell, Action::GoToPage(leaf.page));
     }
 }
 
