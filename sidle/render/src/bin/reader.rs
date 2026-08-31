@@ -56,6 +56,12 @@ const WINDOW_HEIGHT: f32 = 900.0;
 /// How many rows of a list a page key moves it by.
 const ROWS_A_LEAP: f32 = 5.0;
 
+/// The host faces standing in for the reading fonts a Kindle carries, best
+/// first: Bookerly's old-style serif for Latin, 明朝 for Japanese — the face
+/// Amazon's own iOS reader sets Japanese in. `--serif` and `--cjk` name others.
+const SERIF: [&str; 3] = ["Iowan Old Style", "Charter", "Georgia"];
+const MINCHO: [&str; 3] = ["Hiragino Mincho ProN", "Hiragino Mincho Pro", "YuMincho"];
+
 #[derive(Default)]
 struct Options {
     book: Option<PathBuf>,
@@ -65,6 +71,8 @@ struct Options {
     serif: Option<String>,
     cjk: Option<String>,
     chapter: usize,
+    /// Which page of the chapter a shot shows.
+    page: usize,
     pages: Option<usize>,
     per_line: bool,
     font_size: Option<usize>,
@@ -92,6 +100,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--serif" => options.serif = Some(value()?),
             "--cjk" => options.cjk = Some(value()?),
             "--chapter" => options.chapter = value()?.parse()?,
+            "--page" => options.page = value()?.parse()?,
             "--font-size" => options.font_size = Some(value()?.parse()?),
             "--pages" => options.pages = Some(value()?.parse()?),
             "--lines" => options.per_line = true,
@@ -167,6 +176,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     for directory in &options.fonts {
         fonts.add_directory(directory);
     }
+    fonts.reading_family(FaceScript::Latin, &SERIF);
+    fonts.reading_family(FaceScript::Cjk, &MINCHO);
     if let Some(family) = &options.serif {
         fonts.reading_family(FaceScript::Latin, &[family]);
     }
@@ -224,6 +235,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if let Some(path) = options.shot {
+        reader.page = options.page;
         reader.chrome.revealed = options.reveal;
         reader.chrome.grid = options.grid;
         reader.chrome.overlay = options.open;

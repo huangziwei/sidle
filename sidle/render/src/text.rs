@@ -23,9 +23,51 @@ pub fn is_cjk(ch: char) -> bool {
         | 0x20000..=0x3FFFD)
 }
 
-/// Whether `ch` stands upright on a vertical line. Latin lies on its side.
+/// Whether `ch` stands upright on a vertical line: the `U` and `Tu` classes
+/// of UAX #50. Latin lies on its side.
 pub fn is_upright_in_vertical(ch: char) -> bool {
     is_cjk(ch)
+        || matches!(ch as u32,
+            0x00A7 | 0x00A9 | 0x00AE | 0x00B1 | 0x00D7 | 0x00F7
+            | 0x00BC..=0x00BE
+            | 0x02EA..=0x02EB
+            | 0x1401..=0x167F  // Canadian syllabics
+            | 0x18B0..=0x18FF
+            | 0x2016           // Double vertical line
+            | 0x2020..=0x2021  // Dagger, double dagger
+            | 0x2030..=0x2031
+            | 0x203B..=0x203C  // Reference mark, double exclamation
+            | 0x2042
+            | 0x2047..=0x2049
+            | 0x2051
+            | 0x2100..=0x2101
+            | 0x2103..=0x2109  // Degree Celsius through Fahrenheit
+            | 0x210F | 0x2113 | 0x2114 | 0x2125 | 0x2127 | 0x2129 | 0x212E
+            | 0x2116..=0x2117
+            | 0x2135..=0x213F
+            | 0x2145..=0x214A
+            | 0x214F
+            | 0x2150..=0x2189  // Fractions and Roman numerals
+            | 0x221E
+            | 0x2234..=0x2235
+            | 0x2300..=0x2307
+            | 0x230C..=0x231F
+            | 0x232B
+            | 0x237D..=0x239A
+            | 0x23BE..=0x23CD
+            | 0x23CF
+            | 0x23E2..=0x244A
+            | 0x2460..=0x24FF  // Enclosed alphanumerics
+            | 0x25A0..=0x25FF  // Geometric shapes
+            | 0x2600..=0x2619  // Symbols, the star among them
+            | 0x2620..=0x26FF
+            | 0x2700..=0x2767
+            | 0x2776..=0x2793
+            | 0x2B12..=0x2B2F
+            | 0x2B50..=0x2B59
+            | 0x2B97
+            | 0x2BB8..=0x2BD1
+            | 0x2BF0..=0x2BFF)
 }
 
 /// Whether `ch` occupies a full em: the Wide and Fullwidth classes of
@@ -111,6 +153,16 @@ pub fn em_advance(ch: char, vertical: bool) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_symbol_stands_upright_where_a_letter_lies_down() {
+        assert!(is_upright_in_vertical('★'));
+        assert!(is_upright_in_vertical('※'));
+        assert!(is_upright_in_vertical('①'));
+        assert!(is_upright_in_vertical('あ'));
+        assert!(!is_upright_in_vertical('A'));
+        assert!(!is_upright_in_vertical('→'));
+    }
 
     #[test]
     fn kana_and_kanji_are_cjk_and_latin_is_not() {

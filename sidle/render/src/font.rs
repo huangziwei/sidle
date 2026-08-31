@@ -74,6 +74,9 @@ impl Face {
 /// What `select` caches a choice under.
 type Request = (String, u16, bool, Script);
 
+/// What `select` caches a lone character's face under.
+type OddRequest = (String, u16, bool, char);
+
 /// Loaded [`Face`]s and the catalogue `select` searches.
 pub struct Fonts {
     db: fontdb::Database,
@@ -82,6 +85,8 @@ pub struct Fonts {
     loaded: HashMap<fontdb::ID, FaceId>,
     /// Past selections, by what was asked for.
     chosen: HashMap<Request, Option<FaceId>>,
+    /// Faces found for a character the script's own face misses.
+    covering: HashMap<OddRequest, Option<FaceId>>,
     /// Single characters shaped once each.
     shaped: HashMap<(FaceId, bool, char), Option<Shaped>>,
     /// The families the reading settings chose, per script.
@@ -105,6 +110,7 @@ impl Fonts {
             faces: Vec::new(),
             loaded: HashMap::new(),
             chosen: HashMap::new(),
+            covering: HashMap::new(),
             shaped: HashMap::new(),
             reading: HashMap::new(),
             coverage_only: Vec::new(),
@@ -122,12 +128,14 @@ impl Fonts {
     pub fn add_directory(&mut self, path: impl AsRef<Path>) {
         self.db.load_fonts_dir(path);
         self.chosen.clear();
+        self.covering.clear();
     }
 
     /// Add a face a book carries, ahead of the host's.
     pub fn add_embedded(&mut self, data: Vec<u8>) {
         self.db.load_font_data(data);
         self.chosen.clear();
+        self.covering.clear();
     }
 
     /// The families `select` falls to for `script`, best first.
@@ -137,12 +145,14 @@ impl Fonts {
             families.iter().map(|name| (*name).to_string()).collect(),
         );
         self.chosen.clear();
+        self.covering.clear();
     }
 
     /// Bar `family` from every route but `any_covering`.
     pub fn only_by_coverage(&mut self, family: &str) {
         self.coverage_only.push(family.to_string());
         self.chosen.clear();
+        self.covering.clear();
     }
 
     pub fn face(&self, id: FaceId) -> &Face {
@@ -157,11 +167,22 @@ impl Fonts {
         let italic = style.font_style != FontStyle::Normal;
 
         let key = (families.clone(), weight, italic, script);
-        if let Some(&cached) = self.chosen.get(&key) {
+        if let Some(&cached) = self.chosen.get(&key)
+            && cached.is_none_or(|id| self.faces[id.0 as usize].covers(ch))
+        {
+            return cached;
+        }
+        // A character the script's own face has no glyph for is searched for
+        // by itself: a star among Latin letters, a symbol among kana.
+        let odd = (families.clone(), weight, italic, ch);
+        if let Some(&cached) = self.covering.get(&odd) {
             return cached;
         }
         let chosen = self.resolve(&families, weight, italic, script, ch);
-        self.chosen.insert(key, chosen);
+        match self.chosen.contains_key(&key) {
+            true => self.covering.insert(odd, chosen),
+            false => self.chosen.insert(key, chosen),
+        };
         chosen
     }
 
@@ -199,10 +220,12 @@ impl Fonts {
             best.get_or_insert(face);
         }
 
-        // Past the names: the generic family, then `coverage_only` faces.
+        // Past the names: the generic family, then every face there is. A
+        // character none of them covers keeps the run's own face.
         self.by_generic(script, weight, italic, ch)
+            .or_else(|| self.any_covering(ch))
             .or(best)
-            .or_else(|| self.any_covering(weight, italic, ch))
+            .or_else(|| self.any_face(weight, italic))
     }
 
     /// The generic family's face for `ch`.
@@ -235,7 +258,7 @@ impl Fonts {
     }
 
     /// Any loadable face covering `ch`.
-    fn any_covering(&mut self, weight: u16, italic: bool, ch: char) -> Option<FaceId> {
+    fn any_covering(&mut self, ch: char) -> Option<FaceId> {
         let ids: Vec<fontdb::ID> = self.db.faces().map(|info| info.id).collect();
         for id in ids {
             let Some(face) = self.load(id) else { continue };
@@ -243,7 +266,12 @@ impl Fonts {
                 return Some(face);
             }
         }
-        // No glyph anywhere: a real face draws a visible `.notdef`.
+        None
+    }
+
+    /// A face for a character no face has a glyph for, which draws a visible
+    /// `.notdef`.
+    fn any_face(&mut self, weight: u16, italic: bool) -> Option<FaceId> {
         self.db
             .query(&fontdb::Query {
                 families: &[fontdb::Family::Serif, fontdb::Family::SansSerif],
@@ -364,6 +392,21 @@ mod tests {
         let style = ComputedStyle::default();
 
         assert_eq!(fonts.select(&style, 'a'), None);
+    }
+
+    #[test]
+    fn a_character_the_reading_face_misses_takes_one_that_covers_it() {
+        // `★` between kana: no Latin reading face carries it, and the run it
+        // sits in has settled on one from the letters around it.
+        let mut fonts = Fonts::new();
+        let style = ComputedStyle::default();
+        fonts.select(&style, 'a');
+
+        let Some(face) = fonts.select(&style, '★') else {
+            return;
+        };
+
+        assert!(fonts.face(face).covers('★'));
     }
 
     #[test]

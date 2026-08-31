@@ -1,5 +1,5 @@
 //! Inline layout: text and atomic boxes packed into lines. `rustybuzz`
-//! shapes; lines break at UAX #14 opportunities, refined by `hyphenate`.
+//! shapes; lines break at UAX #14 opportunities, reined by `hyphenate`.
 
 use std::ops::Range;
 
@@ -514,6 +514,9 @@ impl Inline<'_> {
         let mut face = None;
 
         let mut last: Option<(crate::font::Script, Option<FaceId>)> = None;
+        // One run is one face standing one way: a star among kana keeps the
+        // face that draws it and the orientation it is read at.
+        let mut standing = text::is_upright_in_vertical(slice.chars().next().unwrap_or(' '));
         for (index, ch) in slice.char_indices() {
             let at = range.start + index;
             let script = crate::font::Script::of(ch);
@@ -525,14 +528,17 @@ impl Inline<'_> {
                     found
                 }
             };
+            let upright = text::is_upright_in_vertical(ch);
             if face.is_none() {
                 face = chosen;
+                standing = upright;
                 continue;
             }
-            if chosen.is_some() && chosen != face {
+            if (chosen.is_some() && chosen != face) || upright != standing {
                 self.shape_one(stretch, cut..at, face, out);
                 cut = at;
-                face = chosen;
+                face = chosen.or(face);
+                standing = upright;
             }
         }
         if cut < range.end {
