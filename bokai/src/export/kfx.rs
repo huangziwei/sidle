@@ -2437,8 +2437,8 @@ fn reject_unrasterizable_svg(_href: &str, _data: &[u8]) -> io::Result<()> {
 }
 
 /// Prepare a media asset's bytes for KFX bundling: a raster image is re-encoded
-/// as grayscale JPEG-XR, Amazon's own image codec, and an SVG is rasterized onto
-/// the same path. A font or an encode failure takes the JPEG sanitize path.
+/// as JPEG-XR in `mode`, and an SVG is rasterized onto the same path. A font or
+/// an encode failure takes the JPEG sanitize path.
 fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
     if let Some(jxr) = encode_jxr_asset(data, mode) {
         return jxr;
@@ -2464,7 +2464,7 @@ fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
 /// [`ColorMode`][jxr::ColorMode]. Shared by [`encode_jxr_asset`] and the
 /// fixed-layout manga thumbnailer.
 fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Option<Vec<u8>> {
-    use jxr::{ColorMode, ImageInput, encode};
+    use jxr::{ChromaSampling, ColorMode, EncodeOptions, ImageInput, encode_with_options};
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
@@ -2506,7 +2506,15 @@ fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Optio
         planes: &planes,
         premultiplied_alpha: false,
     };
-    encode(&input, mode, JXR_DEFAULT_QP).ok()
+    let opts = EncodeOptions {
+        qp: JXR_DEFAULT_QP,
+        // Every colour Kindle is a Kaleido panel: colour resolves at 150 ppi
+        // against 300 ppi luma, so 4:4:4 stores chroma no device can display.
+        // Ignored on the grayscale path, which never reaches the chroma arms.
+        chroma: ChromaSampling::Yuv420,
+        ..Default::default()
+    };
+    encode_with_options(&input, mode, opts).ok()
 }
 
 fn build_external_resource_fragment(
