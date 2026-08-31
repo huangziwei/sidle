@@ -17,6 +17,12 @@ pub struct Resolver {
     pub line_spacing: f32,
     /// Feeds `embolden`.
     pub embolden_weight: f32,
+    /// Added after every character, in ems.
+    pub character_spacing: f32,
+    /// Added at every word break, in ems.
+    pub word_spacing: f32,
+    /// Added before a paragraph, in ems.
+    pub paragraph_spacing: f32,
 }
 
 /// Divides `font_size * embolden_weight` into the dots `embolden` returns.
@@ -29,6 +35,9 @@ impl Default for Resolver {
             root_font_size: ROOT_FONT_SIZE_PX,
             line_spacing: 1.0,
             embolden_weight: 0.0,
+            character_spacing: 0.0,
+            word_spacing: 0.0,
+            paragraph_spacing: 0.0,
         }
     }
 }
@@ -79,6 +88,16 @@ impl Resolver {
     pub fn embolden(&self, font_size: f32) -> f32 {
         (font_size * self.embolden_weight / EMBOLDEN_DIVISOR).round()
     }
+
+    /// Dots `character_spacing` adds after one glyph at `font_size`.
+    pub fn tracking(&self, font_size: f32) -> f32 {
+        font_size * self.character_spacing
+    }
+
+    /// Dots `word_spacing` adds to one word break at `font_size`.
+    pub fn word_gap(&self, font_size: f32) -> f32 {
+        font_size * self.word_spacing
+    }
 }
 
 #[cfg(test)]
@@ -92,7 +111,7 @@ mod tests {
             metrics: Metrics::kindle(),
             root_font_size: 44.0,
             line_spacing: 1.35,
-            embolden_weight: 0.0,
+            ..Resolver::default()
         }
     }
 
@@ -158,7 +177,7 @@ mod tests {
             metrics: Metrics::kfx(KINDLE_PANEL_DPI),
             root_font_size: 44.0,
             line_spacing: 1.0,
-            embolden_weight: 0.0,
+            ..Resolver::default()
         };
 
         assert_eq!(plain.line_height(Length::Em(2.0), 44.0), 88.0);

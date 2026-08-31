@@ -3,7 +3,8 @@
 //! ```text
 //! sidle-render [options] <book>
 //!
-//!   --panel <ile>     panel ladders, in the form `Panel::parse` reads
+//!   --device <name>    which screen to emulate: colorsoft or scribe
+//!   --panel <file>     panel ladders, in the form `Panel::parse` reads
 //!   --fonts <dir>      faces to search ahead of the host's installed ones
 //!   --serif <family>   what the reading settings choose for Latin
 //!   --cjk <family>     the same for Chinese, Japanese and Korean
@@ -22,11 +23,13 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use bokai::model::{AnchorTarget, Book, ChapterId, PositionMap};
-use sidle_render::chrome::{Action, Canvas, Chrome, Ladder, Overlay, Position, aa, bars, goto};
+use bokai::model::{AnchorTarget, Book, ChapterId, LandmarkType, PositionMap};
+use sidle_render::chrome::{
+    AaPane, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto,
+};
 use sidle_render::font::Script as FaceScript;
 use sidle_render::paint::{Cache, Painter};
-use sidle_render::settings::{Direction, Panel, Stop};
+use sidle_render::settings::{Device, Direction, Panel, Script, Stop, reading_families};
 use sidle_render::{Axis, BookResources, Fonts, Layout, Node, Pages, Settings, Size, Viewport};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use winit::application::ApplicationHandler;
@@ -35,8 +38,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-const USAGE: &str = "usage: sidle-render [--panel <file>] [--fonts <dir>] [--serif <family>] \
-[--cjk <family>] [--chapter <n>] [--font-size <n>] [--pages <n>] [--lines] <book>";
+const USAGE: &str = "usage: sidle-render [--device <name>] [--panel <file>] [--fonts <dir>] \
+[--serif <family>] [--cjk <family>] [--chapter <n>] [--font-size <n>] [--pages <n>] [--lines] \
+<book>";
 
 /// Words a reader gets through in a minute, which sets the time left.
 const WORDS_A_MINUTE: f32 = 220.0;
@@ -47,6 +51,7 @@ const LOCATIONS_A_PAGE: i64 = 14;
 #[derive(Default)]
 struct Options {
     book: Option<PathBuf>,
+    device: Option<Device>,
     panel: Option<PathBuf>,
     fonts: Vec<PathBuf>,
     serif: Option<String>,
@@ -66,6 +71,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 .ok_or_else(|| format!("{argument} needs a value"))
         };
         match argument.as_str() {
+            "--device" => options.device = Some(named_device(&value()?)?),
             "--panel" => options.panel = Some(PathBuf::from(value()?)),
             "--fonts" => options.fonts.push(PathBuf::from(value()?)),
             "--serif" => options.serif = Some(value()?),
@@ -85,6 +91,17 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     Ok(options)
 }
 
+/// The [`Device`] `name` picks, matched however it is cased.
+fn named_device(name: &str) -> Result<Device, Box<dyn Error>> {
+    Device::ALL
+        .into_iter()
+        .find(|device| device.name().eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let names: Vec<&str> = Device::ALL.iter().map(|d| d.name()).collect();
+            format!("no such device: {name} (try {})", names.join(", ")).into()
+        })
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     let Some(path) = options.book.clone() else {
@@ -102,6 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let positions = book.position_map();
     let contents = contents_of(&mut book, &spine, &positions);
+    let fixed = fixed_rows(&book, &spine);
     let resources = BookResources::declared(&mut book);
 
     let panel = options.panel.as_ref().map(Panel::read).transpose()?;
@@ -116,11 +134,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         fonts.reading_family(FaceScript::Cjk, &[family]);
     }
 
-    let mut settings = Settings::default_for(
-        panel
-            .as_ref()
-            .unwrap_or(&Panel::reader(Size::new(1272.0, 1696.0), 300.0)),
-    );
+    let device = options.device.or(panel.is_none().then(Device::default));
+    let in_force = panel
+        .clone()
+        .unwrap_or_else(|| device.unwrap_or_default().panel());
+    let numbered = !book.page_list().is_empty();
+    let families: Vec<String> = reading_families(&language)
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+
+    let mut settings = Settings::default_for(&in_force);
+    settings.progress =
+        sidle_render::settings::Progress::default_for(numbered, !contents.is_empty());
     if let Some(stop) = options.font_size {
         settings.font_size = stop;
     }
@@ -136,6 +162,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         resources,
         fonts,
         panel,
+        chapter_starts: Vec::new(),
+        fixed,
+        device,
+        families,
+        numbered,
         settings,
         chrome: Chrome::default(),
         per_line: options.per_line,
@@ -157,6 +188,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut reader)?;
     Ok(())
+}
+
+/// The chapter each [`goto::Fixed`] row opens, where the book marks one.
+fn fixed_rows(book: &Book, spine: &[ChapterId]) -> Vec<(goto::Fixed, usize)> {
+    let chapter_of = |kind: LandmarkType| -> Option<usize> {
+        let landmark = book
+            .landmarks()
+            .iter()
+            .find(|landmark| landmark.landmark_type == kind)?;
+        match book.resolve_toc_href(ChapterId(0), &landmark.href)? {
+            AnchorTarget::Chapter(id) => spine.iter().position(|entry| *entry == id),
+            AnchorTarget::Internal(global) => {
+                spine.iter().position(|entry| *entry == global.chapter)
+            }
+            _ => None,
+        }
+    };
+    let last = spine.len().saturating_sub(1);
+    let beginning = chapter_of(LandmarkType::StartReading)
+        .or_else(|| chapter_of(LandmarkType::BodyMatter))
+        .unwrap_or(0);
+
+    let mut rows = vec![(
+        goto::Fixed::Cover,
+        chapter_of(LandmarkType::Cover).unwrap_or(0),
+    )];
+    if let Some(front) = chapter_of(LandmarkType::FrontMatter) {
+        rows.push((goto::Fixed::FrontMatter, front));
+    }
+    rows.push((goto::Fixed::Beginning, beginning));
+    rows.push((goto::Fixed::End, last));
+    rows
 }
 
 /// Every contents row, in the order the book lists them.
@@ -227,8 +290,18 @@ struct Reader {
     positions: Option<PositionMap>,
     resources: BookResources,
     fonts: Fonts,
-    /// The panel being laid out for. Without one the window is the page.
+    /// A panel read from a file, which stands in for a device's own.
     panel: Option<Panel>,
+    /// The location each chapter opens at, filled by `chapter_locations`.
+    chapter_starts: Vec<i64>,
+    /// The rows above the book's own contents, and what each opens.
+    fixed: Vec<(goto::Fixed, usize)>,
+    /// Which [`Device`] is in force.
+    device: Option<Device>,
+    /// The reading fonts this book's language offers.
+    families: Vec<String>,
+    /// Whether the book carries page numbers.
+    numbered: bool,
     settings: Settings,
     chrome: Chrome,
     per_line: bool,
@@ -246,6 +319,88 @@ struct Reader {
     view: Option<View>,
 }
 
+/// The location the first element drawn in each page of `pages` falls in.
+/// An empty vector where the book states no location scale.
+fn page_locations(
+    root: &sidle_render::Fragment,
+    pages: &Pages,
+    chapter: &bokai::model::Chapter,
+    positions: Option<&PositionMap>,
+) -> Vec<i64> {
+    let Some(positions) = positions.filter(|map| map.has_locations()) else {
+        return Vec::new();
+    };
+    let along = |rect: sidle_render::Rect| match pages.axis() {
+        Axis::VerticalRl => -rect.right(),
+        _ => rect.y,
+    };
+    let mut drawn: Vec<(f32, i64)> = root
+        .walk()
+        .filter(|fragment| !matches!(fragment.content, sidle_render::Content::Empty))
+        .filter_map(|fragment| {
+            let element = source_element(chapter, fragment.source)?;
+            let position = positions.position(element, 0)?;
+            Some((along(fragment.rect), positions.location_for(position)))
+        })
+        .collect();
+    drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    (0..pages.count())
+        .map(|n| {
+            let start = along(pages.window(n));
+            drawn
+                .iter()
+                .find(|(at, _)| *at >= start - 0.01)
+                .or(drawn.last())
+                .map_or(1, |(_, location)| *location)
+        })
+        .collect()
+}
+
+/// The source element `node` belongs to: its own, else its nearest ancestor's.
+/// A text node carries none; the block that holds it does.
+fn source_element(chapter: &bokai::model::Chapter, node: bokai::model::NodeId) -> Option<i64> {
+    let mut at = Some(node);
+    while let Some(id) = at {
+        if let Some(element) = chapter.semantics.source_element(id) {
+            return Some(element);
+        }
+        at = chapter.node(id).and_then(|node| node.parent);
+    }
+    None
+}
+
+/// The location `chapter` opens at.
+fn first_location(chapter: &bokai::model::Chapter, positions: Option<&PositionMap>) -> Option<i64> {
+    let positions = positions.filter(|map| map.has_locations())?;
+    let element = chapter.source_elements().into_iter().next()?;
+    Some(positions.location_for(positions.position(element, 0)?))
+}
+
+/// A copy of what the panels show, taken before the canvas borrows the fonts.
+struct Shown {
+    settings: Settings,
+    device: Option<Device>,
+    families: Vec<String>,
+    vertical: bool,
+    numbered: bool,
+    chaptered: bool,
+}
+
+impl Shown {
+    fn reading<'a>(&'a self, panel: &'a Panel) -> Reading<'a> {
+        Reading {
+            panel,
+            settings: &self.settings,
+            device: self.device,
+            families: &self.families,
+            vertical: self.vertical,
+            numbered: self.numbered,
+            chaptered: self.chaptered,
+        }
+    }
+}
+
 /// What a drawn page depends on: another value means another page.
 #[derive(PartialEq)]
 struct PageKey {
@@ -261,6 +416,8 @@ struct Laid {
     root: sidle_render::Fragment,
     viewport: Viewport,
     words: usize,
+    /// The location each page opens at, empty without a location scale.
+    locations: Vec<i64>,
 }
 
 struct View {
@@ -273,16 +430,14 @@ struct View {
 }
 
 impl Reader {
-    /// The panel in force: the one named, or one sized to the window.
-    fn panel_for(&self, window: Size) -> Panel {
-        self.panel
-            .clone()
-            .unwrap_or_else(|| Panel::reader(window, self.dpi))
+    /// The panel in force: the one named, else the screen being emulated.
+    fn panel_for(&self) -> Panel {
+        self.panel.clone().unwrap_or_else(|| self.device().panel())
     }
 
     /// The area a page is laid out into, less the bars above and below it.
-    fn viewport(&self, window: Size) -> Viewport {
-        let panel = self.panel_for(window);
+    fn viewport(&self) -> Viewport {
+        let panel = self.panel_for();
         let direction = if self.axis.is_vertical() {
             Direction::Vertical
         } else {
@@ -295,8 +450,8 @@ impl Reader {
         viewport
     }
 
-    fn relayout(&mut self, window: Size) {
-        let viewport = self.viewport(window);
+    fn relayout(&mut self) {
+        let viewport = self.viewport();
         if self
             .laid
             .as_ref()
@@ -325,12 +480,43 @@ impl Reader {
         let pages = Pages::of(&laid, &viewport);
         self.page = self.page.min(pages.count().saturating_sub(1));
         self.sheet = None;
+        let locations = page_locations(&laid.root, &pages, &chapter, self.positions.as_ref());
         self.laid = Some(Laid {
             pages,
             root: laid.root,
             viewport,
             words,
+            locations,
         });
+    }
+
+    /// Give every contents row the location its chapter opens at.
+    fn number_the_contents(&mut self) {
+        let starts = self.chapter_locations().to_vec();
+        for entry in &mut self.contents {
+            if let Some(start) = starts.get(entry.chapter) {
+                entry.location = *start;
+            }
+        }
+    }
+
+    /// The location each chapter opens at, read once and kept.
+    fn chapter_locations(&mut self) -> &[i64] {
+        if self.chapter_starts.is_empty() {
+            let spine = self.spine.clone();
+            let mut starts = Vec::with_capacity(spine.len());
+            for id in spine {
+                let start = self
+                    .book
+                    .load_chapter(id)
+                    .ok()
+                    .and_then(|chapter| first_location(&chapter, self.positions.as_ref()))
+                    .unwrap_or(0);
+                starts.push(start);
+            }
+            self.chapter_starts = starts;
+        }
+        &self.chapter_starts
     }
 
     /// Every picture drawn on page `n`.
@@ -406,7 +592,7 @@ impl Reader {
         self.request_redraw();
     }
 
-    /// Where the reader is, as the bars state it.
+    /// What [`bars::draw`] states about this page.
     fn position(&self) -> Position {
         let pages = self
             .laid
@@ -422,7 +608,14 @@ impl Reader {
             .map(|map| map.location_count())
             .filter(|count| *count > 0)
             .unwrap_or(chapters as i64 * LOCATIONS_A_PAGE);
+        // The book's own number where it states one, else a share of the axis.
+        let location = self
+            .laid
+            .as_ref()
+            .and_then(|laid| laid.locations.get(self.page).copied())
+            .unwrap_or_else(|| ((through * locations as f32) as i64).max(1));
         let left = pages.saturating_sub(self.page + 1) as f32 / pages as f32;
+        let minutes = |words: f32| (words / WORDS_A_MINUTE).ceil() as u32;
 
         Position {
             title: self.title.clone(),
@@ -432,36 +625,27 @@ impl Reader {
                 .rfind(|entry| entry.chapter <= self.chapter)
                 .map(|entry| entry.title.clone())
                 .unwrap_or_default(),
-            location: ((through * locations as f32) as i64).max(1),
+            location,
             locations,
+            page: (self.chapter * pages + self.page + 1) as i64,
+            pages: (chapters * pages) as i64,
             percent: (through * 100.0).round() as u32,
-            minutes_left: ((words as f32 * left) / WORDS_A_MINUTE).ceil() as u32,
+            minutes_left_in_chapter: minutes(words as f32 * left),
+            minutes_left: minutes(words as f32 * (1.0 - through) * chapters as f32),
         }
     }
 
-    /// Where each ladder sits, as `Aa` shows it.
-    fn ladder(&self, panel: &Panel) -> Ladder {
-        let script = sidle_render::settings::Script::of(&self.language);
-        Ladder {
-            font_size: self.settings.font_size,
-            font_sizes: panel.font_sizes.get(&script).map_or(1, Vec::len).max(1),
-            bold: self.settings.boldness,
-            bolds: panel.boldness.len().max(1),
-            spacing: self.settings.line_spacing,
-            margins: self.settings.margins,
+    /// A copy of the fields [`Reading`] borrows, taken before [`Canvas`]
+    /// borrows `self.fonts`.
+    fn shown(&self) -> Shown {
+        Shown {
+            settings: self.settings.clone(),
+            device: self.device,
+            families: self.families.clone(),
             vertical: self.axis.is_vertical(),
-            justified: self.settings.justified,
-            family: self.chrome_family(),
-            families: vec![
-                "Publisher".to_string(),
-                "Serif".to_string(),
-                "Sans".to_string(),
-            ],
+            numbered: self.numbered,
+            chaptered: self.contents.len() > 1,
         }
-    }
-
-    fn chrome_family(&self) -> usize {
-        0
     }
 
     /// Act on a click or a key.
@@ -470,6 +654,10 @@ impl Reader {
             Action::TurnPage(by) => self.turn(by),
             Action::Open(overlay) => {
                 self.chrome.overlay = overlay;
+                self.chrome.pane = AaPane::Tab;
+                if overlay == Overlay::GoTo {
+                    self.number_the_contents();
+                }
                 self.request_redraw();
             }
             Action::Close => {
@@ -478,13 +666,43 @@ impl Reader {
             }
             Action::Tab(tab) => {
                 self.chrome.tab = tab;
+                self.chrome.pane = AaPane::Tab;
+                self.request_redraw();
+            }
+            Action::Pane(pane) => {
+                self.chrome.pane = pane;
+                self.request_redraw();
+            }
+            Action::Preset(preset) => {
+                let panel = self.panel.clone();
+                let panel = panel.unwrap_or_else(|| self.device().panel());
+                self.restyle(|s| *s = s.preset(&panel, preset));
+            }
+            Action::Screen(device) => {
+                self.device = Some(device);
+                self.panel = None;
+                self.settings = Settings::default_for(&device.panel());
+                self.laid = None;
+                self.sheet = None;
                 self.request_redraw();
             }
             Action::FontSize(stop) => self.restyle(|s| s.font_size = stop),
             Action::Bold(stop) => self.restyle(|s| s.boldness = stop),
-            Action::Spacing(stop) => self.restyle(|s| s.line_spacing = stop),
+            Action::Spacing(stop) => self.restyle(|s| {
+                s.line_spacing = stop;
+                s.fine_spacing = false;
+            }),
+            Action::FineLineSpacing(stop) => self.restyle(|s| {
+                s.fine_line_spacing = stop;
+                s.fine_spacing = true;
+            }),
+            Action::ParagraphSpacing(stop) => self.restyle(|s| s.paragraph_spacing = stop),
+            Action::WordSpacing(stop) => self.restyle(|s| s.word_spacing = stop),
+            Action::CharacterSpacing(stop) => self.restyle(|s| s.character_spacing = stop),
             Action::Margins(stop) => self.restyle(|s| s.margins = stop),
             Action::Justified(on) => self.restyle(|s| s.justified = on),
+            Action::Hyphenate(on) => self.restyle(|s| s.hyphenate = on),
+            Action::Columns(columns) => self.restyle(|s| s.columns = columns),
             Action::Vertical(on) => {
                 self.axis = if on {
                     Axis::VerticalRl
@@ -498,7 +716,16 @@ impl Reader {
                 self.chrome.dark = dark;
                 self.request_redraw();
             }
-            Action::Family(_) => self.request_redraw(),
+            Action::Progress(mode) => {
+                self.settings.progress = mode;
+                self.request_redraw();
+            }
+            Action::Family(family) => {
+                self.settings.family = family;
+                self.apply_family();
+                self.laid = None;
+                self.request_redraw();
+            }
             Action::GoToChapter(chapter) => {
                 self.chrome.overlay = Overlay::None;
                 self.go_to(chapter);
@@ -507,7 +734,28 @@ impl Reader {
                 self.chrome.overlay = Overlay::None;
                 self.go_to(0);
             }
+            Action::GoToEnd => {
+                self.chrome.overlay = Overlay::None;
+                self.go_to(self.spine.len().saturating_sub(1));
+            }
         }
+    }
+
+    /// The screen being emulated, which a named profile stands in for.
+    fn device(&self) -> Device {
+        self.device.unwrap_or_default()
+    }
+
+    /// Point the reading settings at the family the font list chose.
+    fn apply_family(&mut self) {
+        let Some(family) = self.families.get(self.settings.family) else {
+            return;
+        };
+        let script = match Script::of(&self.language) {
+            Script::Cjk => FaceScript::Cjk,
+            _ => FaceScript::Latin,
+        };
+        self.fonts.reading_family(script, &[family.as_str()]);
     }
 
     fn restyle(&mut self, change: impl FnOnce(&mut Settings)) {
@@ -533,11 +781,10 @@ impl Reader {
         };
         // The panel is the window's own pixels at the resolution they sit at.
         let scale = view.window.scale_factor() as f32;
-        let window = Size::new(physical.width as f32, physical.height as f32);
         self.dpi = sidle_render::units::CSS_DPI * scale;
-        self.relayout(window);
+        self.relayout();
 
-        let panel = self.panel_for(window);
+        let panel = self.panel_for();
         let theme = self.chrome.theme();
         let fit = (physical.width as f32 / panel.size.width)
             .min(physical.height as f32 / panel.size.height);
@@ -615,10 +862,12 @@ impl Reader {
 
         self.chrome.begin();
         let at = self.position();
-        let ladder = self.ladder(&panel);
+        let shown = self.shown();
+        let mode = shown.settings.progress;
         let overlay = self.chrome.overlay;
         let leftward = self.pages_leftward();
         let contents_here = self.chapter;
+        let fixed = self.fixed.clone();
         let mut canvas = Canvas {
             target: &mut target.as_mut(),
             fonts: &mut self.fonts,
@@ -628,13 +877,17 @@ impl Reader {
             scale: fit,
             offset,
         };
-        bars::draw(&mut self.chrome, &mut canvas, &at, leftward);
+        bars::draw(&mut self.chrome, &mut canvas, &at, mode, leftward);
         match overlay {
             Overlay::None => {}
-            Overlay::Aa => aa::draw(&mut self.chrome, &mut canvas, &ladder),
-            Overlay::GoTo => {
-                goto::draw(&mut self.chrome, &mut canvas, &self.contents, contents_here)
-            }
+            Overlay::Aa => aa::draw(&mut self.chrome, &mut canvas, &shown.reading(&panel)),
+            Overlay::GoTo => goto::draw(
+                &mut self.chrome,
+                &mut canvas,
+                &fixed,
+                &self.contents,
+                contents_here,
+            ),
         }
 
         let view = self.view.as_mut().expect("checked at the top of draw");
@@ -652,11 +905,7 @@ impl Reader {
 
     /// What the first `pages` pages of this chapter settled on.
     fn report(&mut self, pages: usize) {
-        let window = self
-            .panel
-            .as_ref()
-            .map_or(Size::new(1272.0, 1696.0), |panel| panel.size);
-        self.relayout(window);
+        self.relayout();
         let Some(laid) = &self.laid else {
             eprintln!("nothing laid out");
             return;
@@ -666,8 +915,8 @@ impl Reader {
         let origin = if vertical { top } else { left };
         let block_origin = if vertical { left } else { top };
         println!(
-            "{:<6} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6}",
-            "page", "elem", "line", "top", "pitch", "left", "right", "adv"
+            "{:<6} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+            "page", "elem", "line", "top", "pitch", "left", "right", "adv", "loc"
         );
         for number in 0..pages.min(laid.pages.count()) {
             let window = laid.pages.window(number);
@@ -703,7 +952,7 @@ impl Reader {
                 .fold(f32::INFINITY, f32::min);
 
             println!(
-                "{:<6} {:>5} {:>5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0}",
+                "{:<6} {:>5} {:>5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6}",
                 number + 1,
                 runs.len(),
                 blocks.len(),
@@ -716,6 +965,7 @@ impl Reader {
                 },
                 if end.is_finite() { end + origin } else { 0.0 },
                 median_advance(&runs),
+                laid.locations.get(number).copied().unwrap_or(0),
             );
             if !self.per_line {
                 continue;
@@ -860,8 +1110,9 @@ impl ApplicationHandler for Reader {
                     Key::Character("p") => self.go_to(self.chapter.saturating_sub(1)),
                     Key::Character("q") => event_loop.exit(),
                     Key::Character("+") | Key::Character("=") => {
-                        let panel = self.panel_for(Size::new(1272.0, 1696.0));
-                        let stops = self.ladder(&panel).font_sizes;
+                        let panel = self.panel_for();
+                        let script = Script::of(&self.language);
+                        let stops = panel.font_sizes.get(&script).map_or(1, Vec::len).max(1);
                         let next = (self.settings.font_size + 1).min(stops - 1);
                         self.act(Action::FontSize(next));
                     }

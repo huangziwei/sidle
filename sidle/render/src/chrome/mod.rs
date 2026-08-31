@@ -14,7 +14,7 @@ use crate::font::Fonts;
 use crate::geom::{Rect, Size};
 use crate::paint::{Cache, Painter};
 use crate::resource::Resources;
-use crate::settings::Stop;
+use crate::settings::{Device, Panel, Preset, Progress, Settings, Stop};
 
 /// Which overlay is open over the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +48,32 @@ impl AaTab {
     }
 }
 
+/// A screen `Aa` opens over a tab, which a back row leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AaPane {
+    /// The tab itself.
+    #[default]
+    Tab,
+    FontList,
+    Spacing,
+    ReadingProgress,
+    /// Which [`Device`] is in force.
+    Screen,
+}
+
+impl AaPane {
+    /// What this screen calls itself.
+    pub fn title(self) -> &'static str {
+        match self {
+            AaPane::Tab => "",
+            AaPane::FontList => "Font family",
+            AaPane::Spacing => "Spacing",
+            AaPane::ReadingProgress => "Reading progress",
+            AaPane::Screen => "Device",
+        }
+    }
+}
+
 /// What a click on a control asks for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -55,16 +81,27 @@ pub enum Action {
     Open(Overlay),
     Close,
     Tab(AaTab),
+    Pane(AaPane),
+    Preset(Preset),
+    Screen(Device),
     FontSize(usize),
     Bold(usize),
     Spacing(Stop),
+    FineLineSpacing(usize),
+    ParagraphSpacing(usize),
+    WordSpacing(usize),
+    CharacterSpacing(usize),
     Margins(Stop),
     Vertical(bool),
     Justified(bool),
+    Hyphenate(bool),
+    Columns(u8),
     Family(usize),
     PageColor(bool),
+    Progress(Progress),
     GoToChapter(usize),
     GoToBeginning,
+    GoToEnd,
 }
 
 /// One control's area, and what clicking it asks for.
@@ -110,28 +147,60 @@ pub fn grey(level: u8) -> Color {
     }
 }
 
-/// What the bars say about where the reader is.
+/// What [`bars::draw`] states about where a page sits in its book.
 pub struct Position {
     pub title: String,
     pub chapter_title: String,
     pub location: i64,
     pub locations: i64,
+    pub page: i64,
+    pub pages: i64,
     pub percent: u32,
+    pub minutes_left_in_chapter: u32,
     pub minutes_left: u32,
 }
 
-/// Where each stop of a ladder sits, as `Aa` shows it.
-pub struct Ladder {
-    pub font_size: usize,
-    pub font_sizes: usize,
-    pub bold: usize,
-    pub bolds: usize,
-    pub spacing: Stop,
-    pub margins: Stop,
+impl Position {
+    /// What the bar below the page reads in `mode`.
+    pub fn progress(&self, mode: Progress) -> String {
+        match mode {
+            Progress::PageNumber => format!("Page {} of {}", self.page, self.pages),
+            Progress::Location => format!("Loc {} of {}", self.location, self.locations),
+            Progress::TimeLeftInChapter => {
+                format!("{} left in chapter", duration(self.minutes_left_in_chapter))
+            }
+            Progress::TimeLeft => format!("{} left in book", duration(self.minutes_left)),
+            Progress::None => String::new(),
+        }
+    }
+}
+
+/// `minutes` in the short form the bar has room for.
+fn duration(minutes: u32) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "less than 1 min".to_string(),
+        (0, 1) => "1 min".to_string(),
+        (0, minutes) => format!("{minutes} mins"),
+        (1, 0) => "1 hr".to_string(),
+        (hours, 0) => format!("{hours} hrs"),
+        (1, minutes) => format!("1 hr {minutes} mins"),
+        (hours, minutes) => format!("{hours} hrs {minutes} mins"),
+    }
+}
+
+/// Everything the panels show about the book in hand.
+pub struct Reading<'a> {
+    pub panel: &'a Panel,
+    pub settings: &'a Settings,
+    /// Which [`Device`] is in force, absent for a panel read from a file.
+    pub device: Option<Device>,
+    /// The reading fonts this book's script offers.
+    pub families: &'a [String],
+    /// Whether the book reads down the page.
     pub vertical: bool,
-    pub justified: bool,
-    pub family: usize,
-    pub families: Vec<String>,
+    /// Whether the book carries page numbers, and whether it has chapters.
+    pub numbered: bool,
+    pub chaptered: bool,
 }
 
 /// The chrome's own state.
@@ -139,6 +208,7 @@ pub struct Ladder {
 pub struct Chrome {
     pub overlay: Overlay,
     pub tab: AaTab,
+    pub pane: AaPane,
     pub dark: bool,
     hits: Vec<Hit>,
 }
@@ -178,8 +248,8 @@ impl Chrome {
     /// How far down the page the text may start, and where it must stop.
     pub fn bands(&self, panel: Size) -> (f32, f32) {
         (
-            bars::HEADER * panel.height / 1696.0,
-            bars::FOOTER * panel.height / 1696.0,
+            bars::HEADER * panel.height / bars::REFERENCE,
+            bars::FOOTER * panel.height / bars::REFERENCE,
         )
     }
 }
@@ -202,6 +272,12 @@ pub struct Canvas<'a, 'p> {
 impl Canvas<'_, '_> {
     fn view(&self) -> Transform {
         Transform::from_translate(self.offset.0, self.offset.1).post_scale(self.scale, self.scale)
+    }
+
+    /// One dot of the reference panel every chrome measurement is stated
+    /// against, in dots of the panel in hand.
+    pub fn unit(&self) -> f32 {
+        self.panel.height / bars::REFERENCE
     }
 
     pub fn fill(&mut self, rect: Rect, color: Color) {
@@ -285,5 +361,73 @@ struct NoResources;
 impl Resources for NoResources {
     fn image_size(&self, _src: &str) -> Option<Size> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOCATION: i64 = 412;
+    const LOCATIONS: i64 = 5108;
+    const PAGE: i64 = 31;
+    const PAGES: i64 = 402;
+
+    fn somewhere() -> Position {
+        Position {
+            title: "A Book".to_string(),
+            chapter_title: "One".to_string(),
+            location: LOCATION,
+            locations: LOCATIONS,
+            page: PAGE,
+            pages: PAGES,
+            percent: 8,
+            minutes_left_in_chapter: 7,
+            minutes_left: 194,
+        }
+    }
+
+    #[test]
+    fn each_progress_mode_reads_the_way_the_bar_reads_it() {
+        let at = somewhere();
+
+        assert_eq!(
+            at.progress(Progress::Location),
+            format!("Loc {LOCATION} of {LOCATIONS}")
+        );
+        assert_eq!(
+            at.progress(Progress::PageNumber),
+            format!("Page {PAGE} of {PAGES}")
+        );
+        assert_eq!(
+            at.progress(Progress::TimeLeftInChapter),
+            "7 mins left in chapter"
+        );
+        assert_eq!(
+            at.progress(Progress::TimeLeft),
+            "3 hrs 14 mins left in book"
+        );
+        assert_eq!(at.progress(Progress::None), "");
+    }
+
+    #[test]
+    fn a_duration_takes_the_singular_and_the_short_hour() {
+        assert_eq!(duration(0), "less than 1 min");
+        assert_eq!(duration(1), "1 min");
+        assert_eq!(duration(59), "59 mins");
+        assert_eq!(duration(60), "1 hr");
+        assert_eq!(duration(61), "1 hr 1 mins");
+        assert_eq!(duration(120), "2 hrs");
+    }
+
+    #[test]
+    fn the_topmost_control_takes_a_click() {
+        let mut chrome = Chrome::default();
+        chrome.add(Rect::new(0.0, 0.0, 100.0, 100.0), Action::Close);
+        chrome.add(Rect::new(10.0, 10.0, 20.0, 20.0), Action::TurnPage(1));
+
+        assert_eq!(chrome.acted((15.0, 15.0)), Some(Action::TurnPage(1)));
+        assert_eq!(chrome.acted((50.0, 50.0)), Some(Action::Close));
+        assert_eq!(chrome.acted((150.0, 50.0)), None);
     }
 }

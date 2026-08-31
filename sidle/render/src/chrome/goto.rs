@@ -1,7 +1,28 @@
-//! `Go To`: a card over the page listing the book's own contents.
+//! `Go To`: a card over the page listing the book's own contents, under the
+//! fixed rows every book has.
 
 use super::{Action, Canvas, Chrome, text::Align};
 use crate::geom::Rect;
+
+/// A row every book carries, above its own contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fixed {
+    Cover,
+    FrontMatter,
+    Beginning,
+    End,
+}
+
+impl Fixed {
+    pub fn label(self) -> &'static str {
+        match self {
+            Fixed::Cover => "Cover",
+            Fixed::FrontMatter => "Front Matter",
+            Fixed::Beginning => "Beginning",
+            Fixed::End => "End",
+        }
+    }
+}
 
 /// One row of the contents list.
 pub struct Entry {
@@ -15,9 +36,15 @@ pub struct Entry {
 }
 
 /// Draw the card and as many entries as fit, marking the one in hand.
-pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, entries: &[Entry], here: usize) {
+pub fn draw(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    fixed: &[(Fixed, usize)],
+    entries: &[Entry],
+    here: usize,
+) {
     let panel = canvas.panel;
-    let unit = panel.height / 1696.0;
+    let unit = canvas.unit();
     let theme = canvas.theme;
 
     // Anything outside the card closes it.
@@ -97,22 +124,26 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, entries: &[Entry],
         theme.ink,
     );
 
-    let beginning = Rect::new(left, tabs + 108.0 * unit, right - left, 76.0 * unit);
-    canvas.text(
-        "Beginning",
-        38.0 * unit,
-        theme.ink,
-        false,
-        (left, beginning.y + 14.0 * unit),
-        Align::Left,
-    );
-    chrome.add(beginning, Action::GoToBeginning);
-    canvas.rule(left, right, beginning.bottom(), 2.0 * unit, theme.faint);
+    let height = 84.0 * unit;
+    let mut y = tabs + 108.0 * unit;
+    for (row, chapter) in fixed {
+        canvas.text(
+            row.label(),
+            38.0 * unit,
+            theme.ink,
+            false,
+            (left, y + 14.0 * unit),
+            Align::Left,
+        );
+        let area = Rect::new(left, y, right - left, height);
+        chrome.add(area, Action::GoToChapter(*chapter));
+        canvas.rule(left, right, area.bottom(), 2.0 * unit, theme.faint);
+        y += height;
+    }
+    y += 20.0 * unit;
 
-    let mut y = beginning.bottom() + 20.0 * unit;
-    let row = 84.0 * unit;
-    for (n, entry) in entries.iter().enumerate() {
-        if y + row > card.bottom() - 20.0 * unit {
+    for entry in entries {
+        if y + height > card.bottom() - 20.0 * unit {
             break;
         }
         let chosen = entry.chapter == here;
@@ -134,10 +165,9 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, entries: &[Entry],
                 Align::Right,
             );
         }
-        let area = Rect::new(left, y, right - left, row);
+        let area = Rect::new(left, y, right - left, height);
         chrome.add(area, Action::GoToChapter(entry.chapter));
         canvas.rule(left, right, area.bottom(), 2.0 * unit, theme.faint);
-        y += row;
-        let _ = n;
+        y += height;
     }
 }

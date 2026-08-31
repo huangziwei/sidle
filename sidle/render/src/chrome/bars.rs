@@ -1,8 +1,12 @@
-//! The bar above a page and the one below it, stated against a 1696-dot
-//! panel and scaled to the one in hand.
+//! The bar above a page and the one below it, stated against a panel
+//! [`REFERENCE`] dots tall and scaled to the one in hand.
 
 use super::{Action, Canvas, Chrome, Overlay, Position, text::Align};
 use crate::geom::Rect;
+use crate::settings::Progress;
+
+/// The panel height every measurement in the chrome is stated against.
+pub const REFERENCE: f32 = 1696.0;
 
 /// Height of the toolbar, the title band under it, and the two together.
 pub const TOOLBAR: f32 = 130.0;
@@ -14,9 +18,15 @@ pub const FOOTER: f32 = 150.0;
 
 /// Draw the toolbar, the title band, and the bar below the page.
 /// `leftward` states which side of the page carries on.
-pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, leftward: bool) {
+pub fn draw(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    at: &Position,
+    mode: Progress,
+    leftward: bool,
+) {
     let panel = canvas.panel;
-    let unit = panel.height / 1696.0;
+    let unit = canvas.unit();
     let side = panel.width * 0.05;
     let theme = canvas.theme;
 
@@ -69,7 +79,7 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, lef
     );
     canvas.rule(0.0, panel.width, HEADER * unit, 2.0 * unit, theme.ink);
 
-    // Below the page.
+    // Below the page: the chapter title, then `mode`, then the percentage.
     let foot = panel.height - FOOTER * unit;
     canvas.fill(Rect::new(0.0, foot, panel.width, FOOTER * unit), theme.page);
     canvas.rule(0.0, panel.width, foot, 2.0 * unit, theme.ink);
@@ -81,17 +91,24 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, lef
         (panel.width / 2.0, foot + 26.0 * unit),
         Align::Center,
     );
-    let progress = format!(
-        "Loc {} of {} | {} mins left in chapter | {}%",
-        at.location, at.locations, at.minutes_left, at.percent
-    );
+    let progress = at.progress(mode);
+    if !progress.is_empty() {
+        canvas.text(
+            &progress,
+            30.0 * unit,
+            theme.ink,
+            false,
+            (side, foot + 82.0 * unit),
+            Align::Left,
+        );
+    }
     canvas.text(
-        &progress,
+        &format!("{}%", at.percent),
         30.0 * unit,
         theme.ink,
         false,
-        (panel.width / 2.0, foot + 82.0 * unit),
-        Align::Center,
+        (panel.width - side, foot + 82.0 * unit),
+        Align::Right,
     );
 
     // One third of the page turns one way and the rest the other.

@@ -40,6 +40,12 @@ pub struct Viewport {
     pub align: TextAlign,
     /// Passed to `Resolver::embolden_weight`.
     pub embolden_weight: f32,
+    /// Passed to `Resolver::character_spacing`.
+    pub character_spacing: f32,
+    /// Passed to `Resolver::word_spacing`.
+    pub word_spacing: f32,
+    /// Extra space before a paragraph, in ems.
+    pub paragraph_spacing: f32,
 }
 
 impl Default for Viewport {
@@ -53,6 +59,9 @@ impl Default for Viewport {
             line_spacing: 1.0,
             align: TextAlign::Start,
             embolden_weight: 0.0,
+            character_spacing: 0.0,
+            word_spacing: 0.0,
+            paragraph_spacing: 0.0,
         }
     }
 }
@@ -87,6 +96,9 @@ impl Viewport {
             root_font_size: self.root_font_size,
             line_spacing: self.line_spacing,
             embolden_weight: self.embolden_weight,
+            character_spacing: self.character_spacing,
+            word_spacing: self.word_spacing,
+            paragraph_spacing: self.paragraph_spacing,
         }
     }
 
@@ -265,7 +277,7 @@ impl<'a> Flow<'a, '_> {
         let role = role_of(chapter, node);
         let inherited = self.inherit(parent, style);
 
-        let margin = self.logical(
+        let mut margin = self.logical(
             [
                 style.margin_top,
                 style.margin_right,
@@ -275,6 +287,9 @@ impl<'a> Flow<'a, '_> {
             available,
             inherited,
         );
+        if role == Role::Paragraph {
+            margin.block_start += self.resolver.paragraph_spacing * inherited.font_size;
+        }
         let padding = self.logical(
             [
                 style.padding_top,
@@ -564,10 +579,12 @@ impl<'a> Flow<'a, '_> {
             color: style.color.unwrap_or(inherited.color),
             letter_spacing: self
                 .length(style.letter_spacing, 0.0, inherited)
-                .unwrap_or(0.0),
+                .unwrap_or(0.0)
+                + self.resolver.tracking(inherited.font_size),
             word_spacing: self
                 .length(style.word_spacing, 0.0, inherited)
-                .unwrap_or(0.0),
+                .unwrap_or(0.0)
+                + self.resolver.word_gap(inherited.font_size),
             embolden: self.resolver.embolden(inherited.font_size),
             underline: style.text_decoration_underline,
             line_through: style.text_decoration_line_through,

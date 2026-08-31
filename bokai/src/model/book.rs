@@ -805,11 +805,7 @@ impl Book {
     /// Resolve a navigation href (TOC / page-list / landmarks), falling back to
     /// the chapter start when a `path#fragment`'s file resolves but its fragment
     /// is dead. See [`crate::import::Importer::resolve_toc_href`].
-    pub(crate) fn resolve_toc_href(
-        &self,
-        from_chapter: ChapterId,
-        href: &str,
-    ) -> Option<AnchorTarget> {
+    pub fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         self.backend.resolve_toc_href(from_chapter, href)
     }
 

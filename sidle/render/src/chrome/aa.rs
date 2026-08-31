@@ -1,16 +1,24 @@
-//! The `Aa` panel: a tab strip over Themes, Font, Layout and More.
+//! The `Aa` sheet: a tab strip over Themes, Font, Layout and More, and the
+//! screens a row opens over one of them.
 
-use super::{AaTab, Action, Canvas, Chrome, Ladder, text::Align};
+use super::{AaPane, AaTab, Action, Canvas, Chrome, Reading, text::Align};
 use crate::geom::Rect;
-use crate::settings::Stop;
+use crate::settings::{
+    CHARACTER_SPACINGS, Device, FINE_LINE_SPACINGS, PARAGRAPH_SPACINGS, Preset, Progress, Stop,
+    WORD_SPACINGS,
+};
 
 /// The share of the panel the sheet covers.
-const SHEET: f32 = 0.6;
+const SHEET: f32 = 0.62;
 
-/// Draw the sheet and everything on the tab in hand.
-pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, ladder: &Ladder) {
+/// Height of one row, and of one carrying a slider, in reference dots.
+const ROW: f32 = 84.0;
+const SLIDER_ROW: f32 = 112.0;
+
+/// Draw the sheet and whichever screen is showing.
+pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, reading: &Reading<'_>) {
     let panel = canvas.panel;
-    let unit = panel.height / 1696.0;
+    let unit = canvas.unit();
     let theme = canvas.theme;
     let top = panel.height * (1.0 - SHEET);
 
@@ -23,8 +31,39 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, ladder: &Ladder) {
     // Anything outside the sheet closes it.
     chrome.add(Rect::new(0.0, 0.0, panel.width, top), Action::Close);
 
+    let body = if chrome.pane == AaPane::Tab {
+        tabs(chrome, canvas, top, unit)
+    } else {
+        heading(chrome, canvas, top, unit)
+    };
+
+    let mut rows = Rows {
+        y: body,
+        left: panel.width * 0.05,
+        right: panel.width * 0.95,
+        unit,
+    };
+    match chrome.pane {
+        AaPane::Tab => match chrome.tab {
+            AaTab::Themes => themes(chrome, canvas, &mut rows, reading),
+            AaTab::Font => font(chrome, canvas, &mut rows, reading),
+            AaTab::Layout => layout(chrome, canvas, &mut rows, reading),
+            AaTab::More => more(chrome, canvas, &mut rows),
+        },
+        AaPane::FontList => font_list(chrome, canvas, &mut rows, reading),
+        AaPane::Spacing => spacing(chrome, canvas, &mut rows, reading),
+        AaPane::ReadingProgress => reading_progress(chrome, canvas, &mut rows, reading),
+        AaPane::Screen => screens(chrome, canvas, &mut rows, reading),
+    }
+}
+
+/// The tab strip, returning where the body starts.
+fn tabs(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) -> f32 {
+    let panel = canvas.panel;
+    let theme = canvas.theme;
     let strip = top + 62.0 * unit;
     let mut x = panel.width * 0.05;
+
     for tab in AaTab::ALL {
         let chosen = tab == chrome.tab;
         let label = canvas.text(
@@ -62,215 +101,267 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, ladder: &Ladder) {
         2.0 * unit,
         theme.faint,
     );
-
-    let body = strip + 90.0 * unit;
-    match chrome.tab {
-        AaTab::Themes => themes(chrome, canvas, body, unit),
-        AaTab::Font => font(chrome, canvas, body, unit, ladder),
-        AaTab::Layout => layout(chrome, canvas, body, unit, ladder),
-        AaTab::More => more(canvas, body, unit),
-    }
+    strip + 90.0 * unit
 }
 
-fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) {
+/// A sub-screen's back arrow and title, returning where its body starts.
+fn heading(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) -> f32 {
     let panel = canvas.panel;
     let theme = canvas.theme;
     let left = panel.width * 0.05;
-    let right = panel.width * 0.95;
+    let strip = top + 62.0 * unit;
 
+    chevron(canvas, (left + 14.0 * unit, strip), 18.0 * unit, false);
     canvas.text(
-        "Page Color",
-        36.0 * unit,
+        chrome.pane.title(),
+        38.0 * unit,
         theme.ink,
-        false,
-        (left, top),
+        true,
+        (left + 54.0 * unit, strip - 24.0 * unit),
         Align::Left,
     );
-    let pale = (right - 84.0 * unit, top + 18.0 * unit);
-    let dark = (right - 18.0 * unit, top + 18.0 * unit);
-    canvas.circle(pale, 26.0 * unit, theme.ink, false);
-    canvas.circle(pale, 18.0 * unit, theme.page, true);
-    canvas.circle(dark, 26.0 * unit, theme.ink, true);
     chrome.add(
-        Rect::new(
-            pale.0 - 30.0 * unit,
-            top - 8.0 * unit,
-            60.0 * unit,
-            60.0 * unit,
-        ),
-        Action::PageColor(false),
+        Rect::new(0.0, top, panel.width, 100.0 * unit),
+        Action::Pane(AaPane::Tab),
     );
-    chrome.add(
-        Rect::new(
-            dark.0 - 30.0 * unit,
-            top - 8.0 * unit,
-            60.0 * unit,
-            60.0 * unit,
-        ),
-        Action::PageColor(true),
+    canvas.rule(
+        0.0,
+        panel.width,
+        strip + 36.0 * unit,
+        2.0 * unit,
+        theme.faint,
     );
-    canvas.rule(left, right, top + 62.0 * unit, 2.0 * unit, theme.ink);
-
-    let names = ["Custom", "Compact", "Standard", "Large"];
-    for (n, name) in names.into_iter().enumerate() {
-        let column = (n % 2) as f32;
-        let row = (n / 2) as f32;
-        let x = left + column * (panel.width * 0.45);
-        let y = top + 110.0 * unit + row * 100.0 * unit;
-        canvas.stroke(
-            Rect::new(x, y, 56.0 * unit, 56.0 * unit),
-            theme.ink,
-            3.0 * unit,
-        );
-        for line in 0..4 {
-            let weight = if n == 3 { 5.0 } else { 3.0 };
-            canvas.fill(
-                Rect::new(
-                    x + 12.0 * unit,
-                    y + 12.0 * unit + line as f32 * 10.0 * unit,
-                    32.0 * unit,
-                    weight * unit,
-                ),
-                theme.ink,
-            );
-        }
-        canvas.text(
-            name,
-            34.0 * unit,
-            theme.ink,
-            n == 0,
-            (x + 76.0 * unit, y + 6.0 * unit),
-            Align::Left,
-        );
-    }
+    strip + 90.0 * unit
 }
 
-fn font(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32, ladder: &Ladder) {
-    let panel = canvas.panel;
-    let theme = canvas.theme;
-    let left = panel.width * 0.05;
-    let right = panel.width * 0.95;
-
-    for (n, family) in ladder.families.iter().enumerate() {
-        let column = (n % 2) as f32;
-        let row = (n / 2) as f32;
-        let x = left + column * (panel.width * 0.45);
-        let y = top + row * 74.0 * unit;
-        let dot = (x + 18.0 * unit, y + 18.0 * unit);
-        canvas.circle(dot, 18.0 * unit, theme.ink, false);
-        if n == ladder.family {
-            canvas.circle(dot, 10.0 * unit, theme.ink, true);
-        }
-        canvas.text(
-            family,
-            34.0 * unit,
-            theme.ink,
-            false,
-            (x + 46.0 * unit, y - 4.0 * unit),
-            Align::Left,
-        );
-        chrome.add(
-            Rect::new(x, y - 8.0 * unit, panel.width * 0.4, 56.0 * unit),
-            Action::Family(n),
-        );
-    }
-
-    let rows = top + (ladder.families.len().div_ceil(2)) as f32 * 74.0 * unit + 30.0 * unit;
-    canvas.rule(left, right, rows, 2.0 * unit, theme.faint);
-    slider(
-        chrome,
-        canvas,
-        Slider {
-            label: "Bold",
-            y: rows + 60.0 * unit,
-            unit,
-            at: ladder.bold,
-            stops: ladder.bolds,
-            bold: true,
-        },
-    );
-    canvas.rule(left, right, rows + 130.0 * unit, 2.0 * unit, theme.faint);
-    slider(
-        chrome,
-        canvas,
-        Slider {
-            label: "Size",
-            y: rows + 190.0 * unit,
-            unit,
-            at: ladder.font_size,
-            stops: ladder.font_sizes,
-            bold: false,
-        },
-    );
-}
-
-/// A row of stops with a `−` and a `+`, and where the chosen one sits.
-struct Slider<'a> {
-    label: &'a str,
+/// Where the next row goes, and how wide a row is.
+struct Rows {
     y: f32,
+    left: f32,
+    right: f32,
     unit: f32,
-    at: usize,
-    stops: usize,
-    /// Which `Action` a stop asks for.
-    bold: bool,
 }
 
-/// Draw one `Slider`, the stops up to its own filled.
-fn slider(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, s: Slider<'_>) {
-    let Slider {
-        label,
-        y,
-        unit,
-        at,
-        stops,
-        bold,
-    } = s;
-    let panel = canvas.panel;
+impl Rows {
+    /// The area of a row `height` reference dots tall, advancing past it.
+    fn take(&mut self, height: f32) -> Rect {
+        let rect = Rect::new(
+            self.left,
+            self.y,
+            self.right - self.left,
+            height * self.unit,
+        );
+        self.y += height * self.unit;
+        rect
+    }
+
+    fn rule(&self, canvas: &mut Canvas<'_, '_>) {
+        let faint = canvas.theme.faint;
+        canvas.rule(self.left, self.right, self.y, 2.0 * self.unit, faint);
+    }
+}
+
+/// A row whose label sits left and whose value sits right, with a chevron.
+fn link(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    label: &str,
+    value: &str,
+    pane: AaPane,
+) {
+    let unit = rows.unit;
     let theme = canvas.theme;
-    let left = panel.width * 0.05;
+    let row = rows.take(ROW);
     canvas.text(
         label,
         34.0 * unit,
         theme.ink,
         false,
-        (left, y - 20.0 * unit),
+        (row.x, row.y + 16.0 * unit),
+        Align::Left,
+    );
+    canvas.text(
+        value,
+        32.0 * unit,
+        theme.faint,
+        false,
+        (row.right() - 40.0 * unit, row.y + 18.0 * unit),
+        Align::Right,
+    );
+    chevron(
+        canvas,
+        (row.right() - 16.0 * unit, row.y + 30.0 * unit),
+        16.0 * unit,
+        true,
+    );
+    chrome.add(row, Action::Pane(pane));
+    rows.rule(canvas);
+}
+
+/// A row of prose with a switch at its right end.
+fn toggle(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    label: &str,
+    on: bool,
+    action: Option<Action>,
+) {
+    let unit = rows.unit;
+    let theme = canvas.theme;
+    let row = rows.take(ROW);
+    let ink = if action.is_some() {
+        theme.ink
+    } else {
+        theme.faint
+    };
+    canvas.text(
+        label,
+        34.0 * unit,
+        ink,
+        false,
+        (row.x, row.y + 16.0 * unit),
         Align::Left,
     );
 
-    let track_left = panel.width * 0.36;
-    let track_right = panel.width * 0.88;
-    let step = (track_right - track_left) / stops.max(1) as f32;
-    let choose = |n: usize| {
-        if bold {
-            Action::Bold(n)
-        } else {
-            Action::FontSize(n)
-        }
+    let track = Rect::new(
+        row.right() - 76.0 * unit,
+        row.y + 14.0 * unit,
+        76.0 * unit,
+        40.0 * unit,
+    );
+    canvas.stroke(track, ink, 3.0 * unit);
+    let knob = if on {
+        track.right() - 20.0 * unit
+    } else {
+        track.x + 20.0 * unit
     };
+    canvas.circle((knob, track.y + track.height / 2.0), 14.0 * unit, ink, on);
+    if let Some(action) = action {
+        chrome.add(row, action);
+    }
+    rows.rule(canvas);
+}
+
+/// A row of buttons, the one in force marked.
+fn choices<T: PartialEq + Copy>(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    label: &str,
+    options: &[(T, &str)],
+    chosen: T,
+    action: impl Fn(T) -> Action,
+) {
+    let unit = rows.unit;
+    let theme = canvas.theme;
+    let row = rows.take(ROW);
+    canvas.text(
+        label,
+        34.0 * unit,
+        theme.ink,
+        false,
+        (row.x, row.y + 16.0 * unit),
+        Align::Left,
+    );
+
+    let width = 128.0 * unit;
+    let mut x = row.right() - width * options.len() as f32;
+    for (value, name) in options {
+        let box_ = Rect::new(x, row.y + 8.0 * unit, width - 8.0 * unit, 52.0 * unit);
+        let marked = *value == chosen;
+        canvas.stroke(box_, theme.ink, if marked { 5.0 } else { 2.0 } * unit);
+        canvas.text(
+            name,
+            28.0 * unit,
+            theme.ink,
+            marked,
+            (box_.x + box_.width / 2.0, box_.y + 10.0 * unit),
+            Align::Center,
+        );
+        chrome.add(box_, action(*value));
+        x += width;
+    }
+    rows.rule(canvas);
+}
+
+/// A list of options with a dot beside the one in force.
+fn radios<T: PartialEq + Copy>(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    options: &[(T, String)],
+    chosen: T,
+    action: impl Fn(T) -> Action,
+) {
+    let unit = rows.unit;
+    let theme = canvas.theme;
+    for (value, name) in options {
+        let row = rows.take(ROW);
+        let dot = (row.x + 18.0 * unit, row.y + 30.0 * unit);
+        canvas.circle(dot, 18.0 * unit, theme.ink, false);
+        if *value == chosen {
+            canvas.circle(dot, 10.0 * unit, theme.ink, true);
+        }
+        canvas.text(
+            name,
+            34.0 * unit,
+            theme.ink,
+            false,
+            (row.x + 56.0 * unit, row.y + 12.0 * unit),
+            Align::Left,
+        );
+        chrome.add(row, action(*value));
+        rows.rule(canvas);
+    }
+}
+
+/// A row of stops with a `−` and a `+`, the stops up to the chosen one filled.
+fn slider(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    label: &str,
+    at: usize,
+    stops: usize,
+    action: impl Fn(usize) -> Action,
+) {
+    let unit = rows.unit;
+    let theme = canvas.theme;
+    let row = rows.take(SLIDER_ROW);
+    let y = row.y + 66.0 * unit;
+    canvas.text(
+        label,
+        34.0 * unit,
+        theme.ink,
+        false,
+        (row.x, row.y + 4.0 * unit),
+        Align::Left,
+    );
+
+    let track_left = row.x + 76.0 * unit;
+    let track_right = row.right() - 76.0 * unit;
+    let step = (track_right - track_left) / stops.max(1) as f32;
 
     canvas.fill(
-        Rect::new(
-            track_left - 44.0 * unit,
-            y - 2.0 * unit,
-            26.0 * unit,
-            5.0 * unit,
-        ),
+        Rect::new(row.x, y - 2.0 * unit, 30.0 * unit, 5.0 * unit),
         theme.ink,
     );
     chrome.add(
         Rect::new(
-            track_left - 64.0 * unit,
-            y - 26.0 * unit,
+            row.x - 10.0 * unit,
+            y - 30.0 * unit,
+            70.0 * unit,
             60.0 * unit,
-            52.0 * unit,
         ),
-        choose(at.saturating_sub(1)),
+        action(at.saturating_sub(1)),
     );
     for n in 0..stops {
         let box_ = Rect::new(
             track_left + n as f32 * step,
             y - 9.0 * unit,
-            step * 0.8,
+            step * 0.78,
             18.0 * unit,
         );
         if n <= at {
@@ -278,208 +369,364 @@ fn slider(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, s: Slider<'_>) {
         } else {
             canvas.stroke(box_, theme.ink, 2.0 * unit);
         }
-        chrome.add(box_, choose(n));
+        chrome.add(
+            Rect::new(box_.x, y - 30.0 * unit, step, 60.0 * unit),
+            action(n),
+        );
     }
-    canvas.text(
-        &format!("{}", at + 1),
-        26.0 * unit,
-        theme.ink,
-        false,
-        (track_left + (at as f32 + 0.4) * step, y - 46.0 * unit),
-        Align::Center,
-    );
+
+    let plus = row.right() - 30.0 * unit;
     canvas.fill(
-        Rect::new(
-            track_right + 20.0 * unit,
-            y - 2.0 * unit,
-            26.0 * unit,
-            5.0 * unit,
-        ),
+        Rect::new(plus, y - 2.0 * unit, 30.0 * unit, 5.0 * unit),
         theme.ink,
     );
     canvas.fill(
-        Rect::new(
-            track_right + 30.0 * unit,
-            y - 12.0 * unit,
-            5.0 * unit,
-            26.0 * unit,
-        ),
+        Rect::new(plus + 12.0 * unit, y - 14.0 * unit, 5.0 * unit, 30.0 * unit),
         theme.ink,
     );
     chrome.add(
         Rect::new(
-            track_right + 6.0 * unit,
-            y - 26.0 * unit,
+            plus - 20.0 * unit,
+            y - 30.0 * unit,
+            70.0 * unit,
             60.0 * unit,
-            52.0 * unit,
         ),
-        choose((at + 1).min(stops.saturating_sub(1))),
+        action((at + 1).min(stops.saturating_sub(1))),
     );
+    rows.rule(canvas);
 }
 
-fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32, ladder: &Ladder) {
-    let panel = canvas.panel;
+fn themes(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let unit = rows.unit;
     let theme = canvas.theme;
-    let left = panel.width * 0.06;
-    let mid = panel.width * 0.43;
-
+    let dark = chrome.dark;
+    let row = rows.take(ROW);
     canvas.text(
+        "Page color",
+        34.0 * unit,
+        theme.ink,
+        false,
+        (row.x, row.y + 16.0 * unit),
+        Align::Left,
+    );
+    for (n, night) in [false, true].into_iter().enumerate() {
+        let centre = (
+            row.right() - 90.0 * unit + n as f32 * 72.0 * unit,
+            row.y + 30.0 * unit,
+        );
+        canvas.circle(centre, 28.0 * unit, theme.ink, night);
+        if night == dark {
+            canvas.circle(centre, 34.0 * unit, theme.ink, false);
+        }
+        chrome.add(
+            Rect::new(centre.0 - 36.0 * unit, row.y, 72.0 * unit, row.height),
+            Action::PageColor(night),
+        );
+    }
+    rows.rule(canvas);
+
+    toggle(chrome, canvas, rows, "Use system theme", false, None);
+
+    let here = reading.settings.matches(reading.panel);
+    let presets: Vec<(Option<Preset>, String)> = Preset::ALL
+        .into_iter()
+        .map(|preset| (Some(preset), preset.label().to_string()))
+        .collect();
+    radios(chrome, canvas, rows, &presets, here, |preset| {
+        Action::Preset(preset.unwrap_or(Preset::Standard))
+    });
+
+    let screen = reading.device.map_or("Custom", Device::name);
+    link(chrome, canvas, rows, "Device", screen, AaPane::Screen);
+}
+
+fn font(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, rows: &mut Rows, reading: &Reading<'_>) {
+    let settings = reading.settings;
+    let panel = reading.panel;
+    let family = reading
+        .families
+        .get(settings.family)
+        .map_or("Publisher Font", String::as_str)
+        .to_string();
+    link(
+        chrome,
+        canvas,
+        rows,
+        "Font family",
+        &family,
+        AaPane::FontList,
+    );
+
+    let sizes = panel
+        .font_sizes
+        .values()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Size",
+        settings.font_size,
+        sizes,
+        Action::FontSize,
+    );
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Bold",
+        settings.boldness,
+        panel.boldness.len().max(1),
+        Action::Bold,
+    );
+    link(chrome, canvas, rows, "Spacing", "", AaPane::Spacing);
+}
+
+fn layout(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let settings = reading.settings;
+    choices(
+        chrome,
+        canvas,
+        rows,
         "Orientation",
-        34.0 * unit,
-        theme.ink,
-        false,
-        (left, top),
-        Align::Left,
+        &[(false, "Portrait"), (true, "Landscape")],
+        reading.vertical,
+        Action::Vertical,
     );
-    for (n, vertical) in [true, false].into_iter().enumerate() {
-        let x = left + n as f32 * 84.0 * unit;
-        let y = top + 54.0 * unit;
-        let box_ = Rect::new(x, y, 68.0 * unit, 88.0 * unit);
-        canvas.stroke(
-            box_,
-            theme.ink,
-            if vertical == ladder.vertical {
-                5.0
-            } else {
-                2.0
-            } * unit,
+    if reading.panel.columns_offered {
+        choices(
+            chrome,
+            canvas,
+            rows,
+            "Column",
+            &[(1u8, "One"), (2u8, "Two")],
+            settings.columns,
+            Action::Columns,
         );
-        rules_in(canvas, box_, vertical, unit);
-        chrome.add(box_, Action::Vertical(vertical));
     }
-
-    canvas.text(
+    choices(
+        chrome,
+        canvas,
+        rows,
         "Margins",
-        34.0 * unit,
-        theme.ink,
-        false,
-        (mid, top - 12.0 * unit),
-        Align::Left,
+        &[
+            (Stop::Narrow, "Narrow"),
+            (Stop::Normal, "Normal"),
+            (Stop::Wide, "Wide"),
+        ],
+        settings.margins,
+        Action::Margins,
     );
-    for (n, stop) in [Stop::Narrow, Stop::Normal, Stop::Wide]
-        .into_iter()
-        .enumerate()
-    {
-        let x = mid + n as f32 * 84.0 * unit;
-        let y = top + 42.0 * unit;
-        let box_ = Rect::new(x, y, 68.0 * unit, 88.0 * unit);
-        canvas.stroke(
-            box_,
-            theme.ink,
-            if stop == ladder.margins { 5.0 } else { 2.0 } * unit,
-        );
-        rules_in(canvas, box_, true, unit);
-        chrome.add(box_, Action::Margins(stop));
-    }
-
-    let second = top + 180.0 * unit;
-    canvas.text(
+    choices(
+        chrome,
+        canvas,
+        rows,
         "Alignment",
-        34.0 * unit,
-        theme.ink,
-        false,
-        (left, second),
-        Align::Left,
+        &[(true, "Justified"), (false, "Ragged")],
+        settings.justified,
+        Action::Justified,
     );
-    for (n, justified) in [true, false].into_iter().enumerate() {
-        let x = left + n as f32 * 100.0 * unit;
-        let y = second + 54.0 * unit;
-        let box_ = Rect::new(x, y, 84.0 * unit, 56.0 * unit);
-        canvas.stroke(
-            box_,
-            theme.ink,
-            if justified == ladder.justified {
-                5.0
-            } else {
-                2.0
-            } * unit,
+    if !settings.fine_spacing {
+        choices(
+            chrome,
+            canvas,
+            rows,
+            "Spacing",
+            &[
+                (Stop::Narrow, "Narrow"),
+                (Stop::Normal, "Normal"),
+                (Stop::Wide, "Wide"),
+            ],
+            settings.line_spacing,
+            Action::Spacing,
         );
-        for line in 0..3 {
-            let width = if justified || line < 2 { 60.0 } else { 40.0 };
-            canvas.fill(
-                Rect::new(
-                    x + 12.0 * unit,
-                    y + 12.0 * unit + line as f32 * 14.0 * unit,
-                    width * unit,
-                    3.0 * unit,
-                ),
-                theme.ink,
-            );
-        }
-        chrome.add(box_, Action::Justified(justified));
     }
-
-    canvas.text(
-        "Spacing",
-        34.0 * unit,
-        theme.ink,
-        false,
-        (mid, second - 12.0 * unit),
-        Align::Left,
+    toggle(
+        chrome,
+        canvas,
+        rows,
+        "Hyphenation",
+        settings.hyphenate,
+        Some(Action::Hyphenate(!settings.hyphenate)),
     );
-    for (n, stop) in [Stop::Narrow, Stop::Normal, Stop::Wide]
-        .into_iter()
-        .enumerate()
-    {
-        let x = mid + n as f32 * 84.0 * unit;
-        let y = second + 42.0 * unit;
-        let box_ = Rect::new(x, y, 68.0 * unit, 88.0 * unit);
-        canvas.stroke(
-            box_,
-            theme.ink,
-            if stop == ladder.spacing { 5.0 } else { 2.0 } * unit,
-        );
-        rules_in(canvas, box_, true, unit);
-        chrome.add(box_, Action::Spacing(stop));
-    }
 }
 
-/// The little ruled page inside a Layout button.
-fn rules_in(canvas: &mut Canvas<'_, '_>, box_: Rect, vertical: bool, unit: f32) {
+fn more(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, rows: &mut Rows) {
+    for label in [
+        "About this book",
+        "Book mentions",
+        "Word wise",
+        "Popular highlights",
+        "Vocabulary builder",
+        "Assistive reader",
+        "Annotation menu",
+        "Page turn animations",
+        "Show clock while reading",
+    ] {
+        toggle(chrome, canvas, rows, label, false, None);
+    }
+    link(
+        chrome,
+        canvas,
+        rows,
+        "Reading progress",
+        "",
+        AaPane::ReadingProgress,
+    );
+}
+
+fn font_list(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let options: Vec<(usize, String)> = reading
+        .families
+        .iter()
+        .enumerate()
+        .map(|(n, family)| (n, family.clone()))
+        .collect();
+    radios(
+        chrome,
+        canvas,
+        rows,
+        &options,
+        reading.settings.family,
+        Action::Family,
+    );
+}
+
+fn spacing(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let settings = reading.settings;
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Line spacing",
+        settings.fine_line_spacing,
+        FINE_LINE_SPACINGS.len(),
+        Action::FineLineSpacing,
+    );
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Paragraph spacing",
+        settings.paragraph_spacing,
+        PARAGRAPH_SPACINGS.len(),
+        Action::ParagraphSpacing,
+    );
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Word spacing",
+        settings.word_spacing,
+        WORD_SPACINGS.len(),
+        Action::WordSpacing,
+    );
+    slider(
+        chrome,
+        canvas,
+        rows,
+        "Character spacing",
+        settings.character_spacing,
+        CHARACTER_SPACINGS.len(),
+        Action::CharacterSpacing,
+    );
+
+    let unit = rows.unit;
     let ink = canvas.theme.ink;
-    for n in 0..5 {
-        if vertical {
-            let x = box_.x + 12.0 * unit + n as f32 * 10.0 * unit;
-            canvas.fill(
-                Rect::new(
-                    x,
-                    box_.y + 12.0 * unit,
-                    3.0 * unit,
-                    box_.height - 24.0 * unit,
-                ),
-                ink,
-            );
-        } else {
-            let y = box_.y + 14.0 * unit + n as f32 * 13.0 * unit;
-            canvas.fill(
-                Rect::new(
-                    box_.x + 10.0 * unit,
-                    y,
-                    box_.width - 20.0 * unit,
-                    3.0 * unit,
-                ),
-                ink,
-            );
-        }
-    }
+    let row = rows.take(ROW);
+    canvas.text(
+        "Reset to default",
+        34.0 * unit,
+        ink,
+        false,
+        (row.x, row.y + 16.0 * unit),
+        Align::Left,
+    );
+    chrome.add(row, Action::Spacing(Stop::Normal));
 }
 
-fn more(canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) {
-    let panel = canvas.panel;
-    let theme = canvas.theme;
-    let left = panel.width * 0.05;
-    for (n, row) in ["Reading Ruler", "About This Book", "Reading Progress"]
+fn reading_progress(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let options: Vec<(Progress, String)> = Progress::ALL
         .into_iter()
-        .enumerate()
-    {
-        let y = top + n as f32 * 84.0 * unit;
-        canvas.text(row, 34.0 * unit, theme.faint, false, (left, y), Align::Left);
-        canvas.rule(
-            left,
-            panel.width * 0.95,
-            y + 56.0 * unit,
-            2.0 * unit,
-            theme.faint,
-        );
+        .filter(|mode| mode.offered(reading.numbered, reading.chaptered))
+        .map(|mode| (mode, mode.label().to_string()))
+        .collect();
+    radios(
+        chrome,
+        canvas,
+        rows,
+        &options,
+        reading.settings.progress,
+        Action::Progress,
+    );
+}
+
+fn screens(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    rows: &mut Rows,
+    reading: &Reading<'_>,
+) {
+    let options: Vec<(Device, String)> = Device::ALL
+        .into_iter()
+        .map(|device| {
+            let panel = device.panel();
+            (
+                device,
+                format!(
+                    "{}  {}×{}",
+                    device.name(),
+                    panel.size.width as u32,
+                    panel.size.height as u32
+                ),
+            )
+        })
+        .collect();
+    let here = reading.device.unwrap_or(Device::Colorsoft);
+    radios(chrome, canvas, rows, &options, here, Action::Screen);
+}
+
+/// A chevron pointing right, or back the way a heading's does.
+fn chevron(canvas: &mut Canvas<'_, '_>, at: (f32, f32), size: f32, forward: bool) {
+    let ink = canvas.theme.ink;
+    let weight = size * 0.22;
+    let steps = (size / weight).max(2.0) as usize;
+    for step in 0..steps {
+        let t = step as f32 / steps as f32 * size;
+        let x = if forward {
+            at.0 - size + t
+        } else {
+            at.0 + size - t
+        };
+        canvas.fill(Rect::new(x, at.1 - t - weight, weight, weight), ink);
+        canvas.fill(Rect::new(x, at.1 + t, weight, weight), ink);
     }
 }

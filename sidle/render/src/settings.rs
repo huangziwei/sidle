@@ -1,5 +1,5 @@
-//! [`Panel`] holds one screen's ladders, read by [`Panel::parse`] from a
-//! profile the caller supplies. [`Settings`] picks a stop from each and
+//! [`Panel`] holds one screen's ladders, either a [`Device`]'s own or read by
+//! [`Panel::parse`] from a profile. [`Settings`] picks a stop from each and
 //! turns the pair into a [`Viewport`].
 
 use std::collections::HashMap;
@@ -12,6 +12,111 @@ use bokai::style::TextAlign;
 use crate::geom::{Edges, Size};
 use crate::resolve::NORMAL_LINE_HEIGHT;
 use crate::units::Metrics;
+
+/// Line-spacing multipliers, five stops, narrow to wide. One ladder covers
+/// every panel and every language.
+pub const FINE_LINE_SPACINGS: [f32; 5] = [1.14, 1.35, 1.54, 1.74, 1.94];
+
+/// Which [`FINE_LINE_SPACINGS`] stop a book opens at.
+pub const DEFAULT_FINE_LINE_SPACING: usize = 1;
+
+/// Extra space before a paragraph, in ems.
+pub const PARAGRAPH_SPACINGS: [f32; 5] = [0.0, 1.0, 2.0, 3.0, 4.0];
+
+/// Extra space at every word break, in ems.
+pub const WORD_SPACINGS: [f32; 5] = [0.0, 0.22, 0.44, 0.66, 0.88];
+
+/// Extra space between two characters, in ems.
+pub const CHARACTER_SPACINGS: [f32; 5] = [0.0, 0.056, 0.112, 0.168, 0.224];
+
+/// A screen a book is laid out for, and the [`Panel`] it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Device {
+    #[default]
+    Colorsoft,
+    Scribe,
+}
+
+/// Font-size ladders in points, one per [`Script`], for a 300 dpi panel.
+const FONT_SIZES_DEFAULT: [f32; 14] = [
+    6.96, 7.92, 8.4, 9.36, 10.56, 11.52, 12.48, 13.92, 15.36, 17.04, 19.2, 22.08, 25.2, 29.28,
+];
+const FONT_SIZES_CJK: [f32; 14] = [
+    6.96, 7.92, 8.4, 9.36, 10.56, 11.52, 12.48, 13.92, 15.36, 17.04, 19.2, 22.08, 25.2, 29.04,
+];
+const FONT_SIZES_INDIC: [f32; 14] = [
+    8.4, 9.36, 10.56, 11.52, 12.48, 12.96, 13.44, 14.64, 15.84, 17.04, 19.68, 22.56, 25.92, 29.28,
+];
+
+impl Device {
+    pub const ALL: [Device; 2] = [Device::Colorsoft, Device::Scribe];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Device::Colorsoft => "Colorsoft",
+            Device::Scribe => "Scribe",
+        }
+    }
+
+    /// This screen's ladders.
+    pub fn panel(self) -> Panel {
+        let font_sizes = HashMap::from([
+            (Script::Default, FONT_SIZES_DEFAULT.to_vec()),
+            (Script::Cjk, FONT_SIZES_CJK.to_vec()),
+            (Script::Indic, FONT_SIZES_INDIC.to_vec()),
+        ]);
+        let shared = Panel {
+            size: Size::new(0.0, 0.0),
+            dpi: 300.0,
+            color: false,
+            columns_offered: false,
+            font_sizes,
+            default_font_size: 4,
+            font_size_presets: vec![2, 4, 6, 10],
+            line_spacings: vec![1.14, 1.35, 1.54],
+            wide_line_spacings: vec![1.3523, 1.51, 1.635],
+            boldness: vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0],
+            default_boldness: 0,
+            boldness_presets: vec![0, 0, 1, 4],
+            margins_horizontal: Vec::new(),
+            margins_vertical: Vec::new(),
+        };
+        match self {
+            Device::Colorsoft => Panel {
+                size: Size::new(1272.0, 1696.0),
+                color: true,
+                default_boldness: 1,
+                boldness_presets: vec![0, 1, 1, 4],
+                margins_horizontal: vec![
+                    Edges::new(65.0, 82.0, 0.0, 82.0),
+                    Edges::new(65.0, 164.0, 0.0, 164.0),
+                    Edges::new(65.0, 246.0, 0.0, 246.0),
+                ],
+                margins_vertical: vec![
+                    Edges::new(82.0, 82.0, 17.0, 82.0),
+                    Edges::new(164.0, 82.0, 99.0, 82.0),
+                    Edges::new(246.0, 82.0, 181.0, 82.0),
+                ],
+                ..shared
+            },
+            Device::Scribe => Panel {
+                size: Size::new(1860.0, 2480.0),
+                columns_offered: true,
+                margins_horizontal: vec![
+                    Edges::new(64.0, 158.0, 8.0, 158.0),
+                    Edges::new(64.0, 200.0, 8.0, 200.0),
+                    Edges::new(64.0, 244.0, 8.0, 244.0),
+                ],
+                margins_vertical: vec![
+                    Edges::new(158.0, 158.0, 102.0, 158.0),
+                    Edges::new(242.0, 158.0, 186.0, 158.0),
+                    Edges::new(363.0, 158.0, 307.0, 158.0),
+                ],
+                ..shared
+            },
+        }
+    }
+}
 
 /// One panel's ladders.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +132,8 @@ pub struct Panel {
     pub font_sizes: HashMap<Script, Vec<f32>>,
     /// Which font-size stop a book opens at.
     pub default_font_size: usize,
+    /// Which font-size stop each [`Preset`] sets.
+    pub font_size_presets: Vec<usize>,
     /// Line-spacing multipliers, narrow to wide.
     pub line_spacings: Vec<f32>,
     /// The same for the languages [`Script::wide_line_spacing`] names.
@@ -35,6 +142,8 @@ pub struct Panel {
     pub boldness: Vec<f32>,
     /// Which embolden weight a book opens at.
     pub default_boldness: usize,
+    /// Which embolden weight each [`Preset`] sets.
+    pub boldness_presets: Vec<usize>,
     /// Three widths of the four margins, in dots, for a book that reads
     /// across the page.
     pub margins_horizontal: Vec<Edges>,
@@ -45,15 +154,9 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// Read a profile.
-    ///
-    /// One `key value…` per line, `#` to end of line a comment. Keys:
-    /// `panel` (width height dpi), `color` and `columns` (0 or 1),
-    /// `font_size_default` / `font_size_cjk` / `font_size_indic` (points),
-    /// `default_font_size` and `default_boldness` (an index), `line_spacing`
-    /// and `line_spacing_wide` (multipliers), `boldness` (weights), and
-    /// `margins_horizontal` / `margins_vertical` (top right bottom left,
-    /// three times over).
+    /// Read a profile: one `key value…` per line, `#` to end of line a
+    /// comment, the keys `take`, `flag`, `index`, `ladder` and `stops` name
+    /// below. Each `margins_*` line states top right bottom left three times.
     pub fn parse(profile: &str) -> Result<Self, String> {
         let mut fields: HashMap<&str, Vec<f32>> = HashMap::new();
         for line in profile.lines() {
@@ -98,6 +201,14 @@ impl Panel {
             (Script::Indic, take("font_size_indic")?),
         ]);
 
+        let stops = |key: &str, fallback: Vec<usize>| -> Vec<usize> {
+            fields
+                .get(key)
+                .map(|values| values.iter().map(|v| *v as usize).collect())
+                .unwrap_or(fallback)
+        };
+        let built_in = Device::Colorsoft.panel();
+
         Ok(Self {
             size: Size::new(width, height),
             dpi,
@@ -105,10 +216,12 @@ impl Panel {
             columns_offered: flag("columns")?,
             font_sizes,
             default_font_size: index("default_font_size")?,
+            font_size_presets: stops("font_size_presets", built_in.font_size_presets),
             line_spacings: take("line_spacing")?,
             wide_line_spacings: take("line_spacing_wide")?,
             boldness: take("boldness")?,
             default_boldness: index("default_boldness")?,
+            boldness_presets: stops("boldness_presets", built_in.boldness_presets),
             margins_horizontal: ladder("margins_horizontal")?,
             margins_vertical: ladder("margins_vertical")?,
         })
@@ -124,37 +237,6 @@ impl Panel {
     pub fn metrics(&self) -> Metrics {
         Metrics::kfx(self.dpi)
     }
-
-    /// Ladders of this crate's own, for a screen of `size` at `dpi`.
-    ///
-    /// Margins take a share of the page. [`Panel::parse`] reads a device's own.
-    pub fn reader(size: Size, dpi: f32) -> Panel {
-        let sizes = vec![
-            8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0, 23.0, 26.0, 30.0, 34.0,
-        ];
-        let band = (size.height * 0.055).max(24.0).round();
-        let side = |share: f32| (size.width * share).round();
-        let margins = |share: f32| Edges::new(band, side(share), band, side(share));
-
-        Panel {
-            size,
-            dpi,
-            color: true,
-            columns_offered: false,
-            font_sizes: HashMap::from([
-                (Script::Default, sizes.clone()),
-                (Script::Cjk, sizes.clone()),
-                (Script::Indic, sizes),
-            ]),
-            default_font_size: 3,
-            line_spacings: vec![1.2, 1.45, 1.7],
-            wide_line_spacings: vec![1.35, 1.6, 1.85],
-            boldness: vec![0.0],
-            default_boldness: 0,
-            margins_horizontal: vec![margins(0.07), margins(0.12), margins(0.18)],
-            margins_vertical: vec![margins(0.07), margins(0.12), margins(0.18)],
-        }
-    }
 }
 
 /// Which way the book reads, which the margin ladder keys on.
@@ -162,6 +244,91 @@ impl Panel {
 pub enum Direction {
     Horizontal,
     Vertical,
+}
+
+/// A named stop for every field of [`Settings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Compact,
+    Standard,
+    Large,
+    LowVision,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [
+        Preset::Compact,
+        Preset::Standard,
+        Preset::Large,
+        Preset::LowVision,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Compact => "Compact",
+            Preset::Standard => "Standard",
+            Preset::Large => "Large",
+            Preset::LowVision => "Low Vision",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Preset::Compact => 0,
+            Preset::Standard => 1,
+            Preset::Large => 2,
+            Preset::LowVision => 3,
+        }
+    }
+}
+
+/// Which measure of progress the bar below the page states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Progress {
+    PageNumber,
+    TimeLeftInChapter,
+    TimeLeft,
+    #[default]
+    Location,
+    None,
+}
+
+impl Progress {
+    pub const ALL: [Progress; 5] = [
+        Progress::PageNumber,
+        Progress::TimeLeftInChapter,
+        Progress::TimeLeft,
+        Progress::Location,
+        Progress::None,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Progress::PageNumber => "Page in book",
+            Progress::TimeLeftInChapter => "Time left in chapter",
+            Progress::TimeLeft => "Time left in book",
+            Progress::Location => "Location in book",
+            Progress::None => "None",
+        }
+    }
+
+    /// Whether a book with `pages` and `chapters` offers this mode.
+    pub fn offered(self, pages: bool, chapters: bool) -> bool {
+        match self {
+            Progress::PageNumber => pages,
+            Progress::TimeLeftInChapter => chapters,
+            _ => true,
+        }
+    }
+
+    /// What a book with these two opens showing.
+    pub fn default_for(pages: bool, _chapters: bool) -> Self {
+        if pages {
+            Progress::PageNumber
+        } else {
+            Progress::Location
+        }
+    }
 }
 
 /// One of the three stops a ladder with a narrow, a normal and a wide setting
@@ -212,6 +379,38 @@ impl Script {
     }
 }
 
+/// The reading fonts a book in `language` is offered, the first the one it
+/// opens in. `Publisher Font` heads every list and leaves the book's own
+/// faces alone.
+pub fn reading_families(language: &str) -> &'static [&'static str] {
+    let tag = language.to_ascii_lowercase().replace('_', "-");
+    let script = tag.split('-').nth(1).unwrap_or("");
+    match (primary_subtag(&tag).as_str(), script) {
+        ("ja", _) => &["Publisher Font", "Mincho", "Gothic", "Droid Serif"],
+        ("zh", "hant") | ("zh", "tw") | ("zh", "hk") => &["Publisher Font", "System"],
+        ("zh", _) => &["Publisher Font", "Song", "Hei", "Droid Serif", "System"],
+        ("hi" | "mr", _) => &["Publisher Font", "Devanagari Serif"],
+        ("gu", _) => &["Publisher Font", "Gujarati Serif"],
+        ("ta", _) => &["Publisher Font", "Tamil Serif"],
+        ("ml", _) => &["Publisher Font", "Malayalam Serif"],
+        ("ar" | "fa", _) => &["Publisher Font", "Sakkal Kitab", "Muna"],
+        ("he", _) => &["Publisher Font", "Noto Sans Hebrew"],
+        _ => &[
+            "Publisher Font",
+            "Bookerly",
+            "Amazon Ember Bold",
+            "Baskerville",
+            "Caecilia",
+            "Droid Serif",
+            "Georgia",
+            "Helvetica",
+            "Lucida",
+            "OpenDyslexic",
+            "Palatino",
+        ],
+    }
+}
+
 fn primary_subtag(language: &str) -> String {
     language
         .split(['-', '_'])
@@ -226,6 +425,16 @@ pub struct Settings {
     /// Which font-size stop.
     pub font_size: usize,
     pub line_spacing: Stop,
+    /// Which [`FINE_LINE_SPACINGS`] stop `fine_spacing` takes.
+    pub fine_line_spacing: usize,
+    /// Whether line spacing comes off the five-stop ladder.
+    pub fine_spacing: bool,
+    /// Which [`PARAGRAPH_SPACINGS`] stop.
+    pub paragraph_spacing: usize,
+    /// Which [`WORD_SPACINGS`] stop.
+    pub word_spacing: usize,
+    /// Which [`CHARACTER_SPACINGS`] stop.
+    pub character_spacing: usize,
     pub margins: Stop,
     /// Which embolden weight.
     pub boldness: usize,
@@ -233,6 +442,9 @@ pub struct Settings {
     pub hyphenate: bool,
     /// One or two, and two only where the panel offers it.
     pub columns: u8,
+    /// Which family of the book's own script list.
+    pub family: usize,
+    pub progress: Progress,
 }
 
 impl Settings {
@@ -242,11 +454,51 @@ impl Settings {
             font_size: panel.default_font_size,
             boldness: panel.default_boldness,
             line_spacing: Stop::Normal,
+            fine_line_spacing: DEFAULT_FINE_LINE_SPACING,
+            fine_spacing: false,
+            paragraph_spacing: 0,
+            word_spacing: 0,
+            character_spacing: 0,
             margins: Stop::Narrow,
             justified: true,
             hyphenate: true,
             columns: 1,
+            family: 0,
+            progress: Progress::default(),
         }
+    }
+
+    /// The same settings with every stop [`Preset`] names.
+    pub fn preset(&self, panel: &Panel, preset: Preset) -> Self {
+        let stop = preset.index();
+        Self {
+            font_size: at(&panel.font_size_presets, stop),
+            boldness: at(&panel.boldness_presets, stop),
+            line_spacing: if preset == Preset::Compact {
+                Stop::Narrow
+            } else {
+                Stop::Normal
+            },
+            fine_line_spacing: if preset == Preset::Compact {
+                0
+            } else {
+                DEFAULT_FINE_LINE_SPACING
+            },
+            paragraph_spacing: 0,
+            word_spacing: 0,
+            character_spacing: 0,
+            margins: Stop::Narrow,
+            justified: preset != Preset::LowVision,
+            hyphenate: preset != Preset::LowVision,
+            ..self.clone()
+        }
+    }
+
+    /// Which [`Preset`] these settings are, where they are one.
+    pub fn matches(&self, panel: &Panel) -> Option<Preset> {
+        Preset::ALL
+            .into_iter()
+            .find(|preset| self.preset(panel, *preset) == *self)
     }
 
     /// The chosen font size, in points. A script the panel names no ladder
@@ -263,12 +515,30 @@ impl Settings {
 
     /// The chosen line-spacing multiplier.
     pub fn line_spacing(&self, panel: &Panel, language: &str) -> f32 {
+        if self.fine_spacing {
+            return at(&FINE_LINE_SPACINGS, self.fine_line_spacing);
+        }
         let ladder = if Script::wide_line_spacing(language) {
             &panel.wide_line_spacings
         } else {
             &panel.line_spacings
         };
         at(ladder, self.line_spacing.index())
+    }
+
+    /// The chosen extra space before a paragraph, in ems.
+    pub fn paragraph_spacing(&self) -> f32 {
+        at(&PARAGRAPH_SPACINGS, self.paragraph_spacing)
+    }
+
+    /// The chosen extra space at a word break, in ems.
+    pub fn word_spacing(&self) -> f32 {
+        at(&WORD_SPACINGS, self.word_spacing)
+    }
+
+    /// The chosen extra space between two characters, in ems.
+    pub fn character_spacing(&self) -> f32 {
+        at(&CHARACTER_SPACINGS, self.character_spacing)
     }
 
     /// The chosen embolden weight.
@@ -318,6 +588,9 @@ impl Settings {
             metrics: panel.metrics(),
             line_spacing: self.line_spacing(panel, language),
             embolden_weight: self.embolden_weight(panel),
+            character_spacing: self.character_spacing(),
+            word_spacing: self.word_spacing(),
+            paragraph_spacing: self.paragraph_spacing(),
             align: if self.justified {
                 TextAlign::Justify
             } else {
@@ -438,6 +711,101 @@ margins_vertical 5 6 7 8  15 16 17 18  25 26 27 28
         assert_eq!(settings.line_spacing(&panel, "ar"), 1.6);
         assert_eq!(settings.line_spacing(&panel, "en"), 1.5);
         assert_eq!(settings.line_spacing(&panel, "zh-Hans"), 1.5);
+    }
+
+    #[test]
+    fn each_device_carries_its_own_screen_and_ladders() {
+        let colorsoft = Device::Colorsoft.panel();
+        let scribe = Device::Scribe.panel();
+
+        assert_eq!(colorsoft.size, Size::new(1272.0, 1696.0));
+        assert_eq!(scribe.size, Size::new(1860.0, 2480.0));
+        assert!(colorsoft.color && !scribe.color);
+        // Two columns resolve on the larger panel alone.
+        assert!(scribe.columns_offered && !colorsoft.columns_offered);
+        // A colour screen opens one stop bolder.
+        assert_eq!(colorsoft.default_boldness, 1);
+        assert_eq!(scribe.default_boldness, 0);
+        // The vertical ladder moves onto the block axis, sides pinned narrow.
+        assert_eq!(
+            scribe.margins_vertical[2],
+            Edges::new(363.0, 158.0, 307.0, 158.0)
+        );
+        assert_eq!(
+            scribe.margins_horizontal[2],
+            Edges::new(64.0, 244.0, 8.0, 244.0)
+        );
+    }
+
+    #[test]
+    fn a_preset_sets_every_setting_at_once() {
+        let panel = Device::Scribe.panel();
+        let opened = Settings::default_for(&panel);
+
+        let large = opened.preset(&panel, Preset::Large);
+        assert_eq!(large.font_size, 6);
+        assert_eq!(large.boldness, 1);
+
+        let low = opened.preset(&panel, Preset::LowVision);
+        assert_eq!(low.font_size, 10);
+        assert_eq!(low.boldness, 4);
+        assert!(!low.justified);
+        assert!(!low.hyphenate);
+
+        let compact = opened.preset(&panel, Preset::Compact);
+        assert_eq!(compact.line_spacing, Stop::Narrow);
+    }
+
+    #[test]
+    fn a_preset_recognises_itself() {
+        let panel = Device::Colorsoft.panel();
+        let opened = Settings::default_for(&panel);
+        let large = opened.preset(&panel, Preset::Large);
+
+        assert_eq!(large.matches(&panel), Some(Preset::Large));
+        assert_eq!(
+            Settings {
+                font_size: 13,
+                ..large
+            }
+            .matches(&panel),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fine_ladder_takes_over_line_spacing_when_it_is_chosen() {
+        let panel = Device::Scribe.panel();
+        let mut settings = Settings::default_for(&panel);
+
+        // Japanese takes its own three-stop ladder until the fine one is set.
+        assert_eq!(settings.line_spacing(&panel, "ja"), 1.51);
+        settings.fine_spacing = true;
+        assert_eq!(settings.line_spacing(&panel, "ja"), 1.35);
+        settings.fine_line_spacing = 4;
+        assert_eq!(settings.line_spacing(&panel, "ja"), 1.94);
+    }
+
+    #[test]
+    fn a_progress_mode_a_book_cannot_show_is_not_offered() {
+        assert!(!Progress::PageNumber.offered(false, true));
+        assert!(Progress::PageNumber.offered(true, true));
+        assert!(!Progress::TimeLeftInChapter.offered(true, false));
+        assert!(Progress::Location.offered(false, false));
+        assert_eq!(Progress::default_for(false, true), Progress::Location);
+        assert_eq!(Progress::default_for(true, true), Progress::PageNumber);
+    }
+
+    #[test]
+    fn a_script_takes_the_font_list_its_own_language_offers() {
+        assert_eq!(reading_families("ja")[1], "Mincho");
+        assert_eq!(reading_families("zh-Hans")[1], "Song");
+        assert_eq!(reading_families("zh-Hant")[1], "System");
+        assert_eq!(reading_families("en-GB")[1], "Bookerly");
+        // Every list leaves the book's own faces reachable.
+        for tag in ["ja", "zh", "he", "ar", "ta", "en"] {
+            assert_eq!(reading_families(tag)[0], "Publisher Font", "{tag}");
+        }
     }
 
     #[test]
