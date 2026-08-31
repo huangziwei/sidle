@@ -1,8 +1,6 @@
-//! Painting: a laid-out chapter onto a pixel buffer.
-//!
-//! [`Painter::paint`] reads a [`Fragment`] tree and never the document, at
-//! any `scale`. A glyph is painted as a filled outline, upright or turned on
-//! its side for a vertical line.
+//! Painting a laid-out chapter onto a pixel buffer. [`Painter::paint`] reads
+//! a [`Fragment`] tree and never the document; a glyph comes from a
+//! [`Sprite`] where one fits and from its outline where none does.
 
 use std::collections::HashMap;
 
@@ -18,11 +16,13 @@ use crate::fragment::{Border, Content, Fragment, GlyphRun, Orientation};
 use crate::geom::Rect;
 use crate::resource::Resources;
 
-/// Outlines and decoded pictures a [`Painter`] builds, kept between draws.
+/// Outlines, sprites and decoded pictures a [`Painter`] builds, kept between
+/// draws.
 #[derive(Default)]
 pub struct Cache {
     outlines: HashMap<(FaceId, u16), Option<tiny_skia::Path>>,
     images: HashMap<String, Option<Pixmap>>,
+    sprites: HashMap<(FaceId, u16, Shape, u32), Option<Sprite>>,
 }
 
 /// Draws fragment trees, caching the glyph outlines it builds.
@@ -66,16 +66,9 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// Draw the part of `tree` that falls inside `window` — a region in
-    /// chapter coordinates — onto `target`, placing `window`'s top-left
-    /// corner at `origin` in CSS pixels. Anything outside the window is
-    /// skipped: a page shows nothing of the page after it.
-    ///
-    /// `scale` is buffer pixels per dot. A 2× display draws the same page at
-    /// the same size in twice the pixels.
-    ///
-    /// Composites onto `target`. The page's own background is the caller's
-    /// to fill.
+    /// Draw the part of `tree` inside `window`, in chapter coordinates, onto
+    /// `target`, with `window`'s corner at `origin` and `scale` buffer pixels
+    /// to the dot. Composites; `target`'s own ground is the caller's to fill.
     pub fn paint(
         &mut self,
         tree: &Fragment,
@@ -90,11 +83,14 @@ impl<'a> Painter<'a> {
         let clip = window_mask(window, origin, scale, target);
         let clip = clip.as_ref();
 
+        // `showing` is walked once; both passes then run over it.
+        let showing: Vec<&Fragment> = tree
+            .walk()
+            .filter(|fragment| fragment.rect.intersects(&window))
+            .collect();
+
         // Backgrounds and borders first; text sits on top of them.
-        for fragment in tree.walk() {
-            if !fragment.rect.intersects(&window) {
-                continue;
-            }
+        for fragment in &showing {
             if let Some(color) = fragment.background {
                 fill_clipped(fragment.rect, color, view, clip, target);
             }
@@ -103,10 +99,7 @@ impl<'a> Painter<'a> {
             }
         }
 
-        for fragment in tree.walk() {
-            if !fragment.rect.intersects(&window) {
-                continue;
-            }
+        for fragment in &showing {
             match &fragment.content {
                 Content::Empty => {}
                 Content::Glyphs(run) => self.glyphs(fragment.rect, run, view, clip, target),
@@ -210,14 +203,54 @@ impl<'a> Painter<'a> {
                 .pre_rotate(90.0)
                 .pre_scale(unit, -unit),
             };
+            let transform = placement.post_concat(view);
+            if self.blit(run, glyph.id, transform, clip, target) {
+                continue;
+            }
             let Some(path) = self.outline(run.face, glyph.id) else {
                 continue;
             };
-            let transform = placement.post_concat(view);
             target.fill_path(path, &paint, FillRule::Winding, transform, clip);
         }
 
         self.rules(rect, run, view, clip, target);
+    }
+
+    /// Draw one glyph from its rasterized sprite, `false` where it has none.
+    fn blit(
+        &mut self,
+        run: &GlyphRun,
+        glyph: u16,
+        transform: Transform,
+        clip: Clip<'_>,
+        target: &mut PixmapMut<'_>,
+    ) -> bool {
+        let shape = Shape {
+            sx: transform.sx.to_bits(),
+            ky: transform.ky.to_bits(),
+            kx: transform.kx.to_bits(),
+            sy: transform.sy.to_bits(),
+        };
+        let key = (run.face, glyph, shape, colour_of(run.color));
+        if !self.cache.get().sprites.contains_key(&key) {
+            let drawn = self
+                .outline(run.face, glyph)
+                .cloned()
+                .and_then(|path| Sprite::of(&path, shape, run.color));
+            self.cache.get().sprites.insert(key, drawn);
+        }
+        let Some(sprite) = self.cache.get().sprites.get(&key).and_then(Option::as_ref) else {
+            return false;
+        };
+        target.draw_pixmap(
+            (transform.tx + sprite.dx).round() as i32,
+            (transform.ty + sprite.dy).round() as i32,
+            sprite.pixmap.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            clip,
+        );
+        true
     }
 
     /// Underline and strike-through, drawn across the whole run.
@@ -382,11 +415,9 @@ fn rectangle(rect: Rect) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
-/// A glyph's contours as one path, in font units with y up.
-///
-/// The curves arrive as a flat list with no contour boundaries marked. A
-/// contour ends wherever the next curve does not begin where the last one
-/// finished, which keeps a letter's counters out of its outline.
+/// A glyph's contours as one path, in font units with y up. `outline` marks
+/// no contour boundary: one ends wherever the next curve fails to begin
+/// where the last finished.
 fn build_outline(font: &ab_glyph::FontRef<'static>, glyph: u16) -> Option<tiny_skia::Path> {
     let outline = font.outline(ab_glyph::GlyphId(glyph))?;
     let mut builder = PathBuilder::new();
@@ -557,4 +588,69 @@ mod tests {
         // The middle is inside the border, and nothing filled it.
         assert_eq!(pixmap.pixel(5, 5).unwrap().alpha(), 0);
     }
+}
+
+/// A glyph's transform without its position: what a sprite is baked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Shape {
+    sx: u32,
+    ky: u32,
+    kx: u32,
+    sy: u32,
+}
+
+impl Shape {
+    fn transform(self) -> Transform {
+        Transform::from_row(
+            f32::from_bits(self.sx),
+            f32::from_bits(self.ky),
+            f32::from_bits(self.kx),
+            f32::from_bits(self.sy),
+            0.0,
+            0.0,
+        )
+    }
+}
+
+/// One glyph rasterized at one shape and colour.
+struct Sprite {
+    pixmap: Pixmap,
+    /// Where the sprite's own corner sits against the glyph's origin.
+    dx: f32,
+    dy: f32,
+}
+
+/// The widest sprite kept. A larger glyph takes the path straight to the page.
+const SPRITE_LIMIT: u32 = 320;
+
+impl Sprite {
+    fn of(path: &tiny_skia::Path, shape: Shape, color: Color) -> Option<Sprite> {
+        let placed = path.clone().transform(shape.transform())?;
+        let bounds = placed.bounds();
+        let dx = bounds.left().floor();
+        let dy = bounds.top().floor();
+        let width = (bounds.right().ceil() - dx).max(1.0) as u32;
+        let height = (bounds.bottom().ceil() - dy).max(1.0) as u32;
+        if width > SPRITE_LIMIT || height > SPRITE_LIMIT {
+            return None;
+        }
+        let mut pixmap = Pixmap::new(width, height)?;
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        pixmap.fill_path(
+            &placed,
+            &paint,
+            FillRule::Winding,
+            Transform::from_translate(-dx, -dy),
+            None,
+        );
+        Some(Sprite { pixmap, dx, dy })
+    }
+}
+
+fn colour_of(color: Color) -> u32 {
+    u32::from_be_bytes([color.r, color.g, color.b, color.a])
 }

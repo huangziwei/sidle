@@ -8,6 +8,7 @@
 //!   --serif <family>   what the reading settings choose for Latin
 //!   --cjk <family>     the same for Chinese, Japanese and Korean
 //!   --chapter <n>      open at this chapter
+//!   --font-size <n>    open at this stop of the size ladder
 //!   --pages <n>        print the geometry of the first `n` pages and exit
 //!   --lines            list every line of every page reported
 //! ```
@@ -35,7 +36,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 const USAGE: &str = "usage: sidle-render [--panel <file>] [--fonts <dir>] [--serif <family>] \
-[--cjk <family>] [--chapter <n>] [--pages <n>] [--lines] <book>";
+[--cjk <family>] [--chapter <n>] [--font-size <n>] [--pages <n>] [--lines] <book>";
 
 /// Words a reader gets through in a minute, which sets the time left.
 const WORDS_A_MINUTE: f32 = 220.0;
@@ -332,6 +333,38 @@ impl Reader {
         });
     }
 
+    /// Every picture drawn on page `n`.
+    fn pictures_on(&self, n: usize) -> Vec<String> {
+        let Some(laid) = &self.laid else {
+            return Vec::new();
+        };
+        let window = laid.pages.window(n);
+        laid.root
+            .walk()
+            .filter(|f| f.rect.intersects(&window))
+            .filter_map(|f| match &f.content {
+                sidle_render::Content::Image(src) => Some(src.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Decode what the pages either side of this one draw.
+    fn prefetch(&mut self) {
+        let Some(laid) = &self.laid else { return };
+        let last = laid.pages.count().saturating_sub(1);
+        let mut wanted = Vec::new();
+        if self.page < last {
+            wanted.extend(self.pictures_on(self.page + 1));
+        }
+        if self.page > 0 {
+            wanted.extend(self.pictures_on(self.page - 1));
+        }
+        if !wanted.is_empty() {
+            self.resources.load_named(&mut self.book, &wanted);
+        }
+    }
+
     fn go_to(&mut self, chapter: usize) {
         if chapter >= self.spine.len() {
             return;
@@ -614,6 +647,7 @@ impl Reader {
             *out = (pixel.red() as u32) << 16 | (pixel.green() as u32) << 8 | pixel.blue() as u32;
         }
         buffer.present().expect("present failed");
+        self.prefetch();
     }
 
     /// What the first `pages` pages of this chapter settled on.

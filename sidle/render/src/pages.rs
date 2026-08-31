@@ -50,17 +50,24 @@ impl Pages {
     /// of the page after it.
     pub fn window(&self, n: usize) -> Rect {
         let start = self.starts.get(n).copied().unwrap_or(0.0);
+        // `starts[n + 1]` is a line's own edge. A window of the whole
+        // `extent` reaches past it into the page after.
+        let end = self
+            .starts
+            .get(n + 1)
+            .copied()
+            .unwrap_or(start + self.extent)
+            .min(start + self.extent);
+        let span = (end - start).max(0.0);
         let (inline, _) = self.content();
-        // Back from the reading coordinate to a physical block position: the
-        // page's near edge in reading order is its right edge on a
-        // `vertical-rl` page and its top edge on a horizontal one.
+        // A reading coordinate back to a physical block position.
         let block_start = match self.axis {
-            Axis::VerticalRl => -(start + self.extent),
+            Axis::VerticalRl => -end,
             _ => start,
         };
         match self.axis {
-            Axis::HorizontalTb => Rect::new(0.0, block_start, inline, self.extent),
-            _ => Rect::new(block_start, 0.0, self.extent, inline),
+            Axis::HorizontalTb => Rect::new(0.0, block_start, inline, span),
+            _ => Rect::new(block_start, 0.0, span, inline),
         }
     }
 
