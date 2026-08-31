@@ -6,8 +6,8 @@ use std::sync::LazyLock;
 
 use bokai::model::{Chapter, NodeId, Role};
 use bokai::style::{
-    BorderStyle, Color, ComputedStyle, Display, Length, ListStyleType, ROOT_FONT_SIZE_PX,
-    TextAlign, WritingMode,
+    BorderStyle, BoxAlign, Color, ComputedStyle, Display, Length, ListStyleType, ROOT_FONT_SIZE_PX,
+    StyleId, TextAlign, WritingMode,
 };
 use bokai::text::hyphenation::{self, Hyphenator};
 
@@ -155,6 +155,8 @@ pub struct Page {
     pub axis: Axis,
     /// How far the chapter reaches along that direction.
     pub block_extent: f32,
+    /// Whether the outermost styled box states `BoxAlign::Center`.
+    pub centred: bool,
 }
 
 impl Layout<'_> {
@@ -170,6 +172,7 @@ impl Layout<'_> {
             resources: self.resources,
             resolver,
             axis,
+            across: axis.is_vertical() != self.axis.is_vertical(),
             page_block,
             hyphenator: hyphenation::for_language(language),
         };
@@ -184,6 +187,7 @@ impl Layout<'_> {
                 a: 255,
             },
             align: self.viewport.align,
+            centred: false,
         };
         let mut root = flow
             .block(chapter.root(), 0.0, 0.0, inline_size, inherited)
@@ -197,6 +201,7 @@ impl Layout<'_> {
             root,
             axis,
             block_extent: page_block,
+            centred: centred(chapter),
         }
     }
 }
@@ -207,18 +212,33 @@ const DEFAULT_OBJECT: Size = Size {
     height: 150.0,
 };
 
-/// The `Axis` `chapter` declares, `None` where it declares none.
-/// `WritingMode::HorizontalTb` is the initial value and states nothing.
+/// The `Axis` `chapter` is written along: the writing mode of its outermost
+/// styled box. A vertical novel sets its title page and colophon across the
+/// page. `None` where no box carries a style of its own.
 fn axis_of(chapter: &Chapter) -> Option<Axis> {
-    for id in 0..chapter.node_count() {
-        let node = NodeId(id as u32);
-        match style_of(chapter, node).writing_mode {
-            WritingMode::VerticalRl => return Some(Axis::VerticalRl),
-            WritingMode::VerticalLr => return Some(Axis::VerticalLr),
-            WritingMode::HorizontalTb => {}
-        }
-    }
-    None
+    Some(
+        match style_of(chapter, outermost_styled(chapter)?).writing_mode {
+            WritingMode::VerticalRl => Axis::VerticalRl,
+            WritingMode::VerticalLr => Axis::VerticalLr,
+            WritingMode::HorizontalTb => Axis::HorizontalTb,
+        },
+    )
+}
+
+/// Whether `chapter`'s outermost styled box states [`BoxAlign::Center`].
+fn centred(chapter: &Chapter) -> bool {
+    outermost_styled(chapter)
+        .map(|node| style_of(chapter, node).box_align)
+        .is_some_and(|align| align == BoxAlign::Center)
+}
+
+/// The first box in `chapter` carrying a style of its own.
+fn outermost_styled(chapter: &Chapter) -> Option<NodeId> {
+    chapter.iter_dfs().find(|node| {
+        chapter
+            .node(*node)
+            .is_some_and(|n| n.style != StyleId::DEFAULT)
+    })
 }
 
 static INITIAL_STYLE: LazyLock<ComputedStyle> = LazyLock::new(ComputedStyle::default);
@@ -241,6 +261,9 @@ struct Inherited {
     line_height: f32,
     color: Color,
     align: TextAlign,
+    /// Whether an enclosing box states `BoxAlign::Center`, which places a
+    /// picture it holds.
+    centred: bool,
 }
 
 /// A laid-out box and the block extent it claims, its own margins included.
@@ -255,6 +278,8 @@ struct Flow<'a, 'f> {
     resources: &'a dyn Resources,
     resolver: Resolver,
     axis: Axis,
+    /// Whether `axis` crosses the one the book at large is written along.
+    across: bool,
     /// How far a page reaches along the block axis, which is the most a
     /// picture may take.
     page_block: f32,
@@ -308,14 +333,25 @@ impl<'a> Flow<'a, '_> {
             inline_end: padding.inline_end + border.widths_logical(self.axis).inline_end,
         };
 
-        // A declared inline size is the content's own.
+        // A declared inline size is the content's own, and a declared cap
+        // holds it under that.
         let outer_inline = (available - margin.inline()).max(0.0);
         let content_inline = match self.declared_inline(style, available, inherited) {
             Some(declared) => declared.max(0.0),
             None => (outer_inline - frame.inline()).max(0.0),
         };
+        let content_inline = match self.capped_inline(style, available, inherited) {
+            Some(cap) => content_inline.min(cap.max(0.0)),
+            None => content_inline,
+        };
 
-        let content_inline_origin = inline + margin.inline_start + frame.inline_start;
+        // A chapter written across the book's own direction carries a box the
+        // page leaves room around in the middle of it.
+        let spare = match self.across {
+            true => ((outer_inline - content_inline - frame.inline()) / 2.0).max(0.0),
+            false => 0.0,
+        };
+        let content_inline_origin = inline + margin.inline_start + frame.inline_start + spare;
         let content_block_origin = block + margin.block_start + frame.block_start;
 
         let mut children = Vec::new();
@@ -331,7 +367,7 @@ impl<'a> Flow<'a, '_> {
         );
 
         let rect = Rect::new(
-            inline + margin.inline_start,
+            inline + margin.inline_start + spare,
             block + margin.block_start,
             content_inline + frame.inline(),
             content_block + frame.block(),
@@ -413,18 +449,21 @@ impl<'a> Flow<'a, '_> {
         let indent = self
             .length(style.text_indent, available, inherited)
             .unwrap_or(0.0);
+        // A box that states `BoxAlign::Center` places the picture it holds;
+        // text in it keeps the alignment the block itself carries.
+        let picture = gathered
+            .iter()
+            .all(|item| matches!(item, Item::Replaced { .. }));
+        let align = match inherited.centred && picture {
+            true => TextAlign::Center,
+            false => inherited.align,
+        };
         let mut lines = Inline {
             fonts: self.fonts,
             axis: self.axis,
             hyphenator: self.hyphenator,
         }
-        .lay_out(
-            &gathered,
-            available,
-            indent,
-            inherited.align,
-            inherited.line_height,
-        );
+        .lay_out(&gathered, available, indent, align, inherited.line_height);
 
         if lines.fragments.is_empty() {
             return lines.block_size;
@@ -694,6 +733,7 @@ impl<'a> Flow<'a, '_> {
                 TextAlign::Start => parent.align,
                 declared => declared,
             },
+            centred: parent.centred || style.box_align == BoxAlign::Center,
         }
     }
 
@@ -711,6 +751,22 @@ impl<'a> Flow<'a, '_> {
             style.width
         };
         self.length(declared, available, inherited)
+    }
+
+    /// The most a box may measure across the inline axis, where the style
+    /// caps it.
+    fn capped_inline(
+        &self,
+        style: &ComputedStyle,
+        available: f32,
+        inherited: Inherited,
+    ) -> Option<f32> {
+        let cap = if self.axis.is_vertical() {
+            style.max_height
+        } else {
+            style.max_width
+        };
+        self.length(cap, available, inherited)
     }
 
     fn border(&self, style: &ComputedStyle, available: f32, inherited: Inherited) -> Border {
@@ -1151,14 +1207,64 @@ mod tests {
     }
 
     fn lay_out(chapter: &Chapter, viewport: Viewport) -> Page {
+        lay_out_along(chapter, viewport, Axis::HorizontalTb)
+    }
+
+    /// Lay `chapter` out in a book written along `axis`.
+    fn lay_out_along(chapter: &Chapter, viewport: Viewport, axis: Axis) -> Page {
         let mut fonts = Fonts::empty();
         Layout {
             viewport,
             fonts: &mut fonts,
             resources: &Unknown,
-            axis: Axis::HorizontalTb,
+            axis,
         }
         .chapter(chapter)
+    }
+
+    /// `one_paragraph`, its paragraph styled to read along `mode`. The
+    /// alignment stands for everything else a real style names: a style
+    /// holding nothing but the initial values is the pool's default style,
+    /// which an unstyled box reads.
+    fn one_paragraph_along(text: &str, mode: WritingMode) -> Chapter {
+        let mut chapter = one_paragraph(text);
+        let style = chapter.styles.intern(ComputedStyle {
+            writing_mode: mode,
+            text_align: TextAlign::Center,
+            ..ComputedStyle::default()
+        });
+        let paragraph = chapter.children(chapter.root()).next().expect("added");
+        chapter.node_mut(paragraph).expect("added").style = style;
+        chapter
+    }
+
+    #[test]
+    fn a_chapter_of_horizontal_styles_reads_across_a_vertical_book() {
+        // A vertical novel sets its title page and colophon across the page,
+        // and says so in those sections' own styles.
+        let chapter = one_paragraph_along("title", WritingMode::HorizontalTb);
+
+        let page = lay_out_along(&chapter, Viewport::new(400.0, 600.0), Axis::VerticalRl);
+
+        assert_eq!(page.axis, Axis::HorizontalTb);
+    }
+
+    #[test]
+    fn a_chapter_carrying_no_style_reads_the_way_the_book_does() {
+        let chapter = one_paragraph("body text");
+
+        let page = lay_out_along(&chapter, Viewport::new(400.0, 600.0), Axis::VerticalRl);
+
+        assert_eq!(page.axis, Axis::VerticalRl);
+    }
+
+    #[test]
+    fn a_chapter_of_vertical_styles_reads_down_a_horizontal_book() {
+        let chapter = one_paragraph_along("縦書き", WritingMode::VerticalRl);
+
+        let page = lay_out(&chapter, Viewport::new(400.0, 600.0));
+
+        assert_eq!(page.axis, Axis::VerticalRl);
     }
 
     #[test]

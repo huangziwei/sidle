@@ -2826,9 +2826,11 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::Visibility::Visible,
             };
         }
-        // BoxAlign: reverse of export - set both margins to auto
+        // BoxAlign: both margins auto, and the property itself. `Length::Auto`
+        // is the margin default.
         IrField::BoxAlign => {
             if css_value == "center" {
+                ir_style.box_align = ir_style::BoxAlign::Center;
                 ir_style.margin_left = ir_style::Length::Auto;
                 ir_style.margin_right = ir_style::Length::Auto;
             }
@@ -2951,11 +2953,19 @@ fn parse_css_length_to_ir(s: &str) -> Option<ir_style::Length> {
 
 /// Import KFX style properties into an IR `ComputedStyle`: look up the schema
 /// rule by `kfx_symbol`, apply the inverse transform, set the IR field.
+///
+/// The style starts at `doc_writing_mode`, the axis a KFX style inherits from
+/// `document_data`. A style declaring `writing_mode` of its own — a horizontal
+/// title page inside a vertical book — states an axis apart from it.
 pub fn import_kfx_style(
     schema: &StyleSchema,
     props: &[(u64, IonValue)],
+    doc_writing_mode: ir_style::WritingMode,
 ) -> ir_style::ComputedStyle {
-    let mut style = ir_style::ComputedStyle::default();
+    let mut style = ir_style::ComputedStyle {
+        writing_mode: doc_writing_mode,
+        ..ir_style::ComputedStyle::default()
+    };
 
     for (kfx_symbol, kfx_value) in props {
         // Apply EVERY rule backed by this KFX symbol (e.g. `$underline`
@@ -3637,12 +3647,41 @@ mod tests {
         ];
 
         // Import using schema
-        let ir_style = import_kfx_style(schema, &props);
+        let ir_style = import_kfx_style(schema, &props, ir_style::WritingMode::default());
 
         // Verify fields were set correctly
         assert_eq!(ir_style.font_weight, FontWeight::BOLD);
         assert_eq!(ir_style.text_align, TextAlign::Center);
         assert_eq!(ir_style.margin_top, crate::style::Length::Em(2.0));
+    }
+
+    #[test]
+    fn a_style_declaring_no_axis_reads_the_document_s() {
+        let schema = StyleSchema::standard();
+        let props = vec![(
+            KfxSymbol::FontWeight as u64,
+            IonValue::Symbol(KfxSymbol::Bold as u64),
+        )];
+
+        let style = import_kfx_style(schema, &props, ir_style::WritingMode::VerticalRl);
+
+        assert_eq!(style.writing_mode, ir_style::WritingMode::VerticalRl);
+    }
+
+    #[test]
+    fn a_horizontal_style_in_a_vertical_book_keeps_its_own_axis() {
+        // A title page or a colophon set across a book that reads down the
+        // page: the KFX style says so, and the IR must not lose it to the CSS
+        // initial value.
+        let schema = StyleSchema::standard();
+        let props = vec![(
+            KfxSymbol::WritingMode as u64,
+            IonValue::Symbol(KfxSymbol::HorizontalTb as u64),
+        )];
+
+        let style = import_kfx_style(schema, &props, ir_style::WritingMode::VerticalRl);
+
+        assert_eq!(style.writing_mode, ir_style::WritingMode::HorizontalTb);
     }
 
     #[test]
@@ -4563,7 +4602,7 @@ mod tests {
             ]),
         )];
 
-        let style = import_kfx_style(schema, &props);
+        let style = import_kfx_style(schema, &props, ir_style::WritingMode::default());
 
         assert!(
             !matches!(style.border_width_top, Length::Auto),

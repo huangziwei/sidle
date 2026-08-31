@@ -26,6 +26,21 @@ struct TokenizeContext<'a> {
     ruby_index: Option<&'a HashMap<String, Vec<String>>>,
 }
 
+/// The styles a storyline names, and the axis `document_data` states — which
+/// a style that declares no `writing_mode` of its own inherits.
+#[derive(Clone, Copy, Default)]
+pub struct Styles<'a> {
+    pub by_name: Option<&'a HashMap<String, Vec<(u64, IonValue)>>>,
+    pub writing_mode: crate::style::WritingMode,
+}
+
+impl Styles<'_> {
+    /// The properties `name` stands for.
+    fn get(&self, name: &str) -> Option<&Vec<(u64, IonValue)>> {
+        self.by_name?.get(name)
+    }
+}
+
 /// Shorthand for getting a KfxSymbol as u64.
 macro_rules! sym {
     ($variant:ident) => {
@@ -622,7 +637,7 @@ fn clamp_events_to_run(events: &[SpanStart], start: usize, end: usize) -> Vec<Sp
 pub fn build_ir_from_tokens<F>(
     tokens: &TokenStream,
     symbols: &SymbolTable,
-    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    styles: Styles<'_>,
     content_lookup: F,
 ) -> Chapter
 where
@@ -637,7 +652,7 @@ where
 pub fn build_ir_from_tokens_anchored<F>(
     tokens: &TokenStream,
     symbols: &SymbolTable,
-    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    styles: Styles<'_>,
     anchor_table: Option<&AnchorTable>,
     mut content_lookup: F,
 ) -> Chapter
@@ -677,7 +692,7 @@ where
                 let node_role = if elem.is_image {
                     Role::Image
                 } else {
-                    resolve_hinted_role(elem, styles, symbols, anchor_table)
+                    resolve_hinted_role(elem, styles.by_name, symbols, anchor_table)
                 };
                 // KFX writes a cell as a plain text element; its place in a
                 // `TableRow` is what names it.
@@ -713,8 +728,7 @@ where
                 if elem.is_image && !elem.render_inline {
                     let mut merged = CssDecl::new();
                     if let Some(style_name) = &elem.style_name
-                        && let Some(styles_map) = styles
-                        && let Some(kfx_props) = styles_map.get(style_name)
+                        && let Some(kfx_props) = styles.get(style_name)
                     {
                         for (k, v) in convert_yj_properties(kfx_props, symbols).items {
                             merged.set(k, v);
@@ -732,8 +746,9 @@ where
                     // The wrapper carries the image element's layout hints: a
                     // heading/figure/caption-hinted block image promotes the
                     // wrapper `<div>` to `<hN>` / `<figure>` / `<figcaption>`.
-                    let wrapper_role = hinted_wrapper_role(elem, styles, symbols, anchor_table)
-                        .unwrap_or(Role::Container);
+                    let wrapper_role =
+                        hinted_wrapper_role(elem, styles.by_name, symbols, anchor_table)
+                            .unwrap_or(Role::Container);
                     let wrapper = chapter.alloc_node(Node::new(wrapper_role));
                     chapter.append_child(attach_parent, wrapper);
                     chapter.append_child(wrapper, node_id);
@@ -753,10 +768,8 @@ where
                     // normalized export names its stylesheet rules after.
                     if let Some(style_name) = &elem.style_name {
                         chapter.semantics.set_class(node_id, style_name);
-                        if let Some(styles_map) = styles
-                            && let Some(kfx_props) = styles_map.get(style_name)
-                        {
-                            let ir_style = kfx_style_to_ir(kfx_props, symbols);
+                        if let Some(kfx_props) = styles.get(style_name) {
+                            let ir_style = kfx_style_to_ir(kfx_props, symbols, styles.writing_mode);
                             let style_id = chapter.styles.intern(ir_style);
                             if let Some(node) = chapter.node_mut(node_id) {
                                 node.style = style_id;
@@ -790,7 +803,7 @@ where
                 let (style_cols, style_rows) = elem
                     .style_name
                     .as_ref()
-                    .and_then(|name| styles?.get(name))
+                    .and_then(|name| styles.get(name))
                     .map(|props| cell_spans_from_style(props))
                     .unwrap_or_default();
                 if let Some(n) = elem.column_span.or(style_cols) {
@@ -1075,7 +1088,7 @@ pub fn apply_section_template(
     template: &SectionTemplate,
     story_eid: Option<i64>,
     symbols: &SymbolTable,
-    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    styles: Styles<'_>,
     anchor_table: Option<&AnchorTable>,
 ) {
     let SectionTemplate {
@@ -1089,10 +1102,8 @@ pub fn apply_section_template(
 
     if let Some(style_name) = template_style {
         chapter.semantics.set_class(wrapper, style_name);
-        if let Some(styles_map) = styles
-            && let Some(kfx_props) = styles_map.get(style_name)
-        {
-            let ir_style = kfx_style_to_ir(kfx_props, symbols);
+        if let Some(kfx_props) = styles.get(style_name) {
+            let ir_style = kfx_style_to_ir(kfx_props, symbols, styles.writing_mode);
             let style_id = chapter.styles.intern(ir_style);
             if let Some(node) = chapter.node_mut(wrapper) {
                 node.style = style_id;
@@ -1521,14 +1532,17 @@ fn apply_semantics_to_node(
 
 /// Convert KFX style properties to an IR `ComputedStyle` over the schema
 /// rules carrying a KFX symbol mapping, applying each inverse transform.
+/// `writing_mode` is the axis `document_data` states, which a style inherits
+/// where it declares none.
 fn kfx_style_to_ir(
     props: &[(u64, IonValue)],
     symbols: &SymbolTable,
+    writing_mode: crate::style::WritingMode,
 ) -> crate::style::ComputedStyle {
     use crate::formats::kfx::style_schema::{StyleSchema, import_kfx_style};
 
     let schema = StyleSchema::standard();
-    let mut style = import_kfx_style(schema, props);
+    let mut style = import_kfx_style(schema, props, writing_mode);
     // `background_image` names an `external_resource` by symbol, past the
     // reach of the schema's value transforms. The IR keeps the resource name
     // until the importer swaps in the exported filename.
@@ -1549,7 +1563,7 @@ fn build_text_with_spans(
     text: &str,
     spans: &[SpanStart],
     symbols: &SymbolTable,
-    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    styles: Styles<'_>,
 ) {
     // KFX expresses a link and a ruby/styled run over one text as independent,
     // partly overlapping events. Links partition the outside and never nest; a
@@ -1651,10 +1665,8 @@ fn build_text_with_spans(
             && let Some(style_name) = symbols.resolve_opt(style_sym)
         {
             chapter.semantics.set_class(span_node, style_name);
-            if let Some(styles_map) = styles
-                && let Some(kfx_props) = styles_map.get(style_name)
-            {
-                let ir_style = kfx_style_to_ir(kfx_props, symbols);
+            if let Some(kfx_props) = styles.get(style_name) {
+                let ir_style = kfx_style_to_ir(kfx_props, symbols, styles.writing_mode);
                 let style_id = chapter.styles.intern(ir_style);
                 if let Some(node) = chapter.node_mut(span_node) {
                     node.style = style_id;
@@ -1816,7 +1828,7 @@ pub fn parse_storyline_to_ir<F>(
     storyline: &IonValue,
     symbols: &SymbolTable,
     anchors: Option<&HashMap<String, String>>,
-    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    styles: Styles<'_>,
     ruby_index: Option<&HashMap<String, Vec<String>>>,
     anchor_table: Option<&AnchorTable>,
     content_lookup: F,
@@ -1824,7 +1836,7 @@ pub fn parse_storyline_to_ir<F>(
 where
     F: FnMut(&str, usize) -> Option<String>,
 {
-    let tokens = tokenize_storyline(storyline, symbols, anchors, styles, ruby_index);
+    let tokens = tokenize_storyline(storyline, symbols, anchors, styles.by_name, ruby_index);
     build_ir_from_tokens_anchored(&tokens, symbols, styles, anchor_table, content_lookup)
 }
 
@@ -3491,7 +3503,7 @@ mod tests {
         stream.text("Hello");
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| None);
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| None);
         assert_eq!(chapter.node_count(), 3); // root + para + text
     }
 
@@ -3526,7 +3538,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| None);
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| None);
 
         let children: Vec<_> = chapter.children(chapter.root()).collect();
         assert_eq!(children.len(), 1);
@@ -3567,13 +3579,14 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |name, idx| {
-            if name == "content_1" && idx == 0 {
-                Some("Hello, world!".to_string())
-            } else {
-                None
-            }
-        });
+        let chapter =
+            build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |name, idx| {
+                if name == "content_1" && idx == 0 {
+                    Some("Hello, world!".to_string())
+                } else {
+                    None
+                }
+            });
 
         assert_eq!(chapter.node_count(), 3); // root + para + text
         let para_id = chapter.children(chapter.root()).next().unwrap();
@@ -3615,7 +3628,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| {
             Some("Chapter 1".to_string())
         });
 
@@ -3669,7 +3682,7 @@ mod tests {
         stream.end_element();
 
         // Text is "Hello, world!" - span at offset 7, length 5 = "world"
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| {
             Some("Hello, world!".to_string())
         });
 
@@ -3766,8 +3779,9 @@ mod tests {
         stream.push(KfxToken::Text("　お互いです".to_string()));
         stream.end_element();
 
-        let chapter =
-            build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| Some("!!".to_string()));
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| {
+            Some("!!".to_string())
+        });
 
         let para_id = chapter.children(chapter.root()).next().unwrap();
         let children: Vec<_> = chapter.children(para_id).collect();
@@ -3873,10 +3887,13 @@ mod tests {
         stream.push(KfxToken::Text("　お互いです".to_string()));
         stream.end_element();
 
-        let chapter =
-            build_ir_from_tokens_anchored(&stream, &no_symbols(), None, Some(&table), |_, _| {
-                Some("!!".to_string())
-            });
+        let chapter = build_ir_from_tokens_anchored(
+            &stream,
+            &no_symbols(),
+            Styles::default(),
+            Some(&table),
+            |_, _| Some("!!".to_string()),
+        );
 
         // The anchor splits the tail run between "い" and "です".
         let stamped = table.id_at(50, 8).unwrap();
@@ -5171,7 +5188,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), Styles::default(), |_, _| {
             Some("1. Easy Concurrency".to_string())
         });
 

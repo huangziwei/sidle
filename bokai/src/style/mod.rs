@@ -31,11 +31,12 @@ pub use font_family::{
 // Re-export property types
 pub use properties::ROOT_FONT_SIZE_PX;
 pub use properties::{
-    BackgroundRepeat, BackgroundSize, BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear,
-    Color, DecorationStyle, Display, Float, FontStyle, FontVariant, FontWeight, Hyphens, Length,
-    LineBreak, ListStylePosition, ListStyleType, OverflowWrap, TextAlign, TextCombineUpright,
-    TextEmphasisOver, TextEmphasisPosition, TextEmphasisRight, TextEmphasisStyle, TextOrientation,
-    TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak, WritingMode,
+    BackgroundRepeat, BackgroundSize, BorderCollapse, BorderStyle, BoxAlign, BoxSizing, BreakValue,
+    Clear, Color, DecorationStyle, Display, Float, FontStyle, FontVariant, FontWeight, Hyphens,
+    Length, LineBreak, ListStylePosition, ListStyleType, OverflowWrap, TextAlign,
+    TextCombineUpright, TextEmphasisOver, TextEmphasisPosition, TextEmphasisRight,
+    TextEmphasisStyle, TextOrientation, TextTransform, VerticalAlign, Visibility, WhiteSpace,
+    WordBreak, WritingMode,
 };
 
 // Re-export core style types

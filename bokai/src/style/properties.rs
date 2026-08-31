@@ -253,6 +253,18 @@ enum_property! {
 }
 
 enum_property! {
+    /// Where a box places a picture it holds, KFX `box_align`. Text keeps
+    /// `text_align`.
+    pub enum BoxAlign {
+        /// The edge the box's own direction starts at.
+        #[default]
+        Start => "start",
+        /// The middle of the box, along both axes.
+        Center => "center",
+    }
+}
+
+enum_property! {
     /// CSS clear values for float clearing.
     pub enum Clear {
         #[default]

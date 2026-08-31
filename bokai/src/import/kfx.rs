@@ -19,7 +19,7 @@ use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::position::PositionFragments;
 use crate::formats::kfx::resource_index::{self, ImageResource};
 use crate::formats::kfx::schema::schema;
-use crate::formats::kfx::storyline::{SectionTemplate, parse_storyline_to_ir};
+use crate::formats::kfx::storyline::{SectionTemplate, Styles, parse_storyline_to_ir};
 use crate::formats::kfx::structure::{self, ContentSource};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
@@ -589,18 +589,22 @@ impl Importer for KfxImporter {
         })
     }
 
+    fn writing_mode(&mut self) -> crate::style::WritingMode {
+        self.document_axis()
+    }
+}
+
+impl KfxImporter {
     /// `document_data.writing_mode`, resolved at open. A `-rl` horizontal mode
     /// is a page-progression value and lays out as `horizontal-tb`.
-    fn writing_mode(&mut self) -> crate::style::WritingMode {
+    fn document_axis(&self) -> crate::style::WritingMode {
         match self.css_writing_mode.as_str() {
             "vertical-rl" => crate::style::WritingMode::VerticalRl,
             "vertical-lr" => crate::style::WritingMode::VerticalLr,
             _ => crate::style::WritingMode::HorizontalTb,
         }
     }
-}
 
-impl KfxImporter {
     /// Create an importer from a ByteSource.
     pub fn from_source(source: Arc<dyn ByteSource>) -> io::Result<Self> {
         // Read and parse container header (18 bytes)
@@ -1426,6 +1430,7 @@ impl KfxImporter {
         let mut declared_eids = Vec::new();
         collect_declared_eids(&storyline_ion, &mut declared_eids);
 
+        let writing_mode = self.document_axis();
         let symbols = Arc::clone(&self.symbols);
         let anchors = Arc::clone(&self.anchors);
         let styles = Arc::clone(&self.styles);
@@ -1437,7 +1442,10 @@ impl KfxImporter {
             &storyline_ion,
             symbols.as_ref(),
             Some(anchors.as_ref()),
-            Some(styles.as_ref()),
+            Styles {
+                by_name: Some(styles.as_ref()),
+                writing_mode,
+            },
             Some(ruby_index.as_ref()),
             Some(anchor_table.as_ref()),
             |name, index| self.lookup_content_text(name, index),
@@ -1463,7 +1471,10 @@ impl KfxImporter {
             &template,
             story_eid,
             &self.symbols,
-            Some(styles.as_ref()),
+            Styles {
+                by_name: Some(styles.as_ref()),
+                writing_mode,
+            },
             Some(anchor_table.as_ref()),
         );
 
@@ -1560,6 +1571,7 @@ impl KfxImporter {
         let inline_style =
             crate::formats::kfx::yj_properties::convert_yj_properties(cfields, &self.symbols).items;
 
+        let writing_mode = self.document_axis();
         let symbols = Arc::clone(&self.symbols);
         let anchors = Arc::clone(&self.anchors);
         let styles = Arc::clone(&self.styles);
@@ -1569,7 +1581,10 @@ impl KfxImporter {
             &synthetic,
             symbols.as_ref(),
             Some(anchors.as_ref()),
-            Some(styles.as_ref()),
+            Styles {
+                by_name: Some(styles.as_ref()),
+                writing_mode,
+            },
             Some(ruby_index.as_ref()),
             Some(anchor_table.as_ref()),
             |name, index| self.lookup_content_text(name, index),
@@ -1587,7 +1602,10 @@ impl KfxImporter {
             },
             story_eid,
             &self.symbols,
-            Some(styles.as_ref()),
+            Styles {
+                by_name: Some(styles.as_ref()),
+                writing_mode,
+            },
             Some(anchor_table.as_ref()),
         );
 

@@ -9,7 +9,7 @@ pub mod scrub;
 pub mod text;
 
 use bokai::style::Color;
-use tiny_skia::{FillRule, Paint, PathBuilder, PixmapMut, Stroke, Transform};
+use tiny_skia::{FillRule, Mask, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 
 use crate::font::Fonts;
 use crate::geom::{Rect, Size};
@@ -230,6 +230,9 @@ pub struct Chrome {
     pub grid: bool,
     /// Which page the scrubber stands at.
     pub at: usize,
+    /// How far the open list is scrolled, in panel dots, held to what the
+    /// list has to show.
+    pub scroll: f32,
     hits: Vec<Hit>,
 }
 
@@ -295,11 +298,23 @@ pub struct Canvas<'a, 'p> {
     pub scale: f32,
     /// Where the panel's own origin sits in the buffer.
     pub offset: (f32, f32),
+    /// Where drawing is confined, set by [`Canvas::clip_to`].
+    pub clip: Option<Mask>,
 }
 
 impl Canvas<'_, '_> {
     fn view(&self) -> Transform {
         Transform::from_translate(self.offset.0, self.offset.1).post_scale(self.scale, self.scale)
+    }
+
+    /// Draw nothing outside `rect`, in panel dots, until [`Canvas::unclip`].
+    pub fn clip_to(&mut self, rect: Rect) {
+        self.clip = crate::paint::mask(rect, self.view(), self.target);
+    }
+
+    /// Drop the clip [`Canvas::clip_to`] set.
+    pub fn unclip(&mut self) {
+        self.clip = None;
     }
 
     /// One dot of the reference panel every chrome measurement is stated
@@ -314,11 +329,13 @@ impl Canvas<'_, '_> {
     }
 
     pub fn fill(&mut self, rect: Rect, color: Color) {
-        crate::paint::fill(rect, color, self.view(), self.target);
+        let view = self.view();
+        crate::paint::fill(rect, color, view, self.clip.as_ref(), self.target);
     }
 
     pub fn stroke(&mut self, rect: Rect, color: Color, width: f32) {
-        crate::paint::outline(rect, color, width, self.view(), self.target);
+        let view = self.view();
+        crate::paint::outline(rect, color, width, view, self.clip.as_ref(), self.target);
     }
 
     /// A rule `width` dots thick along `y`.
@@ -339,7 +356,8 @@ impl Canvas<'_, '_> {
             ..Stroke::default()
         };
         let view = self.view();
-        self.target.stroke_path(&path, &paint, &stroke, view, None);
+        self.target
+            .stroke_path(&path, &paint, &stroke, view, self.clip.as_ref());
     }
 
     /// The same rectangle filled.
@@ -352,7 +370,7 @@ impl Canvas<'_, '_> {
         paint.anti_alias = true;
         let view = self.view();
         self.target
-            .fill_path(&path, &paint, FillRule::Winding, view, None);
+            .fill_path(&path, &paint, FillRule::Winding, view, self.clip.as_ref());
     }
 
     /// A closed shape through `points`, in the artwork's own units, placed
@@ -374,7 +392,7 @@ impl Canvas<'_, '_> {
         paint.anti_alias = true;
         let view = self.view();
         self.target
-            .fill_path(&path, &paint, FillRule::Winding, view, None);
+            .fill_path(&path, &paint, FillRule::Winding, view, self.clip.as_ref());
     }
 
     /// The chevron a row or a page arrow carries, in a box of [`CHEVRON_BOX`],
@@ -405,6 +423,7 @@ impl Canvas<'_, '_> {
             rect.y + (rect.height - height * fit) / 2.0,
         )
         .pre_scale(fit, fit);
+        let view = placed.post_concat(self.view());
         self.target.draw_pixmap(
             0,
             0,
@@ -413,8 +432,8 @@ impl Canvas<'_, '_> {
                 quality: tiny_skia::FilterQuality::Bilinear,
                 ..tiny_skia::PixmapPaint::default()
             },
-            placed.post_concat(self.view()),
-            None,
+            view,
+            self.clip.as_ref(),
         );
     }
 
@@ -428,13 +447,14 @@ impl Canvas<'_, '_> {
         let view = self.view();
         if filled {
             self.target
-                .fill_path(&path, &paint, FillRule::Winding, view, None);
+                .fill_path(&path, &paint, FillRule::Winding, view, self.clip.as_ref());
         } else {
             let stroke = Stroke {
                 width: radius * 0.24,
                 ..Stroke::default()
             };
-            self.target.stroke_path(&path, &paint, &stroke, view, None);
+            self.target
+                .stroke_path(&path, &paint, &stroke, view, self.clip.as_ref());
         }
     }
 
@@ -458,13 +478,12 @@ impl Canvas<'_, '_> {
             self.panel.width.max(1.0),
             self.panel.height.max(1.0),
         );
-        Painter::cached(self.fonts, &NoResources, self.cache).paint(
-            &tree,
-            page,
-            self.offset,
-            self.scale,
-            self.target,
-        );
+        let painter = Painter::cached(self.fonts, &NoResources, self.cache);
+        let mut painter = match &self.clip {
+            Some(mask) => painter.within(mask),
+            None => painter,
+        };
+        painter.paint(&tree, page, self.offset, self.scale, self.target);
         let left = match align {
             text::Align::Left => at.0,
             text::Align::Center => at.0 - width / 2.0,

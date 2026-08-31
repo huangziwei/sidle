@@ -30,6 +30,8 @@ pub struct Painter<'a> {
     fonts: &'a Fonts,
     resources: &'a dyn Resources,
     cache: Owned<'a>,
+    /// The mask every draw is confined to, over the window's own.
+    clip: Clip<'a>,
 }
 
 /// A [`Cache`] the painter borrowed, or one it made for a single draw.
@@ -54,6 +56,7 @@ impl<'a> Painter<'a> {
             fonts,
             resources,
             cache: Owned::Own(Box::default()),
+            clip: None,
         }
     }
 
@@ -63,7 +66,14 @@ impl<'a> Painter<'a> {
             fonts,
             resources,
             cache: Owned::Borrowed(cache),
+            clip: None,
         }
+    }
+
+    /// Confine every draw to `mask`, in buffer pixels.
+    pub fn within(mut self, mask: &'a Mask) -> Self {
+        self.clip = Some(mask);
+        self
     }
 
     /// Draw the part of `tree` inside `window`, in chapter coordinates, onto
@@ -83,8 +93,8 @@ impl<'a> Painter<'a> {
         // `showing` is gathered once; both passes then run over it.
         let showing = shown(tree, window);
         // Anything straddling the mask's edge is cut at it.
-        let clip = window_mask(window, &showing, origin, scale, target);
-        let clip = clip.as_ref();
+        let own = window_mask(window, &showing, origin, scale, target);
+        let clip = self.clip.or(own.as_ref());
 
         // Backgrounds and borders first; text sits on top of them.
         for fragment in &showing {
@@ -337,8 +347,8 @@ impl<'a> Painter<'a> {
 pub type Clip<'a> = Option<&'a Mask>;
 
 /// Fill one rectangle, given in the coordinates `view` maps from.
-pub fn fill(rect: Rect, color: Color, view: Transform, target: &mut PixmapMut<'_>) {
-    fill_clipped(rect, color, view, None, target);
+pub fn fill(rect: Rect, color: Color, view: Transform, clip: Clip<'_>, target: &mut PixmapMut<'_>) {
+    fill_clipped(rect, color, view, clip, target);
 }
 
 fn fill_clipped(
@@ -424,8 +434,23 @@ fn window_mask(
     Some(mask)
 }
 
+/// A mask over `rect`, given in the coordinates `view` maps from, covering a
+/// buffer the size of `target`.
+pub fn mask(rect: Rect, view: Transform, target: &PixmapMut<'_>) -> Option<Mask> {
+    let mut mask = Mask::new(target.width(), target.height())?;
+    mask.fill_path(&rectangle(rect)?, FillRule::Winding, true, view);
+    Some(mask)
+}
+
 /// Stroke one rectangle's outline, `width` wide in the same coordinates.
-pub fn outline(rect: Rect, color: Color, width: f32, view: Transform, target: &mut PixmapMut<'_>) {
+pub fn outline(
+    rect: Rect,
+    color: Color,
+    width: f32,
+    view: Transform,
+    clip: Clip<'_>,
+    target: &mut PixmapMut<'_>,
+) {
     let Some(path) = rectangle(rect) else {
         return;
     };
@@ -435,7 +460,7 @@ pub fn outline(rect: Rect, color: Color, width: f32, view: Transform, target: &m
         width,
         ..Default::default()
     };
-    target.stroke_path(&path, &paint, &stroke, view, None);
+    target.stroke_path(&path, &paint, &stroke, view, clip);
 }
 
 /// A rectangle as a path. `None` for one with no area.

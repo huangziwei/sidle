@@ -65,6 +65,19 @@ impl Rect {
         )
     }
 
+    /// The part of this rectangle inside `other`, of no area where the two
+    /// miss.
+    pub fn intersection(&self, other: &Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        Rect::new(
+            x,
+            y,
+            (self.right().min(other.right()) - x).max(0.0),
+            (self.bottom().min(other.bottom()) - y).max(0.0),
+        )
+    }
+
     /// This rectangle inset by `all` on every side.
     pub fn inset_by(&self, all: f32) -> Rect {
         self.inset(Edges::new(all, all, all, all))

@@ -103,6 +103,8 @@ pub struct ComputedStyle {
     pub max_width: Length,
     pub min_height: Length,
     pub float: Float,
+    /// Where the box places a picture it holds.
+    pub box_align: BoxAlign,
 
     // Page break properties
     pub break_before: BreakValue,

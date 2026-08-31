@@ -15,8 +15,9 @@
 //! ```
 //!
 //! Click the page to turn it, `Aa` and the contents mark to open a panel.
-//! Arrows, space and the wheel turn pages; `n` and `p` change chapter; `t`
-//! opens the contents, `a` the settings, escape closes them, `q` quits.
+//! Arrows, space and the wheel turn pages, and scroll an open list; `n` and
+//! `p` change chapter; `t` opens the contents, `a` the settings, escape
+//! closes them, `q` quits.
 
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -52,6 +53,9 @@ const LOCATIONS_A_PAGE: i64 = 14;
 /// How tall the window opens, in logical pixels.
 const WINDOW_HEIGHT: f32 = 900.0;
 
+/// How many rows of a list a page key moves it by.
+const ROWS_A_LEAP: f32 = 5.0;
+
 #[derive(Default)]
 struct Options {
     book: Option<PathBuf>,
@@ -69,6 +73,8 @@ struct Options {
     grid: bool,
     open: Overlay,
     tab: AaTab,
+    /// How many rows down the open list stands.
+    scroll: f32,
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -94,6 +100,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--grid" => options.grid = true,
             "--open" => options.open = named_overlay(&value()?)?,
             "--tab" => options.tab = named_tab(&value()?)?,
+            "--scroll" => options.scroll = value()?.parse()?,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -221,6 +228,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         reader.chrome.grid = options.grid;
         reader.chrome.overlay = options.open;
         reader.chrome.tab = options.tab;
+        reader.chrome.scroll = options.scroll * reader.scroll_step();
         reader.shot(&path)?;
         return Ok(());
     }
@@ -554,7 +562,7 @@ impl Reader {
         }
         .chapter(&chapter);
 
-        let pages = Pages::of(&laid, &viewport);
+        let pages = Pages::of(&laid, &viewport, self.axis);
         self.page = self.page.min(pages.count().saturating_sub(1));
         self.sheet = None;
         let locations = page_locations(&laid.root, &pages, &chapter, self.positions.as_ref());
@@ -608,6 +616,21 @@ impl Reader {
         self.page = 0;
         self.laid = None;
         self.request_redraw();
+    }
+
+    /// Move an open list by `dots`, reporting whether one took it.
+    fn scroll(&mut self, dots: f32) -> bool {
+        if self.chrome.overlay != Overlay::GoTo {
+            return false;
+        }
+        self.chrome.scroll = (self.chrome.scroll + dots).max(0.0);
+        self.request_redraw();
+        true
+    }
+
+    /// One step of a list, in panel dots: a row of it.
+    fn scroll_step(&self) -> f32 {
+        goto::ROW * self.panel_for().size.height / bars::REFERENCE
     }
 
     /// Whether the page after this one lies to its left, which is what a
@@ -665,6 +688,8 @@ impl Reader {
             .as_ref()
             .and_then(|laid| laid.locations.get(self.page).copied())
             .unwrap_or_else(|| ((through * locations as f32) as i64).max(1));
+        // How far in the book stands: the location's share of `locations`.
+        let read = (location as f32 / locations.max(1) as f32).clamp(0.0, 1.0);
         let left = pages.saturating_sub(self.page + 1) as f32 / pages as f32;
         let minutes = |words: f32| (words / WORDS_A_MINUTE).ceil() as u32;
 
@@ -680,9 +705,9 @@ impl Reader {
             locations,
             page: (self.chapter * pages + self.page + 1) as i64,
             pages: (chapters * pages) as i64,
-            percent: (through * 100.0).round() as u32,
+            percent: (read * 100.0).ceil() as u32,
             minutes_left_in_chapter: minutes(words as f32 * left),
-            minutes_left: minutes(words as f32 * (1.0 - through) * chapters as f32),
+            minutes_left: minutes(words as f32 * (1.0 - read) * chapters as f32),
         }
     }
 
@@ -726,10 +751,12 @@ impl Reader {
             Action::Open(overlay) => {
                 self.chrome.overlay = overlay;
                 self.chrome.pane = AaPane::Tab;
+                self.chrome.scroll = 0.0;
                 self.request_redraw();
             }
             Action::Close => {
                 self.chrome.overlay = Overlay::None;
+                self.chrome.scroll = 0.0;
                 self.request_redraw();
             }
             Action::Tab(tab) => {
@@ -1035,6 +1062,7 @@ impl Reader {
             dpi: panel.dpi,
             scale: fit,
             offset,
+            clip: None,
         };
         bars::draw(&mut self.chrome, &mut canvas, &at, mode, leftward);
         match overlay {
@@ -1280,11 +1308,16 @@ impl ApplicationHandler for Reader {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, lines) => -lines,
-                    MouseScrollDelta::PixelDelta(position) => -position.y as f32 / 120.0,
+                // A wheel scrolls an open list and turns the page under none.
+                let fit = self.view.as_ref().map_or(1.0, |view| view.fit.0).max(0.001);
+                let step = self.scroll_step();
+                let (lines, dots) = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => (-lines, -lines * step),
+                    MouseScrollDelta::PixelDelta(position) => {
+                        (-position.y as f32 / 120.0, -position.y as f32 / fit)
+                    }
                 };
-                if lines.abs() >= 1.0 {
+                if !self.scroll(dots) && lines.abs() >= 1.0 {
                     self.turn(lines.signum() as isize);
                 }
             }
@@ -1296,10 +1329,26 @@ impl ApplicationHandler for Reader {
                     Key::Named(NamedKey::ArrowRight) => {
                         self.turn(if self.pages_leftward() { -1 } else { 1 })
                     }
-                    Key::Named(NamedKey::ArrowDown)
-                    | Key::Named(NamedKey::PageDown)
-                    | Key::Named(NamedKey::Space) => self.turn(1),
-                    Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::PageUp) => self.turn(-1),
+                    Key::Named(NamedKey::ArrowDown) => {
+                        if !self.scroll(self.scroll_step()) {
+                            self.turn(1);
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        if !self.scroll(-self.scroll_step()) {
+                            self.turn(-1);
+                        }
+                    }
+                    Key::Named(NamedKey::PageDown) | Key::Named(NamedKey::Space) => {
+                        if !self.scroll(ROWS_A_LEAP * self.scroll_step()) {
+                            self.turn(1);
+                        }
+                    }
+                    Key::Named(NamedKey::PageUp) => {
+                        if !self.scroll(-ROWS_A_LEAP * self.scroll_step()) {
+                            self.turn(-1);
+                        }
+                    }
                     Key::Named(NamedKey::Escape) => self.act(Action::Close),
                     Key::Character("a") => self.act(Action::Open(Overlay::Aa)),
                     Key::Character("t") => self.act(Action::Open(Overlay::GoTo)),

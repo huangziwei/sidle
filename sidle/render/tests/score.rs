@@ -143,7 +143,7 @@ fn from_layout(path: &PathBuf, panel: &Panel, fonts: &mut Fonts) -> Geometry {
         axis,
     }
     .chapter(&chapter);
-    let pages = Pages::of(&laid, &viewport);
+    let pages = Pages::of(&laid, &viewport, axis);
 
     let vertical = pages.axis().is_vertical();
     let (left, top) = pages.origin(0);
