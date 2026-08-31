@@ -53,6 +53,23 @@ impl Rect {
             && other.y < self.bottom()
     }
 
+    /// The smallest rectangle covering this one and `other`.
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect::new(
+            x,
+            y,
+            self.right().max(other.right()) - x,
+            self.bottom().max(other.bottom()) - y,
+        )
+    }
+
+    /// This rectangle inset by `all` on every side.
+    pub fn inset_by(&self, all: f32) -> Rect {
+        self.inset(Edges::new(all, all, all, all))
+    }
+
     /// This rectangle inset on every side by `edges`. A box whose insets
     /// exceed its own size collapses to zero.
     pub fn inset(&self, edges: Edges) -> Rect {

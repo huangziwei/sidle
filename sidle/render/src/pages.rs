@@ -3,7 +3,7 @@
 //! leftward for `Axis::VerticalRl`.
 
 use crate::flow::{Page, Viewport};
-use crate::fragment::{Content, Fragment};
+use crate::fragment::{Content, Fragment, Node};
 use crate::geom::{Axis, Edges, Rect, Size};
 
 /// Where a chapter divides.
@@ -71,13 +71,15 @@ impl Pages {
         }
     }
 
-    /// Where a page's content sits: the margin plus `lead`.
-    pub fn origin(&self) -> (f32, f32) {
-        if self.axis.is_vertical() {
-            (self.margins.left, self.margins.top + self.lead)
-        } else {
-            (self.margins.left + self.lead, self.margins.top)
+    /// Where page `n`'s content sits: `margins` plus `lead`. A vertical
+    /// `axis` splits what no whole block claims of `extent` between
+    /// `margins.left` and `margins.right`.
+    pub fn origin(&self, n: usize) -> (f32, f32) {
+        if self.axis == Axis::HorizontalTb {
+            return (self.margins.left + self.lead, self.margins.top);
         }
+        let slack = (self.extent - self.window(n).width).max(0.0) / 2.0;
+        (self.margins.left + slack, self.margins.top + self.lead)
     }
 
     /// The content area, as an inline extent and a block extent.
@@ -98,27 +100,38 @@ fn reading(axis: Axis, block: f32) -> f32 {
     }
 }
 
-/// Every drawn fragment's extent along the reading direction.
+/// What a page is cut between, along the reading direction: a [`Node::Line`]'s
+/// own box stands for everything on it, and anything drawn outside a line
+/// stands for itself.
 fn spans(root: &Fragment, axis: Axis) -> Vec<(f32, f32)> {
-    root.walk()
-        .filter(|fragment| !matches!(fragment.content, Content::Empty))
-        .map(|fragment| {
-            let (near, far) = if axis.is_vertical() {
-                (fragment.rect.x, fragment.rect.right())
-            } else {
-                (fragment.rect.y, fragment.rect.bottom())
-            };
-            match axis {
-                Axis::VerticalRl => (-far, -near),
-                _ => (near, far),
-            }
-        })
-        .collect()
+    let mut out = Vec::new();
+    extents(root, axis, &mut out);
+    out
+}
+
+fn extents(fragment: &Fragment, axis: Axis, out: &mut Vec<(f32, f32)>) {
+    let line = fragment.kind == Node::Line;
+    if line || !matches!(fragment.content, Content::Empty) {
+        let (near, far) = if axis.is_vertical() {
+            (fragment.rect.x, fragment.rect.right())
+        } else {
+            (fragment.rect.y, fragment.rect.bottom())
+        };
+        out.push(match axis {
+            Axis::VerticalRl => (-far, -near),
+            _ => (near, far),
+        });
+    }
+    if line {
+        return;
+    }
+    for child in &fragment.children {
+        extents(child, axis, out);
+    }
 }
 
 /// Page starts, in reading order. A page ends at the furthest point no span
-/// crosses; a single item taller than a page is given the page anyway rather
-/// than stalling.
+/// crosses. A span longer than `extent` takes the page whole.
 fn cut(spans: &[(f32, f32)], extent: f32, first: f32, last: f32) -> Vec<f32> {
     let mut starts = vec![first];
     if extent <= 0.0 {

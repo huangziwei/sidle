@@ -115,9 +115,11 @@ impl PositionMap {
         self.extent
     }
 
-    /// The location number a coordinate falls in: the count of boundaries
+    /// The location number a coordinate falls in: the count of boundaries at
+    /// or before it, floored at 1. A coordinate on `boundaries[k]` opens the
+    /// `(k+1)`-th location.
     pub fn location_for(&self, position: i64) -> i64 {
-        self.boundaries.partition_point(|&b| b < position).max(1) as i64
+        self.boundaries.partition_point(|&b| b <= position).max(1) as i64
     }
 
     /// How many locations the book has — the "Loc N of M" denominator.
@@ -188,19 +190,20 @@ mod tests {
     }
 
     #[test]
-    fn a_coordinate_on_a_boundary_completes_that_location() {
+    fn a_coordinate_on_a_boundary_opens_that_location() {
         let m = sample();
         assert_eq!(m.location_for(0), 1, "floored at 1, never Location 0");
         assert_eq!(m.location_for(50), 1);
-        assert_eq!(m.location_for(100), 1, "exactly on boundary #2");
+        assert_eq!(m.location_for(100), 2, "exactly on boundary #2");
         assert_eq!(m.location_for(101), 2);
+        assert_eq!(m.location_for(300), 4);
         assert_eq!(m.location_count(), 4);
     }
 
     #[test]
     fn element_locations_are_ordered_by_element() {
         let m = sample();
-        assert_eq!(m.element_locations(), vec![(4, 3), (7, 1), (9, 1)]);
+        assert_eq!(m.element_locations(), vec![(4, 4), (7, 1), (9, 1)]);
     }
 
     #[test]

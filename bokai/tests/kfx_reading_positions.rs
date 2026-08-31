@@ -33,7 +33,7 @@ fn reflowable_kfx_positions_are_pinned() {
     };
     let (elements, locations, digest) = chain(&kfx);
     assert_eq!((elements, locations), (1918, 8117), "scale shape");
-    assert_eq!(digest, 0xbaab_3895_4479_563d, "eid → pid → Location moved");
+    assert_eq!(digest, 0xe723_eb41_d7e2_5b78, "eid → pid → Location moved");
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn short_kfx_positions_are_pinned() {
     };
     let (elements, locations, digest) = chain(&kfx);
     assert_eq!((elements, locations), (881, 1703), "scale shape");
-    assert_eq!(digest, 0x2dd1_34da_d597_4e68, "eid → pid → Location moved");
+    assert_eq!(digest, 0x27cd_785e_9c49_1761, "eid → pid → Location moved");
 }
 
 /// Offsets ride on top of an element's coordinate — this is what turns an

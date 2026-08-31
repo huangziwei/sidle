@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use bokai::model::{AnchorTarget, Book, ChapterId, LandmarkType, PositionMap};
 use sidle_render::chrome::{
-    AaPane, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto,
+    AaPane, AaTab, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto, scrub,
 };
 use sidle_render::font::Script as FaceScript;
 use sidle_render::paint::{Cache, Painter};
@@ -33,6 +33,7 @@ use sidle_render::settings::{Device, Direction, Panel, Script, Stop, reading_fam
 use sidle_render::{Axis, BookResources, Fonts, Layout, Node, Pages, Settings, Size, Viewport};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -48,6 +49,9 @@ const WORDS_A_MINUTE: f32 = 220.0;
 /// Locations one screen of text covers, before a page is laid out.
 const LOCATIONS_A_PAGE: i64 = 14;
 
+/// How tall the window opens, in logical pixels.
+const WINDOW_HEIGHT: f32 = 900.0;
+
 #[derive(Default)]
 struct Options {
     book: Option<PathBuf>,
@@ -60,6 +64,11 @@ struct Options {
     pages: Option<usize>,
     per_line: bool,
     font_size: Option<usize>,
+    shot: Option<PathBuf>,
+    reveal: bool,
+    grid: bool,
+    open: Overlay,
+    tab: AaTab,
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -80,6 +89,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--font-size" => options.font_size = Some(value()?.parse()?),
             "--pages" => options.pages = Some(value()?.parse()?),
             "--lines" => options.per_line = true,
+            "--shot" => options.shot = Some(PathBuf::from(value()?)),
+            "--reveal" => options.reveal = true,
+            "--grid" => options.grid = true,
+            "--open" => options.open = named_overlay(&value()?)?,
+            "--tab" => options.tab = named_tab(&value()?)?,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -89,6 +103,25 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
     Ok(options)
+}
+
+/// The [`Overlay`] `name` opens.
+fn named_overlay(name: &str) -> Result<Overlay, Box<dyn Error>> {
+    match name {
+        "aa" => Ok(Overlay::Aa),
+        "goto" => Ok(Overlay::GoTo),
+        "scrub" => Ok(Overlay::Scrubber),
+        "none" => Ok(Overlay::None),
+        _ => Err(format!("no such panel: {name} (try aa, goto, scrub, none)").into()),
+    }
+}
+
+/// The [`AaTab`] `name` picks.
+fn named_tab(name: &str) -> Result<AaTab, Box<dyn Error>> {
+    AaTab::ALL
+        .into_iter()
+        .find(|tab| tab.label().eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("no such tab: {name}").into())
 }
 
 /// The [`Device`] `name` picks, matched however it is cased.
@@ -162,7 +195,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         resources,
         fonts,
         panel,
-        chapter_starts: Vec::new(),
         fixed,
         device,
         families,
@@ -184,14 +216,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    if let Some(path) = options.shot {
+        reader.chrome.revealed = options.reveal;
+        reader.chrome.grid = options.grid;
+        reader.chrome.overlay = options.open;
+        reader.chrome.tab = options.tab;
+        reader.shot(&path)?;
+        return Ok(());
+    }
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut reader)?;
     Ok(())
 }
 
+/// The element a navigation href names outright, as `#941` or `#941:4`.
+fn named_element(href: &str) -> Option<i64> {
+    let name = href.trim().strip_prefix('#')?;
+    name.split(':').next()?.parse().ok()
+}
+
 /// The chapter each [`goto::Fixed`] row opens, where the book marks one.
-fn fixed_rows(book: &Book, spine: &[ChapterId]) -> Vec<(goto::Fixed, usize)> {
+fn fixed_rows(book: &Book, spine: &[ChapterId]) -> Vec<(goto::Fixed, Option<usize>)> {
     let chapter_of = |kind: LandmarkType| -> Option<usize> {
         let landmark = book
             .landmarks()
@@ -205,21 +252,14 @@ fn fixed_rows(book: &Book, spine: &[ChapterId]) -> Vec<(goto::Fixed, usize)> {
             _ => None,
         }
     };
-    let last = spine.len().saturating_sub(1);
     let beginning = chapter_of(LandmarkType::StartReading)
         .or_else(|| chapter_of(LandmarkType::BodyMatter))
         .unwrap_or(0);
 
-    let mut rows = vec![(
-        goto::Fixed::Cover,
-        chapter_of(LandmarkType::Cover).unwrap_or(0),
-    )];
-    if let Some(front) = chapter_of(LandmarkType::FrontMatter) {
-        rows.push((goto::Fixed::FrontMatter, front));
-    }
-    rows.push((goto::Fixed::Beginning, beginning));
-    rows.push((goto::Fixed::End, last));
-    rows
+    vec![
+        (goto::Fixed::Beginning, Some(beginning)),
+        (goto::Fixed::PageOrLocation, None),
+    ]
 }
 
 /// Every contents row, in the order the book lists them.
@@ -228,55 +268,98 @@ fn contents_of(
     spine: &[ChapterId],
     positions: &Option<PositionMap>,
 ) -> Vec<goto::Entry> {
-    let mut entries = Vec::new();
-    let starts: Vec<i64> = spine
-        .iter()
-        .enumerate()
-        .map(|(n, _)| n as i64 * LOCATIONS_A_PAGE)
-        .collect();
-    gather(book.toc(), 0, spine, positions, &starts, &mut entries);
-    if entries.is_empty() {
-        entries = spine
+    // A nav href names an element id, which places itself in a chapter only
+    // once that chapter has been read. The cache holds what layout reads next.
+    let chapters = book.load_chapters_cached(spine).unwrap_or_default();
+    let toc = book.toc().to_vec();
+    let mut rows = Vec::new();
+    gather(&toc, 0, spine, book, &mut rows);
+    if rows.is_empty() {
+        return spine
             .iter()
             .enumerate()
             .map(|(n, _)| goto::Entry {
                 title: format!("Chapter {}", n + 1),
                 chapter: n,
-                location: starts.get(n).copied().unwrap_or(0),
+                location: n as i64 * LOCATIONS_A_PAGE,
                 depth: 0,
             })
             .collect();
     }
-    entries
+
+    // Each row's own location: the element its href names, else the element
+    // its node was built from, else the chapter's first.
+    rows.into_iter()
+        .map(|row| {
+            let location = named_element(&row.href)
+                .or_else(|| {
+                    chapters
+                        .get(row.chapter)
+                        .and_then(|chapter| match row.node {
+                            Some(node) if node != bokai::model::NodeId::ROOT => {
+                                source_element(chapter, node)
+                            }
+                            _ => chapter.source_elements().into_iter().next(),
+                        })
+                })
+                .zip(positions.as_ref().filter(|map| map.has_locations()))
+                .and_then(|(element, map)| Some(map.location_for(map.position(element, 0)?)))
+                .unwrap_or(0);
+            goto::Entry {
+                title: row.title,
+                chapter: row.chapter,
+                location,
+                depth: row.depth,
+            }
+        })
+        .collect()
+}
+
+/// One contents row before its location is read.
+struct Row {
+    title: String,
+    /// What the book's own navigation points at.
+    href: String,
+    chapter: usize,
+    /// The node the row's own href names, absent where it names a chapter.
+    node: Option<bokai::model::NodeId>,
+    depth: usize,
 }
 
 fn gather(
     toc: &[bokai::model::TocEntry],
     depth: usize,
     spine: &[ChapterId],
-    positions: &Option<PositionMap>,
-    starts: &[i64],
-    out: &mut Vec<goto::Entry>,
+    book: &Book,
+    out: &mut Vec<Row>,
 ) {
     for entry in toc {
-        let chapter = match &entry.target {
-            Some(AnchorTarget::Chapter(id)) => spine.iter().position(|s| s == id),
-            Some(AnchorTarget::Internal(global)) => spine.iter().position(|s| *s == global.chapter),
+        // An entry carries a resolved target only where the book was opened
+        // through a route that resolves them; its own href states the rest.
+        let target = entry
+            .target
+            .clone()
+            .or_else(|| book.resolve_toc_href(ChapterId(0), &entry.href));
+        let placed = match target {
+            Some(AnchorTarget::Chapter(id)) => {
+                spine.iter().position(|s| *s == id).map(|at| (at, None))
+            }
+            Some(AnchorTarget::Internal(global)) => spine
+                .iter()
+                .position(|s| *s == global.chapter)
+                .map(|at| (at, Some(global.node))),
             _ => None,
         };
-        if let Some(chapter) = chapter {
-            let location = positions
-                .as_ref()
-                .map(|_| starts.get(chapter).copied().unwrap_or(0))
-                .unwrap_or_default();
-            out.push(goto::Entry {
+        if let Some((chapter, node)) = placed {
+            out.push(Row {
                 title: entry.title.clone(),
+                href: entry.href.clone(),
                 chapter,
-                location,
+                node,
                 depth,
             });
         }
-        gather(&entry.children, depth + 1, spine, positions, starts, out);
+        gather(&entry.children, depth + 1, spine, book, out);
     }
 }
 
@@ -292,10 +375,8 @@ struct Reader {
     fonts: Fonts,
     /// A panel read from a file, which stands in for a device's own.
     panel: Option<Panel>,
-    /// The location each chapter opens at, filled by `chapter_locations`.
-    chapter_starts: Vec<i64>,
     /// The rows above the book's own contents, and what each opens.
-    fixed: Vec<(goto::Fixed, usize)>,
+    fixed: Vec<(goto::Fixed, Option<usize>)>,
     /// Which [`Device`] is in force.
     device: Option<Device>,
     /// The reading fonts this book's language offers.
@@ -370,13 +451,6 @@ fn source_element(chapter: &bokai::model::Chapter, node: bokai::model::NodeId) -
     None
 }
 
-/// The location `chapter` opens at.
-fn first_location(chapter: &bokai::model::Chapter, positions: Option<&PositionMap>) -> Option<i64> {
-    let positions = positions.filter(|map| map.has_locations())?;
-    let element = chapter.source_elements().into_iter().next()?;
-    Some(positions.location_for(positions.position(element, 0)?))
-}
-
 /// A copy of what the panels show, taken before the canvas borrows the fonts.
 struct Shown {
     settings: Settings,
@@ -385,6 +459,7 @@ struct Shown {
     vertical: bool,
     numbered: bool,
     chaptered: bool,
+    hyphenates: bool,
 }
 
 impl Shown {
@@ -397,6 +472,7 @@ impl Shown {
             vertical: self.vertical,
             numbered: self.numbered,
             chaptered: self.chaptered,
+            hyphenates: self.hyphenates,
         }
     }
 }
@@ -430,12 +506,17 @@ struct View {
 }
 
 impl Reader {
-    /// The panel in force: the one named, else the screen being emulated.
+    /// The panel in force: the one named, else the screen being emulated,
+    /// held the way the settings hold it.
     fn panel_for(&self) -> Panel {
-        self.panel.clone().unwrap_or_else(|| self.device().panel())
+        self.panel
+            .clone()
+            .unwrap_or_else(|| self.device().panel())
+            .held(self.settings.orientation)
     }
 
-    /// The area a page is laid out into, less the bars above and below it.
+    /// The area a page is laid out into: the panel and the margin ladder
+    /// the book's own direction takes. The bars are drawn over it.
     fn viewport(&self) -> Viewport {
         let panel = self.panel_for();
         let direction = if self.axis.is_vertical() {
@@ -443,11 +524,7 @@ impl Reader {
         } else {
             Direction::Horizontal
         };
-        let mut viewport = self.settings.viewport(&panel, &self.language, direction);
-        let (header, footer) = self.chrome.bands(panel.size);
-        viewport.margins.top = viewport.margins.top.max(header);
-        viewport.margins.bottom = viewport.margins.bottom.max(footer);
-        viewport
+        self.settings.viewport(&panel, &self.language, direction)
     }
 
     fn relayout(&mut self) {
@@ -491,34 +568,6 @@ impl Reader {
     }
 
     /// Give every contents row the location its chapter opens at.
-    fn number_the_contents(&mut self) {
-        let starts = self.chapter_locations().to_vec();
-        for entry in &mut self.contents {
-            if let Some(start) = starts.get(entry.chapter) {
-                entry.location = *start;
-            }
-        }
-    }
-
-    /// The location each chapter opens at, read once and kept.
-    fn chapter_locations(&mut self) -> &[i64] {
-        if self.chapter_starts.is_empty() {
-            let spine = self.spine.clone();
-            let mut starts = Vec::with_capacity(spine.len());
-            for id in spine {
-                let start = self
-                    .book
-                    .load_chapter(id)
-                    .ok()
-                    .and_then(|chapter| first_location(&chapter, self.positions.as_ref()))
-                    .unwrap_or(0);
-                starts.push(start);
-            }
-            self.chapter_starts = starts;
-        }
-        &self.chapter_starts
-    }
-
     /// Every picture drawn on page `n`.
     fn pictures_on(&self, n: usize) -> Vec<String> {
         let Some(laid) = &self.laid else {
@@ -567,8 +616,10 @@ impl Reader {
         self.axis == Axis::VerticalRl
     }
 
-    /// Turn `by` pages, running on into the next chapter at either end.
+    /// Turn `by` pages, running on into the next chapter at either end. The
+    /// bars go away with the page they were drawn over.
     fn turn(&mut self, by: isize) {
+        self.chrome.revealed = false;
         let Some(laid) = &self.laid else { return };
         let last = laid.pages.count().saturating_sub(1) as isize;
         let next = self.page as isize + by;
@@ -645,6 +696,7 @@ impl Reader {
             vertical: self.axis.is_vertical(),
             numbered: self.numbered,
             chaptered: self.contents.len() > 1,
+            hyphenates: !matches!(Script::of(&self.language), Script::Cjk),
         }
     }
 
@@ -652,12 +704,28 @@ impl Reader {
     fn act(&mut self, action: Action) {
         match action {
             Action::TurnPage(by) => self.turn(by),
+            Action::Grid(grid) => {
+                self.chrome.grid = grid;
+                self.chrome.at = self.page;
+                self.chrome.overlay = Overlay::Scrubber;
+                self.request_redraw();
+            }
+            Action::Scrub(page) => {
+                self.chrome.at = page;
+                self.page = page;
+                self.sheet = None;
+                self.request_redraw();
+            }
+            Action::Jump(by) => {
+                let next = self.chapter as isize + by;
+                if (0..self.spine.len() as isize).contains(&next) {
+                    self.go_to(next as usize);
+                    self.chrome.at = 0;
+                }
+            }
             Action::Open(overlay) => {
                 self.chrome.overlay = overlay;
                 self.chrome.pane = AaPane::Tab;
-                if overlay == Overlay::GoTo {
-                    self.number_the_contents();
-                }
                 self.request_redraw();
             }
             Action::Close => {
@@ -692,24 +760,19 @@ impl Reader {
                 s.line_spacing = stop;
                 s.fine_spacing = false;
             }),
-            Action::FineLineSpacing(stop) => self.restyle(|s| {
-                s.fine_line_spacing = stop;
-                s.fine_spacing = true;
-            }),
-            Action::ParagraphSpacing(stop) => self.restyle(|s| s.paragraph_spacing = stop),
-            Action::WordSpacing(stop) => self.restyle(|s| s.word_spacing = stop),
-            Action::CharacterSpacing(stop) => self.restyle(|s| s.character_spacing = stop),
             Action::Margins(stop) => self.restyle(|s| s.margins = stop),
             Action::Justified(on) => self.restyle(|s| s.justified = on),
             Action::Hyphenate(on) => self.restyle(|s| s.hyphenate = on),
             Action::Columns(columns) => self.restyle(|s| s.columns = columns),
-            Action::Vertical(on) => {
-                self.axis = if on {
-                    Axis::VerticalRl
-                } else {
-                    Axis::HorizontalTb
-                };
+            Action::Orient(orientation) => {
+                self.settings.orientation = orientation;
                 self.laid = None;
+                self.sheet = None;
+                self.resize_to_panel();
+                self.request_redraw();
+            }
+            Action::Reveal(on) => {
+                self.chrome.revealed = on;
                 self.request_redraw();
             }
             Action::PageColor(dark) => {
@@ -739,6 +802,73 @@ impl Reader {
                 self.go_to(self.spine.len().saturating_sub(1));
             }
         }
+    }
+
+    /// The pages the scrubber offers: the one it stands at, or the nine
+    /// around it, each rendered small enough to lay out at once.
+    fn leaves(&mut self) -> Vec<(Pixmap, i64, usize)> {
+        let panel = self.panel_for().size;
+        let (grid, at) = (self.chrome.grid, self.chrome.at);
+        let theme = self.chrome.theme();
+        let Some(laid) = &self.laid else {
+            return Vec::new();
+        };
+        let count = laid.pages.count();
+        let (first, wanted) = if grid {
+            (at.saturating_sub(4).min(count.saturating_sub(9)), 9)
+        } else {
+            (at, 1)
+        };
+        let scale = if grid { 0.3 } else { 0.86 };
+
+        let mut out = Vec::new();
+        for page in first..(first + wanted).min(count) {
+            let Some(mut sheet) = Pixmap::new(
+                (panel.width * scale).max(1.0) as u32,
+                (panel.height * scale).max(1.0) as u32,
+            ) else {
+                continue;
+            };
+            sheet.fill(tiny_skia::Color::from_rgba8(
+                theme.page.r,
+                theme.page.g,
+                theme.page.b,
+                0xff,
+            ));
+            Painter::cached(&self.fonts, &self.resources, &mut self.cache).paint(
+                &laid.root,
+                laid.pages.window(page),
+                laid.pages.origin(page),
+                scale,
+                &mut sheet.as_mut(),
+            );
+            out.push((sheet, laid.locations.get(page).copied().unwrap_or(0), page));
+        }
+        out
+    }
+
+    /// Hold the panel's shape through a resize: the window keeps the width it
+    /// was given and takes the height the panel's own ratio states.
+    fn hold_shape(&mut self, size: PhysicalSize<u32>) {
+        let Some(view) = &self.view else { return };
+        let panel = self.panel_for().size;
+        let wanted = (size.width as f32 * panel.height / panel.width).round();
+        if (wanted - size.height as f32).abs() > 2.0 {
+            let _ = view
+                .window
+                .request_inner_size(PhysicalSize::new(size.width, wanted as u32));
+        }
+    }
+
+    /// Ask the window for the panel's shape at the height it stands at.
+    fn resize_to_panel(&mut self) {
+        let Some(view) = &self.view else { return };
+        let size = view.window.inner_size();
+        let panel = self.panel_for().size;
+        let width = (size.height as f32 * panel.width / panel.height).round();
+        let _ = view
+            .window
+            .request_inner_size(PhysicalSize::new(width as u32, size.height));
     }
 
     /// The screen being emulated, which a named profile stands in for.
@@ -782,19 +912,46 @@ impl Reader {
         // The panel is the window's own pixels at the resolution they sit at.
         let scale = view.window.scale_factor() as f32;
         self.dpi = sidle_render::units::CSS_DPI * scale;
+        let Some(target) = self.frame(physical.width, physical.height) else {
+            return;
+        };
+
+        let view = self.view.as_mut().expect("checked at the top of draw");
+        view.surface
+            .resize(width, height)
+            .expect("surface resize failed");
+        let mut buffer = view.surface.buffer_mut().expect("no buffer to draw into");
+        for (out, pixel) in buffer.iter_mut().zip(target.pixels()) {
+            *out = (pixel.red() as u32) << 16 | (pixel.green() as u32) << 8 | pixel.blue() as u32;
+        }
+        buffer.present().expect("present failed");
+        self.prefetch();
+    }
+
+    /// Write one frame at the panel's own size to `path`.
+    fn shot(&mut self, path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+        let panel = self.panel_for().size;
+        let frame = self
+            .frame(panel.width as u32, panel.height as u32)
+            .ok_or("nothing to draw")?;
+        frame.save_png(path)?;
+        Ok(())
+    }
+
+    /// Compose one frame `width` by `height` pixels: the page scaled to fit
+    /// it, with the bars and whichever panel is open drawn over it.
+    fn frame(&mut self, width: u32, height: u32) -> Option<Pixmap> {
         self.relayout();
 
         let panel = self.panel_for();
         let theme = self.chrome.theme();
-        let fit = (physical.width as f32 / panel.size.width)
-            .min(physical.height as f32 / panel.size.height);
+        let fit = (width as f32 / panel.size.width).min(height as f32 / panel.size.height);
         let offset = (
-            (physical.width as f32 - panel.size.width * fit) / 2.0,
-            (physical.height as f32 - panel.size.height * fit) / 2.0,
+            (width as f32 - panel.size.width * fit) / 2.0,
+            (height as f32 - panel.size.height * fit) / 2.0,
         );
 
-        let mut target =
-            Pixmap::new(physical.width, physical.height).expect("the window has a nonzero size");
+        let mut target = Pixmap::new(width, height)?;
         target.fill(tiny_skia::Color::from_rgba8(0x20, 0x20, 0x20, 0xff));
 
         // The page is drawn once per turn and kept: opening a panel over it
@@ -822,12 +979,10 @@ impl Reader {
                 })
                 .unwrap_or_default();
             self.resources.load_named(&mut self.book, &wanted);
-            let Some(mut sheet) = Pixmap::new(
+            let mut sheet = Pixmap::new(
                 panel.size.width.max(1.0) as u32,
                 panel.size.height.max(1.0) as u32,
-            ) else {
-                return;
-            };
+            )?;
             sheet.fill(tiny_skia::Color::from_rgba8(
                 theme.page.r,
                 theme.page.g,
@@ -838,16 +993,14 @@ impl Reader {
                 Painter::cached(&self.fonts, &self.resources, &mut self.cache).paint(
                     &laid.root,
                     laid.pages.window(self.page),
-                    laid.pages.origin(),
+                    laid.pages.origin(self.page),
                     1.0,
                     &mut sheet.as_mut(),
                 );
             }
             self.sheet = Some((sheet, key));
         }
-        let Some((sheet, _)) = &self.sheet else {
-            return;
-        };
+        let (sheet, _) = self.sheet.as_ref()?;
         target.draw_pixmap(
             0,
             0,
@@ -868,12 +1021,18 @@ impl Reader {
         let leftward = self.pages_leftward();
         let contents_here = self.chapter;
         let fixed = self.fixed.clone();
+        let pages_here = self.laid.as_ref().map_or(1, |laid| laid.pages.count());
+        let leaves = match overlay {
+            Overlay::Scrubber => self.leaves(),
+            _ => Vec::new(),
+        };
         let mut canvas = Canvas {
             target: &mut target.as_mut(),
             fonts: &mut self.fonts,
             cache: &mut self.cache,
             theme,
             panel: panel.size,
+            dpi: panel.dpi,
             scale: fit,
             offset,
         };
@@ -888,19 +1047,36 @@ impl Reader {
                 &self.contents,
                 contents_here,
             ),
+            Overlay::Scrubber => {
+                let offered: Vec<scrub::Leaf<'_>> = leaves
+                    .iter()
+                    .map(|(sheet, location, page)| scrub::Leaf {
+                        sheet,
+                        location: *location,
+                        page: *page,
+                    })
+                    .collect();
+                scrub::draw(
+                    &mut self.chrome,
+                    &mut canvas,
+                    &scrub::Scrub {
+                        chapter_title: at.chapter_title.clone(),
+                        leaves: &offered,
+                        here: self.page,
+                        pages: pages_here,
+                        location: at.location,
+                        locations: at.locations,
+                        leftward,
+                    },
+                );
+            }
         }
 
-        let view = self.view.as_mut().expect("checked at the top of draw");
-        view.fit = (fit, offset);
-        view.surface
-            .resize(width, height)
-            .expect("surface resize failed");
-        let mut buffer = view.surface.buffer_mut().expect("no buffer to draw into");
-        for (out, pixel) in buffer.iter_mut().zip(target.pixels()) {
-            *out = (pixel.red() as u32) << 16 | (pixel.green() as u32) << 8 | pixel.blue() as u32;
+        if let Some(view) = self.view.as_mut() {
+            view.fit = (fit, offset);
         }
-        buffer.present().expect("present failed");
         self.prefetch();
+        Some(target)
     }
 
     /// What the first `pages` pages of this chapter settled on.
@@ -911,24 +1087,40 @@ impl Reader {
             return;
         };
         let vertical = laid.pages.axis().is_vertical();
-        let (left, top) = laid.pages.origin();
-        let origin = if vertical { top } else { left };
-        let block_origin = if vertical { left } else { top };
+        let across = laid.pages.origin(0);
+        let origin = if vertical { across.1 } else { across.0 };
         println!(
-            "{:<6} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
-            "page", "elem", "line", "top", "pitch", "left", "right", "adv", "loc"
+            "{:<6} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>6}",
+            "page", "elem", "line", "blk0", "blk1", "win", "in0", "in1", "adv", "loc"
         );
         for number in 0..pages.min(laid.pages.count()) {
             let window = laid.pages.window(number);
-            let runs: Vec<&sidle_render::Fragment> = laid
-                .root
-                .of_kind(Node::Run)
-                .filter(|run| run.rect.intersects(&window))
+            let runs: Vec<&sidle_render::Fragment> = sidle_render::paint::shown(&laid.root, window)
+                .into_iter()
+                .filter(|fragment| fragment.kind == Node::Run)
                 .collect();
-            let mut blocks: Vec<f32> = runs
+            // Block positions on the page, against the window's own corner.
+            let shift = if vertical { window.x } else { window.y };
+            let lines: Vec<&sidle_render::Fragment> =
+                sidle_render::paint::shown(&laid.root, window)
+                    .into_iter()
+                    .filter(|fragment| fragment.kind == Node::Line)
+                    .collect();
+            let mut blocks: Vec<f32> = lines
                 .iter()
-                .map(|run| if vertical { run.rect.x } else { run.rect.y })
+                .map(|run| if vertical { run.rect.x } else { run.rect.y } - shift)
                 .collect();
+            let far = lines
+                .iter()
+                .map(|run| {
+                    if vertical {
+                        run.rect.right()
+                    } else {
+                        run.rect.bottom()
+                    }
+                })
+                .fold(f32::NEG_INFINITY, f32::max)
+                - shift;
             blocks.sort_by(f32::total_cmp);
             blocks.dedup();
 
@@ -946,18 +1138,18 @@ impl Reader {
                     }
                 })
                 .fold(f32::NEG_INFINITY, f32::max);
-            let pitch = blocks
-                .windows(2)
-                .map(|pair| pair[1] - pair[0])
-                .fold(f32::INFINITY, f32::min);
-
             println!(
-                "{:<6} {:>5} {:>5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6}",
+                "{:<6} {:>5} {:>5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>5.0} {:>6}",
                 number + 1,
                 runs.len(),
                 blocks.len(),
-                blocks.first().copied().unwrap_or(0.0) + block_origin,
-                if pitch.is_finite() { pitch } else { 0.0 },
+                blocks.first().copied().unwrap_or(0.0) + laid.pages.origin(number).0,
+                far + laid.pages.origin(number).0,
+                if vertical {
+                    window.width
+                } else {
+                    window.height
+                },
                 if start.is_finite() {
                     start + origin
                 } else {
@@ -1033,7 +1225,13 @@ impl ApplicationHandler for Reader {
         if self.view.is_some() {
             return;
         }
-        let attributes = Window::default_attributes().with_title(&self.title);
+        let panel = self.panel_for().size;
+        let attributes = Window::default_attributes()
+            .with_title(&self.title)
+            .with_inner_size(LogicalSize::new(
+                (WINDOW_HEIGHT * panel.width / panel.height) as f64,
+                WINDOW_HEIGHT as f64,
+            ));
         let window = Rc::new(
             event_loop
                 .create_window(attributes)
@@ -1053,12 +1251,11 @@ impl ApplicationHandler for Reader {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                if self.panel.is_none() {
-                    self.laid = None;
-                }
+            WindowEvent::Resized(size) => {
+                self.hold_shape(size);
                 self.request_redraw();
             }
+            WindowEvent::ScaleFactorChanged { .. } => self.request_redraw(),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::CursorMoved { position, .. } => {
                 // `position` counts buffer pixels, which is what `fit` and

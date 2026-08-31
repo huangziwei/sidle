@@ -146,7 +146,7 @@ fn from_layout(path: &PathBuf, panel: &Panel, fonts: &mut Fonts) -> Geometry {
     let pages = Pages::of(&laid, &viewport);
 
     let vertical = pages.axis().is_vertical();
-    let (left, top) = pages.origin();
+    let (left, top) = pages.origin(0);
     let along = if vertical { top } else { left };
     let window = pages.window(0);
     let runs: Vec<&sidle_render::Fragment> = laid

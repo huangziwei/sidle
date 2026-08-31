@@ -4,22 +4,19 @@
 use super::{Action, Canvas, Chrome, text::Align};
 use crate::geom::Rect;
 
-/// A row every book carries, above its own contents.
+/// A row the card carries above the book's own contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fixed {
-    Cover,
-    FrontMatter,
     Beginning,
-    End,
+    /// The screen a number is typed into, marked with a chevron of its own.
+    PageOrLocation,
 }
 
 impl Fixed {
     pub fn label(self) -> &'static str {
         match self {
-            Fixed::Cover => "Cover",
-            Fixed::FrontMatter => "Front Matter",
             Fixed::Beginning => "Beginning",
-            Fixed::End => "End",
+            Fixed::PageOrLocation => "Page or Location",
         }
     }
 }
@@ -39,7 +36,7 @@ pub struct Entry {
 pub fn draw(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,
-    fixed: &[(Fixed, usize)],
+    fixed: &[(Fixed, Option<usize>)],
     entries: &[Entry],
     here: usize,
 ) {
@@ -98,14 +95,22 @@ pub fn draw(
     }
     chrome.add(cross, Action::Close);
 
+    // The tab in hand carries into the list below it; the other sits in a
+    // box of its own.
     let tabs = card.y + 108.0 * unit;
+    let divide = card.x + card.width * 0.5;
     canvas.rule(card.x, card.right(), tabs, 3.0 * unit, theme.ink);
+    canvas.stroke(
+        Rect::new(divide, tabs, card.right() - divide, 90.0 * unit),
+        theme.ink,
+        3.0 * unit,
+    );
     canvas.text(
         "Contents",
         38.0 * unit,
         theme.ink,
         true,
-        (card.x + card.width * 0.28, tabs + 22.0 * unit),
+        (card.x + card.width * 0.25, tabs + 22.0 * unit),
         Align::Center,
     );
     canvas.text(
@@ -113,16 +118,10 @@ pub fn draw(
         38.0 * unit,
         theme.faint,
         false,
-        (card.x + card.width * 0.72, tabs + 22.0 * unit),
+        (card.x + card.width * 0.75, tabs + 22.0 * unit),
         Align::Center,
     );
-    canvas.rule(
-        card.x,
-        card.right(),
-        tabs + 90.0 * unit,
-        3.0 * unit,
-        theme.ink,
-    );
+    canvas.rule(card.x, divide, tabs + 90.0 * unit, 3.0 * unit, theme.ink);
 
     let height = 84.0 * unit;
     let mut y = tabs + 108.0 * unit;
@@ -136,10 +135,15 @@ pub fn draw(
             Align::Left,
         );
         let area = Rect::new(left, y, right - left, height);
-        chrome.add(area, Action::GoToChapter(*chapter));
+        match chapter {
+            Some(chapter) => chrome.add(area, Action::GoToChapter(*chapter)),
+            None => arrow(canvas, (right - 20.0 * unit, y + 40.0 * unit), 16.0 * unit),
+        }
         canvas.rule(left, right, area.bottom(), 2.0 * unit, theme.faint);
         y += height;
     }
+    // The list scrolls under the rows above it.
+    canvas.rule(card.x, card.right(), y, 3.0 * unit, theme.ink);
     y += 20.0 * unit;
 
     for entry in entries {
@@ -169,5 +173,19 @@ pub fn draw(
         chrome.add(area, Action::GoToChapter(entry.chapter));
         canvas.rule(left, right, area.bottom(), 2.0 * unit, theme.faint);
         y += height;
+    }
+}
+
+/// The solid mark a row carrying a screen of its own ends with.
+fn arrow(canvas: &mut Canvas<'_, '_>, at: (f32, f32), size: f32) {
+    let ink = canvas.theme.ink;
+    let steps = (size * 1.2) as usize;
+    for step in 0..steps.max(1) {
+        let t = step as f32;
+        let reach = (size - t * 0.8).max(0.0);
+        canvas.fill(
+            Rect::new(at.0 - size + t * 0.8, at.1 - reach, 1.5, reach * 2.0),
+            ink,
+        );
     }
 }

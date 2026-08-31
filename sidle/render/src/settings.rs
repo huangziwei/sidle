@@ -78,6 +78,7 @@ impl Device {
             boldness: vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0],
             default_boldness: 0,
             boldness_presets: vec![0, 0, 1, 4],
+            progress_band: 0.0,
             margins_horizontal: Vec::new(),
             margins_vertical: Vec::new(),
         };
@@ -85,6 +86,7 @@ impl Device {
             Device::Colorsoft => Panel {
                 size: Size::new(1272.0, 1696.0),
                 color: true,
+                progress_band: 65.0,
                 default_boldness: 1,
                 boldness_presets: vec![0, 1, 1, 4],
                 margins_horizontal: vec![
@@ -102,6 +104,7 @@ impl Device {
             Device::Scribe => Panel {
                 size: Size::new(1860.0, 2480.0),
                 columns_offered: true,
+                progress_band: 56.0,
                 margins_horizontal: vec![
                     Edges::new(64.0, 158.0, 8.0, 158.0),
                     Edges::new(64.0, 200.0, 8.0, 200.0),
@@ -144,6 +147,9 @@ pub struct Panel {
     pub default_boldness: usize,
     /// Which embolden weight each [`Preset`] sets.
     pub boldness_presets: Vec<usize>,
+    /// The band at the foot of the screen the reading progress is stated in,
+    /// which every ladder states as its own `top` less its `bottom`.
+    pub progress_band: f32,
     /// Three widths of the four margins, in dots, for a book that reads
     /// across the page.
     pub margins_horizontal: Vec<Edges>,
@@ -222,6 +228,9 @@ impl Panel {
             boldness: take("boldness")?,
             default_boldness: index("default_boldness")?,
             boldness_presets: stops("boldness_presets", built_in.boldness_presets),
+            progress_band: ladder("margins_horizontal")?
+                .first()
+                .map_or(0.0, |edges| (edges.top - edges.bottom).max(0.0)),
             margins_horizontal: ladder("margins_horizontal")?,
             margins_vertical: ladder("margins_vertical")?,
         })
@@ -233,9 +242,33 @@ impl Panel {
         Self::parse(&text).map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))
     }
 
+    /// The page a book is laid out into: the panel less the band its reading
+    /// progress is stated in, which sits at the foot of the screen whichever
+    /// way the book reads.
+    pub fn page(&self) -> Size {
+        Size::new(self.size.width, self.size.height - self.progress_band)
+    }
+
     /// How this panel turns a KFX book's declared values into dots.
     pub fn metrics(&self) -> Metrics {
         Metrics::kfx(self.dpi)
+    }
+
+    /// How many stops the font-size ladder carries.
+    pub fn font_size_stops(&self) -> usize {
+        self.font_sizes.values().map(Vec::len).max().unwrap_or(0)
+    }
+
+    /// This panel held in `orientation`: a landscape screen is the same
+    /// screen on its side, with the ladders it came with.
+    pub fn held(&self, orientation: Orientation) -> Panel {
+        match orientation {
+            Orientation::Portrait => self.clone(),
+            Orientation::Landscape => Panel {
+                size: Size::new(self.size.height, self.size.width),
+                ..self.clone()
+            },
+        }
     }
 }
 
@@ -244,6 +277,18 @@ impl Panel {
 pub enum Direction {
     Horizontal,
     Vertical,
+}
+
+/// Which way up the screen is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Orientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+
+impl Orientation {
+    pub const ALL: [Orientation; 2] = [Orientation::Portrait, Orientation::Landscape];
 }
 
 /// A named stop for every field of [`Settings`].
@@ -262,6 +307,9 @@ impl Preset {
         Preset::Large,
         Preset::LowVision,
     ];
+
+    /// The tiles the Themes tab lays out beside the current theme.
+    pub const OFFERED: [Preset; 3] = [Preset::Compact, Preset::Standard, Preset::Large];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -342,7 +390,7 @@ pub enum Stop {
 }
 
 impl Stop {
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Stop::Narrow => 0,
             Stop::Normal => 1,
@@ -442,6 +490,8 @@ pub struct Settings {
     pub hyphenate: bool,
     /// One or two, and two only where the panel offers it.
     pub columns: u8,
+    /// Which way up the screen is held.
+    pub orientation: Orientation,
     /// Which family of the book's own script list.
     pub family: usize,
     pub progress: Progress,
@@ -463,6 +513,7 @@ impl Settings {
             justified: true,
             hyphenate: true,
             columns: 1,
+            orientation: Orientation::Portrait,
             family: 0,
             progress: Progress::default(),
         }
@@ -581,7 +632,7 @@ impl Settings {
     /// ladder gives it, and the em `rem` resolves against.
     pub fn viewport(&self, panel: &Panel, language: &str, direction: Direction) -> Viewport {
         Viewport {
-            size: panel.size,
+            size: panel.page(),
             margins: self.margins(panel, direction),
             root_font_size: self.em(panel, language),
             language: Some(language.to_string()),

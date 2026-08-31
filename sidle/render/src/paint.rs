@@ -12,7 +12,7 @@ use tiny_skia::{
 };
 
 use crate::font::{FaceId, Fonts};
-use crate::fragment::{Border, Content, Fragment, GlyphRun, Orientation};
+use crate::fragment::{Border, Content, Fragment, GlyphRun, Node, Orientation};
 use crate::geom::Rect;
 use crate::resource::Resources;
 
@@ -79,15 +79,12 @@ impl<'a> Painter<'a> {
     ) {
         let view = Transform::from_translate(origin.0 - window.x, origin.1 - window.y)
             .post_scale(scale, scale);
-        // Anything straddling the window's edge is cut at it.
-        let clip = window_mask(window, origin, scale, target);
-        let clip = clip.as_ref();
 
-        // `showing` is walked once; both passes then run over it.
-        let showing: Vec<&Fragment> = tree
-            .walk()
-            .filter(|fragment| fragment.rect.intersects(&window))
-            .collect();
+        // `showing` is gathered once; both passes then run over it.
+        let showing = shown(tree, window);
+        // Anything straddling the mask's edge is cut at it.
+        let clip = window_mask(window, &showing, origin, scale, target);
+        let clip = clip.as_ref();
 
         // Backgrounds and borders first; text sits on top of them.
         for fragment in &showing {
@@ -362,18 +359,52 @@ fn fill_clipped(
     target.fill_path(&path, &paint, FillRule::Winding, view, clip);
 }
 
-/// A mask covering just the page's content area, in device pixels.
+/// The fragments page `window` shows. A [`Node::Line`]'s own box decides its
+/// whole subtree: a ruby strip lies outside that box, and is drawn with the
+/// base it reads.
+pub fn shown(tree: &Fragment, window: Rect) -> Vec<&Fragment> {
+    let mut out = Vec::new();
+    gather(tree, &window, &mut out);
+    out
+}
+
+fn gather<'a>(fragment: &'a Fragment, window: &Rect, out: &mut Vec<&'a Fragment>) {
+    if fragment.kind == Node::Line {
+        // A line abutting the window belongs to the page on the other side of
+        // the cut; the inset keeps it there through a rounded coordinate.
+        if fragment.rect.intersects(&window.inset_by(0.5)) {
+            out.extend(fragment.walk());
+        }
+        return;
+    }
+    if fragment.rect.intersects(window) {
+        out.push(fragment);
+    }
+    for child in &fragment.children {
+        gather(child, window, out);
+    }
+}
+
+/// A mask over the page's content area and what `showing` draws past it, in
+/// device pixels. A fragment larger than the window keeps the window's edge.
 fn window_mask(
     window: Rect,
+    showing: &[&Fragment],
     origin: (f32, f32),
     scale: f32,
     target: &PixmapMut<'_>,
 ) -> Option<Mask> {
+    let bleed = showing
+        .iter()
+        .filter(|fragment| fragment.draws())
+        .map(|fragment| fragment.rect)
+        .filter(|rect| rect.width <= window.width && rect.height <= window.height)
+        .fold(window, |area, rect| area.union(&rect));
     let area = Rect::new(
-        origin.0 * scale,
-        origin.1 * scale,
-        window.width * scale,
-        window.height * scale,
+        (origin.0 + bleed.x - window.x) * scale,
+        (origin.1 + bleed.y - window.y) * scale,
+        bleed.width * scale,
+        bleed.height * scale,
     );
     // A window covering the whole buffer masks nothing off.
     if area.x <= 0.0
@@ -587,6 +618,96 @@ mod tests {
         assert_eq!(pixmap.pixel(9, 5).unwrap().red(), 255);
         // The middle is inside the border, and nothing filled it.
         assert_eq!(pixmap.pixel(5, 5).unwrap().alpha(), 0);
+    }
+
+    /// A line carrying a ruby strip, the strip set `strip` before the line's
+    /// own box and given `source`.
+    fn ruby_line(source: u32, block: f32, height: f32, strip: f32) -> Fragment {
+        let mut line = Fragment::new(
+            NodeId(source),
+            Role::Paragraph,
+            Rect::new(0.0, block, 100.0, height),
+        )
+        .as_kind(Node::Line);
+        let mut annotation = Fragment::new(
+            NodeId(source + 1),
+            Role::Paragraph,
+            Rect::new(10.0, block - strip, 20.0, strip),
+        );
+        annotation.background = Some(RED);
+        line.children.push(annotation);
+        line
+    }
+
+    fn ruby_pages() -> Fragment {
+        let mut root = Fragment::new(
+            NodeId(0),
+            Role::Paragraph,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+        );
+        root.children.push(ruby_line(1, 0.0, 50.0, 10.0));
+        root.children.push(ruby_line(3, 50.0, 50.0, 10.0));
+        root
+    }
+
+    fn sources(showing: &[&Fragment]) -> Vec<u32> {
+        showing.iter().map(|fragment| fragment.source.0).collect()
+    }
+
+    #[test]
+    fn a_ruby_strip_reaching_back_stays_with_its_own_page() {
+        let root = ruby_pages();
+        let first = sources(&shown(&root, Rect::new(0.0, 0.0, 100.0, 50.0)));
+
+        assert!(first.contains(&2));
+        assert!(!first.contains(&4));
+    }
+
+    #[test]
+    fn a_line_abutting_the_window_belongs_to_the_page_past_it() {
+        let mut root = Fragment::new(
+            NodeId(0),
+            Role::Paragraph,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+        );
+        root.children.push(ruby_line(1, 0.0, 50.0, 10.0));
+        root.children.push(ruby_line(3, 50.0, 50.0, 10.0));
+
+        // The window ends where the second line starts.
+        let first = sources(&shown(&root, Rect::new(0.0, 0.0, 100.0, 50.0)));
+
+        assert!(first.contains(&1));
+        assert!(!first.contains(&3));
+    }
+
+    #[test]
+    fn a_first_lines_ruby_strip_is_drawn_with_it() {
+        let root = ruby_pages();
+        let second = sources(&shown(&root, Rect::new(0.0, 50.0, 100.0, 50.0)));
+
+        assert!(second.contains(&4));
+        assert!(!second.contains(&2));
+    }
+
+    #[test]
+    fn a_page_paints_its_own_strip_and_not_the_next_pages() {
+        let (fonts, resources) = painter();
+        let mut painter = Painter::new(&fonts, &resources);
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+
+        painter.paint(
+            &ruby_pages(),
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            (0.0, 10.0),
+            1.0,
+            &mut pixmap.as_mut(),
+        );
+
+        // The strip of the line this page starts with, ten dots above the
+        // window's own edge.
+        assert_eq!(pixmap.pixel(15, 5).unwrap().red(), 255);
+        // The strip of the line the page after it starts with.
+        assert_eq!(pixmap.pixel(15, 55).unwrap().alpha(), 0);
     }
 }
 

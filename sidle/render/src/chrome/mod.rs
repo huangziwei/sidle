@@ -5,6 +5,7 @@
 pub mod aa;
 pub mod bars;
 pub mod goto;
+pub mod scrub;
 pub mod text;
 
 use bokai::style::Color;
@@ -14,7 +15,7 @@ use crate::font::Fonts;
 use crate::geom::{Rect, Size};
 use crate::paint::{Cache, Painter};
 use crate::resource::Resources;
-use crate::settings::{Device, Panel, Preset, Progress, Settings, Stop};
+use crate::settings::{Device, Orientation, Panel, Preset, Progress, Settings, Stop};
 
 /// Which overlay is open over the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,6 +24,8 @@ pub enum Overlay {
     None,
     Aa,
     GoTo,
+    /// The pages of the chapter, one at a time or nine at a time.
+    Scrubber,
 }
 
 /// Which panel of `Aa` is showing.
@@ -54,11 +57,7 @@ pub enum AaPane {
     /// The tab itself.
     #[default]
     Tab,
-    FontList,
-    Spacing,
     ReadingProgress,
-    /// Which [`Device`] is in force.
-    Screen,
 }
 
 impl AaPane {
@@ -66,10 +65,7 @@ impl AaPane {
     pub fn title(self) -> &'static str {
         match self {
             AaPane::Tab => "",
-            AaPane::FontList => "Font family",
-            AaPane::Spacing => "Spacing",
-            AaPane::ReadingProgress => "Reading progress",
-            AaPane::Screen => "Device",
+            AaPane::ReadingProgress => "Reading Progress",
         }
     }
 }
@@ -78,6 +74,14 @@ impl AaPane {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     TurnPage(isize),
+    /// Whether the bars are showing.
+    Reveal(bool),
+    /// Which page of the chapter the scrubber stands at.
+    Scrub(usize),
+    /// Whether the scrubber shows nine pages at once.
+    Grid(bool),
+    /// The chapter before this one, or the one after it.
+    Jump(isize),
     Open(Overlay),
     Close,
     Tab(AaTab),
@@ -87,12 +91,8 @@ pub enum Action {
     FontSize(usize),
     Bold(usize),
     Spacing(Stop),
-    FineLineSpacing(usize),
-    ParagraphSpacing(usize),
-    WordSpacing(usize),
-    CharacterSpacing(usize),
     Margins(Stop),
-    Vertical(bool),
+    Orient(Orientation),
     Justified(bool),
     Hyphenate(bool),
     Columns(u8),
@@ -173,6 +173,18 @@ impl Position {
             Progress::None => String::new(),
         }
     }
+
+    /// What the footer reads with the bars showing: the location, the measure
+    /// `mode` names beside it, and how far in.
+    pub fn stated(&self, mode: Progress) -> String {
+        let mut parts = vec![self.progress(Progress::Location)];
+        match mode {
+            Progress::Location | Progress::None => {}
+            mode => parts.push(self.progress(mode)),
+        }
+        parts.push(format!("{}%", self.percent));
+        parts.join(" | ")
+    }
 }
 
 /// `minutes` in the short form the bar has room for.
@@ -201,15 +213,23 @@ pub struct Reading<'a> {
     /// Whether the book carries page numbers, and whether it has chapters.
     pub numbered: bool,
     pub chaptered: bool,
+    /// Whether the book breaks words at the margin.
+    pub hyphenates: bool,
 }
 
 /// The chrome's own state.
 #[derive(Default)]
 pub struct Chrome {
     pub overlay: Overlay,
+    /// Whether the bars are showing over the page.
+    pub revealed: bool,
     pub tab: AaTab,
     pub pane: AaPane,
     pub dark: bool,
+    /// Whether the scrubber shows nine pages at once.
+    pub grid: bool,
+    /// Which page the scrubber stands at.
+    pub at: usize,
     hits: Vec<Hit>,
 }
 
@@ -244,15 +264,21 @@ impl Chrome {
             })
             .map(|hit| hit.action.clone())
     }
-
-    /// How far down the page the text may start, and where it must stop.
-    pub fn bands(&self, panel: Size) -> (f32, f32) {
-        (
-            bars::HEADER * panel.height / bars::REFERENCE,
-            bars::FOOTER * panel.height / bars::REFERENCE,
-        )
-    }
 }
+
+/// The density a control's artwork states its own geometry at.
+pub const ARTWORK_DPI: f32 = 167.0;
+
+/// The chevron, as its own artwork states it, and the box it sits in.
+pub const CHEVRON: [(f32, f32); 6] = [
+    (9.0, 2.0),
+    (17.369, 12.0),
+    (9.0, 22.0),
+    (6.5, 22.0),
+    (14.87, 12.0),
+    (6.5, 2.0),
+];
+pub const CHEVRON_BOX: f32 = 24.0;
 
 /// Somewhere to draw a control, with the fonts to letter it.
 pub struct Canvas<'a, 'p> {
@@ -263,6 +289,8 @@ pub struct Canvas<'a, 'p> {
     pub theme: Theme,
     /// The panel being drawn, in dots.
     pub panel: Size,
+    /// The panel's density, which every control's artwork scales from.
+    pub dpi: f32,
     /// Panel dots to buffer pixels.
     pub scale: f32,
     /// Where the panel's own origin sits in the buffer.
@@ -280,6 +308,11 @@ impl Canvas<'_, '_> {
         self.panel.height / bars::REFERENCE
     }
 
+    /// One unit of the artwork a control is drawn from, in panel dots.
+    pub fn art(&self) -> f32 {
+        self.dpi / ARTWORK_DPI
+    }
+
     pub fn fill(&mut self, rect: Rect, color: Color) {
         crate::paint::fill(rect, color, self.view(), self.target);
     }
@@ -291,6 +324,98 @@ impl Canvas<'_, '_> {
     /// A rule `width` dots thick along `y`.
     pub fn rule(&mut self, x0: f32, x1: f32, y: f32, width: f32, color: Color) {
         self.fill(Rect::new(x0, y - width / 2.0, x1 - x0, width), color);
+    }
+
+    /// A rectangle with `radius` corners, outlined `width` dots thick.
+    pub fn round_stroke(&mut self, rect: Rect, radius: f32, color: Color, width: f32) {
+        let Some(path) = rounded(rect, radius) else {
+            return;
+        };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width,
+            ..Stroke::default()
+        };
+        let view = self.view();
+        self.target.stroke_path(&path, &paint, &stroke, view, None);
+    }
+
+    /// The same rectangle filled.
+    pub fn round_fill(&mut self, rect: Rect, radius: f32, color: Color) {
+        let Some(path) = rounded(rect, radius) else {
+            return;
+        };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        paint.anti_alias = true;
+        let view = self.view();
+        self.target
+            .fill_path(&path, &paint, FillRule::Winding, view, None);
+    }
+
+    /// A closed shape through `points`, in the artwork's own units, placed
+    /// with its box's corner at `at`.
+    pub fn polygon(&mut self, points: &[(f32, f32)], at: (f32, f32), art: f32, color: Color) {
+        let mut path = PathBuilder::new();
+        for (n, (x, y)) in points.iter().enumerate() {
+            let (x, y) = (at.0 + x * art, at.1 + y * art);
+            if n == 0 {
+                path.move_to(x, y);
+            } else {
+                path.line_to(x, y);
+            }
+        }
+        path.close();
+        let Some(path) = path.finish() else { return };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        paint.anti_alias = true;
+        let view = self.view();
+        self.target
+            .fill_path(&path, &paint, FillRule::Winding, view, None);
+    }
+
+    /// The chevron a row or a page arrow carries, in a box of [`CHEVRON_BOX`],
+    /// pointing back where `back`.
+    pub fn chevron(&mut self, at: (f32, f32), art: f32, back: bool, color: Color) {
+        let points: Vec<(f32, f32)> = CHEVRON
+            .iter()
+            .map(|(x, y)| {
+                if back {
+                    (CHEVRON_BOX - x, *y)
+                } else {
+                    (*x, *y)
+                }
+            })
+            .collect();
+        self.polygon(&points, at, art, color);
+    }
+
+    /// A rendered page, scaled to fill `rect`.
+    pub fn picture(&mut self, rect: Rect, sheet: &tiny_skia::Pixmap) {
+        let (width, height) = (sheet.width() as f32, sheet.height() as f32);
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let fit = (rect.width / width).min(rect.height / height);
+        let placed = Transform::from_translate(
+            rect.x + (rect.width - width * fit) / 2.0,
+            rect.y + (rect.height - height * fit) / 2.0,
+        )
+        .pre_scale(fit, fit);
+        self.target.draw_pixmap(
+            0,
+            0,
+            sheet.as_ref(),
+            &tiny_skia::PixmapPaint {
+                quality: tiny_skia::FilterQuality::Bilinear,
+                ..tiny_skia::PixmapPaint::default()
+            },
+            placed.post_concat(self.view()),
+            None,
+        );
     }
 
     pub fn circle(&mut self, centre: (f32, f32), radius: f32, color: Color, filled: bool) {
@@ -353,6 +478,25 @@ impl Canvas<'_, '_> {
         let ink = self.theme.ink;
         text::lay(self.fonts, content, size, ink, bold).width
     }
+}
+
+/// A rectangle whose corners are `radius` quarter-turns.
+fn rounded(rect: Rect, radius: f32) -> Option<tiny_skia::Path> {
+    let r = radius.min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+    let (x0, y0) = (rect.x, rect.y);
+    let (x1, y1) = (rect.right(), rect.bottom());
+    let mut path = PathBuilder::new();
+    path.move_to(x0 + r, y0);
+    path.line_to(x1 - r, y0);
+    path.quad_to(x1, y0, x1, y0 + r);
+    path.line_to(x1, y1 - r);
+    path.quad_to(x1, y1, x1 - r, y1);
+    path.line_to(x0 + r, y1);
+    path.quad_to(x0, y1, x0, y1 - r);
+    path.line_to(x0, y0 + r);
+    path.quad_to(x0, y0, x0 + r, y0);
+    path.close();
+    path.finish()
 }
 
 /// A book's chrome draws no pictures.

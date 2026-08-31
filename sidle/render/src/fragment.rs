@@ -177,6 +177,13 @@ impl Fragment {
         PreOrder { stack: vec![self] }
     }
 
+    /// Whether this box puts anything on the page of its own.
+    pub fn draws(&self) -> bool {
+        self.background.is_some()
+            || self.border.is_some()
+            || !matches!(self.content, Content::Empty)
+    }
+
     /// The fragment produced for `node`, if layout produced one. A node with
     /// `display: none`, and every node inside it, has none.
     pub fn find(&self, node: NodeId) -> Option<&Fragment> {
