@@ -136,7 +136,7 @@ pub struct KfxImporter {
     /// names.
     content_by_name: HashMap<String, EntityLoc>,
     /// Content cache: name -> list of strings (lazily populated). Behind a
-    /// lock so `lookup_content_text` works from `&self` — chapter builds
+    /// lock, letting `lookup_content_text` work from `&self` — chapter builds
     /// run in parallel across a shared importer reference.
     content_cache: std::sync::RwLock<HashMap<String, Vec<String>>>,
 
@@ -398,6 +398,24 @@ impl Importer for KfxImporter {
             results[*slot] = Some(result);
         }
         results.into_iter().map(|r| r.expect("filled")).collect()
+    }
+
+    fn load_assets_stored(
+        &mut self,
+        paths: &[PathBuf],
+    ) -> Vec<io::Result<(Vec<u8>, Option<String>)>> {
+        paths
+            .iter()
+            .map(|path| {
+                let name = path.to_string_lossy();
+                match self.image_by_filename.get(&*name).copied() {
+                    Some(idx) if self.images[idx].is_jxr => self
+                        .read_image_raw(idx)
+                        .map(|raw| (raw, Some("jxr".into()))),
+                    _ => self.load_asset(path).map(|bytes| (bytes, None)),
+                }
+            })
+            .collect()
     }
 
     fn requires_normalized_export(&self) -> bool {

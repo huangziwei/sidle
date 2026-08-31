@@ -53,9 +53,11 @@ impl BookResources {
             return;
         }
         let paths: Vec<std::path::PathBuf> = wanted.iter().map(std::path::PathBuf::from).collect();
-        for (src, bytes) in wanted.into_iter().zip(book.load_assets(&paths)) {
-            let Ok(bytes) = bytes else { continue };
-            let Some(bitmap) = decode(&bytes) else {
+        for (src, stored) in wanted.into_iter().zip(book.load_assets_stored(&paths)) {
+            let Ok((bytes, format)) = stored else {
+                continue;
+            };
+            let Some(bitmap) = decode(&bytes, format.as_deref()) else {
                 continue;
             };
             self.sizes.insert(src.clone(), bitmap.size());
@@ -104,11 +106,55 @@ fn file_name(src: &str) -> &str {
     src.rsplit('/').next().unwrap_or(src)
 }
 
-fn decode(bytes: &[u8]) -> Option<Bitmap> {
+/// `bytes` as pixels. A JPEG-XR goes through [`jxr`]; everything else
+/// through [`image`].
+fn decode(bytes: &[u8], format: Option<&str>) -> Option<Bitmap> {
+    if format == Some("jxr") || bytes.starts_with(&[0x49, 0x49, 0xBC]) {
+        return decode_jxr(bytes);
+    }
     let decoded = image::load_from_memory(bytes).ok()?.into_rgba8();
     Some(Bitmap {
         width: decoded.width(),
         height: decoded.height(),
         rgba: decoded.into_raw(),
+    })
+}
+
+/// A JPEG-XR straight to RGBA, with no re-encode on the way.
+fn decode_jxr(bytes: &[u8]) -> Option<Bitmap> {
+    use jxr::decode::pixels::{ColorModel, SampleType};
+    use jxr::decode::{container, decoder};
+
+    let container = container::parse(bytes).ok()?;
+    let decoded = decoder::Decoder::new(container.image_data).decode().ok()?;
+    let buffer = decoded.to_pixel_buffer().ok()?;
+    if buffer.sample != SampleType::U8 {
+        return None;
+    }
+    let channels = buffer.channels as usize;
+    let colour = match buffer.color {
+        ColorModel::Gray | ColorModel::NChannel(1) => 1,
+        ColorModel::Rgb => 3,
+        ColorModel::NChannel(k) if k >= 3 => 3,
+        _ => return None,
+    };
+    let count = buffer.width as usize * buffer.height as usize;
+    let mut rgba = vec![0xffu8; count * 4];
+    for (out, pixel) in rgba
+        .chunks_exact_mut(4)
+        .zip(buffer.data.chunks_exact(channels))
+    {
+        if colour == 1 {
+            out[0] = pixel[0];
+            out[1] = pixel[0];
+            out[2] = pixel[0];
+        } else {
+            out[..3].copy_from_slice(&pixel[..3]);
+        }
+    }
+    Some(Bitmap {
+        width: buffer.width,
+        height: buffer.height,
+        rgba,
     })
 }

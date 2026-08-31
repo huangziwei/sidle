@@ -543,10 +543,9 @@ impl Book {
         })
     }
 
-    /// Create a Book over an [`Importer`] the caller built.
-    ///
-    /// [`Book::open_format`] and [`Book::from_vec`] pick a backend for a
-    /// [`Format`] this crate carries; this one takes any [`Importer`].
+    /// A Book over an [`Importer`] the caller built. [`Book::open_format`]
+    /// and [`Book::from_vec`] pick a backend for a [`Format`]; this takes
+    /// any [`Importer`].
     pub fn from_importer(backend: Box<dyn Importer>) -> Self {
         Self {
             backend,
@@ -842,6 +841,15 @@ impl Book {
     /// parallelize expensive per-asset work, e.g. KFX image transcodes).
     pub fn load_assets(&mut self, paths: &[std::path::PathBuf]) -> Vec<io::Result<Vec<u8>>> {
         self.backend.load_assets(paths)
+    }
+
+    /// The same assets as the source stores them, each with its declared
+    /// format. See [`crate::import::Importer::load_assets_stored`].
+    pub fn load_assets_stored(
+        &mut self,
+        paths: &[std::path::PathBuf],
+    ) -> Vec<io::Result<(Vec<u8>, Option<String>)>> {
+        self.backend.load_assets_stored(paths)
     }
 
     /// List all assets.

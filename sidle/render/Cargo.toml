@@ -39,9 +39,12 @@ ab_glyph = "0.2"
 fontdb = { version = "0.23", default-features = false, features = ["fs", "memmap", "fontconfig"] }
 # UAX #14 break opportunities, the base the CJK rules refine.
 unicode-linebreak = "0.1"
-# Image decoding for the resources a book carries: KFX transcodes its
-# JPEG-XR to JPEG, EPUB ships any of the rest.
+# Image decoding for the resources a book carries.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+# JPEG-XR, which a KFX stores its pictures as. Decoded straight to pixels:
+# a re-encode on the way costs more than the decode.
+jxr = { path = "../../jxr" }
 
 # A Skia subset — paths, fills, strokes, gradients, blends, clips — matching
 # what the device paints through. Already in the tree via resvg.

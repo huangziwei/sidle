@@ -3,7 +3,7 @@
 //! ```text
 //! sidle-render [options] <book>
 //!
-//!   --panel <file>     panel ladders, in the form `Panel::parse` reads
+//!   --panel <ile>     panel ladders, in the form `Panel::parse` reads
 //!   --fonts <dir>      faces to search ahead of the host's installed ones
 //!   --serif <family>   what the reading settings choose for Latin
 //!   --cjk <family>     the same for Chinese, Japanese and Korean

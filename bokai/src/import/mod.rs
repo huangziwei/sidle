@@ -193,9 +193,22 @@ pub trait Importer: Send + Sync {
     /// Load an asset by path.
     fn load_asset(&mut self, path: &Path) -> std::io::Result<Vec<u8>>;
 
-    /// Load several assets, one result per input path. Implementations may
+    /// Load several assets, one result per input path.
     fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<std::io::Result<Vec<u8>>> {
         paths.iter().map(|p| self.load_asset(p)).collect()
+    }
+
+    /// The same assets as the source stores them, each with its declared
+    /// format. [`Self::load_assets`] re-encodes what it stores in a format
+    /// no common decoder reads.
+    fn load_assets_stored(
+        &mut self,
+        paths: &[PathBuf],
+    ) -> Vec<std::io::Result<(Vec<u8>, Option<String>)>> {
+        self.load_assets(paths)
+            .into_iter()
+            .map(|bytes| bytes.map(|bytes| (bytes, None)))
+            .collect()
     }
 
     /// The authoritative asset list for a normalized EPUB export, in
@@ -292,8 +305,8 @@ pub trait Importer: Send + Sync {
         &[]
     }
 
-    /// Mutable page-list access, so `Book::resolve_page_list_targets`
-    /// can fill in each entry's resolved `target`. Default empty.
+    /// Mutable page-list access, for `Book::resolve_page_list_targets` to
+    /// fill in each entry's `target`. Empty by default.
     fn page_list_mut(&mut self) -> &mut [TocEntry] {
         &mut []
     }
@@ -334,12 +347,9 @@ pub trait Importer: Send + Sync {
         None
     }
 
-    /// The axis the document states it is written along.
-    ///
-    /// A format that carries the writing mode per element leaves this at the
-    /// initial value and lets the cascade answer per box. One that states it
-    /// once for the whole book, as KFX does in `document_data.writing_mode`,
-    /// answers here.
+    /// The axis the document states it is written along. A format carrying a
+    /// writing mode per element leaves this at the initial value; one stating
+    /// it once for the book, as `document_data.writing_mode` does, answers.
     fn writing_mode(&mut self) -> crate::style::WritingMode {
         crate::style::WritingMode::HorizontalTb
     }
@@ -418,7 +428,7 @@ pub fn resolve_path_based_href(
         (href, None)
     };
 
-    // Collapse `.` / `..` so a href like `OEBPS/Text/../Text/Ch01.xhtml`
+    // Collapse `.` / `..`: a href like `OEBPS/Text/../Text/Ch01.xhtml`
     let normalized_path = normalize_components(Path::new(raw_path));
     let normalized_path = normalized_path.to_string_lossy();
     let path: &str = &normalized_path;
@@ -473,7 +483,7 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
     let base_path = Path::new(base);
     let base_dir = base_path.parent().unwrap_or(Path::new(""));
 
-    // Join and collapse `..` / `.` so the result matches the canonical
+    // Join and collapse `..` / `.`; the result matches the canonical
     // archive entry (PathBuf::join does not normalize on its own).
     normalize_components(&base_dir.join(relative))
 }

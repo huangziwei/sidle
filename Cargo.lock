@@ -6041,6 +6041,7 @@ dependencies = [
  "bokai",
  "fontdb",
  "image",
+ "jxr",
  "rustybuzz",
  "softbuffer",
  "tiny-skia 0.12.0",
