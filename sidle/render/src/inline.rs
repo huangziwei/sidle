@@ -1,9 +1,5 @@
-//! Inline layout: text and atomic boxes packed into lines.
-//!
-//! `rustybuzz` shapes the text, giving the font's own glyph selection,
-//! kerning and ligatures. Lines break at UAX #14 opportunities, refined by
-//! the hyphenator where the style asks for hyphenation. Each line box is
-//! measured along the writing axis and across it.
+//! Inline layout: text and atomic boxes packed into lines. `rustybuzz`
+//! shapes; lines break at UAX #14 opportunities, refined by `hyphenate`.
 
 use std::ops::Range;
 
@@ -14,7 +10,7 @@ use bokai::text::hyphenation::Hyphenator;
 use unicode_linebreak::BreakOpportunity;
 
 use crate::font::{FaceId, Fonts};
-use crate::fragment::{Content, Fragment, Glyph, GlyphRun, Orientation};
+use crate::fragment::{Content, Fragment, Glyph, GlyphRun, Node, Orientation};
 use crate::geom::{Axis, Rect};
 use crate::text;
 
@@ -26,9 +22,66 @@ pub struct TextStyle<'a> {
     pub line_height: f32,
     pub color: Color,
     pub letter_spacing: f32,
+    /// Added to every space's advance.
+    pub word_spacing: f32,
+    /// Added to every glyph's advance.
+    pub embolden: f32,
     pub underline: bool,
     pub line_through: bool,
     pub preserve_spaces: bool,
+}
+
+/// One paragraph's `trim_table`, and where a stretch sits in it.
+/// A junction spans two `Atom`s wherever the line breaker split the pair.
+#[derive(Debug, Clone, Copy)]
+struct Spacing<'a> {
+    /// Leading and trailing trims in ems, by the byte a character starts at.
+    trims: &'a [(f32, f32)],
+    /// Where this stretch starts in the paragraph.
+    base: usize,
+}
+
+impl Spacing<'_> {
+    /// The trims on the character `at` bytes into its own item.
+    fn at(&self, at: usize) -> (f32, f32) {
+        self.trims
+            .get(self.base.wrapping_add(at))
+            .copied()
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// A stretch no junction reaches: a ruby reading.
+    fn none() -> Self {
+        Self {
+            trims: &[],
+            base: 0,
+        }
+    }
+}
+
+/// One `Item`'s text and what shaping a range of it needs.
+#[derive(Clone, Copy)]
+struct Stretch<'a, 't> {
+    /// Which [`Item`] the text belongs to.
+    item: usize,
+    text: &'t str,
+    style: TextStyle<'a>,
+    spacing: Spacing<'a>,
+}
+
+/// Each character's leading and trailing trim in ems, by its first byte.
+fn trim_table(text: &str) -> Vec<(f32, f32)> {
+    let mut table = vec![(0.0, 0.0); text.len() + 1];
+    let mut previous: Option<(usize, char)> = None;
+    for (at, ch) in text.char_indices() {
+        if let Some((before, left)) = previous {
+            let (trailing, leading) = text::junction_trim(left, ch);
+            table[before].1 = trailing;
+            table[at].0 = leading;
+        }
+        previous = Some((at, ch));
+    }
+    table
 }
 
 /// One piece of inline content, before it is broken into lines.
@@ -168,6 +221,18 @@ impl Inline<'_> {
             fallback_line_height,
         )
     }
+
+    /// The widest unbreakable piece of `items`, and all of it on one line.
+    pub fn measure(&mut self, items: &[Item<'_>]) -> (f32, f32) {
+        let atoms = self.atoms(items);
+        let widest = atoms
+            .iter()
+            .filter(|atom| !atom.is_space)
+            .map(|atom| atom.advance)
+            .fold(0.0f32, f32::max);
+        let whole = atoms.iter().map(|atom| atom.advance).sum();
+        (widest, whole)
+    }
 }
 
 // --- Building atoms -------------------------------------------------------
@@ -202,6 +267,7 @@ impl Inline<'_> {
         } else {
             unicode_linebreak::linebreaks(&joined).collect()
         };
+        let trims = trim_table(&joined);
 
         let mut atoms = Vec::new();
         let mut span = spans.iter();
@@ -210,12 +276,18 @@ impl Inline<'_> {
                 Item::Text { style, text, .. } => {
                     let Some(range) = span.next() else { continue };
                     self.text_atoms(
-                        index,
-                        text,
+                        Stretch {
+                            item: index,
+                            text,
+                            style: *style,
+                            spacing: Spacing {
+                                trims: &trims,
+                                base: range.start,
+                            },
+                        },
                         range.start,
                         &opportunities,
                         joined.len(),
-                        *style,
                         &mut atoms,
                     );
                 }
@@ -266,16 +338,29 @@ impl Inline<'_> {
         annotation_style: TextStyle<'_>,
         out: &mut Vec<Atom>,
     ) {
+        // A ruby group's text sits outside the paragraph's own run.
         let mut shaped = Vec::new();
-        self.shape_into(item, base, 0..base.len(), style, &mut shaped);
+        self.shape_into(
+            Stretch {
+                item,
+                text: base,
+                style,
+                spacing: Spacing::none(),
+            },
+            0..base.len(),
+            &mut shaped,
+        );
         let mut atom = merge_atoms(item, shaped);
 
         let mut marks = Vec::new();
         self.shape_into(
-            item,
-            annotation,
+            Stretch {
+                item,
+                text: annotation,
+                style: annotation_style,
+                spacing: Spacing::none(),
+            },
             0..annotation.len(),
-            annotation_style,
             &mut marks,
         );
         let marks = merge_atoms(item, marks);
@@ -292,17 +377,15 @@ impl Inline<'_> {
     }
 
     /// Split one text item at its break opportunities and shape each piece.
-    #[allow(clippy::too_many_arguments)]
     fn text_atoms(
         &mut self,
-        item: usize,
-        text: &str,
+        stretch: Stretch<'_, '_>,
         offset: usize,
         opportunities: &[(usize, BreakOpportunity)],
         end: usize,
-        style: TextStyle<'_>,
         out: &mut Vec<Atom>,
     ) {
+        let text = stretch.text;
         let mut cut = 0usize;
         for &(at, kind) in opportunities {
             // `linebreaks` reports the byte after the break, in the joined
@@ -316,11 +399,11 @@ impl Inline<'_> {
             // The end of the content is where the text stops, not a break in
             // it: taking it as one leaves an empty line after every block.
             let mandatory = kind == BreakOpportunity::Mandatory && at < end;
-            self.piece(item, text, cut..local, style, mandatory, out);
+            self.piece(stretch, cut..local, mandatory, out);
             cut = local;
         }
         if cut < text.len() {
-            self.piece(item, text, cut..text.len(), style, false, out);
+            self.piece(stretch, cut..text.len(), false, out);
         }
     }
 
@@ -328,13 +411,14 @@ impl Inline<'_> {
     /// hyphenation before it is shaped.
     fn piece(
         &mut self,
-        item: usize,
-        text: &str,
+        stretch: Stretch<'_, '_>,
         range: Range<usize>,
-        style: TextStyle<'_>,
         mandatory: bool,
         out: &mut Vec<Atom>,
     ) {
+        let Stretch {
+            item, text, style, ..
+        } = stretch;
         let slice = &text[range.clone()];
         if slice.is_empty() {
             return;
@@ -358,12 +442,12 @@ impl Inline<'_> {
         let splits = self.hyphenate(visible, &style);
         if splits.is_empty() {
             let visible_range = range.start..range.start + visible.len();
-            self.shape_run(item, text, visible_range, style, out);
+            self.shape_run(stretch, visible_range, out);
         } else {
             let last_split = splits.len() - 1;
             for (number, split) in splits.into_iter().enumerate() {
                 let sub = range.start + split.start..range.start + split.end;
-                self.shape_run(item, text, sub, style, out);
+                self.shape_run(stretch, sub, out);
                 if number != last_split
                     && out.len() > start
                     && let Some(last) = out.last_mut()
@@ -379,16 +463,9 @@ impl Inline<'_> {
 
     /// Shape a stretch and merge it into a single atom. A whole word is one
     /// indivisible piece even where it changes face part way through.
-    fn shape_run(
-        &mut self,
-        item: usize,
-        text: &str,
-        range: Range<usize>,
-        style: TextStyle<'_>,
-        out: &mut Vec<Atom>,
-    ) {
+    fn shape_run(&mut self, stretch: Stretch<'_, '_>, range: Range<usize>, out: &mut Vec<Atom>) {
         let mut shaped = Vec::new();
-        self.shape_into(item, text, range, style, &mut shaped);
+        self.shape_into(stretch, range, &mut shaped);
         match shaped.len() {
             0 => {}
             1 => out.push(shaped.pop().expect("checked")),
@@ -405,7 +482,9 @@ impl Inline<'_> {
         let Some(hyphenator) = self.hyphenator else {
             return Vec::new();
         };
-        if style.computed.hyphens != Hyphens::Auto {
+        // The reading settings hyphenate every reflowable book that says
+        // nothing, so only an explicit `none` turns it off.
+        if style.computed.hyphens == Hyphens::None {
             return Vec::new();
         }
         // Only a run of letters hyphenates; punctuation and spaces carry
@@ -428,14 +507,8 @@ impl Inline<'_> {
     }
 
     /// Shape one stretch, splitting where the face has to change.
-    fn shape_into(
-        &mut self,
-        item: usize,
-        text: &str,
-        range: Range<usize>,
-        style: TextStyle<'_>,
-        out: &mut Vec<Atom>,
-    ) {
+    fn shape_into(&mut self, stretch: Stretch<'_, '_>, range: Range<usize>, out: &mut Vec<Atom>) {
+        let Stretch { text, style, .. } = stretch;
         let slice = &text[range.clone()];
         let mut cut = range.start;
         let mut face = None;
@@ -448,26 +521,31 @@ impl Inline<'_> {
                 continue;
             }
             if chosen.is_some() && chosen != face {
-                self.shape_one(item, text, cut..at, face, style, out);
+                self.shape_one(stretch, cut..at, face, out);
                 cut = at;
                 face = chosen;
             }
         }
         if cut < range.end {
-            self.shape_one(item, text, cut..range.end, face, style, out);
+            self.shape_one(stretch, cut..range.end, face, out);
         }
     }
 
     /// Shape one stretch that uses a single face.
     fn shape_one(
         &mut self,
-        item: usize,
-        text: &str,
+        stretch: Stretch<'_, '_>,
         range: Range<usize>,
         face: Option<FaceId>,
-        style: TextStyle<'_>,
         out: &mut Vec<Atom>,
     ) {
+        let Stretch {
+            item,
+            text,
+            style,
+            spacing,
+        } = stretch;
+        let range_start = range.start;
         let slice = &text[range];
         if slice.is_empty() {
             return;
@@ -485,11 +563,18 @@ impl Inline<'_> {
             Orientation::Sideways
         };
 
+        let vertical = self.axis.is_vertical();
         let Some(face_id) = face else {
-            // No face at all: the run occupies space and the page does
-            // not silently reflow around text it could not draw.
+            // With no face the run holds `em_advance` of space.
             out.push(Atom {
-                advance: slice.chars().count() as f32 * style.font_size * 0.5,
+                advance: slice
+                    .char_indices()
+                    .map(|(index, ch)| {
+                        let (leading, trailing) = spacing.at(range_start + index);
+                        let cell = text::em_advance(ch, vertical).unwrap_or(0.5);
+                        (cell - leading - trailing) * style.font_size + style.embolden
+                    })
+                    .sum(),
                 ascent: style.font_size * 0.8,
                 descent: style.font_size * 0.2,
                 line_height: style.line_height,
@@ -519,7 +604,7 @@ impl Inline<'_> {
         {
             let x_offset = position.x_offset as f32 * scale;
             let y_offset = position.y_offset as f32 * scale;
-            let (along, across, step) = if orientation == Orientation::Upright {
+            let (along, across, shaped_step) = if orientation == Orientation::Upright {
                 // Shaping a vertical run puts the pen at each glyph's
                 // vertical origin, the top centre of its cell. The offsets
                 // carry the shift back to the outline's own origin.
@@ -533,12 +618,29 @@ impl Inline<'_> {
             } else {
                 (pen + x_offset, -y_offset, position.x_advance as f32 * scale)
             };
+
+            // `em_advance` overrides the face; a leading trim moves the ink
+            // back as well as shortening the cell.
+            let at = range_start + info.cluster as usize;
+            let ch = text[at..].chars().next();
+            let (leading, trailing) = ch.map_or((0.0, 0.0), |_| spacing.at(at));
+            let cell = ch
+                .and_then(|ch| text::em_advance(ch, vertical))
+                .map_or(shaped_step, |ems| ems * style.font_size);
+            let step = cell - (leading + trailing) * style.font_size;
+
             glyphs.push(Glyph {
                 id: info.glyph_id as u16,
-                along,
+                offset: at as u32,
+                along: along - leading * style.font_size,
                 across,
             });
-            pen += step + style.letter_spacing;
+            let gap = if ch.is_some_and(is_collapsible) {
+                style.word_spacing
+            } else {
+                0.0
+            };
+            pen += step + style.letter_spacing + style.embolden + gap;
         }
 
         let (ascent, descent) = if orientation == Orientation::Upright {
@@ -676,14 +778,9 @@ impl Inline<'_> {
                 .map(|atom| atom.line_height)
                 .fold(0.0f32, f32::max)
                 .max(fallback_line_height);
-            // Ruby widens the line by a strip alongside it, which is what
-            // keeps annotations from colliding with the line before.
-            let ruby = visible
-                .iter()
-                .map(|atom| atom.annotation_size)
-                .fold(0.0f32, f32::max);
+            // An annotation claims none of the line's advance.
             let body = declared.max(ascent + descent);
-            let block_size = ruby + body;
+            let block_size = body;
             // Measured from the top of the body, which starts where the ruby
             // strip ends. The text's own box never covers the strip, and no
             // two boxes in the tree claim the same ground.
@@ -706,10 +803,10 @@ impl Inline<'_> {
                 _ => (indent, 0.0),
             };
 
+            let mut runs = Vec::new();
             self.emit_line(
                 Line {
                     block,
-                    ruby,
                     body,
                     baseline,
                     ascent,
@@ -719,8 +816,22 @@ impl Inline<'_> {
                 },
                 items,
                 visible,
-                &mut fragments,
+                &mut runs,
             );
+
+            // The line spans the column's whole inline size.
+            let source = visible
+                .first()
+                .map_or(NodeId(0), |atom| items[atom.item].source());
+            let mut fragment = Fragment::new(
+                source,
+                Role::Container,
+                Rect::new(0.0, block, available, block_size),
+            )
+            .as_kind(Node::Line);
+            fragment.children = runs;
+            fragments.push(fragment);
+
             block += block_size;
         }
 
@@ -733,9 +844,7 @@ impl Inline<'_> {
     /// Draw one line's atoms, joining neighbours that share a face and style
     /// into a single run.
     fn emit_line(&self, line: Line, items: &[Item<'_>], atoms: &[Atom], out: &mut Vec<Fragment>) {
-        // The text's own box starts where the ruby strip ends. No two boxes
-        // in the tree claim the same ground.
-        let body_block = line.block + line.ruby;
+        let body_block = line.block;
         let mut inline = line.start;
         let mut pending: Option<Pending> = None;
 
@@ -806,8 +915,9 @@ impl Inline<'_> {
         annotation: &Run,
         inline: f32,
     ) -> Fragment {
-        let em_start = line.block + line.ruby + line.baseline - line.ascent;
-        let block = (em_start - atom.annotation_size).max(line.block);
+        // The strip sits outside the line, at its em boxes' start edge.
+        let em_start = line.block + line.baseline - line.ascent;
+        let block = em_start - atom.annotation_size;
         // Across its own box: an upright glyph centres on its em box, where a
         // horizontal one hangs from a baseline near the foot of the strip.
         let baseline = if annotation.orientation.is_vertical() {
@@ -880,7 +990,7 @@ impl Inline<'_> {
             underline: run.underline,
             line_through: run.line_through,
         });
-        fragment
+        fragment.as_kind(Node::Run)
     }
 
     /// The hyphen a broken word takes at the end of its line.
@@ -913,6 +1023,7 @@ impl Inline<'_> {
             orientation: run.orientation,
             glyphs: vec![Glyph {
                 id: id.0,
+                offset: Glyph::NO_SOURCE,
                 along: 0.0,
                 across: 0.0,
             }],
@@ -928,8 +1039,6 @@ impl Inline<'_> {
 struct Line {
     /// Where the line starts along the block axis.
     block: f32,
-    /// How much of it the ruby strip takes, before the text.
-    ruby: f32,
     /// The text's own extent across the line.
     body: f32,
     /// Baseline, measured from the start of the body.
@@ -947,7 +1056,7 @@ struct Line {
 /// Neighbouring atoms being gathered into one run.
 struct Pending {
     item: usize,
-    /// Where the run starts along the line, and where it currently ends.
+    /// Where the run starts along the line, and where its last atom ends.
     inline: f32,
     end: f32,
     run: Run,
@@ -1062,5 +1171,126 @@ mod tests {
         // U+3000 is Japanese paragraph indentation, and is content.
         assert_eq!(collapse("\u{3000}あ"), "\u{3000}あ");
         assert_eq!(collapse("\u{00a0}a"), "\u{00a0}a");
+    }
+
+    /// One em.
+    const EM: f32 = 44.0;
+
+    /// The inline extent one paragraph of `text` takes with no face loaded.
+    fn line_extent(text: &str) -> f32 {
+        let computed = ComputedStyle::default();
+        let style = TextStyle {
+            computed: &computed,
+            font_size: EM,
+            line_height: EM * 1.2,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            embolden: 0.0,
+            underline: false,
+            line_through: false,
+            preserve_spaces: false,
+        };
+        let items = vec![Item::Text {
+            source: NodeId(0),
+            style,
+            text: text.to_string(),
+        }];
+        let mut fonts = Fonts::empty();
+        let atoms = Inline {
+            fonts: &mut fonts,
+            axis: Axis::VerticalRl,
+            hyphenator: None,
+        }
+        .atoms(&items);
+
+        atoms.iter().map(|atom| atom.advance).sum()
+    }
+
+    #[test]
+    fn a_mark_between_ideographs_takes_a_whole_em() {
+        assert_eq!(line_extent("亜、亜"), 3.0 * EM);
+        assert_eq!(line_extent("亜「亜"), 3.0 * EM);
+    }
+
+    #[test]
+    fn two_marks_side_by_side_come_to_one_and_a_half_ems() {
+        // `、` gives up its trailing blank, `。` keeps its own.
+        assert_eq!(line_extent("、。"), 1.5 * EM);
+        // Two blanks meet and the following mark gives one up.
+        assert_eq!(line_extent("。「"), 1.5 * EM);
+        assert_eq!(line_extent("】【"), 1.5 * EM);
+    }
+
+    #[test]
+    fn a_bracket_pair_facing_ink_to_ink_keeps_both_ems() {
+        assert_eq!(line_extent("「」"), 2.0 * EM);
+        assert_eq!(line_extent("（）"), 2.0 * EM);
+    }
+
+    #[test]
+    fn a_mark_beside_a_kana_keeps_its_whole_em() {
+        assert_eq!(line_extent("。あ"), 2.0 * EM);
+        assert_eq!(line_extent("あ「"), 2.0 * EM);
+    }
+
+    #[test]
+    fn the_vertical_colon_takes_one_and_a_half_ems() {
+        assert_eq!(line_extent("亜：亜"), 3.5 * EM);
+    }
+
+    #[test]
+    fn a_junction_still_trims_where_the_line_breaker_split_the_pair() {
+        // A CJK line breaks between every pair, so `、` and `。` are separate
+        // atoms. The trim is read from the paragraph, not from the atom.
+        let split: Vec<f32> = {
+            let computed = ComputedStyle::default();
+            let style = TextStyle {
+                computed: &computed,
+                font_size: EM,
+                line_height: EM * 1.2,
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+                letter_spacing: 0.0,
+                word_spacing: 0.0,
+                embolden: 0.0,
+                underline: false,
+                line_through: false,
+                preserve_spaces: false,
+            };
+            let items = vec![
+                Item::Text {
+                    source: NodeId(0),
+                    style,
+                    text: "、".to_string(),
+                },
+                Item::Text {
+                    source: NodeId(1),
+                    style,
+                    text: "。".to_string(),
+                },
+            ];
+            let mut fonts = Fonts::empty();
+            Inline {
+                fonts: &mut fonts,
+                axis: Axis::VerticalRl,
+                hyphenator: None,
+            }
+            .atoms(&items)
+            .iter()
+            .map(|atom| atom.advance)
+            .collect()
+        };
+
+        assert_eq!(split, [0.5 * EM, EM]);
     }
 }

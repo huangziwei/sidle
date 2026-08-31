@@ -1,13 +1,7 @@
-//! Writes the probe books out as KFX, each with the request script that
-//! renders it.
+//! Writes [`suite`] out as KFX, each book with the script that renders it.
 //!
-//! Usage: `sidle-render-probe <directory> <profile> <uri-prefix>`
-//!
-//! `<profile>` is the panel's ladders, in the form [`Panel::parse`] takes.
-//! `<uri-prefix>` is the path the renderer opens each book at.
-//!
-//! A control in [`suite`] declares nothing. Every other book declares one
-//! property at one value, on the same text.
+//! `sidle-render-probe <directory> <profile> <uri-prefix>`, where `<profile>`
+//! is a [`Panel::parse`] file and `<uri-prefix>` the path each book opens at.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -163,6 +157,10 @@ fn suite() -> Vec<Probe> {
     probes.extend(on_elements());
     probes.extend(narrow_pictures());
     probes.extend(inline_structure());
+    probes.extend(cjk_metrics());
+    probes.extend(pinned_faces());
+    probes.extend(word_spacing());
+    probes.extend(cjk_junctions());
     probes
 }
 
@@ -602,5 +600,119 @@ fn narrow_pictures() -> Vec<Probe> {
             KfxSymbol::BoxAlign,
             IonValue::Symbol(KfxSymbol::Right as u64),
         ),
+    ]
+}
+
+/// The CJK punctuation repertoire `cjk_metrics` sets one paragraph per.
+const CJK_MARKS: &[char] = &[
+    '、', '。', '，', '．', '・', '：', '；', '！', '？', '…', '‥', '―', 'ー', '〜', '～', '「',
+    '」', '『', '』', '（', '）', '［', '］', '｛', '｝', '〈', '〉', '《', '》', '【', '】', '〔',
+    '〕', '々', '\u{3000}',
+];
+
+/// The ideograph each mark is set between.
+const REFERENCE_IDEOGRAPH: char = '亜';
+
+/// A line alternating `REFERENCE_IDEOGRAPH` with `mark`.
+fn mark_line(mark: char) -> String {
+    let mut line = String::new();
+    for _ in 0..8 {
+        line.push(REFERENCE_IDEOGRAPH);
+        line.push(mark);
+    }
+    line.push(REFERENCE_IDEOGRAPH);
+    line
+}
+
+/// One paragraph per mark in `CJK_MARKS`, on both axes.
+fn cjk_metrics() -> Vec<Probe> {
+    let mut lines: Vec<String> = vec![mark_line(REFERENCE_IDEOGRAPH)];
+    lines.extend(CJK_MARKS.iter().copied().map(mark_line));
+    let paragraphs: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+    vec![
+        Probe::new("cjk-advances-horizontal", &paragraphs)
+            .as_element("div")
+            .in_language("ja"),
+        Probe::new("cjk-advances-vertical", &paragraphs)
+            .as_element("div")
+            .in_language("ja")
+            .vertical(),
+    ]
+}
+
+/// A `font_family` written past the `default` head every export carries.
+fn pinned_faces() -> Vec<Probe> {
+    let pinned = |name: &str, family: &str| {
+        Probe::new(name, &[MEASURED_LATIN, PROSE_LATIN])
+            .as_element("div")
+            .injecting(KfxSymbol::FontFamily, IonValue::String(family.to_string()))
+    };
+
+    vec![
+        pinned("face-baskerville", "Baskerville"),
+        pinned("face-futura", "Futura"),
+        pinned("face-caecilia", "Caecilia"),
+        // A family the search path has no file for.
+        pinned("face-absent", "NoSuchFamily"),
+        // The deferring form, spelled out.
+        pinned("face-deferred", "default"),
+    ]
+}
+
+/// Word spacing over [`MEASURED_LATIN`], whose spaces can be counted.
+fn word_spacing() -> Vec<Probe> {
+    vec![
+        Probe::new("word-spacing-control", &[MEASURED_LATIN, MEASURED_LATIN]).as_element("div"),
+        Probe::new("word-spacing-8", &[MEASURED_LATIN, MEASURED_LATIN])
+            .as_element("div")
+            .declaring("word-spacing", "8px"),
+        Probe::new("word-spacing-16", &[MEASURED_LATIN, MEASURED_LATIN])
+            .as_element("div")
+            .declaring("word-spacing", "16px"),
+    ]
+}
+
+/// Punctuation pairs `cjk_junctions` sets side by side.
+const CJK_JUNCTIONS: &[[char; 2]] = &[
+    ['、', '。'],
+    ['。', '「'],
+    ['」', '「'],
+    ['「', '」'],
+    ['）', '（'],
+    ['（', '）'],
+    ['、', '、'],
+    ['「', '「'],
+    ['。', 'あ'],
+    ['あ', '「'],
+    ['、', '」'],
+    ['】', '【'],
+];
+
+/// One line per pair in `CJK_JUNCTIONS`, plus a line opening on a bracket
+/// and one closing on a stop.
+fn cjk_junctions() -> Vec<Probe> {
+    let mut lines: Vec<String> = Vec::new();
+    for pair in CJK_JUNCTIONS {
+        let mut line = String::from(REFERENCE_IDEOGRAPH);
+        for _ in 0..6 {
+            line.push(pair[0]);
+            line.push(pair[1]);
+            line.push(REFERENCE_IDEOGRAPH);
+        }
+        lines.push(line);
+    }
+    lines.push(format!("「{0}{0}{0}{0}{0}{0}」", REFERENCE_IDEOGRAPH));
+    lines.push(format!("{0}{0}{0}{0}{0}{0}。", REFERENCE_IDEOGRAPH));
+    let paragraphs: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+    vec![
+        Probe::new("cjk-junctions-horizontal", &paragraphs)
+            .as_element("div")
+            .in_language("ja"),
+        Probe::new("cjk-junctions-vertical", &paragraphs)
+            .as_element("div")
+            .in_language("ja")
+            .vertical(),
     ]
 }

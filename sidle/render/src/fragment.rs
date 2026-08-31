@@ -1,10 +1,6 @@
-//! The output of layout: a tree of positioned rectangles.
-//!
-//! Layout resolves a styled document tree into fragments; every later pass —
-//! painting, pagination, hit testing, decoration — reads this tree and never
-//! the document again. A fragment keeps the id of the node it came from, so
-//! anything keyed to the source (a link target, an annotation offset, the
-//! device's own per-element layout rects) can be matched back to it.
+//! The output of layout: a tree of positioned rectangles. Painting,
+//! pagination, hit testing and decoration read this and not the document.
+//! Each [`Fragment`] keeps the [`NodeId`] it was produced for.
 
 use bokai::model::{NodeId, Role};
 use bokai::style::Color;
@@ -12,11 +8,27 @@ use bokai::style::Color;
 use crate::font::FaceId;
 use crate::geom::{Edges, Rect};
 
+/// What a box is in the tree layout builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Node {
+    /// A block box: a paragraph, a table cell, a picture, the root.
+    #[default]
+    Container,
+    /// The `Line`s one block's inline content breaks into.
+    Column,
+    /// One line of a `Column`, spanning its whole inline size.
+    Line,
+    /// Glyphs on one line, from one face at one size.
+    Run,
+}
+
 /// One positioned box.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fragment {
     /// The document node this box was produced for.
     pub source: NodeId,
+    /// Where this box sits in the layout tree.
+    pub kind: Node,
     /// The node's structural role, which tells a heading from a rule without
     /// the document open.
     pub role: Role,
@@ -68,6 +80,8 @@ pub struct GlyphRun {
 pub struct Glyph {
     /// Index into the face, as shaping produced it — not a character.
     pub id: u16,
+    /// Byte in the source node's text, or [`Glyph::NO_SOURCE`].
+    pub offset: u32,
     /// Distance along the line from the run's start to this glyph's drawing
     /// origin.
     pub along: f32,
@@ -87,6 +101,16 @@ pub enum Orientation {
     /// A vertical line, glyphs turned a quarter turn clockwise — Latin in
     /// vertical writing.
     Sideways,
+}
+
+impl Glyph {
+    /// The `offset` of a glyph no source character asked for.
+    pub const NO_SOURCE: u32 = u32::MAX;
+
+    /// Whether a source character asked for this glyph.
+    pub fn is_from_source(&self) -> bool {
+        self.offset != Self::NO_SOURCE
+    }
 }
 
 impl Orientation {
@@ -121,6 +145,7 @@ impl Fragment {
     pub fn new(source: NodeId, role: Role, rect: Rect) -> Self {
         Self {
             source,
+            kind: Node::Container,
             role,
             rect,
             content: Content::Empty,
@@ -128,6 +153,22 @@ impl Fragment {
             border: None,
             children: Vec::new(),
         }
+    }
+
+    /// The same box, stated as another `Node`.
+    pub fn as_kind(mut self, kind: Node) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Every box of `kind` in the tree, in document order.
+    pub fn of_kind(&self, kind: Node) -> impl Iterator<Item = &Fragment> {
+        self.walk().filter(move |f| f.kind == kind)
+    }
+
+    /// Every `Node::Line` in the tree, in document order.
+    pub fn lines(&self) -> impl Iterator<Item = &Fragment> {
+        self.of_kind(Node::Line)
     }
 
     /// Every fragment in the tree, this one first, then its children in

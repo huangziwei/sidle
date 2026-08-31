@@ -8,6 +8,7 @@
 //! decides where a box lands and the rest of layout does not.
 
 pub mod book;
+pub mod decorate;
 pub mod flow;
 pub mod font;
 pub mod fragment;
@@ -20,15 +21,17 @@ pub mod pages;
 pub mod paint;
 #[cfg(feature = "probe")]
 pub mod probe;
+pub mod resolve;
 pub mod resource;
 pub mod settings;
 pub mod text;
 pub mod units;
 
 pub use book::BookResources;
+pub use decorate::{Decorations, Kind, Mark, Span, Tint};
 pub use flow::{Layout, Page, Viewport};
 pub use font::Fonts;
-pub use fragment::{Content, Fragment, Glyph, GlyphRun, Orientation};
+pub use fragment::{Content, Fragment, Glyph, GlyphRun, Node, Orientation};
 pub use geom::{Axis, Edges, Rect, Size};
 pub use pages::Pages;
 pub use resource::{Bitmap, Resources, Unknown};

@@ -1,29 +1,23 @@
-//! Block layout: boxes stacked along the block axis.
-//!
-//! Everything here is measured logically — an inline size along the line, a
-//! block size across it — and turned into rectangles once, at the end. A
-//! vertical Japanese page and a horizontal English one are then the same
-//! stack of boxes, differing only in the final conversion.
-//!
-//! Each block takes the inline size its container offers, less its own
-//! margins, borders and padding, and takes its block size from what it
-//! contains. Adjacent margins add. Inline children go
-//! to [`crate::inline`], which breaks them into lines.
+//! Block layout: boxes stacked along the block axis, measured as an inline
+//! and a block size and turned into rectangles once by `to_physical`.
+//! Adjacent margins add. Inline children go to [`crate::inline`].
 
 use std::sync::LazyLock;
 
 use bokai::model::{Chapter, NodeId, Role};
 use bokai::style::{
-    BorderStyle, BoxSizing, Color, ComputedStyle, Display, Length, ListStyleType,
-    ROOT_FONT_SIZE_PX, TextAlign, WritingMode,
+    BorderStyle, Color, ComputedStyle, Display, Length, ListStyleType, ROOT_FONT_SIZE_PX,
+    TextAlign, WritingMode,
 };
 use bokai::text::hyphenation::{self, Hyphenator};
 
 use crate::font::Fonts;
-use crate::fragment::{Border, Content, Fragment, GlyphRun};
+use crate::fragment::{Border, Content, Fragment, GlyphRun, Node};
 use crate::geom::{Axis, Edges, LogicalEdges, Rect, Size};
 use crate::inline::{self, Inline, Item, TextStyle};
+use crate::resolve::{NORMAL_LINE_HEIGHT, Resolver};
 use crate::resource::Resources;
+use crate::settings::Script;
 use crate::units::Metrics;
 
 /// The area a chapter is laid out into.
@@ -40,6 +34,12 @@ pub struct Viewport {
     /// How a value the source declared becomes a dot. The source format
     /// decides it, and the caller that opened the book states it.
     pub metrics: Metrics,
+    /// Passed to `Resolver::line_spacing`.
+    pub line_spacing: f32,
+    /// Used where a block declares no `text_align` of its own.
+    pub align: TextAlign,
+    /// Passed to `Resolver::embolden_weight`.
+    pub embolden_weight: f32,
 }
 
 impl Default for Viewport {
@@ -50,6 +50,9 @@ impl Default for Viewport {
             root_font_size: ROOT_FONT_SIZE_PX,
             language: None,
             metrics: Metrics::default(),
+            line_spacing: 1.0,
+            align: TextAlign::Start,
+            embolden_weight: 0.0,
         }
     }
 }
@@ -77,14 +80,46 @@ impl Viewport {
         self
     }
 
-    /// The page less its margins, as an inline extent and a block extent —
-    /// the line length text has to fill, and how far a page stacks.
+    /// A `Resolver` at these settings.
+    pub fn resolver(&self) -> Resolver {
+        Resolver {
+            metrics: self.metrics,
+            root_font_size: self.root_font_size,
+            line_spacing: self.line_spacing,
+            embolden_weight: self.embolden_weight,
+        }
+    }
+
+    /// The page less its margins, as an inline and a block extent.
+    /// On an em grid the inline extent is a whole number of ems.
     pub fn content(&self, axis: Axis) -> (f32, f32) {
         let margins = axis.logical_edges(self.margins);
-        (
-            (axis.inline_of(self.size) - margins.inline()).max(1.0),
-            (axis.block_of(self.size) - margins.block()).max(1.0),
-        )
+        let available = (axis.inline_of(self.size) - margins.inline()).max(1.0);
+        let block = (axis.block_of(self.size) - margins.block()).max(1.0);
+        (available - self.grid_remainder(axis), block)
+    }
+
+    /// Half `grid_remainder`, rounded down.
+    pub fn inline_lead(&self, axis: Axis) -> f32 {
+        (self.grid_remainder(axis) / 2.0).floor()
+    }
+
+    /// The measure no whole cell claims, rounded to a dot. Zero off the grid.
+    fn grid_remainder(&self, axis: Axis) -> f32 {
+        if !self.on_an_em_grid() || self.root_font_size <= 0.0 {
+            return 0.0;
+        }
+        let margins = axis.logical_edges(self.margins);
+        let available = (axis.inline_of(self.size) - margins.inline()).max(1.0);
+        let cells = (available / self.root_font_size).floor().max(1.0);
+        (available - cells * self.root_font_size).max(0.0).round()
+    }
+
+    /// Whether `language` reads as `Script::Cjk`.
+    fn on_an_em_grid(&self) -> bool {
+        self.language
+            .as_deref()
+            .is_some_and(|tag| Script::of(tag) == Script::Cjk)
     }
 }
 
@@ -116,12 +151,12 @@ impl Layout<'_> {
         let axis = axis_of(chapter).unwrap_or(self.axis);
         let (inline_size, page_block) = self.viewport.content(axis);
         let language = self.viewport.language.as_deref().unwrap_or("");
+        let resolver = self.viewport.resolver();
         let mut flow = Flow {
             chapter,
             fonts: self.fonts,
             resources: self.resources,
-            root_font_size: self.viewport.root_font_size,
-            metrics: self.viewport.metrics,
+            resolver,
             axis,
             page_block,
             hyphenator: hyphenation::for_language(language),
@@ -129,14 +164,14 @@ impl Layout<'_> {
 
         let inherited = Inherited {
             font_size: self.viewport.root_font_size,
-            line_height: self.viewport.root_font_size * NORMAL_LINE_HEIGHT,
+            line_height: resolver.normal_line_height(self.viewport.root_font_size),
             color: Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
             },
-            align: TextAlign::Start,
+            align: self.viewport.align,
         };
         let mut root = flow
             .block(chapter.root(), 0.0, 0.0, inline_size, inherited)
@@ -154,20 +189,14 @@ impl Layout<'_> {
     }
 }
 
-/// `line-height: normal`, as a multiple of the font size.
-const NORMAL_LINE_HEIGHT: f32 = 1.2;
-
 /// CSS's size for a replaced box whose own proportions are unknown.
 const DEFAULT_OBJECT: Size = Size {
     width: 300.0,
     height: 150.0,
 };
 
-/// The axis a chapter declares for itself, or `None` where it declares
-/// nothing and the book's own default stands.
-///
-/// `horizontal-tb` is the CSS initial value: a style carrying it may have
-/// declared it or said nothing. Only a vertical mode is a statement.
+/// The `Axis` `chapter` declares, `None` where it declares none.
+/// `WritingMode::HorizontalTb` is the initial value and states nothing.
 fn axis_of(chapter: &Chapter) -> Option<Axis> {
     for id in 0..chapter.node_count() {
         let node = NodeId(id as u32);
@@ -212,8 +241,7 @@ struct Flow<'a, 'f> {
     chapter: &'a Chapter,
     fonts: &'f mut Fonts,
     resources: &'a dyn Resources,
-    root_font_size: f32,
-    metrics: Metrics,
+    resolver: Resolver,
     axis: Axis,
     /// How far a page reaches along the block axis, which is the most a
     /// picture may take.
@@ -265,11 +293,9 @@ impl<'a> Flow<'a, '_> {
             inline_end: padding.inline_end + border.widths_logical(self.axis).inline_end,
         };
 
+        // A declared inline size is the content's own.
         let outer_inline = (available - margin.inline()).max(0.0);
         let content_inline = match self.declared_inline(style, available, inherited) {
-            Some(declared) if style.box_sizing == BoxSizing::BorderBox => {
-                (declared - frame.inline()).max(0.0)
-            }
             Some(declared) => declared.max(0.0),
             None => (outer_inline - frame.inline()).max(0.0),
         };
@@ -278,7 +304,8 @@ impl<'a> Flow<'a, '_> {
         let content_block_origin = block + margin.block_start + frame.block_start;
 
         let mut children = Vec::new();
-        let mut content_block = self.children(
+        // A block takes its block size from what it holds.
+        let content_block = self.children(
             node,
             content_inline_origin,
             content_block_origin,
@@ -287,14 +314,6 @@ impl<'a> Flow<'a, '_> {
             style,
             &mut children,
         );
-
-        if let Some(declared) = self.declared_block(style, available, inherited) {
-            content_block = if style.box_sizing == BoxSizing::BorderBox {
-                (declared - frame.block()).max(0.0)
-            } else {
-                declared.max(0.0)
-            };
-        }
 
         let rect = Rect::new(
             inline + margin.inline_start,
@@ -341,7 +360,12 @@ impl<'a> Flow<'a, '_> {
                 continue;
             }
 
-            if is_block_level(role, child_style.display) {
+            if role == Role::Table {
+                cursor += self.flush(&mut items, inline, cursor, available, inherited, style, out);
+                let laid = self.table(child, inline, cursor, available, inherited);
+                cursor += laid.outer;
+                out.push(laid.fragment);
+            } else if is_block_level(role, child_style.display) {
                 cursor += self.flush(&mut items, inline, cursor, available, inherited, style, out);
                 let laid = self.block(child, inline, cursor, available, inherited);
                 cursor += laid.outer;
@@ -387,10 +411,25 @@ impl<'a> Flow<'a, '_> {
             inherited.line_height,
         );
 
+        if lines.fragments.is_empty() {
+            return lines.block_size;
+        }
         for fragment in &mut lines.fragments {
             fragment.translate(inline, block);
         }
-        out.append(&mut lines.fragments);
+        // The lines of one block are a `Node::Column`.
+        let source = lines
+            .fragments
+            .first()
+            .map_or(NodeId(0), |fragment| fragment.source);
+        let mut column = Fragment::new(
+            source,
+            Role::Container,
+            Rect::new(inline, block, available, lines.block_size),
+        )
+        .as_kind(Node::Column);
+        column.children = std::mem::take(&mut lines.fragments);
+        out.push(column);
         lines.block_size
     }
 
@@ -526,6 +565,10 @@ impl<'a> Flow<'a, '_> {
             letter_spacing: self
                 .length(style.letter_spacing, 0.0, inherited)
                 .unwrap_or(0.0),
+            word_spacing: self
+                .length(style.word_spacing, 0.0, inherited)
+                .unwrap_or(0.0),
+            embolden: self.resolver.embolden(inherited.font_size),
             underline: style.text_decoration_underline,
             line_through: style.text_decoration_line_through,
             preserve_spaces,
@@ -549,13 +592,13 @@ impl<'a> Flow<'a, '_> {
             .and_then(|src| self.resources.image_size(src))
             .map(|size| {
                 Size::new(
-                    self.metrics.image_px(size.width),
-                    self.metrics.image_px(size.height),
+                    self.resolver.metrics.image_px(size.width),
+                    self.resolver.metrics.image_px(size.height),
                 )
             });
         let unknown = Size::new(
-            self.metrics.css_px(DEFAULT_OBJECT.width),
-            self.metrics.css_px(DEFAULT_OBJECT.height),
+            self.resolver.metrics.css_px(DEFAULT_OBJECT.width),
+            self.resolver.metrics.css_px(DEFAULT_OBJECT.height),
         );
         let ratio = intrinsic
             .filter(|size| size.height > 0.0)
@@ -617,19 +660,11 @@ impl<'a> Flow<'a, '_> {
     /// The context a node passes to its children: its own declarations where
     /// it made them, its parent's where it did not.
     fn inherit(&self, parent: Inherited, style: &ComputedStyle) -> Inherited {
-        let font_size = self
-            .length(style.font_size, parent.font_size, parent)
-            .unwrap_or(parent.font_size);
+        let font_size = self.resolver.font_size(style.font_size, parent.font_size);
         let line_height = match style.line_height {
-            // `normal` scales with the font size in effect.
+            // A silent style at the parent's size keeps the parent's line.
             Length::Auto if font_size == parent.font_size => parent.line_height,
-            Length::Auto => font_size * NORMAL_LINE_HEIGHT,
-            // A bare number — `line-height: 1.5` — is stored as a multiple.
-            Length::Em(factor) => font_size * factor,
-            Length::Percent(percent) => font_size * percent / 100.0,
-            declared => self
-                .length(declared, font_size, parent)
-                .unwrap_or(font_size * NORMAL_LINE_HEIGHT),
+            declared => self.resolver.line_height(declared, font_size),
         };
 
         Inherited {
@@ -657,20 +692,6 @@ impl<'a> Flow<'a, '_> {
             style.height
         } else {
             style.width
-        };
-        self.length(declared, available, inherited)
-    }
-
-    fn declared_block(
-        &self,
-        style: &ComputedStyle,
-        available: f32,
-        inherited: Inherited,
-    ) -> Option<f32> {
-        let declared = if self.axis.is_vertical() {
-            style.width
-        } else {
-            style.height
         };
         self.length(declared, available, inherited)
     }
@@ -721,21 +742,9 @@ impl<'a> Flow<'a, '_> {
     }
 
     /// Resolve a length to device dots, or `None` where the source declared
-    /// `auto`. Percentages resolve against `available`, which for every
-    /// box-model property is the containing block's inline size — its block
-    /// size included, per CSS.
-    ///
-    /// `Px` is the IR's only absolute unit and converts through
-    /// [`Metrics::length`]. `Em`, `Rem` and `Percent` scale a value that is
-    /// in dots.
+    /// `auto`.
     fn length(&self, value: Length, available: f32, inherited: Inherited) -> Option<f32> {
-        match value {
-            Length::Auto => None,
-            Length::Px(px) => Some(self.metrics.length(px)),
-            Length::Em(em) => Some(em * inherited.font_size),
-            Length::Rem(rem) => Some(rem * self.root_font_size),
-            Length::Percent(percent) => Some(available * percent / 100.0),
-        }
+        self.resolver.length(value, available, inherited.font_size)
     }
 }
 
@@ -907,5 +916,424 @@ fn physical_baseline(run: &GlyphRun, axis: Axis, block_size: f32) -> f32 {
     match axis {
         Axis::HorizontalTb | Axis::VerticalLr => run.baseline,
         Axis::VerticalRl => block_size - run.baseline,
+    }
+}
+
+// --- Tables ---------------------------------------------------------------
+
+/// One cell, and how much of the grid it claims.
+struct Cell {
+    node: NodeId,
+    /// Which column it starts in, and how many it spans.
+    column: usize,
+    span: usize,
+}
+
+impl<'a> Flow<'a, '_> {
+    /// Columns size to what they hold; a row is as deep as its deepest cell.
+    fn table(
+        &mut self,
+        node: NodeId,
+        inline: f32,
+        block: f32,
+        available: f32,
+        parent: Inherited,
+    ) -> Laid {
+        let style = style_of(self.chapter, node);
+        let inherited = self.inherit(parent, style);
+        let margin = self.logical(
+            [
+                style.margin_top,
+                style.margin_right,
+                style.margin_bottom,
+                style.margin_left,
+            ],
+            available,
+            inherited,
+        );
+        let measure = (available - margin.inline()).max(0.0);
+
+        let rows = self.rows(node);
+        if rows.is_empty() {
+            return self.block(node, inline, block, available, parent);
+        }
+        let widths = self.columns(&rows, measure, inherited);
+
+        let origin_inline = inline + margin.inline_start;
+        let origin_block = block + margin.block_start;
+        let mut children = Vec::new();
+        let mut cursor = origin_block;
+        for row in &rows {
+            let mut depth = 0.0f32;
+            let start = children.len();
+            for cell in row {
+                let offset: f32 = widths[..cell.column].iter().sum();
+                let width: f32 = widths[cell.column..(cell.column + cell.span).min(widths.len())]
+                    .iter()
+                    .sum();
+                let laid = self.block(cell.node, origin_inline + offset, cursor, width, inherited);
+                depth = depth.max(laid.outer);
+                children.push(laid.fragment);
+            }
+            // Every cell reaches the row's own depth.
+            for fragment in &mut children[start..] {
+                fragment.rect = grow_block(fragment.rect, self.axis, depth);
+            }
+            cursor += depth;
+        }
+
+        let width: f32 = widths.iter().sum();
+        let rect = Rect::new(origin_inline, origin_block, width, cursor - origin_block);
+        let border = self.border(style, available, inherited);
+        let mut fragment = Fragment::new(node, Role::Table, rect);
+        fragment.background = style.background_color;
+        fragment.border = border.is_visible().then_some(border);
+        fragment.children = children;
+
+        Laid {
+            outer: margin.block() + rect.height,
+            fragment,
+        }
+    }
+
+    /// The table's cells, row by row, in the columns their spans claim.
+    fn rows(&self, table: NodeId) -> Vec<Vec<Cell>> {
+        let chapter = self.chapter;
+        let mut rows = Vec::new();
+        let mut walk = vec![table];
+        while let Some(node) = walk.pop() {
+            for child in chapter.children(node) {
+                match role_of(chapter, child) {
+                    Role::TableRow => rows.push(self.cells(child)),
+                    // A head and a body hold rows and lay out no box.
+                    Role::TableHead | Role::TableBody => walk.push(child),
+                    _ => {}
+                }
+            }
+        }
+        rows.retain(|row: &Vec<Cell>| !row.is_empty());
+        rows
+    }
+
+    /// One row's cells, in the columns they claim.
+    fn cells(&self, row: NodeId) -> Vec<Cell> {
+        let chapter = self.chapter;
+        let mut cells = Vec::new();
+        let mut column = 0;
+        for child in chapter.children(row) {
+            if role_of(chapter, child) != Role::TableCell {
+                continue;
+            }
+            let span = chapter.semantics.col_span(child).unwrap_or(1).max(1) as usize;
+            cells.push(Cell {
+                node: child,
+                column,
+                span,
+            });
+            column += span;
+        }
+        cells
+    }
+
+    /// A width per column, shrunk in proportion past `measure`.
+    fn columns(&mut self, rows: &[Vec<Cell>], measure: f32, inherited: Inherited) -> Vec<f32> {
+        let count = rows
+            .iter()
+            .filter_map(|row| row.last().map(|cell| cell.column + cell.span))
+            .max()
+            .unwrap_or(0);
+        let mut least = vec![0.0f32; count];
+        let mut most = vec![0.0f32; count];
+
+        for row in rows {
+            for cell in row {
+                let (min, max) = self.cell_width(cell.node, measure, inherited);
+                // A cell over several columns sizes none of them.
+                if cell.span != 1 {
+                    continue;
+                }
+                least[cell.column] = least[cell.column].max(min);
+                most[cell.column] = most[cell.column].max(max);
+            }
+        }
+
+        let wanted: f32 = most.iter().sum();
+        if wanted <= measure || wanted <= 0.0 {
+            return most;
+        }
+        let floor: f32 = least.iter().sum();
+        if floor >= measure {
+            return least;
+        }
+        // Share `slack` over each column's own `appetite`.
+        let slack = measure - floor;
+        let appetite = wanted - floor;
+        least
+            .iter()
+            .zip(&most)
+            .map(|(min, max)| min + (max - min) / appetite * slack)
+            .collect()
+    }
+
+    /// How wide `cell`'s content wants to be, unbroken and whole.
+    fn cell_width(&mut self, cell: NodeId, available: f32, inherited: Inherited) -> (f32, f32) {
+        let style = style_of(self.chapter, cell);
+        let inherited = self.inherit(inherited, style);
+        let padding = self.logical(
+            [
+                style.padding_top,
+                style.padding_right,
+                style.padding_bottom,
+                style.padding_left,
+            ],
+            available,
+            inherited,
+        );
+        let mut items: Vec<Item<'a>> = Vec::new();
+        for child in self.chapter.children(cell) {
+            self.collect(child, available, inherited, &mut items);
+        }
+        let (min, max) = Inline {
+            fonts: self.fonts,
+            axis: self.axis,
+            hyphenator: self.hyphenator,
+        }
+        .measure(&items);
+        let frame = padding.inline();
+        (min + frame, max + frame)
+    }
+}
+
+/// `rect` stretched to `depth` along the block axis.
+fn grow_block(rect: Rect, axis: Axis, depth: f32) -> Rect {
+    if axis.is_vertical() {
+        Rect::new(rect.x, rect.y, depth, rect.height)
+    } else {
+        Rect::new(rect.x, rect.y, rect.width, depth)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bokai::model::Node as IrNode;
+
+    use crate::fragment::Node as Kind;
+    use crate::resource::Unknown;
+
+    /// A chapter of one paragraph holding `text`.
+    fn one_paragraph(text: &str) -> Chapter {
+        let mut chapter = Chapter::new();
+        let paragraph = chapter.alloc_node(IrNode::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), paragraph);
+        let range = chapter.append_text(text);
+        let mut leaf = IrNode::new(Role::Text);
+        leaf.text = range;
+        let leaf = chapter.alloc_node(leaf);
+        chapter.append_child(paragraph, leaf);
+        chapter
+    }
+
+    fn lay_out(chapter: &Chapter, viewport: Viewport) -> Page {
+        let mut fonts = Fonts::empty();
+        Layout {
+            viewport,
+            fonts: &mut fonts,
+            resources: &Unknown,
+            axis: Axis::HorizontalTb,
+        }
+        .chapter(chapter)
+    }
+
+    #[test]
+    fn a_paragraph_lays_out_as_a_column_of_lines_of_runs() {
+        let chapter = one_paragraph("one two three four five six seven eight nine ten");
+        let page = lay_out(&chapter, Viewport::new(200.0, 400.0));
+
+        let columns: Vec<&Fragment> = page.root.of_kind(Kind::Column).collect();
+        assert_eq!(columns.len(), 1, "one block, one column");
+        let lines: Vec<&Fragment> = page.root.lines().collect();
+        assert!(lines.len() > 1, "the text is longer than one line");
+        // Every line hangs off the column, and nothing else does.
+        assert_eq!(columns[0].children.len(), lines.len());
+        for line in &columns[0].children {
+            assert_eq!(line.kind, Kind::Line);
+        }
+    }
+
+    #[test]
+    fn a_line_spans_its_columns_whole_inline_size() {
+        let chapter = one_paragraph("one two three four five six seven eight nine ten");
+        let viewport = Viewport::new(200.0, 400.0);
+        let content = viewport.content(Axis::HorizontalTb).0;
+        let page = lay_out(&chapter, viewport);
+
+        for line in page.root.lines() {
+            assert_eq!(line.rect.width, content);
+        }
+    }
+
+    #[test]
+    fn lines_stack_down_the_page_in_order() {
+        let chapter = one_paragraph("one two three four five six seven eight nine ten");
+        let page = lay_out(&chapter, Viewport::new(200.0, 400.0));
+
+        let tops: Vec<f32> = page.root.lines().map(|line| line.rect.y).collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[1] > pair[0]),
+            "lines out of order: {tops:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_block_size_moves_nothing() {
+        // `height` reaches the container and the device ignores it: a block
+        // takes its block size from what it holds.
+        let chapter = one_paragraph("one two three");
+        let plain = lay_out(&chapter, Viewport::new(200.0, 400.0));
+
+        let mut tall = Chapter::new();
+        let paragraph = tall.alloc_node(IrNode::new(Role::Paragraph));
+        tall.append_child(tall.root(), paragraph);
+        let range = tall.append_text("one two three");
+        let mut leaf = IrNode::new(Role::Text);
+        leaf.text = range;
+        let leaf = tall.alloc_node(leaf);
+        tall.append_child(paragraph, leaf);
+        let id = tall.styles.intern(ComputedStyle {
+            height: Length::Px(500.0),
+            ..ComputedStyle::default()
+        });
+        tall.node_mut(paragraph).expect("just added").style = id;
+
+        let declared = lay_out(&tall, Viewport::new(200.0, 400.0));
+
+        assert_eq!(declared.block_extent, plain.block_extent);
+    }
+
+    #[test]
+    fn a_cjk_measure_is_a_whole_number_of_ems() {
+        // The Scribe's vertical ladder: 2480 tall less 158 and 102 leaves
+        // 2220, which holds 50 ems of 44 with 20 dots over.
+        let viewport = Viewport {
+            size: Size::new(1860.0, 2480.0),
+            margins: Edges::new(158.0, 158.0, 102.0, 158.0),
+            root_font_size: 44.0,
+            language: Some("ja".to_string()),
+            ..Viewport::default()
+        };
+
+        let (inline, _) = viewport.content(Axis::VerticalRl);
+
+        assert_eq!(inline, 2200.0);
+        assert_eq!(viewport.inline_lead(Axis::VerticalRl), 10.0);
+    }
+
+    #[test]
+    fn an_odd_remainder_leaves_the_smaller_half_at_the_start() {
+        // The Colorsoft's: 1696 less 82 and 17 leaves 1597, which holds 36
+        // ems with 13 over — 6 before the text and 7 after.
+        let viewport = Viewport {
+            size: Size::new(1272.0, 1696.0),
+            margins: Edges::new(82.0, 82.0, 17.0, 82.0),
+            root_font_size: 44.0,
+            language: Some("ja".to_string()),
+            ..Viewport::default()
+        };
+
+        assert_eq!(viewport.content(Axis::VerticalRl).0, 1584.0);
+        assert_eq!(viewport.inline_lead(Axis::VerticalRl), 6.0);
+    }
+
+    #[test]
+    fn a_book_in_a_proportional_script_takes_the_whole_measure() {
+        let viewport = Viewport {
+            size: Size::new(1272.0, 1696.0),
+            margins: Edges::new(65.0, 82.0, 0.0, 82.0),
+            root_font_size: 44.0,
+            language: Some("en".to_string()),
+            ..Viewport::default()
+        };
+
+        assert_eq!(viewport.content(Axis::HorizontalTb).0, 1108.0);
+        assert_eq!(viewport.inline_lead(Axis::HorizontalTb), 0.0);
+    }
+
+    /// A table of one row, `cells` wide.
+    fn one_row(cells: &[&str], spans: &[u32]) -> Chapter {
+        let mut chapter = Chapter::new();
+        let table = chapter.alloc_node(IrNode::new(Role::Table));
+        chapter.append_child(chapter.root(), table);
+        let row = chapter.alloc_node(IrNode::new(Role::TableRow));
+        chapter.append_child(table, row);
+        for (index, text) in cells.iter().enumerate() {
+            let cell = chapter.alloc_node(IrNode::new(Role::TableCell));
+            chapter.append_child(row, cell);
+            if let Some(span) = spans.get(index) {
+                chapter.semantics.set_col_span(cell, *span);
+            }
+            let range = chapter.append_text(text);
+            let mut leaf = IrNode::new(Role::Text);
+            leaf.text = range;
+            let leaf = chapter.alloc_node(leaf);
+            chapter.append_child(cell, leaf);
+        }
+        chapter
+    }
+
+    #[test]
+    fn a_rows_cells_sit_side_by_side() {
+        let chapter = one_row(&["one", "two", "three"], &[]);
+        let page = lay_out(&chapter, Viewport::new(400.0, 400.0));
+
+        let cells: Vec<&Fragment> = page
+            .root
+            .walk()
+            .filter(|f| f.role == Role::TableCell)
+            .collect();
+        assert_eq!(cells.len(), 3);
+        let lefts: Vec<f32> = cells.iter().map(|cell| cell.rect.x).collect();
+        assert!(
+            lefts.windows(2).all(|pair| pair[1] > pair[0]),
+            "cells stacked instead of ranging along the row: {lefts:?}"
+        );
+        // One row, so every cell starts at the same block position.
+        assert!(cells.iter().all(|cell| cell.rect.y == cells[0].rect.y));
+    }
+
+    #[test]
+    fn a_table_narrower_than_the_page_takes_only_what_it_holds() {
+        let chapter = one_row(&["a", "b", "c"], &[]);
+        let viewport = Viewport::new(400.0, 400.0);
+        let measure = viewport.content(Axis::HorizontalTb).0;
+        let page = lay_out(&chapter, viewport);
+
+        let table = page
+            .root
+            .walk()
+            .find(|f| f.role == Role::Table)
+            .expect("a table box");
+        assert!(
+            table.rect.width < measure,
+            "a table of three letters filled {measure} dots"
+        );
+    }
+
+    #[test]
+    fn a_spanning_cell_covers_the_columns_it_claims() {
+        let chapter = one_row(&["wide", "one", "two"], &[2, 1, 1]);
+        let page = lay_out(&chapter, Viewport::new(400.0, 400.0));
+
+        let cells: Vec<&Fragment> = page
+            .root
+            .walk()
+            .filter(|f| f.role == Role::TableCell)
+            .collect();
+        assert_eq!(cells.len(), 3);
+        // The spanning cell reaches the third column's own start.
+        assert!(
+            cells[0].rect.right() >= cells[1].rect.x,
+            "the spanning cell stopped short: {:?}",
+            cells.iter().map(|c| c.rect).collect::<Vec<_>>()
+        );
     }
 }

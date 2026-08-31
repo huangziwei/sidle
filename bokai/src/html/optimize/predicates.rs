@@ -46,7 +46,13 @@ pub fn is_block_container(role: Option<Role>) -> bool {
 pub fn is_inline_role(role: Role) -> bool {
     matches!(
         role,
-        Role::Text | Role::Inline | Role::Link | Role::Image | Role::Break
+        Role::Text
+            | Role::Inline
+            | Role::Link
+            | Role::Image
+            | Role::Break
+            | Role::Ruby
+            | Role::RubyText
     )
 }
 

@@ -1,10 +1,6 @@
-//! Cutting a chapter into pages.
-//!
-//! A laid-out chapter is one long strip along the block axis. A page is a cut
-//! across it, falling only where no [`Fragment`] is drawn.
-//!
-//! Every measurement is in a reading coordinate that grows the way pages
-//! advance: down the page for horizontal text, leftward for `vertical-rl`.
+//! Cutting a chapter into pages: a cut falls only where no [`Fragment`] is
+//! drawn. `reading` grows the way pages advance — down for horizontal text,
+//! leftward for `Axis::VerticalRl`.
 
 use crate::flow::{Page, Viewport};
 use crate::fragment::{Content, Fragment};
@@ -15,6 +11,8 @@ pub struct Pages {
     axis: Axis,
     size: Size,
     margins: Edges,
+    /// `Viewport::inline_lead` at this axis.
+    lead: f32,
     /// The block extent one page holds, margins excluded.
     extent: f32,
     /// Reading coordinate each page starts at.
@@ -34,6 +32,7 @@ impl Pages {
             axis,
             size: viewport.size,
             margins: viewport.margins,
+            lead: viewport.inline_lead(axis),
             extent,
             starts: cut(&content, extent, first.min(last), first.max(last)),
         }
@@ -65,10 +64,13 @@ impl Pages {
         }
     }
 
-    /// Where a page's content sits on the page, in CSS pixels — the margin
-    /// the window is drawn at.
+    /// Where a page's content sits: the margin plus `lead`.
     pub fn origin(&self) -> (f32, f32) {
-        (self.margins.left, self.margins.top)
+        if self.axis.is_vertical() {
+            (self.margins.left, self.margins.top + self.lead)
+        } else {
+            (self.margins.left + self.lead, self.margins.top)
+        }
     }
 
     /// The content area, as an inline extent and a block extent.

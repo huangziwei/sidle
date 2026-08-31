@@ -1,25 +1,17 @@
-//! The reading settings a Kindle offers for a KFX book, and what each stop is
-//! worth.
-//!
-//! A [`Panel`] holds the stops one device offers: font sizes in points by
-//! script, line-spacing multipliers, embolden weights, and a margin ladder per
-//! reading direction. [`Panel::parse`] reads one from a profile the caller
-//! supplies; this crate carries none.
-//!
-//! [`Settings`] picks a stop from each ladder, and turns the pair into the
-//! [`Viewport`] a page is laid out into.
+//! [`Panel`] holds one screen's ladders, read by [`Panel::parse`] from a
+//! profile the caller supplies. [`Settings`] picks a stop from each and
+//! turns the pair into a [`Viewport`].
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::{fs, io};
 
 use crate::flow::Viewport;
-use crate::geom::{Edges, Size};
-use crate::units::Metrics;
+use bokai::style::TextAlign;
 
-/// Line height as a multiple of the em, before the line-spacing stop
-/// multiplies it.
-pub const BASE_LINE_HEIGHT: f32 = 1.2;
+use crate::geom::{Edges, Size};
+use crate::resolve::NORMAL_LINE_HEIGHT;
+use crate::units::Metrics;
 
 /// One panel's ladders.
 #[derive(Debug, Clone, PartialEq)]
@@ -281,7 +273,7 @@ impl Settings {
 
     /// The distance between two baselines, in dots.
     pub fn line_height(&self, panel: &Panel, language: &str) -> f32 {
-        self.em(panel, language) * BASE_LINE_HEIGHT * self.line_spacing(panel, language)
+        self.em(panel, language) * NORMAL_LINE_HEIGHT * self.line_spacing(panel, language)
     }
 
     /// The area a page is laid out into: the whole panel, the margins the
@@ -293,6 +285,13 @@ impl Settings {
             root_font_size: self.em(panel, language),
             language: Some(language.to_string()),
             metrics: panel.metrics(),
+            line_spacing: self.line_spacing(panel, language),
+            embolden_weight: self.embolden_weight(panel),
+            align: if self.justified {
+                TextAlign::Justify
+            } else {
+                TextAlign::Start
+            },
         }
     }
 }

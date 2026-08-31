@@ -679,6 +679,15 @@ where
                 } else {
                     resolve_hinted_role(elem, styles, symbols, anchor_table)
                 };
+                // KFX writes a cell as a plain text element; its place in a
+                // `TableRow` is what names it.
+                let node_role = if chapter.node(parent).map(|n| n.role) == Some(Role::TableRow)
+                    && node_role != Role::Image
+                {
+                    Role::TableCell
+                } else {
+                    node_role
+                };
                 let node_id = chapter.alloc_node(Node::new(node_role));
 
                 // An image element's `link_to` becomes an `<a>` wrapping the
@@ -2881,7 +2890,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     ctx.resolve_pending_chapter_anchor(container_id);
 
                     // Create fragment-based anchor if this element is a link/TOC target
-                    // Note: Kindle expects offset: 0 for all navigation entries (per reference KFX)
+                    // Every navigation entry takes offset 0.
                     // Check both: elements with IDs AND elements that are registered targets (for TOC)
                     if let Some(node_id) = elem.node_id {
                         let has_id = elem.get_semantic(SemanticTarget::Id).is_some();
@@ -3080,7 +3089,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     span_info.length = length;
 
                     // Add the span as a style_event (if non-empty)
-                    // Note: The flattening algorithm ensures spans are non-overlapping
+                    // Flattening leaves the spans non-overlapping.
                     // and carry every accumulated attribute merged.
                     if length > 0
                         && let Some(current) = stack.last_mut()

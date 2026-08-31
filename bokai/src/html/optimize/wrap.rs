@@ -21,7 +21,7 @@ fn wrap_mixed_children(chapter: &mut Chapter, parent_id: NodeId) {
         return;
     }
 
-    // Analyze children: do we have both inline and block children?
+    // Both an inline and a block child make the content mixed.
     let (has_inline, has_block) = analyze_children(chapter, parent_id);
     if !has_inline || !has_block {
         return; // No mixed content
@@ -31,7 +31,7 @@ fn wrap_mixed_children(chapter: &mut Chapter, parent_id: NodeId) {
     wrap_inline_runs(chapter, parent_id);
 }
 
-/// Analyze children to detect if we have mixed inline/block content.
+/// Whether `parent_id` holds both inline and block children.
 fn analyze_children(chapter: &Chapter, parent_id: NodeId) -> (bool, bool) {
     let mut has_inline = false;
     let mut has_block = false;
@@ -199,6 +199,48 @@ mod tests {
         assert_eq!(
             chapter.node(wrapper_children[0]).unwrap().role,
             Role::Inline
+        );
+    }
+
+    /// A paragraph of `Ruby`, text, `Ruby`, text holds no block child, so
+    /// `wrap_mixed_content` leaves its order alone.
+    #[test]
+    fn ruby_beside_bare_text_is_not_mixed_content() {
+        let mut chapter = Chapter::new();
+        let para = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(NodeId::ROOT, para);
+
+        let ruby_group = |base: &str, reading: &str, chapter: &mut Chapter| {
+            let ruby = chapter.alloc_node(Node::new(Role::Ruby));
+            chapter.append_child(para, ruby);
+            let range = chapter.append_text(base);
+            let text = chapter.alloc_node(Node::text(range));
+            chapter.append_child(ruby, text);
+            let rt = chapter.alloc_node(Node::new(Role::RubyText));
+            chapter.append_child(ruby, rt);
+            let range = chapter.append_text(reading);
+            let reading = chapter.alloc_node(Node::text(range));
+            chapter.append_child(rt, reading);
+        };
+        ruby_group("東京", "とうきょう", &mut chapter);
+        let range = chapter.append_text("にある");
+        let between = chapter.alloc_node(Node::text(range));
+        chapter.append_child(para, between);
+        ruby_group("組版", "くみはん", &mut chapter);
+        let range = chapter.append_text("の本");
+        let after = chapter.alloc_node(Node::text(range));
+        chapter.append_child(para, after);
+
+        wrap_mixed_content(&mut chapter);
+
+        let roles: Vec<Role> = chapter
+            .children(para)
+            .map(|id| chapter.node(id).expect("just built").role)
+            .collect();
+        assert_eq!(
+            roles,
+            [Role::Ruby, Role::Text, Role::Ruby, Role::Text],
+            "a wrapper here reorders the sentence"
         );
     }
 
