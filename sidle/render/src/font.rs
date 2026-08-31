@@ -34,7 +34,7 @@ impl Script {
 pub const DEFERRING_HEAD: &str = "default";
 
 pub struct Face {
-    shaper: rustybuzz::Face<'static>,
+    pub(crate) shaper: rustybuzz::Face<'static>,
     outline: FontRef<'static>,
 }
 
@@ -82,6 +82,8 @@ pub struct Fonts {
     loaded: HashMap<fontdb::ID, FaceId>,
     /// Past selections, by what was asked for.
     chosen: HashMap<Request, Option<FaceId>>,
+    /// Single characters shaped once each.
+    shaped: HashMap<(FaceId, bool, char), Option<Shaped>>,
     /// The families the reading settings chose, per script.
     reading: HashMap<Script, Vec<String>>,
     /// Families no name and no script may reach — only a character nothing
@@ -103,6 +105,7 @@ impl Fonts {
             faces: Vec::new(),
             loaded: HashMap::new(),
             chosen: HashMap::new(),
+            shaped: HashMap::new(),
             reading: HashMap::new(),
             coverage_only: Vec::new(),
         }
@@ -369,5 +372,50 @@ mod tests {
         fonts.only_by_coverage("Code2000");
 
         assert!(fonts.coverage_only.contains(&"Code2000".to_string()));
+    }
+}
+
+/// One character shaped on its own, in the face's own design units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shaped {
+    pub glyph: u16,
+    pub advance: f32,
+    pub x_offset: f32,
+    pub y_offset: f32,
+}
+
+impl Fonts {
+    /// `ch` shaped alone in `face`, kept for every later occurrence.
+    ///
+    /// A CJK line breaks between every pair; the same few thousand characters
+    /// recur all book.
+    pub fn glyph(&mut self, face: FaceId, vertical: bool, ch: char) -> Option<Shaped> {
+        if let Some(&held) = self.shaped.get(&(face, vertical, ch)) {
+            return held;
+        }
+        let loaded = &self.faces[face.0 as usize];
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(ch.encode_utf8(&mut [0u8; 4]));
+        buffer.guess_segment_properties();
+        if vertical {
+            buffer.set_direction(rustybuzz::Direction::TopToBottom);
+        }
+        let run = rustybuzz::shape(&loaded.shaper, &[], buffer);
+        let shaped = run
+            .glyph_infos()
+            .first()
+            .zip(run.glyph_positions().first())
+            .map(|(info, position)| Shaped {
+                glyph: info.glyph_id as u16,
+                advance: if vertical {
+                    (position.y_advance as f32).abs()
+                } else {
+                    position.x_advance as f32
+                },
+                x_offset: position.x_offset as f32,
+                y_offset: position.y_offset as f32,
+            });
+        self.shaped.insert((face, vertical, ch), shaped);
+        shaped
     }
 }

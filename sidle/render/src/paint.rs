@@ -18,21 +18,51 @@ use crate::fragment::{Border, Content, Fragment, GlyphRun, Orientation};
 use crate::geom::Rect;
 use crate::resource::Resources;
 
-/// Draws fragment trees, caching the glyph outlines it builds.
-pub struct Painter<'a> {
-    fonts: &'a Fonts,
-    resources: &'a dyn Resources,
+/// Outlines and decoded pictures a [`Painter`] builds, kept between draws.
+#[derive(Default)]
+pub struct Cache {
     outlines: HashMap<(FaceId, u16), Option<tiny_skia::Path>>,
     images: HashMap<String, Option<Pixmap>>,
 }
 
+/// Draws fragment trees, caching the glyph outlines it builds.
+pub struct Painter<'a> {
+    fonts: &'a Fonts,
+    resources: &'a dyn Resources,
+    cache: Owned<'a>,
+}
+
+/// A [`Cache`] the painter borrowed, or one it made for a single draw.
+enum Owned<'a> {
+    Borrowed(&'a mut Cache),
+    Own(Box<Cache>),
+}
+
+impl Owned<'_> {
+    fn get(&mut self) -> &mut Cache {
+        match self {
+            Owned::Borrowed(cache) => cache,
+            Owned::Own(cache) => cache,
+        }
+    }
+}
+
 impl<'a> Painter<'a> {
+    /// A painter whose outlines live only as long as it does.
     pub fn new(fonts: &'a Fonts, resources: &'a dyn Resources) -> Self {
         Self {
             fonts,
             resources,
-            outlines: HashMap::new(),
-            images: HashMap::new(),
+            cache: Owned::Own(Box::default()),
+        }
+    }
+
+    /// A painter drawing through `cache`, which outlives it.
+    pub fn cached(fonts: &'a Fonts, resources: &'a dyn Resources, cache: &'a mut Cache) -> Self {
+        Self {
+            fonts,
+            resources,
+            cache: Owned::Borrowed(cache),
         }
     }
 
@@ -158,9 +188,8 @@ impl<'a> Painter<'a> {
         paint.set_color_rgba8(run.color.r, run.color.g, run.color.b, run.color.a);
 
         for glyph in &run.glyphs {
-            // `along` runs down the line and `across` out from its baseline,
-            // so the three orientations differ only in which way those two
-            // map onto the page.
+            // `along` runs down the line and `across` out from its baseline.
+            // Each `Orientation` maps the two onto the page differently.
             let placement = match run.orientation {
                 Orientation::Horizontal => Transform::from_translate(
                     rect.x + glyph.along,
@@ -229,7 +258,9 @@ impl<'a> Painter<'a> {
     /// A glyph's outline as a path in font units, y up.
     fn outline(&mut self, face: FaceId, glyph: u16) -> Option<&tiny_skia::Path> {
         let loaded = self.fonts.face(face);
-        self.outlines
+        self.cache
+            .get()
+            .outlines
             .entry((face, glyph))
             .or_insert_with(|| build_outline(loaded.outline(), glyph))
             .as_ref()
@@ -248,6 +279,8 @@ impl<'a> Painter<'a> {
         }
         let resources = self.resources;
         let pixmap = self
+            .cache
+            .get()
             .images
             .entry(src.to_string())
             .or_insert_with(|| decode(resources, src));

@@ -483,7 +483,7 @@ impl Inline<'_> {
             return Vec::new();
         };
         // The reading settings hyphenate every reflowable book that says
-        // nothing, so only an explicit `none` turns it off.
+        // nothing; only an explicit `none` turns it off.
         if style.computed.hyphens == Hyphens::None {
             return Vec::new();
         }
@@ -513,9 +513,18 @@ impl Inline<'_> {
         let mut cut = range.start;
         let mut face = None;
 
+        let mut last: Option<(crate::font::Script, Option<FaceId>)> = None;
         for (index, ch) in slice.char_indices() {
             let at = range.start + index;
-            let chosen = self.fonts.select(style.computed, ch);
+            let script = crate::font::Script::of(ch);
+            let chosen = match last {
+                Some((held, found)) if held == script => found,
+                _ => {
+                    let found = self.fonts.select(style.computed, ch);
+                    last = Some((script, found));
+                    found
+                }
+            };
             if face.is_none() {
                 face = chosen;
                 continue;
@@ -531,6 +540,76 @@ impl Inline<'_> {
         }
     }
 
+    /// One character's atom, taking its shape from [`Fonts::glyph`].
+    #[allow(clippy::too_many_arguments)]
+    fn one_glyph(
+        &mut self,
+        stretch: Stretch<'_, '_>,
+        at: usize,
+        ch: char,
+        face: FaceId,
+        orientation: Orientation,
+        scale: f32,
+        out: &mut Vec<Atom>,
+    ) {
+        let Stretch {
+            item,
+            style,
+            spacing,
+            ..
+        } = stretch;
+        let vertical = orientation == Orientation::Upright;
+        let Some(shaped) = self.fonts.glyph(face, vertical, ch) else {
+            return;
+        };
+        let (leading, trailing) = spacing.at(at);
+        let cell = text::em_advance(ch, self.axis.is_vertical())
+            .map_or(shaped.advance * scale, |ems| ems * style.font_size);
+        let step = cell - (leading + trailing) * style.font_size;
+
+        let (along, across) = if vertical {
+            (-shaped.y_offset * scale, shaped.x_offset * scale)
+        } else {
+            (shaped.x_offset * scale, -shaped.y_offset * scale)
+        };
+        let (ascent, descent) = if vertical {
+            (style.font_size / 2.0, style.font_size / 2.0)
+        } else {
+            let loaded = self.fonts.face(face);
+            (
+                loaded.ascent(style.font_size),
+                loaded.descent(style.font_size),
+            )
+        };
+        let gap = if is_collapsible(ch) {
+            style.word_spacing
+        } else {
+            0.0
+        };
+
+        out.push(Atom {
+            advance: step + style.letter_spacing + style.embolden + gap,
+            run: Some(Run {
+                face,
+                size: style.font_size,
+                color: style.color,
+                orientation,
+                underline: style.underline,
+                line_through: style.line_through,
+                glyphs: vec![Glyph {
+                    id: shaped.glyph,
+                    offset: at as u32,
+                    along: along - leading * style.font_size,
+                    across,
+                }],
+            }),
+            ascent,
+            descent,
+            line_height: style.line_height,
+            is_space: is_collapsible(ch),
+            ..Atom::empty(item)
+        });
+    }
     /// Shape one stretch that uses a single face.
     fn shape_one(
         &mut self,
@@ -586,6 +665,13 @@ impl Inline<'_> {
 
         let loaded = self.fonts.face(face_id);
         let scale = style.font_size / loaded.units_per_em();
+
+        // A CJK line breaks between every pair, leaving one character an atom.
+        let mut only = slice.chars();
+        if let (Some(ch), None) = (only.next(), only.next()) {
+            self.one_glyph(stretch, range_start, ch, face_id, orientation, scale, out);
+            return;
+        }
 
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(slice);
@@ -1246,8 +1332,8 @@ mod tests {
 
     #[test]
     fn a_junction_still_trims_where_the_line_breaker_split_the_pair() {
-        // A CJK line breaks between every pair, so `、` and `。` are separate
-        // atoms. The trim is read from the paragraph, not from the atom.
+        // A CJK line breaks between every pair: `、` and `。` are separate
+        // atoms, and the trim is read from the paragraph.
         let split: Vec<f32> = {
             let computed = ComputedStyle::default();
             let style = TextStyle {

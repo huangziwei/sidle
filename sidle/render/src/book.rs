@@ -1,9 +1,5 @@
-//! A book's resources, read through bokai.
-//!
-//! Sizes come from the manifest, which costs no decoding — a KFX states each
-//! image's pixel dimensions on its resource record — so a page can be laid
-//! out before any image is read. Pixels are fetched separately, for the
-//! chapter about to be drawn.
+//! A book's resources. [`BookResources::declared`] reads every size from the
+//! manifest; [`BookResources::load_named`] decodes the pixels a page needs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,9 +39,15 @@ impl BookResources {
     /// Read and decode every image `chapter` refers to that `bitmaps` lacks.
     /// An image that fails to decode is skipped and its box draws empty.
     pub fn load(&mut self, book: &mut Book, chapter: &Chapter) {
-        let wanted: Vec<String> = referenced(chapter)
-            .into_iter()
-            .filter(|src| !self.bitmaps.contains_key(src))
+        self.load_named(book, &referenced(chapter));
+    }
+
+    /// Read and decode each of `srcs` this holds no pixels for.
+    pub fn load_named(&mut self, book: &mut Book, srcs: &[String]) {
+        let wanted: Vec<String> = srcs
+            .iter()
+            .filter(|src| !self.bitmaps.contains_key(*src))
+            .cloned()
             .collect();
         if wanted.is_empty() {
             return;

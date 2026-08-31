@@ -8,6 +8,8 @@
 //! decides where a box lands and the rest of layout does not.
 
 pub mod book;
+#[cfg(feature = "raster")]
+pub mod chrome;
 pub mod decorate;
 pub mod flow;
 pub mod font;

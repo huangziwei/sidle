@@ -1296,7 +1296,7 @@ mod tests {
             lefts.windows(2).all(|pair| pair[1] > pair[0]),
             "cells stacked instead of ranging along the row: {lefts:?}"
         );
-        // One row, so every cell starts at the same block position.
+        // One row: every cell starts at the same block position.
         assert!(cells.iter().all(|cell| cell.rect.y == cells[0].rect.y));
     }
 

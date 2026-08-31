@@ -124,6 +124,37 @@ impl Panel {
     pub fn metrics(&self) -> Metrics {
         Metrics::kfx(self.dpi)
     }
+
+    /// Ladders of this crate's own, for a screen of `size` at `dpi`.
+    ///
+    /// Margins take a share of the page. [`Panel::parse`] reads a device's own.
+    pub fn reader(size: Size, dpi: f32) -> Panel {
+        let sizes = vec![
+            8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0, 23.0, 26.0, 30.0, 34.0,
+        ];
+        let band = (size.height * 0.055).max(24.0).round();
+        let side = |share: f32| (size.width * share).round();
+        let margins = |share: f32| Edges::new(band, side(share), band, side(share));
+
+        Panel {
+            size,
+            dpi,
+            color: true,
+            columns_offered: false,
+            font_sizes: HashMap::from([
+                (Script::Default, sizes.clone()),
+                (Script::Cjk, sizes.clone()),
+                (Script::Indic, sizes),
+            ]),
+            default_font_size: 3,
+            line_spacings: vec![1.2, 1.45, 1.7],
+            wide_line_spacings: vec![1.35, 1.6, 1.85],
+            boldness: vec![0.0],
+            default_boldness: 0,
+            margins_horizontal: vec![margins(0.07), margins(0.12), margins(0.18)],
+            margins_vertical: vec![margins(0.07), margins(0.12), margins(0.18)],
+        }
+    }
 }
 
 /// Which way the book reads, which the margin ladder keys on.
