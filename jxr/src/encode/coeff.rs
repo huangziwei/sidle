@@ -1,9 +1,9 @@
 //! Coefficient-coding primitives (encode side).
 
 use super::bitstream::BitWriter;
+use crate::decode::misc::HuffTable;
 use crate::decode::state::AdaptiveVLC;
 use crate::decode::tables;
-use std::collections::HashMap;
 
 /// Encode-side inverse of the decoder's `decode_run`: emit a run length `run`
 /// in `1..=i_max_run` (`i_max_run` in `1..=14`). Run 0 is signalled by a flag
@@ -40,7 +40,7 @@ pub fn encode_run(bw: &mut BitWriter, run: u32, i_max_run: u32) {
 
 /// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
 /// the adaptive table *index* is chosen by the caller). Emits `level` (`>= 2`)
-pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i32) -> i32 {
+pub fn encode_abs_level(bw: &mut BitWriter, table: &HuffTable, level: i32) -> i32 {
     use super::entropy::write_huff;
     const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
     const FIXED: [u32; 6] = [0, 0, 1, 2, 2, 2];
@@ -180,7 +180,7 @@ pub fn encode_dc_value(
     bw: &mut BitWriter,
     value: i32,
     model_bits: i32,
-    abs_table: &HashMap<u64, i32>,
+    abs_table: &HuffTable,
 ) -> (bool, i32) {
     let high = (value.unsigned_abs() as i64 >> model_bits as u32) as i32;
     let b_abs_level = high > 0;
@@ -195,7 +195,7 @@ pub fn encode_dc_residual(
     value: i32,
     model_bits: i32,
     b_abs_level: bool,
-    abs_table: &HashMap<u64, i32>,
+    abs_table: &HuffTable,
 ) -> i32 {
     let mag = value.unsigned_abs() as i64;
     let m = model_bits as u32;

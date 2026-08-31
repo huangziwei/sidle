@@ -1,22 +1,18 @@
 //! Huffman tables used by the JPEG-XR decoder.
 
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use super::misc::hbin;
+use super::misc::{HuffTable, hbin};
 
 /// Helper: build-and-cache a single Huffman table.
-fn cached(
-    slot: &'static OnceLock<HashMap<u64, i32>>,
-    build: fn() -> HashMap<u64, i32>,
-) -> &'static HashMap<u64, i32> {
+fn cached(slot: &'static OnceLock<HuffTable>, build: fn() -> HuffTable) -> &'static HuffTable {
     slot.get_or_init(build)
 }
 
 // --- VAL_DC_YUV ---
 
-pub fn val_dc_yuv() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn val_dc_yuv() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[
             ("10", 0),
@@ -33,9 +29,9 @@ pub fn val_dc_yuv() -> &'static HashMap<u64, i32> {
 
 // --- NUM_CBPHP ---
 
-pub fn num_cbphp(idx: usize) -> &'static HashMap<u64, i32> {
-    static SLOT0: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT1: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn num_cbphp(idx: usize) -> &'static HuffTable {
+    static SLOT0: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT1: OnceLock<HuffTable> = OnceLock::new();
     match idx {
         0 => cached(&SLOT0, || {
             hbin(&[("1", 0), ("01", 1), ("001", 2), ("0000", 3), ("0001", 4)])
@@ -52,9 +48,9 @@ pub fn num_cbphp(idx: usize) -> &'static HashMap<u64, i32> {
 
 // --- NUM_BLKCBPHP2 ---
 
-pub fn num_blkcbphp2(idx: usize) -> &'static HashMap<u64, i32> {
-    static SLOT0: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT1: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn num_blkcbphp2(idx: usize) -> &'static HuffTable {
+    static SLOT0: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT1: OnceLock<HuffTable> = OnceLock::new();
     match idx {
         0 => cached(&SLOT0, || {
             hbin(&[
@@ -88,12 +84,12 @@ pub fn num_blkcbphp2(idx: usize) -> &'static HashMap<u64, i32> {
 
 // --- FIRST_INDEX ---
 
-pub fn first_index(idx: usize) -> &'static HashMap<u64, i32> {
-    static SLOT0: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT1: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT2: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT3: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT4: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn first_index(idx: usize) -> &'static HuffTable {
+    static SLOT0: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT1: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT2: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT3: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT4: OnceLock<HuffTable> = OnceLock::new();
     match idx {
         0 => cached(&SLOT0, || {
             hbin(&[
@@ -181,11 +177,11 @@ pub fn first_index(idx: usize) -> &'static HashMap<u64, i32> {
 
 // --- INDEX_A ---
 
-pub fn index_a(idx: usize) -> &'static HashMap<u64, i32> {
-    static SLOT0: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT1: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT2: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT3: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn index_a(idx: usize) -> &'static HuffTable {
+    static SLOT0: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT1: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT2: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT3: OnceLock<HuffTable> = OnceLock::new();
     match idx {
         0 => cached(&SLOT0, || {
             hbin(&[
@@ -233,8 +229,8 @@ pub fn index_a(idx: usize) -> &'static HashMap<u64, i32> {
 
 // --- INDEX_B ---
 
-pub fn index_b() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn index_b() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[("0", 0), ("10", 2), ("110", 1), ("111", 3)])
     })
@@ -242,8 +238,8 @@ pub fn index_b() -> &'static HashMap<u64, i32> {
 
 // --- RUN_INDEX ---
 
-pub fn run_index() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn run_index() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[("1", 0), ("01", 1), ("001", 2), ("0000", 3), ("0001", 4)])
     })
@@ -252,10 +248,10 @@ pub fn run_index() -> &'static HashMap<u64, i32> {
 // --- RUN_VALUE ---
 
 /// `RUN_VALUE[max_run]`; indices 0..=1 are unused (None in Python).
-pub fn run_value(max_run: usize) -> &'static HashMap<u64, i32> {
-    static SLOT2: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT3: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT4: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn run_value(max_run: usize) -> &'static HuffTable {
+    static SLOT2: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT3: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT4: OnceLock<HuffTable> = OnceLock::new();
     match max_run {
         2 => cached(&SLOT2, || hbin(&[("1", 1), ("0", 2)])),
         3 => cached(&SLOT3, || hbin(&[("1", 1), ("01", 2), ("00", 3)])),
@@ -268,9 +264,9 @@ pub fn run_value(max_run: usize) -> &'static HashMap<u64, i32> {
 
 // --- ABS_LEVEL_INDEX ---
 
-pub fn abs_level_index(idx: usize) -> &'static HashMap<u64, i32> {
-    static SLOT0: OnceLock<HashMap<u64, i32>> = OnceLock::new();
-    static SLOT1: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn abs_level_index(idx: usize) -> &'static HuffTable {
+    static SLOT0: OnceLock<HuffTable> = OnceLock::new();
+    static SLOT1: OnceLock<HuffTable> = OnceLock::new();
     match idx {
         0 => cached(&SLOT0, || {
             hbin(&[
@@ -300,8 +296,8 @@ pub fn abs_level_index(idx: usize) -> &'static HashMap<u64, i32> {
 
 // --- REF_CBPHP1, NUM_CH_BLK, CHR_CBPHP/VAL_INC/CBPHP_CH_BLK ---
 
-pub fn ref_cbphp1() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn ref_cbphp1() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[
             ("00", 3),
@@ -314,32 +310,32 @@ pub fn ref_cbphp1() -> &'static HashMap<u64, i32> {
     })
 }
 
-pub fn num_ch_blk() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn num_ch_blk() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[("1", 0), ("01", 1), ("000", 2), ("001", 3)])
     })
 }
 
 /// Shared by CHR_CBPHP, VAL_INC, CBPHP_CH_BLK in calibre.
-pub fn chr_cbphp() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn chr_cbphp() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || hbin(&[("1", 0), ("01", 1), ("00", 2)]))
 }
 
-pub fn val_inc() -> &'static HashMap<u64, i32> {
+pub fn val_inc() -> &'static HuffTable {
     chr_cbphp()
 }
 
 #[allow(dead_code)]
-pub fn cbphp_ch_blk() -> &'static HashMap<u64, i32> {
+pub fn cbphp_ch_blk() -> &'static HuffTable {
     chr_cbphp()
 }
 
 // --- CBPLP_YUV1 ---
 
-pub fn cbplp_yuv1_444() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn cbplp_yuv1_444() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[
             ("0", 0),
@@ -354,8 +350,8 @@ pub fn cbplp_yuv1_444() -> &'static HashMap<u64, i32> {
     })
 }
 
-pub fn cbplp_yuv1_42x() -> &'static HashMap<u64, i32> {
-    static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
+pub fn cbplp_yuv1_42x() -> &'static HuffTable {
+    static SLOT: OnceLock<HuffTable> = OnceLock::new();
     cached(&SLOT, || {
         hbin(&[("0", 0), ("10", 1), ("110", 2), ("111", 3)])
     })

@@ -80,8 +80,8 @@ pub struct DecodedImage {
     pub timing: DecodeTiming,
 }
 
-/// Per-image sub-stage timing collected during `Decoder::decode`. Used by
-/// the `BOKO_KFX2EPUB_TRACE=1` aggregator to scope the next perf lever.
+/// Per-image sub-stage timing collected during `Decoder::decode`, for
+/// attributing decode cost across the stages below.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DecodeTiming {
     /// `image_header` + plane headers + index table + vlw_esc/profile_level_info.
@@ -2137,7 +2137,8 @@ impl<'a> Decoder<'a> {
         } else {
             self.decode_run((15 - i_location) as u32)?
         };
-        let mut block = vec![(run, level)];
+        let mut block = Vec::with_capacity(16);
+        block.push((run, level));
         let mut i_loc = i_location + run as usize + 1;
 
         let mut next_is_immediate = next_is_immediate;
