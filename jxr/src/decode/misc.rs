@@ -49,7 +49,9 @@ impl<'a> Deserializer<'a> {
         self.len() == 0
     }
 
-    /// Read `size` bytes from current offset. Errors if too few bytes are
+    /// Read `size` bytes from current offset. Errors if too few are available.
+    /// Requires the bit buffer to be empty unless `check_remaining` is false,
+    /// which the bit reader uses to refill its own window.
     pub fn extract(&mut self, size: usize, check_remaining: bool) -> Result<&'a [u8]> {
         if check_remaining && self.bits_remaining != 0 {
             return Err(DeserializerError::UnexpectedBits(self.bits_remaining));
@@ -154,11 +156,9 @@ impl<'a> Deserializer<'a> {
         Err(DeserializerError::HuffmanFailure)
     }
 
-    /// Drop buffered bits to realign to the next byte boundary.
-    ///
-    /// `huff` reads ahead a whole byte, so the accumulator can hold bytes that
-    /// were fetched but not consumed; rewind `offset` past them. `coded_tiles`
-    /// reads `offset` as the stream position at each tile boundary.
+    /// Drop buffered bits to realign to the next byte boundary. `huff` reads
+    /// ahead a whole byte, so rewind `offset` past any unconsumed bytes:
+    /// `coded_tiles` reads `offset` as the tile-boundary stream position.
     pub fn discard_remainder_bits(&mut self) {
         self.offset -= (self.bits_remaining / 8) as usize;
         self.bits_remaining = 0;

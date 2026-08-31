@@ -38,8 +38,9 @@ pub fn encode_run(bw: &mut BitWriter, run: u32, i_max_run: u32) {
     }
 }
 
-/// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
-/// the adaptive table *index* is chosen by the caller). Emits `level` (`>= 2`)
+/// Encode-side inverse of the decoder's `decode_abs_level` (value path only).
+/// Emits `level` (`>= 2`) with the abs-level Huffman `table` plus fixed/escape
+/// suffix bits; returns the `abs_level_index` (0..=6) for the discriminator.
 pub fn encode_abs_level(bw: &mut BitWriter, table: &HuffTable, level: i32) -> i32 {
     use super::entropy::write_huff;
     const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
@@ -83,7 +84,9 @@ pub fn encode_abs_level(bw: &mut BitWriter, table: &HuffTable, level: i32) -> i3
     }
 }
 
-/// Encode-side inverse of the decoder's `decode_block` (the run-level
+/// Encode-side inverse of the decoder's `decode_block`. `pairs` are
+/// `(run, level)` for the nonzero coarse levels in scan order. Emits the index
+/// packing, runs, signs and abs-levels, updating the adaptive discriminators.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_block(
     bw: &mut BitWriter,
@@ -175,7 +178,9 @@ fn next_flags(pairs: &[(u32, i32)], j: usize) -> (i32, i32) {
     }
 }
 
-/// Encode one DC coefficient `value` (already a prediction residual) for a
+/// Encode one DC coefficient `value` (a prediction residual) for a single
+/// component: the `b_abs_level` flag, an optional abs-level VLC, the
+/// `model_bits` low part, then a sign bit iff nonzero.
 pub fn encode_dc_value(
     bw: &mut BitWriter,
     value: i32,
@@ -189,7 +194,9 @@ pub fn encode_dc_value(
     (b_abs_level, abs_index)
 }
 
-/// Flag-less DC value body: emit the abs-level VLC (iff `b_abs_level`), the
+/// Flag-less DC value body: the abs-level VLC (iff `b_abs_level`), the
+/// `model_bits` low part, then the sign iff nonzero. Color bundles the three
+/// components' `b_abs` flags into one `val_dc_yuv` symbol written beforehand.
 pub fn encode_dc_residual(
     bw: &mut BitWriter,
     value: i32,
@@ -270,6 +277,8 @@ impl ModelState {
 }
 
 /// Two-model `m_bits`/`m_state` (luma + chroma) for a **color** plane, mirroring
+/// `Decoder::update_model_mb` with `i_num_models = 2`. Index 0 = luma, 1 =
+/// chroma; grayscale uses the single-model [`ModelState`].
 #[derive(Clone, Copy)]
 pub struct ColorModel {
     pub m_bits: [i32; 2],
@@ -307,6 +316,8 @@ impl ColorModel {
     }
 
     /// Table-116 chroma weights for the JOINTLY-coded 420/422 chroma "plane"
+    /// (`iWeight2`, with no `>>4` on HP), mirroring `update_model_mb`'s
+    /// `INT_YUV420`/`INT_YUV422` arms. The encoder must diverge identically.
     pub fn update_42x(&mut self, mut lap: [i32; 2], band: usize, is_420: bool) {
         const W0: [i32; 3] = [240, 12, 1];
         const I_WEIGHT2: [i32; 6] = [120, 37, 2, 120, 18, 1];

@@ -25,6 +25,7 @@ impl QpSet {
 }
 
 /// Per-band, per-component-class scaling factors at quantizer set `qp` — the
+/// exact divisors the decoder's `quant_map` multiplies back.
 pub fn scaling_factors_for(qp: QpSet, chroma: bool, scaled: bool) -> (i32, i32, i32) {
     let comp = usize::from(chroma);
     (
@@ -63,7 +64,8 @@ pub struct TileQps {
     pub hp: Vec<BandQp>,
 }
 
-/// The 4e quantization plan for the primary plane: per-tile QP sets (one
+/// The quantization plan for the primary plane: per-tile QP sets (one entry, or
+/// one per tile) plus optional per-MB LP/HP DQUANT index maps.
 #[derive(Clone, Debug)]
 pub struct QpPlan {
     /// One entry (image-uniform) or one per tile, raster order.
