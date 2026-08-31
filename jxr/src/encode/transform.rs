@@ -272,7 +272,7 @@ pub fn forward_stage2_chroma_422(buf: &mut [i32; 128], halve_dclp: bool) {
         }
     }
     // Decoder order: 2pt(0,4); t2x2h(0,1,2,3)+swap(1,2); t2x2h(4,6,5,7)+swap(5,6).
-    // Undo in reverse:
+    // Undone in reverse below.
     d.swap(5, 6);
     let v = undo_t2x2h([d[4], d[6], d[5], d[7]], 0);
     d[4] = v[0];

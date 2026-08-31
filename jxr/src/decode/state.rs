@@ -1,4 +1,6 @@
-//! Decoder state types ported from `jxr_image.py`.
+//! Decoder state types: the per-plane, per-macroblock and per-band state the
+//! decode pipeline carries. The methods that mutate it live in `decoder.rs`,
+//! which owns the bitstream reader.
 
 #![allow(non_snake_case)]
 // See decoder.rs: JPEG-XR spec port — explicit index loops over parallel state
@@ -120,7 +122,7 @@ impl AdaptiveScan {
     }
 
     pub fn reset_totals(&mut self) {
-        // Python: [None, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4]
+        // Index 0 is unused.
         let scan_totals: [i32; 16] = [0, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4];
         for (i, v) in scan_totals.iter().enumerate() {
             if i < self.totals.len() {
@@ -272,8 +274,8 @@ fn shift_left_signed(man: i32, exp: i32) -> i32 {
 
 /// One macroblock of decoder state.
 pub struct MB {
-    // Port-parity position fields (jxr_image.py stores them on each MB;
-    // the Rust pipeline threads positions as arguments instead).
+    // Unused: the pipeline threads macroblock positions as arguments rather
+    // than reading them back off the MB.
     #[allow(dead_code)]
     pub mbx: usize,
     #[allow(dead_code)]
@@ -310,7 +312,9 @@ pub struct MB {
     /// ModelBitsMBHP[chroma 0..2]
     pub model_bits_mb_hp: [i32; 2],
     pub mb_qp_index_lp: usize,
-    /// This MB's HP QP-set index (DQUANT). Stored per MB because in
+    /// This MB's HP QP-set index (DQUANT). Per MB because in frequency mode HP
+    /// dequantization runs in the FLEX pass, after the plane-level `index_qps`
+    /// has advanced past this MB.
     pub mb_qp_index_hp: usize,
 
     /// MBBuffer flat across components: `mb_buffer[c * MB_BUF_PER_COMP + pos]`
@@ -359,6 +363,8 @@ impl MB {
             mb_lp_mode: NO_PREDICTION,
             mb_hp_mode: NO_PREDICTION,
             // Coefficient/sample buffers are allocated lazily by
+            // `alloc_buffers` on first decode; the grid holds cheap skeletons
+            // until then, so a rejected geometry never pays for them.
             hp_input_vlc: Vec::new(),
             hp_input_flex: Vec::new(),
             mb_dclp: Vec::new(),
@@ -370,7 +376,9 @@ impl MB {
         }
     }
 
-    /// Allocate this MB's coefficient/sample buffers (idempotent). Called by
+    /// Allocate this MB's coefficient/sample buffers (idempotent), so only
+    /// macroblocks actually reached pay for them. Re-entrant across frequency
+    /// mode's passes: later ones see non-empty buffers and skip.
     pub fn alloc_buffers(&mut self, num_components: usize) {
         if self.mb_buffer.is_empty() {
             self.hp_input_vlc = vec![0; num_components * HP_INPUT_PER_COMP];
@@ -414,7 +422,7 @@ pub struct Plane {
     pub dc_qp: Option<QP>,
     pub lp_qp: Option<QP>,
     pub hp_qp: Option<QP>,
-    /// True if lp_qp is currently aliased to dc_qp (Python `is` check).
+    /// True if `lp_qp` is currently aliased to `dc_qp` — identity, not equality.
     pub lp_qp_eq_dc: bool,
     /// True if hp_qp is currently aliased to lp_qp.
     pub hp_qp_eq_lp: bool,
@@ -463,7 +471,8 @@ pub struct Plane {
     pub image_plane: Vec<Plane2D>,
 }
 
-/// 2D image plane stored flat row-major in a single `Vec<i32>`. Replaces the
+/// 2D image plane stored flat row-major in a single `Vec<i32>`: one allocation
+/// per plane, indexed `data[y * stride + x]`.
 #[derive(Debug, Default, Clone)]
 pub struct Plane2D {
     pub data: Vec<i32>,

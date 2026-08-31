@@ -1,4 +1,6 @@
-//! T.832 constants: the public spec-code vocabulary for the raw `u8` fields
+//! T.832 constants: the spec-code vocabulary for the raw `u8` header fields,
+//! plus the crate-internal permutation/delta tables. Names are the spec's
+//! verbatim — do not rename them.
 
 #![allow(non_upper_case_globals)]
 
@@ -108,7 +110,8 @@ pub const FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING: u8 = 2;
 pub(crate) const ICT4X4_INV_PERM: [usize; 16] =
     [0, 8, 4, 13, 2, 15, 3, 14, 1, 12, 5, 9, 7, 11, 6, 10];
 
-// Port-parity table (jxr_image.py carries the forward permutation too).
+// The forward permutation, inverse of `ICT4X4_INV_PERM`. Unused by the
+// decoder; kept so both directions are available.
 #[allow(dead_code)]
 pub(crate) const ICT4X4_PERM: [usize; 16] = [0, 8, 4, 6, 2, 10, 14, 12, 1, 11, 15, 13, 9, 3, 7, 5];
 
@@ -116,7 +119,7 @@ pub(crate) const I_HIER_SCAN_ORDER: [usize; 16] =
     [0, 4, 1, 5, 8, 12, 9, 13, 2, 6, 3, 7, 10, 14, 11, 15];
 
 /// Zigzag inverse scan for 4x4 LP block (horizontal).
-/// First entry is `None` in Python (unused); we shift by one so index 1..=15.
+/// Index 0 is unused; entries are addressed 1..=15.
 pub(crate) const GRGI_ZIGZAG_INV_4X4_H: [usize; 16] = [
     0, // index 0 unused
     1, 4, 5, 2, 8, 6, 9, 3, 12, 10, 7, 13, 11, 14, 15,
@@ -183,7 +186,8 @@ pub(crate) const XY4: [(i32, i32); 16] = [
     (3, 3),
 ];
 
-// Port-parity coordinate list (jxr_image.py keeps both orders).
+// The (y, x) ordering of the same four positions as `XY2`. Unused by the
+// decoder; kept so both orders are available.
 #[allow(dead_code)]
 pub(crate) const YX2: [(i32, i32); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
 

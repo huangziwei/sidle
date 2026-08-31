@@ -41,7 +41,9 @@ pub(super) struct YOnlyPlane {
 }
 
 impl YOnlyPlane {
-    /// Pad pre-bias `luma` ([`super::convert`] already centered it — and,
+    /// Pad pre-bias `luma` to the 16-aligned MB grid by edge replication,
+    /// placing the image at `(top, left) = window`. `super::convert` has
+    /// already centered it.
     pub(super) fn new(
         luma: &[i32],
         w: u32,
@@ -419,7 +421,8 @@ pub fn encode_grayscale_options(
     )
 }
 
-/// Depth-general grayscale driver: `luma` is already forward-converted to
+/// Depth-general grayscale driver over a `luma` plane `super::convert` has
+/// already forward-converted to the pre-bias domain.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_gray_prebias(
     luma: &[i32],

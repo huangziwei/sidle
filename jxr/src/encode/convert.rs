@@ -84,7 +84,8 @@ fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
     if bits >> 31 != 0 { -h } else { h }
 }
 
-/// The RGBE per-channel fold (libjxr `forwardRGBE`, strenc.c:315): mantissa
+/// The RGBE per-channel fold (libjxr's `forwardRGBE`): mantissa byte + shared
+/// exponent into the `(e << 7) | m` pseudo-log value the codestream codes.
 fn fold_rgbe(mut m: i32, e: i32) -> i32 {
     if e == 0 {
         return 0;
@@ -261,7 +262,8 @@ impl SamplePlanes<'_> {
     }
 }
 
-/// `OUTPUT_BITDEPTH` plus its plane-header conversion parameters — what the
+/// `OUTPUT_BITDEPTH` plus the plane-header conversion parameters an input
+/// family contributes: `shift_bits`, and `len_mantissa`/`exp_bias` for floats.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Depth {
     /// T.832 `OUTPUT_BITDEPTH` code.
@@ -294,7 +296,7 @@ impl Depth {
         len_mantissa: 0,
         exp_bias: 0,
     };
-    /// libjxr's default pre-shift for 32-bit input (`strenc.c:785`).
+    /// The reference pre-shift for 32-bit input.
     pub const BD32S: Depth = Depth {
         bitdepth: BD32S,
         shift_bits: 10,
@@ -337,8 +339,7 @@ impl Depth {
         len_mantissa: 0,
         exp_bias: 0,
     };
-    /// The reference defaults: `len_mantissa = 13` (strenc.c:790),
-    /// `exp_bias = 4` (header-dumped from every jxrencapp BD32F mint).
+    /// The reference defaults: `len_mantissa = 13`, `exp_bias = 4`.
     pub const BD32F: Depth = Depth {
         bitdepth: BD32F,
         shift_bits: 0,
@@ -429,9 +430,9 @@ pub(super) fn cmykdirect_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Ve
         .collect()
 }
 
-/// Unpack packed RGB words into the three pre-bias channel planes — the
-/// inverse of the decoder's pack (Tables 196/197/198: `c0 + (c1 << hi1) +
-/// (c2 << hi2)` over clipped channels) + its per-channel bias/scaling:
+/// Unpack packed RGB words into the three pre-bias channel planes — the inverse
+/// of the decoder's pack (Tables 196/197/198) and its per-channel bias/scaling.
+/// BD565's 5-bit channels carry an extra `<< 1`.
 pub(super) fn packed_prebias(
     samples: &SamplePlanes<'_>,
     scaled: bool,

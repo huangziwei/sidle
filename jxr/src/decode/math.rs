@@ -1,4 +1,5 @@
-//! JPEG-XR integer transform / overlap-filter primitives.
+//! JPEG-XR integer transform / overlap-filter primitives. All values are `i32`;
+//! the spec works in fixed precision and rounds via arithmetic right shift.
 
 #![allow(non_snake_case)]
 
@@ -187,7 +188,7 @@ pub fn inv_odd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
     c = c.wrapping_add(b);
     d = d.wrapping_sub(a);
 
-    // Python returns [a, -b, -c, d]
+    // Yields [a, -b, -c, d].
     (a, b.wrapping_neg(), c.wrapping_neg(), d)
 }
 

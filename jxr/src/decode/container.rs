@@ -104,7 +104,9 @@ fn field_value_u64(field_type: u16, field_data: &[u8]) -> Option<u64> {
     }
 }
 
-/// The Microsoft pixel-format GUID family: `24c3dd6f-034e-fe4b-b185-3d77768dc9XX`
+/// The Microsoft pixel-format GUID family: `24c3dd6f-034e-fe4b-b185-3d77768dc9XX`,
+/// last byte selecting the format. 0x0f is `32bppBGRA`; the plain RGBA formats
+/// are NOT in this family — see `ODDBALL_UUIDS`.
 const FAMILY_PREFIX: &str = "24c3dd6f-034e-fe4b-b185-3d77768dc9";
 const FAMILY_FORMATS: &[(u8, &str)] = &[
     (0x05, "BlackWhite"),
@@ -198,11 +200,13 @@ pub fn format_name(uuid: &str) -> Option<&'static str> {
         .map(|(_, n)| *n)
 }
 
-/// Format the 16 bytes of a UUID in the canonical `8-4-4-4-12` form. We have
+/// Format the 16 bytes of a UUID in the canonical `8-4-4-4-12` form. Done by
+/// hand: a JXR pixel-format GUID uses Microsoft's on-disk layout, whose first
+/// three fields are little-endian and last two big-endian.
 fn format_jxr_uuid(b: &[u8]) -> String {
-    // Python's `uuid.UUID(bytes=b)` interprets the bytes as the big-endian
-    // 128-bit integer form, then prints canonical 8-4-4-4-12. So we must
-    // emit the bytes in straight order. (NOT `bytes_le`.)
+    // The stored bytes are already the big-endian 128-bit integer form the
+    // canonical spelling wants, so emit them in straight order — never
+    // byte-swapped within the first three groups.
     debug_assert_eq!(b.len(), 16);
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -225,7 +229,9 @@ fn format_jxr_uuid(b: &[u8]) -> String {
     )
 }
 
-/// Parse the TIFF-like JXR container: locate the primary (and, when
+/// Parse the TIFF-like JXR container: the primary (and any separate-alpha)
+/// WMPHOTO codestream, pixel-format GUID, dimensions, and optional ICC/XMP/EXIF
+/// ranges. Unknown tags are tolerated; codestream bytes are not touched.
 pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerError> {
     let mut ds = Deserializer::new(data);
     let sig = ds.extract(4, true)?;

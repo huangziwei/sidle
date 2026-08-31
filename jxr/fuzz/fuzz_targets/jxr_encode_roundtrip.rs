@@ -124,7 +124,7 @@ fuzz_target!(|data: &[u8]| {
             .expect("re-encode of decoded F32 must be accepted");
             let c2 = jxr::decode::container::parse(&again).unwrap();
             let img2 = jxr::decode::decode_image(&c2).expect("re-encoded F32 must decode");
-            // The decoder can emit -0.0 (a flushed tiny negative keeps its
+            // The decoder can emit -0.0, so compare zeroes sign-insensitively.
             let zfold = |v: i32| if v & 0x7fff_ffff == 0 { 0 } else { v };
             for (ch, plane2) in img2.image_plane.iter().enumerate() {
                 for (i, (&a, &b)) in plane2.iter().zip(&img.image_plane[ch]).enumerate() {

@@ -49,7 +49,7 @@ impl HpState {
         s.abs1.init_table1();
         s.num_cbphp.init_table1();
         s.num_blk_cbphp.init_table1();
-        // mb_cbphp inits the cbphp model at initialize_context:
+        // The cbphp model's initialize_context values.
         s.cbphp_model.cbphp_state = [0, 0];
         s.cbphp_model.count_ones = [-4, -4];
         s.cbphp_model.count_zeroes = [4, 4];

@@ -2,14 +2,14 @@
 //! [`crate::decode::misc::Deserializer::huff`].
 
 use super::bitstream::BitWriter;
-use std::collections::HashMap;
+use crate::decode::misc::HuffTable;
 
 /// Emit `value` using a decoder Huffman `table` (the same `code → value` map
 /// the decoder reads with `huff`).
-pub fn write_huff(bw: &mut BitWriter, table: &HashMap<u64, i32>, value: i32) {
+pub fn write_huff(bw: &mut BitWriter, table: &HuffTable, value: i32) {
     let code_key = table
         .iter()
-        .find_map(|(&k, &v)| (v == value).then_some(k))
+        .find_map(|(k, v)| (v == value).then_some(k))
         .unwrap_or_else(|| panic!("value {value} not present in huffman table"));
     // The code key is `1` followed by the real code bits; its highest set bit
     // is the synthetic leading 1, so the code length is that bit's position.
@@ -25,8 +25,8 @@ mod tests {
     use crate::decode::tables as t;
 
     /// Every value in `table` must encode then decode back to itself.
-    fn roundtrip_all(table: &HashMap<u64, i32>) {
-        let mut values: Vec<i32> = table.values().copied().collect();
+    fn roundtrip_all(table: &HuffTable) {
+        let mut values: Vec<i32> = table.values().collect();
         values.sort_unstable();
         for v in values {
             let mut bw = BitWriter::new();

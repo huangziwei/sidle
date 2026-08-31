@@ -512,7 +512,8 @@ impl MultiPlane {
             }
         }
 
-        // CBPHP for ALL components first (decoder `mb_cbphp`): per component,
+        // CBPHP for ALL components first, matching the decoder's `mb_cbphp`:
+        // one pass per component, then the model updates.
         {
             let bw = sink.hp();
             for comp in 0..nc {
@@ -626,8 +627,8 @@ impl MultiPlane {
     }
 
     /// Write one component's CBPHP difference pattern — the VLC half of
-    /// [`hp::encode_cbphp`] against this plane's shared `num_cbphp`/
-    /// `num_blk_cbphp` state (multi-component planes use the YONLY tables:
+    /// [`hp::encode_cbphp`] against this plane's shared `num_cbphp` /
+    /// `num_blk_cbphp` state. Multi-component planes use the YONLY tables.
     fn write_cbphp_diff(&mut self, bw: &mut BitWriter, i_diff: i32) {
         let nibbles = [
             i_diff & 0xF,
@@ -686,6 +687,8 @@ impl codestream::TileEncode for MultiPlane {
 }
 
 /// Depth-general multi-component driver (`OUT_CMYK` / `OUT_CMYKDIRECT` /
+/// `OUT_NCOMPONENT`) over planes `super::convert` has already forward-converted,
+/// with an optional alpha image plane.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_multi_prebias(
     comps: &[Vec<i32>],

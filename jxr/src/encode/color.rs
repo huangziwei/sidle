@@ -32,7 +32,8 @@ pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
     (y, u, v)
 }
 
-/// Pad one u8 plane to a 16-aligned grid with edge replication (as `gray.rs`),
+/// Pad one plane to a 16-aligned grid with edge replication, placing the
+/// content at `(top, left)`.
 fn pad_plane(
     src: &[i32],
     wu: usize,
@@ -53,6 +54,7 @@ fn pad_plane(
 }
 
 /// libjxr's `DF_ODD` 5-tap chroma decimation filter: `[1,4,6,4,1]/16` with
+/// rounding, over five consecutive samples.
 #[inline]
 fn df_odd(d0: i32, d1: i32, d2: i32, d3: i32, d4: i32) -> i32 {
     (((d1 + d2 + d3) << 2) + (d2 << 1) + d0 + d4 + 8) >> 4
@@ -73,8 +75,8 @@ fn reflect(i: isize, m: isize) -> usize {
 }
 
 /// Horizontal 2:1 chroma decimation of a `w×h` centered plane → `w/2 × h`
-/// (444→422). Whole-plane port of libjxr `downsampleUV`'s horizontal pass
-/// (`strenc.c:1603`); `w` is the padded (16-aligned, hence even) width.
+/// (444→422). Whole-plane form of libjxr's `downsampleUV` horizontal pass; `w`
+/// is the padded (16-aligned, hence even) width.
 pub fn downsample_h(src: &[i32], w: usize, h: usize) -> Vec<i32> {
     let ow = w / 2;
     let m = (w - 1) as isize;
@@ -122,7 +124,9 @@ pub fn downsample_v(src: &[i32], w: usize, h: usize) -> Vec<i32> {
     out
 }
 
-/// One 3-component YUV image plane (`INT_YUV444`, or subsampled
+/// One 3-component YUV image plane (`INT_YUV444`, `INT_YUV422` or
+/// `INT_YUV420`): quantized coefficients plus the shared adaptive entropy
+/// state, encodable one macroblock at a time.
 pub(super) struct ColorPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
@@ -192,7 +196,7 @@ impl ColorPlane {
         )
     }
 
-    /// [`Self::new`] generalized over chroma sampling and `bands_present`:
+    /// [`Self::new`] generalized over chroma sampling and `bands_present`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_fmt(
         r: &[i32],
@@ -258,7 +262,7 @@ impl ColorPlane {
         );
         let (mbw, mbh) = (pw / 16, ph / 16);
 
-        // Pad the pre-bias RGB ([`super::convert`] already centered/shifted
+        // Pad the pre-bias RGB; `super::convert` has already centered it.
         let (rp, gp, bp) = (
             pad_plane(r, wu, hu, pw, ph, top, left),
             pad_plane(g, wu, hu, pw, ph, top, left),
@@ -1185,6 +1189,7 @@ pub(super) fn encode_color_prebias(
 }
 
 /// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
+/// a per-MB interleaved alpha image plane quantized by its own `alpha_qp`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_color_alpha(
     r: &[u8],
@@ -1238,7 +1243,8 @@ pub fn encode_color_alpha(
     )
 }
 
-/// Depth-general RGB+alpha driver ([`encode_color_alpha`] over pre-bias
+/// Depth-general RGB+alpha driver: [`encode_color_alpha`] over pre-bias planes
+/// `super::convert` has already forward-converted.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_color_alpha_prebias(
     r: &[i32],
@@ -1319,7 +1325,8 @@ pub(super) fn encode_color_alpha_prebias(
     container::write_container(&body, w, h, guid)
 }
 
-/// Encode an RGB image as **internal YONLY** with `OUT_RGB` output (the
+/// Encode an RGB image as **internal YONLY** with `OUT_RGB` output: one luma
+/// plane, the decoder reconstructing gray R=G=B from it.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_yonly_from_color(
     r: &[u8],
@@ -1421,7 +1428,8 @@ pub(super) fn encode_yonly_prebias(
     container::write_container(&body, w, h, guid)
 }
 
-/// HP-band adaptive state for the color path — multi-component analogue of
+/// HP-band adaptive state for the color path: the multi-component analogue of
+/// the grayscale `HpState`, with luma/chroma class buckets.
 struct ColorHpState {
     model: coeff::ColorModel,
     first: [AdaptiveVLC; 2], // [lum, chr]
@@ -1513,7 +1521,8 @@ fn unpredict_cascade_422(mut c: i32) -> i32 {
     c
 }
 
-/// Encode the three components' `mb_cbphp` (per-block HP coded-block
+/// Encode the three components' `mb_cbphp` (per-block HP coded-block patterns),
+/// predicted from the left/top neighbours' stored values.
 #[allow(clippy::too_many_arguments)]
 fn encode_color_cbphp(
     bw: &mut BitWriter,
@@ -1685,7 +1694,8 @@ fn encode_color_cbphp(
     }
 }
 
-/// Encode the HP band of one macroblock for all 3 components — inverse of
+/// Encode the HP band of one macroblock for all 3 components — the inverse of
+/// the decoder's `mb_cbphp` + `mb_hp_flex`.
 #[allow(clippy::too_many_arguments)]
 fn encode_color_hp_mb(
     sink: &mut codestream::Sink,
@@ -1939,7 +1949,8 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             self.0
         }
-        /// A well-distributed byte from the LCG's **high** bits. (The low 8 bits
+        /// A well-distributed byte from the LCG's **high** bits; the low bits
+        /// of an LCG cycle too short to be useful.
         fn byte(&mut self) -> u8 {
             (self.next() >> 32) as u8
         }
@@ -2051,7 +2062,7 @@ mod tests {
     }
 
     /// 4b Stage A gate: whole-image constant color at 420/422 **DCONLY**
-    /// round-trips END-TO-END exactly (constant chroma survives decimation;
+    /// round-trips end-to-end exactly, constant chroma surviving decimation.
     #[test]
     fn roundtrip_constant_color_42x_dconly() {
         for &fmt in &[INT_YUV420, INT_YUV422] {
@@ -2131,7 +2142,8 @@ mod tests {
         }
     }
 
-    /// 4b Stage C gate (in-crate half): arbitrary **luma** detail over
+    /// Arbitrary **luma** detail over constant chroma at 420/422 ALL_BANDS
+    /// round-trips exactly.
     #[test]
     fn roundtrip_gray_content_42x_allbands() {
         let mut r = Lcg(0xc0a1_e5ce_0042_c0a1);
@@ -2427,7 +2439,8 @@ mod tests {
         assert_rgb_exact(&jxr, w, h, &expected);
     }
 
-    /// The real goal: ANY color image round-trips **exactly** (ALL_BANDS,
+    /// ANY color image round-trips **exactly** at ALL_BANDS 4:4:4 lossless, across
+    /// macroblock grids and content kinds.
     #[test]
     fn roundtrip_arbitrary_color_allbands_lossless() {
         let mut r = Lcg(0x4242_a5a5_1234_5678);
@@ -2463,7 +2476,8 @@ mod tests {
         }
     }
 
-    /// Lossy color is a fixpoint: a decoded image is already on the quant grid,
+    /// Lossy color is a fixpoint: a decoded image already sits on the quant grid,
+    /// so re-encoding it must yield byte-identical output. Aligned sizes only.
     #[test]
     fn lossy_color_roundtrip_is_a_fixpoint() {
         let mut r = Lcg(0x1357_9bdf_2468_ace0);

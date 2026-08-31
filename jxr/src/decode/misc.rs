@@ -1,7 +1,5 @@
 //! Bit/byte-stream reader for the JXR decoder.
 
-use std::collections::HashMap;
-
 pub struct Deserializer<'a> {
     pub buffer: &'a [u8],
     pub offset: usize,
@@ -51,7 +49,9 @@ impl<'a> Deserializer<'a> {
         self.len() == 0
     }
 
-    /// Read `size` bytes from current offset. Errors if too few bytes are
+    /// Read `size` bytes from current offset. Errors if too few are available.
+    /// Requires the bit buffer to be empty unless `check_remaining` is false,
+    /// which the bit reader uses to refill its own window.
     pub fn extract(&mut self, size: usize, check_remaining: bool) -> Result<&'a [u8]> {
         if check_remaining && self.bits_remaining != 0 {
             return Err(DeserializerError::UnexpectedBits(self.bits_remaining));
@@ -123,21 +123,44 @@ impl<'a> Deserializer<'a> {
         Ok(v)
     }
 
-    /// Huffman decode: read bits one at a time, prefixing with a synthetic
-    /// leading 1 so codes of different lengths can share a single table.
-    /// Matches calibre's `huff(table, name)`.
-    pub fn huff(&mut self, table: &HashMap<u64, i32>) -> Result<i32> {
-        let mut k: u64 = 1;
+    /// Huffman decode. Prefixes a synthetic leading 1 so codes of different
+    /// lengths can share a single table; matches calibre's `huff(table, name)`,
+    /// which walks the code one bit at a time as the fallback path below does.
+    pub fn huff(&mut self, table: &HuffTable) -> Result<i32> {
+        // Fast path: every code in these tables is at most 8 bits, so with a
+        // full byte in the accumulator one 256-entry lookup resolves the symbol
+        // and its length in one step.
+        while self.bits_remaining < 8 && self.offset < self.buffer.len() {
+            let byte = self.buffer[self.offset];
+            self.offset += 1;
+            self.remainder = (self.remainder << 8) | byte as u64;
+            self.bits_remaining += 8;
+        }
+        if self.bits_remaining >= 8 {
+            let peek = ((self.remainder >> (self.bits_remaining - 8)) & 0xff) as usize;
+            let e = table.fast[peek];
+            if e != 0 {
+                self.bits_remaining -= (e >> 8) as u32;
+                self.remainder &= (1u64 << self.bits_remaining) - 1;
+                return Ok((e & 0xff) as i32 - 1);
+            }
+        }
+        let mut k: usize = 1;
         while k <= 0xff {
-            k = (k << 1) + self.unpack_bits(1)?;
-            if let Some(&v) = table.get(&k) {
-                return Ok(v);
+            k = (k << 1) + self.unpack_bits(1)? as usize;
+            let v = table.lut[k];
+            if v >= 0 {
+                return Ok(v as i32);
             }
         }
         Err(DeserializerError::HuffmanFailure)
     }
 
+    /// Drop buffered bits to realign to the next byte boundary. `huff` reads
+    /// ahead a whole byte, so rewind `offset` past any unconsumed bytes:
+    /// `coded_tiles` reads `offset` as the tile-boundary stream position.
     pub fn discard_remainder_bits(&mut self) {
+        self.offset -= (self.bits_remaining / 8) as usize;
         self.bits_remaining = 0;
         self.remainder = 0;
     }
@@ -146,16 +169,53 @@ impl<'a> Deserializer<'a> {
 /// Build a huffman table from a sparse `{bit_string: value}` map. Mirrors
 /// calibre's `HBIN`: a binary string like `"010"` becomes the key
 /// `int("1" + "010", 2) = 0b1010 = 10`.
-pub fn hbin(entries: &[(&str, i32)]) -> HashMap<u64, i32> {
-    let mut out = HashMap::with_capacity(entries.len());
+pub fn hbin(entries: &[(&str, i32)]) -> HuffTable {
+    let mut lut = [-1i8; 512];
+    let mut fast = [0u16; 256];
     for (s, v) in entries {
-        let mut k: u64 = 1;
+        let mut k: usize = 1;
         for c in s.chars() {
             k = (k << 1) + (if c == '1' { 1 } else { 0 });
         }
-        out.insert(k, *v);
+        assert!(
+            (0..=i8::MAX as i32).contains(v),
+            "huffman value {v} does not fit the table's i8 slot"
+        );
+        lut[k] = *v as i8;
+        let len = s.len();
+        assert!(len <= 8, "huffman code longer than the 8-bit fast table");
+        let bits = k & ((1 << len) - 1);
+        let lo = bits << (8 - len);
+        for slot in fast.iter_mut().skip(lo).take(1 << (8 - len)) {
+            *slot = ((len as u16) << 8) | (*v as u16 + 1);
+        }
     }
-    out
+    HuffTable { lut, fast }
+}
+
+/// Flat lookup table for one Huffman code set: index = the accumulated code
+/// with its synthetic leading 1; `-1` means "no code ends here".
+pub struct HuffTable {
+    lut: [i8; 512],
+    /// `code << (8 - len)` → `(len << 8) | (value + 1)`; `0` = no code.
+    fast: [u16; 256],
+}
+
+impl HuffTable {
+    /// `(code_key, value)` for every code in the table, ascending by key.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, i32)> + '_ {
+        self.lut
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v >= 0)
+            .map(|(k, &v)| (k as u64, v as i32))
+    }
+
+    /// Every value the table can code, ascending by code key.
+    #[cfg(test)]
+    pub fn values(&self) -> impl Iterator<Item = i32> + '_ {
+        self.iter().map(|(_, v)| v)
+    }
 }
 
 #[cfg(test)]
@@ -185,8 +245,56 @@ mod tests {
         // From VAL_DC_YUV: "10" -> 0, "001" -> 1, etc.
         let t = hbin(&[("10", 0), ("001", 1), ("00001", 2)]);
         // Prefix '1' added: "110" = 6, "1001" = 9, "100001" = 33
-        assert_eq!(t.get(&6), Some(&0));
-        assert_eq!(t.get(&9), Some(&1));
-        assert_eq!(t.get(&33), Some(&2));
+        assert_eq!(t.lut[6], 0);
+        assert_eq!(t.lut[9], 1);
+        assert_eq!(t.lut[33], 2);
+    }
+
+    #[test]
+    fn huff_matches_bit_at_a_time_decode() {
+        // The 8-bit peek must agree with the one-bit-at-a-time walk for every
+        // code in a table, including the 8-bit-long codes.
+        let entries: &[(&str, i32)] = &[
+            ("1", 0),
+            ("01", 1),
+            ("001", 2),
+            ("0001", 3),
+            ("00001", 4),
+            ("000001", 5),
+            ("0000001", 6),
+            ("00000000", 7),
+            ("00000001", 8),
+        ];
+        let t = hbin(entries);
+        for (code, want) in entries {
+            // Pad past the code so the reader always has a full byte to peek.
+            let mut bits: Vec<u8> = code.bytes().map(|b| b - b'0').collect();
+            bits.resize(bits.len().div_ceil(8) * 8 + 8, 0);
+            let buf: Vec<u8> = bits
+                .chunks(8)
+                .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
+                .collect();
+            let mut d = Deserializer::new(&buf);
+            assert_eq!(d.huff(&t).unwrap(), *want, "code {code}");
+        }
+    }
+
+    #[test]
+    fn discard_remainder_bits_rewinds_read_ahead_bytes() {
+        // `huff` fills the accumulator to a whole byte, so after a short code
+        // whole bytes can sit unread in it. Discarding must hand `offset` back:
+        // `coded_tiles` uses it as the tile-boundary stream position.
+        let t = hbin(&[("1", 0)]);
+        let buf = [0b0100_0000u8, 0x55, 0xAA];
+        let mut d = Deserializer::new(&buf);
+        // Leave a partial byte buffered, so `huff`'s refill pulls byte 1 in
+        // whole while two bits of byte 0 are still unconsumed.
+        assert_eq!(d.unpack_bits(1).unwrap(), 0);
+        assert_eq!(d.huff(&t).unwrap(), 0);
+        // Two bits consumed, both inside byte 0: realigning lands at byte 1,
+        // and byte 1 has been read into the accumulator but not consumed.
+        d.discard_remainder_bits();
+        assert_eq!(d.offset, 1);
+        assert_eq!(d.unpack_u8().unwrap(), 0x55);
     }
 }
