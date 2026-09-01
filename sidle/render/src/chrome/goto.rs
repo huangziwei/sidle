@@ -31,12 +31,21 @@ impl Fixed {
 /// One row of the contents list.
 pub struct Entry {
     pub title: String,
-    /// Which spine entry the row opens.
+    /// The spine entry the row's own place falls in.
     pub chapter: usize,
     /// The location the row starts at, as the list shows it.
     pub location: i64,
     /// How far the title is indented.
     pub depth: usize,
+}
+
+/// The row a place falls in: the last one its location reaches, else the last
+/// one at or before its chapter.
+pub fn here(entries: &[Entry], location: i64, chapter: usize) -> Option<usize> {
+    entries
+        .iter()
+        .rposition(|entry| entry.location > 0 && entry.location <= location)
+        .or_else(|| entries.iter().rposition(|entry| entry.chapter <= chapter))
 }
 
 /// Draw the card and as many entries as fit, marking the one in hand.
@@ -45,7 +54,7 @@ pub fn draw(
     canvas: &mut Canvas<'_, '_>,
     fixed: &[(Fixed, Option<usize>)],
     entries: &[Entry],
-    here: usize,
+    here: Option<usize>,
 ) {
     let panel = canvas.panel;
     let unit = canvas.unit();
@@ -152,13 +161,13 @@ pub fn draw(
 
     canvas.clip_to(list);
     let mut y = list.y + lead - chrome.scroll;
-    for entry in entries {
+    for (n, entry) in entries.iter().enumerate() {
         let area = Rect::new(left, y, right - left, height);
         y += height;
         if !area.intersects(&list) {
             continue;
         }
-        let chosen = entry.chapter == here;
+        let chosen = here == Some(n);
         canvas.text(
             &entry.title,
             36.0 * unit,
@@ -182,7 +191,7 @@ pub fn draw(
         }
         canvas.rule(left, right, area.bottom(), 2.0 * unit, theme.faint);
         // A row `list` cuts takes a click only where it shows.
-        chrome.add(area.intersection(&list), Action::GoToChapter(entry.chapter));
+        chrome.add(area.intersection(&list), Action::GoToEntry(n));
     }
     canvas.unclip();
 }
@@ -230,7 +239,7 @@ impl Numbering {
 /// The screen [`Fixed::PageOrLocation`] opens: what has been typed into it,
 /// and how far the book's two scales run.
 pub struct Jump {
-    /// The digits typed so far.
+    /// The digits typed into the field.
     pub typed: String,
     pub numbering: Numbering,
     /// The last page the book numbers, absent where it numbers none.
@@ -471,6 +480,42 @@ fn wrapped(canvas: &mut Canvas<'_, '_>, content: &str, size: f32, room: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A contents list whose last three rows share one section.
+    fn contents() -> Vec<Entry> {
+        [(0, 1), (1, 100), (2, 200), (2, 300), (2, 400)]
+            .into_iter()
+            .enumerate()
+            .map(|(n, (chapter, location))| Entry {
+                title: format!("Entry {}", n + 1),
+                chapter,
+                location,
+                depth: 0,
+            })
+            .collect()
+    }
+
+    /// `here` names the last row the location reaches, one row of a shared
+    /// section as readily as a row holding a section of its own.
+    #[test]
+    fn a_row_of_a_shared_section_stands_for_its_own_place() {
+        let entries = contents();
+        assert_eq!(here(&entries, 1, 0), Some(0));
+        assert_eq!(here(&entries, 150, 1), Some(1));
+        assert_eq!(here(&entries, 250, 2), Some(2));
+        assert_eq!(here(&entries, 300, 2), Some(3));
+        assert_eq!(here(&entries, 900, 2), Some(4));
+        // `unlocated` numbers no location, and an empty list holds no row.
+        let unlocated: Vec<Entry> = entries
+            .into_iter()
+            .map(|entry| Entry {
+                location: 0,
+                ..entry
+            })
+            .collect();
+        assert_eq!(here(&unlocated, 600, 1), Some(1));
+        assert_eq!(here(&[], 600, 1), None);
+    }
 
     fn screen(typed: &str, numbering: Numbering, pages: Option<i64>) -> Jump {
         Jump {

@@ -108,6 +108,8 @@ pub enum Action {
     PageColor(bool),
     Progress(Progress),
     GoToChapter(usize),
+    /// Open the place a contents row names.
+    GoToEntry(usize),
     GoToBeginning,
     GoToEnd,
     /// Whether the number being typed names a page or a location.

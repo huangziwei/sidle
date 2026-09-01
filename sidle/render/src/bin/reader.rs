@@ -1054,15 +1054,8 @@ impl Reader {
             .map_or(1, |laid| laid.pages.count().max(1));
         let words = self.laid.as_ref().map_or(0, |laid| laid.words);
         let chapters = self.spine.len().max(1);
-        let through =
-            (self.chapter as f32 + (self.page as f32 + 1.0) / pages as f32) / chapters as f32;
         let locations = self.locations();
-        // The book's own number where it states one, else a share of the axis.
-        let location = self
-            .laid
-            .as_ref()
-            .and_then(|laid| laid.locations.get(self.page).copied())
-            .unwrap_or_else(|| ((through * locations as f32) as i64).max(1));
+        let location = self.location();
         // How far in the book stands: the location's share of `locations`.
         let read = (location as f32 / locations.max(1) as f32).clamp(0.0, 1.0);
         let left = pages.saturating_sub(self.page + 1) as f32 / pages as f32;
@@ -1071,9 +1064,8 @@ impl Reader {
         Position {
             title: self.title.clone(),
             chapter_title: self
-                .contents
-                .iter()
-                .rfind(|entry| entry.chapter <= self.chapter)
+                .contents_here()
+                .and_then(|entry| self.contents.get(entry))
                 .map(|entry| entry.title.clone())
                 .unwrap_or_default(),
             location,
@@ -1201,6 +1193,14 @@ impl Reader {
                 self.chrome.overlay = Overlay::None;
                 self.go_to(chapter);
             }
+            Action::GoToEntry(entry) => {
+                self.chrome.overlay = Overlay::None;
+                if let Some(row) = self.contents.get(entry) {
+                    let (chapter, location) = (row.chapter, row.location);
+                    self.wanted = (location > 0).then_some(location);
+                    self.go_to(chapter);
+                }
+            }
             Action::GoToBeginning => {
                 self.chrome.overlay = Overlay::None;
                 self.go_to(0);
@@ -1243,6 +1243,30 @@ impl Reader {
             .map(|map| map.location_count())
             .filter(|count| *count > 0)
             .unwrap_or(self.spine.len().max(1) as i64 * LOCATIONS_A_PAGE)
+    }
+
+    /// The location the page in hand starts at: the book's own number where
+    /// it states one, else the page's share of the axis.
+    fn location(&self) -> i64 {
+        if let Some(location) = self
+            .laid
+            .as_ref()
+            .and_then(|laid| laid.locations.get(self.page).copied())
+        {
+            return location;
+        }
+        let pages = self
+            .laid
+            .as_ref()
+            .map_or(1, |laid| laid.pages.count().max(1));
+        let through = (self.chapter as f32 + (self.page as f32 + 1.0) / pages as f32)
+            / self.spine.len().max(1) as f32;
+        ((through * self.locations() as f32) as i64).max(1)
+    }
+
+    /// The contents row the page in hand falls in.
+    fn contents_here(&self) -> Option<usize> {
+        goto::here(&self.contents, self.location(), self.chapter)
     }
 
     /// Open the place the number typed into `Page or Location` names.
@@ -1511,7 +1535,7 @@ impl Reader {
         let mode = self.page_box().is_none().then_some(shown.settings.progress);
         let overlay = self.chrome.overlay;
         let leftward = self.pages_leftward();
-        let contents_here = self.chapter;
+        let contents_here = self.contents_here();
         let fixed = self.fixed.clone();
         let jumping = self.jump();
         let pages_here = self.laid.as_ref().map_or(1, |laid| laid.pages.count());
