@@ -14,10 +14,11 @@
 //!   --pages <n>        print the geometry of the first `n` pages and exit
 //!   --lines            list every line of every page reported
 //!   --shot <file>      write one page to a PNG and exit
-//!   --open <panel>     open aa, goto, scrub, search or none
+//!   --open <panel>     open aa, goto, number, scrub, search or none
 //!   --tab <name>       which `Aa` tab the sheet opens on
 //!   --scroll <n>       how many rows down the open list stands
 //!   --query <text>     what the search card looks for
+//!   --number <n>       open where `Page or Location` sends this number
 //!   --reveal           draw the bars over the page
 //!   --grid             rule the page at the margin ladder
 //!   --dark             draw the page and the chrome dark
@@ -27,7 +28,9 @@
 //! Click the page to turn it, `Aa` and the contents mark to open a panel.
 //! Arrows, space and the wheel turn pages, and scroll an open list; `n` and
 //! `p` change chapter; `t` opens the contents, `a` the settings and `s` the
-//! search card, which takes what is typed; escape closes them, `q` quits.
+//! search card, which takes what is typed and what an input method composes.
+//! The contents card's `Page or Location` row takes a number and opens where
+//! it names; escape closes a panel, `q` quits.
 
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -47,8 +50,8 @@ use sidle_render::{
 };
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -56,13 +59,16 @@ use winit::window::{Window, WindowId};
 const USAGE: &str = "usage: sidle-render [--device <name>] [--panel <file>] [--fonts <dir>] \
 [--serif <family>] [--cjk <family>] [--chapter <n>] [--page <n>] [--font-size <n>] \
 [--pages <n>] [--lines] [--shot <file>] [--open <panel>] [--tab <name>] [--scroll <n>] \
-[--query <text>] [--reveal] [--grid] [--dark] [--hits] <book>";
+[--query <text>] [--number <n>] [--reveal] [--grid] [--dark] [--hits] <book>";
 
 /// Words a reader gets through in a minute, which sets the time left.
 const WORDS_A_MINUTE: f32 = 220.0;
 
 /// Locations one screen of text covers, before a page is laid out.
 const LOCATIONS_A_PAGE: i64 = 14;
+
+/// How long a number the `Page or Location` field takes.
+const DIGITS: usize = 20;
 
 /// How much of the text either side of a match a result states.
 const LEAD_IN: usize = 16;
@@ -121,6 +127,8 @@ struct Options {
     dark: bool,
     /// What a shot of the search card has been asked to look for.
     query: String,
+    /// The number `Page or Location` has been asked to open at.
+    number: Option<i64>,
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -151,6 +159,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--scroll" => options.scroll = value()?.parse()?,
             "--hits" => options.hits = true,
             "--query" => options.query = value()?,
+            "--number" => options.number = Some(value()?.parse()?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -167,10 +176,13 @@ fn named_overlay(name: &str) -> Result<Overlay, Box<dyn Error>> {
     match name {
         "aa" => Ok(Overlay::Aa),
         "goto" => Ok(Overlay::GoTo),
+        "number" => Ok(Overlay::PageOrLocation),
         "scrub" => Ok(Overlay::Scrubber),
         "search" => Ok(Overlay::Search),
         "none" => Ok(Overlay::None),
-        _ => Err(format!("no such panel: {name} (try aa, goto, scrub, search, none)").into()),
+        _ => {
+            Err(format!("no such panel: {name} (try aa, goto, number, scrub, search, none)").into())
+        }
     }
 }
 
@@ -222,6 +234,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect();
     let positions = book.position_map();
     let contents = contents_of(&mut book, &spine, &positions);
+    let numbers = numbers_of(&mut book, &spine, &positions);
+    let starts = chapter_starts(&mut book, &spine, &positions);
     let fixed = fixed_rows(&book, &spine);
     let resources = BookResources::declared(&mut book);
 
@@ -283,6 +297,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         device,
         families,
         numbered,
+        // The page number is the numbering offered first where the book
+        // prints any.
+        numbering: match numbers.is_empty() {
+            true => goto::Numbering::Location,
+            false => goto::Numbering::Page,
+        },
+        numbers,
+        starts,
+        number: String::new(),
         settings,
         chrome: Chrome::default(),
         per_line: options.per_line,
@@ -294,11 +317,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         laid: None,
         view: None,
         query: String::new(),
+        preedit: String::new(),
         found: Vec::new(),
         opens: Vec::new(),
         searched: false,
         wanted: None,
     };
+
+    if let Some(number) = options.number {
+        reader.number = number.to_string();
+        reader.go_to_number();
+    }
 
     if let Some(pages) = options.pages {
         reader.report(pages);
@@ -400,30 +429,89 @@ fn contents_of(
             .collect();
     }
 
-    // Each row's own location: the element its href names, else the element
-    // its node was built from, else the chapter's first.
     rows.into_iter()
-        .map(|row| {
-            let location = named_element(&row.href)
-                .or_else(|| {
-                    chapters
-                        .get(row.chapter)
-                        .and_then(|chapter| match row.node {
-                            Some(node) if node != bokai::model::NodeId::ROOT => {
-                                source_element(chapter, node)
-                            }
-                            _ => chapter.source_elements().into_iter().next(),
-                        })
+        .map(|row| goto::Entry {
+            location: located(&row, &chapters, positions),
+            title: row.title,
+            chapter: row.chapter,
+            depth: row.depth,
+        })
+        .collect()
+}
+
+/// A row's own location: the element its href names, else the element its
+/// node was built from, else the chapter's first.
+fn located(
+    row: &Row,
+    chapters: &[std::sync::Arc<bokai::model::Chapter>],
+    positions: &Option<PositionMap>,
+) -> i64 {
+    named_element(&row.href)
+        .or_else(|| {
+            chapters
+                .get(row.chapter)
+                .and_then(|chapter| match row.node {
+                    Some(node) if node != bokai::model::NodeId::ROOT => {
+                        source_element(chapter, node)
+                    }
+                    _ => chapter.source_elements().into_iter().next(),
                 })
-                .zip(positions.as_ref().filter(|map| map.has_locations()))
-                .and_then(|(element, map)| Some(map.location_for(map.position(element, 0)?)))
-                .unwrap_or(0);
-            goto::Entry {
-                title: row.title,
+        })
+        .zip(positions.as_ref().filter(|map| map.has_locations()))
+        .and_then(|(element, map)| Some(map.location_for(map.position(element, 0)?)))
+        .unwrap_or(0)
+}
+
+/// One page number the book prints, and where it prints it.
+struct Printed {
+    number: i64,
+    chapter: usize,
+    location: i64,
+}
+
+/// Every page number the book prints, in the order it prints them. A page
+/// list entry whose label is not a number names no page.
+fn numbers_of(
+    book: &mut Book,
+    spine: &[ChapterId],
+    positions: &Option<PositionMap>,
+) -> Vec<Printed> {
+    let chapters = book.load_chapters_cached(spine).unwrap_or_default();
+    let pages = book.page_list().to_vec();
+    let mut rows = Vec::new();
+    gather(&pages, 0, spine, book, &mut rows);
+    rows.into_iter()
+        .filter_map(|row| {
+            Some(Printed {
+                number: row.title.trim().parse().ok()?,
+                location: located(&row, &chapters, positions),
                 chapter: row.chapter,
-                location,
-                depth: row.depth,
-            }
+            })
+        })
+        .collect()
+}
+
+/// The location each chapter starts at, in the spine's order.
+fn chapter_starts(
+    book: &mut Book,
+    spine: &[ChapterId],
+    positions: &Option<PositionMap>,
+) -> Vec<i64> {
+    let chapters = book.load_chapters_cached(spine).unwrap_or_default();
+    let Some(map) = positions.as_ref().filter(|map| map.has_locations()) else {
+        return (0..spine.len())
+            .map(|n| n as i64 * LOCATIONS_A_PAGE)
+            .collect();
+    };
+    chapters
+        .iter()
+        .map(|chapter| {
+            chapter
+                .source_elements()
+                .into_iter()
+                .next()
+                .and_then(|element| Some(map.location_for(map.position(element, 0)?)))
+                .unwrap_or(0)
         })
         .collect()
 }
@@ -500,6 +588,14 @@ struct Reader {
     families: Vec<String>,
     /// Whether the book carries page numbers.
     numbered: bool,
+    /// Every page number the book prints, in the order it prints them.
+    numbers: Vec<Printed>,
+    /// The location each chapter starts at, in the spine's order.
+    starts: Vec<i64>,
+    /// The number typed into `Page or Location`, and whether it names one of
+    /// the book's pages or one of its locations.
+    number: String,
+    numbering: goto::Numbering,
     settings: Settings,
     chrome: Chrome,
     per_line: bool,
@@ -517,6 +613,8 @@ struct Reader {
     view: Option<View>,
     /// The phrase the search card is looking for.
     query: String,
+    /// What the input method is composing, which is not yet part of `query`.
+    preedit: String,
     /// Where it was found, as the card states each place.
     found: Vec<search::Found>,
     /// Where each of `found` opens, in the same order.
@@ -789,6 +887,44 @@ impl Reader {
             .map_or(0, |position| positions.location_for(position))
     }
 
+    /// Tell the window whether the panel in hand takes text, and where its
+    /// field sits, so the host's input method composes into it.
+    fn hold_ime(&mut self) {
+        let Some(view) = &self.view else { return };
+        let takes_text = self.chrome.overlay == Overlay::Search;
+        view.window.set_ime_allowed(takes_text);
+        let (fit, offset) = view.fit;
+        if let Some(field) = self.chrome.field.filter(|_| takes_text) {
+            view.window.set_ime_cursor_area(
+                PhysicalPosition::new(offset.0 + field.x * fit, offset.1 + field.y * fit),
+                PhysicalSize::new(field.width * fit, field.height * fit),
+            );
+        }
+        if !takes_text {
+            self.preedit.clear();
+        }
+    }
+
+    /// Take what an input method composed. A committed string is typed into
+    /// the field; anything still being composed shows after it. Only the
+    /// search card takes text, so nothing else takes a composition.
+    fn composed(&mut self, event: Ime) {
+        if self.chrome.overlay != Overlay::Search {
+            self.preedit.clear();
+            return;
+        }
+        match event {
+            Ime::Preedit(text, _) => self.preedit = text,
+            Ime::Commit(text) => {
+                self.preedit.clear();
+                self.query.push_str(&text);
+                self.searched = false;
+            }
+            Ime::Enabled | Ime::Disabled => self.preedit.clear(),
+        }
+        self.request_redraw();
+    }
+
     /// A key the search field takes, reporting whether it was the field's.
     fn typed(&mut self, key: &Key<&str>) -> bool {
         match key {
@@ -921,12 +1057,7 @@ impl Reader {
         let chapters = self.spine.len().max(1);
         let through =
             (self.chapter as f32 + (self.page as f32 + 1.0) / pages as f32) / chapters as f32;
-        let locations = self
-            .positions
-            .as_ref()
-            .map(|map| map.location_count())
-            .filter(|count| *count > 0)
-            .unwrap_or(chapters as i64 * LOCATIONS_A_PAGE);
+        let locations = self.locations();
         // The book's own number where it states one, else a share of the axis.
         let location = self
             .laid
@@ -1087,7 +1218,84 @@ impl Reader {
                     self.go_to(chapter);
                 }
             }
+            Action::Numbering(numbering) => {
+                self.numbering = numbering;
+                self.request_redraw();
+            }
+            Action::GoToNumber => self.go_to_number(),
         }
+    }
+
+    /// The screen `Page or Location` opens, as it stands.
+    fn jump(&self) -> goto::Jump {
+        goto::Jump {
+            typed: self.number.clone(),
+            numbering: self.numbering,
+            pages: self.numbers.last().map(|printed| printed.number),
+            locations: self.locations(),
+        }
+    }
+
+    /// The last location in the book: its own count where it states one,
+    /// else [`LOCATIONS_A_PAGE`] for every chapter.
+    fn locations(&self) -> i64 {
+        self.positions
+            .as_ref()
+            .map(|map| map.location_count())
+            .filter(|count| *count > 0)
+            .unwrap_or(self.spine.len().max(1) as i64 * LOCATIONS_A_PAGE)
+    }
+
+    /// Open the place the number typed into `Page or Location` names.
+    fn go_to_number(&mut self) {
+        let Some(number) = self.jump().number() else {
+            return;
+        };
+        let placed = match self.numbering {
+            goto::Numbering::Page => self
+                .numbers
+                .iter()
+                .find(|printed| printed.number == number)
+                .map(|printed| (printed.chapter, printed.location)),
+            goto::Numbering::Location => Some((self.chapter_at(number), number)),
+        };
+        let Some((chapter, location)) = placed else {
+            return;
+        };
+        self.number.clear();
+        self.chrome.overlay = Overlay::None;
+        self.wanted = Some(location);
+        self.go_to(chapter);
+    }
+
+    /// The chapter `location` falls in.
+    fn chapter_at(&self, location: i64) -> usize {
+        self.starts
+            .iter()
+            .rposition(|start| *start <= location)
+            .unwrap_or(0)
+    }
+
+    /// A key the `Page or Location` field takes, reporting whether it was
+    /// the field's. The device types into it with a number pad, so a
+    /// character that is not a digit is none of the field's business.
+    fn dialled(&mut self, key: &Key<&str>) -> bool {
+        match key {
+            Key::Named(NamedKey::Backspace) => {
+                self.number.pop();
+            }
+            Key::Named(NamedKey::Enter) => self.go_to_number(),
+            Key::Character(text)
+                if !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()) =>
+            {
+                if self.number.len() + text.len() <= DIGITS {
+                    self.number.push_str(text);
+                }
+            }
+            _ => return false,
+        }
+        self.request_redraw();
+        true
     }
 
     /// The pages the scrubber offers: the one it stands at, or the nine
@@ -1307,6 +1515,7 @@ impl Reader {
         let leftward = self.pages_leftward();
         let contents_here = self.chapter;
         let fixed = self.fixed.clone();
+        let jumping = self.jump();
         let pages_here = self.laid.as_ref().map_or(1, |laid| laid.pages.count());
         let leaves = match overlay {
             Overlay::Scrubber => self.leaves(),
@@ -1334,11 +1543,23 @@ impl Reader {
                 &self.contents,
                 contents_here,
             ),
+            // The screen a row of the card opens stands over the card.
+            Overlay::PageOrLocation => {
+                goto::draw(
+                    &mut self.chrome,
+                    &mut canvas,
+                    &fixed,
+                    &self.contents,
+                    contents_here,
+                );
+                goto::jump(&mut self.chrome, &mut canvas, &jumping);
+            }
             Overlay::Search => search::draw(
                 &mut self.chrome,
                 &mut canvas,
                 &search::Search {
                     query: &self.query,
+                    composing: &self.preedit,
                     found: &self.found,
                     searched: self.searched,
                 },
@@ -1551,7 +1772,11 @@ impl ApplicationHandler for Reader {
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.request_redraw(),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                self.draw();
+                self.hold_ime();
+            }
+            WindowEvent::Ime(event) => self.composed(event),
             WindowEvent::CursorMoved { position, .. } => {
                 // `position` counts buffer pixels, which is what `fit` and
                 // `offset` are stated in.
@@ -1590,7 +1815,12 @@ impl ApplicationHandler for Reader {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let key = event.logical_key.as_ref();
-                if self.chrome.overlay == Overlay::Search && self.typed(&key) {
+                let taken = match self.chrome.overlay {
+                    Overlay::Search => self.typed(&key),
+                    Overlay::PageOrLocation => self.dialled(&key),
+                    _ => false,
+                };
+                if taken {
                     return;
                 }
                 match key {

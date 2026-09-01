@@ -14,6 +14,10 @@ use crate::fragment::{Content, Fragment, Glyph, GlyphRun, Node, Orientation};
 use crate::geom::{Axis, Rect};
 use crate::text;
 
+/// How far a ruby reading hangs past its base at each end, in ems of the
+/// base: half the character beside it.
+const RUBY_OVERHANG: f32 = 0.5;
+
 /// Text style resolved to numbers, as a run needs it.
 #[derive(Debug, Clone, Copy)]
 pub struct TextStyle<'a> {
@@ -140,10 +144,12 @@ struct Run {
 struct Atom {
     item: usize,
     advance: f32,
-    /// What the atom draws on the line. Absent for a break.
-    run: Option<Run>,
-    /// A ruby annotation, drawn in the strip alongside the line.
-    annotation: Option<Run>,
+    /// What the atom draws on the line: a run per face and orientation it
+    /// takes, in order. Empty for a break.
+    runs: Vec<Run>,
+    /// A ruby annotation, drawn in the strip alongside the line, on the same
+    /// terms.
+    annotation: Vec<Run>,
     /// How far the annotation reaches along the line, and how far across it.
     annotation_advance: f32,
     annotation_size: f32,
@@ -163,8 +169,8 @@ impl Atom {
         Self {
             item,
             advance: 0.0,
-            run: None,
-            annotation: None,
+            runs: Vec::new(),
+            annotation: Vec::new(),
             annotation_advance: 0.0,
             annotation_size: 0.0,
             ascent: 0.0,
@@ -362,13 +368,23 @@ impl Inline<'_> {
             &mut marks,
         );
         let marks = merge_atoms(item, marks);
-        if let Some(run) = marks.run {
+        if !marks.runs.is_empty() {
             atom.annotation_advance = marks.advance;
             atom.annotation_size = annotation_style.font_size;
-            atom.annotation = Some(run);
-            // The group is as long as its longer half, and the shorter one
-            // centres against it.
-            atom.advance = atom.advance.max(marks.advance);
+            atom.annotation = marks.runs;
+            // A reading longer than its base hangs over the text either side
+            // of it. Only the length no overhang covers parts the base from
+            // its neighbours, and the base then centres in what it takes.
+            let widened = atom
+                .advance
+                .max(marks.advance - 2.0 * RUBY_OVERHANG * style.font_size);
+            let centred = (widened - atom.advance) / 2.0;
+            if centred > 0.0 {
+                for glyph in atom.runs.iter_mut().flat_map(|run| &mut run.glyphs) {
+                    glyph.along += centred;
+                }
+            }
+            atom.advance = widened;
         }
         atom.line_height = style.line_height;
         out.push(atom);
@@ -584,7 +600,7 @@ impl Inline<'_> {
 
         out.push(Atom {
             advance: step + style.letter_spacing + style.embolden + gap,
-            run: Some(Run {
+            runs: vec![Run {
                 face,
                 size: style.font_size,
                 color: style.color,
@@ -597,7 +613,7 @@ impl Inline<'_> {
                     along: along - leading * style.font_size,
                     across,
                 }],
-            }),
+            }],
             ascent,
             descent,
             line_height: style.line_height,
@@ -728,7 +744,7 @@ impl Inline<'_> {
 
         out.push(Atom {
             advance: pen,
-            run: Some(Run {
+            runs: vec![Run {
                 face: face_id,
                 size: style.font_size,
                 color: style.color,
@@ -736,7 +752,7 @@ impl Inline<'_> {
                 underline: style.underline,
                 line_through: style.line_through,
                 glyphs,
-            }),
+            }],
             ascent,
             descent,
             line_height: style.line_height,
@@ -760,34 +776,28 @@ fn reach(face: &Face, size: f32, orientation: Orientation) -> (f32, f32) {
     }
 }
 
-/// Join consecutive shaped pieces into one atom, keeping the first face.
-/// Used where the caller needs a single indivisible piece.
+/// Join consecutive shaped pieces into one indivisible atom, keeping every
+/// run they drew and joining neighbours that share a face.
 fn merge_atoms(item: usize, atoms: Vec<Atom>) -> Atom {
     let mut merged = Atom::empty(item);
     for atom in atoms {
-        if let Some(run) = atom.run {
-            match &mut merged.run {
-                Some(held) if held.face == run.face && held.size == run.size => {
-                    held.glyphs
-                        .extend(run.glyphs.into_iter().map(|glyph| Glyph {
-                            along: glyph.along + merged.advance,
-                            ..glyph
-                        }));
+        for run in atom.runs {
+            let glyphs = run.glyphs.into_iter().map(|glyph| Glyph {
+                along: glyph.along + merged.advance,
+                ..glyph
+            });
+            match merged.runs.last_mut() {
+                Some(held)
+                    if held.face == run.face
+                        && held.size == run.size
+                        && held.orientation == run.orientation =>
+                {
+                    held.glyphs.extend(glyphs);
                 }
-                Some(_) => {}
-                slot @ None => {
-                    *slot = Some(Run {
-                        glyphs: run
-                            .glyphs
-                            .into_iter()
-                            .map(|glyph| Glyph {
-                                along: glyph.along + merged.advance,
-                                ..glyph
-                            })
-                            .collect(),
-                        ..run
-                    })
-                }
+                _ => merged.runs.push(Run {
+                    glyphs: glyphs.collect(),
+                    ..run
+                }),
             }
         }
         merged.advance += atom.advance;
@@ -895,6 +905,7 @@ impl Inline<'_> {
                     body,
                     baseline,
                     ascent,
+                    measure: available,
                     start,
                     spread,
                     hyphen,
@@ -932,15 +943,24 @@ impl Inline<'_> {
         let body_block = line.block;
         let mut inline = line.start;
         let mut pending: Option<Pending> = None;
+        // Where the reading before this one ended: no two overlap, and none
+        // hangs past either end of the line.
+        let mut taken = 0.0f32;
 
         for atom in atoms {
-            if let Some(annotation) = &atom.annotation {
-                out.push(self.annotate(&line, items, atom, annotation, inline));
+            if !atom.annotation.is_empty() {
+                let centred = inline + (atom.advance - atom.annotation_advance) / 2.0;
+                let last = (line.measure - atom.annotation_advance).max(taken);
+                let at = centred.clamp(taken, last);
+                for run in &atom.annotation {
+                    out.push(self.annotate(&line, items, atom, run, at));
+                }
+                taken = at + atom.annotation_advance;
             }
 
-            match &atom.run {
-                Some(run)
-                    if atom.annotation.is_none()
+            match atom.runs.as_slice() {
+                [run]
+                    if atom.annotation.is_empty()
                         && pending
                             .as_ref()
                             .is_some_and(|held| held.continues(atom.item, run)) =>
@@ -953,7 +973,7 @@ impl Inline<'_> {
                     }));
                     held.end = inline + atom.advance;
                 }
-                Some(run) => {
+                [run, rest @ ..] => {
                     self.flush(items, pending.take(), &line, body_block, out);
                     pending = Some(Pending {
                         item: atom.item,
@@ -961,8 +981,22 @@ impl Inline<'_> {
                         end: inline + atom.advance,
                         run: run.clone(),
                     });
+                    // A run the atom took a second face or orientation for
+                    // draws beside the first, its glyphs already placed.
+                    for run in rest {
+                        out.push(self.run_fragment(
+                            items,
+                            atom.item,
+                            inline,
+                            body_block,
+                            atom.advance,
+                            line.body,
+                            line.baseline,
+                            run.clone(),
+                        ));
+                    }
                 }
-                None => {
+                [] => {
                     self.flush(items, pending.take(), &line, body_block, out);
                     if let Some(fragment) =
                         self.replaced(items, atom, inline, body_block, line.baseline)
@@ -990,15 +1024,15 @@ impl Inline<'_> {
         }
     }
 
-    /// A ruby annotation, centred along its base and set against the edge of
-    /// its em box.
+    /// A ruby annotation, starting `at` along the line and set against the
+    /// edge of its em box.
     fn annotate(
         &self,
         line: &Line,
         items: &[Item<'_>],
         atom: &Atom,
         annotation: &Run,
-        inline: f32,
+        at: f32,
     ) -> Fragment {
         // The strip sits outside the line, at its em boxes' start edge.
         let em_start = line.block + line.baseline - line.ascent;
@@ -1013,7 +1047,7 @@ impl Inline<'_> {
         self.run_fragment(
             items,
             atom.item,
-            inline + (atom.advance - atom.annotation_advance) / 2.0,
+            at,
             block,
             atom.annotation_advance,
             atom.annotation_size,
@@ -1105,7 +1139,8 @@ impl Inline<'_> {
         baseline: f32,
         out: &mut Vec<Fragment>,
     ) {
-        let Some(run) = &atom.run else { return };
+        // The hyphen takes the face the broken word ended in.
+        let Some(run) = atom.runs.last() else { return };
         let loaded = self.fonts.face(run.face);
         let id = loaded.outline().glyph_id('-');
         if id.0 == 0 {
@@ -1145,6 +1180,8 @@ struct Line {
     baseline: f32,
     /// Tallest ascent on the line, which is where its em boxes begin.
     ascent: f32,
+    /// The whole inline size the line was broken to.
+    measure: f32,
     /// Where the first atom starts along the line, and how far justification
     /// pushes each one after it.
     start: f32,
@@ -1414,6 +1451,129 @@ mod tests {
             "line baseline {} in a body of {}",
             upright.baseline,
             line.rect.height
+        );
+    }
+
+    /// A reading an em longer than its base hangs half an em over the text
+    /// at each end instead of parting it, and a reading longer than that
+    /// parts the text by the rest.
+    #[test]
+    fn a_long_reading_hangs_over_the_text_beside_it() {
+        let mut fonts = Fonts::new();
+        let computed = ComputedStyle::default();
+        if fonts.select(&computed, '亜').is_none() {
+            return; // the host carries no face for the script
+        }
+        let style = TextStyle {
+            computed: &computed,
+            font_size: EM,
+            line_height: EM,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            embolden: 0.0,
+            underline: false,
+            line_through: false,
+            preserve_spaces: false,
+        };
+        let annotation_style = TextStyle {
+            font_size: EM / 2.0,
+            line_height: EM / 2.0,
+            ..style
+        };
+        let group = |annotation: &str| Item::Ruby {
+            source: NodeId(0),
+            style,
+            base: "亜亜亜".to_string(),
+            annotation_style,
+            annotation: annotation.to_string(),
+        };
+        let extent = |item, fonts: &mut Fonts| {
+            Inline {
+                fonts,
+                axis: Axis::VerticalRl,
+                hyphenator: None,
+            }
+            .atoms(&[item])
+            .iter()
+            .map(|atom| atom.advance)
+            .sum::<f32>()
+        };
+
+        // Eight half-em readings come to four ems over a base of three: the
+        // group stays three ems long, half an em hanging off each end.
+        assert!((extent(group("ああああああああ"), &mut fonts) - 3.0 * EM).abs() < 0.01);
+        // Nine come to four and a half, and the half the overhang cannot
+        // take widens the group.
+        assert!((extent(group("あああああああああ"), &mut fonts) - 3.5 * EM).abs() < 0.01);
+    }
+
+    /// A ruby base that takes a second face, or reads at a second
+    /// orientation, draws every run it took and not just the first.
+    #[test]
+    fn a_ruby_base_of_two_faces_draws_both_of_them() {
+        let mut fonts = Fonts::new();
+        let computed = ComputedStyle::default();
+        if fonts.select(&computed, 'A').is_none() || fonts.select(&computed, '亜').is_none() {
+            return; // the host carries no face for one of them
+        }
+        let style = TextStyle {
+            computed: &computed,
+            font_size: EM,
+            line_height: EM,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            embolden: 0.0,
+            underline: false,
+            line_through: false,
+            preserve_spaces: false,
+        };
+        let items = vec![Item::Ruby {
+            source: NodeId(0),
+            style,
+            base: "亜A".to_string(),
+            annotation_style: TextStyle {
+                font_size: EM / 2.0,
+                line_height: EM / 2.0,
+                ..style
+            },
+            annotation: "ああ".to_string(),
+        }];
+        let lines = Inline {
+            fonts: &mut fonts,
+            axis: Axis::VerticalRl,
+            hyphenator: None,
+        }
+        .lay_out(&items, 20.0 * EM, 0.0, TextAlign::Start, EM);
+
+        let line = lines.fragments.first().expect("one line");
+        let drawn: Vec<&GlyphRun> = line
+            .children
+            .iter()
+            .filter_map(|child| match &child.content {
+                Content::Glyphs(run) => Some(run),
+                _ => None,
+            })
+            .collect();
+        let glyphs: usize = drawn.iter().map(|run| run.glyphs.len()).sum();
+        // The reading, the ideograph and the letter, which stand three ways.
+        assert_eq!(glyphs, 4, "{drawn:#?}");
+        assert!(
+            drawn
+                .iter()
+                .any(|run| run.orientation == Orientation::Sideways),
+            "the letter lies on its side: {drawn:#?}"
         );
     }
 

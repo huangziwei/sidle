@@ -26,6 +26,8 @@ pub enum Overlay {
     None,
     Aa,
     GoTo,
+    /// The screen `Go To` opens for a page or location number.
+    PageOrLocation,
     /// Where a phrase occurs in the book.
     Search,
     /// The pages of the chapter, one at a time or nine at a time.
@@ -108,6 +110,10 @@ pub enum Action {
     GoToChapter(usize),
     GoToBeginning,
     GoToEnd,
+    /// Whether the number being typed names a page or a location.
+    Numbering(goto::Numbering),
+    /// Open the place that number names.
+    GoToNumber,
     /// Open the page a search result was found on.
     GoToFound(usize),
 }
@@ -252,6 +258,10 @@ pub struct Chrome {
     /// How far the open list is scrolled, in panel dots, held to what the
     /// list has to show.
     pub scroll: f32,
+    /// Where the text field of the panel in hand sits, in panel dots, for an
+    /// input method to show its candidates beside. `None` where the panel
+    /// takes no text.
+    pub field: Option<Rect>,
     hits: Vec<Hit>,
 }
 
@@ -267,6 +277,7 @@ impl Chrome {
     /// Forget the controls the last draw pass placed.
     pub fn begin(&mut self) {
         self.hits.clear();
+        self.field = None;
     }
 
     /// The controls the last draw pass placed.

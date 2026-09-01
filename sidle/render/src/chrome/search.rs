@@ -27,6 +27,9 @@ pub struct Found {
 pub struct Search<'a> {
     /// The phrase as it has been typed so far.
     pub query: &'a str,
+    /// What an input method is composing after it, underlined until the
+    /// method commits it into `query`.
+    pub composing: &'a str,
     /// Where it was found, in reading order.
     pub found: &'a [Found],
     /// Whether the book has been searched for the phrase in hand.
@@ -57,21 +60,46 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, search: &Search<'_
     let left = card.x + 40.0 * unit;
     let right = card.right() - 40.0 * unit;
 
-    // The field: the glass, then the phrase or the hint standing in for it.
+    // The field: the glass, then the phrase or the hint standing in for it,
+    // and after the phrase whatever an input method is still composing.
     let glass = Rect::new(left, card.y + 26.0 * unit, 44.0 * unit, 44.0 * unit);
     canvas.icon(icon::SEARCH, glass, theme.ink);
-    let (typed, ink) = match search.query.is_empty() {
+    let size = 40.0 * unit;
+    let at = (glass.right() + 20.0 * unit, card.y + 28.0 * unit);
+    let empty = search.query.is_empty() && search.composing.is_empty();
+    let (typed, ink) = match empty {
         true => (HINT, theme.faint),
         false => (search.query, theme.ink),
     };
-    canvas.text(
-        typed,
-        40.0 * unit,
-        ink,
-        false,
-        (glass.right() + 20.0 * unit, card.y + 28.0 * unit),
-        Align::Left,
-    );
+    let drawn = canvas.text(typed, size, ink, false, at, Align::Left);
+    if !search.composing.is_empty() {
+        let x = match empty {
+            true => at.0,
+            false => drawn.right(),
+        };
+        let composed = canvas.text(
+            search.composing,
+            size,
+            theme.ink,
+            false,
+            (x, at.1),
+            Align::Left,
+        );
+        canvas.rule(
+            composed.x,
+            composed.right(),
+            composed.bottom() - 6.0 * unit,
+            3.0 * unit,
+            theme.ink,
+        );
+    }
+    // The field's own box, where an input method puts its candidates.
+    chrome.field = Some(Rect::new(
+        at.0,
+        at.1,
+        right - 60.0 * unit - at.0,
+        canvas.line_of(size, false),
+    ));
     let cross = Rect::new(
         right - 44.0 * unit,
         card.y + 26.0 * unit,
@@ -210,6 +238,7 @@ mod tests {
         let card = |found: &[Found], searched| {
             stated(&Search {
                 query: "cat",
+                composing: "",
                 found,
                 searched,
             })
