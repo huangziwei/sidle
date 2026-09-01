@@ -273,6 +273,13 @@ impl<'a> Painter<'a> {
             return;
         }
         let thickness = (run.size / 16.0).max(1.0);
+        // A quarter-turned run's own downward points at the page's left edge,
+        // so its rules sit the other side of its baseline from an upright
+        // run's.
+        let side = match run.orientation {
+            Orientation::Sideways => -1.0,
+            _ => 1.0,
+        };
         let along = |offset: f32| match run.orientation {
             Orientation::Horizontal => Rect::new(
                 rect.x,
@@ -281,7 +288,7 @@ impl<'a> Painter<'a> {
                 thickness,
             ),
             _ => Rect::new(
-                rect.x + run.baseline + offset,
+                rect.x + run.baseline + offset * side,
                 rect.y,
                 thickness,
                 rect.height,

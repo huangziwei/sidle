@@ -42,7 +42,9 @@ use sidle_render::chrome::{
 use sidle_render::font::Script as FaceScript;
 use sidle_render::paint::{Cache, Painter};
 use sidle_render::settings::{Device, Direction, Panel, Script, Stop, reading_families};
-use sidle_render::{Axis, BookResources, Fonts, Layout, Node, Pages, Settings, Size, Viewport};
+use sidle_render::{
+    Axis, BookResources, Edges, Fonts, Layout, Node, Pages, Settings, Size, Viewport,
+};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -206,6 +208,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     if spine.is_empty() {
         return Err(format!("{} has no chapters", path.display()).into());
     }
+    // The pixel box a section states for itself — a cover, or a page of a
+    // fixed-layout book. `None` for a section that reflows.
+    let boxes: Vec<Option<Size>> = book
+        .spine()
+        .iter()
+        .map(|entry| {
+            entry
+                .viewport
+                .map(|(width, height)| Size::new(width as f32, height as f32))
+        })
+        .collect();
     let positions = book.position_map();
     let contents = contents_of(&mut book, &spine, &positions);
     let fixed = fixed_rows(&book, &spine);
@@ -258,6 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         language,
         axis,
         spine,
+        boxes,
         contents,
         positions,
         resources,
@@ -466,6 +480,8 @@ struct Reader {
     language: String,
     axis: Axis,
     spine: Vec<ChapterId>,
+    /// The box each section states for itself, in the spine's order.
+    boxes: Vec<Option<Size>>,
     contents: Vec<goto::Entry>,
     positions: Option<PositionMap>,
     resources: BookResources,
@@ -628,16 +644,56 @@ impl Reader {
             .held(self.settings.orientation)
     }
 
+    /// The box the chapter in hand states for itself, where it states one.
+    fn page_box(&self) -> Option<Size> {
+        self.boxes.get(self.chapter).copied().flatten()
+    }
+
     /// The area a page is laid out into: the panel and the margin ladder
     /// the book's own direction takes. The bars are drawn over it.
+    ///
+    /// A chapter that states a box of its own is laid out in that box
+    /// instead, dot for dot and with none of the reading settings — margins,
+    /// type size and spacing shape a reflowed column, and this page is not
+    /// one. [`Reader::placed`] scales the result to the panel.
     fn viewport(&self) -> Viewport {
         let panel = self.panel_for();
+        if let Some(page) = self.page_box() {
+            return Viewport {
+                size: page,
+                margins: Edges::ZERO,
+                metrics: panel.metrics(),
+                ..Viewport::default()
+            };
+        }
         let direction = if self.axis.is_vertical() {
             Direction::Vertical
         } else {
             Direction::Horizontal
         };
         self.settings.viewport(&panel, &self.language, direction)
+    }
+
+    /// How the laid-out page meets the panel: the scale it is drawn at, and
+    /// where the start of its window lands. A reflowed page is drawn dot for
+    /// dot where pagination put it; a page with a box of its own is scaled to
+    /// fit the panel and centred in it.
+    fn placed(&self, panel: Size) -> (f32, (f32, f32)) {
+        let origin = self
+            .laid
+            .as_ref()
+            .map_or((0.0, 0.0), |laid| laid.pages.origin(self.page));
+        let Some(page) = self.page_box() else {
+            return (1.0, origin);
+        };
+        let scale = (panel.width / page.width).min(panel.height / page.height);
+        (
+            scale,
+            (
+                origin.0 + (panel.width / scale - page.width) / 2.0,
+                origin.1 + (panel.height / scale - page.height) / 2.0,
+            ),
+        )
     }
 
     fn relayout(&mut self) {
@@ -1216,12 +1272,13 @@ impl Reader {
                 panel.size.height.max(1.0) as u32,
             )?;
             sheet.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
+            let (page_scale, origin) = self.placed(panel.size);
             if let Some(laid) = &self.laid {
                 Painter::cached(&self.fonts, &self.resources, &mut self.cache).paint(
                     &laid.root,
                     laid.pages.window(self.page),
-                    laid.pages.origin(self.page),
-                    1.0,
+                    origin,
+                    page_scale,
                     &mut sheet.as_mut(),
                 );
             }
@@ -1246,7 +1303,9 @@ impl Reader {
         self.chrome.begin();
         let at = self.position();
         let shown = self.shown();
-        let mode = shown.settings.progress;
+        // A page with a box of its own carries no line below it: the box is
+        // the whole panel.
+        let mode = self.page_box().is_none().then_some(shown.settings.progress);
         let overlay = self.chrome.overlay;
         let leftward = self.pages_leftward();
         let contents_here = self.chapter;

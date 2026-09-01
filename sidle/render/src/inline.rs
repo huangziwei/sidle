@@ -9,7 +9,7 @@ use bokai::style::{Color, ComputedStyle, TextAlign, WhiteSpace};
 use bokai::text::hyphenation::Hyphenator;
 use unicode_linebreak::BreakOpportunity;
 
-use crate::font::{FaceId, Fonts};
+use crate::font::{Face, FaceId, Fonts};
 use crate::fragment::{Content, Fragment, Glyph, GlyphRun, Node, Orientation};
 use crate::geom::{Axis, Rect};
 use crate::text;
@@ -578,15 +578,7 @@ impl Inline<'_> {
         } else {
             (shaped.x_offset * scale, -shaped.y_offset * scale)
         };
-        let (ascent, descent) = if vertical {
-            (style.font_size / 2.0, style.font_size / 2.0)
-        } else {
-            let loaded = self.fonts.face(face);
-            (
-                loaded.ascent(style.font_size),
-                loaded.descent(style.font_size),
-            )
-        };
+        let (ascent, descent) = reach(self.fonts.face(face), style.font_size, orientation);
         let gap = if is_collapsible(ch) {
             style.word_spacing
         } else {
@@ -735,16 +727,7 @@ impl Inline<'_> {
             pen += step + style.letter_spacing + style.embolden + gap;
         }
 
-        let (ascent, descent) = if orientation == Orientation::Upright {
-            // An upright glyph sits centred on the line, reaching half an em
-            // to each side of it.
-            (style.font_size / 2.0, style.font_size / 2.0)
-        } else {
-            (
-                loaded.ascent(style.font_size),
-                loaded.descent(style.font_size),
-            )
-        };
+        let (ascent, descent) = reach(loaded, style.font_size, orientation);
 
         out.push(Atom {
             advance: pen,
@@ -763,6 +746,23 @@ impl Inline<'_> {
             is_space,
             ..Atom::empty(item)
         });
+    }
+}
+
+/// How far a run of `face` at `size` reaches either side of the line's
+/// baseline. A horizontal run hangs from it by the face's own ascent and
+/// descent. An upright glyph on a vertical line sits centred, half an em each
+/// way. A quarter-turned one sits centred too, so it reaches half its own
+/// height each way and its alphabetic baseline moves off the line's —
+/// see [`Inline::run_baseline`].
+fn reach(face: &Face, size: f32, orientation: Orientation) -> (f32, f32) {
+    match orientation {
+        Orientation::Horizontal => (face.ascent(size), face.descent(size)),
+        Orientation::Upright => (size / 2.0, size / 2.0),
+        Orientation::Sideways => {
+            let half = (face.ascent(size) + face.descent(size)) / 2.0;
+            (half, half)
+        }
     }
 }
 
@@ -1077,12 +1077,30 @@ impl Inline<'_> {
             size: run.size,
             color: run.color,
             orientation: run.orientation,
+            baseline: self.run_baseline(&run, baseline),
             glyphs: run.glyphs,
-            baseline,
             underline: run.underline,
             line_through: run.line_through,
         });
         fragment.as_kind(Node::Run)
+    }
+
+    /// Where `run`'s own baseline sits, `line` being the line's. They are the
+    /// same but for a quarter-turned run: it stands centred on the column,
+    /// while the letters hang from a baseline half the gap between its ascent
+    /// and its descent away. The tops of the letters face the page's right
+    /// edge, which is where the line's blocks start in [`Axis::VerticalRl`]
+    /// and where they end in [`Axis::VerticalLr`].
+    fn run_baseline(&self, run: &Run, line: f32) -> f32 {
+        if run.orientation != Orientation::Sideways {
+            return line;
+        }
+        let face = self.fonts.face(run.face);
+        let shift = (face.ascent(run.size) - face.descent(run.size)) / 2.0;
+        match self.axis {
+            Axis::VerticalRl => line + shift,
+            _ => line - shift,
+        }
     }
 
     /// The hyphen a broken word takes at the end of its line.
@@ -1119,7 +1137,7 @@ impl Inline<'_> {
                 along: 0.0,
                 across: 0.0,
             }],
-            baseline,
+            baseline: self.run_baseline(run, baseline),
             underline: false,
             line_through: false,
         });
@@ -1334,6 +1352,80 @@ mod tests {
     #[test]
     fn the_vertical_colon_takes_one_and_a_half_ems() {
         assert_eq!(line_extent("亜：亜"), 3.5 * EM);
+    }
+
+    /// A quarter-turned run stands centred on the column, like the upright
+    /// glyphs beside it: its own baseline sits half the gap between its
+    /// ascent and its descent off the line's, and the line stays centred in
+    /// the box it claims.
+    #[test]
+    fn a_quarter_turned_run_stands_centred_on_the_column() {
+        let mut fonts = Fonts::new();
+        let computed = ComputedStyle::default();
+        if fonts.select(&computed, 'A').is_none() || fonts.select(&computed, '亜').is_none() {
+            return; // the host carries no face for one of them
+        }
+        let style = TextStyle {
+            computed: &computed,
+            font_size: EM,
+            line_height: EM * 1.75,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            embolden: 0.0,
+            underline: false,
+            line_through: false,
+            preserve_spaces: false,
+        };
+        let items = vec![Item::Text {
+            source: NodeId(0),
+            style,
+            text: "亜A亜".to_string(),
+        }];
+        let lines = Inline {
+            fonts: &mut fonts,
+            axis: Axis::VerticalRl,
+            hyphenator: None,
+        }
+        .lay_out(&items, 20.0 * EM, 0.0, TextAlign::Start, EM * 1.75);
+
+        let line = lines.fragments.first().expect("one line");
+        let runs: Vec<&GlyphRun> = line
+            .children
+            .iter()
+            .filter_map(|child| match &child.content {
+                Content::Glyphs(run) => Some(run),
+                _ => None,
+            })
+            .collect();
+        let upright = runs
+            .iter()
+            .find(|run| run.orientation == Orientation::Upright)
+            .expect("the ideographs stand upright");
+        let sideways = runs
+            .iter()
+            .find(|run| run.orientation == Orientation::Sideways)
+            .expect("the letter lies on its side");
+
+        let face = fonts.face(sideways.face);
+        let off_axis = (face.ascent(EM) - face.descent(EM)) / 2.0;
+        assert!(
+            (sideways.baseline - upright.baseline - off_axis).abs() < 0.01,
+            "sideways {} upright {} off_axis {off_axis}",
+            sideways.baseline,
+            upright.baseline
+        );
+        assert!(
+            (upright.baseline - line.rect.height / 2.0).abs() < 0.01,
+            "line baseline {} in a body of {}",
+            upright.baseline,
+            line.rect.height
+        );
     }
 
     #[test]

@@ -722,8 +722,10 @@ impl KfxImporter {
         importer.build_image_index();
         // Fixed-layout books: split each section into per-page spine entries
         // (needs `content_ppd` from `derive_writing_direction` for the
-        // spread pairing).
+        // spread pairing). Reflowable books instead carry the box of any
+        // section that states one, the cover among them.
         importer.expand_fxl_spine()?;
+        importer.read_page_boxes();
         // Content name → location, which a per-token text lookup reads
         // directly.
         importer.index_content_entities();
@@ -1235,25 +1237,9 @@ impl KfxImporter {
         }
     }
 
-    /// Replace the one-entry-per-section spine with one entry per page. A
-    /// section's first page template is a `page_spread` / `facing_page`
-    /// container or a single leaf page, named `{section}[-left|-right]`.
-    fn expand_fxl_spine(&mut self) -> io::Result<()> {
-        if !self.metadata.fixed_layout || self.section_names.is_empty() {
-            return Ok(());
-        }
-
-        // Structure ($608) entity name → location, for `page_templates`
-        // entries holding a symbol reference.
-        for e in &self.entities {
-            if e.type_id == KfxSymbol::Structure as u32 {
-                let name = self.symbols.resolve(e.id as u64).to_string();
-                self.structures_by_name.entry(name).or_insert(*e);
-            }
-        }
-
-        // Section name → FIRST page template, one pass over the section
-        // entities. Only needed for the leaf walk below.
+    /// Each section's first page template, by section name, in one pass over
+    /// the section entities.
+    fn section_templates(&mut self) -> HashMap<String, IonValue> {
         let mut templates: HashMap<String, IonValue> = HashMap::new();
         let sec_locs: Vec<EntityLoc> = self
             .entities
@@ -1283,6 +1269,50 @@ impl KfxImporter {
             };
             templates.entry(name).or_insert(t0);
         }
+        templates
+    }
+
+    /// Carry each section's own `fixed_width`/`fixed_height` onto its spine
+    /// entry. In a reflowable book the cover is such a section: a page
+    /// authored to a pixel box, which the reader scales to the screen rather
+    /// than reflowing into the reading area. A fixed-layout book reads its
+    /// boxes per page in [`Self::expand_fxl_spine`] instead.
+    fn read_page_boxes(&mut self) {
+        if self.metadata.fixed_layout {
+            return;
+        }
+        let templates = self.section_templates();
+        for (entry, section) in self.spine.iter_mut().zip(&self.section_names) {
+            entry.viewport = templates
+                .get(section)
+                .and_then(|template| template.unwrap_annotated().as_struct())
+                .and_then(|fields| {
+                    Some((
+                        fxl::read_px(fields, KfxSymbol::FixedWidth)?,
+                        fxl::read_px(fields, KfxSymbol::FixedHeight)?,
+                    ))
+                });
+        }
+    }
+
+    /// Replace the one-entry-per-section spine with one entry per page. A
+    /// section's first page template is a `page_spread` / `facing_page`
+    /// container or a single leaf page, named `{section}[-left|-right]`.
+    fn expand_fxl_spine(&mut self) -> io::Result<()> {
+        if !self.metadata.fixed_layout || self.section_names.is_empty() {
+            return Ok(());
+        }
+
+        // Structure ($608) entity name → location, for `page_templates`
+        // entries holding a symbol reference.
+        for e in &self.entities {
+            if e.type_id == KfxSymbol::Structure as u32 {
+                let name = self.symbols.resolve(e.id as u64).to_string();
+                self.structures_by_name.entry(name).or_insert(*e);
+            }
+        }
+
+        let templates = self.section_templates();
 
         let old_sections = std::mem::take(&mut self.section_names);
         self.spine.clear();

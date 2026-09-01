@@ -43,9 +43,10 @@ pub struct SpineEntry {
     /// occupies (source's declared `page-spread-*`). `None` for reflowable
     /// books or FXL pages with no declared side. See [`crate::model::PageSpread`].
     pub page_spread: Option<crate::model::PageSpread>,
-    /// For a fixed-layout page, its pixel viewport `(width, height)` — the
-    /// `<meta name="viewport">` box the page is authored to. `None` for
-    /// reflowable documents.
+    /// The pixel box the page is authored to, where the source states one:
+    /// `<meta name="viewport">` in EPUB and KF8, `fixed_width`/`fixed_height`
+    /// in KFX. Every page of a fixed-layout book carries one, and so does a
+    /// reflowable book's cover. `None` for a page that reflows.
     pub viewport: Option<(u32, u32)>,
     /// The author-drawn comic panels on this page, in `ordinal` order. Empty
     /// for a page the source gave none. See [`crate::model::Panel`].

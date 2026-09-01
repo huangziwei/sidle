@@ -23,17 +23,19 @@ pub const FOOTER: f32 = 290.0;
 const REVEAL: f32 = 0.14;
 
 /// Draw the progress line, the bars where they are showing, and the areas a
-/// tap acts on. `leftward` states which side of the page carries on.
+/// tap acts on. `mode` is the measure the page states below it, `None` for a
+/// page that states none. `leftward` states which side of the page carries
+/// on.
 pub fn draw(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,
     at: &Position,
-    mode: Progress,
+    mode: Option<Progress>,
     leftward: bool,
 ) {
     if chrome.revealed {
         bars(chrome, canvas, at, mode);
-    } else {
+    } else if let Some(mode) = mode {
         line(canvas, at, mode);
     }
     taps(chrome, canvas, leftward);
@@ -66,7 +68,7 @@ fn line(canvas: &mut Canvas<'_, '_>, at: &Position, mode: Progress) {
 }
 
 /// The toolbar, the title band and the footer, drawn over the page.
-fn bars(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, mode: Progress) {
+fn bars(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, mode: Option<Progress>) {
     let panel = canvas.panel;
     let unit = canvas.unit();
     let side = panel.width * 0.05;
@@ -134,14 +136,16 @@ fn bars(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, mode: P
         (panel.width / 2.0, foot + 30.0 * unit),
         Align::Center,
     );
-    canvas.text(
-        &at.stated(mode),
-        30.0 * unit,
-        theme.ink,
-        false,
-        (panel.width / 2.0, foot + 92.0 * unit),
-        Align::Center,
-    );
+    if let Some(mode) = mode {
+        canvas.text(
+            &at.stated(mode),
+            30.0 * unit,
+            theme.ink,
+            false,
+            (panel.width / 2.0, foot + 92.0 * unit),
+            Align::Center,
+        );
+    }
     views(chrome, canvas, foot + 176.0 * unit, unit);
 }
 
