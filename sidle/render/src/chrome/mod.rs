@@ -84,7 +84,7 @@ pub enum Action {
     Reveal(bool),
     /// Which page of the chapter the scrubber stands at.
     Scrub(usize),
-    /// The page a preview stands for, which the reader opens.
+    /// The page a preview stands for.
     GoToPage(usize),
     /// Whether the scrubber shows nine pages at once.
     Grid(bool),

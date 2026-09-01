@@ -287,8 +287,8 @@ impl Jump {
 }
 
 /// Draw the screen a page or location number is typed into, over the card
-/// that opened it. Every measurement is the dialog's own, in the dots its
-/// artwork is drawn at.
+/// that opened it. Its boxes are stated in the artwork dots [`Canvas::art`]
+/// scales, its type in the panel dots [`Canvas::unit`] does.
 pub fn jump(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, jump: &Jump) {
     let panel = canvas.panel;
     let unit = canvas.unit();

@@ -61,7 +61,7 @@ const USAGE: &str = "usage: sidle-render [--device <name>] [--panel <file>] [--f
 [--pages <n>] [--lines] [--shot <file>] [--open <panel>] [--tab <name>] [--scroll <n>] \
 [--query <text>] [--number <n>] [--reveal] [--grid] [--dark] [--hits] <book>";
 
-/// Words a reader gets through in a minute, which sets the time left.
+/// Words read in a minute, the rate every time left divides by.
 const WORDS_A_MINUTE: f32 = 220.0;
 
 /// Locations one screen of text covers, before a page is laid out.
@@ -81,8 +81,8 @@ const WINDOW_HEIGHT: f32 = 900.0;
 const ROWS_A_LEAP: f32 = 5.0;
 
 /// The host faces standing in for the reading fonts a Kindle carries, best
-/// first: Bookerly's old-style serif for Latin, 明朝 for Japanese — the face
-/// Amazon's own iOS reader sets Japanese in. `--serif` and `--cjk` name others.
+/// first: an old-style serif for Latin, 明朝 for Japanese. `--serif` and
+/// `--cjk` name others.
 const SERIF: [&str; 3] = ["Iowan Old Style", "Charter", "Georgia"];
 const MINCHO: [&str; 3] = ["Hiragino Mincho ProN", "Hiragino Mincho Pro", "YuMincho"];
 const GOTHIC: [&str; 3] = ["Hiragino Sans", "Hiragino Kaku Gothic ProN", "YuGothic"];
@@ -613,7 +613,7 @@ struct Reader {
     view: Option<View>,
     /// The phrase the search card is looking for.
     query: String,
-    /// What the input method is composing, which is not yet part of `query`.
+    /// What an input method is composing, which `query` does not hold.
     preedit: String,
     /// Where it was found, as the card states each place.
     found: Vec<search::Found>,
@@ -888,7 +888,7 @@ impl Reader {
     }
 
     /// Tell the window whether the panel in hand takes text, and where its
-    /// field sits, so the host's input method composes into it.
+    /// field sits for the host's input method to compose into.
     fn hold_ime(&mut self) {
         let Some(view) = &self.view else { return };
         let takes_text = self.chrome.overlay == Overlay::Search;
@@ -905,9 +905,8 @@ impl Reader {
         }
     }
 
-    /// Take what an input method composed. A committed string is typed into
-    /// the field; anything still being composed shows after it. Only the
-    /// search card takes text, so nothing else takes a composition.
+    /// Take what an input method composed: a commit joins `query`, and a
+    /// preedit shows after it. Only the search card takes text.
     fn composed(&mut self, event: Ime) {
         if self.chrome.overlay != Overlay::Search {
             self.preedit.clear();
@@ -1277,8 +1276,7 @@ impl Reader {
     }
 
     /// A key the `Page or Location` field takes, reporting whether it was
-    /// the field's. The device types into it with a number pad, so a
-    /// character that is not a digit is none of the field's business.
+    /// the field's: a digit, a backspace, or the return that opens the place.
     fn dialled(&mut self, key: &Key<&str>) -> bool {
         match key {
             Key::Named(NamedKey::Backspace) => {

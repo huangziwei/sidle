@@ -495,8 +495,8 @@ impl Inline<'_> {
         let Some(hyphenator) = self.hyphenator else {
             return Vec::new();
         };
-        // The reading settings hyphenate every reflowable book that says
-        // nothing; only an explicit `none` turns it off.
+        // Only an explicit `Hyphens::None` stops a word breaking; a style
+        // that declares nothing takes the hyphenator.
         if style.computed.hyphens == Hyphens::None {
             return Vec::new();
         }
@@ -981,8 +981,8 @@ impl Inline<'_> {
                         end: inline + atom.advance,
                         run: run.clone(),
                     });
-                    // A run the atom took a second face or orientation for
-                    // draws beside the first, its glyphs already placed.
+                    // A run `rest` holds took a second face or orientation,
+                    // and draws beside the first at the same `inline`.
                     for run in rest {
                         out.push(self.run_fragment(
                             items,
@@ -1455,8 +1455,7 @@ mod tests {
     }
 
     /// A reading an em longer than its base hangs half an em over the text
-    /// at each end instead of parting it, and a reading longer than that
-    /// parts the text by the rest.
+    /// at each end, and one longer than that parts the text by the rest.
     #[test]
     fn a_long_reading_hangs_over_the_text_beside_it() {
         let mut fonts = Fonts::new();
@@ -1514,7 +1513,7 @@ mod tests {
     }
 
     /// A ruby base that takes a second face, or reads at a second
-    /// orientation, draws every run it took and not just the first.
+    /// orientation, draws every run it took.
     #[test]
     fn a_ruby_base_of_two_faces_draws_both_of_them() {
         let mut fonts = Fonts::new();

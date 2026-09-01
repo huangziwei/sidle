@@ -27,8 +27,8 @@ pub struct Found {
 pub struct Search<'a> {
     /// The phrase as it has been typed so far.
     pub query: &'a str,
-    /// What an input method is composing after it, underlined until the
-    /// method commits it into `query`.
+    /// What an input method is composing after it, drawn underlined and
+    /// carried into `query` on a commit.
     pub composing: &'a str,
     /// Where it was found, in reading order.
     pub found: &'a [Found],
@@ -60,8 +60,8 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, search: &Search<'_
     let left = card.x + 40.0 * unit;
     let right = card.right() - 40.0 * unit;
 
-    // The field: the glass, then the phrase or the hint standing in for it,
-    // and after the phrase whatever an input method is still composing.
+    // The field: the glass, the phrase or the hint standing in for it, and
+    // the composition an input method holds after them.
     let glass = Rect::new(left, card.y + 26.0 * unit, 44.0 * unit, 44.0 * unit);
     canvas.icon(icon::SEARCH, glass, theme.ink);
     let size = 40.0 * unit;
