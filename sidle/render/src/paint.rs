@@ -273,9 +273,7 @@ impl<'a> Painter<'a> {
             return;
         }
         let thickness = (run.size / 16.0).max(1.0);
-        // A quarter-turned run's own downward points at the page's left edge,
-        // so its rules sit the other side of its baseline from an upright
-        // run's.
+        // A `Sideways` run's own downward points at the page's left edge.
         let side = match run.orientation {
             Orientation::Sideways => -1.0,
             _ => 1.0,

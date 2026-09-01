@@ -14,7 +14,7 @@ use bokai::style::Color;
 use tiny_skia::{FillRule, Mask, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 
 use crate::font::Fonts;
-use crate::geom::{Rect, Size};
+use crate::geom::{Axis, Rect, Size};
 use crate::paint::{Cache, Painter};
 use crate::resource::Resources;
 use crate::settings::{Device, Orientation, Panel, Preset, Progress, Settings, Stop};
@@ -152,6 +152,16 @@ pub fn grey(level: u8) -> Color {
         g: level,
         b: level,
         a: 0xff,
+    }
+}
+
+/// Whether the page after one lies to its left. `progression` is the book's
+/// `page-progression-direction`; `axis` answers where it states none.
+pub fn pages_leftward(progression: Option<&str>, axis: Axis) -> bool {
+    match progression {
+        Some("rtl") => true,
+        Some("ltr") => false,
+        _ => axis == Axis::VerticalRl,
     }
 }
 
@@ -618,6 +628,19 @@ impl Resources for NoResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `pages_leftward` takes `progression` at every `axis`, and reads `axis`
+    /// only where `progression` is `None`.
+    #[test]
+    fn a_book_progresses_the_way_it_states_whatever_its_axis() {
+        assert!(pages_leftward(Some("rtl"), Axis::HorizontalTb));
+        assert!(pages_leftward(Some("rtl"), Axis::VerticalRl));
+        assert!(!pages_leftward(Some("ltr"), Axis::HorizontalTb));
+        assert!(!pages_leftward(Some("ltr"), Axis::VerticalRl));
+        assert!(!pages_leftward(None, Axis::HorizontalTb));
+        assert!(pages_leftward(None, Axis::VerticalRl));
+        assert!(!pages_leftward(None, Axis::VerticalLr));
+    }
 
     const LOCATION: i64 = 412;
     const LOCATIONS: i64 = 5108;

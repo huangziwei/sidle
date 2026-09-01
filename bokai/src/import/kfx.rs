@@ -722,8 +722,7 @@ impl KfxImporter {
         importer.build_image_index();
         // Fixed-layout books: split each section into per-page spine entries
         // (needs `content_ppd` from `derive_writing_direction` for the
-        // spread pairing). Reflowable books instead carry the box of any
-        // section that states one, the cover among them.
+        // spread pairing). `read_page_boxes` covers the reflowable ones.
         importer.expand_fxl_spine()?;
         importer.read_page_boxes();
         // Content name → location, which a per-token text lookup reads
@@ -1272,11 +1271,9 @@ impl KfxImporter {
         templates
     }
 
-    /// Carry each section's own `fixed_width`/`fixed_height` onto its spine
-    /// entry. In a reflowable book the cover is such a section: a page
-    /// authored to a pixel box, which the reader scales to the screen rather
-    /// than reflowing into the reading area. A fixed-layout book reads its
-    /// boxes per page in [`Self::expand_fxl_spine`] instead.
+    /// Carry each section's own `fixed_width`/`fixed_height` onto its
+    /// [`SpineEntry::viewport`]. A reflowable book states them on its cover
+    /// section; a fixed-layout one is served by [`Self::expand_fxl_spine`].
     fn read_page_boxes(&mut self) {
         if self.metadata.fixed_layout {
             return;
@@ -1866,8 +1863,8 @@ impl KfxImporter {
         for (sec_name, template) in section_templates {
             self.section_templates.entry(sec_name).or_insert(template);
         }
-        // Retained for story-name resolution outside the section hop (spread
-        // pages, container story references on the fixed-layout path).
+        // `storylines_by_name` serves story-name resolution outside the
+        // section hop: spread pages and container story references.
         self.storylines_by_name = storyline_map;
 
         self.section_storylines_indexed = true;
@@ -2029,8 +2026,7 @@ impl KfxImporter {
         for loc in locs {
             if let Ok(elem) = self.parse_entity_ion(loc)
                 && let Some(fields) = elem.as_struct()
-                // The scan this replaces skipped a name-matching entity
-                // with no content_list; only list-bearing entities index.
+                // Only an entity carrying a `content_list` indexes.
                 && get_field(fields, sym!(ContentList)).is_some_and(|v| v.as_list().is_some())
                 && let Some(name) = get_field(fields, sym!(Name))
                     .and_then(|v| self.get_symbol_text(v))

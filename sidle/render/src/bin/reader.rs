@@ -36,7 +36,7 @@ use std::rc::Rc;
 
 use bokai::model::{AnchorTarget, Book, ChapterId, LandmarkType, Match, PositionMap};
 use sidle_render::chrome::{
-    AaPane, AaTab, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto, scrub,
+    self, AaPane, AaTab, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto, scrub,
     search,
 };
 use sidle_render::font::Script as FaceScript;
@@ -204,12 +204,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let title = book.metadata().title.clone();
     let language = book.metadata().language.clone();
     let axis: Axis = book.writing_mode().into();
+    let leftward =
+        chrome::pages_leftward(book.metadata().page_progression_direction.as_deref(), axis);
     let spine: Vec<ChapterId> = book.spine().iter().map(|entry| entry.id).collect();
     if spine.is_empty() {
         return Err(format!("{} has no chapters", path.display()).into());
     }
-    // The pixel box a section states for itself — a cover, or a page of a
-    // fixed-layout book. `None` for a section that reflows.
+    // `SpineEntry::viewport` per section, `None` where the section reflows.
     let boxes: Vec<Option<Size>> = book
         .spine()
         .iter()
@@ -270,6 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         title,
         language,
         axis,
+        leftward,
         spine,
         boxes,
         contents,
@@ -479,6 +481,8 @@ struct Reader {
     title: String,
     language: String,
     axis: Axis,
+    /// Whether the book progresses right to left, from its own metadata.
+    leftward: bool,
     spine: Vec<ChapterId>,
     /// The box each section states for itself, in the spine's order.
     boxes: Vec<Option<Size>>,
@@ -649,13 +653,9 @@ impl Reader {
         self.boxes.get(self.chapter).copied().flatten()
     }
 
-    /// The area a page is laid out into: the panel and the margin ladder
-    /// the book's own direction takes. The bars are drawn over it.
-    ///
-    /// A chapter that states a box of its own is laid out in that box
-    /// instead, dot for dot and with none of the reading settings — margins,
-    /// type size and spacing shape a reflowed column, and this page is not
-    /// one. [`Reader::placed`] scales the result to the panel.
+    /// The area a page is laid out into: the panel and the margin ladder the
+    /// book's own direction takes, or a [`Reader::page_box`] at its stated
+    /// size with no margins and no reading settings.
     fn viewport(&self) -> Viewport {
         let panel = self.panel_for();
         if let Some(page) = self.page_box() {
@@ -674,10 +674,9 @@ impl Reader {
         self.settings.viewport(&panel, &self.language, direction)
     }
 
-    /// How the laid-out page meets the panel: the scale it is drawn at, and
-    /// where the start of its window lands. A reflowed page is drawn dot for
-    /// dot where pagination put it; a page with a box of its own is scaled to
-    /// fit the panel and centred in it.
+    /// The scale the laid-out page is drawn at and where the start of its
+    /// window lands in `panel`: `Pages::origin` at 1.0, and a
+    /// [`Reader::page_box`] scaled to fit `panel` and centred in it.
     fn placed(&self, panel: Size) -> (f32, (f32, f32)) {
         let origin = self
             .laid
@@ -880,10 +879,9 @@ impl Reader {
         row * panel.size.height / bars::REFERENCE
     }
 
-    /// Whether the page after this one lies to its left, which is what a
-    /// book stacking blocks right to left does.
+    /// Whether the page after this one lies to its left.
     fn pages_leftward(&self) -> bool {
-        self.axis == Axis::VerticalRl
+        self.leftward
     }
 
     /// Turn `by` pages, running on into the next chapter at either end. The
@@ -1303,8 +1301,7 @@ impl Reader {
         self.chrome.begin();
         let at = self.position();
         let shown = self.shown();
-        // A page with a box of its own carries no line below it: the box is
-        // the whole panel.
+        // A chapter with a `page_box` states no progress below it.
         let mode = self.page_box().is_none().then_some(shown.settings.progress);
         let overlay = self.chrome.overlay;
         let leftward = self.pages_leftward();

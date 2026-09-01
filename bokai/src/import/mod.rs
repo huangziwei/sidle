@@ -1,7 +1,6 @@
-//! Format importers for reading ebook files.
-//!
-//! [`Importer`] runs two tracks over one file: `load_chapter` for normalized
-//! IR, `load_raw` and `load_asset` for the source's own bytes.
+//! Format importers. [`Importer`] runs two tracks over one file:
+//! `load_chapter` for normalized IR, `load_raw` and `load_asset` for the
+//! source's own bytes.
 
 mod azw3;
 mod epub;
@@ -43,10 +42,9 @@ pub struct SpineEntry {
     /// occupies (source's declared `page-spread-*`). `None` for reflowable
     /// books or FXL pages with no declared side. See [`crate::model::PageSpread`].
     pub page_spread: Option<crate::model::PageSpread>,
-    /// The pixel box the page is authored to, where the source states one:
-    /// `<meta name="viewport">` in EPUB and KF8, `fixed_width`/`fixed_height`
-    /// in KFX. Every page of a fixed-layout book carries one, and so does a
-    /// reflowable book's cover. `None` for a page that reflows.
+    /// The pixel box the page is authored to: `<meta name="viewport">` in
+    /// EPUB and KF8, `fixed_width`/`fixed_height` in KFX. Carried by every
+    /// fixed-layout page and by a reflowable book's cover, `None` elsewhere.
     pub viewport: Option<(u32, u32)>,
     /// The author-drawn comic panels on this page, in `ordinal` order. Empty
     /// for a page the source gave none. See [`crate::model::Panel`].

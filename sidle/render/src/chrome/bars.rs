@@ -1,4 +1,4 @@
-//! The bars over a page: the progress line a page always carries, and the
+//! The bars over a page: the progress line a page states below it, and the
 //! toolbar, title band and footer a tap reveals over it. Every measurement is
 //! stated against a [`REFERENCE`]-dot panel and scaled to the one in hand.
 
@@ -23,9 +23,8 @@ pub const FOOTER: f32 = 290.0;
 const REVEAL: f32 = 0.14;
 
 /// Draw the progress line, the bars where they are showing, and the areas a
-/// tap acts on. `mode` is the measure the page states below it, `None` for a
-/// page that states none. `leftward` states which side of the page carries
-/// on.
+/// tap acts on. `mode` is the measure the page states below it, `None` for
+/// none at all; `leftward` states which side of the page carries on.
 pub fn draw(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,

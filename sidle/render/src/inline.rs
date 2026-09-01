@@ -239,11 +239,9 @@ impl Inline<'_> {
 
 impl Inline<'_> {
     fn atoms(&mut self, items: &[Item<'_>]) -> Vec<Atom> {
-        // Break opportunities are a property of the text as a whole. The
-        // items are joined before UAX #14 runs: a word split across two spans
-        // gains no break in the middle. A ruby group joins as its base,
-        // The text around it breaks as usual; the group
-        // itself is one atom and never splits.
+        // `items` join into one string ahead of UAX #14: a word split across
+        // two spans gains no break in the middle. An `Item::Ruby` joins as
+        // its base and stays one atom.
         let mut joined = String::new();
         let mut spans: Vec<Range<usize>> = Vec::new();
         for item in items {
@@ -328,7 +326,7 @@ impl Inline<'_> {
     }
 
     /// One ruby group: base and annotation shaped together into a single
-    /// atom: a line never breaks between a word and its reading.
+    /// atom, which no line break divides.
     fn ruby_atom(
         &mut self,
         item: usize,
@@ -396,8 +394,7 @@ impl Inline<'_> {
             if local == 0 || local > text.len() {
                 continue;
             }
-            // The end of the content is where the text stops, not a break in
-            // it: taking it as one leaves an empty line after every block.
+            // The end of the content is where the text stops, not a break.
             let mandatory = kind == BreakOpportunity::Mandatory && at < end;
             self.piece(stretch, cut..local, mandatory, out);
             cut = local;
@@ -750,11 +747,8 @@ impl Inline<'_> {
 }
 
 /// How far a run of `face` at `size` reaches either side of the line's
-/// baseline. A horizontal run hangs from it by the face's own ascent and
-/// descent. An upright glyph on a vertical line sits centred, half an em each
-/// way. A quarter-turned one sits centred too, so it reaches half its own
-/// height each way and its alphabetic baseline moves off the line's —
-/// see [`Inline::run_baseline`].
+/// baseline: the face's own ascent and descent when `Horizontal`, half an em
+/// each way when `Upright`, half its own height when `Sideways`.
 fn reach(face: &Face, size: f32, orientation: Orientation) -> (f32, f32) {
     match orientation {
         Orientation::Horizontal => (face.ascent(size), face.descent(size)),
@@ -874,8 +868,7 @@ impl Inline<'_> {
             let body = declared.max(ascent + descent);
             let block_size = body;
             // Measured from the top of the body, which starts where the ruby
-            // strip ends. The text's own box never covers the strip, and no
-            // two boxes in the tree claim the same ground.
+            // strip ends: the text's own box never covers the strip.
             let baseline = (body - (ascent + descent)) / 2.0 + ascent;
 
             let indent = if number == 0 { indent } else { 0.0 };
@@ -1085,12 +1078,9 @@ impl Inline<'_> {
         fragment.as_kind(Node::Run)
     }
 
-    /// Where `run`'s own baseline sits, `line` being the line's. They are the
-    /// same but for a quarter-turned run: it stands centred on the column,
-    /// while the letters hang from a baseline half the gap between its ascent
-    /// and its descent away. The tops of the letters face the page's right
-    /// edge, which is where the line's blocks start in [`Axis::VerticalRl`]
-    /// and where they end in [`Axis::VerticalLr`].
+    /// Where `run`'s own baseline sits, `line` being the line's. A `Sideways`
+    /// run moves half the gap between `Face::ascent` and `Face::descent`
+    /// towards the page's left edge; every other orientation takes `line`.
     fn run_baseline(&self, run: &Run, line: f32) -> f32 {
         if run.orientation != Orientation::Sideways {
             return line;
@@ -1354,10 +1344,9 @@ mod tests {
         assert_eq!(line_extent("亜：亜"), 3.5 * EM);
     }
 
-    /// A quarter-turned run stands centred on the column, like the upright
-    /// glyphs beside it: its own baseline sits half the gap between its
-    /// ascent and its descent off the line's, and the line stays centred in
-    /// the box it claims.
+    /// A `Sideways` run's baseline sits half the gap between its ascent and
+    /// its descent off the line's, and the line's own baseline halves the
+    /// box it claims.
     #[test]
     fn a_quarter_turned_run_stands_centred_on_the_column() {
         let mut fonts = Fonts::new();
