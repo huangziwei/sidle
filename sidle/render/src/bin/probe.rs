@@ -169,6 +169,87 @@ fn suite() -> Vec<Probe> {
 fn paired() -> Vec<Probe> {
     let three = [MEASURED_LATIN, PROSE_LATIN, MEASURED_LATIN];
     vec![
+        // A cap in ems on a bordered box, and the same box padded: the
+        // border draws the box the cap left.
+        Probe::new("max-width-22em-bordered", &[MEASURED_LATIN, PROSE_LATIN])
+            .as_element("div")
+            .styled("div { max-width: 22em; border-top: 8px solid #000; }\n"),
+        Probe::new("max-width-22em-padded", &[MEASURED_LATIN, PROSE_LATIN])
+            .as_element("div")
+            .styled(
+                "div { max-width: 22em; padding: 0 4em 0 1.5em; \
+                 border-top: 8px solid #000; }\n",
+            ),
+        // A capped, padded box holding a bordered child: the child's border
+        // draws what the cap and the two boxes' insets left.
+        Probe::new("max-width-22em-nested", &["<div class=\"rule\">組版</div>"])
+            .as_element("div")
+            .as_markup()
+            .in_language("ja")
+            .styled(
+                "div.p0 { max-width: 22em; padding: 0 4em 0 1.5em; }\n\
+             div.rule { margin-left: 3em; margin-right: 1.5em; \
+             padding-right: 1.5em; font-size: 0.85em; \
+             border-top: 8px solid #000; }\n",
+            ),
+        // The nested pair split: the outer box's padding alone, then the
+        // inner box's margins alone at a font size of its own.
+        Probe::new(
+            "max-width-22em-outer-pad",
+            &["<div class=\"rule\">組版</div>"],
+        )
+        .as_element("div")
+        .as_markup()
+        .in_language("ja")
+        .styled(
+            "div.p0 { max-width: 22em; padding: 0 4em 0 1.5em; }\n\
+             div.rule { border-top: 8px solid #000; }\n",
+        ),
+        // The outer box's padding, in a book that reads in English.
+        Probe::new(
+            "max-width-22em-outer-pad-latin",
+            &["<div class=\"rule\">Typography</div>"],
+        )
+        .as_element("div")
+        .as_markup()
+        .styled(
+            "div.p0 { max-width: 22em; padding: 0 4em 0 1.5em; }\n\
+             div.rule { border-top: 8px solid #000; }\n",
+        ),
+        // Half an em of padding either side, in a book on the em grid.
+        Probe::new(
+            "max-width-22em-half-pad",
+            &["<div class=\"rule\">組版</div>"],
+        )
+        .as_element("div")
+        .as_markup()
+        .in_language("ja")
+        .styled(
+            "div.p0 { max-width: 22em; padding: 0 0.5em; }\n\
+             div.rule { border-top: 8px solid #000; }\n",
+        ),
+        Probe::new(
+            "max-width-22em-inner-margin",
+            &["<div class=\"rule\">組版</div>"],
+        )
+        .as_element("div")
+        .as_markup()
+        .in_language("ja")
+        .styled(
+            "div.p0 { max-width: 22em; }\n\
+             div.rule { margin-left: 3em; margin-right: 1.5em; \
+             font-size: 0.85em; border-top: 8px solid #000; }\n",
+        ),
+        // The same cap on a section written across a book that reads down
+        // the page.
+        Probe::new("max-width-22em-across", &[PROSE_JAPANESE])
+            .as_element("div")
+            .in_language("ja")
+            .vertical()
+            .styled(
+                "div { max-width: 22em; writing-mode: horizontal-tb; \
+                 border-top: 8px solid #000; }\n",
+            ),
         // A border weight and a border style, declared together.
         Probe::new("border-top-8px-solid", &[MEASURED_LATIN, PROSE_LATIN])
             .as_element("div")

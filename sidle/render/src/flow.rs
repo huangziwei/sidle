@@ -150,8 +150,8 @@ pub struct Page {
     /// The outermost box, spanning the whole chapter — which pagination
     /// later cuts into pages.
     pub root: Fragment,
-    /// The direction it was written along, which is what tells a reader
-    /// which edge to start at and which way to turn pages.
+    /// The direction it was written along, which states the edge a page
+    /// opens at and the way its pages turn.
     pub axis: Axis,
     /// How far the chapter reaches along that direction.
     pub block_extent: f32,
@@ -166,14 +166,25 @@ impl Layout<'_> {
         let (inline_size, page_block) = self.viewport.content(axis);
         let language = self.viewport.language.as_deref().unwrap_or("");
         let resolver = self.viewport.resolver();
+        let across = axis.is_vertical() != self.axis.is_vertical();
         let mut flow = Flow {
             chapter,
             fonts: self.fonts,
             resources: self.resources,
             resolver,
             axis,
-            across: axis.is_vertical() != self.axis.is_vertical(),
+            across,
+            across_pitch: across.then(|| {
+                resolver
+                    .normal_line_height(self.viewport.root_font_size)
+                    .round()
+            }),
+            across_from_end: self.axis == Axis::VerticalRl,
             page_block,
+            grid: self
+                .viewport
+                .on_an_em_grid()
+                .then_some(self.viewport.root_font_size),
             hyphenator: hyphenation::for_language(language),
         };
 
@@ -213,8 +224,8 @@ const DEFAULT_OBJECT: Size = Size {
 };
 
 /// The `Axis` `chapter` is written along: the writing mode of its outermost
-/// styled box. A vertical novel sets its title page and colophon across the
-/// page. `None` where no box carries a style of its own.
+/// styled box, which a section may state against the book's own. `None` where
+/// no box carries a style of its own.
 fn axis_of(chapter: &Chapter) -> Option<Axis> {
     Some(
         match style_of(chapter, outermost_styled(chapter)?).writing_mode {
@@ -283,6 +294,12 @@ struct Flow<'a, 'f> {
     /// How far a page reaches along the block axis, which is the most a
     /// picture may take.
     page_block: f32,
+    /// The em-grid cell a book holds its boxes to, `None` off the grid.
+    grid: Option<f32>,
+    /// The pitch of the book's lines where they cross the chapter, in dots.
+    across_pitch: Option<f32>,
+    /// Whether those lines start at the chapter's inline end.
+    across_from_end: bool,
     hyphenator: Option<&'static Hyphenator>,
 }
 
@@ -333,25 +350,31 @@ impl<'a> Flow<'a, '_> {
             inline_end: padding.inline_end + border.widths_logical(self.axis).inline_end,
         };
 
-        // A declared inline size is the content's own, and a declared cap
-        // holds it under that.
+        // A declared inline size is the content's own; a declared cap holds
+        // the whole box, padding and border in.
         let outer_inline = (available - margin.inline()).max(0.0);
         let content_inline = match self.declared_inline(style, available, inherited) {
             Some(declared) => declared.max(0.0),
             None => (outer_inline - frame.inline()).max(0.0),
         };
-        let content_inline = match self.capped_inline(style, available, inherited) {
-            Some(cap) => content_inline.min(cap.max(0.0)),
-            None => content_inline,
+        // The measure no whole cell of the em grid claims splits either side
+        // of the content, leaving the box the size the cap gave it.
+        let (content_inline, gutter) = match self.capped_inline(style, available, inherited) {
+            Some(cap) => {
+                let held = content_inline.min((cap - frame.inline()).max(0.0));
+                let cells = self.on_grid(held);
+                (cells, (held - cells) / 2.0)
+            }
+            None => (content_inline, 0.0),
         };
 
-        // A chapter written across the book's own direction carries a box the
-        // page leaves room around in the middle of it.
+        let box_inline = content_inline + frame.inline() + 2.0 * gutter;
         let spare = match self.across {
-            true => ((outer_inline - content_inline - frame.inline()) / 2.0).max(0.0),
+            true => self.across_lead(outer_inline, box_inline),
             false => 0.0,
         };
-        let content_inline_origin = inline + margin.inline_start + frame.inline_start + spare;
+        let content_inline_origin =
+            inline + margin.inline_start + frame.inline_start + spare + gutter;
         let content_block_origin = block + margin.block_start + frame.block_start;
 
         let mut children = Vec::new();
@@ -369,7 +392,7 @@ impl<'a> Flow<'a, '_> {
         let rect = Rect::new(
             inline + margin.inline_start + spare,
             block + margin.block_start,
-            content_inline + frame.inline(),
+            box_inline,
             content_block + frame.block(),
         );
         let mut fragment = Fragment::new(node, role, rect);
@@ -751,6 +774,30 @@ impl<'a> Flow<'a, '_> {
             style.width
         };
         self.length(declared, available, inherited)
+    }
+
+    /// `inline` cut to a whole number of cells on the em grid, which a book
+    /// off the grid takes whole.
+    fn on_grid(&self, inline: f32) -> f32 {
+        match self.grid {
+            Some(cell) if cell > 0.0 => (inline / cell).floor() * cell,
+            _ => inline,
+        }
+    }
+
+    /// Where a box of `box_inline` starts in `available` on a page whose own
+    /// lines cross it: the whole lines `available` holds stand in the middle
+    /// of it, and the box takes the edge they start at.
+    fn across_lead(&self, available: f32, box_inline: f32) -> f32 {
+        let Some(pitch) = self.across_pitch.filter(|pitch| *pitch > 0.0) else {
+            return ((available - box_inline) / 2.0).max(0.0);
+        };
+        let lines = (available / pitch).floor().max(1.0) * pitch;
+        let lead = ((available - lines) / 2.0).max(0.0);
+        match self.across_from_end {
+            true => (lead + lines - box_inline).max(0.0),
+            false => lead,
+        }
     }
 
     /// The most a box may measure across the inline axis, where the style
@@ -1223,9 +1270,8 @@ mod tests {
     }
 
     /// `one_paragraph`, its paragraph styled to read along `mode`. The
-    /// alignment stands for everything else a real style names: a style
-    /// holding nothing but the initial values is the pool's default style,
-    /// which an unstyled box reads.
+    /// alignment stands for everything else a real style names: initial
+    /// values alone are the pool's default style, which an unstyled box reads.
     fn one_paragraph_along(text: &str, mode: WritingMode) -> Chapter {
         let mut chapter = one_paragraph(text);
         let style = chapter.styles.intern(ComputedStyle {
@@ -1240,8 +1286,7 @@ mod tests {
 
     #[test]
     fn a_chapter_of_horizontal_styles_reads_across_a_vertical_book() {
-        // A vertical novel sets its title page and colophon across the page,
-        // and says so in those sections' own styles.
+        // A section that reads across the book says so in its own styles.
         let chapter = one_paragraph_along("title", WritingMode::HorizontalTb);
 
         let page = lay_out_along(&chapter, Viewport::new(400.0, 600.0), Axis::VerticalRl);
@@ -1309,8 +1354,8 @@ mod tests {
 
     #[test]
     fn a_declared_block_size_moves_nothing() {
-        // `height` reaches the container and the device ignores it: a block
-        // takes its block size from what it holds.
+        // A block takes its block size from what it holds, `height` or no
+        // `height`.
         let chapter = one_paragraph("one two three");
         let plain = lay_out(&chapter, Viewport::new(200.0, 400.0));
 
@@ -1365,6 +1410,76 @@ mod tests {
 
         assert_eq!(viewport.content(Axis::VerticalRl).0, 1584.0);
         assert_eq!(viewport.inline_lead(Axis::VerticalRl), 6.0);
+    }
+
+    /// A box capped at 22 ems, padded 1.5 before the text and 4 after it.
+    fn one_capped_paragraph(text: &str) -> Chapter {
+        let mut chapter = one_paragraph(text);
+        let style = chapter.styles.intern(ComputedStyle {
+            max_width: Length::Em(22.0),
+            padding_left: Length::Em(1.5),
+            padding_right: Length::Em(4.0),
+            ..ComputedStyle::default()
+        });
+        let paragraph = chapter.children(chapter.root()).next().expect("added");
+        chapter.node_mut(paragraph).expect("added").style = style;
+        chapter
+    }
+
+    /// A cap holds the whole box, padding in — 22 ems less the 5.5 the
+    /// padding takes — and a book on the em grid holds the content it leaves
+    /// to a whole number of cells: 16.5 ems become 16.
+    #[test]
+    fn a_capped_box_holds_its_padding_and_stands_on_the_em_grid() {
+        let chapter = one_capped_paragraph("組版");
+        let measured = |language: &str| {
+            let viewport = Viewport {
+                size: Size::new(1272.0, 1696.0),
+                margins: Edges::new(82.0, 82.0, 17.0, 82.0),
+                root_font_size: 44.0,
+                language: Some(language.to_string()),
+                ..Viewport::default()
+            };
+            let page = lay_out(&chapter, viewport);
+            page.root
+                .lines()
+                .map(|line| line.rect.width)
+                .next()
+                .expect("a line")
+        };
+
+        assert_eq!(measured("ja"), 704.0);
+        assert_eq!(measured("en"), 726.0);
+    }
+
+    /// A capped box on a page whose own lines cross it takes the edge those
+    /// lines start at, its content centred in what the em grid leaves.
+    #[test]
+    fn a_capped_box_across_the_book_starts_where_its_lines_do() {
+        let chapter = one_capped_paragraph("組版");
+        let viewport = Viewport {
+            size: Size::new(1272.0, 1696.0),
+            margins: Edges::new(82.0, 82.0, 17.0, 82.0),
+            root_font_size: 44.0,
+            language: Some("ja".to_string()),
+            line_spacing: 1.51,
+            ..Viewport::default()
+        };
+
+        let page = lay_out_along(&chapter, viewport, Axis::VerticalRl);
+
+        let cells: f32 = 25.0 * 44.0;
+        let lines = (cells / 80.0).floor() * 80.0;
+        let cap = 22.0 * 44.0;
+        let padding = 1.5 * 44.0;
+        let gutter = (cap - padding - 4.0 * 44.0 - 704.0) / 2.0;
+
+        let line = page.root.lines().next().expect("a line");
+        assert_eq!(line.rect.width, 704.0);
+        assert_eq!(
+            line.rect.x,
+            (cells - lines) / 2.0 + lines - cap + padding + gutter
+        );
     }
 
     #[test]

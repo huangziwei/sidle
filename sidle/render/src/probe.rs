@@ -166,7 +166,7 @@ impl Probe {
         self.name.replace([' ', '/', ':'], "-")
     }
 
-    /// The document, as the importer will be handed it.
+    /// The document the importer is handed.
     ///
     /// Each paragraph carries a `p0`, `p1`, … class, which a rule in
     /// [`Probe::styling`] selects to give one block a different declaration
@@ -380,7 +380,7 @@ fn stamp_elements(ion: &mut IonValue, properties: &[(u64, IonValue)]) {
 }
 
 /// Stretch the first entry of every `style_events` list to the end of the last
-/// entry, so the first range contains the others.
+/// entry, leaving the first range holding the others.
 fn stretch_first_event(ion: &mut IonValue) {
     match ion {
         IonValue::Struct(fields) => {
@@ -462,6 +462,10 @@ impl Importer for Source {
 
     fn landmarks(&self) -> &[Landmark] {
         &self.landmarks
+    }
+
+    fn landmarks_mut(&mut self) -> &mut [Landmark] {
+        &mut self.landmarks
     }
 
     fn spine(&self) -> &[SpineEntry] {
