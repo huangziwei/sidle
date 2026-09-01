@@ -1913,6 +1913,19 @@ fn page_background_style(chapter: &Chapter) -> Option<crate::style::ComputedStyl
     })
 }
 
+/// The axis `chapter` is written along: the computed writing mode of its
+/// outermost styled box.
+fn chapter_axis(chapter: &Chapter) -> Option<crate::style::WritingMode> {
+    use crate::style::StyleId;
+    let node = chapter.iter_dfs().find(|id| {
+        chapter
+            .node(*id)
+            .is_some_and(|n| n.style != StyleId::DEFAULT)
+    })?;
+    let style = chapter.styles.get(chapter.node(node)?.style)?;
+    Some(style.writing_mode)
+}
+
 /// Build chapter entities separately for grouped emission:
 /// (section, storyline, Option<content>).
 fn build_chapter_entities_grouped(
@@ -2057,7 +2070,13 @@ fn build_chapter_entities_grouped(
         // A picture `<body>` paints belongs to the page: the storyline walk
         // emits the root's children and never the root. Only a background
         // reaches the page template; body's margins and padding stay behind.
-        if let Some(style) = page_background_style(chapter) {
+        let mut page_style = page_background_style(chapter);
+        if let Some(axis) =
+            chapter_axis(chapter).filter(|axis| *axis != ctx.ir_document_writing_mode())
+        {
+            page_style.get_or_insert_with(Default::default).writing_mode = axis;
+        }
+        if let Some(style) = page_style {
             let symbol = ctx.register_ir_style_with_hint(&style, Some("page"));
             fields.push((KfxSymbol::Style as u64, IonValue::Symbol(symbol)));
         }

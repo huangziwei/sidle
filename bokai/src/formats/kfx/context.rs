@@ -913,7 +913,7 @@ impl ExportContext {
     /// The document-effective (possibly user-forced) writing mode as an IR
     /// enum. This is the axis text actually renders in, whereas
     /// [`Self::ir_style_baseline_writing_mode`] is the source's own authored axis.
-    fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
+    pub fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
         kfx_symbol_to_ir_writing_mode(self.document_writing_mode)
     }
 
