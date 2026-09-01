@@ -1,7 +1,7 @@
 //! `Go To`: a card over the page listing the book's own contents, under the
 //! fixed rows every book has.
 
-use super::{Action, Canvas, Chrome, text::Align};
+use super::{Action, Canvas, Chrome, icon, text::Align};
 use crate::geom::Rect;
 
 /// How tall one row stands, against the panel [`super::bars::REFERENCE`]
@@ -81,22 +81,7 @@ pub fn draw(
         44.0 * unit,
         44.0 * unit,
     );
-    for step in 0..(44.0 * unit) as usize {
-        let t = step as f32;
-        canvas.fill(
-            Rect::new(cross.x + t, cross.y + t, 5.0 * unit, 5.0 * unit),
-            theme.ink,
-        );
-        canvas.fill(
-            Rect::new(
-                cross.right() - t - 5.0 * unit,
-                cross.y + t,
-                5.0 * unit,
-                5.0 * unit,
-            ),
-            theme.ink,
-        );
-    }
+    canvas.icon(icon::CLOSE, cross, theme.ink);
     chrome.add(cross, Action::Close);
 
     // The tab in hand carries into the list below it; the other sits in a

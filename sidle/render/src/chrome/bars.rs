@@ -4,7 +4,7 @@
 
 use bokai::style::Color;
 
-use super::{Action, Canvas, Chrome, Overlay, Position, text::Align};
+use super::{Action, Canvas, Chrome, Overlay, Position, icon, text::Align};
 use crate::geom::Rect;
 use crate::settings::Progress;
 
@@ -103,7 +103,7 @@ fn bars(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: &Position, mode: P
         Tool::Aa,
     ] {
         let box_ = Rect::new(x - step, middle - 26.0 * unit, step, 52.0 * unit);
-        icon(canvas, tool, box_, unit);
+        icon(canvas, tool, box_);
         if let Some(action) = tool.action() {
             chrome.add(box_, action);
         }
@@ -246,90 +246,28 @@ impl Tool {
         match self {
             Tool::Aa => Some(Action::Open(Overlay::Aa)),
             Tool::Contents => Some(Action::Open(Overlay::GoTo)),
+            Tool::Search => Some(Action::Open(Overlay::Search)),
             _ => None,
         }
     }
 }
 
+/// The way back to the library, its own artwork in `box_`.
 fn back_arrow(canvas: &mut Canvas<'_, '_>, box_: Rect) {
     let ink = canvas.theme.ink;
-    let mid = box_.y + box_.height / 2.0;
-    let weight = box_.height * 0.09;
-    canvas.fill(
-        Rect::new(box_.x, mid - weight / 2.0, box_.width, weight),
-        ink,
-    );
-    // The head, as two short bars meeting at the shaft's end.
-    let arm = box_.height * 0.3;
-    for step in 0..(arm as usize).max(1) {
-        let t = step as f32;
-        canvas.fill(Rect::new(box_.x + t, mid - t - weight, weight, weight), ink);
-        canvas.fill(Rect::new(box_.x + t, mid + t, weight, weight), ink);
-    }
+    canvas.icon(icon::BACK, box_, ink);
 }
 
-/// One [`Tool`]'s mark, drawn from filled rectangles and circles.
-fn icon(canvas: &mut Canvas<'_, '_>, tool: Tool, box_: Rect, unit: f32) {
+/// One [`Tool`]'s mark, its own artwork in `box_`.
+fn icon(canvas: &mut Canvas<'_, '_>, tool: Tool, box_: Rect) {
     let ink = canvas.theme.ink;
-    let cx = box_.x + box_.width / 2.0;
-    let cy = box_.y + box_.height / 2.0;
-    let weight = 4.0 * unit;
-
-    match tool {
-        Tool::Aa => {
-            canvas.text(
-                "Aa",
-                40.0 * unit,
-                ink,
-                false,
-                (cx, cy - 24.0 * unit),
-                Align::Center,
-            );
-        }
-        Tool::Contents => {
-            for (n, width) in [26.0, 20.0, 32.0].into_iter().enumerate() {
-                let y = cy - 14.0 * unit + n as f32 * 14.0 * unit;
-                canvas.fill(Rect::new(cx - 22.0 * unit, y, width * unit, weight), ink);
-            }
-            for n in 0..3 {
-                let y = cy - 14.0 * unit + n as f32 * 14.0 * unit;
-                canvas.fill(Rect::new(cx + 16.0 * unit, y, weight, weight), ink);
-            }
-        }
-        Tool::Notes => {
-            canvas.stroke(
-                Rect::new(cx - 18.0 * unit, cy - 22.0 * unit, 36.0 * unit, 44.0 * unit),
-                ink,
-                weight,
-            );
-            canvas.fill(
-                Rect::new(cx - 6.0 * unit, cy - 22.0 * unit, weight, 44.0 * unit),
-                ink,
-            );
-        }
-        Tool::Bookmark => {
-            canvas.stroke(
-                Rect::new(cx - 16.0 * unit, cy - 22.0 * unit, 32.0 * unit, 44.0 * unit),
-                ink,
-                weight,
-            );
-            canvas.fill(
-                Rect::new(cx - 4.0 * unit, cy + 4.0 * unit, 8.0 * unit, 18.0 * unit),
-                canvas.theme.page,
-            );
-        }
-        Tool::Search => {
-            canvas.circle((cx - 3.0 * unit, cy - 5.0 * unit), 15.0 * unit, ink, false);
-            canvas.fill(
-                Rect::new(cx + 7.0 * unit, cy + 6.0 * unit, 14.0 * unit, weight),
-                ink,
-            );
-        }
-        Tool::More => {
-            for n in 0..3 {
-                let y = cy - 20.0 * unit + n as f32 * 18.0 * unit;
-                canvas.circle((cx, y), 4.0 * unit, ink, true);
-            }
-        }
-    }
+    let art = match tool {
+        Tool::Aa => icon::AA,
+        Tool::Contents => icon::CONTENTS,
+        Tool::Notes => icon::NOTES,
+        Tool::Bookmark => icon::BOOKMARK,
+        Tool::Search => icon::SEARCH,
+        Tool::More => icon::MORE,
+    };
+    canvas.icon(art, box_, ink);
 }

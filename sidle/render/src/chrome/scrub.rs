@@ -3,7 +3,7 @@
 
 use tiny_skia::Pixmap;
 
-use super::{Action, Canvas, Chrome, bars, text::Align};
+use super::{Action, Canvas, Chrome, bars, icon, text::Align};
 use crate::geom::Rect;
 
 /// How much of the panel the bar below the pages takes.
@@ -31,8 +31,6 @@ pub struct Scrub<'a> {
     /// Which page the chapter is open at.
     pub here: usize,
     pub pages: usize,
-    /// The location the page it stands at opens with.
-    pub location: i64,
     pub locations: i64,
     /// Whether the pages carry on leftward.
     pub leftward: bool,
@@ -228,14 +226,6 @@ fn bar(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, scrub: &Scrub<'_>, foot
     }
 
     views(chrome, canvas, foot + 216.0 * unit, chrome.grid);
-    canvas.text(
-        &format!("Loc {}", scrub.location),
-        30.0 * unit,
-        theme.ink,
-        true,
-        (panel.width - side - 40.0 * unit, foot + 226.0 * unit),
-        Align::Right,
-    );
 }
 
 /// The page view and the grid view, the one showing filled.
@@ -266,15 +256,9 @@ fn views(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, y: f32, grid: bool) {
 fn cross(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, at: (f32, f32), unit: f32) {
     let ink = canvas.theme.ink;
     let reach = 26.0 * unit;
-    for step in 0..(reach * 2.0) as usize {
-        let t = step as f32 - reach;
-        canvas.fill(Rect::new(at.0 + t, at.1 + t, 5.0 * unit, 5.0 * unit), ink);
-        canvas.fill(Rect::new(at.0 + t, at.1 - t, 5.0 * unit, 5.0 * unit), ink);
-    }
-    chrome.add(
-        Rect::new(at.0 - reach, at.1 - reach, reach * 2.0, reach * 2.0),
-        Action::Close,
-    );
+    let box_ = Rect::new(at.0 - reach, at.1 - reach, reach * 2.0, reach * 2.0);
+    canvas.icon(icon::CLOSE, box_, ink);
+    chrome.add(box_, Action::Close);
 }
 
 /// The chevron a page arrow carries, its own artwork scaled to `size`.

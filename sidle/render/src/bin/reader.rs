@@ -16,17 +16,18 @@
 //!
 //! Click the page to turn it, `Aa` and the contents mark to open a panel.
 //! Arrows, space and the wheel turn pages, and scroll an open list; `n` and
-//! `p` change chapter; `t` opens the contents, `a` the settings, escape
-//! closes them, `q` quits.
+//! `p` change chapter; `t` opens the contents, `a` the settings and `s` the
+//! search card, which takes what is typed; escape closes them, `q` quits.
 
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use bokai::model::{AnchorTarget, Book, ChapterId, LandmarkType, PositionMap};
+use bokai::model::{AnchorTarget, Book, ChapterId, LandmarkType, Match, PositionMap};
 use sidle_render::chrome::{
     AaPane, AaTab, Action, Canvas, Chrome, Overlay, Position, Reading, aa, bars, goto, scrub,
+    search,
 };
 use sidle_render::font::Script as FaceScript;
 use sidle_render::paint::{Cache, Painter};
@@ -49,6 +50,10 @@ const WORDS_A_MINUTE: f32 = 220.0;
 
 /// Locations one screen of text covers, before a page is laid out.
 const LOCATIONS_A_PAGE: i64 = 14;
+
+/// How much of the text either side of a match a result states.
+const LEAD_IN: usize = 16;
+const LEAD_OUT: usize = 64;
 
 /// How tall the window opens, in logical pixels.
 const WINDOW_HEIGHT: f32 = 900.0;
@@ -101,6 +106,8 @@ struct Options {
     hits: bool,
     /// Whether the page and the chrome are drawn dark.
     dark: bool,
+    /// What a shot of the search card has been asked to look for.
+    query: String,
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -130,6 +137,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--tab" => options.tab = named_tab(&value()?)?,
             "--scroll" => options.scroll = value()?.parse()?,
             "--hits" => options.hits = true,
+            "--query" => options.query = value()?,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -147,8 +155,9 @@ fn named_overlay(name: &str) -> Result<Overlay, Box<dyn Error>> {
         "aa" => Ok(Overlay::Aa),
         "goto" => Ok(Overlay::GoTo),
         "scrub" => Ok(Overlay::Scrubber),
+        "search" => Ok(Overlay::Search),
         "none" => Ok(Overlay::None),
-        _ => Err(format!("no such panel: {name} (try aa, goto, scrub, none)").into()),
+        _ => Err(format!("no such panel: {name} (try aa, goto, scrub, search, none)").into()),
     }
 }
 
@@ -257,6 +266,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         pointer: None,
         laid: None,
         view: None,
+        query: String::new(),
+        found: Vec::new(),
+        opens: Vec::new(),
+        searched: false,
+        wanted: None,
     };
 
     if let Some(pages) = options.pages {
@@ -273,8 +287,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         reader.chrome.overlay = options.open;
         reader.chrome.tab = options.tab;
         reader.chrome.scroll = options.scroll * reader.scroll_step();
+        if !options.query.is_empty() {
+            reader.query = options.query.clone();
+            reader.look();
+        }
         reader.shot(&path)?;
         if options.hits {
+            for opens in &reader.opens {
+                println!("chapter {} loc {}", opens.chapter, opens.location);
+            }
             for hit in reader.chrome.hits() {
                 let rect = hit.rect;
                 println!(
@@ -459,6 +480,22 @@ struct Reader {
     pointer: Option<(f32, f32)>,
     laid: Option<Laid>,
     view: Option<View>,
+    /// The phrase the search card is looking for.
+    query: String,
+    /// Where it was found, as the card states each place.
+    found: Vec<search::Found>,
+    /// Where each of `found` opens, in the same order.
+    opens: Vec<Opens>,
+    /// Whether the book has been searched for the phrase in hand.
+    searched: bool,
+    /// The location the chapter being laid out is to open at.
+    wanted: Option<i64>,
+}
+
+/// Where a search result opens: its chapter, and the location inside it.
+struct Opens {
+    chapter: usize,
+    location: i64,
 }
 
 /// The location the first element drawn in each page of `pages` falls in.
@@ -626,9 +663,84 @@ impl Reader {
             words,
             locations,
         });
+        if let Some(location) = self.wanted.take() {
+            self.page = self.page_of(location);
+            self.sheet = None;
+        }
     }
 
-    /// Give every contents row the location its chapter opens at.
+    /// The page of the chapter laid out that `location` falls on.
+    fn page_of(&self, location: i64) -> usize {
+        self.laid.as_ref().map_or(0, |laid| {
+            laid.locations
+                .iter()
+                .rposition(|at| *at <= location)
+                .unwrap_or(0)
+        })
+    }
+
+    /// Look through every chapter for the phrase in hand.
+    fn look(&mut self) {
+        self.found.clear();
+        self.opens.clear();
+        self.searched = true;
+        self.chrome.scroll = 0.0;
+        let needle = self.query.trim().to_string();
+        if needle.is_empty() {
+            return;
+        }
+        for chapter in 0..self.spine.len() {
+            let Ok(text) = self.book.load_chapter_cached(self.spine[chapter]) else {
+                continue;
+            };
+            for found in text.find(&needle) {
+                let (before, hit, after) = text.around(found, LEAD_IN, LEAD_OUT);
+                let location = self.location_of(&text, found);
+                self.found.push(search::Found {
+                    before: before.to_string(),
+                    found: hit.to_string(),
+                    after: after.to_string(),
+                    location,
+                });
+                self.opens.push(Opens { chapter, location });
+            }
+        }
+    }
+
+    /// The location a match falls in, or 0 where the book states no scale.
+    fn location_of(&self, chapter: &bokai::model::Chapter, found: Match) -> i64 {
+        let Some(positions) = self.positions.as_ref().filter(|map| map.has_locations()) else {
+            return 0;
+        };
+        chapter
+            .node_at(found.at)
+            .and_then(|node| source_element(chapter, node))
+            .and_then(|element| positions.position(element, 0))
+            .map_or(0, |position| positions.location_for(position))
+    }
+
+    /// A key the search field takes, reporting whether it was the field's.
+    fn typed(&mut self, key: &Key<&str>) -> bool {
+        match key {
+            Key::Named(NamedKey::Backspace) => {
+                self.query.pop();
+                self.searched = false;
+            }
+            Key::Named(NamedKey::Space) => {
+                self.query.push(' ');
+                self.searched = false;
+            }
+            Key::Named(NamedKey::Enter) => self.look(),
+            Key::Character(text) => {
+                self.query.push_str(text);
+                self.searched = false;
+            }
+            _ => return false,
+        }
+        self.request_redraw();
+        true
+    }
+
     /// Every picture drawn on page `n`.
     fn pictures_on(&self, n: usize) -> Vec<String> {
         let Some(laid) = &self.laid else {
@@ -673,7 +785,7 @@ impl Reader {
 
     /// Move an open list by `dots`, reporting whether one took it.
     fn scroll(&mut self, dots: f32) -> bool {
-        if self.chrome.overlay != Overlay::GoTo {
+        if !matches!(self.chrome.overlay, Overlay::GoTo | Overlay::Search) {
             return false;
         }
         self.chrome.scroll = (self.chrome.scroll + dots).max(0.0);
@@ -683,7 +795,11 @@ impl Reader {
 
     /// One step of a list, in panel dots: a row of it.
     fn scroll_step(&self) -> f32 {
-        goto::ROW * self.panel_for().size.height / bars::REFERENCE
+        let row = match self.chrome.overlay {
+            Overlay::Search => search::ROW,
+            _ => goto::ROW,
+        };
+        row * self.panel_for().size.height / bars::REFERENCE
     }
 
     /// Whether the page after this one lies to its left, which is what a
@@ -758,7 +874,7 @@ impl Reader {
             locations,
             page: (self.chapter * pages + self.page + 1) as i64,
             pages: (chapters * pages) as i64,
-            percent: (read * 100.0).ceil() as u32,
+            percent: (read * 100.0) as u32,
             minutes_left_in_chapter: minutes(words as f32 * left),
             minutes_left: minutes(words as f32 * (1.0 - read) * chapters as f32),
         }
@@ -886,6 +1002,14 @@ impl Reader {
             Action::GoToEnd => {
                 self.chrome.overlay = Overlay::None;
                 self.go_to(self.spine.len().saturating_sub(1));
+            }
+            Action::GoToFound(found) => {
+                self.chrome.overlay = Overlay::None;
+                if let Some(opens) = self.opens.get(found) {
+                    let (chapter, location) = (opens.chapter, opens.location);
+                    self.wanted = Some(location);
+                    self.go_to(chapter);
+                }
             }
         }
     }
@@ -1132,6 +1256,15 @@ impl Reader {
                 &self.contents,
                 contents_here,
             ),
+            Overlay::Search => search::draw(
+                &mut self.chrome,
+                &mut canvas,
+                &search::Search {
+                    query: &self.query,
+                    found: &self.found,
+                    searched: self.searched,
+                },
+            ),
             Overlay::Scrubber => {
                 let offered: Vec<scrub::Leaf<'_>> = leaves
                     .iter()
@@ -1149,7 +1282,6 @@ impl Reader {
                         leaves: &offered,
                         here: self.page,
                         pages: pages_here,
-                        location: at.location,
                         locations: at.locations,
                         leftward,
                     },
@@ -1379,7 +1511,11 @@ impl ApplicationHandler for Reader {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match event.logical_key.as_ref() {
+                let key = event.logical_key.as_ref();
+                if self.chrome.overlay == Overlay::Search && self.typed(&key) {
+                    return;
+                }
+                match key {
                     Key::Named(NamedKey::ArrowLeft) => {
                         self.turn(if self.pages_leftward() { 1 } else { -1 })
                     }
@@ -1409,6 +1545,7 @@ impl ApplicationHandler for Reader {
                     Key::Named(NamedKey::Escape) => self.act(Action::Close),
                     Key::Character("a") => self.act(Action::Open(Overlay::Aa)),
                     Key::Character("t") => self.act(Action::Open(Overlay::GoTo)),
+                    Key::Character("s") => self.act(Action::Open(Overlay::Search)),
                     Key::Character("n") => self.go_to(self.chapter + 1),
                     Key::Character("p") => self.go_to(self.chapter.saturating_sub(1)),
                     Key::Character("q") => event_loop.exit(),

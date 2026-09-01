@@ -5,7 +5,9 @@
 pub mod aa;
 pub mod bars;
 pub mod goto;
+pub mod icon;
 pub mod scrub;
+pub mod search;
 pub mod text;
 
 use bokai::style::Color;
@@ -24,6 +26,8 @@ pub enum Overlay {
     None,
     Aa,
     GoTo,
+    /// Where a phrase occurs in the book.
+    Search,
     /// The pages of the chapter, one at a time or nine at a time.
     Scrubber,
 }
@@ -104,6 +108,8 @@ pub enum Action {
     GoToChapter(usize),
     GoToBeginning,
     GoToEnd,
+    /// Open the page a search result was found on.
+    GoToFound(usize),
 }
 
 /// One control's area, and what clicking it asks for.
@@ -163,11 +169,12 @@ pub struct Position {
 }
 
 impl Position {
-    /// What the bar below the page reads in `mode`.
+    /// What the bar below the page reads in `mode`: a location alone, a page
+    /// number with its total.
     pub fn progress(&self, mode: Progress) -> String {
         match mode {
             Progress::PageNumber => format!("Page {} of {}", self.page, self.pages),
-            Progress::Location => format!("Loc {} of {}", self.location, self.locations),
+            Progress::Location => format!("Loc {}", self.location),
             Progress::TimeLeftInChapter => {
                 format!("{} left in chapter", duration(self.minutes_left_in_chapter))
             }
@@ -444,6 +451,68 @@ impl Canvas<'_, '_> {
         );
     }
 
+    /// An icon's artwork in the middle of `box_`, as large as it fits: each
+    /// shape in turn, in the ink or in the ground it sits on.
+    pub fn icon(&mut self, steps: &[icon::Step], box_: Rect, ink: Color) {
+        let art = (box_.width / icon::BOX).min(box_.height / icon::BOX);
+        let at = (
+            box_.x + (box_.width - icon::BOX * art) / 2.0,
+            box_.y + (box_.height - icon::BOX * art) / 2.0,
+        );
+        let place = |x: f32, y: f32| (at.0 + x * art, at.1 + y * art);
+        let mut builder = PathBuilder::new();
+        let mut open = false;
+        let mut color = ink;
+        for step in steps {
+            match *step {
+                icon::Step::Ink | icon::Step::Ground => {
+                    self.shape(&mut builder, color);
+                    open = false;
+                    color = match step {
+                        icon::Step::Ink => ink,
+                        _ => self.theme.page,
+                    };
+                }
+                icon::Step::Move(x, y) => {
+                    if open {
+                        builder.close();
+                    }
+                    let (x, y) = place(x, y);
+                    builder.move_to(x, y);
+                    open = true;
+                }
+                icon::Step::Line(x, y) => {
+                    let (x, y) = place(x, y);
+                    builder.line_to(x, y);
+                }
+                icon::Step::Curve(x1, y1, x2, y2, x, y) => {
+                    let (x1, y1) = place(x1, y1);
+                    let (x2, y2) = place(x2, y2);
+                    let (x, y) = place(x, y);
+                    builder.cubic_to(x1, y1, x2, y2, x, y);
+                }
+                icon::Step::Close => {
+                    builder.close();
+                    open = false;
+                }
+            }
+        }
+        self.shape(&mut builder, color);
+    }
+
+    /// Fill what `builder` holds, leaving it empty.
+    fn shape(&mut self, builder: &mut PathBuilder, color: Color) {
+        let Some(path) = std::mem::replace(builder, PathBuilder::new()).finish() else {
+            return;
+        };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        paint.anti_alias = true;
+        let view = self.view();
+        self.target
+            .fill_path(&path, &paint, FillRule::EvenOdd, view, self.clip.as_ref());
+    }
+
     pub fn circle(&mut self, centre: (f32, f32), radius: f32, color: Color, filled: bool) {
         let mut builder = PathBuilder::new();
         builder.push_circle(centre.0, centre.1, radius);
@@ -567,10 +636,7 @@ mod tests {
     fn each_progress_mode_reads_the_way_the_bar_reads_it() {
         let at = somewhere();
 
-        assert_eq!(
-            at.progress(Progress::Location),
-            format!("Loc {LOCATION} of {LOCATIONS}")
-        );
+        assert_eq!(at.progress(Progress::Location), format!("Loc {LOCATION}"));
         assert_eq!(
             at.progress(Progress::PageNumber),
             format!("Page {PAGE} of {PAGES}")
