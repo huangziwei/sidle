@@ -1,6 +1,6 @@
-//! Core data types and runtime handle for ebooks.
-//!
-//! This module provides:
+//! Core data types and runtime handle for ebooks: [`Book`] over a format's
+//! [`crate::import::Importer`], with the [`Metadata`], [`TocEntry`],
+//! [`Landmark`] and [`SpineEntry`] it reaches through one surface.
 
 use std::collections::HashMap;
 use std::io::{self, Seek, Write};
@@ -375,6 +375,8 @@ pub struct Landmark {
     pub href: String,
     /// Display label
     pub label: String,
+    /// Resolved target (set by `resolve_links()`)
+    pub target: Option<AnchorTarget>,
 }
 
 // ============================================================================
@@ -516,9 +518,9 @@ impl Book {
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::from_source(source)?),
             Format::Azw3 => Box::new(Azw3Importer::from_source(source)?),
-            // See the matching arm in `open_format` for the routing rationale.
-            // The sniff is cheap (PDB + record 0); branching here keeps the
-            // dispatch on a single .mobi extension across both entry points.
+            // `Format::Mobi` covers pure MOBI6, pure KF8 and the two combined:
+            // `sniff_format` reads the PDB header and record 0 to tell them
+            // apart, as the matching arm in `open_format` does.
             Format::Mobi => {
                 if crate::formats::mobi::sniff_format(&*source)?.is_kf8() {
                     Box::new(Azw3Importer::from_source(source)?)
@@ -640,7 +642,8 @@ impl Book {
         self.backend.load_chapter(id)
     }
 
-    /// Load a chapter as IR, holding each parsed chapter in a cache. A second
+    /// Load a chapter as IR, holding each parsed chapter in an [`Arc`] cache
+    /// keyed by [`ChapterId`]. A second call for the same id clones the handle.
     pub fn load_chapter_cached(&mut self, id: ChapterId) -> io::Result<Arc<Chapter>> {
         // Fast path: check read lock first
         {
@@ -779,8 +782,6 @@ impl Book {
     /// entries, setting each `target` from `resolve_href` to the content
     /// position the KFX exporter looks up.
     pub(crate) fn resolve_page_list_targets(&mut self) {
-        // Cloned hrefs: the resolve pass holds no borrow of the page list,
-        // which the write-back below takes mutably.
         let hrefs: Vec<String> = self
             .backend
             .page_list()
@@ -793,6 +794,24 @@ impl Book {
             .collect();
         for (entry, target) in self.backend.page_list_mut().iter_mut().zip(targets) {
             entry.target = target;
+        }
+    }
+
+    /// The flat sibling of [`Self::resolve_toc_targets`] for the landmarks:
+    /// walks them, setting each `target` from `resolve_toc_href`.
+    pub(crate) fn resolve_landmark_targets(&mut self) {
+        let hrefs: Vec<String> = self
+            .backend
+            .landmarks()
+            .iter()
+            .map(|landmark| landmark.href.clone())
+            .collect();
+        let targets: Vec<Option<AnchorTarget>> = hrefs
+            .iter()
+            .map(|href| self.backend.resolve_toc_href(ChapterId(0), href))
+            .collect();
+        for (landmark, target) in self.backend.landmarks_mut().iter_mut().zip(targets) {
+            landmark.target = target;
         }
     }
 
@@ -949,9 +968,8 @@ mod tests {
         over.title = "SHADOWED".into();
         book.set_metadata_override(over);
 
-        // The override is what every later read (and thus every exporter) sees…
+        // `metadata` reads the override's title and the backend's language.
         assert_eq!(book.metadata().title, "SHADOWED");
-        // …while the fields copied from the backend are unchanged.
         assert_eq!(book.metadata().language, backend_lang);
     }
 }

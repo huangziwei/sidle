@@ -7,9 +7,9 @@ use crate::import::ChapterId;
 use crate::model::notes::detect_notes;
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NoteRole, Role};
 
-/// Book-level link resolution result with forward and reverse mappings.
-///
-/// This struct is produced by `Book::resolve_links()` and provides:
+/// Book-level link resolution result, from `Book::resolve_links`: every link
+/// node's target, the source nodes each target is named by, the hrefs that
+/// resolved to nothing, and each node's [`NoteRole`].
 #[derive(Debug, Default)]
 pub struct ResolvedLinks {
     /// Source link node → resolved target
@@ -24,7 +24,7 @@ pub struct ResolvedLinks {
     /// Broken links: (source node, unresolved href)
     broken: Vec<(GlobalNodeId, String)>,
 
-    /// `NoteRole` per node. See [`crate::model::notes`].
+    /// `NoteRole` per node. See `crate::model::notes`.
     notes: HashMap<GlobalNodeId, NoteRole>,
 }
 
@@ -76,7 +76,7 @@ impl ResolvedLinks {
         &self.broken
     }
 
-    /// The `NoteRole` of `node`. See [`crate::model::notes`].
+    /// The `NoteRole` of `node`. See `crate::model::notes`.
     pub fn note_role(&self, node: GlobalNodeId) -> Option<NoteRole> {
         self.notes.get(&node).copied()
     }
@@ -156,9 +156,9 @@ impl ResolvedLinksBuilder {
     }
 }
 
-/// Resolve all links in a book.
-///
-/// This is the main resolution algorithm that:
+/// Resolve all links in a book: load the spine, index the importer's anchors,
+/// fill in the targets `toc`, `page_list` and `landmarks` name, then walk
+/// every chapter's [`Role::Link`] nodes through `resolve_href`.
 pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Result<ResolvedLinks> {
     let mut builder = ResolvedLinksBuilder::new();
 
@@ -180,10 +180,13 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
     // Step 4: Resolve TOC entry targets
     book.resolve_toc_targets();
 
-    // Step 4b: Resolve page-list entry targets (physical page numbers → positions)
+    // Step 5: Resolve page-list entry targets (physical page numbers → positions)
     book.resolve_page_list_targets();
 
-    // Step 5: Walk all chapters, find Link nodes, resolve via importer
+    // Step 6: Resolve landmark targets (cover, start reading, endnotes)
+    book.resolve_landmark_targets();
+
+    // Step 7: Walk all chapters, find Link nodes, resolve via importer
     for (chapter_id, chapter) in &chapters {
         for node_id in chapter.iter_dfs() {
             let node = match chapter.node(node_id) {
@@ -222,7 +225,7 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
         }
     }
 
-    // Step 6: `NoteRole` per node, from the resolved topology.
+    // Step 8: `NoteRole` per node, from the resolved topology.
     let nav_targets = nav_targets(book);
     let mut resolved = builder.build();
     resolved.notes = detect_notes(&chapters, &resolved, &nav_targets);
@@ -231,8 +234,8 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
 }
 
 /// The `AnchorTarget::Internal` blocks named by `toc`, `page_list` and
-/// `landmarks`. Valid after `resolve_toc_targets` and
-/// `resolve_page_list_targets`.
+/// `landmarks`. Valid after `resolve_toc_targets`,
+/// `resolve_page_list_targets` and `resolve_landmark_targets`.
 fn nav_targets(book: &crate::model::Book) -> HashSet<GlobalNodeId> {
     fn walk(entries: &[crate::model::TocEntry], out: &mut HashSet<GlobalNodeId>) {
         for entry in entries {
@@ -247,9 +250,7 @@ fn nav_targets(book: &crate::model::Book) -> HashSet<GlobalNodeId> {
     walk(book.toc(), &mut out);
     walk(book.page_list(), &mut out);
     for landmark in book.landmarks() {
-        if let Some(AnchorTarget::Internal(target)) =
-            book.resolve_toc_href(ChapterId(0), &landmark.href)
-        {
+        if let Some(AnchorTarget::Internal(target)) = landmark.target {
             out.insert(target);
         }
     }

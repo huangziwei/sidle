@@ -574,6 +574,12 @@ impl Canvas<'_, '_> {
         text::lay(self.fonts, "A", size, ink, bold).baseline
     }
 
+    /// How tall a line of `size` stands.
+    pub fn line_of(&mut self, size: f32, bold: bool) -> f32 {
+        let ink = self.theme.ink;
+        text::lay(self.fonts, "A", size, ink, bold).height
+    }
+
     /// How wide `content` sets at `size`.
     pub fn width_of(&mut self, content: &str, size: f32, bold: bool) -> f32 {
         let ink = self.theme.ink;

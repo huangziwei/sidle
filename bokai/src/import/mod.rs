@@ -1,6 +1,7 @@
 //! Format importers for reading ebook files.
 //!
-//! The `Importer` trait defines a two-track interface:
+//! [`Importer`] runs two tracks over one file: `load_chapter` for normalized
+//! IR, `load_raw` and `load_asset` for the source's own bytes.
 
 mod azw3;
 mod epub;
@@ -65,7 +66,8 @@ pub struct AssetInfo {
     pub height: Option<u32>,
 }
 
-/// A source format's contribution to the normalized stylesheet: every named
+/// A source format's contribution to the normalized stylesheet: the named
+/// styles it declares, the document's axis, and whether it is fixed layout.
 #[derive(Debug, Default)]
 pub struct CssProgram {
     /// Raw source style name → converted declarations. A node whose
@@ -73,6 +75,7 @@ pub struct CssProgram {
     /// sanitized class attribute in synthesized XHTML.
     pub named: HashMap<String, CssDecl>,
     /// Raw source style name → the state-conditional rules that style carries,
+    /// each keyed by its selector suffix (`:first-letter`, `:hover`).
     pub pseudo: HashMap<String, Vec<(String, CssDecl)>>,
     /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
     pub writing_mode: String,
@@ -80,9 +83,8 @@ pub struct CssProgram {
     pub fixed_layout: bool,
 }
 
-/// Polymorphic interface for format-specific backends.
-///
-/// Implementors provide access to book content via two tracks:
+/// Polymorphic interface for format-specific backends: `load_chapter` gives
+/// normalized IR, `load_raw` and `load_asset` the source's own bytes.
 pub trait Importer: Send + Sync {
     // --- Lifecycle ---
 
@@ -100,22 +102,26 @@ pub trait Importer: Send + Sync {
     /// Landmarks (structural navigation points like cover, start reading location).
     fn landmarks(&self) -> &[Landmark];
 
+    /// Mutable landmark access, for `Book::resolve_landmark_targets` to fill
+    /// in each landmark's `target`.
+    fn landmarks_mut(&mut self) -> &mut [Landmark];
+
     /// Reading order (spine).
     fn spine(&self) -> &[SpineEntry];
 
     // --- Track 1: Normalization ---
 
-    /// Load a chapter as normalized IR.
-    ///
-    /// The default implementation:
+    /// Load a chapter as normalized IR. The default decodes `load_raw`,
+    /// gathers the stylesheets its DOM names, compiles it through
+    /// `compile_dom` and resolves the paths its `src` and `href` carry.
     fn load_chapter(&mut self, id: ChapterId) -> std::io::Result<Chapter> {
         // Load raw HTML
         let html_bytes = self.load_raw(id)?;
         let hint_encoding = crate::util::extract_xml_encoding(&html_bytes);
         let html_str = crate::util::decode_text(&html_bytes, hint_encoding);
 
-        // Parse the chapter DOM once; it is shared by stylesheet discovery and
-        // IR compilation below (avoids a second decode + full parse).
+        // One parse of the chapter DOM, shared by stylesheet discovery and
+        // IR compilation below.
         let dom = parse_dom(&html_str);
 
         // Extract stylesheet references from the parsed DOM
@@ -162,7 +168,9 @@ pub trait Importer: Send + Sync {
         Ok(chapter)
     }
 
-    /// Load several chapters, one result per input id. Implementations
+    /// Load several chapters, one result per input id. The default calls
+    /// [`Self::load_chapter`] for each; an importer with a parallel stage
+    /// overrides it.
     fn load_chapters(&mut self, ids: &[ChapterId]) -> Vec<std::io::Result<Chapter>> {
         ids.iter().map(|id| self.load_chapter(*id)).collect()
     }
@@ -177,7 +185,8 @@ pub trait Importer: Send + Sync {
     /// Returns the internal source path for a chapter (e.g., "OEBPS/text/ch01.xhtml").
     fn source_id(&self, id: ChapterId) -> Option<&str>;
 
-    /// The document `<title>` for a spine chapter. Defaults to the source id;
+    /// The document `<title>` for a spine chapter. The default is the source
+    /// id, which an importer that parses titles overrides.
     fn chapter_title(&self, id: ChapterId) -> Option<&str> {
         self.source_id(id)
     }
@@ -211,12 +220,15 @@ pub trait Importer: Send + Sync {
             .collect()
     }
 
-    /// The authoritative asset list for a normalized EPUB export, in
+    /// The authoritative asset list for a normalized EPUB export, in the paths
+    /// [`Self::load_asset`] takes. `None` leaves the export to
+    /// [`Self::list_assets`].
     fn bundled_assets(&self) -> Option<Vec<PathBuf>> {
         None
     }
 
     /// [`Self::bundled_assets`] with each entry's predicted media type and
+    /// declared pixel size. `None` where the format describes neither.
     fn asset_manifest(&mut self) -> Option<Vec<AssetInfo>> {
         None
     }
@@ -300,7 +312,9 @@ pub trait Importer: Send + Sync {
     /// Get mutable access to TOC entries for resolution.
     fn toc_mut(&mut self) -> &mut [TocEntry];
 
-    /// Physical page-break list (EPUB 3 `<nav epub:type="page-list">`), mapping
+    /// Physical page-break list (EPUB 3 `<nav epub:type="page-list">`), each
+    /// entry's `title` a printed page number and its `href` where that page
+    /// opens. Empty for a format that states none.
     fn page_list(&self) -> &[TocEntry] {
         &[]
     }
@@ -488,7 +502,8 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
     normalize_components(&base_dir.join(relative))
 }
 
-/// Collapse `.` and `..` components in a path. `PathBuf::join` appends
+/// Collapse `.` and `..` components in a path, leaving the components a
+/// zip entry name is matched against.
 pub(crate) fn normalize_components(p: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in p.components() {
@@ -668,6 +683,10 @@ mod tests {
                 &self.landmarks
             }
 
+            fn landmarks_mut(&mut self) -> &mut [Landmark] {
+                &mut self.landmarks
+            }
+
             fn spine(&self) -> &[SpineEntry] {
                 &self.spine
             }
@@ -786,6 +805,10 @@ mod tests {
 
             fn landmarks(&self) -> &[Landmark] {
                 &self.landmarks
+            }
+
+            fn landmarks_mut(&mut self) -> &mut [Landmark] {
+                &mut self.landmarks
             }
 
             fn spine(&self) -> &[SpineEntry] {

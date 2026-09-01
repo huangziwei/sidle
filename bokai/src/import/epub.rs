@@ -108,6 +108,10 @@ impl Importer for EpubImporter {
         &self.landmarks
     }
 
+    fn landmarks_mut(&mut self) -> &mut [Landmark] {
+        &mut self.landmarks
+    }
+
     fn spine(&self) -> &[SpineEntry] {
         &self.spine
     }

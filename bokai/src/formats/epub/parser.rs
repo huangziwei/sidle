@@ -1157,6 +1157,7 @@ pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
                                 landmark_type,
                                 href,
                                 label: current_label.clone(),
+                                target: None,
                             });
                         }
                         current_label.clear();
@@ -1246,6 +1247,7 @@ fn reference_attrs_to_landmark(e: &quick_xml::events::BytesStart) -> Option<Land
         landmark_type,
         href,
         label: title,
+        target: None,
     })
 }
 

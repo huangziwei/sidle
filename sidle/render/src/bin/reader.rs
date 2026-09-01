@@ -9,9 +9,19 @@
 //!   --serif <family>   what the reading settings choose for Latin
 //!   --cjk <family>     the same for Chinese, Japanese and Korean
 //!   --chapter <n>      open at this chapter
+//!   --page <n>         open at this page of it
 //!   --font-size <n>    open at this stop of the size ladder
 //!   --pages <n>        print the geometry of the first `n` pages and exit
 //!   --lines            list every line of every page reported
+//!   --shot <file>      write one page to a PNG and exit
+//!   --open <panel>     open aa, goto, scrub, search or none
+//!   --tab <name>       which `Aa` tab the sheet opens on
+//!   --scroll <n>       how many rows down the open list stands
+//!   --query <text>     what the search card looks for
+//!   --reveal           draw the bars over the page
+//!   --grid             rule the page at the margin ladder
+//!   --dark             draw the page and the chrome dark
+//!   --hits             list the controls a shot placed
 //! ```
 //!
 //! Click the page to turn it, `Aa` and the contents mark to open a panel.
@@ -42,8 +52,9 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 const USAGE: &str = "usage: sidle-render [--device <name>] [--panel <file>] [--fonts <dir>] \
-[--serif <family>] [--cjk <family>] [--chapter <n>] [--font-size <n>] [--pages <n>] [--lines] \
-<book>";
+[--serif <family>] [--cjk <family>] [--chapter <n>] [--page <n>] [--font-size <n>] \
+[--pages <n>] [--lines] [--shot <file>] [--open <panel>] [--tab <name>] [--scroll <n>] \
+[--query <text>] [--reveal] [--grid] [--dark] [--hits] <book>";
 
 /// Words a reader gets through in a minute, which sets the time left.
 const WORDS_A_MINUTE: f32 = 220.0;
@@ -326,7 +337,11 @@ fn fixed_rows(book: &Book, spine: &[ChapterId]) -> Vec<(goto::Fixed, Option<usiz
             .landmarks()
             .iter()
             .find(|landmark| landmark.landmark_type == kind)?;
-        match book.resolve_toc_href(ChapterId(0), &landmark.href)? {
+        let target = landmark
+            .target
+            .clone()
+            .or_else(|| book.resolve_toc_href(ChapterId(0), &landmark.href))?;
+        match target {
             AnchorTarget::Chapter(id) => spine.iter().position(|entry| *entry == id),
             AnchorTarget::Internal(global) => {
                 spine.iter().position(|entry| *entry == global.chapter)
@@ -785,7 +800,12 @@ impl Reader {
 
     /// Move an open list by `dots`, reporting whether one took it.
     fn scroll(&mut self, dots: f32) -> bool {
-        if !matches!(self.chrome.overlay, Overlay::GoTo | Overlay::Search) {
+        let listed = match self.chrome.overlay {
+            Overlay::GoTo | Overlay::Search => true,
+            Overlay::Aa => self.chrome.tab == AaTab::More && self.chrome.pane == AaPane::Tab,
+            _ => false,
+        };
+        if !listed {
             return false;
         }
         self.chrome.scroll = (self.chrome.scroll + dots).max(0.0);
@@ -795,11 +815,13 @@ impl Reader {
 
     /// One step of a list, in panel dots: a row of it.
     fn scroll_step(&self) -> f32 {
+        let panel = self.panel_for();
         let row = match self.chrome.overlay {
+            Overlay::Aa => return aa::row_of(panel.size.height, panel.dpi),
             Overlay::Search => search::ROW,
             _ => goto::ROW,
         };
-        row * self.panel_for().size.height / bars::REFERENCE
+        row * panel.size.height / bars::REFERENCE
     }
 
     /// Whether the page after this one lies to its left, which is what a

@@ -5,13 +5,47 @@ use super::{AaPane, AaTab, Action, Canvas, Chrome, Reading, text::Align};
 use crate::geom::Rect;
 use crate::settings::{Device, Orientation, Preset, Progress, Stop};
 
-/// The share of the panel the sheet covers.
+/// The share of the panel the sheet covers, which the reader sets outside the
+/// sheet's own layout.
 const SHEET: f32 = 0.6;
 
-/// Where a tab's own content starts below the sheet's top edge, and how far
-/// apart two rows of controls sit, in reference dots.
-const BODY: f32 = 155.0;
-const GROUP: f32 = 250.0;
+/// The tab strip's own height, in stated dots.
+const TAB_STRIP: f32 = 60.0;
+
+/// The padding a row of settings holds above and below what it carries.
+const ROW_PAD: f32 = 19.0;
+
+/// The block a list of font names takes, by the rows of names in it.
+const FAMILY_BLOCK: [f32; 2] = [92.0, 161.0];
+
+/// A ladder's own row: how deep it stands, the share of it left for the
+/// ladder beside its label, the share of that the ladder fills, and the room
+/// the `-` before its stops and the `+` after them stand in.
+const LADDER_ROW: f32 = 92.0;
+const LADDER_VIEW: f32 = 0.78;
+const LADDER_TRACK: f32 = 0.95;
+const LADDER_END: f32 = 58.0;
+
+/// The row one font's name stands in.
+const FAMILY_ROW: f32 = 63.0;
+
+/// The padding a group of controls holds above and below its row of them.
+const GROUP_PAD: f32 = 13.0;
+
+/// How deep the box one control in a group sits in stands. A taller control
+/// grows it, which is what sets one group in a row against another.
+const CONTROL_BOX: f32 = 60.0;
+
+/// The share of the More tab one of its rows takes, which stands four of them
+/// on a page.
+const MORE_ROW: f32 = 0.25;
+
+/// A theme tile's own row, and the padding the rows of them sit in.
+const TILE_ROW: f32 = 83.0;
+const TILES_PAD: f32 = 19.0;
+
+/// The padding the Layout tab's own rows sit under.
+const LAYOUT_PAD: f32 = 24.0;
 
 /// The corner a plate is rounded by, and the padding around it: `TILE` sets
 /// 41 in a box of 61.
@@ -20,6 +54,12 @@ const PADDING: f32 = 10.0;
 
 /// The share of the sheet the Layout tab's two blocks take.
 const BLOCK_LEFT: f32 = 0.41;
+
+/// One row of the More tab on a panel `height` deep at `dpi`, which is the
+/// step a scrolling list of settings takes.
+pub fn row_of(height: f32, dpi: f32) -> f32 {
+    (height * SHEET - dpi / super::ARTWORK_DPI * TAB_STRIP) * MORE_ROW
+}
 
 /// Draw the sheet and whichever tab or screen is showing.
 pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, reading: &Reading<'_>) {
@@ -37,35 +77,38 @@ pub fn draw(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, reading: &Reading<
     // Anything above the sheet closes it.
     chrome.add(Rect::new(0.0, 0.0, panel.width, top), Action::Close);
 
-    let body = match chrome.pane {
-        AaPane::Tab => tabs(chrome, canvas, top, unit),
-        AaPane::ReadingProgress => heading(chrome, canvas, top, unit),
-    };
-    let page = Page {
+    let strip = canvas.art() * TAB_STRIP;
+    match chrome.pane {
+        AaPane::Tab => tabs(chrome, canvas, top, strip),
+        AaPane::ReadingProgress => heading(chrome, canvas, top, strip),
+    }
+    let mut page = Page {
         left: panel.width * 0.05,
         right: panel.width * 0.95,
-        body,
+        body: top + strip,
         unit,
+        art: canvas.art(),
     };
 
     match chrome.pane {
         AaPane::Tab => match chrome.tab {
-            AaTab::Themes => themes(chrome, canvas, &page, reading),
-            AaTab::Font => font(chrome, canvas, &page, reading),
-            AaTab::Layout => layout(chrome, canvas, &page, reading),
-            AaTab::More => more(chrome, canvas, &page, reading),
+            AaTab::Themes => themes(chrome, canvas, &mut page, reading, panel.height),
+            AaTab::Font => font(chrome, canvas, &mut page, reading),
+            AaTab::Layout => layout(chrome, canvas, &mut page, reading),
+            AaTab::More => more(chrome, canvas, &mut page, reading, panel.height),
         },
-        AaPane::ReadingProgress => reading_progress(chrome, canvas, &page, reading),
+        AaPane::ReadingProgress => reading_progress(chrome, canvas, &mut page, reading),
     }
 }
 
-/// Where a tab's controls go: the inset edges, the first row, and one
-/// reference dot in dots of the panel in hand.
+/// Where a tab lays its bands out: the inset edges, the top of the band to
+/// come, and one reference and one stated dot in dots of the panel in hand.
 struct Page {
     left: f32,
     right: f32,
     body: f32,
     unit: f32,
+    art: f32,
 }
 
 impl Page {
@@ -78,186 +121,213 @@ impl Page {
         self.left + self.width() * 0.46
     }
 
-    /// `dots` reference dots below the first row.
-    fn at(&self, dots: f32) -> f32 {
-        self.body + dots * self.unit
+    /// `dots` stated dots, in dots of the panel in hand.
+    fn dp(&self, dots: f32) -> f32 {
+        dots * self.art
+    }
+
+    /// Take a band of `dots` stated dots, returning its top edge.
+    fn band(&mut self, dots: f32) -> f32 {
+        let top = self.body;
+        self.body += dots * self.art;
+        top
     }
 }
 
-/// The tab strip, returning where the body starts.
-fn tabs(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) -> f32 {
+/// The tab strip, filling a band `strip` deep from `top`.
+fn tabs(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, strip: f32) {
     let panel = canvas.panel;
+    let unit = canvas.unit();
     let theme = canvas.theme;
     let mut x = panel.width * 0.05;
+    let size = 36.0 * unit;
+    let middle = top + strip / 2.0;
 
     for tab in AaTab::ALL {
         let chosen = tab == chrome.tab;
-        let label = canvas.text(
-            tab.label(),
-            36.0 * unit,
-            theme.ink,
-            chosen,
-            (x, top + 40.0 * unit),
-            Align::Left,
-        );
+        let line = middle - canvas.line_of(size, chosen) / 2.0;
+        let label = canvas.text(tab.label(), size, theme.ink, chosen, (x, line), Align::Left);
         if chosen {
             canvas.rule(
                 label.x - 4.0 * unit,
                 label.right() + 4.0 * unit,
-                top + 96.0 * unit,
+                top + strip - 4.0 * unit,
                 8.0 * unit,
                 theme.ink,
             );
         }
         chrome.add(
-            Rect::new(
-                label.x - 14.0 * unit,
-                top,
-                label.width + 28.0 * unit,
-                100.0 * unit,
-            ),
+            Rect::new(label.x - 14.0 * unit, top, label.width + 28.0 * unit, strip),
             Action::Tab(tab),
         );
         x = label.right() + 56.0 * unit;
     }
-    canvas.rule(
-        0.0,
-        panel.width,
-        top + 100.0 * unit,
-        2.0 * unit,
-        theme.faint,
-    );
-    top + BODY * unit
+    canvas.rule(0.0, panel.width, top + strip, 2.0 * unit, theme.faint);
 }
 
-/// A screen's back arrow and title, returning where its body starts.
-fn heading(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, unit: f32) -> f32 {
+/// A screen's back arrow and title, filling a band `strip` deep from `top`.
+fn heading(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, top: f32, strip: f32) {
     let panel = canvas.panel;
+    let unit = canvas.unit();
     let theme = canvas.theme;
     let left = panel.width * 0.05;
+    let size = 38.0 * unit;
+    let middle = top + strip / 2.0;
 
-    chevron(
-        canvas,
-        (left + 14.0 * unit, top + 58.0 * unit),
-        18.0 * unit,
-        true,
-    );
+    chevron(canvas, (left + 14.0 * unit, middle), 18.0 * unit, true);
+    let line = middle - canvas.line_of(size, true) / 2.0;
     canvas.text(
         chrome.pane.title(),
-        38.0 * unit,
+        size,
         theme.ink,
         true,
-        (left + 54.0 * unit, top + 34.0 * unit),
+        (left + 54.0 * unit, line),
         Align::Left,
     );
     chrome.add(
-        Rect::new(0.0, top, panel.width * 0.5, 100.0 * unit),
+        Rect::new(0.0, top, panel.width * 0.5, strip),
         Action::Pane(AaPane::Tab),
     );
-    canvas.rule(
-        0.0,
-        panel.width,
-        top + 100.0 * unit,
-        2.0 * unit,
-        theme.faint,
-    );
-    top + BODY * unit
+    canvas.rule(0.0, panel.width, top + strip, 2.0 * unit, theme.faint);
 }
 
-fn themes(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
+fn themes(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    page: &mut Page,
+    reading: &Reading<'_>,
+    bottom: f32,
+) {
     let unit = page.unit;
     let theme = canvas.theme;
     let dark = chrome.dark;
 
+    // Page colour: a labelled row, as tall as the taller of its label and its
+    // two swatches, in the padding a row of settings holds. The ring a chosen
+    // swatch carries stands outside the row, as its own artwork states it.
+    let size = 36.0 * unit;
+    let label = canvas.line_of(size, false);
+    let swatch = 26.0 * unit;
+    let ring = 34.0 * unit;
+    let row = page.dp(ROW_PAD * 2.0) + label.max(swatch * 2.0);
+    let top = page.band(0.0);
+    let middle = top + row / 2.0;
     canvas.text(
         "Page Color",
-        36.0 * unit,
+        size,
         theme.ink,
         false,
-        (page.left, page.body),
+        (page.left, middle - label / 2.0),
         Align::Left,
     );
     for (n, night) in [false, true].into_iter().enumerate() {
-        let centre = (
-            page.right - (84.0 - n as f32 * 66.0) * unit,
-            page.body + 18.0 * unit,
-        );
-        canvas.circle(centre, 26.0 * unit, theme.ink, night);
+        let centre = (page.right - (84.0 - n as f32 * 66.0) * unit, middle);
+        canvas.circle(centre, swatch, theme.ink, night);
         if night == dark {
-            canvas.circle(centre, 34.0 * unit, theme.ink, false);
+            canvas.circle(centre, ring, theme.ink, false);
         }
         chrome.add(
-            Rect::new(
-                centre.0 - 34.0 * unit,
-                page.body - 10.0 * unit,
-                68.0 * unit,
-                68.0 * unit,
-            ),
+            Rect::new(centre.0 - ring, middle - ring, ring * 2.0, ring * 2.0),
             Action::PageColor(night),
         );
     }
-    canvas.rule(page.left, page.right, page.at(62.0), 2.0 * unit, theme.ink);
+    page.body = top + row;
+    canvas.rule(page.left, page.right, page.body, 2.0 * unit, theme.ink);
+
+    // Manage Themes and Save Current Settings sit at the foot of the sheet,
+    // and the tiles take what is left between them.
+    let manage = bottom - page.dp(TAB_STRIP);
+    let save = manage - page.dp(LADDER_ROW);
+    let tiles = page.body + page.dp(TILES_PAD);
 
     // The theme in hand, then the three `Preset::OFFERED` names.
     let held = reading.settings.matches(reading.panel);
-    tile(chrome, canvas, page, 0, "Custom", held.is_none(), None);
+    tile(
+        chrome,
+        canvas,
+        page,
+        Tile {
+            top: tiles,
+            slot: 0,
+            name: "Custom",
+            held: held.is_none(),
+            preset: None,
+        },
+    );
     for (n, preset) in Preset::OFFERED.into_iter().enumerate() {
         tile(
             chrome,
             canvas,
             page,
-            n + 1,
-            preset.label(),
-            held == Some(preset),
-            Some(preset),
+            Tile {
+                top: tiles,
+                slot: n + 1,
+                name: preset.label(),
+                held: held == Some(preset),
+                preset: Some(preset),
+            },
         );
     }
 
-    let save = Rect::new(page.left, page.at(430.0), page.width(), 76.0 * unit);
-    canvas.round_stroke(save, 6.0 * unit, theme.faint, 2.0 * unit);
+    let button = Rect::new(
+        page.left,
+        save + page.dp(ROW_PAD),
+        page.width(),
+        page.dp(LADDER_ROW - ROW_PAD * 2.0),
+    );
+    canvas.round_stroke(button, 6.0 * unit, theme.faint, 2.0 * unit);
+    let size = 34.0 * unit;
+    let line = canvas.line_of(size, false);
     canvas.text(
         "Save Current Settings",
-        34.0 * unit,
+        size,
         theme.faint,
         false,
-        (page.left + page.width() / 2.0, page.at(452.0)),
+        (
+            page.left + page.width() / 2.0,
+            button.y + (button.height - line) / 2.0,
+        ),
         Align::Center,
     );
 
-    canvas.rule(
-        page.left,
-        page.right,
-        page.at(545.0),
-        2.0 * unit,
-        theme.faint,
-    );
+    canvas.rule(page.left, page.right, manage, 2.0 * unit, theme.faint);
+    let middle = manage + (bottom - manage) / 2.0;
     canvas.text(
         "Manage Themes",
-        34.0 * unit,
+        size,
         theme.faint,
         false,
-        (page.left, page.at(575.0)),
+        (page.left, middle - line / 2.0),
         Align::Left,
     );
     chevron(
         canvas,
-        (page.right - 18.0 * unit, page.at(596.0)),
+        (page.right - 18.0 * unit, middle),
         16.0 * unit,
         false,
     );
 }
 
-/// One theme tile: a ruled page in a box, its name beside it, and the tick
-/// where it is the theme in hand.
-fn tile(
-    chrome: &mut Chrome,
-    canvas: &mut Canvas<'_, '_>,
-    page: &Page,
+/// One theme tile: where the tiles start, which slot it takes, what it is
+/// called, whether it is the theme in hand, and the preset it sets.
+struct Tile<'a> {
+    top: f32,
     slot: usize,
-    name: &str,
+    name: &'a str,
     held: bool,
     preset: Option<Preset>,
-) {
+}
+
+/// One theme tile: a ruled page in a box, its name beside it, and the tick
+/// where it is the theme in hand.
+fn tile(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, tile: Tile<'_>) {
+    let Tile {
+        top,
+        slot,
+        name,
+        held,
+        preset,
+    } = tile;
     let unit = page.unit;
     let art = canvas.art();
     let theme = canvas.theme;
@@ -266,7 +336,10 @@ fn tile(
     } else {
         page.column()
     };
-    let y = page.at(110.0 + (slot / 2) as f32 * 150.0);
+    // The tile's box sits in the middle of its own row.
+    let row = page.dp(TILE_ROW);
+    let box_ = 61.0 * art;
+    let y = top + (slot / 2) as f32 * row + (row - box_) / 2.0;
 
     // The plate sits inside its own touch box, ruled at the pitch the theme
     // sets. A theme with no ruled page of its own carries its initial.
@@ -282,7 +355,8 @@ fn tile(
                 chosen: false,
                 action: Action::Preset(Preset::OFFERED[n]),
             };
-            control(chrome, canvas, &button, inside, art);
+            let ink = canvas.theme.ink;
+            control(chrome, canvas, &button, inside, art, ink);
         }
         None => {
             canvas.round_stroke(
@@ -308,22 +382,27 @@ fn tile(
         canvas.polygon(&bite(), (x, y), art, theme.page);
         canvas.polygon(&TICK, (x, y), art, theme.ink);
     }
-    let box_ = 61.0 * art;
-    canvas.text(
-        name,
-        34.0 * unit,
-        theme.ink,
-        held,
-        (x + box_ + 16.0 * art, y + 16.0 * art),
-        Align::Left,
-    );
+    // The name, and under it what a held tile is called, the pair of them in
+    // the middle of the box beside them.
+    let size = 34.0 * unit;
+    let said = 30.0 * unit;
+    let name_line = canvas.line_of(size, held);
+    let lines = name_line
+        + if held {
+            canvas.line_of(said, false)
+        } else {
+            0.0
+        };
+    let beside = x + box_ + 16.0 * art;
+    let top = y + (box_ - lines) / 2.0;
+    canvas.text(name, size, theme.ink, held, (beside, top), Align::Left);
     if held {
         canvas.text(
             "Current Theme",
-            30.0 * unit,
+            said,
             theme.faint,
             false,
-            (x + box_ + 16.0 * art, y + 38.0 * art),
+            (beside, top + name_line),
             Align::Left,
         );
     }
@@ -346,73 +425,75 @@ fn check(canvas: &mut Canvas<'_, '_>, box_: Rect) {
     canvas.polygon(&TICK, at, art, ink);
 }
 
-fn font(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
+fn font(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &mut Page, reading: &Reading<'_>) {
     let unit = page.unit;
     let theme = canvas.theme;
     let settings = reading.settings;
     let panel = reading.panel;
 
+    // The names take a block of their own, stated by how many rows they run
+    // to, with the rows in the middle of it.
+    let rows = reading.families.len().div_ceil(2);
+    let block = FAMILY_BLOCK[usize::from(rows > 1).min(FAMILY_BLOCK.len() - 1)];
+    let name = 34.0 * unit;
+    let line = canvas.line_of(name, false);
+    let dot = 22.0 * unit;
+    let row = page.dp(FAMILY_ROW);
+    let top = page.band(block.max(rows as f32 * row / page.art));
+    let first = top + (page.dp(block) - rows as f32 * row).max(0.0) / 2.0;
+
     for (n, family) in reading.families.iter().enumerate() {
         let x = if n % 2 == 0 { page.left } else { page.column() };
-        let y = page.at((n / 2) as f32 * 112.0);
-        let dot = (x + 18.0 * unit, y + 18.0 * unit);
-        canvas.circle(dot, 20.0 * unit, theme.ink, false);
+        let middle = first + (n / 2) as f32 * row + row / 2.0;
+        canvas.circle((x + dot, middle), 20.0 * unit, theme.ink, false);
         if n == settings.family {
-            canvas.circle(dot, 11.0 * unit, theme.ink, true);
+            canvas.circle((x + dot, middle), 11.0 * unit, theme.ink, true);
         }
         canvas.text(
             family,
-            34.0 * unit,
+            name,
             theme.ink,
             false,
-            (x + 52.0 * unit, y - 4.0 * unit),
+            (x + 52.0 * unit, middle - line / 2.0),
             Align::Left,
         );
         chrome.add(
-            Rect::new(x, y - 10.0 * unit, page.width() * 0.45, 66.0 * unit),
+            Rect::new(x, middle - row / 2.0, page.width() * 0.45, row),
             Action::Family(n),
         );
     }
 
-    let rows = reading.families.len().div_ceil(2) as f32 * 112.0 + 30.0;
-    canvas.rule(
-        page.left,
-        page.right,
-        page.at(rows),
-        2.0 * unit,
-        theme.faint,
-    );
-    slider(
-        chrome,
-        canvas,
-        page,
-        Ladder {
-            label: "Bold",
-            y: page.at(rows + 80.0),
-            at: settings.boldness,
-            stops: panel.boldness.len(),
-        },
-        &Action::Bold,
-    );
-    canvas.rule(
-        page.left,
-        page.right,
-        page.at(rows + 160.0),
-        2.0 * unit,
-        theme.faint,
-    );
-    slider(
-        chrome,
-        canvas,
-        page,
-        Ladder {
-            label: "Size",
-            y: page.at(rows + 250.0),
-            at: settings.font_size,
-            stops: panel.font_size_stops(),
-        },
-        &Action::FontSize,
-    );
+    // Then one ladder to a row, each under a rule.
+    for ladder in [
+        (
+            "Bold",
+            settings.boldness,
+            panel.boldness.len(),
+            &Action::Bold as &dyn Fn(usize) -> Action,
+        ),
+        (
+            "Size",
+            settings.font_size,
+            panel.font_size_stops(),
+            &Action::FontSize,
+        ),
+    ] {
+        let (label, at, stops, action) = ladder;
+        canvas.rule(page.left, page.right, page.body, 2.0 * unit, theme.faint);
+        let band = page.band(LADDER_ROW);
+        slider(
+            chrome,
+            canvas,
+            page,
+            Ladder {
+                label,
+                y: band + page.dp(LADDER_ROW) / 2.0,
+                at,
+                stops,
+            },
+            action,
+        );
+    }
 }
 
 /// One labelled ladder: where it sits, which stop it is at, and how many it
@@ -441,8 +522,10 @@ fn slider(
     } = ladder;
     let unit = page.unit;
     let theme = canvas.theme;
-    let track_left = page.left + page.width() * 0.30;
-    let track_right = page.right - 60.0 * unit;
+    // The label takes the head of the row and the ladder the rest, which the
+    // `-` opens and the `+` closes.
+    let track_right = page.right - page.dp(LADDER_END);
+    let track_left = page.right - page.width() * LADDER_VIEW * LADDER_TRACK + page.dp(LADDER_END);
     let step = (track_right - track_left) / stops.max(1) as f32;
 
     canvas.text(
@@ -524,10 +607,16 @@ fn slider(
     );
 }
 
-fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
+fn layout(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    page: &mut Page,
+    reading: &Reading<'_>,
+) {
     let settings = reading.settings;
     let down = reading.vertical;
     let right = page.left + page.width() * BLOCK_LEFT;
+    page.band(LAYOUT_PAD);
 
     // `down` takes the other plate, turned: its rules draw as columns.
     let orientation = Orientation::ALL.map(|held| {
@@ -543,15 +632,6 @@ fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading
             action: Action::Orient(held),
         }
     });
-    group(
-        chrome,
-        canvas,
-        page,
-        "Orientation",
-        page.left,
-        page.body,
-        &orientation,
-    );
 
     let stops = [Stop::Narrow, Stop::Normal, Stop::Wide];
     let margins = stops.map(|stop| Button {
@@ -566,29 +646,22 @@ fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading
         chosen: stop == settings.margins,
         action: Action::Margins(stop),
     });
-    group(chrome, canvas, page, "Margins", right, page.body, &margins);
+    row(
+        chrome,
+        canvas,
+        page,
+        [
+            Group::new("Orientation", page.left, &orientation),
+            Group::new("Margins", right, &margins),
+        ],
+    );
 
-    // `down` denies the alignment group.
-    let second = page.at(GROUP);
-    if down {
-        denied(canvas, page, "Alignment", page.left, second);
-    } else {
-        let alignment = [true, false].map(|justified| Button {
-            art: plate(ALIGNMENT_ART[usize::from(!justified)], false),
-            chosen: justified == settings.justified,
-            action: Action::Justified(justified),
-        });
-        group(
-            chrome,
-            canvas,
-            page,
-            "Alignment",
-            page.left,
-            second,
-            &alignment,
-        );
-    }
-
+    // `down` denies the alignment group and greys its controls.
+    let alignment = [true, false].map(|justified| Button {
+        art: plate(ALIGNMENT_ART[usize::from(!justified)], false),
+        chosen: !down && justified == settings.justified,
+        action: Action::Justified(justified),
+    });
     let spacing = stops.map(|stop| Button {
         art: plate(
             if down {
@@ -601,16 +674,27 @@ fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading
         chosen: stop == settings.line_spacing,
         action: Action::Spacing(stop),
     });
-    group(chrome, canvas, page, "Spacing", right, second, &spacing);
+    let mut left = Group::new("Alignment", page.left, &alignment);
+    left.denied = down;
+    row(
+        chrome,
+        canvas,
+        page,
+        [left, Group::new("Spacing", right, &spacing)],
+    );
 
-    let third = page.at(GROUP * 2.0);
+    let columns = [1u8, 2].map(|count| Button {
+        art: plate(COLUMN_ART[usize::from(count == 2)], down),
+        chosen: count == settings.columns,
+        action: Action::Columns(count),
+    });
     if reading.panel.columns_offered {
-        let columns = [1u8, 2].map(|count| Button {
-            art: plate(COLUMN_ART[usize::from(count == 2)], down),
-            chosen: count == settings.columns,
-            action: Action::Columns(count),
-        });
-        group(chrome, canvas, page, "Column", page.left, third, &columns);
+        row(
+            chrome,
+            canvas,
+            page,
+            [Group::new("Column", page.left, &columns)],
+        );
     }
     if reading.hyphenates {
         toggle(
@@ -618,11 +702,69 @@ fn layout(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading
             canvas,
             page,
             "Hyphenate words that extend beyond the margin",
-            page.at(GROUP * 2.0 + 200.0),
             settings.hyphenate,
             &Action::Hyphenate,
         );
     }
+}
+
+/// One labelled group of controls in a row of them.
+struct Group<'a> {
+    label: &'a str,
+    x: f32,
+    buttons: &'a [Button],
+    /// Whether the book denies the setting, which greys the group and states
+    /// so under its label.
+    denied: bool,
+}
+
+impl<'a> Group<'a> {
+    fn new(label: &'a str, x: f32, buttons: &'a [Button]) -> Self {
+        Self {
+            label,
+            x,
+            buttons,
+            denied: false,
+        }
+    }
+
+    /// What the group stands: its label, what a denied one says under it, the
+    /// box its controls sit in, and the padding either side of that box.
+    fn stands(&self, canvas: &mut Canvas<'_, '_>, page: &Page) -> f32 {
+        let mut label = canvas.line_of(34.0 * page.unit, false);
+        if self.denied {
+            label += canvas.line_of(30.0 * page.unit, false);
+        }
+        label + page.dp(GROUP_PAD * 2.0) + self.box_of(page)
+    }
+
+    /// The box one row of its controls sits in: the stated one, grown to the
+    /// tallest control in it.
+    fn box_of(&self, page: &Page) -> f32 {
+        let tallest = self
+            .buttons
+            .iter()
+            .map(|button| button.art.size().1)
+            .fold(0.0f32, f32::max);
+        page.dp(CONTROL_BOX.max(tallest))
+    }
+}
+
+/// A row of groups, each in the middle of the tallest of them, over the
+/// padding a row of controls carries below it.
+fn row<const N: usize>(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    page: &mut Page,
+    groups: [Group<'_>; N],
+) {
+    let stands: [f32; N] = std::array::from_fn(|n| groups[n].stands(canvas, page));
+    let tallest = stands.iter().fold(0.0f32, |tallest, it| tallest.max(*it));
+    let top = page.body;
+    for (group, stands) in groups.iter().zip(stands) {
+        draw_group(chrome, canvas, page, group, top + (tallest - stands) / 2.0);
+    }
+    page.body = top + tallest + page.dp(GROUP_PAD);
 }
 
 /// One control's artwork: the plate it is drawn on and the rules inside it,
@@ -854,34 +996,51 @@ fn plate(rules: &'static [(f32, f32, f32)], turned: bool) -> Art {
     }
 }
 
-/// A labelled row of icon buttons, `chosen` in the heavier border.
-fn group(
+/// One group: its label, its controls in a row below, and what a denied one
+/// says between the two.
+fn draw_group(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,
     page: &Page,
-    label: &str,
-    x: f32,
-    y: f32,
-    buttons: &[Button],
+    group: &Group<'_>,
+    top: f32,
 ) {
     let art = canvas.art();
-    canvas.text(
-        label,
-        34.0 * page.unit,
-        canvas.theme.ink,
-        false,
-        (x, y),
-        Align::Left,
-    );
-    let tallest = buttons
-        .iter()
-        .map(|button| button.art.size().1)
-        .fold(0.0f32, f32::max);
-    let mut at = x;
-    for button in buttons {
+    let unit = page.unit;
+    let ink = if group.denied {
+        canvas.theme.faint
+    } else {
+        canvas.theme.ink
+    };
+    let size = 34.0 * unit;
+    let mut label = canvas.line_of(size, false);
+    canvas.text(group.label, size, ink, false, (group.x, top), Align::Left);
+    if group.denied {
+        canvas.text(
+            "Not Available",
+            30.0 * unit,
+            ink,
+            false,
+            (group.x, top + label),
+            Align::Left,
+        );
+        label += canvas.line_of(30.0 * unit, false);
+    }
+
+    // Each control in the middle of the box the row of them stands in.
+    let box_ = group.box_of(page);
+    let row = top + label + page.dp(GROUP_PAD);
+    let mut at = group.x;
+    for button in group.buttons {
         let (width, height) = button.art.size();
-        let top = y + 54.0 * page.unit + (tallest - height) / 2.0 * art;
-        control(chrome, canvas, button, (at, top), art);
+        control(
+            chrome,
+            canvas,
+            button,
+            (at, row + (box_ - height * art) / 2.0),
+            art,
+            ink,
+        );
         at += (width + PADDING) * art;
     }
 }
@@ -893,8 +1052,8 @@ fn control(
     button: &Button,
     at: (f32, f32),
     art: f32,
+    ink: crate::chrome::Color,
 ) {
-    let ink = canvas.theme.ink;
     let (width, height) = button.art.size();
     let (inset, weight) = if button.chosen {
         (1.5, 3.0)
@@ -930,77 +1089,83 @@ fn control(
     );
 }
 
-/// A group the book denies, greyed under what the catalogue calls it.
-fn denied(canvas: &mut Canvas<'_, '_>, page: &Page, label: &str, x: f32, y: f32) {
-    let unit = page.unit;
-    let faint = canvas.theme.faint;
-    canvas.text(label, 34.0 * unit, faint, false, (x, y), Align::Left);
-    canvas.text(
-        "Not Available",
-        30.0 * unit,
-        faint,
-        false,
-        (x, y + 40.0 * unit),
-        Align::Left,
-    );
-}
-
 /// A row with a box at its right, checked where the setting is on.
 fn toggle(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,
-    page: &Page,
+    page: &mut Page,
     label: &str,
-    y: f32,
     on: bool,
     action: &dyn Fn(bool) -> Action,
 ) {
     let unit = page.unit;
     let theme = canvas.theme;
+    let size = 32.0 * unit;
+    let line = canvas.line_of(size, false);
+    let check_box = 44.0 * unit;
+    let height = page.dp(ROW_PAD * 2.0) + line.max(check_box);
+    let top = page.band(height / page.art);
+    let middle = top + height / 2.0;
+
     canvas.text(
         label,
-        32.0 * unit,
+        size,
         theme.ink,
         false,
-        (page.left, y),
+        (page.left, middle - line / 2.0),
         Align::Left,
     );
     let box_ = Rect::new(
-        page.right - 44.0 * unit,
-        y - 4.0 * unit,
-        44.0 * unit,
-        44.0 * unit,
+        page.right - check_box,
+        middle - check_box / 2.0,
+        check_box,
+        check_box,
     );
     canvas.round_stroke(box_, 4.0 * unit, theme.ink, 3.0 * unit);
     if on {
         check(canvas, box_.inset_by(9.0 * unit));
     }
-    chrome.add(
-        Rect::new(page.left, y - 12.0 * unit, page.width(), 60.0 * unit),
-        action(!on),
-    );
+    chrome.add(Rect::new(page.left, top, page.width(), height), action(!on));
 }
 
-fn more(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: &Reading<'_>) {
+fn more(
+    chrome: &mut Chrome,
+    canvas: &mut Canvas<'_, '_>,
+    page: &mut Page,
+    reading: &Reading<'_>,
+    bottom: f32,
+) {
     let unit = page.unit;
     let theme = canvas.theme;
 
+    // Four rows to a page, and more rows than that, so they scroll inside the
+    // tab.
+    let button = 56.0 * unit;
+    let line = canvas.line_of(34.0 * unit, false);
+    let list = Rect::new(0.0, page.body, page.right + page.left, bottom - page.body);
+    let row = (list.height * MORE_ROW).max(page.dp(ROW_PAD * 2.0) + line.max(button));
+    let reach = (row * MORE_ROWS as f32 - list.height).max(0.0);
+    chrome.scroll = chrome.scroll.clamp(0.0, reach);
+    canvas.clip_to(list);
+    page.body -= chrome.scroll;
+
     // The screen the emulator draws, which a Kindle has in hardware.
-    let mut y = page.body;
+    let size = 34.0 * unit;
+    let (_, middle) = settings_row(canvas, page, button, row);
     canvas.text(
         "Screen",
-        34.0 * unit,
+        size,
         theme.ink,
         false,
-        (page.left, y),
+        (page.left, middle - line / 2.0),
         Align::Left,
     );
     for (n, device) in Device::ALL.into_iter().enumerate() {
         let box_ = Rect::new(
             page.right - (2 - n) as f32 * 200.0 * unit + 10.0 * unit,
-            y - 10.0 * unit,
+            middle - button / 2.0,
             190.0 * unit,
-            56.0 * unit,
+            button,
         );
         let chosen = reading.device == Some(device);
         canvas.round_stroke(
@@ -1009,85 +1174,95 @@ fn more(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: 
             theme.ink,
             if chosen { 5.0 } else { 2.0 } * unit,
         );
+        let size = 30.0 * unit;
+        let line = canvas.line_of(size, chosen);
         canvas.text(
             device.name(),
-            30.0 * unit,
+            size,
             theme.ink,
             chosen,
-            (box_.x + box_.width / 2.0, box_.y + 12.0 * unit),
+            (box_.x + box_.width / 2.0, middle - line / 2.0),
             Align::Center,
         );
         chrome.add(box_, Action::Screen(device));
     }
-    canvas.rule(
-        page.left,
-        page.right,
-        y + 56.0 * unit,
-        2.0 * unit,
-        theme.faint,
-    );
+    rule_under(canvas, page);
 
-    y += 84.0 * unit;
+    // What the bar below the page states, then the rows a Kindle carries that
+    // this reader has nothing behind.
+    let (top, middle) = settings_row(canvas, page, 0.0, row);
     canvas.text(
         "Reading Progress",
-        34.0 * unit,
+        size,
         theme.ink,
         false,
-        (page.left, y),
+        (page.left, middle - line / 2.0),
         Align::Left,
     );
+    let said = canvas.line_of(30.0 * unit, false);
     canvas.text(
         reading.settings.progress.label(),
         30.0 * unit,
         theme.faint,
         false,
-        (page.right - 40.0 * unit, y + 4.0 * unit),
+        (page.right - 40.0 * unit, middle - said / 2.0),
         Align::Right,
     );
     chevron(
         canvas,
-        (page.right - 14.0 * unit, y + 20.0 * unit),
+        (page.right - 14.0 * unit, middle),
         16.0 * unit,
         false,
     );
     chrome.add(
-        Rect::new(page.left, y - 14.0 * unit, page.width(), 70.0 * unit),
+        Rect::new(page.left, top, page.width(), page.body - top),
         Action::Pane(AaPane::ReadingProgress),
     );
-    canvas.rule(
-        page.left,
-        page.right,
-        y + 56.0 * unit,
-        2.0 * unit,
-        theme.faint,
-    );
+    rule_under(canvas, page);
 
-    for row in [
-        "About This Book",
-        "Book Mentions",
-        "Highlight Menu",
-        "Page Turn Animation",
-        "Popular Highlights",
-        "Show Clock While Reading",
-        "Word Wise",
-    ] {
-        y += 84.0 * unit;
+    for inert in INERT {
+        let (_, middle) = settings_row(canvas, page, 0.0, row);
         canvas.text(
-            row,
-            34.0 * unit,
+            inert,
+            size,
             theme.faint,
             false,
-            (page.left, y),
+            (page.left, middle - line / 2.0),
             Align::Left,
         );
-        canvas.rule(
-            page.left,
-            page.right,
-            y + 56.0 * unit,
-            2.0 * unit,
-            theme.faint,
-        );
+        rule_under(canvas, page);
     }
+    canvas.unclip();
+}
+
+/// The rows a Kindle carries that this reader has nothing behind.
+const INERT: [&str; 7] = [
+    "About This Book",
+    "Book Mentions",
+    "Highlight Menu",
+    "Page Turn Animation",
+    "Popular Highlights",
+    "Show Clock While Reading",
+    "Word Wise",
+];
+
+/// How many rows the More tab holds beside the one naming the screen.
+const MORE_ROWS: usize = INERT.len() + 1;
+
+/// Take a row of settings `deep` dots deep, or as deep as the padding around
+/// what it holds makes it, and report its top edge and its middle. `tall` is
+/// what the row carries beside its label.
+fn settings_row(canvas: &mut Canvas<'_, '_>, page: &mut Page, tall: f32, deep: f32) -> (f32, f32) {
+    let line = canvas.line_of(34.0 * page.unit, false);
+    let height = deep.max(page.dp(ROW_PAD * 2.0) + line.max(tall));
+    let top = page.band(height / page.art);
+    (top, top + height / 2.0)
+}
+
+/// The rule closing the row in hand.
+fn rule_under(canvas: &mut Canvas<'_, '_>, page: &Page) {
+    let faint = canvas.theme.faint;
+    canvas.rule(page.left, page.right, page.body, 2.0 * page.unit, faint);
 }
 
 /// The screen behind More's `Reading Progress` row: what the bar below the
@@ -1095,43 +1270,38 @@ fn more(chrome: &mut Chrome, canvas: &mut Canvas<'_, '_>, page: &Page, reading: 
 fn reading_progress(
     chrome: &mut Chrome,
     canvas: &mut Canvas<'_, '_>,
-    page: &Page,
+    page: &mut Page,
     reading: &Reading<'_>,
 ) {
     let unit = page.unit;
     let theme = canvas.theme;
     let chosen = reading.settings.progress;
+    let size = 34.0 * unit;
+    let line = canvas.line_of(size, false);
+    let dot = 22.0 * unit;
 
-    for (n, mode) in Progress::ALL
+    for mode in Progress::ALL
         .into_iter()
         .filter(|mode| mode.offered(reading.numbered, reading.chaptered))
-        .enumerate()
     {
-        let y = page.at(n as f32 * 84.0);
-        let dot = (page.left + 18.0 * unit, y + 18.0 * unit);
-        canvas.circle(dot, 20.0 * unit, theme.ink, false);
+        let (top, middle) = settings_row(canvas, page, dot * 2.0, 0.0);
+        canvas.circle((page.left + dot, middle), 20.0 * unit, theme.ink, false);
         if mode == chosen {
-            canvas.circle(dot, 11.0 * unit, theme.ink, true);
+            canvas.circle((page.left + dot, middle), 11.0 * unit, theme.ink, true);
         }
         canvas.text(
             mode.label(),
-            34.0 * unit,
+            size,
             theme.ink,
             false,
-            (page.left + 56.0 * unit, y - 4.0 * unit),
+            (page.left + 56.0 * unit, middle - line / 2.0),
             Align::Left,
         );
         chrome.add(
-            Rect::new(page.left, y - 14.0 * unit, page.width(), 70.0 * unit),
+            Rect::new(page.left, top, page.width(), page.body - top),
             Action::Progress(mode),
         );
-        canvas.rule(
-            page.left,
-            page.right,
-            y + 56.0 * unit,
-            2.0 * unit,
-            theme.faint,
-        );
+        rule_under(canvas, page);
     }
 }
 

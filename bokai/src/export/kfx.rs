@@ -3122,10 +3122,7 @@ fn resolve_landmarks_from_ir(
         let chapter_id = source_to_chapter.get(href_path).copied();
 
         if let Some(cid) = chapter_id {
-            // The landmark's href through the book's navigation resolver
-            let resolved_target = book.resolve_toc_href(cid, &landmark.href);
-
-            let target = match resolved_target {
+            let target = match landmark.target {
                 Some(AnchorTarget::Internal(gid)) => {
                     // Look up position for the internal target
                     ctx.position_map
