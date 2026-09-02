@@ -182,6 +182,9 @@ export function makeKfxBook(dto, loader) {
   const sections = dto.sections.map((s, index) => ({
     id: s.href,
     linear: "yes",
+    // The paginator's spread pairing keys on this: image-only sections
+    // pair by position in their run.
+    imageOnly: !!s.image_only,
     // Byte weight: the paginator's progress fraction is meaningful — from
     // the manifest, valid whether or not the HTML shipped inline.
     size: s.size || s.html?.length || 1,

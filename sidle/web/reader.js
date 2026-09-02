@@ -481,9 +481,9 @@ function paintAnnotations(doc, overlayer) {
   const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
     if (ann.hidden) continue; // hidden in Sidle — kept in the backup, not painted
-    // A note attached to a highlight is drawn by that highlight. Painting it too
-    // would double-ink the same words, and a Kindle's note covers no text at all
-    // (it anchors to a point); there is nothing to draw.
+    // A note attached to a highlight is drawn by that highlight; painting it
+    // too double-inks the same words. A Kindle note anchored to a point
+    // covers no text; there is nothing to draw.
     if (ann.attached_to != null) continue;
     if (ann.kind === "bookmark") {
       // PDF mode draws bookmarks as a page-corner marker (paintPdfPageBookmarks),
@@ -682,8 +682,8 @@ function openExternalHref(href) {
   });
 }
 
-// Place the popover near a parent-document point, flipping above if it would
-// overflow the bottom, clamped to the viewport.
+// Place the popover near a parent-document point, flipped above when it
+// overflows the bottom, clamped to the viewport.
 function positionPopover(pop, px, py) {
   pop.hidden = false; // unhide: offset sizes are real
   const left = Math.max(8, Math.min(px, window.innerWidth - pop.offsetWidth - 8));
@@ -2136,8 +2136,8 @@ function onKey(e) {
   if (readerMode === "notebook") return notebookOnKey(e);
   // The go-to-location input owns its keys (digits, Enter, Esc) while focused.
   if (e.target?.closest?.(".reader-goto-input")) return;
-  // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
-  // would search the host doc, not the section iframe's content). Handled
+  // ⌘F / Ctrl+F → open search: the browser's own find-in-page searches
+  // the host doc, not the section iframe's content. Handled
   // before the modifier filter below.
   if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "f" || e.key === "F")) {
     toggleSearchPanel();
@@ -4212,7 +4212,7 @@ if (document.readyState === "loading") {
   wire();
 }
 
-// The palette goes out alongside the resolver because a caller listing
+// The palette goes out alongside the resolver: a caller listing
 window.sidleReader = {
   open,
   close,

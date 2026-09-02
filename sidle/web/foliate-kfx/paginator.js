@@ -79,8 +79,8 @@ const { SHOW_ELEMENT, SHOW_TEXT, SHOW_CDATA_SECTION,
 
 const filter = SHOW_ELEMENT | SHOW_TEXT | SHOW_CDATA_SECTION
 
-// needed cause there seems to be a bug in `getBoundingClientRect()` in Firefox
-// where it fails to include rects that have zero width and non-zero height
+// `getBoundingClientRect()` in Firefox omits rects of zero width and
+// non-zero height
 // (CSSOM spec says "rectangles [...] of which the height or width is not zero")
 const getBoundingClientRect = target => {
     let top = Infinity, right = -Infinity, left = Infinity, bottom = -Infinity
@@ -223,6 +223,7 @@ class View {
     // starts at the element's top (no leading blank page), and one shared
     // scroll offset shows page p in the primary and p+1 here.
     #secondary = false
+    #leftAlone = false
     // A horizontal ltr-content section in an rtl book pages right to left:
     // the column order flips at the root while body text stays ltr.
     #bookRtl = false
@@ -257,7 +258,7 @@ class View {
             display: 'none',
             width: '100%', height: '100%',
         })
-        // `allow-scripts` is needed for events because of WebKit bug
+        // `allow-scripts`: without it a WebKit bug swallows events in the iframe
         this.#iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts')
         this.#iframe.setAttribute('scrolling', 'no')
     }
@@ -433,13 +434,16 @@ class View {
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
             // In a spread the strip is one page wide, placed as the right
-            // (primary) or left (secondary) half of the container.
+            // (primary) or left (secondary) half of the container; a
+            // `leftAlone` primary takes the left half, the right half empty.
             const spread = this.#layout.spread
             const otherSize = spread ? `${this.#layout.width}px` : '100%'
             if (spread) {
                 Object.assign(this.#element.style, this.#secondary
                     ? { position: 'absolute', left: '0', marginLeft: '0', marginRight: '0', pointerEvents: '' }
-                    : { position: 'relative', marginLeft: 'auto', marginRight: '0' })
+                    : this.#leftAlone
+                        ? { position: 'relative', marginLeft: '0', marginRight: 'auto' }
+                        : { position: 'relative', marginLeft: 'auto', marginRight: '0' })
             } else {
                 Object.assign(this.#element.style,
                     { position: 'relative', marginLeft: '', marginRight: '' })
@@ -479,8 +483,8 @@ class View {
         this.onExpand()
     }
     // Position + size the overlay SVG over the expanded view. Runs on every
-    // expand and on attach — the attach-time call matters because expand()
-    // may skip between attach and the next geometry change.
+    // expand and on attach — expand() may skip between attach and the
+    // next geometry change.
     #placeOverlayer() {
         if (!this.#overlayer || this.#expandedSize == null) return
         const expandedSize = this.#expandedSize
@@ -509,6 +513,9 @@ class View {
     }
     get overlayer() {
         return this.#overlayer
+    }
+    set leftAlone(value) {
+        this.#leftAlone = value
     }
     get contentPages() {
         return this.#expandedSize != null && this.#size > 0
@@ -541,6 +548,7 @@ export class Paginator extends HTMLElement {
     // the left page, one page ahead of the primary on the shared scroll.
     #spreadView = null
     #spreadOn = false
+    #bookSpread = false
     #spreadLoading = false
     #currentSrc = null
     #lastLayout = null
@@ -778,7 +786,7 @@ export class Paginator extends HTMLElement {
             detail.data = Promise.resolve(detail.data).then(data => data
                 // unprefix as most of the props are (only) supported unprefixed
                 .replace(/(?<=[{\s;])-epub-/gi, '')
-                // replace vw and vh as they cause problems with layout
+                // vw and vh resolve against the iframe, not the window: bake in px
                 .replace(/(\d*\.?\d+)vw/gi, (_, d) => parseFloat(d) * w / 100 + 'px')
                 .replace(/(\d*\.?\d+)vh/gi, (_, d) => parseFloat(d) * h / 100 + 'px')
                 // `page-break-*` unsupported in columns; replace with `column-break-*`
@@ -834,6 +842,7 @@ export class Paginator extends HTMLElement {
         const spreadGap = Math.max(0, parseFloat(this.getAttribute('spread-gap')) || 0)
         const bookSpread = width > height
             && this.getAttribute('vertical-spread') === 'on'
+        this.#bookSpread = bookSpread
 
         const flow = this.getAttribute('flow')
         if (flow === 'scrolled') {
@@ -901,7 +910,10 @@ export class Paginator extends HTMLElement {
     }
     // Create, update, or drop the left-page Views to match `#spreadOn`.
     #syncSpreadView(layout, force) {
-        if (!this.#spreadOn || this.scrolled || !this.#currentSrc) {
+        // An 'alone' section (the cover) fills neither half: no same-section
+        // left page, no cross fill — the other half stays empty.
+        if (!this.#spreadOn || this.scrolled || !this.#currentSrc
+            || this.#spreadSide(this.#index) === 'alone') {
             this.#dropSpreadView()
             this.#dropCrossView()
             return
@@ -917,10 +929,11 @@ export class Paginator extends HTMLElement {
         this.#spreadView = null
     }
     #syncCrossView(layout, force) {
-        // nextIndex is null on the first linear section (it stands alone)
-        // and when nothing linear follows.
-        const nextIndex = this.#adjacentIndex(-1) == null
-            ? null : this.#adjacentIndex(1)
+        // Only a right-page image section fills its left half from the
+        // next linear section (its gallery partner, or a text section
+        // whose first page continues the artwork).
+        const nextIndex = this.#spreadSide(this.#index) === 'right'
+            ? this.#adjacentIndex(1) : null
         if (nextIndex == null) {
             this.#dropCrossView()
             return
@@ -1121,7 +1134,7 @@ export class Paginator extends HTMLElement {
         this.#scrollToPage(page, 'snap').then(() => {
             const dir = page <= 0 ? -1 : page >= pages - 1 ? 1 : null
             if (dir) return this.#goTo({
-                index: this.#adjacentIndex(dir),
+                index: this.#spreadTarget(this.#adjacentIndex(dir), dir),
                 anchor: dir < 0 ? () => 1 : () => 0,
             })
         })
@@ -1216,6 +1229,16 @@ export class Paginator extends HTMLElement {
         }
     }
     async #scrollToPage(page, reason, smooth) {
+        // Landings snap to the section's fixed pair grid — forward and
+        // backward passes show identical spreads.
+        if (this.#spreadOn && !this.scrolled) {
+            const last = this.pages - 2
+            if (page >= 1 && page <= last) {
+                const base = Math.min(this.#spreadBase(), last)
+                page = page < base ? base
+                    : base + 2 * Math.floor((page - base) / 2)
+            }
+        }
         const offset = this.size * (this.#rtl ? -page : page)
         return this.#scrollTo(offset, reason, smooth)
     }
@@ -1224,11 +1247,6 @@ export class Paginator extends HTMLElement {
     }
     async #scrollToAnchor(anchor, reason = 'anchor') {
         this.#anchor = anchor
-        // anchor.page: an explicit page-number target
-        if (anchor && typeof anchor === 'object' && typeof anchor.page === 'number') {
-            await this.#scrollToPage(anchor.page, reason)
-            return
-        }
         const rects = uncollapse(anchor)?.getClientRects?.()
         // if anchor is an element or a range
         if (rects) {
@@ -1288,6 +1306,9 @@ export class Paginator extends HTMLElement {
             this.#destroyView()
             this.dispatchEvent(new CustomEvent('prerender', { detail: { index } }))
             const view = this.#createView()
+            // 'alone' in an rtl book: the opening page takes the left half.
+            view.leftAlone = this.bookDir === 'rtl'
+                && this.#spreadSide(index) === 'alone'
             const afterLoad = doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
@@ -1374,28 +1395,59 @@ export class Paginator extends HTMLElement {
         for (let index = from + dir; this.#canGoToIndex(index); index += dir)
             if (this.sections[index]?.linear !== 'no') return index
     }
+    // Spread pairing is a pure function of the spine, never of the
+    // navigation path. An image-only section pairs by its position in the
+    // run of consecutive image-only sections around it: even offsets from
+    // the run's origin are right pages ('right' — they open a pair and
+    // cross-fill), odd offsets are left pages ('left' — shown only as a
+    // fill). The origin is the run's first section, shifted one forward
+    // when the run opens the book: the cover stands alone ('alone').
+    #spreadSide(index) {
+        if (!this.sections[index]?.imageOnly) return null
+        let start = index
+        while (true) {
+            const prev = this.#adjacentIndex(-1, start)
+            if (prev == null || !this.sections[prev]?.imageOnly) break
+            start = prev
+        }
+        let origin = start
+        if (this.#adjacentIndex(-1, start) == null)
+            origin = this.#adjacentIndex(1, start) ?? start
+        if (index < origin) return 'alone'
+        let offset = 0
+        for (let i = origin; i != null && i < index; i = this.#adjacentIndex(1, i))
+            offset++
+        return offset % 2 ? 'left' : 'right'
+    }
+    // First page of a section's pair grid: 2 when the section before it is
+    // a right-page image (that spread's left half held page 1), else 1.
+    #spreadBase(index = this.#index) {
+        if (this.sections[index]?.imageOnly) return 1
+        const prev = this.#adjacentIndex(-1, index)
+        return prev != null && this.#spreadSide(prev) === 'right' ? 2 : 1
+    }
+    // A left-page image section is never the primary; land on its partner.
+    #spreadTarget(index, dir) {
+        if (!this.#bookSpread || this.scrolled || index == null) return index
+        if (this.#spreadSide(index) === 'left')
+            return this.#adjacentIndex(dir, index) ?? index
+        return index
+    }
     async #turnPage(dir, distance) {
         if (this.#locked) return
         this.#locked = true
         const prev = dir === -1
-        // fromCross: the spread's left half held sections[crossIndex] page
-        // 1 — the turn resumes that section at page 2, or passes a
-        // single-page section entirely.
-        const fromCross = !prev && this.#spreadOn && !this.scrolled
-            && this.#crossView && this.page >= this.pages - 2
-        const crossIndex = this.#crossIndex
+        const crossIndex = this.#crossView ? this.#crossIndex : null
         const crossPages = this.#crossView?.contentPages ?? 0
         const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
         if (shouldGo) {
-            let index = this.#adjacentIndex(dir)
-            let anchor = prev ? () => 1 : () => 0
-            if (fromCross && index === crossIndex) {
-                if (crossPages <= 1) {
-                    const beyond = this.#adjacentIndex(1, crossIndex)
-                    if (beyond != null) index = beyond
-                } else anchor = () => ({ page: 2 })
-            }
-            await this.#goTo({ index, anchor })
+            let index = this.#spreadTarget(this.#adjacentIndex(dir), dir)
+            // A cross fill that held the whole next section (one page,
+            // consumed as this spread's left half) is passed over.
+            if (!prev && index != null && index === crossIndex
+                && crossPages === 1 && this.#spreadBase(index) === 2)
+                index = this.#adjacentIndex(1, index) ?? index
+            await this.#goTo({ index, anchor: prev ? () => 1 : () => 0 })
         }
         if (shouldGo || !this.hasAttribute('animated')) await wait(100)
         this.#locked = false
@@ -1407,10 +1459,10 @@ export class Paginator extends HTMLElement {
         return this.#turnPage(1, distance)
     }
     prevSection() {
-        return this.goTo({ index: this.#adjacentIndex(-1) })
+        return this.goTo({ index: this.#spreadTarget(this.#adjacentIndex(-1), -1) })
     }
     nextSection() {
-        return this.goTo({ index: this.#adjacentIndex(1) })
+        return this.goTo({ index: this.#spreadTarget(this.#adjacentIndex(1), 1) })
     }
     firstSection() {
         const index = this.sections.findIndex(section => section.linear !== 'no')
@@ -1461,7 +1513,7 @@ export class Paginator extends HTMLElement {
         requestAnimationFrame(() =>
             this.#background.style.background = getBackground(this.#view.document))
 
-        // needed because the resize observer doesn't work in Firefox
+        // Firefox's resize observer misses font swaps; re-expand on fonts.ready
         this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
         this.#spreadView?.document?.fonts?.ready?.then(() => this.#spreadView?.expand())
     }
