@@ -4,6 +4,7 @@ pub mod annotations;
 pub mod apps;
 pub mod convert;
 pub mod device;
+pub mod edit;
 pub mod library;
 pub mod manage;
 pub mod misc;

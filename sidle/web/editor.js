@@ -1,7 +1,11 @@
 // Book editor — a Calibre "Edit book"-style surface built into Sidle. Full-screen
 
+import { mountTextPanel } from "./editor-text-panel.js";
+
 const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
+
+let textPanel = null;
 
 // Live editor session, or null when closed. `open` snapshots the opening values
 // so Revert can restore them and Save can diff against them.
@@ -40,10 +44,17 @@ function close() {
   if (!session) return true;
   if (session.dirty && !confirm("Discard unsaved changes?")) return false;
   removeKeys();
+  unmountTextPanel();
   view().hidden = true;
   $("#editor-center").replaceChildren();
   session = null;
   return true;
+}
+
+function unmountTextPanel() {
+  if (!textPanel) return;
+  textPanel.destroy();
+  textPanel = null;
 }
 
 function isOpen() {
@@ -56,6 +67,7 @@ let keyHandler = null;
 
 function installKeys() {
   keyHandler = (e) => {
+    if (textPanel?.onKey(e)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       close();
@@ -88,7 +100,7 @@ function configureRail() {
     if (!editable || panels.has(p)) {
       item.title = "";
     } else if (p === "text") {
-      item.title = "In-place text editing is coming in a later tier.";
+      item.title = "Text and style editing writes to an EPUB source.";
     } else if (p === "spine") {
       item.title =
         session.data.format === "pdf"
@@ -111,8 +123,22 @@ function selectPanel(panel) {
   }
   session.panel = panel;
   session.dirty = false;
+  unmountTextPanel();
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     item.classList.toggle("active", item.dataset.panel === panel);
+  }
+  if (panel === "text") {
+    markDirty(false);
+    textPanel = mountTextPanel({
+      bookId: session.bookId,
+      center: $("#editor-center"),
+      toast,
+      onDirty: (dirty) => markDirty(dirty),
+      onSaved: (res) => {
+        if (res.toc) renderTocChip(res.toc);
+      },
+    });
+    return;
   }
   // Every panel except Metadata commits via its own in-panel buttons, so the
   // top-bar Save/Revert (the metadata panel's) are disabled for them.
@@ -1431,10 +1457,16 @@ async function applySpine() {
 
 function saveCurrentPanel() {
   if (session.panel === "metadata") return saveMetadata();
+  if (session.panel === "text") return textPanel?.save();
 }
 
 function revertCurrentPanel() {
   if (session.panel === "metadata") renderMetadataPanel();
+  if (session.panel === "text") {
+    textPanel?.revert();
+    markDirty(textPanel?.isDirty() || false);
+    return;
+  }
   markDirty(false);
 }
 

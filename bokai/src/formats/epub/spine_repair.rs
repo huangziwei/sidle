@@ -227,7 +227,11 @@ fn is_machine_sorted(opf: &OpfData, docs: &[SpineDoc]) -> bool {
 }
 
 /// The declared TOC flattened to `(label, absolute href)` in its own order.
-fn flatten_declared(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<(String, String)> {
+pub(crate) fn flatten_declared(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+) -> Vec<(String, String)> {
     fn walk(entries: &[crate::model::TocEntry], out: &mut Vec<(String, String)>) {
         for e in entries {
             out.push((e.title.clone(), e.href.clone()));

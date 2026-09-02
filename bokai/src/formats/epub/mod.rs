@@ -2,6 +2,7 @@
 
 pub mod edit;
 pub mod image_extract;
+pub mod manifest;
 pub mod metadata_edit;
 pub(crate) mod nav_doc;
 pub(crate) mod opf_meta;
@@ -15,6 +16,7 @@ mod zip_repair;
 
 pub use edit::EpubPackage;
 pub use image_extract::{ExtractedImage, epub_extract_images};
+pub use manifest::{Member, MemberRole, add_manifest_item, members};
 pub use metadata_edit::{MetadataPatch, edit_metadata};
 pub use parser::{
     OpfData, parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc,

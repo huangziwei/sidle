@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod db;
 pub mod device;
 pub mod device_backup;
+pub mod editor;
 pub mod epub_cover;
 pub mod export;
 pub mod extent;

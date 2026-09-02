@@ -142,8 +142,11 @@ impl EpubPackage {
         })
     }
 
-    /// Repackage into EPUB (OCF) bytes. `mimetype` is written first and
     pub fn into_bytes(self) -> io::Result<Vec<u8>> {
+        self.to_bytes()
+    }
+
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
 
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -169,6 +172,28 @@ impl EpubPackage {
         let cursor = zip.finish().map_err(io::Error::other)?;
         Ok(cursor.into_inner())
     }
+}
+
+pub fn read_member(bytes: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
+    match read_member_inner(bytes, name) {
+        Ok(found) => Ok(found),
+        Err(first) => match neutralize_spurious_zip64(bytes) {
+            Some(repaired) => read_member_inner(&repaired, name),
+            None => Err(first),
+        },
+    }
+}
+
+fn read_member_inner(bytes: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(io::Error::other)?;
+    let mut file = match archive.by_name(name) {
+        Ok(file) => file,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(io::Error::other(e)),
+    };
+    let mut data = Vec::with_capacity(usize::try_from(file.size()).unwrap_or(0));
+    file.read_to_end(&mut data)?;
+    Ok(Some(data))
 }
 
 /// Map a parsed member's compression to one the writer can always emit. The data
@@ -355,6 +380,21 @@ mod tests {
         assert!(
             opf.windows(9).any(|w| w == b"<dc:title"),
             "opf_bytes returns the package document"
+        );
+    }
+
+    #[test]
+    fn read_member_matches_the_full_parse() {
+        let epub = read_fixture();
+        let pkg = EpubPackage::parse(&epub).expect("parse");
+        let css = read_member(&epub, "OEBPS/style.css")
+            .expect("read")
+            .expect("present");
+        assert_eq!(pkg.get("OEBPS/style.css"), Some(css.as_slice()));
+        assert!(
+            read_member(&epub, "OEBPS/missing.css")
+                .expect("read")
+                .is_none()
         );
     }
 

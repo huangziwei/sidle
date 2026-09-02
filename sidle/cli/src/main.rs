@@ -118,6 +118,8 @@ enum Command {
     Split(cmd::library::SplitArgs),
     /// Highlights, notes and bookmarks.
     Annotations(cmd::annotations::AnnotationsArgs),
+    /// Edit the members of an EPUB source: list, print, write, validate.
+    Edit(cmd::edit::EditArgs),
     /// Judge — and rebuild — tables of contents.
     Toc(cmd::toc::TocArgs),
     /// The connected Kindle.
@@ -181,6 +183,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Split(args) => cmd::library::split(&ctx, args),
         Command::Annotations(args) => cmd::annotations::run(&ctx, args),
         Command::Toc(args) => cmd::toc::run(&ctx, args),
+        Command::Edit(args) => cmd::edit::run(&ctx, args),
         Command::Device(sub) => cmd::device::run(&ctx, sub),
         Command::Apps(sub) => cmd::apps::run(&ctx, sub),
         Command::Notebook(sub) => cmd::notebook::run(&ctx, sub),

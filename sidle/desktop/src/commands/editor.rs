@@ -23,6 +23,9 @@ use bokai::import::pdf::PdfOutlineItem;
 use bokai::model::TocEntry as EpubTocEntry;
 use bokai::validate::source::toc as toc_validate;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use sidle_core::library::editor as text_editor;
 use sidle_core::library::source::{self, Source as SourceKind};
 
 use crate::commands::library::CoverResult;
@@ -44,6 +47,7 @@ fn editor_panels(kind: SourceKind) -> Vec<String> {
         .collect();
     if kind == SourceKind::Epub {
         panels.push("spine".to_string());
+        panels.push("text".to_string());
     }
     panels
 }
@@ -1331,6 +1335,155 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
 }
 
 /// Commit a save to the book's source file.
+#[derive(Serialize)]
+pub struct EditorTextOpen {
+    pub opf_path: String,
+    pub members: Vec<text_editor::MemberInfo>,
+}
+
+#[tauri::command]
+pub async fn editor_text_open(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<EditorTextOpen, String> {
+    let row = editor_row(&state, book_id).await?;
+    tokio::task::spawn_blocking(move || -> Result<EditorTextOpen, String> {
+        let session = text_editor::EpubSession::open(&row).map_err(|e| format!("{e:#}"))?;
+        Ok(EditorTextOpen {
+            opf_path: session.opf_path().map_err(|e| format!("{e:#}"))?,
+            members: session.members().map_err(|e| format!("{e:#}"))?,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn editor_text_read(
+    state: State<'_, AppState>,
+    book_id: i64,
+    member: String,
+) -> Result<String, String> {
+    let (kind, path) = editor_source(&state, book_id).await?;
+    if kind != SourceKind::Epub {
+        return Err("text editing writes to an EPUB source".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        text_editor::member_text(&path, &member).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn editor_text_read_bytes(
+    state: State<'_, AppState>,
+    book_id: i64,
+    member: String,
+) -> Result<String, String> {
+    let (kind, path) = editor_source(&state, book_id).await?;
+    if kind != SourceKind::Epub {
+        return Err("text editing writes to an EPUB source".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        text_editor::member_bytes(&path, &member)
+            .map(|b| B64.encode(b))
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Deserialize)]
+pub struct TextEdit {
+    pub member: String,
+    pub text: String,
+    pub media_type: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct EditorTextSaved {
+    pub written: Vec<String>,
+    pub members: Vec<text_editor::MemberInfo>,
+    pub toc: Option<EditorToc>,
+    pub findings: Vec<text_editor::FindingInfo>,
+}
+
+#[tauri::command]
+pub async fn editor_text_save(
+    state: State<'_, AppState>,
+    book_id: i64,
+    edits: Vec<TextEdit>,
+) -> Result<EditorTextSaved, String> {
+    let row = editor_row(&state, book_id).await?;
+    let db = state.db.clone();
+    let saved = tokio::task::spawn_blocking(move || -> Result<EditorTextSaved, String> {
+        let mut session = text_editor::EpubSession::open(&row).map_err(|e| format!("{e:#}"))?;
+        let existing: HashSet<String> = session
+            .members()
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        for e in edits {
+            if existing.contains(&e.member) {
+                session
+                    .write_text(&e.member, &e.text)
+                    .map_err(|e| format!("{e:#}"))?;
+            } else {
+                let mt = e
+                    .media_type
+                    .or_else(|| text_editor::media_type_for(&e.member).map(str::to_string))
+                    .ok_or_else(|| format!("{}: unknown media type for a new member", e.member))?;
+                session
+                    .add(&e.member, &mt, e.text.into_bytes())
+                    .map_err(|e| format!("{e:#}"))?;
+            }
+        }
+        let written = {
+            let conn = db.blocking_lock();
+            session.save(&conn).map_err(|e| format!("{e:#}"))?
+        };
+        let path = session.path().to_string();
+        Ok(EditorTextSaved {
+            written,
+            members: session.members().map_err(|e| format!("{e:#}"))?,
+            toc: compute_toc(&path, SourceKind::Epub),
+            findings: session.validate().map_err(|e| format!("{e:#}"))?,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if !saved.written.is_empty() {
+        let _ = state.queue.enqueue_reconvert(book_id).await;
+        crate::commands::reader::evict_reader(&state, book_id).await;
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn editor_text_validate(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<text_editor::FindingInfo>, String> {
+    let (kind, path) = editor_source(&state, book_id).await?;
+    if kind != SourceKind::Epub {
+        return Err("text editing writes to an EPUB source".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        text_editor::validate_file(&path).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn editor_row(state: &State<'_, AppState>, book_id: i64) -> Result<BookRow, String> {
+    let conn = state.db.lock().await;
+    db::get_book(&conn, book_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no book with id {book_id}"))
+}
+
 async fn commit_edited_source(
     state: &AppState,
     book_id: i64,
@@ -1405,20 +1558,14 @@ mod tests {
         assert!(export_width_px(2384.0, 600) < 20_000);
     }
 
-    /// The rail's capability gate: every editable source backs these four, and
-    /// `text` is not one of them — the rail offers a Text button, and nothing
-    /// but this list keeps it dark.
     #[test]
-    fn panels_cover_every_built_capability_but_not_text() {
+    fn panels_cover_every_built_capability() {
         for kind in [SourceKind::Kfx, SourceKind::Epub, SourceKind::Pdf] {
             let p = editor_panels(kind);
             for want in ["metadata", "toc", "cover", "images"] {
                 assert!(p.contains(&want.to_string()), "{want} panel is backed");
             }
-            assert!(
-                !p.contains(&"text".to_string()),
-                "no text-edit primitive yet"
-            );
+            assert_eq!(p.contains(&"text".to_string()), kind == SourceKind::Epub);
         }
     }
 
