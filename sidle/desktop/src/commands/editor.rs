@@ -1762,3 +1762,60 @@ mod tests {
         assert_eq!(sanitize_filename(""), "image");
     }
 }
+
+#[derive(Serialize)]
+pub struct EditorStylesRestored {
+    pub report: sidle_core::library::styles::RestoreReport,
+    pub members: Vec<text_editor::MemberInfo>,
+    pub toc: Option<EditorToc>,
+    pub findings: Vec<text_editor::FindingInfo>,
+}
+
+#[tauri::command]
+pub async fn editor_style_candidates(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<sidle_core::library::styles::Candidate>, String> {
+    let row = editor_row(&state, book_id).await?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        sidle_core::library::styles::candidates(&conn, &row).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn editor_restore_styles(
+    state: State<'_, AppState>,
+    book_id: i64,
+    reference_id: i64,
+    force: bool,
+) -> Result<EditorStylesRestored, String> {
+    let row = editor_row(&state, book_id).await?;
+    let reference = editor_row(&state, reference_id).await?;
+    let db = state.db.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<EditorStylesRestored, String> {
+        let report = {
+            let conn = db.blocking_lock();
+            sidle_core::library::styles::restore(&conn, &row, &reference, true, force, None)
+                .map_err(|e| format!("{e:#}"))?
+        };
+        let session = text_editor::EpubSession::open(&row).map_err(|e| format!("{e:#}"))?;
+        let path = session.path().to_string();
+        Ok(EditorStylesRestored {
+            report,
+            members: session.members().map_err(|e| format!("{e:#}"))?,
+            toc: compute_toc(&path, SourceKind::Epub),
+            findings: session.validate().map_err(|e| format!("{e:#}"))?,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if out.report.written {
+        let _ = state.queue.enqueue_reconvert(book_id).await;
+        crate::commands::reader::evict_reader(&state, book_id).await;
+    }
+    Ok(out)
+}

@@ -4,7 +4,7 @@ pub mod epub;
 pub mod kfx;
 pub mod toc;
 
-use super::{Finding, Report, Severity};
+use super::{Finding, FixHint, Report, Severity};
 
 /// Run every source check that applies to `bytes` and return one unified
 /// [`Report`]. Sniffs the format and runs the matching structural checks plus
@@ -33,6 +33,7 @@ pub fn validate(bytes: &[u8]) -> Report {
                 .findings
                 .extend(epub::validate(bytes).into_findings());
             report.findings.extend(toc_findings(bytes));
+            report.findings.extend(style_findings(bytes));
         }
     } else {
         // A single KFX container (or an unknown blob → container-unreadable).
@@ -116,6 +117,27 @@ fn toc_findings(bytes: &[u8]) -> Vec<Finding> {
             fix: None,
         }],
     }
+}
+
+fn style_findings(bytes: &[u8]) -> Vec<Finding> {
+    let Ok(Some(flat)) = crate::formats::epub::flattened_styles(bytes) else {
+        return Vec::new();
+    };
+    let producer = flat.producer.as_deref().unwrap_or("a converter");
+    vec![Finding {
+        check: "style",
+        rule: "flattened".to_string(),
+        severity: Severity::Warning,
+        location: flat.sheets[0].clone(),
+        message: format!(
+            "stylesheet flattened by {producer}: {} generated classes; the publisher's selectors, page kinds and writing-mode classes are collapsed into one computed-style sheet",
+            flat.generated_classes
+        ),
+        fix: Some(FixHint::new(
+            "restore-styles",
+            "Restore the stylesheets and class names from a sibling book that kept the publisher's originals",
+        )),
+    }]
 }
 
 #[cfg(test)]

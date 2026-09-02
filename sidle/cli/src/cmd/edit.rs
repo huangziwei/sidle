@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use sidle_core::library::db::BookRow;
 use sidle_core::library::editor::{self, EpubSession};
+use sidle_core::library::styles;
 
 use crate::ctx::Ctx;
 use crate::select::Select;
@@ -35,6 +36,21 @@ pub enum EditOp {
     },
     /// Print validator findings.
     Validate,
+    /// Restore the publisher's stylesheets and class names from a sibling book; without --from, list the siblings that qualify.
+    RestoreStyles {
+        #[arg(long, value_name = "ID")]
+        from: Option<i64>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Write even when the restoration changes computed styles.
+        #[arg(long)]
+        force: bool,
+        /// Also write the restored EPUB to FILE.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_reconvert: bool,
+    },
 }
 
 pub fn run(ctx: &Ctx, args: EditArgs) -> Result<()> {
@@ -49,6 +65,13 @@ pub fn run(ctx: &Ctx, args: EditArgs) -> Result<()> {
             no_reconvert,
         } => put(ctx, &book, &member, from, media_type, no_reconvert),
         EditOp::Validate => validate(ctx, &book),
+        EditOp::RestoreStyles {
+            from,
+            dry_run,
+            force,
+            out,
+            no_reconvert,
+        } => restore_styles(ctx, &book, from, dry_run, force, out, no_reconvert),
     }
 }
 
@@ -147,4 +170,101 @@ fn validate(ctx: &Ctx, book: &BookRow) -> Result<()> {
         }
         println!("{} finding(s)", findings.len());
     })
+}
+
+fn restore_styles(
+    ctx: &Ctx,
+    book: &BookRow,
+    from: Option<i64>,
+    dry_run: bool,
+    force: bool,
+    out: Option<std::path::PathBuf>,
+    no_reconvert: bool,
+) -> Result<()> {
+    let Some(from) = from else {
+        let list = styles::candidates(&ctx.conn(), book)?;
+        return ctx.report(&list, || {
+            if list.is_empty() {
+                println!("no sibling book keeps the publisher's stylesheets");
+            }
+            for c in &list {
+                let series = match (&c.series_name, c.series_index) {
+                    (Some(s), Some(i)) => format!("  [{s} {i}]"),
+                    (Some(s), None) => format!("  [{s}]"),
+                    _ => String::new(),
+                };
+                println!("{:>6}  {}{}", c.id, c.title, series);
+            }
+        });
+    };
+    let report = {
+        let conn = ctx.conn();
+        let reference = sidle_core::library::db::get_book(&conn, from)?
+            .with_context(|| format!("no book with id {from}"))?;
+        styles::restore(&conn, book, &reference, !dry_run, force, out.as_deref())?
+    };
+    ctx.report(&report, || {
+        println!(
+            "{} document(s) restyled from {}{}",
+            report.documents.len(),
+            report.reference,
+            if dry_run {
+                " (dry run, nothing written)"
+            } else {
+                ""
+            }
+        );
+        for (from, to) in &report.classes {
+            if from != to {
+                println!(
+                    "  {from:<24} -> {}",
+                    if to.is_empty() { "(dropped)" } else { to }
+                );
+            }
+        }
+        if !report.residual.is_empty() {
+            println!("  kept with a residual rule: {}", report.residual.join(" "));
+            for line in report.residual_css.lines().filter(|l| !l.is_empty()) {
+                println!("    {line}");
+            }
+        }
+        for d in &report.diffs {
+            println!(
+                "  {} {}: {} -> {} (x{}){}",
+                d.document,
+                d.property,
+                d.before,
+                d.after,
+                d.count,
+                if d.text.is_empty() {
+                    String::new()
+                } else {
+                    format!("  at \"{}\"", d.text)
+                }
+            );
+        }
+        println!(
+            "  {} material change(s); {}",
+            report.material,
+            match &report.blocked {
+                Some(why) => why.as_str(),
+                None if report.written => "written",
+                None => "not written",
+            }
+        );
+    })?;
+    if report.written && !no_reconvert {
+        crate::cmd::convert::run(
+            ctx,
+            crate::cmd::convert::ConvertArgs::sweep(
+                Select {
+                    ids: vec![book.id],
+                    ..Default::default()
+                },
+                true,
+                None,
+            ),
+        )?;
+    }
+    Ok(())
 }

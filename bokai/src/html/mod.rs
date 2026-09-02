@@ -1,6 +1,7 @@
 //! HTML to IR compiler pipeline.
 
 mod arena;
+pub mod css_imports;
 pub mod element_ref;
 pub mod optimize;
 pub mod panels;
@@ -18,6 +19,7 @@ pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
 }
 
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
+pub use css_imports::{css_import_targets, inline_css_imports};
 pub use element_ref::{BokoSelectors, ElementRef};
 pub use optimize::optimize;
 pub use panels::parse_panels;

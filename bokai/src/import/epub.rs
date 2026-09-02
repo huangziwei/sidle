@@ -14,10 +14,8 @@ use crate::formats::epub::{
     parse_opf, parse_opf_guide,
     structure::{dir_of, resolve_href},
 };
-use crate::html::Stylesheet;
-use crate::import::{
-    ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href, viewport_meta,
-};
+use crate::html::{Stylesheet, inline_css_imports};
+use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href, viewport_meta};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
 use crate::model::{
     AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, NodeId, Role, TocEntry,
@@ -509,13 +507,13 @@ impl EpubImporter {
         visited: &mut std::collections::HashSet<String>,
     ) -> Option<String> {
         let key = path.to_string_lossy().replace('\\', "/");
-        if !visited.insert(key) {
-            return Some(String::new()); // import cycle, treat as empty
+        if !visited.insert(key.clone()) {
+            return Some(String::new());
         }
         let bytes = self.load_asset_immutable(path).ok()?;
         let raw = String::from_utf8_lossy(&bytes).into_owned();
-        Some(inline_css_imports(&raw, path, |child_path| {
-            self.read_css_with_imports(child_path, visited)
+        Some(inline_css_imports(&raw, &key, |child| {
+            self.read_css_with_imports(Path::new(child), visited)
         }))
     }
 
@@ -525,111 +523,6 @@ impl EpubImporter {
         let key = path.to_string_lossy().replace('\\', "/");
         self.read_entry(&key)
     }
-}
-
-/// Replace each `@import` directive with the contents of the file it names,
-/// resolved relative to `base`. Covers all three CSS syntaxes: `@import "url";`,
-/// `@import 'url';`, and `@import url(...)` quoted or bare.
-fn inline_css_imports<F>(src: &str, base: &Path, mut load: F) -> String
-where
-    F: FnMut(&Path) -> Option<String>,
-{
-    let mut out = String::with_capacity(src.len());
-    let bytes = src.as_bytes();
-    // Index of the first byte not yet copied into `out`. Every scanned token
-    // (@, " ', ;, whitespace, parens) is ASCII and never appears as a UTF-8
-    // continuation byte, keeping `i` on a char boundary.
-    let mut copied = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' && src[i..].to_ascii_lowercase().starts_with("@import") {
-            let after_kw = i + "@import".len();
-            let mut j = after_kw;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            // Try to parse one of the supported source-URL forms. Each
-            // helper returns `(url, end_index_past_url_token)` on success.
-            let parsed = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
-                parse_quoted_url(src, j)
-            } else if j + 4 <= bytes.len() && src[j..j + 4].eq_ignore_ascii_case("url(") {
-                parse_url_function(src, j)
-            } else {
-                None
-            };
-            if let Some((url, mut k)) = parsed {
-                // Skip optional media queries / whitespace up to the `;`.
-                while k < bytes.len() && bytes[k] != b';' && bytes[k] != b'}' {
-                    k += 1;
-                }
-                if k < bytes.len() && bytes[k] == b';' {
-                    k += 1;
-                }
-                // Copy everything before the @import as-is, then splice in
-                // the imported file (or drop the @import on load failure).
-                out.push_str(&src[copied..i]);
-                // `PathBuf::join` leaves `..` in place and `url` is a URI
-                // reference: decode and normalize before loading, to reach the
-                // canonical zip entry name.
-                let url = percent_decode(url);
-                let joined = base
-                    .parent()
-                    .map(|p| p.join(&url))
-                    .unwrap_or_else(|| PathBuf::from(&url));
-                let child = normalize_components(&joined);
-                if let Some(child_css) = load(&child) {
-                    out.push_str(&child_css);
-                    out.push('\n');
-                }
-                copied = k;
-                i = k;
-                continue;
-            }
-            // Unrecognised @import form — fall through and keep scanning.
-        }
-        i += 1;
-    }
-    out.push_str(&src[copied..]);
-    out
-}
-
-/// Parse a `"url"` / `'url'` literal starting at the opening quote position.
-/// Returns `(url, index_one_past_closing_quote)`.
-fn parse_quoted_url(src: &str, q_pos: usize) -> Option<(&str, usize)> {
-    let bytes = src.as_bytes();
-    let quote = bytes[q_pos];
-    let start = q_pos + 1;
-    let end_rel = src.as_bytes()[start..].iter().position(|&b| b == quote)?;
-    Some((&src[start..start + end_rel], start + end_rel + 1))
-}
-
-/// Parse a `url( … )` token starting at the `u` of `url`. Inner content can be
-/// `"foo.css"`, `'foo.css'`, or a bare `foo.css`. Returns
-/// `(url, index_one_past_closing_paren)`.
-fn parse_url_function(src: &str, u_pos: usize) -> Option<(&str, usize)> {
-    let bytes = src.as_bytes();
-    let mut p = u_pos + 4; // skip "url("
-    while p < bytes.len() && bytes[p].is_ascii_whitespace() {
-        p += 1;
-    }
-    let (url, end) = if p < bytes.len() && (bytes[p] == b'"' || bytes[p] == b'\'') {
-        parse_quoted_url(src, p)?
-    } else {
-        // Bare URL: read until whitespace or `)`
-        let url_start = p;
-        while p < bytes.len() && bytes[p] != b')' && !bytes[p].is_ascii_whitespace() {
-            p += 1;
-        }
-        (&src[url_start..p], p)
-    };
-    let mut k = end;
-    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-        k += 1;
-    }
-    if k >= bytes.len() || bytes[k] != b')' {
-        return None;
-    }
-    Some((url, k + 1))
 }
 
 /// The picture an SVG at `path` frames: the `href` of its one `<image>`,
@@ -1142,38 +1035,6 @@ mod tests {
             result[0].children[0].children[0].href,
             "content/text/ch1.xhtml#sec1"
         );
-    }
-
-    #[test]
-    fn inline_css_imports_normalizes_parent_dir_in_url() {
-        // A stylesheet chains via `@import url("../Styles/x.css")`. The load
-        // callback sees the canonical zip key, not the literal un-normalized
-        // path.
-        let base = std::path::Path::new("OEBPS/Styles/style0011.css");
-        let mut requested: Vec<String> = Vec::new();
-        let out = inline_css_imports(
-            r#"@import url("../Styles/style0007.css"); body {}"#,
-            base,
-            |p| {
-                requested.push(p.to_string_lossy().into_owned());
-                Some(".vrtl { writing-mode: vertical-rl }".into())
-            },
-        );
-        assert_eq!(requested, vec!["OEBPS/Styles/style0007.css"]);
-        assert!(out.contains(".vrtl"));
-    }
-
-    #[test]
-    fn inline_css_imports_handles_bare_url_function() {
-        // Books 3/4 form: `@import url(file.css)` with no `..` — must keep
-        // working after the normalization patch.
-        let base = std::path::Path::new("OEBPS/Styles/flow0011.css");
-        let mut requested: Vec<String> = Vec::new();
-        let _ = inline_css_imports(r#"@import url(flow0007.css);"#, base, |p| {
-            requested.push(p.to_string_lossy().into_owned());
-            Some(String::new())
-        });
-        assert_eq!(requested, vec!["OEBPS/Styles/flow0007.css"]);
     }
 }
 

@@ -520,8 +520,78 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
         text.append(el("span", "tx-finding-loc", `${f.rule}${f.line ? ` · line ${f.line}` : ""}${f.fix_detail ? ` · ${f.fix_detail}` : ""}`));
         row.append(text);
         body.append(row);
+        if (f.fix_action === "restore-styles") body.append(restoreStylesAction());
       }
     }
+  }
+
+  function restoreStylesAction() {
+    const box = el("div", "tx-fix");
+    const select = el("select", "input-small");
+    select.disabled = true;
+    const go = button("btn btn-small", "Restore", () => restoreStyles(Number(select.value)));
+    go.disabled = true;
+    box.append(el("span", "editor-muted", "Reference:"), select, go);
+    api.invoke("editor_style_candidates", { bookId }).then((list) => {
+      if (st.destroyed) return;
+      if (!list.length) {
+        select.replaceChildren(el("option", null, "No sibling book keeps the publisher's stylesheets"));
+        return;
+      }
+      for (const c of list) {
+        const o = el("option", null, c.series_index != null ? `${c.title} (${c.series_name} ${c.series_index})` : c.title);
+        o.value = String(c.id);
+        select.append(o);
+      }
+      select.disabled = false;
+      go.disabled = false;
+    }).catch((err) => {
+      select.replaceChildren(el("option", null, `Couldn't list siblings: ${err}`));
+    });
+    return box;
+  }
+
+  async function restoreStyles(referenceId, force = false) {
+    if (!Number.isFinite(referenceId)) return;
+    if ([...st.buffers.values()].some((b) => b.dirty)) {
+      toast("Save or revert your edits first.", true);
+      return;
+    }
+    let res;
+    try {
+      res = await api.invoke("editor_restore_styles", { bookId, referenceId, force });
+    } catch (err) {
+      toast(`Restore failed: ${err}`, true);
+      return;
+    }
+    if (st.destroyed) return;
+    if (!res.report.written) {
+      const changes = res.report.diffs
+        .filter((d) => d.text)
+        .slice(0, 6)
+        .map((d) => `${basename(d.document)}: ${d.property} ${d.before} → ${d.after} (×${d.count})`)
+        .join("\n");
+      if (confirm(`${res.report.blocked || "The restoration changes computed styles."}\n\n${changes}\n\nApply anyway?`)) {
+        await restoreStyles(referenceId, true);
+      }
+      return;
+    }
+    for (const m of st.members) preview.forget(m.path);
+    st.buffers.clear();
+    st.members = res.members;
+    st.findings = res.findings;
+    updateFindingsTab();
+    renderFiles();
+    reportDirty();
+    onSaved(res);
+    const current = st.members.some((m) => m.path === st.current) ? st.current : spineMembers()[0]?.path;
+    if (current) await open(current);
+    if (st.tab === "findings") renderFindings();
+    const r = res.report;
+    const diffs = r.diffs.reduce((n, d) => n + d.count, 0);
+    toast(`Restored ${r.documents.length} file${r.documents.length === 1 ? "" : "s"} from “${r.reference}”` +
+      `${r.residual.length ? `, ${r.residual.length} class${r.residual.length === 1 ? "" : "es"} kept with a residual rule` : ""}` +
+      `${diffs ? `, ${diffs} computed-style change${diffs === 1 ? "" : "s"}` : ""} — regenerating the Kindle file…`);
   }
 
   function buildSearchTab() {

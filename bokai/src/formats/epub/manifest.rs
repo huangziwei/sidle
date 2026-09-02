@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::formats::epub::edit::{EpubPackage, escape_attr};
+use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr};
 use crate::formats::epub::spine_repair::flatten_declared;
 use crate::formats::epub::structure::{basename, dir_of, relativize};
 use crate::formats::epub::{OpfData, parse_opf};
@@ -270,6 +270,52 @@ fn insert_item(opf: &str, href: &str, id: &str, media_type: &str) -> io::Result<
     out.push_str(&item);
     out.push_str(&opf[line_start..]);
     Ok(out)
+}
+
+pub fn remove_manifest_item(pkg: &mut EpubPackage, path: &str) -> io::Result<bool> {
+    let opf_path = pkg.opf_path()?;
+    let opf_base = dir_of(&opf_path);
+    let opf_raw = pkg.opf_bytes()?;
+    let opf_text = decode_text(opf_raw, extract_xml_encoding(opf_raw)).into_owned();
+    let mut from = 0;
+    while let Some(rel) = opf_text[from..].find("<item") {
+        let start = from + rel;
+        let Some(end_rel) = opf_text[start..].find('>') else {
+            break;
+        };
+        let end = start + end_rel + 1;
+        let tag = &opf_text[start..end];
+        from = end;
+        if !tag.starts_with("<item ") && !tag.starts_with("<item\n") && !tag.starts_with("<item\t")
+        {
+            continue;
+        }
+        let Some(href) = attr_value(tag, "href") else {
+            continue;
+        };
+        if format!("{opf_base}{}", percent_decode(&href)) != path {
+            continue;
+        }
+        let mut cut_start = start;
+        let line_start = opf_text[..start].rfind('\n').map_or(0, |i| i + 1);
+        if opf_text[line_start..start].chars().all(char::is_whitespace) {
+            cut_start = line_start;
+        }
+        let mut cut_end = end;
+        if tag.ends_with("/>") {
+        } else if let Some(close) = opf_text[end..].find("</item>") {
+            cut_end = end + close + "</item>".len();
+        }
+        if cut_start == line_start && opf_text[cut_end..].starts_with('\n') {
+            cut_end += 1;
+        }
+        let mut out = String::with_capacity(opf_text.len());
+        out.push_str(&opf_text[..cut_start]);
+        out.push_str(&opf_text[cut_end..]);
+        pkg.replace(&opf_path, out.into_bytes());
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

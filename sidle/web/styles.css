@@ -5527,16 +5527,16 @@ kbd {
 
 /* --- Text panel (editor) --- */
 .editor-center-text {
+  position: relative;
   padding: 0;
   overflow: hidden;
-  display: flex;
 }
 .tx-panel {
-  flex: 1 1 auto;
-  min-width: 0;
+  position: absolute;
+  inset: 0;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
-  height: 100%;
+  grid-template-rows: minmax(0, 1fr);
 }
 .tx-files {
   border-right: 1px solid var(--border);
@@ -5741,8 +5741,10 @@ kbd {
   min-height: 0;
   overflow: auto;
 }
-.tx-preview { overflow: hidden; }
+.tx-preview { overflow: hidden; position: relative; }
 .tx-preview-frame {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   border: 0;
@@ -5860,3 +5862,12 @@ kbd {
 .tx-hit-line { color: var(--muted); flex: 0 0 36px; text-align: right; font-size: 11px; }
 .tx-hit-text { white-space: pre; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tx-hit mark { background: rgba(200, 62, 62, 0.25); color: inherit; }
+.tx-fix {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 4px 8px 8px 30px;
+  font-size: 12px;
+}
+.tx-fix select { max-width: 100%; }
