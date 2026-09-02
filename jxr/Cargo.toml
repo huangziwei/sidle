@@ -1,6 +1,6 @@
 [package]
 name = "jxr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Pure-Rust JPEG XR (ITU-T T.832) codec — decoder + encoder, zero dependencies"
 license = "GPL-3.0-or-later"
