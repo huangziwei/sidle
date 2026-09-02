@@ -42,8 +42,8 @@ let searchQuery = ""; // the query that produced searchResults (for race-checks)
 let searchSeq = 0; // request token — late responses for stale queries are dropped
 let searchDebounceTimer = null;
 let searchComposing = false; // true between compositionstart/end (JP IME)
-let lastPaintedCount = 0; // count from last search-paint, so `clearSearchPaint` knows how many keys to remove
-let selectedSearchIndex = -1; // -1 = none picked yet; otherwise the index of the row the user last clicked
+let lastPaintedCount = 0; // count from last search-paint; `clearSearchPaint` knows how many keys to remove
+let selectedSearchIndex = -1; // -1 = none picked; 0+ = index of the row the user last clicked
 let pendingSelection = null; // { doc, anchor, text } for the live text selection — fuels createAnnotation
 let editingAnn = null; // the annotation open in the editable note popover (null = closed)
 let editorColor = "yellow"; // the color currently chosen in the open editor
@@ -89,7 +89,7 @@ function startResLoader(id, images, priorityHrefs, onChunk) {
     }
   }
   for (const h of known.keys()) if (!seen.has(h)) st.queue.push(h);
-  // Background pump: one chunk at a time so an urgent `require` (page turn
+  // Background pump: one chunk at a time: an urgent `require` (page turn
   // ahead of the stream) only ever waits for the chunk in flight.
   (async () => {
     while (!st.cancelled && st.queue.length) {
@@ -100,7 +100,7 @@ function startResLoader(id, images, priorityHrefs, onChunk) {
 }
 
 // Fetch one batch: invoke, blobify, resolve inflight promises, notify. Failed
-// or missing hrefs still count as attempted (logged backend-side) so the
+// or missing hrefs count as attempted (logged backend-side): the
 // indicator completes and nothing waits forever.
 async function fetchHrefs(st, hrefs) {
   const batch = (async () => {
@@ -289,7 +289,7 @@ function cancelTopbarHide() {
 }
 
 // Panels/popovers the top bar's buttons summon — while one is open the bar is
-// "in use", so it should stay put.
+// "in use"; it should stay put.
 function readerChromeOpen() {
   return [
     "#reader-toc-panel",
@@ -308,7 +308,7 @@ function scheduleTopbarHide() {
   cancelTopbarHide();
   topbarHideTimer = setTimeout(() => {
     topbarHideTimer = null;
-    // Re-arm instead of hiding if the user is still on the bar or mid-task; the
+    // Re-arm, never hide, while the user is on the bar or mid-task; the
     // next idle window (or a panel close) lets it fade.
     if (topbarHovered || readerChromeOpen()) {
       scheduleTopbarHide();
@@ -355,16 +355,16 @@ function highlightGroup(color) {
   return g;
 }
 
-// Draw the rects as-is — their thickness (≈1em cross-axis) is already correct.
-// The rects come from `annotationRects` (per element), so each one already stops
-// at its element's text rather than running to the line end.
+// Draw the rects as-is — their thickness (≈1em cross-axis) is correct.
+// The rects come from `annotationRects` (per element); each one stops
+// at its element's text never running to the line end.
 function drawHighlight(rects, options = {}) {
   const g = highlightGroup(options.color || COLORS.yellow);
   for (const { left, top, width, height } of rects) g.append(svgRect(left, top, width, height));
   return g;
 }
 
-// A note = the same band + a solid cue line along its trailing edge, so a noted
+// A note = the same band + a solid cue line along its trailing edge; a noted
 // highlight reads differently from a plain one. The cue is a sibling group at
 // full opacity (not inside the .3-opacity band).
 function drawNote(rects, options = {}) {
@@ -382,7 +382,7 @@ function drawNote(rects, options = {}) {
 }
 
 // A small filled marker at the block-start corner of a bookmark's anchor char,
-// so bookmarks are visible on the page (the jump-list is the primary surface).
+//: bookmarks are visible on the page (the jump-list is the primary surface).
 function drawBookmarkMarker(rects, options = {}) {
   const g = svgEl("g");
   const r = rects[0];
@@ -475,15 +475,15 @@ function pdfAnnotationRects(ann) {
 }
 
 // Paint every resolvable annotation into one section's overlayer. Idempotent:
-// `overlayer.add` replaces an existing key, so re-running after a sync just
-// refreshes (device import is add-only, so nothing needs removing).
+// `overlayer.add` replaces an existing key; re-running after a sync just
+// refreshes (device import is add-only; nothing needs removing).
 function paintAnnotations(doc, overlayer) {
   const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
     if (ann.hidden) continue; // hidden in Sidle — kept in the backup, not painted
     // A note attached to a highlight is drawn by that highlight. Painting it too
     // would double-ink the same words, and a Kindle's note covers no text at all
-    // (it anchors to a point), so there would be nothing to draw.
+    // (it anchors to a point); there is nothing to draw.
     if (ann.attached_to != null) continue;
     if (ann.kind === "bookmark") {
       // PDF mode draws bookmarks as a page-corner marker (paintPdfPageBookmarks),
@@ -537,7 +537,7 @@ function renderColorSwatches(container, current, onPick) {
 function showSelectionToolbar(doc, range) {
   const bar = $("#reader-selection-toolbar");
   if (!bar) return;
-  bar.hidden = false; // unhide first so offset sizes are real
+  bar.hidden = false; // unhide first: offset sizes are real
   const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
   const rect = range.getBoundingClientRect();
   let left = fr.left + rect.left + rect.width / 2 - bar.offsetWidth / 2;
@@ -573,7 +573,7 @@ function onSelection(doc) {
 }
 
 // Create a native highlight from the pending selection (optionally opening the
-// note editor on it). `text` is the ruby-free base-text slice so it re-paints
+// note editor on it). `text` is the ruby-free base-text slice: it re-paints
 // exactly via rangeFor; loc/linear ride along from the start eid's Location.
 async function createAnnotation(color, openEditor) {
   if (!pendingSelection || bookId == null) return;
@@ -616,7 +616,7 @@ async function createAnnotation(color, openEditor) {
 
 // --- click an annotation: edit (native) or read its note (imported) ---
 
-// The overlay SVG is pointer-transparent, so clicks land on the iframe doc. The
+// The overlay SVG is pointer-transparent; clicks land on the iframe doc. The
 // topmost highlight/note under the point (bookmarks aren't edit targets here).
 function annotationAt(doc, x, y) {
   for (const ann of annotations) {
@@ -657,7 +657,7 @@ function onDocClick(e, doc) {
   const px = fr.left + e.clientX;
   const py = fr.top + e.clientY;
   // Every annotation is editable, whatever wrote it. A note lives in its own
-  // row, so annotating an imported highlight never rewrites the highlight — its
+  // row; annotating an imported highlight never rewrites the highlight — its
   // content hash stays put and the device's record keeps matching it.
   openAnnotationEditor(ann, px, py);
 }
@@ -675,7 +675,7 @@ function isExternalHref(href) {
 }
 
 // Open an external link in the OS default browser / mail client via the opener
-// plugin (Rust `open_external_url`), rather than navigating the content iframe.
+// plugin (Rust `open_external_url`), never navigating the content iframe.
 function openExternalHref(href) {
   window.api.invoke("open_external_url", { url: href }).catch((err) => {
     console.error("open_external_url failed", err);
@@ -685,7 +685,7 @@ function openExternalHref(href) {
 // Place the popover near a parent-document point, flipping above if it would
 // overflow the bottom, clamped to the viewport.
 function positionPopover(pop, px, py) {
-  pop.hidden = false; // unhide so offset sizes are real
+  pop.hidden = false; // unhide: offset sizes are real
   const left = Math.max(8, Math.min(px, window.innerWidth - pop.offsetWidth - 8));
   let top = py + 14;
   if (top + pop.offsetHeight > window.innerHeight - 8) top = py - pop.offsetHeight - 14;
@@ -702,13 +702,13 @@ function setEditorColor(name) {
 }
 
 // The notes attached to a highlight, in the order they were made. A Kindle lets
-// one highlight carry several, so this is a list, not a field.
+// one highlight carry several; this is a list, not a field.
 function notesFor(ann) {
   return annotations.filter((a) => a.attached_to === ann.id);
 }
 
 // Editor for an annotation: quote + textarea + color swatches + Save/Delete.
-// `px`/`py` are already in the parent document's coordinate space.
+// `px`/`py` are in the parent document's coordinate space.
 function openAnnotationEditor(ann, px, py) {
   const pop = $("#reader-note-popover");
   if (!pop) return;
@@ -734,7 +734,7 @@ function openAnnotationEditor(ann, px, py) {
 }
 
 // The other notes on this highlight, as a switchable list. Only rendered when
-// there is more than one, so the ordinary single-note case looks unchanged.
+// there is more than one; the ordinary single-note case looks unchanged.
 function renderEditorNotes() {
   const box = $("#reader-note-others");
   if (!box) return;
@@ -908,7 +908,7 @@ function buildEidIndex(d) {
 
 // eid → section index, across the section stream: the local index covers
 // every fetched section (it's invalidated per arriving chunk); a miss while
-// sections are still streaming falls back to the backend's complete map.
+// sections are streaming falls back to the backend's complete map.
 async function sectionIndexForEid(eid) {
   if (eid == null) return null;
   if (!eidToSection) eidToSection = buildEidIndex(dto);
@@ -1075,7 +1075,7 @@ function annotationRow(ann) {
   return li;
 }
 
-// A small ✕ delete control for a panel row. Stops propagation so it doesn't also
+// A small ✕ delete control for a panel row. Stops propagation: it doesn't also
 // trigger the row's jump. Deleting curates the Sidle backup — it never touches the
 // device, and a device-sourced item is recoverable via "Restore from device".
 function rowDeleteButton(onDelete) {
@@ -1156,7 +1156,7 @@ async function refreshPdfInkOverlay() {
 }
 
 // A hide/unhide toggle for a panel row. Hiding stops the reader painting it but
-// keeps it in the backup; reversible. Stops propagation so it doesn't also jump.
+// keeps it in the backup; reversible. Stops propagation: it doesn't also jump.
 function rowHideButton(isHidden, onToggle) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -1197,13 +1197,13 @@ async function setInkHidden(ink, hidden) {
 function renderAnnotationsPanel() {
   const list = $("#reader-annotations-list");
   if (!list) return;
-  // Ink only exists for PDF books — guard so a prior book's ink can't linger in a
+  // Ink only exists for PDF books — guard: a prior book's ink can't linger in a
   // reflowable panel.
   const inks = readerMode === "pdf" ? inkEntries : [];
   const hiddenCount =
     annotations.filter((a) => a.hidden).length + inks.filter((k) => k.hidden).length;
   // Hidden items stay in the backup but are listed only when "Show hidden" is on.
-  // A note attached to a highlight is listed inside that highlight's row, so it
+  // A note attached to a highlight is listed inside that highlight's row; it
   // is not also an entry of its own.
   const listable = annotations.filter((a) => a.attached_to == null);
   const annShown = showHidden ? listable : listable.filter((a) => !a.hidden);
@@ -1251,7 +1251,7 @@ function hideAnnotationsPanel() {
   if (p) p.hidden = true;
 }
 
-// Re-fetch + repaint when a device sync lands while this book is open, so new
+// Re-fetch + repaint when a device sync lands while this book is open; new
 // highlights show up — and ones deleted on the device (full-mirror sync)
 // disappear — without forcing the reader closed. No-op for other books.
 async function reloadAnnotations(forBookId) {
@@ -1274,14 +1274,14 @@ async function reloadAnnotations(forBookId) {
       inkEntries = [];
     }
     // PDF repaints the whole overlay from `annotations` (incl. page-level
-    // bookmark markers), so a removed annotation drops with the fresh overlayer.
+    // bookmark markers); a removed annotation drops with the fresh overlayer.
     repaintPdfOverlay();
     renderAnnotationsPanel();
     updateBookmarkButton();
     return;
   }
   // Clear overlays for annotations the sync removed (overlayer.add only adds /
-  // replaces by key, so a vanished annotation would otherwise linger painted).
+  // replaces by key; a vanished annotation lingers painted without it).
   const live = new Set(annotations.map((a) => a.id));
   const gone = prevIds.filter((id) => !live.has(id));
   for (const { overlayer } of overlays) {
@@ -1296,9 +1296,9 @@ async function reloadAnnotations(forBookId) {
 
 const SEARCH_COLOR = "#5ad1e3"; // cyan — every match
 const SEARCH_COLOR_SELECTED = "#ff5722"; // deep-orange — the row the user last clicked,
-// so when a page carries multiple hits of the same word it's clear which one was jumped to
+//: when a page carries multiple hits of the same word it's clear which one was jumped to
 
-// One painted search match keyed `search-<i>`, so closing search can remove
+// One painted search match keyed `search-<i>`; closing search can remove
 // only its own rects and leave annotation paint untouched.
 function paintOneSearchMatch(doc, overlayer, m, i) {
   const matchAsAnn = { eid_start: m.eid, eid_end: m.eid, off_start: m.off_start, off_end: m.off_end };
@@ -1319,8 +1319,8 @@ function paintSearchMatches(doc, overlayer) {
 }
 
 // Remove any painted search rects across all loaded sections (closing the
-// panel, or clearing before a new query's paint). Iterates up to the previously
-// painted count so a longer prior result set doesn't leave orphans behind.
+// panel, or clearing before a new query's paint). Iterates up to the last-
+// painted count: a longer prior result set doesn't leave orphans behind.
 function clearSearchPaint() {
   for (const { overlayer } of overlays) {
     for (let i = 0; i < lastPaintedCount; i++) overlayer.remove(`search-${i}`);
@@ -1382,7 +1382,7 @@ async function jumpToSearchMatch(m, i) {
       return;
     }
     pdfGoTo(page); // re-render → repaintPdfOverlay paints the match in the selected color
-    repaintPdfOverlay(); // also repaint in place when the match is already on-page
+    repaintPdfOverlay(); // also repaint in place when the match is on-page
     return;
   }
   if (!paginator) return;
@@ -1393,7 +1393,7 @@ async function jumpToSearchMatch(m, i) {
   }
   // Mark this match as the selected one BEFORE repainting + jumping, so:
   //   - every loaded overlayer redraws this i in the selected color (and any
-  //     previously-selected i goes back to the base color);
+  //     last-selected i goes back to the base color);
   selectedSearchIndex = i;
   for (const { doc, overlayer } of overlays) paintSearchMatches(doc, overlayer);
   renderSearchPanel();
@@ -1478,7 +1478,7 @@ function hideSearchPanel() {
 
 // Resolve a TOC href ("c5.xhtml#frag") to a section index + optional fragment.
 // The TOC and the sections come out of one `EpubPackage`, whose `toc` hrefs name
-// its `documents` — the same list `book.hrefs` mirrors — so `indexOf` matches.
+// its `documents` — the same list `book.hrefs` mirrors —: `indexOf` matches.
 function tocTarget(href) {
   const [path, frag] = String(href || "").split("#");
   const index = book?.hrefs?.indexOf(path) ?? -1;
@@ -1499,7 +1499,7 @@ async function goToToc(href) {
 }
 
 // Build rows depth-first, indenting by depth. Each row remembers its section
-// index so `markTocActive` can highlight the current chapter on relocate.
+// index: `markTocActive` can highlight the current chapter on relocate.
 function tocRowsFor(point, depth, out) {
   const li = document.createElement("li");
   li.className = "toc-row";
@@ -1530,7 +1530,7 @@ function markTocActive(currentIndex, doc, range) {
   if (typeof currentIndex !== "number" || !tocEntries.length) return;
   const top = range?.startContainer || null;
   let active = -1;
-  let activeSection = -1; // section of `active`, so a nearer one can outrank it
+  let activeSection = -1; // section of `active`; a nearer one can outrank it
   for (let i = 0; i < tocEntries.length; i++) {
     const e = tocEntries[i];
     if (e.sectionIndex < 0) continue;
@@ -1543,7 +1543,7 @@ function markTocActive(currentIndex, doc, range) {
       if (doc && top && e.frag) {
         const el = doc.getElementById(e.frag);
         // `el.compareDocumentPosition(top)` has the PRECEDING bit set when `top`
-        // comes before `el` — i.e. this entry's target is still ahead of us.
+        // comes before `el` — i.e. this entry's target is ahead of us.
         if (el) {
           const pos = el.compareDocumentPosition(top);
           if (
@@ -1558,7 +1558,7 @@ function markTocActive(currentIndex, doc, range) {
         active = i;
         activeSection = e.sectionIndex;
       }
-      // No early break: a later row may still target this same section.
+      // No early break: a later row may target this same section.
     }
   }
   tocEntries.forEach(({ li }, i) => li.classList.toggle("active", i === active));
@@ -1584,7 +1584,7 @@ function hideTocPanel() {
 function positionedFor(doc) {
   let arr = positionedByDoc.get(doc);
   if (!arr) {
-    // While the deferred location map is still synthesizing (locByEid empty),
+    // While the deferred location map is synthesizing (locByEid empty),
     // keep every [data-eid] element with a null loc — the EID half of the
     // page anchor (live position, bookmarks) must work from the first paint.
     const hasLocs = !!locByEid && locByEid.size > 0;
@@ -1687,14 +1687,14 @@ function updateProgress(detail) {
   sampleReadingSpeed(charPosOf(index, frac));
   lastPos = { loc: anchor.loc, index, frac };
   // Track the live top-of-page anchor in memory only; it's persisted (source
-  // 'sidle') on close, so the Sidle Resume target stays frozen at where this
+  // 'sidle') on close; the Sidle Resume target stays frozen at where this
   // session opened until you leave the book.
   if (anchor.eid != null) livePosition = { eid: anchor.eid, offset: 0, linear_pos: anchor.loc };
   renderProgress();
 }
 
 // Four click-cycled modes: 0 Loc · 1 min-left-in-chapter · 2 min-left-in-book ·
-// 3 hidden (both sides blank, bar dimmed but still tappable to cycle back). The
+// 3 hidden (both sides blank, bar dimmed but tappable to cycle back). The
 // right side is the whole-book % in modes 0–2.
 function renderProgress() {
   const locEl = $("#reader-loc");
@@ -1806,7 +1806,7 @@ function openLocationGoTo() {
 
 // (Per-section base-text char counts and image-only flags now arrive
 // precomputed from the backend — `ReaderSectionDto.chars` / `.image_only` —
-// so the reader never DOM-parses sections at open.)
+//: the reader never DOM-parses sections at open.)
 
 // ---- display style (per-book: font, size, colors, spacing, margins) --------
 
@@ -1839,6 +1839,7 @@ const DEFAULT_STYLE = {
   bg: "#ffffff",
   margin: "normal",
   columns: "auto",
+  spreadGap: 48, // px between the two facing pages of a vertical spread
 };
 let styleSettings = null;
 let imageSections = new Set(); // section indices that are a single full-page image
@@ -1883,7 +1884,7 @@ function mix(a, b, t) {
 
 // (Image-only sections — cover, full-bleed art — are flagged backend-side in
 // `ReaderSectionDto.image_only`; they get the zero-margin, single-column
-// layout so the image fills the page instead of shrinking into a text column.)
+// layout: the image fills the page, never shrinking into a text column.)
 
 // The CSS injected into each section iframe via the paginator's `setStyles`. It
 function buildSectionCss(s) {
@@ -1891,11 +1892,11 @@ function buildSectionCss(s) {
   const out = [
     `:root { color-scheme: ${isDark(s.bg) ? "dark" : "light"}; }`,
     `html, body { background: ${s.bg} !important; }`,
-    // Default = non-important so the book's own text colors still win (as before);
+    // Default = non-important: the book's own text colors win (as before);
     // a custom color forces over them.
     customFg ? `html, body { color: ${s.fg} !important; }` : `body { color: ${s.fg}; }`,
   ];
-  // Anchor the root size only when changed, so a default book keeps its shipped
+  // Anchor the root size only when changed; a default book keeps its shipped
   // root sizing untouched.
   if (s.size !== DEFAULT_STYLE.size) out.push(`html { font-size: ${s.size}px !important; }`);
   const stack = FONT_STACKS[s.font];
@@ -1908,7 +1909,7 @@ function buildSectionCss(s) {
   return out.join("\n");
 }
 
-// Tint the reader chrome (gutter, bars, panels) to the page colors so a sepia or
+// Tint the reader chrome (gutter, bars, panels) to the page colors: a sepia or
 function applyChrome(s) {
   const v = view();
   if (!v) return;
@@ -1944,20 +1945,29 @@ function applyLayout(index, force) {
   if (!paginator || !styleSettings) return;
   const mode = imageSections.has(index) ? "image" : "text";
   if (!force && mode === layoutMode) return;
-  // These attributes feed CSS vars used inside minmax()/calc(), so lengths MUST
+  // These attributes feed CSS vars used inside minmax()/calc(); lengths MUST
   // carry a unit — a bare "48" makes `minmax(48, 1fr)` invalid and the margin
   // silently collapses. (0 is the one length that's valid unitless.)
   layoutMode = mode;
+  const vertical = (book?.writingMode || "").startsWith("vertical");
+  const spread = vertical && styleSettings.columns !== "1" ? "on" : "off";
   if (mode === "image") {
     paginator.setAttribute("margin", "0px");
     paginator.setAttribute("gap", "0%");
     paginator.setAttribute("max-inline-size", `${HUGE_MEASURE}px`);
     paginator.setAttribute("max-column-count", "1");
+    // spread-gap 0: facing full-page images meet at the seam and split
+    // artwork joins.
+    paginator.setAttribute("vertical-spread", spread);
+    paginator.setAttribute("spread-gap", "0");
   } else {
     // Text. The margin preset adds whitespace at the line ends, on the axis the
     // writing mode runs across.
-    const vertical = (book?.writingMode || "").startsWith("vertical");
     paginator.setAttribute("gap", "7%");
+    // Facing pages in a wide window (the paginator holds it to vertical +
+    // landscape); the gutter width is the user's setting.
+    paginator.setAttribute("vertical-spread", spread);
+    paginator.setAttribute("spread-gap", String(styleSettings.spreadGap ?? 48));
     if (vertical) {
       // Block (top/bottom) margin from the preset. For the measure (= column
       // height), branch on the page's orientation — matching the paginator's own
@@ -1980,7 +1990,7 @@ function applyLayout(index, force) {
     }
   }
   // The block-`margin` attribute only re-paginates via a ResizeObserver, which
-  // can miss; force it so a vertical top/bottom-margin change always takes hold.
+  // can miss; force it: a vertical top/bottom-margin change always takes hold.
   // (No-op before the first section loads — render() bails without a view.)
   paginator.render?.(force === true);
 }
@@ -2010,6 +2020,11 @@ function syncStylePanel() {
   set("#rs-spacing", s.spacing);
   set("#rs-margin", s.margin);
   set("#rs-columns", s.columns);
+  set("#rs-spread-gap", s.spreadGap ?? 48);
+  const gv = $("#rs-spread-gap-val");
+  if (gv) gv.textContent = `${s.spreadGap ?? 48}px`;
+  const gr = $("#rs-spread-gap-row");
+  if (gr) gr.hidden = !(book?.writingMode || "").startsWith("vertical");
   set("#rs-align", s.align);
   set("#rs-fg", s.fg);
   set("#rs-bg", s.bg);
@@ -2026,12 +2041,15 @@ function onStyleInput() {
     spacing: val("#rs-spacing", "auto"),
     margin: val("#rs-margin", "normal"),
     columns: val("#rs-columns", "auto"),
+    spreadGap: Math.max(0, Number(val("#rs-spread-gap", 48)) || 0),
     align: val("#rs-align", ""),
     fg: val("#rs-fg", "#111111"),
     bg: val("#rs-bg", "#ffffff"),
   };
   const sv = $("#rs-size-val");
   if (sv) sv.textContent = `${styleSettings.size}px`;
+  const gv = $("#rs-spread-gap-val");
+  if (gv) gv.textContent = `${styleSettings.spreadGap}px`;
   saveStyle();
   applyStyle();
 }
@@ -2144,10 +2162,10 @@ function onKey(e) {
   if (e.target?.closest?.("#reader-style-panel")) return;
   if (e.target?.closest?.("#reader-search-panel")) return;
   // Typing in the note editor owns its own keys (arrows/space/etc.) — don't
-  // hijack them to turn pages. (Escape is already handled above, so it closes.)
+  // hijack them to turn pages. (Escape is handled above; it closes.)
   if (e.target?.closest?.("#reader-note-popover")) return;
   // `Shift+G` → jump to last page of the book. Must run BEFORE the modifier
-  // filter (which would skip it as a shifted key). All other unmodified
+  // filter (that filter skips it as a shifted key). All other unmodified
   // shortcuts go through the switch below.
   if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "G") {
     jumpToSection((dto?.sections?.length ?? 1) - 1, 1);
@@ -2226,7 +2244,7 @@ function onKey(e) {
 
 // ---- PDF (fixed-layout) mode ----------------------------------------------
 
-// Search has nothing to find on an image-only book, so it's hidden there;
+// Search has nothing to find on an image-only book; it's hidden there;
 const PDF_NO_TEXT_HIDDEN = ["#reader-search"];
 
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
@@ -2240,10 +2258,10 @@ const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, c
 // are merged. Kept in sync with the `.reader-pdf-spread.double` gap in styles.css.
 const PDF_SPREAD_GAP = 12;
 const pdfGap = () => (pdfStyle.merge ? 0 : PDF_SPREAD_GAP);
-const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page already fits, so no point
+const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page fits; no point
 const PDF_ZOOM_MAX = 3;
-// PDF and notebook share this panel, so key off whichever document is open. A
-// notebook leaves `bookId` null and carries its id on `nbk`; namespace it so a
+// PDF and notebook share this panel; key off whichever document is open. A
+// notebook leaves `bookId` null and carries its id on `nbk`; namespace it: a
 // notebook and a PDF book with the same numeric id can't share a style.
 const pdfStyleKey = () => `${PDF_STYLE_KEY}.${nbk ? `nb-${nbk.id}` : bookId}`;
 let pdfStyle = { ...PDF_STYLE_DEFAULT }; // replaced per-book by loadPdfStyle() on open
@@ -2327,7 +2345,7 @@ async function openPdf(id, openDto, anns, positions) {
   pdfStyle.zoom = 1; // zoom is per-open: a book opens at fit, not the last zoom
   dto = openDto;
   annotations = anns || [];
-  // PDF books can carry handwritten ink — fetch it so the annotations panel lists
+  // PDF books can carry handwritten ink — fetch it: the annotations panel lists
   // it on open (the on-page overlay is rendered separately by pdfRenderCurrent).
   // reloadAnnotations refetches it after a sync/edit; this is the open-time seed.
   inkEntries = [];
@@ -2354,7 +2372,7 @@ async function openPdf(id, openDto, anns, positions) {
   host.className = "reader-pdf-spread";
   // RTL (Japanese/manga): the spread renders right-to-left (lower page on the
   // right). CSS row-reverse flips only the visual order — pageL stays the lower
-  // index, so every coordinate/overlay calc downstream is unchanged.
+  // index; every coordinate/overlay calc downstream is unchanged.
   if (openDto.page_progression_direction === "rtl") host.classList.add("rtl");
   const mkPage = () => {
     const wrap = document.createElement("div");
@@ -2397,12 +2415,12 @@ async function openPdf(id, openDto, anns, positions) {
     token: 0,
     renderTimer: null, // debounce handle for pdfScheduleRender
     cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
-    inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
+    inflight: new Map(), // key → Promise<url|null>; a turn can await a prefetch
     inkPages: new Set(), // host pages that carry handwritten ink
     inkCache: new Map(), // page → Promise<string[]> (the overlay SVG(s))
   };
 
-  // Which pages carry handwritten ink drawn on the Scribe — fetched once so the
+  // Which pages carry handwritten ink drawn on the Scribe — fetched once: the
   // spread renderer only requests the SVG for pages that actually have it.
   try {
     for (const p of (await window.api.invoke("reader_pdf_ink_pages", { bookId })) || []) {
@@ -2508,7 +2526,7 @@ async function openFxl(id, openDto, anns, positions) {
   });
 
   // KFX TOC (href-based) → PDF TOC (page-index based); an href may carry a
-  // `#fragment`, so match on the file part.
+  // `#fragment`; match on the file part.
   const mapToc = (entries) =>
     (entries || []).map((e) => ({
       label: e.label,
@@ -2760,10 +2778,10 @@ function pdfGoTo(i) {
   pdfScheduleRender();
 }
 
-// Render the current spread — instant when it's already cached (the prefetched
+// Render the current spread — instant when it's cached (the prefetched
 function pdfScheduleRender() {
   clearTimeout(pdf.renderTimer);
-  // Fixed-layout KFX images are already in memory — render now, no debounce.
+  // Fixed-layout KFX images are in memory — render now, no debounce.
   if (pdf.kfxImages) {
     pdfRenderCurrent();
     return;
@@ -2787,7 +2805,7 @@ function pdfRenderWidth(page, half) {
   let dispW = sh * aspect; // fit to height
   const budget = half ? (sw - 2 * pdfGap()) / 2 : sw; // ...but never exceed the width share
   if (dispW > budget) dispW = budget;
-  const zoom = pdfStyle.zoom || 1; // request a bigger raster when zoomed, so it stays crisp
+  const zoom = pdfStyle.zoom || 1; // request a bigger raster when zoomed; it stays crisp
   const raw = Math.max(200, Math.min(Math.round(dispW * dpr * zoom), 3000));
   return Math.round(raw / 50) * 50;
 }
@@ -2802,8 +2820,8 @@ function pdfTrimCache() {
 }
 
 // Fetch (and cache) a page's image, returning its data URL (or null on error).
-// Coalesces with an in-flight request for the same key — so navigating onto a
-// page whose prefetch is still running awaits that prefetch instead of erroring.
+// Coalesces with an in-flight request for the same key —: navigating onto a
+// page whose prefetch is running awaits that prefetch, never erroring.
 function pdfFetchPage(page, width) {
   // Fixed-layout KFX: the page image is a blob URL streamed in by the resource
   // loader — return it directly when it's landed, else await that page's
@@ -2887,7 +2905,7 @@ function renderPdfTextLayer(textEl, page) {
     spans.push([s, w]);
   }
   textEl.appendChild(frag);
-  // Batch the reads (one reflow) then the writes, so fitting N runs doesn't
+  // Batch the reads (one reflow) then the writes; fitting N runs doesn't
   // thrash layout.
   const natW = spans.map(([s]) => s.getBoundingClientRect().width);
   spans.forEach(([s, w], i) => {
@@ -2916,7 +2934,7 @@ async function renderPdfInkLayer(inkEl, page, token) {
 }
 
 // Fetch (and cache) a page's ink overlay SVG(s) — usually one per page. Caches
-// the promise so repeated renders of the same page coalesce.
+// the promise: repeated renders of the same page coalesce.
 function pdfFetchInk(page) {
   const hit = pdf.inkCache.get(page);
   if (hit) return hit;
@@ -2980,9 +2998,9 @@ async function pdfRenderCurrent() {
   if (!pdf) return;
   const token = ++pdf.token;
   const half = pdfSpreadMode() === "double";
-  // Snap onto a spread boundary (cover alone, then odd-aligned pairs) so a
+  // Snap onto a spread boundary (cover alone, then odd-aligned pairs): a
   // resize that flips single↔double — or an init/jump straight to a mid-spread
-  // page — still renders a clean spread.
+  // page — renders a clean spread.
   pdf.page = pdfSpreadStart(pdf.page);
   const left = pdf.page;
   const hasRight = pdfHasRight();
@@ -3000,7 +3018,7 @@ async function pdfRenderCurrent() {
     pdf.textR.replaceChildren();
   }
   // Handwritten-ink overlays (async; token-guarded) — fire-and-forget alongside
-  // the image fetch, so they paint as soon as the cached SVG resolves.
+  // the image fetch; they paint as soon as the cached SVG resolves.
   renderPdfInkLayer(pdf.inkL, left, token);
   renderPdfInkLayer(pdf.inkR, hasRight ? left + 1 : null, token);
   // The current page's eid is the live position (drives the bookmark toggle).
@@ -3019,8 +3037,8 @@ async function pdfRenderCurrent() {
   pdf.overlayer?.redraw(); // wrapper size is final now — settle any sub-pixel drift
 
   // Prefetch the neighbouring spreads (best-effort, off the critical path). Use
-  // the spread starts so the warm targets match real turns — notably cover →
-  // (1,2), which an even-aligned `left ± step` would miss.
+  // the spread starts: the warm targets match real turns — notably cover →
+  // (1,2), missed by an even-aligned `left ± step`.
   const step = half ? 2 : 1;
   const nextStart = pdfSpreadStart(left + step);
   const prevStart = pdfSpreadStart(left - step);
@@ -3090,7 +3108,7 @@ function pdfOnKey(e) {
     return;
   }
   // A focused search input / note editor owns its keys (arrows/space/typing) —
-  // don't steal them to turn pages. (Escape above already closes them.)
+  // don't steal them to turn pages. (Escape above closes them.)
   if (e.target?.closest?.("#reader-search-panel")) return;
   if (e.target?.closest?.("#reader-note-popover")) return;
   // `Shift+G` → last page (before the modifier filter, as the reflowable does).
@@ -3192,7 +3210,7 @@ function renderPdfTocPanel() {
 }
 
 function pdfTocRowsFor(entry, depth, rows) {
-  // Same DOM/class/indent as the reflowable `tocRowsFor`, so the panel looks and
+  // Same DOM/class/indent as the reflowable `tocRowsFor`; the panel looks and
   // behaves identically — only the target differs (a page index, not an href).
   const li = document.createElement("li");
   li.className = "toc-row";
@@ -3223,13 +3241,13 @@ function togglePdfStylePanel() {
 
 function syncPdfStylePanel() {
   // The notebook shares this panel: page layout (spread) + night mode apply, but
-  // a handwritten page has no separable ink layer, so hide the ink-toggle row.
+  // a handwritten page has no separable ink layer; hide the ink-toggle row.
   const notebook = readerMode === "notebook";
   $("#rps-ink")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   // The standalone cover is a PDF concept; a notebook always pairs from page 0.
   $("#rps-cover")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   // Merging the facing-page seam is a PDF / manga concept; handwritten notebook
-  // pages are independent, so there's nothing to join.
+  // pages are independent; there's nothing to join.
   $("#rps-merge")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   const sp = $("#rps-spread");
   if (sp) sp.value = pdfStyle.spread;
@@ -3327,7 +3345,7 @@ function setPdfZoom(z, anchor) {
 }
 
 // Keep the content point under `anchor` (client coords; falls back to the viewport
-// centre for slider/keys) fixed while the page scales by `f` — so a pinch zooms
+// centre for slider/keys) fixed while the page scales by `f` —: a pinch zooms
 // toward the fingers. A no-op when the page fits (scrollLeft/Top clamp to 0).
 function zoomAnchorScroll(f, anchor) {
   const host = $("#reader-paginator-host");
@@ -3385,7 +3403,7 @@ async function openNotebook(desc) {
     pageCount: desc.pageCount || 0,
     page: 0,
     cache: new Map(), // page → SVG string (prefetched neighbours included)
-    token: 0, // bumps per turn so a slow fetch can't paint a stale page
+    token: 0, // bumps per turn: a slow fetch can't paint a stale page
     aspect: 0.75, // page W/H (portrait default); learned from the first rendered SVG
   };
   pdfStyle = loadPdfStyle(); // per-notebook display prefs (keyed on nbk.id)
@@ -3413,7 +3431,7 @@ async function openNotebook(desc) {
   document.addEventListener("keydown", keyHandler, true);
 }
 
-// Synchronous: nothing here is persisted, so callers need not await a close.
+// Synchronous: nothing here is persisted; callers need not await a close.
 function closeNotebook() {
   if (keyHandler) {
     document.removeEventListener("keydown", keyHandler, true);
@@ -3472,7 +3490,7 @@ async function nbkShowPage(i) {
   const spread = document.createElement("div");
   spread.className = double ? "reader-pdf-spread double" : "reader-pdf-spread";
   spread.innerHTML = leftSvg + rightSvg;
-  // Size each page box explicitly (fit × zoom) so it scrolls when zoomed. Only the
+  // Size each page box explicitly (fit × zoom): it scrolls when zoomed. Only the
   // outermost (page) SVGs get sized/classed — not the nested template SVG inside.
   const { w, h } = nbkDisplaySize(nbk.aspect, double);
   for (const el of spread.querySelectorAll(":scope > svg")) {
@@ -3503,7 +3521,7 @@ async function nbkFetch(i) {
   return svg;
 }
 
-// Warm a page's SVG so the next turn paints without a fetch.
+// Warm a page's SVG: the next turn paints without a fetch.
 function nbkPrefetch(i) {
   const v = nbk;
   if (!v || i < 0 || i >= v.pageCount || v.cache.has(i)) return;
@@ -3560,7 +3578,7 @@ function nbkDisplaySize(aspect, half) {
 }
 
 // Cheap re-fit of the on-screen notebook page(s) to the current zoom — resize the
-// existing SVGs (crisp, vector) rather than rebuilding/re-parsing them.
+// existing SVGs (crisp, vector) never rebuilding/re-parsing them.
 function nbkResize() {
   const host = $("#reader-paginator-host");
   if (!nbk || !host) return;
@@ -3598,7 +3616,7 @@ function nbkUpdateProgress() {
 
 // Go-to-page: swap the footer "Page X" readout for a number input (no native
 // prompt). Enter jumps; Esc/blur cancels — then the readout is restored. notebookOnKey
-// ignores the input's keys (its target guard below), so digits/arrows reach it.
+// ignores the input's keys (its target guard below); digits/arrows reach it.
 function openNotebookGoTo() {
   if (!nbk || !nbk.pageCount) return;
   const locEl = $("#reader-loc");
@@ -3664,8 +3682,8 @@ function notebookOnKey(e) {
   // Zoom in/out/reset (before the modifier filter; "+" is Shift+"=" on many layouts).
   if (!e.ctrlKey && !e.metaKey && !e.altKey && handleZoomKey(e)) return;
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
-  // `g` → go to page by number. Notebooks have no TOC, so this is the jump; Home/
-  // End already cover first/last, so there's no vim `gg` chord here.
+  // `g` → go to page by number. Notebooks have no TOC; this is the jump; Home/
+  // End cover first/last; there's no vim `gg` chord here.
   if (e.key === "g") {
     openNotebookGoTo();
     e.preventDefault();
@@ -3738,7 +3756,7 @@ function patchLiveSectionImages() {
     }
   }
   // A picture the stylesheet paints (section-break ornaments and the like)
-  // arrives on the same stream but lives in a rule, not an element — so the
+  // arrives on the same stream but lives in a rule, not an element —: the
   // sheet itself is republished with the new blob URLs bound in.
   try {
     book?.restyle?.(docs);
@@ -3845,13 +3863,16 @@ async function open(id) {
   paginator.addEventListener("create-overlayer", ({ detail: { doc, attach } }) => {
     const overlayer = new Overlayer();
     attach(overlayer);
+    // Detached section docs (their iframe is gone) take no repaint and only
+    // hold memory — dropped.
+    overlays = overlays.filter((o) => o.doc.defaultView);
     overlays.push({ doc, overlayer });
     // Catch up on any deferred images that landed in the gap between this
     if (resLoader) patchPendingImages(doc, resLoader.resolve);
     paintAnnotations(doc, overlayer);
     // If a search is active when a new section first paints, paint its matches
-    // into this section too — otherwise scrolling/navigating into the section
-    // would leave the matches there invisible until you re-queried.
+    // into this section too: without it, scrolling/navigating into the section
+    // leaves the matches there invisible until a re-query.
     if (searchResults.length) paintSearchMatches(doc, overlayer);
     doc.addEventListener("click", (e) => onDocClick(e, doc));
     // Text selected in the section → offer the highlight/note toolbar.
@@ -3869,7 +3890,7 @@ async function open(id) {
     hideSelectionToolbar();
     // Switch to/from full-bleed layout for image-only pages. A mode change
     // re-paginates and fires a fresh relocate with the new geometry, which
-    // updates progress again — so this runs last.
+    // updates progress again —: this runs last.
     applyLayout(detail.index);
   });
 
@@ -3878,7 +3899,7 @@ async function open(id) {
   paginator.open(book);
   // Auto-restore Sidle's OWN last position (never the device's — that's a manual
   // Resume target). Falls back to the start when nothing's saved or the saved
-  // eid no longer resolves (e.g. the book was re-converted).
+  // eid fails to resolve (e.g. the book was re-converted).
   if (!(await goToEid(sidleResume?.eid))) await paginator.goTo({ index: 0 });
   paginator.focus?.();
   keyHandler = onKey;
@@ -3897,7 +3918,7 @@ async function close() {
     closeNotebook();
     return;
   }
-  // Persist Sidle's own last position — ONLY here, so the Resume target stays
+  // Persist Sidle's own last position — ONLY here; the Resume target stays
   // frozen at where this session opened until you leave the book. Best-effort:
   // a failed write just means the next open falls back to the start.
   if (bookId != null && livePosition?.eid != null) {
@@ -3968,7 +3989,7 @@ async function close() {
   hideAnnotationsPanel();
   hideTocPanel();
   hideStylePanel();
-  // Stop the auto-hide timer and un-fade, so a stray timeout can't fire after
+  // Stop the auto-hide timer and un-fade; a stray timeout can't fire after
   // teardown and the next book opens with its bar shown.
   cancelTopbarHide();
   topbarHovered = false;
@@ -3977,7 +3998,7 @@ async function close() {
   if (v) {
     v.classList.remove("open");
     v.hidden = true;
-    // Drop the per-book tint so the next book opens on defaults until its own
+    // Drop the per-book tint: the next book opens on defaults until its own
     // settings apply (no flash of the previous book's theme).
     for (const p of [
       "color-scheme",
@@ -4020,25 +4041,25 @@ function wire() {
     );
   }
   // Page-turn margins: the left margin goes to the physically-left page (= next
-  // in a vertical-rl / RTL book, prev otherwise), mirroring the arrow keys.
+  // in a vertical-rl / RTL book, prev in the rest), mirroring the arrow keys.
   $("#reader-nav-left")?.addEventListener("click", () => (readerPpd() === "rtl" ? forward() : back()));
   $("#reader-nav-right")?.addEventListener("click", () => (readerPpd() === "rtl" ? back() : forward()));
   $("#reader-statusbar")?.addEventListener("click", () => cycleProgressMode());
   // The notebook's "Page X" readout is a go-to-page trigger — its own click region,
-  // so it doesn't also cycle the bar; other modes let the click bubble to cycle.
+  //: it doesn't also cycle the bar; other modes let the click bubble to cycle.
   $("#reader-loc")?.addEventListener("click", (e) => {
     if (readerMode === "notebook" && nbk?.pageCount) {
       e.stopPropagation();
       openNotebookGoTo();
     } else if (readerMode === "reflowable" && progressMode === 0 && maxLoc) {
       // Tapping the "Loc N" readout opens the go-to-location input; stop the
-      // click here so it doesn't also cycle the status bar's progress mode.
+      // click here: it doesn't also cycle the status bar's progress mode.
       e.stopPropagation();
       openLocationGoTo();
     }
   });
   // Resume is its own tap region: open the chooser, and stop the click from
-  // bubbling to the status bar (which would also cycle the progress display).
+  // bubbling to the status bar (that click also cycles the progress display).
   $("#reader-resume")?.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleResumeMenu();
@@ -4123,7 +4144,7 @@ function wire() {
     ?.querySelectorAll("select, input")
     .forEach((el) => {
       // `input` for live drag of the slider/color; `change` as a fallback for
-      // WebKit color inputs that only commit on close. Idempotent, so both is fine.
+      // WebKit color inputs that only commit on close. Idempotent; both is fine.
       el.addEventListener("input", onStyleInput);
       el.addEventListener("change", onStyleInput);
     });
@@ -4144,7 +4165,7 @@ function wire() {
     new ResizeObserver(scheduleReaderResize).observe(stageEl);
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
   // inside the section iframe live in a separate document and don't reach here,
-  // so this never fights the in-text click that opened the note popover.
+  //: this never fights the in-text click that opened the note popover.
   document.addEventListener("mousedown", (e) => {
     const pop = $("#reader-note-popover");
     if (pop && !pop.hidden && !pop.contains(e.target)) hideNotePopover();

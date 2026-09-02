@@ -217,22 +217,39 @@ class View {
     #column = true
     #size
     #layout = {}
-    #expandKey // last-applied expand geometry, so no-op echoes skip the writes
+    #expandKey // last-applied expand geometry; no-op echoes skip the writes
     #expandedSize // cached for #placeOverlayer (attach can precede any change)
-    constructor({ container, onExpand }) {
+    // In a two-page spread the secondary view is the left page: its strip
+    // starts at the element's top (no leading blank page), and one shared
+    // scroll offset shows page p in the primary and p+1 here.
+    #secondary = false
+    // A horizontal ltr-content section in an rtl book pages right to left:
+    // the column order flips at the root while body text stays ltr.
+    #bookRtl = false
+    #flipDir = false
+    constructor({ container, onExpand, secondary = false, bookRtl = false }) {
         this.container = container
         this.onExpand = onExpand
+        this.#secondary = secondary
+        this.#bookRtl = bookRtl
         this.#iframe.setAttribute('part', 'filter')
         this.#element.append(this.#iframe)
         Object.assign(this.#element.style, {
             boxSizing: 'content-box',
-            position: 'relative',
+            // A secondary in normal flow displaces the primary's strip;
+            // absolute from birth.
+            position: secondary ? 'absolute' : 'relative',
+            left: secondary ? '0' : '',
+            top: secondary ? '0' : '',
             overflow: 'hidden',
             flex: '0 0 auto',
             width: '100%', height: '100%',
             display: 'flex',
             justifyContent: 'center',
-            alignItems: 'center',
+            alignItems: secondary ? 'flex-start' : 'center',
+            // Unsized (pre-expand()) the strip spans the whole container,
+            // and a transparent box swallows clicks: no events yet.
+            pointerEvents: secondary ? 'none' : '',
         })
         Object.assign(this.#iframe.style, {
             overflow: 'hidden',
@@ -264,7 +281,8 @@ class View {
                 this.#iframe.style.display = 'none'
 
                 this.#vertical = vertical
-                this.#rtl = rtl
+                this.#flipDir = !vertical && !rtl && this.#bookRtl
+                this.#rtl = rtl || this.#flipDir
 
                 // The document just swapped in (about:blank → section). Any
                 this.#layout = {}
@@ -272,7 +290,7 @@ class View {
                 this.#expandedSize = undefined
 
                 this.#contentRange.selectNodeContents(doc.body)
-                const layout = beforeRender?.({ vertical, rtl, background })
+                const layout = beforeRender?.({ vertical, rtl: this.#rtl, background })
                 this.#iframe.style.display = 'block'
                 this.render(layout)
                 this.#observer.observe(doc.body)
@@ -288,11 +306,11 @@ class View {
     }
     render(layout, force) {
         if (!layout) return
-        // Same geometry → nothing to do. Re-applying identical column styles
-        // still dirties style and forces a full re-layout of the section
-        // (~200-900ms for a long ruby-annotated vertical chapter), and render()
+        // Same geometry → nothing to do. Re-applied identical column styles
+        // dirty style and force a full re-layout of the section (~200-900ms
+        // for a long ruby-annotated vertical chapter).
         const last = this.#layout
-        if (!force && ['flow', 'width', 'height', 'margin', 'gap', 'columnWidth']
+        if (!force && ['flow', 'width', 'height', 'margin', 'gap', 'columnWidth', 'spread']
             .every(k => last[k] === layout[k])) return
         this.#column = layout.flow !== 'scrolled'
         this.#layout = layout
@@ -333,17 +351,21 @@ class View {
             'overflow': 'hidden',
             // force wrap long words
             'overflow-wrap': 'break-word',
-            // reset some potentially problematic props
+            // reset section-set props that conflict with the column styles
             'position': 'static', 'border': '0', 'margin': '0',
             'max-height': 'none', 'max-width': 'none',
             'min-height': 'none', 'min-width': 'none',
             // Line-box sizing at the column's overflow-hidden block edges.
             ...(vertical ? {} : { '-webkit-line-box-contain': 'block font replaced' }),
+            // Root direction orders the column boxes; body direction below
+            // keeps the text itself ltr.
+            ...(this.#flipDir ? { 'direction': 'rtl' } : {}),
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
             'max-width': 'none',
             'margin': '0',
+            ...(this.#flipDir ? { 'direction': 'ltr' } : {}),
         })
         this.setImageSize()
         this.expand()
@@ -381,7 +403,11 @@ class View {
             const blockMax = `${Math.max(0, blockExtent - chrome[i])}px`
             setStylesImportant(el, {
                 // Both caps in definite px: a percentage cap resolves against
-                ...(el.localName === 'img' ? null : { 'width': 'auto', 'height': 'auto' }),
+                // an indefinite page box. In vertical flow an author height
+                // (`height: 100%`) yields to natural aspect; author width stands.
+                ...(el.localName === 'img'
+                    ? (vertical ? { 'height': 'auto' } : null)
+                    : { 'width': 'auto', 'height': 'auto' }),
                 'max-width': vertical ? blockMax : inlineCap,
                 'max-height': vertical ? inlineCap : blockMax,
                 'object-fit': 'contain',
@@ -406,16 +432,28 @@ class View {
             const contentSize = contentStart + contentRect[side]
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
+            // In a spread the strip is one page wide, placed as the right
+            // (primary) or left (secondary) half of the container.
+            const spread = this.#layout.spread
+            const otherSize = spread ? `${this.#layout.width}px` : '100%'
+            if (spread) {
+                Object.assign(this.#element.style, this.#secondary
+                    ? { position: 'absolute', left: '0', marginLeft: '0', marginRight: '0', pointerEvents: '' }
+                    : { position: 'relative', marginLeft: 'auto', marginRight: '0' })
+            } else {
+                Object.assign(this.#element.style,
+                    { position: 'relative', marginLeft: '', marginRight: '' })
+            }
             // Skip the size writes when nothing changed: writing identical
-            const key = `col:${expandedSize}:${this.#size}`
+            const key = `col:${expandedSize}:${this.#size}:${otherSize}`
             if (this.#expandKey !== key) {
                 this.#expandKey = key
                 this.#expandedSize = expandedSize
                 this.#element.style.padding = '0'
                 this.#iframe.style[side] = `${expandedSize}px`
                 this.#element.style[side] = `${expandedSize + this.#size * 2}px`
-                this.#iframe.style[otherSide] = '100%'
-                this.#element.style[otherSide] = '100%'
+                this.#iframe.style[otherSide] = otherSize
+                this.#element.style[otherSide] = otherSize
                 documentElement.style[side] = `${this.#size}px`
             }
         } else {
@@ -448,9 +486,10 @@ class View {
         const expandedSize = this.#expandedSize
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
+            const lead = this.#secondary ? 0 : this.#size
             this.#overlayer.element.style.margin = '0'
-            this.#overlayer.element.style.left = this.#vertical ? '0' : `${this.#size}px`
-            this.#overlayer.element.style.top = this.#vertical ? `${this.#size}px` : '0'
+            this.#overlayer.element.style.left = this.#vertical ? '0' : `${lead}px`
+            this.#overlayer.element.style.top = this.#vertical ? `${lead}px` : '0'
             this.#overlayer.element.style[side] = `${expandedSize}px`
         } else {
             const side = this.#vertical ? 'width' : 'height'
@@ -471,6 +510,13 @@ class View {
     get overlayer() {
         return this.#overlayer
     }
+    get contentPages() {
+        return this.#expandedSize != null && this.#size > 0
+            ? Math.round(this.#expandedSize / this.#size) : 0
+    }
+    get vertical() {
+        return this.#vertical
+    }
     destroy() {
         if (this.document) this.#observer.unobserve(this.document.body)
     }
@@ -481,6 +527,7 @@ export class Paginator extends HTMLElement {
     static observedAttributes = [
         'flow', 'gap', 'margin',
         'max-inline-size', 'max-block-size', 'max-column-count',
+        'vertical-spread', 'spread-gap',
     ]
     #root = this.attachShadow({ mode: 'closed' })
     #observer = new ResizeObserver(() => this.render())
@@ -490,6 +537,20 @@ export class Paginator extends HTMLElement {
     #header
     #footer
     #view
+    // Two-page spread (vertical writing, wide window): the secondary View is
+    // the left page, one page ahead of the primary on the shared scroll.
+    #spreadView = null
+    #spreadOn = false
+    #spreadLoading = false
+    #currentSrc = null
+    #lastLayout = null
+    // Cross-section fill: #crossView holds the next linear section, its
+    // strip placed where the same-section strip ends — at the primary's
+    // last page the left half shows that section's first page.
+    #crossView = null
+    #crossIndex = -1
+    #crossSrc = null
+    #crossLoading = false
     #vertical = false
     #rtl = false
     #margin = 0
@@ -562,6 +623,7 @@ export class Paginator extends HTMLElement {
         #container {
             grid-column: 2 / 5;
             grid-row: 2;
+            position: relative;
             overflow: hidden;
         }
         :host([flow="scrolled"]) #container {
@@ -661,7 +723,10 @@ export class Paginator extends HTMLElement {
                 if (!range) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
-                if (isPointerSelecting && sel.type === 'Range')
+                // In a spread the two page docs are distinct; boundary
+                // comparison against another doc's range throws.
+                if (isPointerSelecting && sel.type === 'Range'
+                    && range.startContainer.ownerDocument === doc)
                     checkPointerSelection(range, sel)
                 else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
@@ -692,6 +757,10 @@ export class Paginator extends HTMLElement {
             case 'max-column-count':
                 this.#top.style.setProperty('--_' + name, value)
                 break
+            case 'vertical-spread':
+            case 'spread-gap':
+                this.render()
+                break
             case 'max-inline-size':
                 // needs explicit `render()` as it doesn't necessarily resize
                 this.#top.style.setProperty('--_' + name, value)
@@ -720,6 +789,8 @@ export class Paginator extends HTMLElement {
         })
     }
     #destroyView() {
+        this.#dropSpreadView()
+        this.#dropCrossView()
         if (this.#view) {
             this.#view.destroy()
             this.#container.removeChild(this.#view.element)
@@ -730,7 +801,11 @@ export class Paginator extends HTMLElement {
         this.#destroyView()
         this.#view = new View({
             container: this,
-            onExpand: () => this.#scrollToAnchor(this.#anchor),
+            bookRtl: this.bookDir === 'rtl',
+            onExpand: () => {
+                this.#positionCrossView()
+                this.#scrollToAnchor(this.#anchor)
+            },
         })
         this.#container.append(this.#view.element)
         return this.#view
@@ -747,7 +822,7 @@ export class Paginator extends HTMLElement {
         const size = vertical ? height : width
 
         const style = getComputedStyle(this.#top)
-        const maxInlineSize = parseFloat(style.getPropertyValue('--_max-inline-size'))
+        let maxInlineSize = parseFloat(style.getPropertyValue('--_max-inline-size'))
         const maxColumnCount = parseInt(style.getPropertyValue('--_max-column-count-spread'))
         const margin = parseFloat(style.getPropertyValue('--_margin'))
         this.#margin = margin
@@ -755,6 +830,10 @@ export class Paginator extends HTMLElement {
         const g = parseFloat(style.getPropertyValue('--_gap')) / 100
         // The gap will be a percentage of the #container, not the whole view.
         const gap = -g / (g - 1) * size
+
+        const spreadGap = Math.max(0, parseFloat(this.getAttribute('spread-gap')) || 0)
+        const bookSpread = width > height
+            && this.getAttribute('vertical-spread') === 'on'
 
         const flow = this.getAttribute('flow')
         if (flow === 'scrolled') {
@@ -768,19 +847,34 @@ export class Paginator extends HTMLElement {
             this.#header.replaceChildren()
             this.#footer.replaceChildren()
 
-            return { flow, margin, gap, columnWidth }
+            this.#spreadOn = false
+            this.#lastLayout = { flow, margin, gap, columnWidth }
+            return this.#lastLayout
         }
+
+        // A horizontal section inside a vertical book (title page, colophon)
+        // reads as two facing half-width columns, never one window-wide one.
+        if (!vertical && bookSpread)
+            maxInlineSize = Math.min(maxInlineSize,
+                Math.floor((width - spreadGap) / 2))
 
         const divisor = Math.min(maxColumnCount, Math.ceil(size / maxInlineSize))
         const columnWidth = (size / divisor) - gap
         this.setAttribute('dir', rtl ? 'rtl' : 'ltr')
 
+        // Two side-by-side pages for vertical writing in a landscape window.
+        // Vertical-rl column boxes stack top to bottom: the left page is a
+        // second View on the shared scroll, never a second CSS column.
+        const spread = vertical && bookSpread
+        this.#spreadOn = spread
+        const pageWidth = spread ? Math.floor((width - spreadGap) / 2) : width
+
         const marginalDivisor = vertical
-            ? Math.min(2, Math.ceil(width / maxInlineSize))
+            ? (spread ? 2 : Math.min(2, Math.ceil(width / maxInlineSize)))
             : divisor
         const marginalStyle = {
             gridTemplateColumns: `repeat(${marginalDivisor}, 1fr)`,
-            gap: `${gap}px`,
+            gap: `${spread ? spreadGap : gap}px`,
             direction: this.bookDir === 'rtl' ? 'rtl' : 'ltr',
         }
         Object.assign(this.#header.style, marginalStyle)
@@ -792,15 +886,184 @@ export class Paginator extends HTMLElement {
         this.#header.replaceChildren(...heads)
         this.#footer.replaceChildren(...feet)
 
-        return { height, width, margin, gap, columnWidth }
+        this.#lastLayout = { height, width: pageWidth, margin, gap, columnWidth, spread }
+        return this.#lastLayout
     }
     render(force) {
         if (!this.#view) return
-        this.#view.render(this.#beforeRender({
+        const layout = this.#beforeRender({
             vertical: this.#vertical,
             rtl: this.#rtl,
-        }), force === true)
+        })
+        this.#view.render(layout, force === true)
+        this.#syncSpreadView(layout, force === true)
         this.#scrollToAnchor(this.#anchor)
+    }
+    // Create, update, or drop the left-page Views to match `#spreadOn`.
+    #syncSpreadView(layout, force) {
+        if (!this.#spreadOn || this.scrolled || !this.#currentSrc) {
+            this.#dropSpreadView()
+            this.#dropCrossView()
+            return
+        }
+        if (this.#spreadView) this.#spreadView.render(layout, force)
+        else this.#loadSpreadView()
+        this.#syncCrossView(layout, force)
+    }
+    #dropSpreadView() {
+        if (!this.#spreadView) return
+        this.#spreadView.destroy()
+        this.#spreadView.element.remove()
+        this.#spreadView = null
+    }
+    #syncCrossView(layout, force) {
+        // nextIndex is null on the first linear section (it stands alone)
+        // and when nothing linear follows.
+        const nextIndex = this.#adjacentIndex(-1) == null
+            ? null : this.#adjacentIndex(1)
+        if (nextIndex == null) {
+            this.#dropCrossView()
+            return
+        }
+        if (this.#crossView && this.#crossIndex === nextIndex) {
+            this.#crossView.render(layout, force)
+            this.#positionCrossView()
+            return
+        }
+        this.#dropCrossView()
+        this.#loadCrossView(nextIndex)
+    }
+    #dropCrossView() {
+        if (this.#crossView) {
+            this.#crossView.destroy()
+            this.#crossView.element.remove()
+            this.#crossView = null
+        }
+        if (this.#crossSrc) {
+            URL.revokeObjectURL(this.#crossSrc)
+            this.#crossSrc = null
+        }
+        this.#crossIndex = -1
+    }
+    // #crossView's strip starts on the shared scroll where the primary's
+    // content ends: its first page is one page after the primary's last.
+    #positionCrossView() {
+        if (!this.#crossView || !this.#view) return
+        const pages = this.#view.contentPages
+        if (pages > 0) this.#crossView.element.style.top = `${pages * this.size}px`
+    }
+    async #loadCrossView(index) {
+        if (this.#crossLoading) return
+        this.#crossLoading = true
+        try {
+            const forIndex = this.#index
+            let src
+            try {
+                src = await Promise.resolve(this.sections[index].load())
+            } catch (e) {
+                console.warn(e)
+                return
+            }
+            if (!this.#spreadOn || this.#index !== forIndex || this.#crossView) {
+                URL.revokeObjectURL(src)
+                return
+            }
+            const view = new View({
+                container: this,
+                onExpand: () => {},
+                secondary: true,
+                bookRtl: this.bookDir === 'rtl',
+            })
+            this.#container.append(view.element)
+            const afterLoad = doc => {
+                if (doc.head) {
+                    const $styleBefore = doc.createElement('style')
+                    doc.head.prepend($styleBefore)
+                    const $style = doc.createElement('style')
+                    doc.head.append($style)
+                    this.#styleMap.set(doc, [$styleBefore, $style])
+                }
+                this.#writeStyles(doc)
+                this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
+            }
+            try {
+                await view.load(src, afterLoad, () => this.#lastLayout)
+            } catch (e) {
+                console.warn(e)
+                view.element.remove()
+                URL.revokeObjectURL(src)
+                return
+            }
+            // A fill on another axis (a horizontal title page after a
+            // vertical section) is dropped.
+            if (!this.#spreadOn || this.#index !== forIndex || this.#crossView
+                || view.vertical !== this.#vertical) {
+                view.destroy()
+                view.element.remove()
+                URL.revokeObjectURL(src)
+                return
+            }
+            this.dispatchEvent(new CustomEvent('create-overlayer', {
+                detail: {
+                    doc: view.document, index,
+                    attach: overlayer => view.overlayer = overlayer,
+                },
+            }))
+            this.#crossView = view
+            this.#crossIndex = index
+            this.#crossSrc = src
+            this.#positionCrossView()
+        } finally {
+            this.#crossLoading = false
+        }
+    }
+    async #loadSpreadView() {
+        if (this.#spreadLoading) return
+        this.#spreadLoading = true
+        try {
+            const src = this.#currentSrc
+            const index = this.#index
+            const view = new View({
+                container: this,
+                onExpand: () => {},
+                secondary: true,
+                bookRtl: this.bookDir === 'rtl',
+            })
+            this.#container.append(view.element)
+            const afterLoad = doc => {
+                if (doc.head) {
+                    const $styleBefore = doc.createElement('style')
+                    doc.head.prepend($styleBefore)
+                    const $style = doc.createElement('style')
+                    doc.head.append($style)
+                    this.#styleMap.set(doc, [$styleBefore, $style])
+                }
+                this.#writeStyles(doc)
+                this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
+            }
+            try {
+                await view.load(src, afterLoad, () => this.#lastLayout)
+            } catch (e) {
+                console.warn(e)
+                view.element.remove()
+                return
+            }
+            // The section or the layout may have moved on while loading.
+            if (src !== this.#currentSrc || !this.#spreadOn || this.#spreadView) {
+                view.destroy()
+                view.element.remove()
+                return
+            }
+            this.dispatchEvent(new CustomEvent('create-overlayer', {
+                detail: {
+                    doc: view.document, index,
+                    attach: overlayer => view.overlayer = overlayer,
+                },
+            }))
+            this.#spreadView = view
+        } finally {
+            this.#spreadLoading = false
+        }
     }
     get scrolled() {
         return this.getAttribute('flow') === 'scrolled'
@@ -961,6 +1224,11 @@ export class Paginator extends HTMLElement {
     }
     async #scrollToAnchor(anchor, reason = 'anchor') {
         this.#anchor = anchor
+        // anchor.page: an explicit page-number target
+        if (anchor && typeof anchor === 'object' && typeof anchor.page === 'number') {
+            await this.#scrollToPage(anchor.page, reason)
+            return
+        }
         const rects = uncollapse(anchor)?.getClientRects?.()
         // if anchor is an element or a range
         if (rects) {
@@ -986,8 +1254,10 @@ export class Paginator extends HTMLElement {
         if (this.scrolled) return getVisibleRange(this.#view.document,
             this.start + this.#margin, this.end - this.#margin, this.#getRectMapper())
         const size = this.#rtl ? -this.size : this.size
+        // A spread shows two pages: the primary's page and the next one.
+        const extra = this.#spreadOn ? this.size : 0
         return getVisibleRange(this.#view.document,
-            this.start - size, this.end - size, this.#getRectMapper())
+            this.start - size, this.end - size + extra, this.#getRectMapper())
     }
     #afterScroll(reason) {
         const range = this.#getVisibleRange()
@@ -1004,7 +1274,7 @@ export class Paginator extends HTMLElement {
             const { page, pages } = this
             this.#header.style.visibility = page > 1 ? 'visible' : 'hidden'
             detail.fraction = (page - 1) / (pages - 2)
-            detail.size = 1 / (pages - 2)
+            detail.size = (this.#spreadOn ? 2 : 1) / (pages - 2)
         }
         this.dispatchEvent(new CustomEvent('relocate', { detail }))
     }
@@ -1029,6 +1299,7 @@ export class Paginator extends HTMLElement {
                 onLoad?.({ doc, index })
             }
             const beforeRender = this.#beforeRender.bind(this)
+            this.#currentSrc = src
             await view.load(src, afterLoad, beforeRender)
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
@@ -1037,6 +1308,7 @@ export class Paginator extends HTMLElement {
                 },
             }))
             this.#view = view
+            this.#syncSpreadView(this.#lastLayout, false)
         }
         await this.scrollToAnchor((typeof anchor === 'function'
             ? anchor(this.#view.document) : anchor) ?? 0, select)
@@ -1076,7 +1348,7 @@ export class Paginator extends HTMLElement {
             return true
         }
         if (this.atStart) return
-        const page = this.page - 1
+        const page = this.page - (this.#spreadOn ? 2 : 1)
         return this.#scrollToPage(page, 'page', true).then(() => page <= 0)
     }
     #scrollNext(distance) {
@@ -1087,7 +1359,7 @@ export class Paginator extends HTMLElement {
             return true
         }
         if (this.atEnd) return
-        const page = this.page + 1
+        const page = this.page + (this.#spreadOn ? 2 : 1)
         const pages = this.pages
         return this.#scrollToPage(page, 'page', true).then(() => page >= pages - 1)
     }
@@ -1095,21 +1367,36 @@ export class Paginator extends HTMLElement {
         return this.#adjacentIndex(-1) == null && this.page <= 1
     }
     get atEnd() {
-        return this.#adjacentIndex(1) == null && this.page >= this.pages - 2
+        return this.#adjacentIndex(1) == null
+            && this.page >= this.pages - (this.#spreadOn ? 3 : 2)
     }
-    #adjacentIndex(dir) {
-        for (let index = this.#index + dir; this.#canGoToIndex(index); index += dir)
+    #adjacentIndex(dir, from = this.#index) {
+        for (let index = from + dir; this.#canGoToIndex(index); index += dir)
             if (this.sections[index]?.linear !== 'no') return index
     }
     async #turnPage(dir, distance) {
         if (this.#locked) return
         this.#locked = true
         const prev = dir === -1
+        // fromCross: the spread's left half held sections[crossIndex] page
+        // 1 — the turn resumes that section at page 2, or passes a
+        // single-page section entirely.
+        const fromCross = !prev && this.#spreadOn && !this.scrolled
+            && this.#crossView && this.page >= this.pages - 2
+        const crossIndex = this.#crossIndex
+        const crossPages = this.#crossView?.contentPages ?? 0
         const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
-        if (shouldGo) await this.#goTo({
-            index: this.#adjacentIndex(dir),
-            anchor: prev ? () => 1 : () => 0,
-        })
+        if (shouldGo) {
+            let index = this.#adjacentIndex(dir)
+            let anchor = prev ? () => 1 : () => 0
+            if (fromCross && index === crossIndex) {
+                if (crossPages <= 1) {
+                    const beyond = this.#adjacentIndex(1, crossIndex)
+                    if (beyond != null) index = beyond
+                } else anchor = () => ({ page: 2 })
+            }
+            await this.#goTo({ index, anchor })
+        }
         if (shouldGo || !this.hasAttribute('animated')) await wait(100)
         this.#locked = false
     }
@@ -1134,23 +1421,41 @@ export class Paginator extends HTMLElement {
         return this.goTo({ index })
     }
     getContents() {
-        if (this.#view) return [{
+        if (!this.#view) return []
+        const contents = [{
             index: this.#index,
             overlayer: this.#view.overlayer,
             doc: this.#view.document,
         }]
-        return []
+        if (this.#spreadView) contents.push({
+            index: this.#index,
+            overlayer: this.#spreadView.overlayer,
+            doc: this.#spreadView.document,
+        })
+        if (this.#crossView) contents.push({
+            index: this.#crossIndex,
+            overlayer: this.#crossView.overlayer,
+            doc: this.#crossView.document,
+        })
+        return contents
     }
-    setStyles(styles) {
-        this.#styles = styles
-        const $$styles = this.#styleMap.get(this.#view?.document)
+    #writeStyles(doc) {
+        const $$styles = this.#styleMap.get(doc)
         if (!$$styles) return
         const [$beforeStyle, $style] = $$styles
+        const styles = this.#styles
         if (Array.isArray(styles)) {
             const [beforeStyle, style] = styles
             $beforeStyle.textContent = beforeStyle
             $style.textContent = style
-        } else $style.textContent = styles
+        } else $style.textContent = styles ?? ''
+    }
+    setStyles(styles) {
+        this.#styles = styles
+        if (!this.#styleMap.get(this.#view?.document)) return
+        this.#writeStyles(this.#view.document)
+        if (this.#spreadView) this.#writeStyles(this.#spreadView.document)
+        if (this.#crossView) this.#writeStyles(this.#crossView.document)
 
         // NOTE: needs `requestAnimationFrame` in Chromium
         requestAnimationFrame(() =>
@@ -1158,12 +1463,15 @@ export class Paginator extends HTMLElement {
 
         // needed because the resize observer doesn't work in Firefox
         this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
+        this.#spreadView?.document?.fonts?.ready?.then(() => this.#spreadView?.expand())
     }
     focusView() {
         this.#view.document.defaultView.focus()
     }
     destroy() {
         this.#observer.unobserve(this)
+        this.#dropSpreadView()
+        this.#dropCrossView()
         this.#view.destroy()
         this.#view = null
         this.sections[this.#index]?.unload?.()

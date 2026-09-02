@@ -8,7 +8,7 @@ const XLINK = "http://www.w3.org/1999/xlink";
 // `url(...)` in a stylesheet, capturing the target with its optional quotes.
 const CSS_URL = /url\(\s*([^)]*?)\s*\)/gi;
 
-// Injected into every section: fit images/SVG to the page so illustrations and
+// Injected into every section: fit images/SVG to the page.
 const READER_CSS = `
 img, image, svg, video {
   max-width: 100% !important;
@@ -27,7 +27,7 @@ img[data-kfx-src], image[data-kfx-src] { opacity: 0.15; }
 img[data-kfx-inline] { vertical-align: text-bottom; }
 `;
 
-// A transparent SVG data URI with the manifest's intrinsic size, so the layout
+// A transparent SVG data URI with the manifest's intrinsic size; the layout
 function placeholderUrl(dims) {
   const w = dims?.width || 600;
   const h = dims?.height || 800;
@@ -70,7 +70,7 @@ export function makeKfxBook(dto, loader) {
 
   const sectionBlobs = new Map(); // index → live section blob URL (for unload)
   // Superseded stylesheet blobs. A document that has not yet swapped to the
-  // republished sheet is still reading one of these, so they are only freed
+  // republished sheet is reading one of these; they are only freed
   // when the book closes.
   const staleSheetUrls = [];
 
@@ -129,13 +129,13 @@ export function makeKfxBook(dto, loader) {
       if (url) {
         el.setAttribute(attr, url);
       } else if (loader?.known.has(v)) {
-        // Bytes still in flight: reserve the box, mark for patching.
+        // Bytes in flight: reserve the box, mark for patching.
         el.setAttribute("data-kfx-src", v);
         el.setAttribute(attr, placeholderUrl(loader.known.get(v)));
       }
     };
     doc.querySelectorAll("link[href]").forEach((el) => {
-      // Remember which sheet this link is, so `restyle` can re-point it once
+      // Remember which sheet this link is; `restyle` can re-point it once
       // the images its rules paint have streamed in.
       const v = el.getAttribute("href");
       if (v && sheets.has(v)) el.setAttribute("data-kfx-sheet", v);
@@ -158,16 +158,19 @@ export function makeKfxBook(dto, loader) {
         el.setAttribute("href", ph);
       }
     });
-    // Reader stylesheet, appended last so it overrides the book's own styles.
+    // Reader stylesheet, appended last: it overrides the book's own styles.
     const style = doc.createElement("style");
     style.textContent = READER_CSS;
     doc.head.appendChild(style);
-    // A full-page-image section (cover, full-bleed art) has no text. Force
+    // A full-page-image section (cover, full-bleed art) has no text.
     const text = (doc.body?.textContent || "").replace(/\s+/g, "");
     if (!text && doc.body?.querySelector("img, image, svg")) {
+      // wm: the book's own axis (`dto.writing_mode`), uniform through the
+      // section.
+      const wm = dto.writing_mode?.startsWith("vertical") ? dto.writing_mode : "horizontal-tb";
       const fb = doc.createElement("style");
       fb.textContent =
-        "html, body, body * { writing-mode: horizontal-tb !important; direction: ltr !important; }" +
+        `html, body, body * { writing-mode: ${wm} !important; direction: ltr !important; }` +
         "body { margin: 0 !important; text-align: center !important; }" +
         "body * { margin-top: 0 !important; margin-bottom: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; }" +
         "img, image, svg { display: block !important; margin: 0 auto !important; }";
@@ -179,12 +182,12 @@ export function makeKfxBook(dto, loader) {
   const sections = dto.sections.map((s, index) => ({
     id: s.href,
     linear: "yes",
-    // Byte weight so the paginator's progress fraction is meaningful — from
+    // Byte weight: the paginator's progress fraction is meaningful — from
     // the manifest, valid whether or not the HTML shipped inline.
     size: s.size || s.html?.length || 1,
-    // The paginator awaits load(), so a withheld section (html == null)
+    // The paginator awaits load(); a withheld section (html == null)
     // simply fetches before its first render. Arrived HTML is written back
-    // to the DTO by the section loader, so later loads are synchronous.
+    // to the DTO by the section loader; later loads are synchronous.
     load: async () => {
       const html = s.html != null ? s.html : await loader?.requireSection?.(index);
       const url = URL.createObjectURL(
@@ -212,7 +215,7 @@ export function makeKfxBook(dto, loader) {
     // index ↔ href, for resolving TOC targets and annotation sections.
     hrefs: dto.sections.map((s) => s.href),
 
-    // Rebuild any stylesheet still waiting on images and re-point the given
+    // Rebuild any stylesheet waiting on images and re-point the given
     // live documents at it — the `patchPendingImages` of CSS backgrounds.
     restyle,
 

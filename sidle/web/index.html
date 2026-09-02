@@ -1068,6 +1068,15 @@
             <option value="1">Single</option>
           </select>
         </div>
+        <!-- Gutter between the two facing pages of a vertical book's spread;
+             shown only for vertical books. -->
+        <div class="rs-row" id="rs-spread-gap-row" hidden>
+          <label for="rs-spread-gap">Page gap</label>
+          <div class="rs-slider">
+            <input type="range" id="rs-spread-gap" min="0" max="128" step="8" />
+            <span id="rs-spread-gap-val" class="rs-val"></span>
+          </div>
+        </div>
         <div class="rs-row">
           <label for="rs-align">Alignment</label>
           <select id="rs-align">
