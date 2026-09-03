@@ -3,9 +3,10 @@ use std::io;
 
 use selectors::parser::{Combinator, Component, Selector};
 
-use crate::formats::epub::edit::{EpubPackage, attr_value};
-use crate::formats::epub::manifest::{add_manifest_item, remove_manifest_item};
-use crate::formats::epub::markup::{Tok, VOID, class_list, set_attr, tokens};
+use crate::formats::epub::edit::{
+    EpubPackage, Tok, VOID, add_manifest_item, attr_value, class_list, remove_manifest_item,
+    set_attr, tokens,
+};
 use crate::formats::epub::parse_opf;
 use crate::formats::epub::structure::{
     basename, dir_of, relativize, resolve_href, spine_documents,

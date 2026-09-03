@@ -1,7 +1,6 @@
 //! HTML to IR compiler pipeline.
 
 mod arena;
-pub mod css_imports;
 pub mod element_ref;
 pub mod optimize;
 pub mod panels;
@@ -19,32 +18,29 @@ pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
 }
 
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
-pub use css_imports::{css_import_targets, inline_css_imports};
 pub(crate) use element_ref::any_element_matches;
 pub use element_ref::{BokoSelectors, ElementRef};
 pub use optimize::optimize;
 pub use panels::parse_panels;
 pub use transform::user_agent_stylesheet;
 
-// Re-export style types for convenience
 pub use crate::style::{Declaration, Origin, Specificity, Stylesheet};
 
 use html5ever::driver::ParseOpts;
 use html5ever::tendril::TendrilSink;
 
 use crate::model::Chapter;
+use crate::util::percent_decode;
 use tree_sink::ArenaSink;
 
-/// Check if content looks like XHTML/XML based on the first ~500 bytes.
-///
-/// Checks for XML declaration (`<?xml`) or XHTML namespace (`xmlns=`).
+/// True if the first 500 bytes of `html` carry `<?xml` or `xmlns=`.
 fn looks_like_xhtml(html: &str) -> bool {
     let end = html.floor_char_boundary(500);
     let prefix = &html[..end];
     prefix.contains("<?xml") || prefix.contains("xmlns=")
 }
 
-/// Parse HTML/XHTML into an ArenaDom.
+/// Parse HTML or XHTML into an `ArenaDom`.
 pub(crate) fn parse_dom(html: &str) -> ArenaDom {
     if looks_like_xhtml(html) {
         let sink = ArenaSink::new();
@@ -54,8 +50,7 @@ pub(crate) fn parse_dom(html: &str) -> ArenaDom {
                 .one(html.as_bytes());
         let dom = result.into_dom();
 
-        // Verify xml5ever produced a usable tree (has a body with children).
-        // Fall through to html5ever if not.
+        // `dom` without a populated `body` falls through to html5ever.
         if let Some(body) = dom.find_by_tag("body")
             && dom.children(body).next().is_some()
         {
@@ -63,7 +58,6 @@ pub(crate) fn parse_dom(html: &str) -> ArenaDom {
         }
     }
 
-    // Fallback: html5ever (permissive HTML5 parser)
     let sink = ArenaSink::new();
     let result = html5ever::parse_document(sink, ParseOpts::default())
         .from_utf8()
@@ -78,17 +72,14 @@ pub fn compile_html(html: &str, author_stylesheets: &[(Stylesheet, Origin)]) -> 
 
 /// Compile a parsed DOM to IR.
 pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
-    // Build complete stylesheet list with UA defaults
     let ua = transform::user_agent_stylesheet();
     let mut all_stylesheets: Vec<(Stylesheet, Origin)> = vec![(ua, Origin::UserAgent)];
     for (sheet, origin) in author_stylesheets {
         all_stylesheets.push((sheet.clone(), *origin));
     }
 
-    // Transform to IR
     let mut chapter = transform::transform(dom, &all_stylesheets);
 
-    // Optimize: merge adjacent text nodes with identical styles
     optimize::optimize(&mut chapter);
 
     chapter
@@ -96,10 +87,8 @@ pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Ori
 
 /// Compile HTML bytes to IR.
 pub fn compile_html_bytes(html: &[u8], author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
-    // Extract encoding from XML declaration if present
     let hint_encoding = crate::util::extract_xml_encoding(html);
 
-    // Decode with proper encoding support
     let html_str = crate::util::decode_text(html, hint_encoding);
 
     compile_html(&html_str, author_stylesheets)
@@ -115,7 +104,6 @@ pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<
     let mut linked = Vec::new();
     let mut inline = Vec::new();
 
-    // Find all link[rel=stylesheet] and style elements
     let mut stack = vec![dom.document()];
     while let Some(id) = stack.pop() {
         if let Some(node) = dom.get(id)
@@ -136,7 +124,6 @@ pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<
                     }
                 }
                 "style" => {
-                    // Collect text content
                     let mut text = String::new();
                     for child in dom.children(id) {
                         if let Some(t) = dom.text_content(child) {
@@ -151,7 +138,7 @@ pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<
             }
         }
 
-        // Add children to stack (reverse for left-to-right order)
+        // Reverse push keeps document order on pop.
         let children: Vec<_> = dom.children(id).collect();
         for child in children.into_iter().rev() {
             stack.push(child);
@@ -161,23 +148,21 @@ pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<
     (linked, inline)
 }
 
-/// Resolve a relative path against a base path logically (no filesystem access).
+/// Resolve `rel` against `base` by path components alone; no filesystem access.
 pub fn resolve_path(base: &str, rel: &str) -> String {
     use std::path::{Component, Path};
 
     let rel_path = Path::new(rel);
 
-    // If absolute (starts with /), treat as archive root
+    // A leading `/` names the archive root.
     if rel_path.has_root() {
         return rel.trim_start_matches('/').to_string();
     }
 
-    // If it's a URL (http://, https://, data:, etc.), return as-is
     if rel.contains("://") || rel.starts_with("data:") {
         return rel.to_string();
     }
 
-    // Pop the filename from base to get the directory
     let base_path = Path::new(base);
     let mut stack: Vec<&str> = base_path
         .parent()
@@ -192,24 +177,109 @@ pub fn resolve_path(base: &str, rel: &str) -> String {
         })
         .collect();
 
-    // Process relative path components
     for component in rel_path.components() {
         match component {
             Component::ParentDir => {
-                stack.pop(); // Handle ".."
+                stack.pop();
             }
             Component::Normal(c) => {
                 if let Some(s) = c.to_str() {
                     stack.push(s);
                 }
             }
-            Component::CurDir => {} // Handle "." (no-op)
+            Component::CurDir => {}
             _ => {}
         }
     }
 
-    // Join with forward slashes for ZIP compatibility
     stack.join("/")
+}
+
+pub fn inline_css_imports<F>(src: &str, base: &str, mut load: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut out = String::with_capacity(src.len());
+    let bytes = src.as_bytes();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' && src[i..].to_ascii_lowercase().starts_with("@import") {
+            let mut j = i + "@import".len();
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let parsed = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                quoted_url(src, j)
+            } else if j + 4 <= bytes.len() && src[j..j + 4].eq_ignore_ascii_case("url(") {
+                url_function(src, j)
+            } else {
+                None
+            };
+            if let Some((url, mut k)) = parsed {
+                while k < bytes.len() && bytes[k] != b';' && bytes[k] != b'}' {
+                    k += 1;
+                }
+                if k < bytes.len() && bytes[k] == b';' {
+                    k += 1;
+                }
+                out.push_str(&src[copied..i]);
+                let child = resolve_path(base, &percent_decode(url));
+                if let Some(child_css) = load(&child) {
+                    out.push_str(&child_css);
+                    out.push('\n');
+                }
+                copied = k;
+                i = k;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&src[copied..]);
+    out
+}
+
+pub fn css_import_targets(src: &str, base: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    inline_css_imports(src, base, |child| {
+        targets.push(child.to_string());
+        None
+    });
+    targets
+}
+
+fn quoted_url(src: &str, q_pos: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    let quote = bytes[q_pos];
+    let start = q_pos + 1;
+    let end_rel = bytes[start..].iter().position(|&b| b == quote)?;
+    Some((&src[start..start + end_rel], start + end_rel + 1))
+}
+
+fn url_function(src: &str, u_pos: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    let mut p = u_pos + 4;
+    while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+        p += 1;
+    }
+    let (url, end) = if p < bytes.len() && (bytes[p] == b'"' || bytes[p] == b'\'') {
+        quoted_url(src, p)?
+    } else {
+        let url_start = p;
+        while p < bytes.len() && bytes[p] != b')' && !bytes[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        (&src[url_start..p], p)
+    };
+    let mut k = end;
+    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    if k >= bytes.len() || bytes[k] != b')' {
+        return None;
+    }
+    Some((url, k + 1))
 }
 
 #[cfg(test)]
@@ -218,14 +288,40 @@ mod tests {
     use crate::model::Role;
 
     #[test]
+    fn normalizes_parent_dir_in_url() {
+        let mut requested: Vec<String> = Vec::new();
+        let out = inline_css_imports(
+            r#"@import url("../Styles/style0007.css"); body {}"#,
+            "OEBPS/Styles/style0011.css",
+            |p| {
+                requested.push(p.to_string());
+                Some(".vrtl { writing-mode: vertical-rl }".into())
+            },
+        );
+        assert_eq!(requested, vec!["OEBPS/Styles/style0007.css"]);
+        assert!(out.contains(".vrtl"));
+        assert!(out.contains("body {}"));
+    }
+
+    #[test]
+    fn handles_bare_url_function_and_lists_targets() {
+        let targets = css_import_targets(
+            "@import url(flow0007.css);\n@import 'flow0008.css';",
+            "OEBPS/Styles/flow0011.css",
+        );
+        assert_eq!(
+            targets,
+            vec!["OEBPS/Styles/flow0007.css", "OEBPS/Styles/flow0008.css"]
+        );
+    }
+
+    #[test]
     fn test_compile_simple_html() {
         let html = "<html><body><p>Test paragraph</p></body></html>";
         let chapter = compile_html(html, &[]);
 
-        // Should have at least root + p (Text) + text content
         assert!(chapter.node_count() >= 3);
 
-        // Verify there's at least one Text node
         let mut found_text = false;
         for id in chapter.iter_dfs() {
             if chapter.node(id).unwrap().role == Role::Text {
@@ -243,7 +339,6 @@ mod tests {
         let author = Stylesheet::parse(css);
         let chapter = compile_html(html, &[(author, Origin::Author)]);
 
-        // Find a styled Paragraph node and check its style
         for id in chapter.iter_dfs() {
             let node = chapter.node(id).unwrap();
             if node.role == Role::Paragraph {
@@ -329,9 +424,6 @@ mod tests {
 
     #[test]
     fn test_optimizer_merges_sibling_text_nodes() {
-        // The optimizer merges adjacent sibling Text nodes with the same style;
-        // the tree shape survives.
-
         let html = r#"
             <html><body>
                 <p>Hello, <b>World</b>!</p>
@@ -339,7 +431,6 @@ mod tests {
         "#;
         let chapter = compile_html(html, &[]);
 
-        // Collect all text content
         let mut text_content = String::new();
         for id in chapter.iter_dfs() {
             let node = chapter.node(id).unwrap();
@@ -348,7 +439,6 @@ mod tests {
             }
         }
 
-        // All text should be preserved
         assert!(
             text_content.contains("Hello"),
             "Missing 'Hello' in: {}",
@@ -363,7 +453,6 @@ mod tests {
 
     #[test]
     fn test_optimizer_preserves_tree_structure() {
-        // The optimizer should not corrupt the tree structure
         let html = r#"
             <html><body>
                 <p>First paragraph</p>
@@ -372,7 +461,6 @@ mod tests {
         "#;
         let chapter = compile_html(html, &[]);
 
-        // Collect all text content via DFS traversal
         let mut text_content = String::new();
         for id in chapter.iter_dfs() {
             let node = chapter.node(id).unwrap();
@@ -381,7 +469,6 @@ mod tests {
             }
         }
 
-        // Both paragraphs should be present
         assert!(
             text_content.contains("First paragraph"),
             "Missing 'First paragraph' in: {}",
@@ -408,7 +495,6 @@ mod tests {
 
     #[test]
     fn test_br_survives_optimizer() {
-        // Verify Break nodes survive the full compile_html pipeline (including optimizer)
         let chapter = compile_html(
             r#"<html xmlns="http://www.w3.org/1999/xhtml">
             <body>
@@ -423,7 +509,6 @@ mod tests {
             &[],
         );
 
-        // Should have a Break node
         let mut found_break = false;
         for id in chapter.iter_dfs() {
             if chapter.node(id).unwrap().role == Role::Break {
@@ -436,9 +521,7 @@ mod tests {
 
     #[test]
     fn test_xhtml_self_closing_script_preserves_content() {
-        // EPUB XHTML files often have self-closing <script/> tags.
-        // In HTML5 parsing, <script/> swallows everything after it.
-        // xml5ever handles this correctly.
+        // html5ever reads a self-closing `<script/>` as an open script element.
         let html = r#"<html xmlns="http://www.w3.org/1999/xhtml">
             <head>
                 <script src="book.js"/>
@@ -478,7 +561,6 @@ mod tests {
 
     #[test]
     fn test_plain_html_still_works() {
-        // Plain HTML without xmlns parses through html5ever.
         let html = "<html><body><p>Plain HTML</p></body></html>";
         let chapter = compile_html(html, &[]);
 
@@ -497,7 +579,6 @@ mod tests {
 
     #[test]
     fn test_xhtml_extract_stylesheets() {
-        // Stylesheet extraction should also work with XHTML
         let html = r#"<html xmlns="http://www.w3.org/1999/xhtml">
             <head>
                 <link rel="stylesheet" href="style.css"/>

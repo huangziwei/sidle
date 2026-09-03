@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use sidle_core::library::db::BookRow;
 use sidle_core::library::editor::{self, EpubSession, Operation};
-use sidle_core::library::styles;
 
 use crate::ctx::Ctx;
 use crate::select::Select;
@@ -296,7 +295,7 @@ fn restore_styles(
     no_reconvert: bool,
 ) -> Result<()> {
     let Some(from) = from else {
-        let list = styles::candidates(&ctx.conn(), book)?;
+        let list = editor::candidates(&ctx.conn(), book)?;
         return ctx.report(&list, || {
             if list.is_empty() {
                 println!("no sibling book keeps the publisher's stylesheets");
@@ -315,7 +314,7 @@ fn restore_styles(
         let conn = ctx.conn();
         let reference = sidle_core::library::db::get_book(&conn, from)?
             .with_context(|| format!("no book with id {from}"))?;
-        styles::restore(&conn, book, &reference, !dry_run, force, out.as_deref())?
+        editor::restore(&conn, book, &reference, !dry_run, force, out.as_deref())?
     };
     ctx.report(&report, || {
         println!(

@@ -82,7 +82,7 @@ pub struct EditorToc {
     pub headings: usize,
     pub section_heads: usize,
     /// On a `"FLATTENED"` verdict: the volumes the TOC lists at one depth, and
-    /// how many entries belong under them. Both 0 otherwise.
+    /// how many entries belong under them; both 0 on any other verdict.
     pub flattened_volumes: usize,
     pub flattened_entries: usize,
 }
@@ -511,7 +511,7 @@ pub struct EditorTocDetail {
     pub nav_count: usize,
     pub nav_chapters: usize,
     /// On a `"FLATTENED"` verdict: the volumes listed at one depth, and how many
-    /// entries the rebuild nests under them. Both 0 otherwise.
+    /// entries the rebuild nests under them; both 0 on any other verdict.
     pub flattened_volumes: usize,
     pub flattened_entries: usize,
     /// The TOC the book declares, as a tree of labels; the targets belong to
@@ -1773,7 +1773,7 @@ mod tests {
 
 #[derive(Serialize)]
 pub struct EditorStylesRestored {
-    pub report: sidle_core::library::styles::RestoreReport,
+    pub report: sidle_core::library::editor::RestoreReport,
     pub members: Vec<text_editor::MemberInfo>,
     pub toc: Option<EditorToc>,
     pub findings: Vec<text_editor::FindingInfo>,
@@ -1783,12 +1783,12 @@ pub struct EditorStylesRestored {
 pub async fn editor_style_candidates(
     state: State<'_, AppState>,
     book_id: i64,
-) -> Result<Vec<sidle_core::library::styles::Candidate>, String> {
+) -> Result<Vec<sidle_core::library::editor::Candidate>, String> {
     let row = editor_row(&state, book_id).await?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let conn = db.blocking_lock();
-        sidle_core::library::styles::candidates(&conn, &row).map_err(|e| format!("{e:#}"))
+        sidle_core::library::editor::candidates(&conn, &row).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1807,7 +1807,7 @@ pub async fn editor_restore_styles(
     let out = tokio::task::spawn_blocking(move || -> Result<EditorStylesRestored, String> {
         let report = {
             let conn = db.blocking_lock();
-            sidle_core::library::styles::restore(&conn, &row, &reference, true, force, None)
+            sidle_core::library::editor::restore(&conn, &row, &reference, true, force, None)
                 .map_err(|e| format!("{e:#}"))?
         };
         let session = text_editor::EpubSession::open(&row).map_err(|e| format!("{e:#}"))?;

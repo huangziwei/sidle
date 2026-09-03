@@ -5,7 +5,6 @@
   // `no-window-prefix` rules assume the Deno runtime and are false positives
   // here (`window.addEventListener`, `window.removeEventListener`), so exclude
   // both.
-  "imports": { "@std/assert": "jsr:@std/assert@1" },
   "lint": {
     // sidle/web/foliate-kfx/ is the vendored foliate paginator (third-party);
     // not held to our lint gate.
