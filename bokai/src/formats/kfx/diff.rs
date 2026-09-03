@@ -21,8 +21,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use serde::Serialize;
-
 use crate::formats::kfx::container::{GeneratorTrailer, parse_container_header, trailer_bytes};
 use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::loader::{self, BookData};
@@ -36,7 +34,8 @@ use crate::formats::kfx::symbols::KfxSymbol;
 const ZWSP: char = '\u{200B}';
 
 /// A measurement on both sides: `(before, after)`.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Pair<T> {
     pub a: T,
     pub b: T,
@@ -53,7 +52,8 @@ impl<T: PartialEq> Pair<T> {
 }
 
 /// What one container is, before anything is compared.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Side {
     pub label: String,
     pub bytes: usize,
@@ -64,7 +64,8 @@ pub struct Side {
 }
 
 /// One fragment type's presence on both sides.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct TypeRow {
     pub type_id: u32,
     /// The type's symbol name (`content`, `storyline`, …), or `$<id>`.
@@ -83,7 +84,8 @@ impl TypeRow {
 }
 
 /// Fragment-level identity: what survived, and byte for byte or not.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Fragments {
     /// `type/name` present in `a`, absent from `b`.
     pub dropped: Vec<String>,
@@ -96,7 +98,8 @@ pub struct Fragments {
 }
 
 /// The reading-order prose on both sides.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Text {
     pub chars: Pair<usize>,
     /// Injected zero-width spaces.
@@ -109,7 +112,8 @@ pub struct Text {
 }
 
 /// Where two texts first differ, with enough either side to read.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Divergence {
     pub at: usize,
     pub a: String,
@@ -117,7 +121,8 @@ pub struct Divergence {
 }
 
 /// How many of the source's element ids survive, and still name the same text.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Eids {
     /// Text-bearing elements on each side.
     pub count: Pair<usize>,
@@ -129,7 +134,8 @@ pub struct Eids {
 
 /// The position fragments a device reads for Location numbers, selection and
 /// dictionary lookup.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Positions {
     /// `location_map` ($550) boundaries.
     pub locations: Pair<usize>,
@@ -154,7 +160,8 @@ pub struct Positions {
 /// `ruby_content` fragment count collapses. What matters is whether every
 /// reading the source states is still stated, and whether the runs still point
 /// at one.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Ruby {
     /// Distinct annotation readings the container states.
     pub readings: Pair<usize>,
@@ -165,7 +172,8 @@ pub struct Ruby {
 }
 
 /// The media files a container carries — images and fonts.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct RawMedia {
     pub count: Pair<usize>,
     pub bytes: Pair<usize>,
@@ -179,7 +187,8 @@ pub struct RawMedia {
 }
 
 /// One media encoding's share on both sides.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct FormatRow {
     pub name: String,
     pub count: Pair<usize>,
@@ -187,7 +196,8 @@ pub struct FormatRow {
 }
 
 /// Everything the differ measured.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Diff {
     pub a: Side,
     pub b: Side,

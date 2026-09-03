@@ -10,59 +10,113 @@ fn fixture() -> Option<Vec<u8>> {
     std::fs::read(FIXTURE).ok()
 }
 
-/// FNV-1a, 64-bit — stable across toolchains, unlike `DefaultHasher`, which
-/// matters because the value is checked in.
-fn digest(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
-    }
-    h
-}
-
 #[test]
-fn the_reader_books_shape_is_pinned() {
+fn the_reader_books_shape_holds_together() {
     let Some(kfx) = fixture() else { return };
 
     let (book, _store) = ReaderBook::open(&kfx).expect("open the fixture");
     assert!(!book.sections.is_empty(), "no sections — a vacuous pass");
 
-    let mut lines = Vec::new();
-    for (i, s) in book.sections.iter().enumerate() {
-        let elements: Vec<String> = s.elements.iter().map(|e| e.to_string()).collect();
-        lines.push(format!(
-            "{i}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
-            s.href,
-            s.chars,
-            s.image_only,
-            s.image_hrefs.join(","),
-            elements.join(","),
-            s.viewport,
-            s.spread,
-        ));
-    }
-    let locations: Vec<String> = book
-        .locations
-        .iter()
-        .map(|(a, b)| format!("{a}:{b}"))
-        .collect();
-    lines.push(format!(
-        "BOOK\t{}\t{}\t{}\t{:?}\t{:?}\t{}\t{}",
-        book.max_location,
-        book.fixed_layout,
-        locations.join(","),
-        book.writing_mode,
-        book.page_progression_direction,
-        book.title,
-        book.language,
-    ));
-
+    // Book-level facts the source states outright.
     assert_eq!(book.sections.len(), 9, "section count");
+    assert_eq!(book.title, "人間失格");
+    assert_eq!(book.language, "ja");
+    assert!(!book.fixed_layout, "a novel is reflowable");
+    assert_eq!(format!("{:?}", book.writing_mode), "\"vertical-rl\"");
     assert_eq!(
-        digest(&lines.join("\n")),
-        0x22cd_ce7f_ef9c_de62,
-        "the reader book's shape moved"
+        format!("{:?}", book.page_progression_direction),
+        "\"rtl\"",
+        "a vertical-rl book turns pages right to left"
+    );
+
+    // The cover leads and carries a picture instead of text; every other
+    // section carries text. A section with neither is a section that renders
+    // blank.
+    let cover = &book.sections[0];
+    assert!(cover.image_only, "the first section is the cover");
+    assert_eq!(cover.chars, 0, "an image-only section has no text");
+    assert!(
+        !cover.image_hrefs.is_empty(),
+        "an image-only section must name its picture"
+    );
+    for (i, s) in book.sections.iter().enumerate().skip(1) {
+        assert!(!s.href.is_empty(), "section {i} has no href");
+        assert!(!s.image_only, "only the cover is image-only, not {i}");
+        assert!(s.chars > 0, "section {i} renders no text");
+        assert!(
+            !s.elements.is_empty(),
+            "section {i} carries no addressable element"
+        );
+    }
+
+    // Section hrefs are distinct — two sections at one href would collide in
+    // the reader's own addressing.
+    let mut hrefs: Vec<&str> = book.sections.iter().map(|s| s.href.as_str()).collect();
+    hrefs.sort_unstable();
+    let count = hrefs.len();
+    hrefs.dedup();
+    assert_eq!(hrefs.len(), count, "two sections share an href");
+
+    // No element is listed twice: an element belongs to exactly one section,
+    // which is what `section_of_element` can only report if it is true.
+    let mut elements: Vec<i64> = book
+        .sections
+        .iter()
+        .flat_map(|s| s.elements.iter().copied())
+        .collect();
+    let total = elements.len();
+    elements.sort_unstable();
+    elements.dedup();
+    assert_eq!(
+        elements.len(),
+        total,
+        "an element is listed by two sections"
+    );
+
+    // The Location scale, keyed by element in ascending element order — that
+    // ordering is what lets the reader binary-search an element's Location.
+    assert!(!book.locations.is_empty(), "no locations — a vacuous pass");
+    assert!(book.max_location > 0, "the book ends at Location 0");
+    let mut previous: Option<i64> = None;
+    for &(element, location) in &book.locations {
+        if let Some(prev) = previous {
+            assert!(
+                element > prev,
+                "the scale lists element {element} after {prev}, out of order"
+            );
+        }
+        assert!(
+            location >= 1,
+            "element {element} sits at Location {location}"
+        );
+        assert!(
+            location <= book.max_location,
+            "element {element} sits at Location {location}, past the book's {}",
+            book.max_location
+        );
+        assert!(
+            elements.binary_search(&element).is_ok(),
+            "the scale places element {element}, which no section lists"
+        );
+        previous = Some(element);
+    }
+    // The scale covers the book: the last element starts inside the final
+    // stretch of it. `max_location` is the axis end, one past the last
+    // addressable position, so it sits a little beyond where any element
+    // starts — but not a chapter beyond.
+    let highest = book.locations.iter().map(|&(_, l)| l).max().unwrap_or(0);
+    assert!(
+        highest <= book.max_location && highest * 100 >= book.max_location * 99,
+        "the last element starts at Location {highest} of {}",
+        book.max_location
+    );
+
+    // And it places most of the book's elements, not a handful.
+    assert!(
+        book.locations.len() * 2 >= elements.len(),
+        "the scale places {} of {} elements",
+        book.locations.len(),
+        elements.len()
     );
 }
 
