@@ -40,10 +40,8 @@ pub struct TextRun {
 }
 
 /// One `style_events` entry: a `[offset, offset+length)` slice of the run's
-/// `content` with its rendered `width` (pt×100). Offsets/lengths are
-/// **characters**, the unit KFX states every offset and span in. PDFKit
-/// indexes its glyph bounds by UTF-16 code unit, so the segmentation runs in
-/// that unit and is converted before it leaves [`extract_page`].
+/// `content` with its rendered `width` (pt×100). Offsets are characters, the
+/// unit KFX states every span in; PDFKit's UTF-16 units convert before this.
 #[derive(Debug, Clone)]
 pub struct StyleSeg {
     pub offset: usize,
@@ -52,13 +50,9 @@ pub struct StyleSeg {
     pub is_word: bool,
 }
 
-/// UTF-16 index → character index in `s`: one entry per code unit, plus the
-/// end. A surrogate pair's two units share one index, so converting a slice
-/// that runs past an astral character lands on the right character.
-///
-/// PDFKit indexes its glyph bounds by UTF-16 code unit and KFX states every
-/// offset and span in characters, so the text layer is segmented in the first
-/// unit and converted through this into the second.
+/// UTF-16 index → character index in `s`: one entry per code unit, plus the end.
+/// A surrogate pair's two units share one index. PDFKit indexes glyph bounds by
+/// unit and KFX counts characters, so the text layer converts through this.
 fn utf16_to_char_index(s: &str) -> Vec<usize> {
     let mut out = Vec::with_capacity(s.len() + 1);
     let mut chars = 0usize;

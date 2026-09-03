@@ -100,10 +100,8 @@ fn the_reader_books_shape_holds_together() {
         );
         previous = Some(element);
     }
-    // The scale covers the book: the last element starts inside the final
-    // stretch of it. `max_location` is the axis end, one past the last
-    // addressable position, so it sits a little beyond where any element
-    // starts — but not a chapter beyond.
+    // The scale covers the book: the last element starts inside its final stretch.
+    // `max_location` is the axis end, so it sits a little past any element's start.
     let highest = book.locations.iter().map(|&(_, l)| l).max().unwrap_or(0);
     assert!(
         highest <= book.max_location && highest * 100 >= book.max_location * 99,

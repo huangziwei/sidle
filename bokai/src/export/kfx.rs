@@ -481,10 +481,8 @@ fn build_kfx_container(
         .cloned()
         .collect();
     let n_media = bundle_paths.len();
-    // Ask for each asset **as the source stores it**. A KFX source already
-    // holds device-ready JPEG-XR plates; `load_asset` would hand back the JPEG
-    // the importer transcoded them into, and the encode below would turn that
-    // back into JPEG-XR — two lossy generations for bytes that can be copied.
+    // Ask for each asset as the source stores it: a KFX already holds device-ready
+    // JPEG-XR plates, and `load_asset` would hand back a transcoded JPEG.
     let stored = book.load_assets_stored(&bundle_paths);
     for (i, (asset_path, loaded)) in bundle_paths.iter().zip(stored).enumerate() {
         on_progress("images", i + 1, n_media, "Encoding images");
@@ -2973,16 +2971,9 @@ fn build_section_position_id_map_fragments(secs: &[SectionPos]) -> Vec<KfxFragme
         .collect()
 }
 
-/// How much text one Location covers, in UTF-8 bytes. The Kindle convention
-/// is a fixed byte budget of the source, which is why a Location spans fewer
-/// characters of CJK than of Latin — [`location_stride`] converts it into the
-/// character stride the position axis is actually measured in.
-///
-/// Amazon's own boundaries cannot be reproduced exactly: they are placed at
-/// ingest from the publisher's source file, which a KFX does not carry, and no
-/// fragment states the count. 128 is the conventional Kindle location size,
-/// which lands in the range Amazon's own spacing occupies without being fitted
-/// to one language.
+/// How much text one Location covers, in UTF-8 bytes — the Kindle convention, so
+/// a Location spans fewer characters of CJK than of Latin. Amazon's own spacing
+/// is set at ingest and no fragment states it; 128 is the conventional size.
 const LOCATION_TEXT_BYTES: usize = 128;
 
 /// One location boundary: where it sits on the pid axis, and the
@@ -2995,14 +2986,9 @@ struct LocationBoundary {
     offset: i64,
 }
 
-/// The character stride between location boundaries for this book: the
-/// [`LOCATION_TEXT_BYTES`] budget scaled by the book's own bytes per
-/// character. Pure CJK lands near 43, Latin near 128.
-///
-/// Only text-bearing elements count. An image or a wrapper holds a position
-/// slot and no bytes, so counting it would report more characters per byte
-/// than the prose has and stretch the stride — an illustrated book would get
-/// coarser Locations than a plain one with the same text.
+/// The character stride between location boundaries: the [`LOCATION_TEXT_BYTES`]
+/// budget scaled by this book's bytes per character. Only text-bearing elements
+/// count — a picture holds a position slot and no bytes, and would stretch it.
 fn location_stride(ctx: &ExportContext) -> i64 {
     let mut chars = 0usize;
     let mut bytes = 0usize;
@@ -3019,10 +3005,8 @@ fn location_stride(ctx: &ExportContext) -> i64 {
     ((LOCATION_TEXT_BYTES * chars).div_ceil(bytes)).max(1) as i64
 }
 
-/// Place location boundaries along the pid axis `secs` defines, one every
-/// [`location_stride`] characters, and resolve each to the element containing
-/// it. Section bases follow `build_position_id_map_fragment`, so the pids here
-/// are the same pids `section_position_id_map` assigns.
+/// Place a boundary every [`location_stride`] characters along the pid axis
+/// `secs` defines, on the same pids `section_position_id_map` assigns.
 fn location_boundaries(ctx: &ExportContext, secs: &[SectionPos]) -> Vec<LocationBoundary> {
     let stride = location_stride(ctx);
     let mut out = Vec::new();
@@ -3206,10 +3190,8 @@ fn is_font_asset(path: &std::path::Path) -> bool {
 }
 
 /// Resolve landmarks from the Book's IR into `landmark_fragments`. A landmark
-/// names a section, never a point inside one: whichever chapter its target —
-/// or failing that, its href — resolves to, the fragment is that chapter's and
-/// the offset is 0. The first landmark of a type wins, and `BodyMatter` doubles
-/// as `StartReading` when the book declares no reading start.
+/// names a section, never a point in one, so the offset is always 0. First of a
+/// type wins, and `BodyMatter` doubles as `StartReading`.
 fn resolve_landmarks_from_ir(
     book: &Book,
     source_to_chapter: &HashMap<String, ChapterId>,
@@ -4939,10 +4921,8 @@ pub fn pdf_to_kfx(
         let image_id = ctx.next_fragment_id();
         ctx.record_content_slot(image_id);
 
-        // The page's rotation aux and its text overlay: the storyline's name,
-        // the `{story_name, ignore}` child EID, and one EID per run carrying the
-        // run's length in characters, the unit every KFX span is stated in. A
-        // textless page gets the pair too.
+        // The page's rotation aux and its text overlay: the storyline name, the
+        // `{story_name, ignore}` child EID, and one EID per run with its char length.
         let rotation_aux_sym = ctx.symbols.get_or_intern(&format!("{section_name}-ad"));
         let runs = page_runs(i);
         let text_story_sym = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
@@ -6999,10 +6979,8 @@ mod tests {
         expect_pair(&walk[4], 1, 0); // terminator at pid == length
     }
 
-    /// Location boundaries walk the pid axis at a fixed character stride and
-    /// resolve to the element holding each one — inside a paragraph, not only
-    /// at its start. The two location fragments come off the same walk, so
-    /// they are parallel by construction (§10.3).
+    /// Location boundaries walk the pid axis at a fixed character stride and resolve
+    /// inside a paragraph. Both fragments come off one walk, so they are parallel.
     #[test]
     fn location_boundaries_land_inside_the_text_and_both_maps_agree() {
         let mut ctx = ExportContext::new();

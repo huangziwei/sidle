@@ -1,13 +1,6 @@
-//! `KfxPackage` — a KFX container parsed into entities, editable one entity at
-//! a time.
-//!
-//! The read half of every surgical write: [`parse`](KfxPackage::parse) splits a
-//! container into its passthrough sections (container id, doc symbols, format
-//! capabilities) and its entity list, and [`into_bytes`](KfxPackage::into_bytes)
-//! puts them back together through
-//! [`serialize_container`](crate::formats::kfx::serialization::serialize_container),
-//! which recomputes every offset and the payload SHA-1. An entity nobody
-//! touches is copied byte for byte.
+//! `KfxPackage` — a KFX container parsed into entities, editable one at a time.
+//! [`parse`](KfxPackage::parse) splits off the passthrough sections and the
+//! entity list; `into_bytes` re-serializes, copying untouched entities verbatim.
 
 use crate::formats::kfx::container::{
     self, EntityLoc, SymbolTable, get_field, parse_container_header, parse_index_table, slice_at,

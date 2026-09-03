@@ -1,12 +1,6 @@
-//! Cached per-page anchor geometry for a PDF-backed KFX: the eid→page map and each
-//! page's box size, the only things ink import needs from the host KFX.
-//! session — next to which the nbk→SVG decode is ~6 ms. Running it per drawn
-//! book on every connect, under the DB lock, is what makes a sync take
-//! seconds. The geometry is a pure
-//! function of the KFX bytes — immutable per `kfx_sha256` — so we cache it as a
-//! derived-asset sidecar keyed by that
-//! sha: computed once (warmed at conversion, see the worker), read as a few-KB
-//! JSON on every sync thereafter.
+//! Cached per-page anchor geometry for a PDF-backed KFX: the eid→page map and
+//! each page's box size, the only things ink import needs from the host KFX.
+//! A pure function of the KFX bytes, so it caches as a sidecar keyed by sha.
 
 use std::path::Path;
 

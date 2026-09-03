@@ -354,10 +354,8 @@ struct BookListEntry {
     #[serde(flatten)]
     row: db::BookRow,
     device_filename: Option<String>,
-    // The Kindle picker's cover cache token (`cover_rev`) rides in on the
-    // flattened `row` — `db::BookRow::cover_rev`, the ms mtime of the served
-    // image, computed once in `row_to_book`. No separate field here (a sibling
-    // would collide with the flattened key).
+    // The cover cache token (`cover_rev`) rides in on the flattened `row`; a
+    // sibling field here would collide with the flattened key.
     kfx_rev: i64,
 }
 

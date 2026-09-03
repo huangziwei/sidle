@@ -674,10 +674,8 @@ pub struct ExportContext {
     /// `location_map` offsets and `section_position_id_map` spans are stated in.
     pub content_id_lengths: HashMap<u64, usize>,
 
-    /// The same text in UTF-8 bytes. Only the ratio is used: it converts the
-    /// format's per-location text budget, which is a byte budget, into the
-    /// character stride the position axis is measured in, so a location covers
-    /// a comparable amount of reading whatever the script.
+    /// The same text in UTF-8 bytes. Only the ratio is used, to convert the format's
+    /// byte-per-location budget into the character stride the axis is measured in.
     pub content_id_bytes: HashMap<u64, usize>,
 
     /// section_name → its resource short names, for `container_entity_map`
@@ -900,16 +898,9 @@ impl ExportContext {
         self.claim_id(None)
     }
 
-    /// The element id to emit for a node: **the source's own** when the node
-    /// carries one and nothing has taken it yet, otherwise a fresh id.
-    ///
-    /// Preserving ids is what makes a rebuilt container usable on a device
-    /// that already has the book: `.sdr` annotations and the stored reading
-    /// position resolve through `(eid, offset)`, so a renumbered element sends
-    /// every highlight somewhere else. A reused id pointing at *different*
-    /// content is worse than a fresh one, which is why a source id is taken at
-    /// most once and every fresh id sits past the source's highest
-    /// ([`Self::reserve_beyond_source_ids`]).
+    /// The element id to emit for a node: the source's own when nothing has taken it
+    /// yet, else a fresh one past the source's highest. A device resolves `.sdr`
+    /// annotations through `(eid, offset)`, so no id may ever mean two things.
     pub fn claim_id(&mut self, preferred: Option<i64>) -> u64 {
         if let Some(id) = preferred.and_then(|e| u64::try_from(e).ok())
             && self.claimed_ids.insert(id)

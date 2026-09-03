@@ -1551,11 +1551,9 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
 
     #[test]
     fn test_lang_as_first_attribute_is_found() {
-        // `<html lang=… xml:lang=…>` with lang as the FIRST attribute. The
-        // attribute walk must see it — the attrs slice starts with the
-        // separator space — or `lang` reads as absent and a duplicate is
-        // appended, an XML well-formedness error (epubcheck RSC-016) on every
-        // retail AZW3 whose html tag leads with lang.
+        // `<html lang=… xml:lang=…>` with lang as the FIRST attribute. The attribute
+        // walk must see it — the attrs slice starts with the separator space — or a
+        // duplicate `lang` is appended, which is not well-formed XML (RSC-016).
         let html = b"<html lang=\"en-US\" xml:lang=\"en-US\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head></html>";
         assert_eq!(ensure_html_lang_dual(html, "en"), html);
     }

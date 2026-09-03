@@ -718,8 +718,6 @@ fn should_drop_attr(name: &[u8]) -> bool {
         b"xml:",
         // ARIA — Kindle's KF8 parser implements no WAI-ARIA, and ARIA-DPUB roles come
         // from the same EPUB3 vocabulary family as `epub:type`, so they go with it.
-        // Ebooks files emit them on every link/section, so they are stripped
-        // with it: same firmware sensitivity class.
         b"aria-",
     ];
     for prefix in DROP_PREFIXES {

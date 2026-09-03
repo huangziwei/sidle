@@ -713,19 +713,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     // The two end-of-book constants a device states for one book, kept so the
-    // pairing outlives the archive it came from.
-    //
-    // Every event line repeats the last *word* position, but only an occasional
-    // `BookEndPosition` states the last position, which is what
-    // [`books_with_last_position`] joins on. An archive that holds a book's
-    // sessions need not hold that event — one reader stack cuts the field off
-    // the line outright — so a pairing derived per-import is lost and the book
-    // unnameable however many times it is read.
-    //
-    // [`resolve_reading_sessions`] re-keys what it can already name. A session
-    // must never be stored twice under the two constants: the identity index
-    // counts the position, so the second key inserts a row rather than
-    // replacing one, and the same sitting is counted twice.
+    // pairing outlives the archive it came from. A session must never be stored
+    // twice under them: the identity index counts the position, so it would double.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS reading_log_book_ends (
             last_word_position INTEGER PRIMARY KEY,

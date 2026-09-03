@@ -384,8 +384,6 @@ impl Schema {
 
             // Each rule's context is evaluated once per document and intersected with what
             // earlier rules claimed — which is what "the first matching rule wins" means.
-            // by scanning would make the walk quadratic in document size — minutes
-            // on a chapter-sized document, all of it here.
             let mut claimed = vec![false; doc.len()];
             for rule in &pattern.rules {
                 let mut ctx = Context::new(doc, NodeRef::element(doc.root()));

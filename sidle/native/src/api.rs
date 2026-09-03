@@ -701,14 +701,8 @@ pub fn push_annotations(
 }
 
 /// Write the sidecars the desktop sent back, returning how many landed.
-///
-/// Best-effort per file: a sidecar that fails to write is logged and skipped,
-/// never fatal — the pull half of this sync already succeeded, and the desktop
-/// will offer the same file again next time.
-///
-/// Only ever writes into an existing `.sdr`; it never creates one. A directory
-/// that isn't there means the device hasn't opened that book, and a sidecar
-/// sitting in a folder the reader never made is a file nothing will read.
+/// Best-effort per file. Only ever writes into an existing `.sdr`: a directory
+/// that isn't there means the device has never opened that book.
 fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize {
     let mut written = 0;
     for item in outgoing {
@@ -736,11 +730,8 @@ fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize 
 }
 
 /// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` that still has its book,
-/// base64 each. Returns them plus the count of orphaned `.sdr` pruned.
-/// with no matching `<stem>.kfx` is a copy the user deleted on the device.
-/// Those are removed and not synced: only a live book's reading-state belongs
-/// in the library. A live `.sdr` with neither sidecar (a pagination cache) is
-/// kept but not pushed.
+/// base64 each. Returns them plus the count of orphaned `.sdr` pruned — an
+/// `.sdr` with no `<stem>.kfx` is a copy deleted on the device.
 fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
     let mut sdrs = Vec::new();
     let mut pruned = 0usize;

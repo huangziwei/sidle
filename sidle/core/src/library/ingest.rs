@@ -731,10 +731,9 @@ mod tests {
         assert_eq!(device, native);
     }
 
-    /// The full round trip: a highlight made in Sidle, pushed to a Kindle,
-    /// and re-imported comes back with the *device's* linear scale rather than
-    /// the reader's. Identity must not notice — the anchor is the same passage,
-    /// so it is the same annotation and must not land as a second row.
+    /// The full round trip: a highlight made in Sidle, pushed to a Kindle and
+    /// re-imported, comes back on the device's linear scale. The anchor is the same
+    /// passage, so it must not land as a second row.
     #[test]
     fn identity_ignores_the_linear_scale() {
         let anchored = |loc: Option<i64>| Resolved {

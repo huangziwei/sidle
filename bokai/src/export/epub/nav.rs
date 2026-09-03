@@ -16,9 +16,6 @@ pub struct NavPoint {
 
 /// Stable-sort each level of the TOC tree by its target file's reading-order
 /// rank, which EPUB 3 requires of the `toc` nav (epubcheck NAV-011).
-/// physically reads first). Ties (same
-/// file, or a target file not in the spine) keep their original order, so a TOC
-/// already in reading order is left byte-identical.
 pub fn sort_toc_reading_order(toc: &mut [NavPoint], file_rank: &HashMap<String, usize>) {
     fn rank(np: &NavPoint, fr: &HashMap<String, usize>) -> usize {
         let file = np.href.split('#').next().unwrap_or(&np.href);

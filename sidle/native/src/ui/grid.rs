@@ -29,10 +29,8 @@ pub const CELL_H_MIN: u32 = 420;
 pub const COL_GAP: u32 = 32;
 pub const ROW_GAP: u32 = 20;
 
-/// The grid as it fits *this* panel: how many cells, how tall, and where the block
-/// sits. Computed once at startup from the framebuffer geometry.
-/// block sits. Computed once at startup from the framebuffer geometry and
-/// passed around whole, so no call site assembles it from parts.
+/// The grid as it fits *this* panel: how many cells, how tall, and where the
+/// block sits. Computed once at startup from the framebuffer geometry.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub cols: usize,

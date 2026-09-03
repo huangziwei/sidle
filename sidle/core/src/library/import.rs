@@ -870,10 +870,9 @@ fn leg<'a>(
     move |phase, cur, total, label| on_progress(&format!("{prefix}{phase}"), cur, total, label)
 }
 
-/// Open an Aozora Bunko `.zip`, sniff the markers, and return EPUB bytes. Any zip
-/// that does not look like Aozora bails, surfacing as a normal import failure.
-/// Pipeline mirrors `aozora_dispatch` in `bokai/src/main.rs` so
-/// the CLI and the GUI produce byte-identical EPUBs from the same input.
+/// Open an Aozora Bunko `.zip`, sniff the markers, and return EPUB bytes. Any
+/// zip that does not look like Aozora bails. Mirrors `aozora_dispatch`, so the
+/// CLI and the GUI produce byte-identical EPUBs.
 fn convert_aozora_zip(
     src: &Path,
     on_progress: &dyn Fn(&str, usize, usize, &str),

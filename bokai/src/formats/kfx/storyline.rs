@@ -2316,12 +2316,9 @@ enum FlatSegment {
     Image {
         node_id: NodeId,
     },
-    /// An id with no text of its own — an empty `<a id=…>`, or an id on an
-    /// inline element wrapping only an image. It becomes a **zero-length
-    /// span**, which registers the anchor at the offset it sits at and emits
-    /// no style event. A synthesized character would do the same job and shift
-    /// every offset after it, which is what the source's own position map
-    /// already states.
+    /// An id with no text of its own — an empty `<a id=…>`, or an id on an inline
+    /// element wrapping only an image. It becomes a zero-length span, registering
+    /// the anchor at its offset without inventing a character.
     Marker {
         state: InlineState,
     },
@@ -2426,10 +2423,8 @@ fn flatten_inline_content(
         // recurses into the empty children of an `<img>` inside
         // `<ruby>`/`<a>`/`<span>` and emits nothing.
         Role::Image => {
-            // A KFX image element carries no anchor. An ancestor inline element
-            // bearing an id (`<a id="map1"><img/></a>`) takes a zero-length
-            // marker span first, holding the id's position just before the
-            // image.
+            // A KFX image element carries no anchor. An ancestor inline element bearing an
+            // id takes a zero-length marker span, holding the id just before the image.
             if effective_state.element_id.is_some() {
                 segments.push(FlatSegment::Marker {
                     state: effective_state.clone(),
@@ -3425,10 +3420,8 @@ impl IonBuilder {
                 );
             }
 
-            // Re-emit the source's word segmentation, but only where it still
-            // describes this element's text: the list is a run-length walk of
-            // the element's offset space, so it is right exactly when it sums
-            // to the span, and a stale one would segment the wrong characters.
+            // Re-emit the source's word segmentation only where it still describes this
+            // element's text: it is right exactly when it sums to the span.
             let span = self.accumulated_char_count as i64;
             if !self.word_boundaries.is_empty() && self.word_boundaries.iter().sum::<i64>() == span
             {
@@ -3585,10 +3578,8 @@ mod tests {
         assert!(matches!(stream.iter().next(), Some(KfxToken::Text(t)) if t == "平成100年"));
     }
 
-    /// The source's word segmentation survives KFX → IR → KFX, and only while
-    /// it still describes the element's text: the list is a run-length walk of
-    /// the offset space, so a sum that no longer matches the span would
-    /// segment the wrong characters and must be dropped instead.
+    /// The source's word segmentation survives KFX → IR → KFX, but only while it
+    /// still sums to the element's span; a stale list segments the wrong characters.
     #[test]
     fn word_boundaries_are_carried_through_and_dropped_when_stale() {
         fn emit(boundaries: Vec<i64>) -> Option<Vec<i64>> {
@@ -5478,10 +5469,9 @@ mod tests {
 
     #[test]
     fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
-        // `<a id="map1"><img/></a>` as a TOC/nav target. A KFX image element
-        // holds no anchor: the flattener emits a zero-length marker segment
-        // carrying the id and node_id just before the image, so the anchor
-        // lands at the image's position without a character being invented.
+        // `<a id="map1"><img/></a>` as a nav target. A KFX image holds no anchor, so
+        // the flattener emits a zero-length marker segment carrying the id just before
+        // the image.
         let mut chapter = Chapter::new();
 
         let img_id = chapter.alloc_node(Node::new(Role::Image));

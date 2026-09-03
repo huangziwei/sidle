@@ -487,7 +487,9 @@ fn div_is_bare(
         && !element_layout_hints.contains_key(&id)
 }
 
-/// Unwrap `e` (an attribute-less div that is the SOLE child of `parent`, whose
+/// Unwrap `e` — an attribute-less, text-free div that is `parent`'s sole child —
+/// into `parent`: its leading text becomes the parent's, its children take its
+/// place, and its tail trails the last child (lxml `strip_tags` semantics).
 fn unwrap_into_parent(dom: &mut Dom, e: NodeId, parent: NodeId) {
     let e_text = dom.get(e).text.clone();
     let e_children = dom.get(e).children.clone();

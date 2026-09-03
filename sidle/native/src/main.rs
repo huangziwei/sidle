@@ -1676,7 +1676,9 @@ fn repaint_page(
     Ok(())
 }
 
-/// Populate `covers[start..end]` for the given page by fetching any cell whose
+/// Populate `covers[start..end]` for this page, fetching any cell still `None`
+/// and painting each into its cell with a GC16 partial refresh as it arrives.
+/// An already-loaded cell is skipped: its cover is on screen already.
 #[allow(clippy::too_many_arguments)]
 fn fetch_and_paint_page(
     fb: &mut Framebuffer,

@@ -1,16 +1,6 @@
 //! Encoder fuzz target — a round-trip oracle, not just no-panic: draw a valid
-//! input over the full envelope, encode, decode, and assert the public contract.
-//!   output is a finding — the reference toolchain cannot mint every valid
-//!   file this target can);
-//! - headers round-trip structurally (dims, bands, tiles, overlap,
-//!   frequency, window, scaled, alpha, internal color format);
-//! - pixels are exact / bounded where the per-family contract says so
-//!   (lossless+unscaled exact; BD32S `(x>>10)<<10`; scaled q1 integer
-//!   within the half-step floors).
-//!
-//! Run WITHOUT the decode fuzzer's `-Coverflow-checks=off` override: this
-//! target feeds VALID data end-to-end, where any overflow is a real
-//! wrong-output bug.
+//! input over the full envelope, encode, decode with this crate's own decoder,
+//! and assert the contract (headers structural, pixels exact or bounded).
 
 #![no_main]
 

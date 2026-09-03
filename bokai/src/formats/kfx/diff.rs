@@ -1,23 +1,6 @@
-//! Entity-level KFX ↔ KFX comparison — the fidelity gate.
-//!
-//! `validate::source::kfx` asks whether a container is *self-consistent*. This
-//! asks the different question: is it still the **same book**. A rebuild can
-//! drop a whole fragment type, renumber every element id and throw away every
-//! word-boundary list while remaining structurally conformant, so a conformance
-//! checker cannot stand in for a fidelity check.
-//!
-//! What it compares, in the order the report prints:
-//!
-//! * **entities** — per fragment type, how many and how many bytes; which
-//!   fragments were added, dropped, changed, or passed through byte for byte;
-//! * **prose** — the reading-order text, character for character, with the
-//!   first divergence quoted;
-//! * **element ids** — how many of the source's eids survive, and how many of
-//!   those still name the same text (what a device's stored annotations and
-//!   reading position key off);
-//! * **positions** — `location_map` boundaries and where they sit,
-//!   `yj.location_pid_map` pids, `word_boundary_list` coverage and
-//!   `style_events`.
+//! Entity-level KFX ↔ KFX comparison — the fidelity gate. Not "is this
+//! container self-consistent" but "is it still the same book": it compares
+//! entities, prose, element ids, positions, ruby and media.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -153,13 +136,9 @@ pub struct Positions {
     pub style_events: Pair<usize>,
 }
 
-/// Ruby (furigana) — the annotations themselves, and where they attach.
-///
-/// A per-type count misleads here: a rebuild that stores each distinct reading
-/// once instead of once per occurrence loses no furigana at all while its
-/// `ruby_content` fragment count collapses. What matters is whether every
-/// reading the source states is still stated, and whether the runs still point
-/// at one.
+/// Ruby (furigana) — the annotations themselves, and where they attach. A
+/// per-type count misleads: storing each distinct reading once collapses the
+/// fragment count while losing no furigana.
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bin", derive(serde::Serialize))]
 pub struct Ruby {
@@ -577,10 +556,8 @@ fn ruby_delta(a: &BookData, b: &BookData) -> Ruby {
     }
 }
 
-/// Walk a `ruby_content` fragment, taking each reading **separately**. The
-/// fragment holds them as `content_list: [{id, ruby_id, content}, …]` — one
-/// entry per reading — so a walk that concatenates an element's whole content
-/// reports the entire fragment as a single reading.
+/// Walk a `ruby_content` fragment, taking each reading separately: it holds them
+/// as `content_list: [{id, ruby_id, content}, …]`, one entry per reading.
 fn collect_ruby_readings(
     value: &crate::formats::kfx::ion::IonValue,
     book: &BookData,
@@ -710,10 +687,9 @@ mod tests {
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
-    /// A container against itself reports nothing.
-    /// Media is matched by content, not by name: swapping one payload must be
-    /// reported even though every entity keeps its id, and the untouched files
-    /// must still count as carried across.
+    /// A container against itself reports nothing. Media is matched by content, not
+    /// by name: a swapped payload must be reported even though every entity keeps
+    /// its id.
     #[test]
     fn a_swapped_media_payload_is_reported() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");

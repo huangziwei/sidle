@@ -366,17 +366,9 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    /// Editing a book must not make it *less* valid than it was. This asks the
-    /// validator, which is what catches a new defect anywhere in the archive.
-    /// `properties="cover-image"` injected into an EPUB 2 manifest violates
-    /// exactly this. The sibling unit test above pins the OPF text; this one asks
-    /// the validator, which is the question that actually matters and the only
-    /// way a *new* defect in any other part of the archive would be caught.
-    ///
-    /// It lives here rather than in the product: sidle runs no validator (a
-    /// finding on a user's machine reaches a stderr nobody reads, having cost a
-    /// full validation pass to produce), so the differential belongs where a
-    /// failure is read — a test.
+    /// Editing a book must not make it *less* valid than it was. The sibling unit
+    /// test pins the OPF text; this one asks the validator, which is what catches a
+    /// new defect anywhere else in the archive.
     #[test]
     fn a_cover_edit_introduces_no_validator_finding() {
         // A real 1×1 PNG: the validator decodes every declared raster resource

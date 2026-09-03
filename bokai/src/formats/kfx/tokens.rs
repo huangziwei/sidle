@@ -78,17 +78,12 @@ pub struct ElementStart {
     pub layout_hints: Vec<String>,
     /// `$790 yj.semantics.heading_level` from the element's own fields.
     pub heading_level: Option<String>,
-    /// The element id the **source** gave this node (`$155 id`), when the book
-    /// was imported from a KFX. Preserving it is what keeps a device's stored
-    /// annotations and reading position pointing at the same words after a
-    /// rebuild; `ExportContext::claim_id` hands it back out.
+    /// The element id the source gave this node (`$155 id`). Preserving it keeps a
+    /// device's annotations and reading position on the same words after a rebuild.
     pub source_element: Option<i64>,
-    /// `$696 word_boundary_list` as the source stated it: a run-length list
-    /// over the element's own offset space, summing to its span. The device
-    /// reads it for double-tap-to-select and dictionary lookup. Carried
-    /// through KFX→IR→KFX as opaque provenance — the exporter re-emits it only
-    /// when the element's span still matches, and generating one for a source
-    /// that states none needs word segmentation bokai does not have.
+    /// `$696 word_boundary_list` as the source stated it: a run-length list over the
+    /// element's offset space, summing to its span. Carried through as provenance —
+    /// bokai has no segmenter to generate one where the source states none.
     pub word_boundaries: Vec<i64>,
     /// `$148 table_column_span` / `$149 table_row_span` — how many grid
     pub column_span: Option<u32>,

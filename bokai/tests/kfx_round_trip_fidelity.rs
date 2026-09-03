@@ -1,5 +1,4 @@
 //! What a KFX → IR → KFX round trip costs, measured entity by entity.
-//!
 //! `validate source` asks whether a container is self-consistent; this asks
 //! whether it is still the same book.
 
@@ -93,11 +92,9 @@ fn a_round_trip_keeps_the_position_fragments() {
         p.locations.b
     );
 
-    // A `word_boundary_list` is a run-length walk of the element's offset
-    // space, so one that does not sum to the span would segment the wrong
-    // characters and must be dropped. This fixture's lists sum to one short of
-    // their text, so most are refused; what has to hold is that none is
-    // invented for an element the source never segmented.
+    // A `word_boundary_list` is a run-length walk of the element's offset space, so
+    // one that does not sum to the span must be dropped. This fixture's lists sum
+    // one short, so most are refused; none may be invented.
     assert!(
         p.word_boundaries.b <= p.word_boundaries.a,
         "no word_boundary_list may be invented: {} → {}",

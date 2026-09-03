@@ -49,10 +49,9 @@ pub struct SemanticMap {
     /// namespace (a KFX `eid`). This is the identifier a reading device
     /// persists in an annotation — the same key [`crate::model::PositionMap`]
     source_element: HashMap<NodeId, i64>,
-    /// The source's own word segmentation for this node, carried verbatim.
-    /// KFX states it as `$696 word_boundary_list`, a run-length list over the
-    /// element's offset space; the device reads it for double-tap selection
-    /// and dictionary lookup. Provenance, not something bokai can derive.
+    /// The source's own word segmentation for this node, carried verbatim: KFX's
+    /// `$696 word_boundary_list`, a run-length list over the element's offset space.
+    /// Provenance, not something bokai can derive.
     word_boundaries: HashMap<NodeId, Vec<i64>>,
     /// Per-node inline style declarations, the `style="…"` attribute form. Carries
     /// source styling that has no named rule.

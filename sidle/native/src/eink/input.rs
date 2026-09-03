@@ -78,9 +78,8 @@ impl Input {
             return Ok(None);
         }
         // Touch first, unlike `next`, which prioritizes bezel presses: the callers are
-        // blocking flows whose touch fd carries Cancel and the screenshot gesture.
-        // button read return early and *shadow* a pending touch event,
-        // stalling the gesture until the main loop resumes.
+        // blocking flows whose touch fd carries Cancel and the screenshot gesture, and
+        // a stale button read would shadow a pending touch.
         if fds[0].revents & libc::POLLIN != 0
             && let Some(ev) = self.touch.next_event()?
         {

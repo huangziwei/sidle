@@ -204,7 +204,9 @@ fn block_style_class(name: &str) -> Option<&'static str> {
     }
 }
 
-/// A `罫囲み`/`枠囲み` (ruled box) class. The box is emitted as ONE `<p>` whose
+/// A `罫囲み`/`枠囲み` (ruled box) class. The box must be ONE `<p>` whose lines are
+/// joined by `<br/>`: Kindle paginates between a container's block children but
+/// flows `<br/>` within a text block, so any other shape breaks the box apart.
 fn is_box_class(cls: &str) -> bool {
     cls.starts_with("keigakomi")
 }

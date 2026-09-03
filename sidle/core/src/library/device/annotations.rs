@@ -25,11 +25,9 @@ pub struct SyncProgress {
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
 pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
-    // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in one
-    // session, not a path-based `list` + `read` per `.sdr`, which is O(books²).
-    // every call (O(books²)). `.yjr.bad_file` is
-    // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a
-    // pure pagination cache) yields no matching files and is dropped.
+    // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in
+    // one session, not a `list` + `read` per `.sdr`, which is O(books²). A `.sdr`
+    // with neither sidecar yields no matching files and is dropped.
     let pulled =
         transport.read_files_in_children(&sidle, &|name| name.ends_with(".sdr"), &|file| {
             file.ends_with(".yjr") || file.ends_with(".yjf")

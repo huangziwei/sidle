@@ -80,14 +80,9 @@ fn mtime(p: &Path) -> std::io::Result<SystemTime> {
     std::fs::metadata(p)?.modified()
 }
 
-/// Generate any missing or stale thumbnails across the whole library.
-/// background task at server startup, so a book with no thumbnail gets one
-/// without a manual step. Idempotent and mtime-gated, so
-/// it's a near-instant no-op once warm. Returns the count (re)generated.
-///
-/// When the on-disk format version is behind [`THUMB_FORMAT_VERSION`] (e.g. the
-/// grayscale→color flip), every thumbnail is rebuilt once regardless of mtime,
-/// then the version marker is advanced so subsequent boots are warm again.
+/// Generate any missing or stale thumbnails across the whole library, in a
+/// background task at startup. Idempotent and mtime-gated; a format version
+/// behind [`THUMB_FORMAT_VERSION`] rebuilds every thumbnail once.
 pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
     let conn = super::db::open(&paths.db()).context("open library.db")?;
     let books = super::db::list_books(&conn).context("list books")?;

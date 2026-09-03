@@ -207,14 +207,9 @@ pub fn eid_text_map(book: &BookData) -> HashMap<i64, String> {
     out
 }
 
-/// The text one element contributes, its inline children included, in reading
-/// order: its `$145 content` (a literal or a reference), then every entry of
-/// its `$146 content_list` — literal runs and nested elements alike.
-///
-/// A `content_list` **mixes** the two: an element's own prose is interleaved
-/// with the inline elements sitting in it (a ruby base, an emphasized run). A
-/// walk that reads only `$145` references sees neither the literal runs nor
-/// their order.
+/// The text one element contributes, inline children included, in reading order:
+/// its `$145 content`, then every entry of its `$146 content_list`. That list
+/// mixes literal runs with nested elements, so both must be walked.
 pub fn element_text(value: &IonValue, source: &impl ContentSource) -> String {
     let inner = value.unwrap_annotated();
     if let Some(s) = inner.as_string() {
@@ -235,12 +230,9 @@ pub fn element_text(value: &IonValue, source: &impl ContentSource) -> String {
     out
 }
 
-/// The book's prose in reading order: every section named by a reading order,
-/// then any section none names, each walked into its storylines.
-///
-/// Every text-bearing element contributes once — the walk takes an element's
-/// whole text via [`element_text`] and does not descend into its content
-/// again, so a nested inline run is neither missed nor counted twice.
+/// The book's prose in reading order: every section a reading order names, then
+/// any it does not. Each text-bearing element contributes once, via
+/// [`element_text`], so a nested inline run is neither missed nor doubled.
 pub fn reading_text(book: &BookData) -> String {
     let mut out = String::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -310,14 +302,9 @@ fn walk_text(
     }
 }
 
-/// Every element's text, keyed by its `$155 id`, inline children included.
-///
-/// A *content* map, not a position-aligned one: a parent's entry holds the
-/// text of the inline runs sitting inside it, so a nested element's words
-/// appear twice — once under its own id, once inside its parent's. That is
-/// what a container-to-container comparison wants ("does this id still name
-/// the same words"), and not what slicing at a position offset wants —
-/// [`eid_text_map`] is the one indexed against the position scale.
+/// Every element's text, keyed by `$155 id`, inline children included. A
+/// *content* map, not position-aligned: a nested element's words appear twice,
+/// under its own id and in its parent's. [`eid_text_map`] is the aligned one.
 pub fn eid_content_map(book: &BookData) -> HashMap<i64, String> {
     fn walk(value: &IonValue, book: &BookData, out: &mut HashMap<i64, String>) {
         match value.unwrap_annotated() {
