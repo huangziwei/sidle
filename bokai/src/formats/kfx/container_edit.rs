@@ -1,69 +1,13 @@
 //! In-place KFX container editing — the shared surgical-write harness.
 
-use crate::formats::kfx::container::{
-    self, EntityLoc, get_field, parse_container_header, parse_index_table, slice_at,
-};
 use crate::formats::kfx::error::KfxError;
-use crate::formats::kfx::ion::{IonParser, IonValue};
-use crate::formats::kfx::serialization::{
-    SerializedEntity, create_entity_data, create_raw_media_data, serialize_container,
-};
-use crate::formats::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::package::KfxPackage;
 
-/// One entity as presented to an [`edit_container`] callback: its index-table
-/// entry plus the verbatim ENTY-wrapped bytes currently backing it.
-pub struct EntityView<'a> {
-    loc: EntityLoc,
-    raw: &'a [u8],
-}
-
-impl<'a> EntityView<'a> {
-    /// The entity id — the fragment-name symbol id. Resolve to a name via the
-    /// `SymbolTable` from the same `loader::load` (`book.symbols.resolve(id)`).
-    #[inline]
-    pub fn id(&self) -> u32 {
-        self.loc.id
-    }
-
-    /// The entity type id (e.g. `KfxSymbol::ExternalResource as u32`).
-    #[inline]
-    pub fn type_id(&self) -> u32 {
-        self.loc.type_id
-    }
-
-    /// True if this entity has the given KFX type.
-    #[inline]
-    pub fn is_type(&self, t: KfxSymbol) -> bool {
-        self.loc.type_id == t as u32
-    }
-
-    /// The index-table entry (id / type / offset / length), copied out.
-    #[inline]
-    pub fn loc(&self) -> EntityLoc {
-        self.loc
-    }
-
-    /// The full ENTY-wrapped source bytes, verbatim.
-    #[inline]
-    pub fn raw(&self) -> &'a [u8] {
-        self.raw
-    }
-
-    /// The entity payload after the ENTY header — raw media bytes for
-    /// `bcRawMedia`/`bcRawFont`, or the Ion body for everything else.
-    #[inline]
-    pub fn media(&self) -> &'a [u8] {
-        container::skip_enty_header(self.raw)
-    }
-
-    /// The payload as an Ion value. Errors on a raw-media entity (an image or
-    /// font); [`Self::media`] returns those bytes.
-    pub fn parse_ion(&self) -> Result<IonValue, KfxError> {
-        IonParser::new(self.media())
-            .parse()
-            .map_err(|e| KfxError::InvalidKfx(format!("parse entity {}: {e}", self.loc.id)))
-    }
-}
+/// One entity as presented to an [`edit_container`] callback. This is
+/// [`package::Entity`](crate::formats::kfx::package::Entity) — its id, type and
+/// verbatim ENTY-wrapped bytes, with `parse_ion` for the Ion body.
+pub use crate::formats::kfx::package::Entity as EntityView;
 
 /// The transform [`edit_container`] applies to one entity.
 pub enum EntityEdit {
@@ -82,114 +26,30 @@ pub enum EntityEdit {
 
 /// Parse `kfx_bytes`, call `edit` once per entity in index-table order, and
 /// re-serialize. [`EntityEdit::Keep`] copies an entity verbatim, and
-/// [`serialize_container`] recomputes every offset and the payload SHA-1.
+/// [`KfxPackage::into_bytes`] recomputes every offset and the payload SHA-1.
 pub fn edit_container(
     kfx_bytes: &[u8],
     mut edit: impl FnMut(&EntityView) -> Result<EntityEdit, KfxError>,
 ) -> Result<Vec<u8>, KfxError> {
-    let layout = parse_layout(kfx_bytes)?;
-
-    // Passthrough sections. Out-of-range offsets collapse to empty; a valid KFX
-    // keeps these in range.
-    let slice = |sec: Option<(usize, usize)>| -> &[u8] {
-        sec.and_then(|(o, l)| slice_at(kfx_bytes, o, l))
-            .unwrap_or(&[])
-    };
-    let symtab_ion = slice(layout.symtab);
-    let format_caps_ion = slice(layout.format_caps);
-
-    let mut out_entities: Vec<SerializedEntity> = Vec::with_capacity(layout.entities.len());
-    for e in &layout.entities {
-        let raw = slice_at(kfx_bytes, e.offset, e.length)
-            .ok_or_else(|| KfxError::InvalidKfx("entity payload out of bounds".into()))?;
-        let view = EntityView { loc: *e, raw };
-        let data = match edit(&view)? {
-            EntityEdit::Keep => view.raw.to_vec(),
-            EntityEdit::Ion(v) => create_entity_data(&v),
-            EntityEdit::RawMedia(b) => create_raw_media_data(&b),
-            EntityEdit::Bytes(b) => b,
-        };
-        out_entities.push(SerializedEntity {
-            id: e.id,
-            entity_type: e.type_id,
-            data,
-        });
+    let mut pkg = KfxPackage::parse(kfx_bytes)?;
+    for i in 0..pkg.entities().len() {
+        // The view borrows the package, so resolve the edit before applying it.
+        let action = edit(&pkg.entities()[i])?;
+        match action {
+            EntityEdit::Keep => {}
+            EntityEdit::Ion(v) => pkg.set_ion(i, &v)?,
+            EntityEdit::RawMedia(b) => pkg.set_media(i, &b)?,
+            EntityEdit::Bytes(b) => pkg.set_raw(i, b)?,
+        }
     }
-
-    Ok(serialize_container(
-        &layout.container_id,
-        &out_entities,
-        symtab_ion,
-        format_caps_ion,
-    ))
-}
-
-/// The passthrough sections and entity table of a parsed container: an edit's
-/// read half.
-struct ContainerLayout {
-    container_id: String,
-    /// `(offset, length)` of the doc-symbol Ion section, if declared.
-    symtab: Option<(usize, usize)>,
-    /// `(offset, length)` of the format-capabilities Ion section, if declared.
-    format_caps: Option<(usize, usize)>,
-    entities: Vec<EntityLoc>,
-}
-
-/// Walk the container header + container-info to recover the passthrough section
-/// ranges, the container id, and the entity index table.
-fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, KfxError> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
-    let ci_bytes = slice_at(
-        kfx_bytes,
-        header.container_info_offset,
-        header.container_info_length,
-    )
-    .ok_or_else(|| KfxError::InvalidKfx("container info out of bounds".into()))?;
-    let ci_fields = {
-        let mut p = IonParser::new(ci_bytes);
-        p.parse()
-            .ok()
-            .and_then(|v| v.as_struct().map(<[_]>::to_vec))
-            .ok_or_else(|| KfxError::InvalidKfx("container info is not a struct".into()))?
-    };
-    let geti = |sym: KfxSymbol| {
-        get_field(&ci_fields, sym as u64)
-            .and_then(IonValue::as_int)
-            .map(|n| n as usize)
-    };
-    let section = |off: KfxSymbol, len: KfxSymbol| geti(off).zip(geti(len));
-
-    let idx_off = geti(KfxSymbol::Bcindextaboffset)
-        .ok_or_else(|| KfxError::InvalidKfx("no index table offset".into()))?;
-    let idx_len = geti(KfxSymbol::Bcindextablength)
-        .ok_or_else(|| KfxError::InvalidKfx("no index table length".into()))?;
-    let container_id = get_field(&ci_fields, KfxSymbol::Bccontid as u64)
-        .and_then(IonValue::as_string)
-        .unwrap_or("")
-        .to_string();
-    let symtab = section(KfxSymbol::Bcdocsymboloffset, KfxSymbol::Bcdocsymbollength);
-    let format_caps = section(
-        KfxSymbol::Bcfcapabilitiesoffset,
-        KfxSymbol::Bcfcapabilitieslength,
-    );
-
-    let index_bytes = slice_at(kfx_bytes, idx_off, idx_len)
-        .ok_or_else(|| KfxError::InvalidKfx("index table out of bounds".into()))?;
-    let entities = parse_index_table(index_bytes, header.header_len);
-
-    Ok(ContainerLayout {
-        container_id,
-        symtab,
-        format_caps,
-        entities,
-    })
+    Ok(pkg.into_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::formats::kfx::loader;
+    use crate::formats::kfx::symbols::KfxSymbol;
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 

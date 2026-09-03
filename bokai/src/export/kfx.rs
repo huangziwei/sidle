@@ -213,6 +213,11 @@ fn build_kfx_container(
         }
     }
 
+    // 1c-2. The survey has now seen every chapter, so lift the id generator
+    // past every element id the source stated. From here a freshly allocated
+    // id and one Pass 2 preserves can never be the same number.
+    ctx.reserve_beyond_source_ids();
+
     // 1d. Resolve landmarks: IR landmarks, then Cover/StartReading heuristics
     resolve_landmarks_from_ir(book, &source_to_chapter, &resolved, &mut ctx);
 
@@ -458,7 +463,7 @@ fn build_kfx_container(
         .values()
         .flat_map(|names| names.iter().cloned())
         .collect();
-    let bundle_paths: Vec<_> = asset_paths
+    let bundle_paths: Vec<std::path::PathBuf> = asset_paths
         .iter()
         .filter(|p| {
             if !is_media_asset(p) {
@@ -473,11 +478,17 @@ fn build_kfx_container(
                 .get_name(&p.to_string_lossy())
                 .is_some_and(|n| referenced_names.contains(n))
         })
+        .cloned()
         .collect();
     let n_media = bundle_paths.len();
-    for (i, asset_path) in bundle_paths.into_iter().enumerate() {
+    // Ask for each asset **as the source stores it**. A KFX source already
+    // holds device-ready JPEG-XR plates; `load_asset` would hand back the JPEG
+    // the importer transcoded them into, and the encode below would turn that
+    // back into JPEG-XR — two lossy generations for bytes that can be copied.
+    let stored = book.load_assets_stored(&bundle_paths);
+    for (i, (asset_path, loaded)) in bundle_paths.iter().zip(stored).enumerate() {
         on_progress("images", i + 1, n_media, "Encoding images");
-        if let Ok(data) = book.load_asset(asset_path) {
+        if let Ok((data, stored_format)) = loaded {
             let href = asset_path.to_string_lossy().to_string();
             // A typeface is not a picture: it skips the image transcode and the
             // external_resource description, and lands in bcRawFont ($418).
@@ -489,7 +500,13 @@ fn build_kfx_container(
             let is_cover =
                 cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
             let bundled = if is_cover {
+                // The cover stays JPEG whatever the source holds: the
+                // sleep-screen thumbnailer does not read JPEG-XR.
                 cover_jpeg_for_kfx(&data).unwrap_or(data)
+            } else if stored_format.as_deref() == Some("jxr")
+                && crate::util::detect_media_format(&href, &data) == crate::util::MediaFormat::Jxr
+            {
+                data
             } else {
                 encode_asset_for_kfx(&data, color_mode)
             };
@@ -518,7 +535,9 @@ fn build_kfx_container(
     fragments.push(build_position_map_fragment(&ctx, &anchor_ids_by_fragment));
     fragments.push(build_position_id_map_fragment(&sec_pos));
     fragments.extend(build_section_position_id_map_fragments(&sec_pos));
-    fragments.push(build_location_map_fragment(&ctx));
+    let locations = location_boundaries(&ctx, &sec_pos);
+    fragments.push(build_location_map_fragment(&locations));
+    fragments.push(build_location_pid_map_fragment(&locations));
 
     // With every resource and section length in hand, the real content_features
     // replaces the placeholder pushed at 2a, in place: the entity order is part
@@ -576,8 +595,19 @@ fn survey_chapter(
     source_path: &str,
     ctx: &mut ExportContext,
 ) {
+    // Every element id the source stated, so Pass 2 can hand them back out and
+    // allocate fresh ones past the highest of them.
+    ctx.note_source_ids(chapter.source_elements());
+
+    // The section's own page-template element, which the KFX importer stamps
+    // on the chapter's root container. Preserving it keeps the section
+    // navigable at the coordinate the source's navigation already names.
+    let template_element = chapter
+        .children(chapter.root())
+        .find_map(|n| chapter.semantics.source_element(n));
+
     // Begin surveying this chapter (with source path for TOC resolution)
-    let _fragment_id = ctx.begin_chapter_survey(chapter_id, source_path);
+    let _fragment_id = ctx.begin_chapter_survey(chapter_id, source_path, template_element);
 
     // Walk the IR tree
     survey_node(chapter, chapter.root(), ctx);
@@ -601,23 +631,13 @@ fn survey_node(chapter: &Chapter, node_id: NodeId, ctx: &mut ExportContext) {
         return;
     }
 
-    // Record position for this node (for link targets)
-    ctx.record_position(node_id);
-
-    // Pass 2 records heading positions in tokens_to_ion(), where content
-    // fragment IDs exist, and creates anchor entities from ResolvedLinks'
-    // GlobalNodeId targets.
+    // Pass 2 records heading and anchor positions in `tokens_to_ion`, where the
+    // content fragment ids exist and offsets are counted in characters — the
+    // unit KFX states them in. Pass 1 only needs the resources.
 
     // Register resources (src attributes) - creates short names like "e0"
     if let Some(src) = chapter.semantics.src(node_id) {
         ctx.resource_registry.register(src, &mut ctx.symbols);
-    }
-
-    // Track text content and advance offset
-    if !node.text.is_empty() {
-        let text = chapter.text(node.text);
-        ctx.advance_text_offset(text.len());
-        // Plain text content needs no interning
     }
 
     // Recurse into children
@@ -2159,9 +2179,9 @@ fn build_illustration_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> I
         // document order: §10.2 gives every content element one, and the
         // chapter-start anchor lands on the wrapper.
         ctx.record_content_id(wrapper_id);
-        ctx.record_content_length(wrapper_id, 1);
+        ctx.record_content_slot(wrapper_id);
         ctx.record_content_id(image_id);
-        ctx.record_content_length(image_id, 1);
+        ctx.record_content_slot(image_id);
         ctx.resolve_pending_chapter_anchor(wrapper_id);
         anchor_page_targets(chapter, wrapper_id, ctx);
 
@@ -2228,7 +2248,7 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
                 // Record content ID for position_map and location_map
                 ctx.record_content_id(container_id);
                 // Record length of 1 for image (per kfx_output algorithm)
-                ctx.record_content_length(container_id, 1);
+                ctx.record_content_slot(container_id);
 
                 // The pending chapter-start anchor, skipped by the cover path
                 ctx.resolve_pending_chapter_anchor(container_id);
@@ -2953,44 +2973,109 @@ fn build_section_position_id_map_fragments(secs: &[SectionPos]) -> Vec<KfxFragme
         .collect()
 }
 
-/// Build location_map fragment ($550): location number → position, one entry per
-/// content block at offset 0, Amazon's format for this entity.
-fn build_location_map_fragment(ctx: &ExportContext) -> KfxFragment {
-    let mut location_entries = Vec::new();
+/// How much text one Location covers, in UTF-8 bytes. The Kindle convention
+/// is a fixed byte budget of the source, which is why a Location spans fewer
+/// characters of CJK than of Latin — [`location_stride`] converts it into the
+/// character stride the position axis is actually measured in.
+///
+/// Amazon's own boundaries cannot be reproduced exactly: they are placed at
+/// ingest from the publisher's source file, which a KFX does not carry, and no
+/// fragment states the count. Over the 30-book Japanese corpus their spacing
+/// works out at 95–136 bytes of *rendered* text per Location (mean 112), so
+/// 128 — the conventional Kindle location size — puts ours inside the observed
+/// range without being fitted to one language.
+const LOCATION_TEXT_BYTES: usize = 128;
 
-    // Helper closure to process a single content ID - always offset 0
-    let mut process_content_id = |content_id: u64| {
-        let entry = IonValue::Struct(vec![
-            (KfxSymbol::Id as u64, IonValue::Int(content_id as i64)),
-            (KfxSymbol::Offset as u64, IonValue::Int(0)),
-        ]);
-        location_entries.push(entry);
-    };
+/// One location boundary: where it sits on the pid axis, and the
+/// `{id, offset}` coordinate `location_map` states it in.
+struct LocationBoundary {
+    pid: i64,
+    eid: u64,
+    /// Characters into that element — non-zero for a boundary inside a
+    /// paragraph, which is where most of them belong.
+    offset: i64,
+}
 
-    // Process cover content ID first if present
-    if let Some(cover_id) = ctx.cover_content_id {
-        process_content_id(cover_id);
+/// The character stride between location boundaries for this book: the
+/// [`LOCATION_TEXT_BYTES`] budget scaled by the book's own bytes per
+/// character. Pure CJK lands near 43, Latin near 128.
+///
+/// Only text-bearing elements count. An image or a wrapper holds a position
+/// slot and no bytes, so counting it would report more characters per byte
+/// than the prose has and stretch the stride — an illustrated book would get
+/// coarser Locations than a plain one with the same text.
+fn location_stride(ctx: &ExportContext) -> i64 {
+    let mut chars = 0usize;
+    let mut bytes = 0usize;
+    for (id, &b) in &ctx.content_id_bytes {
+        if b == 0 {
+            continue;
+        }
+        bytes += b;
+        chars += ctx.content_id_lengths.get(id).copied().unwrap_or(0);
     }
+    if chars == 0 || bytes == 0 {
+        return LOCATION_TEXT_BYTES as i64;
+    }
+    ((LOCATION_TEXT_BYTES * chars).div_ceil(bytes)).max(1) as i64
+}
 
-    // Process chapter content in order (sorted by fragment ID)
-    let mut chapter_entries: Vec<_> = ctx.chapter_fragments.iter().collect();
-    chapter_entries.sort_by_key(|(_, fid)| **fid);
-
-    for (chapter_id, _) in &chapter_entries {
-        if let Some(content_ids) = ctx.content_ids_by_chapter.get(chapter_id) {
-            for &content_id in content_ids {
-                process_content_id(content_id);
+/// Place location boundaries along the pid axis `secs` defines, one every
+/// [`location_stride`] characters, and resolve each to the element containing
+/// it. Section bases follow `build_position_id_map_fragment`, so the pids here
+/// are the same pids `section_position_id_map` assigns.
+fn location_boundaries(ctx: &ExportContext, secs: &[SectionPos]) -> Vec<LocationBoundary> {
+    let stride = location_stride(ctx);
+    let mut out = Vec::new();
+    let mut base = 0i64;
+    // The next boundary's pid, walked forward across sections so a boundary
+    // never restarts at a section edge — the axis is one continuous scale.
+    let mut next = 0i64;
+    for s in secs {
+        for &(eid, span) in &s.eids {
+            let span = span.max(1);
+            while next < base + span {
+                out.push(LocationBoundary {
+                    pid: next,
+                    eid,
+                    offset: next - base,
+                });
+                next += stride;
             }
+            base += span;
         }
     }
+    out
+}
 
-    // Wrap in locations list structure
-    let ion = IonValue::List(vec![IonValue::Struct(vec![(
+/// location_map ($550): the boundary list as `{$155 id, $143 offset}`
+/// coordinates, in axis order (§10.3).
+fn build_location_map_fragment(bounds: &[LocationBoundary]) -> KfxFragment {
+    let entries = bounds
+        .iter()
+        .map(|b| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(b.eid as i64)),
+                (KfxSymbol::Offset as u64, IonValue::Int(b.offset)),
+            ])
+        })
+        .collect();
+    KfxFragment::nameless(KfxSymbol::LocationMap, locations_list(entries))
+}
+
+/// yj.location_pid_map ($621): the same boundaries as bare pids, parallel to
+/// `location_map` entry for entry and non-decreasing (§10.3).
+fn build_location_pid_map_fragment(bounds: &[LocationBoundary]) -> KfxFragment {
+    let entries = bounds.iter().map(|b| IonValue::Int(b.pid)).collect();
+    KfxFragment::nameless(KfxSymbol::YjLocationPidMap, locations_list(entries))
+}
+
+/// The shape both location fragments share: `[{ $167 locations: [ … ] }]`.
+fn locations_list(entries: Vec<IonValue>) -> IonValue {
+    IonValue::List(vec![IonValue::Struct(vec![(
         KfxSymbol::Locations as u64,
-        IonValue::List(location_entries),
-    )])]);
-
-    KfxFragment::nameless(KfxSymbol::LocationMap, ion)
+        IonValue::List(entries),
+    )])])
 }
 
 /// Build resource_path fragment ($395), listing additional resource paths. A
@@ -3143,11 +3228,13 @@ fn resolve_landmarks_from_ir(
         if let Some(cid) = chapter_id {
             let target = match landmark.target {
                 Some(AnchorTarget::Internal(gid)) => {
-                    // Look up position for the internal target
-                    ctx.position_map
-                        .get(&(gid.chapter, gid.node))
-                        .map(|pos| LandmarkTarget {
-                            fragment_id: pos.fragment_id,
+                    // A landmark targets a section, not a point in it: the
+                    // fragment is the target chapter's, and the offset is 0.
+                    ctx.chapter_fragments
+                        .get(&gid.chapter)
+                        .copied()
+                        .map(|frag_id| LandmarkTarget {
+                            fragment_id: frag_id,
                             offset: 0,
                             label: landmark.label.clone(),
                         })
@@ -3572,7 +3659,7 @@ fn image_fxl_to_kfx(
                 let im = ctx.next_fragment_id();
                 (o, inr, im)
             };
-            ctx.record_content_length(image_id, 1);
+            ctx.record_content_slot(image_id);
             page_image_id[pi] = image_id;
             // `panels` ride only a source page that stayed whole.
             let source = origin[pi].0;
@@ -4853,11 +4940,12 @@ pub fn pdf_to_kfx(
         let pt_landscape_id = ctx.next_fragment_id();
         let container_id_num = ctx.next_fragment_id();
         let image_id = ctx.next_fragment_id();
-        ctx.record_content_length(image_id, 1);
+        ctx.record_content_slot(image_id);
 
         // The page's rotation aux and its text overlay: the storyline's name,
         // the `{story_name, ignore}` child EID, and one EID per run carrying the
-        // run's UTF-16 length. A textless page gets the pair too.
+        // run's length in characters, the unit every KFX span is stated in. A
+        // textless page gets the pair too.
         let rotation_aux_sym = ctx.symbols.get_or_intern(&format!("{section_name}-ad"));
         let runs = page_runs(i);
         let text_story_sym = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
@@ -4866,7 +4954,7 @@ pub fn pdf_to_kfx(
             .iter()
             .map(|run| PdfRunRec {
                 id: ctx.next_fragment_id(),
-                len: run.content.encode_utf16().count(),
+                len: run.content.chars().count(),
             })
             .collect();
         let empty_text_id = if run_recs.is_empty() {
@@ -6912,6 +7000,105 @@ mod tests {
         assert_eq!(walk[2].as_int(), Some(1)); // 101 == 100+1 → bare advance
         assert_eq!(walk[3].as_int(), Some(1)); // 102 == 101+1 → bare advance
         expect_pair(&walk[4], 1, 0); // terminator at pid == length
+    }
+
+    /// Location boundaries walk the pid axis at a fixed character stride and
+    /// resolve to the element holding each one — inside a paragraph, not only
+    /// at its start. The two location fragments come off the same walk, so
+    /// they are parallel by construction (§10.3).
+    #[test]
+    fn location_boundaries_land_inside_the_text_and_both_maps_agree() {
+        let mut ctx = ExportContext::new();
+        // Two elements of 100 characters each, 100 UTF-8 bytes: one byte per
+        // character, so the stride is the byte budget itself.
+        ctx.record_content_length(10, 100, 100);
+        ctx.record_content_length(11, 100, 100);
+        assert_eq!(location_stride(&ctx), LOCATION_TEXT_BYTES as i64);
+
+        let secs = vec![SectionPos {
+            name: "c0".into(),
+            sym: 900,
+            eids: vec![(10, 100), (11, 100)],
+        }];
+        let bounds = location_boundaries(&ctx, &secs);
+
+        // Axis is 200 long, stride 128 ⇒ boundaries at pid 0 and 128.
+        assert_eq!(bounds.len(), 2);
+        assert_eq!((bounds[0].pid, bounds[0].eid, bounds[0].offset), (0, 10, 0));
+        assert_eq!(
+            (bounds[1].pid, bounds[1].eid, bounds[1].offset),
+            (128, 11, 28),
+            "a boundary past the first element resolves into the second, at its own offset"
+        );
+
+        // Both fragments state the same boundaries, entry for entry.
+        let locations = |f: &KfxFragment| -> Vec<IonValue> {
+            let FragmentData::Ion(IonValue::List(outer)) = &f.data else {
+                panic!("locations fragment should be a list");
+            };
+            let IonValue::Struct(fields) = &outer[0] else {
+                panic!("locations entry should be a struct");
+            };
+            let IonValue::List(items) = fields
+                .iter()
+                .find(|(k, _)| *k == KfxSymbol::Locations as u64)
+                .map(|(_, v)| v)
+                .expect("locations")
+            else {
+                panic!("locations should be a list");
+            };
+            items.clone()
+        };
+        let map = build_location_map_fragment(&bounds);
+        let pids = build_location_pid_map_fragment(&bounds);
+        assert_eq!(map.ftype, KfxSymbol::LocationMap as u64);
+        assert_eq!(pids.ftype, KfxSymbol::YjLocationPidMap as u64);
+        let (m, p) = (locations(&map), locations(&pids));
+        assert_eq!(m.len(), p.len(), "the two maps must be parallel");
+        assert_eq!(
+            p.iter().map(|v| v.as_int()).collect::<Vec<_>>(),
+            vec![Some(0), Some(128)]
+        );
+        let IonValue::Struct(second) = &m[1] else {
+            panic!("location entry should be a struct")
+        };
+        let field = |key: KfxSymbol| {
+            second
+                .iter()
+                .find(|(k, _)| *k == key as u64)
+                .and_then(|(_, v)| v.as_int())
+        };
+        assert_eq!(field(KfxSymbol::Id), Some(11));
+        assert_eq!(field(KfxSymbol::Offset), Some(28));
+    }
+
+    /// The stride follows the script: a byte budget spent on 3-byte characters
+    /// buys a third as many of them, and picture pages do not stretch it.
+    #[test]
+    fn location_stride_scales_with_bytes_per_character() {
+        let mut ctx = ExportContext::new();
+        ctx.record_content_length(1, 300, 900); // all 3-byte characters
+        let cjk = (LOCATION_TEXT_BYTES * 300).div_ceil(900) as i64;
+        assert_eq!(location_stride(&ctx), cjk);
+        assert_eq!(cjk, 43);
+
+        // A hundred picture pages hold a hundred position slots and no text;
+        // the stride must not move.
+        for id in 100..200 {
+            ctx.record_content_slot(id);
+        }
+        assert_eq!(location_stride(&ctx), cjk);
+
+        // One-byte characters spend the budget one per byte.
+        let mut latin = ExportContext::new();
+        latin.record_content_length(1, 500, 500);
+        assert_eq!(location_stride(&latin), LOCATION_TEXT_BYTES as i64);
+
+        // A book with no text at all still yields a usable stride.
+        assert_eq!(
+            location_stride(&ExportContext::new()),
+            LOCATION_TEXT_BYTES as i64
+        );
     }
 }
 

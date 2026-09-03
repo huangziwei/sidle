@@ -333,7 +333,7 @@ mod tests {
             baseline: 180,
             words: vec![StyleSeg {
                 offset: 0,
-                length: content.encode_utf16().count(),
+                length: content.chars().count(),
                 width: 1000,
                 is_word: true,
             }],

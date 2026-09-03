@@ -230,6 +230,13 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let (layout_hints, heading_level) =
         crate::formats::kfx::yj_properties::layout_hints_from_element_fields(fields);
 
+    // `$696 word_boundary_list` — the source's own word segmentation, carried
+    // through as opaque provenance. Nothing in bokai can regenerate it.
+    let word_boundaries: Vec<i64> = get_field(fields, sym!(WordBoundaryList))
+        .and_then(|v| v.as_list())
+        .map(|items| items.iter().filter_map(|v| v.as_int()).collect())
+        .unwrap_or_default();
+
     // Cell spans. A span of 1 is the absent case and carries nothing.
     let span_of = |field: u64| {
         get_field(fields, field)
@@ -241,7 +248,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let row_span = span_of(sym!(TableRowSpan));
 
     // Emit StartElement token
-    stream.push(KfxToken::StartElement(ElementStart {
+    stream.push(KfxToken::start_element(ElementStart {
         role,
         node_id: None, // Only used during export
         id,
@@ -259,6 +266,9 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         is_image: kfx_type_id == KfxSymbol::Image as u32,
         layout_hints,
         heading_level,
+        // Importing from KFX: the element's own `$155 id` is its source id.
+        source_element: id,
+        word_boundaries,
         column_span,
         row_span,
         column_format: Vec::new(),
@@ -319,9 +329,11 @@ fn tokenize_column_format(
     {
         return;
     }
-    stream.push(KfxToken::StartElement(ElementStart::new(Role::ColumnGroup)));
+    stream.push(KfxToken::start_element(ElementStart::new(
+        Role::ColumnGroup,
+    )));
     for col in columns {
-        stream.push(KfxToken::StartElement(col));
+        stream.push(KfxToken::start_element(col));
         stream.push(KfxToken::EndElement);
     }
     stream.push(KfxToken::EndElement);
@@ -815,6 +827,14 @@ where
 
                 if let Some(n) = elem.list_start {
                     chapter.semantics.set_list_start(node_id, n);
+                }
+
+                // The source's own word segmentation rides on the node that
+                // holds its text, to be re-emitted if that text survives.
+                if !elem.word_boundaries.is_empty() {
+                    chapter
+                        .semantics
+                        .set_word_boundaries(node_id, elem.word_boundaries.clone());
                 }
 
                 // Anchored element: stamp the html id registered at
@@ -1951,7 +1971,7 @@ fn walk_node_for_export(
                 // emit machinery to anchor style_events to.
                 let mut wrapper = ElementStart::new(Role::Paragraph);
                 wrapper.style_symbol = Some(ctx.cite_default_style());
-                stream.push(KfxToken::StartElement(wrapper));
+                stream.push(KfxToken::start_element(wrapper));
                 walk_node_for_export(chapter, child_id, sch, ctx, stream);
                 stream.push(KfxToken::EndElement);
             } else {
@@ -2009,6 +2029,13 @@ fn walk_node_for_export(
     // Build element start with semantics
     let mut elem = ElementStart::new(node.role);
     elem.node_id = Some(node_id);
+    // The id the source gave this element, handed back out by `claim_id`.
+    elem.source_element = chapter.semantics.source_element(node_id);
+    // Carry the source's word segmentation back out. `IonBuilder::build`
+    // re-emits it only if the element's span still matches what it describes.
+    if let Some(boundaries) = chapter.semantics.word_boundaries(node_id) {
+        elem.word_boundaries = boundaries.to_vec();
+    }
 
     // Register the node's style: IR ComputedStyle → a deduplicated KFX style
     // symbol. The source class attribute is a name hint, carrying an
@@ -2119,7 +2146,7 @@ fn walk_node_for_export(
 
     elem.list_start = chapter.semantics.list_start(node_id);
 
-    stream.push(KfxToken::StartElement(elem));
+    stream.push(KfxToken::start_element(elem));
 
     // Emit text content if present
     if !node.text.is_empty() {
@@ -2279,11 +2306,25 @@ fn is_note_reference(state: &InlineState, ctx: &ExportContext) -> bool {
 /// an inline `<img>` as the `Image` variant, which is how an image no
 /// block-level element holds directly reaches the output.
 enum FlatSegment {
-    Text { text: String, state: InlineState },
+    Text {
+        text: String,
+        state: InlineState,
+    },
     // An image segment carries no inline state: the surrounding ruby
     // annotation / link_to / inline style reaches no KFX image element. The
     // node alone is tracked, and `walk_node_for_export` refetches src/alt/style.
-    Image { node_id: NodeId },
+    Image {
+        node_id: NodeId,
+    },
+    /// An id with no text of its own — an empty `<a id=…>`, or an id on an
+    /// inline element wrapping only an image. It becomes a **zero-length
+    /// span**, which registers the anchor at the offset it sits at and emits
+    /// no style event. A synthesized character would do the same job and shift
+    /// every offset after it, which is what the source's own position map
+    /// already states.
+    Marker {
+        state: InlineState,
+    },
 }
 
 /// Concatenate every `Text` descendant of a node into `out`, which the
@@ -2386,11 +2427,11 @@ fn flatten_inline_content(
         // `<ruby>`/`<a>`/`<span>` and emits nothing.
         Role::Image => {
             // A KFX image element carries no anchor. An ancestor inline element
-            // bearing an id (`<a id="map1"><img/></a>`) takes a zero-width-space
-            // span first, holding the id's position just before the image.
+            // bearing an id (`<a id="map1"><img/></a>`) takes a zero-length
+            // marker span first, holding the id's position just before the
+            // image.
             if effective_state.element_id.is_some() {
-                segments.push(FlatSegment::Text {
-                    text: "\u{200B}".to_string(), // Zero-width space
+                segments.push(FlatSegment::Marker {
                     state: effective_state.clone(),
                 });
             }
@@ -2445,9 +2486,9 @@ fn flatten_inline_content(
         _ => {
             let children: Vec<_> = chapter.children(node_id).collect();
             if children.is_empty() && effective_state.element_id.is_some() {
-                // Empty element with ID (anchor marker) - emit zero-width space to carry the ID
-                segments.push(FlatSegment::Text {
-                    text: "\u{200B}".to_string(), // Zero-width space
+                // An empty element carrying only an id is an anchor target: it
+                // marks a position, and contributes no text to mark it with.
+                segments.push(FlatSegment::Marker {
                     state: effective_state,
                 });
             } else {
@@ -2476,6 +2517,26 @@ fn emit_flattened_segments(
                 // walk_node_for_export gives the image element the src/alt/
                 // style/resource registration a block-level image takes.
                 walk_node_for_export(chapter, node_id, sch, ctx, stream);
+            }
+            FlatSegment::Marker { state } => {
+                // A zero-length span: `StartSpan` registers the anchor at the
+                // element's current text offset, `EndSpan` measures length 0
+                // and so adds no style event.
+                let mut span = SpanStart::new(
+                    if state.link_to.is_some() {
+                        Role::Link
+                    } else {
+                        Role::Inline
+                    },
+                    0,
+                    0,
+                );
+                if let Some(ref id) = state.element_id {
+                    span.set_semantic(SemanticTarget::Id, id.clone());
+                }
+                span.node_id = state.node_id;
+                stream.push(KfxToken::StartSpan(span));
+                stream.push(KfxToken::EndSpan);
             }
             FlatSegment::Text { text, state } => {
                 // A run whose own style turns its box (tate-chu-yoko) becomes
@@ -2611,7 +2672,7 @@ fn emit_definition_list(
     );
     dl_elem.style_symbol = Some(dl_style);
 
-    stream.push(KfxToken::StartElement(dl_elem));
+    stream.push(KfxToken::start_element(dl_elem));
 
     // Collect children and group dt+dd pairs
     let children: Vec<NodeId> = chapter.children(node_id).collect();
@@ -2655,7 +2716,7 @@ fn emit_definition_list(
                 ctx.cite_default_style()
             };
             wrapper_elem.style_symbol = Some(wrapper_style);
-            stream.push(KfxToken::StartElement(wrapper_elem));
+            stream.push(KfxToken::start_element(wrapper_elem));
 
             // Emit the dt as a Container (with float:left style)
             let dt_style = ctx.register_style_id_with_hint(
@@ -2665,12 +2726,12 @@ fn emit_definition_list(
             );
             let mut dt_elem = ElementStart::new(Role::DefinitionTerm);
             dt_elem.style_symbol = Some(dt_style);
-            stream.push(KfxToken::StartElement(dt_elem));
+            stream.push(KfxToken::start_element(dt_elem));
 
             // Emit dt's children wrapped in a Paragraph (like KPR)
             let mut dt_inner = ElementStart::new(Role::Paragraph);
             dt_inner.style_symbol = Some(dt_style);
-            stream.push(KfxToken::StartElement(dt_inner));
+            stream.push(KfxToken::start_element(dt_inner));
 
             for dt_child in chapter.children(child_id) {
                 walk_node_for_export(chapter, dt_child, sch, ctx, stream);
@@ -2741,8 +2802,10 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // carries the content.
                     let mut outer_fields = Vec::new();
 
-                    // Unique container ID for outer wrapper
-                    let outer_id = ctx.fragment_ids.next_id();
+                    // The outer box is bokai's own framing, not an element the
+                    // source had: the source's id belongs to the inner element,
+                    // which carries the text a stored `(eid, offset)` names.
+                    let outer_id = ctx.claim_id(None);
                     outer_fields.push((sym!(Id), IonValue::Int(outer_id as i64)));
 
                     // Record this content ID for position_map
@@ -2867,8 +2930,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Create inner text element
                     let mut inner_fields = Vec::new();
 
-                    // Unique ID for inner text element
-                    let inner_id = ctx.fragment_ids.next_id();
+                    // The inner text element inherits the source's id.
+                    let inner_id = ctx.claim_id(elem.source_element);
                     inner_fields.push((sym!(Id), IonValue::Int(inner_id as i64)));
 
                     // Record inner content ID too
@@ -2886,13 +2949,17 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     let mut inner_builder = IonBuilder::with_fields(inner_fields, inner_id);
                     inner_builder.is_inner_wrapper_text = true;
                     inner_builder.outer_container_id = Some(outer_id);
+                    // The wrapper is a box; its text — and so its word
+                    // segmentation — belongs to the inner element.
+                    inner_builder.word_boundaries = elem.word_boundaries.clone();
                     stack.push(inner_builder);
                 } else {
                     // === NORMAL ELEMENT PATH (unchanged) ===
                     let mut fields = Vec::new();
 
-                    // Unique container ID - use the global generator to avoid collisions
-                    let container_id = ctx.fragment_ids.next_id();
+                    // The source's own id where it stated one, else a fresh one
+                    // past every source id.
+                    let container_id = ctx.claim_id(elem.source_element);
                     fields.push((sym!(Id), IonValue::Int(container_id as i64)));
 
                     // The content id a position_map entry resolves a nav target through.
@@ -3033,6 +3100,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
 
                     let mut builder = IonBuilder::with_fields(fields, container_id);
                     builder.is_image = elem.role == Role::Image;
+                    builder.word_boundaries = elem.word_boundaries.clone();
                     stack.push(builder);
                 }
             }
@@ -3111,11 +3179,11 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                 }
             }
             KfxToken::InlineElement(inline) => {
-                let id = ctx.fragment_ids.next_id();
+                let id = ctx.claim_id(None);
                 ctx.record_content_id(id);
                 let (index, _) = ctx.append_text(&inline.text);
                 let chars = inline.text.chars().count();
-                ctx.record_content_length(id, chars);
+                ctx.record_content_length(id, chars, inline.text.len());
 
                 let mut fields = vec![
                     (sym!(Id), IonValue::Int(id as i64)),
@@ -3166,6 +3234,10 @@ struct IonBuilder {
     accumulated_text: String,
     /// Character count of accumulated text (for style event offsets)
     accumulated_char_count: usize,
+    /// UTF-8 byte count of the same text, for the location stride. Unlike
+    /// `accumulated_char_count` this counts only real text: an absorbed inline
+    /// element takes a character slot but contributes no bytes of its own.
+    accumulated_byte_count: usize,
     /// Collected style events for this element (inline spans)
     style_events: Vec<IonValue>,
     /// Container ID for this element (set during StartElement, used for length tracking)
@@ -3188,6 +3260,10 @@ struct IonBuilder {
     /// True when this element is a plain (non-wrapped) image — lets
     /// EndElement route it into a text-bearing parent's inline runs.
     is_image: bool,
+    /// The source's `$696 word_boundary_list`, carried through from the IR.
+    /// `build` re-emits it only when the element's span still matches the one
+    /// it describes; a list whose sum has drifted would segment the wrong text.
+    word_boundaries: Vec<i64>,
 }
 
 impl IonBuilder {
@@ -3197,6 +3273,7 @@ impl IonBuilder {
             children: Vec::new(),
             accumulated_text: String::new(),
             accumulated_char_count: 0,
+            accumulated_byte_count: 0,
             style_events: Vec::new(),
             container_id: None,
             is_inner_wrapper_text: false,
@@ -3204,6 +3281,7 @@ impl IonBuilder {
             inline_runs: Vec::new(),
             inline_foreign_chars: 0,
             is_image: false,
+            word_boundaries: Vec::new(),
         }
     }
 
@@ -3213,6 +3291,7 @@ impl IonBuilder {
             children: Vec::new(),
             accumulated_text: String::new(),
             accumulated_char_count: 0,
+            accumulated_byte_count: 0,
             style_events: Vec::new(),
             container_id: Some(container_id),
             is_inner_wrapper_text: false,
@@ -3220,6 +3299,7 @@ impl IonBuilder {
             inline_runs: Vec::new(),
             inline_foreign_chars: 0,
             is_image: false,
+            word_boundaries: Vec::new(),
         }
     }
 
@@ -3234,10 +3314,7 @@ impl IonBuilder {
         // Text arriving after image-only children puts those images in-run
         // before it (`<p><img/>text…`): they migrate into the inline
         // interleave, which keeps their position.
-        if !self.children.is_empty()
-            && !text.chars().all(|c| c == '\u{200B}')
-            && self.children.iter().all(is_image_struct)
-        {
+        if !self.children.is_empty() && self.children.iter().all(is_image_struct) {
             let migrated: Vec<IonValue> = self.children.drain(..).collect();
             for img in migrated {
                 self.absorb_inline_image(img);
@@ -3246,14 +3323,14 @@ impl IonBuilder {
         let offset = self.accumulated_char_count;
         self.accumulated_text.push_str(text);
         self.accumulated_char_count += text.chars().count();
+        self.accumulated_byte_count += text.len();
         offset
     }
 
     /// True when the element carries inline content, which interleaves an
-    /// in-run image in place of appending it as a block child. A zero-width
-    /// space is an anchor carrier and counts as none.
+    /// in-run image in place of appending it as a block child.
     fn has_real_text_so_far(&self) -> bool {
-        !self.inline_runs.is_empty() || self.accumulated_text.chars().any(|c| c != '\u{200B}')
+        !self.inline_runs.is_empty() || !self.accumulated_text.is_empty()
     }
 
     /// Absorb a nested element into the inline interleave: flush the pending
@@ -3344,7 +3421,22 @@ impl IonBuilder {
                 ctx.record_content_length(
                     container_id,
                     self.accumulated_char_count - self.inline_foreign_chars,
+                    self.accumulated_byte_count,
                 );
+            }
+
+            // Re-emit the source's word segmentation, but only where it still
+            // describes this element's text: the list is a run-length walk of
+            // the element's offset space, so it is right exactly when it sums
+            // to the span, and a stale one would segment the wrong characters.
+            let span = self.accumulated_char_count as i64;
+            if !self.word_boundaries.is_empty() && self.word_boundaries.iter().sum::<i64>() == span
+            {
+                let list = std::mem::take(&mut self.word_boundaries);
+                self.fields.push((
+                    sym!(WordBoundaryList),
+                    IonValue::List(list.into_iter().map(IonValue::Int).collect()),
+                ));
             }
 
             if !self.inline_runs.is_empty() {
@@ -3367,9 +3459,7 @@ impl IonBuilder {
                 return IonValue::Struct(self.fields);
             }
 
-            // If this element has accumulated text, create ONE content reference
-            // Skip if the only content is zero-width spaces (anchor markers from empty ID elements)
-            let has_real_text = self.accumulated_text.chars().any(|c| c != '\u{200B}');
+            let has_real_text = !self.accumulated_text.is_empty();
 
             // §7.4 — an element states `content` or `content_list`, never both.
             // Text beside block children takes the interleave shape: a bare
@@ -3495,6 +3585,52 @@ mod tests {
         assert!(matches!(stream.iter().next(), Some(KfxToken::Text(t)) if t == "平成100年"));
     }
 
+    /// The source's word segmentation survives KFX → IR → KFX, and only while
+    /// it still describes the element's text: the list is a run-length walk of
+    /// the offset space, so a sum that no longer matches the span would
+    /// segment the wrong characters and must be dropped instead.
+    #[test]
+    fn word_boundaries_are_carried_through_and_dropped_when_stale() {
+        fn emit(boundaries: Vec<i64>) -> Option<Vec<i64>> {
+            let mut stream = TokenStream::new();
+            let mut elem = ElementStart::new(Role::Paragraph);
+            elem.word_boundaries = boundaries;
+            stream.push(KfxToken::start_element(elem));
+            stream.text("hello"); // 5 characters
+            stream.end_element();
+
+            let mut ctx = ExportContext::new();
+            let ion = tokens_to_ion(&stream, &mut ctx);
+            fn find(v: &IonValue, out: &mut Option<Vec<i64>>) {
+                match v.unwrap_annotated() {
+                    IonValue::Struct(fields) => {
+                        for (k, val) in fields {
+                            if *k == sym!(WordBoundaryList)
+                                && let Some(items) = val.as_list()
+                            {
+                                *out = Some(items.iter().filter_map(|i| i.as_int()).collect());
+                            }
+                            find(val, out);
+                        }
+                    }
+                    IonValue::List(items) => items.iter().for_each(|i| find(i, out)),
+                    _ => {}
+                }
+            }
+            let mut out = None;
+            find(&ion, &mut out);
+            out
+        }
+
+        // Sums to the element's 5 characters — re-emitted verbatim.
+        assert_eq!(emit(vec![0, 2, 1, 2]), Some(vec![0, 2, 1, 2]));
+        // Describes a longer or shorter run — dropped rather than misapplied.
+        assert_eq!(emit(vec![0, 9]), None);
+        assert_eq!(emit(vec![0, 1]), None);
+        // No source list, nothing invented.
+        assert_eq!(emit(Vec::new()), None);
+    }
+
     #[test]
     fn test_tokenize_creates_proper_structure() {
         // Test that tokenization produces expected token sequence
@@ -3513,7 +3649,7 @@ mod tests {
         let mut semantics = HashMap::new();
         semantics.insert(SemanticTarget::Src, "cover.jpg".to_string());
 
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Image,
             node_id: None,
             id: Some(123),
@@ -3531,6 +3667,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3551,7 +3689,7 @@ mod tests {
     #[test]
     fn test_build_ir_with_text_content() {
         let mut stream = TokenStream::new();
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: None,
@@ -3572,6 +3710,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3598,7 +3738,7 @@ mod tests {
     #[test]
     fn test_build_ir_with_heading() {
         let mut stream = TokenStream::new();
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Heading(2),
             node_id: None,
             id: None,
@@ -3621,6 +3761,8 @@ mod tests {
             // accompanies it.
             layout_hints: vec!["heading".to_string()],
             heading_level: Some("2".to_string()),
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3643,7 +3785,7 @@ mod tests {
         let mut span_semantics = HashMap::new();
         span_semantics.insert(SemanticTarget::Href, "chapter2".to_string());
 
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: None,
@@ -3674,6 +3816,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3712,7 +3856,7 @@ mod tests {
     #[test]
     fn test_interleave_style_events_apply_to_runs() {
         let mut stream = TokenStream::new();
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: Some(50),
@@ -3741,6 +3885,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3749,7 +3895,7 @@ mod tests {
         stream.push(KfxToken::Text("「いや".to_string()));
         // Nested tate-chu-yoko run — its own text is 2 chars long but it
         // occupies one position in the parent's event space.
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: Some(51),
@@ -3770,6 +3916,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -3823,7 +3971,7 @@ mod tests {
         table.register_anchor_fields("mid", pos.as_struct().unwrap());
 
         let mut stream = TokenStream::new();
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: Some(50),
@@ -3851,13 +3999,15 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
             list_start: None,
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: Some(51),
@@ -3878,6 +4028,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -5137,7 +5289,7 @@ mod tests {
         // Text: "1. Easy Concurrency"
         // Link: offset 0, length 19 (entire text)
         // Inline: offset 0, length 2 ("1.")
-        stream.push(KfxToken::StartElement(ElementStart {
+        stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
             id: None,
@@ -5181,6 +5333,8 @@ mod tests {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -5325,8 +5479,9 @@ mod tests {
     #[test]
     fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
         // `<a id="map1"><img/></a>` as a TOC/nav target. A KFX image element
-        // holds no anchor: the flattener emits a zero-width-space segment
-        // carrying the id and node_id just before the image.
+        // holds no anchor: the flattener emits a zero-length marker segment
+        // carrying the id and node_id just before the image, so the anchor
+        // lands at the image's position without a character being invented.
         let mut chapter = Chapter::new();
 
         let img_id = chapter.alloc_node(Node::new(Role::Image));
@@ -5340,20 +5495,65 @@ mod tests {
         let mut segments = Vec::new();
         flatten_inline_content(&chapter, link_id, InlineState::default(), &mut segments);
 
-        assert_eq!(segments.len(), 2, "expected anchor carrier + image");
-        let FlatSegment::Text { text, state } = &segments[0] else {
-            panic!("first segment should be the ZWSP anchor carrier, got an image");
+        assert_eq!(segments.len(), 2, "expected anchor marker + image");
+        let FlatSegment::Marker { state } = &segments[0] else {
+            panic!("first segment should be the anchor marker, got text or an image");
         };
-        assert_eq!(text, "\u{200B}");
         assert_eq!(state.element_id, Some("map1".to_string()));
         assert_eq!(
             state.node_id,
             Some(link_id),
-            "carrier must reference the id-bearing <a> node so its position is recorded"
+            "marker must reference the id-bearing <a> node so its position is recorded"
         );
         assert!(
             matches!(segments[1], FlatSegment::Image { node_id } if node_id == img_id),
             "second segment should be the image itself"
+        );
+    }
+
+    /// An empty `<a id=…>` between two runs marks a position inside the text
+    /// and adds nothing to it — the element's characters and every offset
+    /// after the anchor stay exactly as the source stated them.
+    #[test]
+    fn an_empty_id_element_marks_a_position_without_adding_a_character() {
+        let mut chapter = Chapter::new();
+        let para = chapter.alloc_node(Node::new(Role::Paragraph));
+
+        let text_node = |chapter: &mut Chapter, text: &str| {
+            let range = chapter.append_text(text);
+            let mut node = Node::new(Role::Text);
+            node.text = range;
+            chapter.alloc_node(node)
+        };
+        let before = text_node(&mut chapter, "before");
+        chapter.append_child(para, before);
+
+        let anchor = chapter.alloc_node(Node::new(Role::Inline));
+        chapter.semantics.set_id(anchor, "mid");
+        chapter.append_child(para, anchor);
+
+        let after = text_node(&mut chapter, "after");
+        chapter.append_child(para, after);
+
+        let mut segments = Vec::new();
+        for child in chapter.children(para).collect::<Vec<_>>() {
+            flatten_inline_content(&chapter, child, InlineState::default(), &mut segments);
+        }
+
+        let text: String = segments
+            .iter()
+            .filter_map(|s| match s {
+                FlatSegment::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "beforeafter", "the marker contributes no characters");
+        assert!(
+            segments.iter().any(|s| matches!(
+                s,
+                FlatSegment::Marker { state } if state.element_id.as_deref() == Some("mid")
+            )),
+            "the id survives as a marker"
         );
     }
 

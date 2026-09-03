@@ -130,6 +130,13 @@ impl IdGenerator {
     pub fn peek(&self) -> u64 {
         self.next_id
     }
+
+    /// Raise the floor so every id from here on is at least `floor`. Used once
+    /// the source's own element ids are known, so a freshly allocated id can
+    /// never land on one the export is about to preserve.
+    pub fn advance_to(&mut self, floor: u64) {
+        self.next_id = self.next_id.max(floor);
+    }
 }
 
 impl Default for IdGenerator {
@@ -268,15 +275,6 @@ impl TextAccumulator {
         self.total_len = 0;
         std::mem::take(&mut self.segments)
     }
-}
-
-/// Position entry for a node: (fragment_id, byte_offset).
-#[derive(Debug, Clone, Copy)]
-pub struct Position {
-    /// Fragment ID where this node lives.
-    pub fragment_id: u64,
-    /// Byte offset within the fragment's text content.
-    pub offset: usize,
 }
 
 /// Resolved anchor with position information (for internal links).
@@ -587,20 +585,23 @@ pub struct ExportContext {
     /// Current content entity name (symbol ID), set before `tokens_to_ion`
     pub current_content_name: u64,
 
-    /// (ChapterId, NodeId) → Position, filled in the Pass 1 survey
-    pub position_map: HashMap<(ChapterId, NodeId), Position>,
-
     /// Chapter → fragment ID, filled in Pass 1 for section references
     pub chapter_fragments: HashMap<ChapterId, u64>,
+
+    /// Every element id this export has handed out, preserved or fresh. A
+    /// source id already taken falls back to a fresh one rather than
+    /// colliding.
+    claimed_ids: HashSet<u64>,
+
+    /// The highest element id the source stated, learned in the Pass 1 survey.
+    /// [`Self::reserve_beyond_source_ids`] lifts the generator past it.
+    max_source_id: u64,
 
     /// Current chapter being processed.
     current_chapter: Option<ChapterId>,
 
     /// Current fragment ID being built.
     current_fragment_id: u64,
-
-    /// Current text offset within the fragment.
-    current_text_offset: usize,
 
     /// Source file path (`chapter1.xhtml`) → fragment ID
     pub path_to_fragment: HashMap<String, u64>,
@@ -669,8 +670,15 @@ pub struct ExportContext {
     /// All content fragment IDs for each chapter.
     pub content_ids_by_chapter: HashMap<ChapterId, Vec<u64>>,
 
-    /// Text length for each content fragment ID.
+    /// Text length in characters for each content fragment ID — the unit
+    /// `location_map` offsets and `section_position_id_map` spans are stated in.
     pub content_id_lengths: HashMap<u64, usize>,
+
+    /// The same text in UTF-8 bytes. Only the ratio is used: it converts the
+    /// format's per-location text budget, which is a byte budget, into the
+    /// character stride the position axis is measured in, so a location covers
+    /// a comparable amount of reading whatever the script.
+    pub content_id_bytes: HashMap<u64, usize>,
 
     /// section_name → its resource short names, for `container_entity_map`
     pub section_resource_deps: BTreeMap<String, BTreeSet<String>>,
@@ -796,11 +804,11 @@ impl ExportContext {
             section_ids: Vec::new(),
             text_accumulator: TextAccumulator::new(),
             current_content_name: 0,
-            position_map: HashMap::new(),
             chapter_fragments: HashMap::new(),
+            claimed_ids: HashSet::new(),
+            max_source_id: 0,
             current_chapter: None,
             current_fragment_id: 0,
-            current_text_offset: 0,
             path_to_fragment: HashMap::new(),
             default_style_symbol,
             style_registry: StyleRegistry::new(default_style_symbol),
@@ -822,6 +830,7 @@ impl ExportContext {
             first_content_ids: HashMap::new(),
             content_ids_by_chapter: HashMap::new(),
             content_id_lengths: HashMap::new(),
+            content_id_bytes: HashMap::new(),
             section_resource_deps: BTreeMap::new(),
             ruby_registry: RubyContentRegistry::new(),
             document_writing_mode: KfxSymbol::HorizontalTb,
@@ -888,7 +897,47 @@ impl ExportContext {
 
     /// Generate a new unique fragment ID.
     pub fn next_fragment_id(&mut self) -> u64 {
-        self.fragment_ids.next_id()
+        self.claim_id(None)
+    }
+
+    /// The element id to emit for a node: **the source's own** when the node
+    /// carries one and nothing has taken it yet, otherwise a fresh id.
+    ///
+    /// Preserving ids is what makes a rebuilt container usable on a device
+    /// that already has the book: `.sdr` annotations and the stored reading
+    /// position resolve through `(eid, offset)`, so a renumbered element sends
+    /// every highlight somewhere else. A reused id pointing at *different*
+    /// content is worse than a fresh one, which is why a source id is taken at
+    /// most once and every fresh id sits past the source's highest
+    /// ([`Self::reserve_beyond_source_ids`]).
+    pub fn claim_id(&mut self, preferred: Option<i64>) -> u64 {
+        if let Some(id) = preferred.and_then(|e| u64::try_from(e).ok())
+            && self.claimed_ids.insert(id)
+        {
+            return id;
+        }
+        loop {
+            let id = self.fragment_ids.next_id();
+            if self.claimed_ids.insert(id) {
+                return id;
+            }
+        }
+    }
+
+    /// Note the element ids a source chapter states, during the Pass 1 survey.
+    pub fn note_source_ids(&mut self, ids: impl IntoIterator<Item = i64>) {
+        for id in ids {
+            if let Ok(id) = u64::try_from(id) {
+                self.max_source_id = self.max_source_id.max(id);
+            }
+        }
+    }
+
+    /// Lift the id generator past every id the source stated. Called once the
+    /// survey has seen every chapter and before Pass 2 emits any element, so
+    /// a fresh id and a preserved one can never be the same number.
+    pub fn reserve_beyond_source_ids(&mut self) {
+        self.fragment_ids.advance_to(self.max_source_id + 1);
     }
 
     /// Register a section and return its symbol ID.
@@ -1190,13 +1239,17 @@ impl ExportContext {
     // Pass 1: Survey / Position Tracking
 
     /// Begin surveying a chapter.
-    pub fn begin_chapter_survey(&mut self, chapter_id: ChapterId, path: &str) -> u64 {
-        let fragment_id = self.fragment_ids.next_id();
+    pub fn begin_chapter_survey(
+        &mut self,
+        chapter_id: ChapterId,
+        path: &str,
+        source_element: Option<i64>,
+    ) -> u64 {
+        let fragment_id = self.claim_id(source_element);
         self.chapter_fragments.insert(chapter_id, fragment_id);
         self.path_to_fragment.insert(path.to_string(), fragment_id);
         self.current_chapter = Some(chapter_id);
         self.current_fragment_id = fragment_id;
-        self.current_text_offset = 0;
 
         // Mark chapter-start anchor if this chapter is a target
         if self.anchor_registry.is_chapter_target(chapter_id) {
@@ -1214,28 +1267,6 @@ impl ExportContext {
     /// Get the fragment ID for a given source path.
     pub fn get_fragment_for_path(&self, path: &str) -> Option<u64> {
         self.path_to_fragment.get(path).copied()
-    }
-
-    /// Record position for a node during Pass 1.
-    pub fn record_position(&mut self, node_id: NodeId) {
-        if let Some(chapter_id) = self.current_chapter {
-            self.position_map.insert(
-                (chapter_id, node_id),
-                Position {
-                    fragment_id: self.current_fragment_id,
-                    offset: self.current_text_offset,
-                },
-            );
-        }
-    }
-
-    /// Record a heading position for headings navigation.
-    pub fn record_heading(&mut self, level: u8) {
-        self.heading_positions.push(HeadingPosition {
-            level,
-            fragment_id: self.current_fragment_id,
-            offset: self.current_text_offset,
-        });
     }
 
     /// Record heading position during Pass 2 with actual content fragment ID.
@@ -1316,31 +1347,23 @@ impl ExportContext {
         }
     }
 
-    /// Record text length for a content fragment ID.
-    pub fn record_content_length(&mut self, content_id: u64, text_len: usize) {
-        self.content_id_lengths.insert(content_id, text_len);
+    /// Record a content fragment's text length, in characters and in UTF-8
+    /// bytes. Both come from the same text; see [`Self::content_id_bytes`].
+    pub fn record_content_length(&mut self, content_id: u64, chars: usize, bytes: usize) {
+        self.content_id_lengths.insert(content_id, chars);
+        self.content_id_bytes.insert(content_id, bytes);
     }
 
-    /// Advance the text offset during survey (Pass 1).
-    pub fn advance_text_offset(&mut self, text_len: usize) {
-        self.current_text_offset += text_len;
+    /// Record an element that carries no text of its own — an image, a wrapper
+    /// — and so occupies exactly one position on the axis (§10.2) and
+    /// contributes nothing to the location stride.
+    pub fn record_content_slot(&mut self, content_id: u64) {
+        self.record_content_length(content_id, 1, 0);
     }
 
     /// Get the current fragment ID being surveyed.
     pub fn current_fragment_id(&self) -> u64 {
         self.current_fragment_id
-    }
-
-    /// Get the current text offset during survey.
-    pub fn current_text_offset(&self) -> usize {
-        self.current_text_offset
-    }
-
-    // Pass 2: Position Lookup
-
-    /// Look up position for a node.
-    pub fn get_position(&self, chapter_id: ChapterId, node_id: NodeId) -> Option<Position> {
-        self.position_map.get(&(chapter_id, node_id)).copied()
     }
 
     /// Get fragment ID for a chapter.

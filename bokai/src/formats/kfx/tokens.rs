@@ -7,8 +7,10 @@ use std::collections::HashMap;
 /// A token in the KFX content stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KfxToken {
-    /// Start of an element (container, paragraph, etc.)
-    StartElement(ElementStart),
+    /// Start of an element (container, paragraph, etc.). Boxed: an element
+    /// carries every attribute a KFX element can, and inlining it would make
+    /// every token in the stream that wide.
+    StartElement(Box<ElementStart>),
     /// End of an element
     EndElement,
     /// Text content
@@ -76,6 +78,18 @@ pub struct ElementStart {
     pub layout_hints: Vec<String>,
     /// `$790 yj.semantics.heading_level` from the element's own fields.
     pub heading_level: Option<String>,
+    /// The element id the **source** gave this node (`$155 id`), when the book
+    /// was imported from a KFX. Preserving it is what keeps a device's stored
+    /// annotations and reading position pointing at the same words after a
+    /// rebuild; `ExportContext::claim_id` hands it back out.
+    pub source_element: Option<i64>,
+    /// `$696 word_boundary_list` as the source stated it: a run-length list
+    /// over the element's own offset space, summing to its span. The device
+    /// reads it for double-tap-to-select and dictionary lookup. Carried
+    /// through KFX→IR→KFX as opaque provenance — the exporter re-emits it only
+    /// when the element's span still matches, and generating one for a source
+    /// that states none needs word segmentation bokai does not have.
+    pub word_boundaries: Vec<i64>,
     /// `$148 table_column_span` / `$149 table_row_span` — how many grid
     pub column_span: Option<u32>,
     pub row_span: Option<u32>,
@@ -95,6 +109,13 @@ pub struct ColumnFormat {
     pub fields: Vec<(u64, crate::formats::kfx::style_schema::KfxValue)>,
     /// `$118 column_span` — how many columns this entry describes.
     pub span: Option<u32>,
+}
+
+impl KfxToken {
+    /// A `StartElement` token from an element, boxing it.
+    pub fn start_element(element: ElementStart) -> Self {
+        Self::StartElement(Box::new(element))
+    }
 }
 
 impl ElementStart {
@@ -118,6 +139,8 @@ impl ElementStart {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),
@@ -220,7 +243,7 @@ impl TokenStream {
 
     pub fn start_element(&mut self, role: Role) {
         self.tokens
-            .push(KfxToken::StartElement(ElementStart::new(role)));
+            .push(KfxToken::start_element(ElementStart::new(role)));
     }
 
     pub fn start_element_with(
@@ -231,7 +254,7 @@ impl TokenStream {
         content_ref: Option<ContentRef>,
         style_events: Vec<SpanStart>,
     ) {
-        self.tokens.push(KfxToken::StartElement(ElementStart {
+        self.tokens.push(KfxToken::start_element(ElementStart {
             role,
             node_id: None,
             id,
@@ -249,6 +272,8 @@ impl TokenStream {
             is_image: false,
             layout_hints: Vec::new(),
             heading_level: None,
+            source_element: None,
+            word_boundaries: Vec::new(),
             column_span: None,
             row_span: None,
             column_format: Vec::new(),

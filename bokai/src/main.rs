@@ -246,6 +246,46 @@ enum Command {
         /// Output path. Omit to only report the changes.
         output: Option<String>,
     },
+
+    /// Read and compare KFX containers at the entity level.
+    Kfx {
+        #[command(subcommand)]
+        op: KfxOp,
+    },
+}
+
+#[derive(Subcommand)]
+enum KfxOp {
+    /// List a container's entities: fragment type, name and payload size.
+    Ls {
+        /// KFX file.
+        file: String,
+        /// Only entities of this fragment type (name or `$id`).
+        #[arg(long = "type", value_name = "TYPE")]
+        type_filter: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare two containers entity by entity: fragment types, prose, element
+    /// ids and the position fragments. Answers whether B is still the same
+    /// book as A, which `validate` does not.
+    Diff {
+        /// Reference container (A — the before).
+        a: String,
+        /// Candidate container (B — the after).
+        b: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Show at most N added/dropped fragment names (default 20).
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+        /// Exit non-zero when anything moved.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 #[cfg(feature = "validate")]
@@ -842,6 +882,7 @@ fn main() -> ExitCode {
                 bokai::formats::epub::upgrade_to_epub3(pkg)
             })
         }
+        Command::Kfx { op } => kfx_cmd(op),
     };
 
     match result {
@@ -2771,4 +2812,302 @@ fn aozora_dispatch(
         eprintln!("Done.");
     }
     Ok(Some(()))
+}
+
+/// `bokai kfx …` — read and compare KFX containers at the entity level.
+fn kfx_cmd(op: KfxOp) -> Result<(), String> {
+    match op {
+        KfxOp::Ls {
+            file,
+            type_filter,
+            json,
+        } => kfx_ls(&file, type_filter.as_deref(), json),
+        KfxOp::Diff {
+            a,
+            b,
+            json,
+            details,
+            strict,
+        } => kfx_diff(&a, &b, json, details, strict),
+    }
+}
+
+fn kfx_ls(file: &str, type_filter: Option<&str>, json: bool) -> Result<(), String> {
+    use bokai::formats::kfx::package::KfxPackage;
+
+    let bytes = std::fs::read(file).map_err(|e| format!("read {file}: {e}"))?;
+    let pkg = KfxPackage::parse(&bytes).map_err(|e| e.to_string())?;
+
+    #[derive(Serialize)]
+    struct Row {
+        #[serde(rename = "type")]
+        type_name: String,
+        type_id: u32,
+        name: String,
+        bytes: usize,
+        raw: bool,
+    }
+
+    let rows: Vec<Row> = pkg
+        .entities()
+        .iter()
+        .map(|e| Row {
+            type_name: pkg
+                .symbols()
+                .resolve_opt(e.type_id() as u64)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("${}", e.type_id())),
+            type_id: e.type_id(),
+            name: pkg.name_of(e).to_string(),
+            bytes: e.media().len(),
+            raw: e.is_raw_media(),
+        })
+        .filter(|r| match type_filter {
+            None => true,
+            Some(f) => r.type_name == f || format!("${}", r.type_id) == f,
+        })
+        .collect();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    for r in &rows {
+        println!(
+            "{:>10}  {:<28} {}{}",
+            r.bytes,
+            r.type_name,
+            r.name,
+            if r.raw { "  (raw media)" } else { "" }
+        );
+    }
+    println!("{} entit{}", rows.len(), plural(rows.len(), "y", "ies"));
+    Ok(())
+}
+
+fn kfx_diff(a: &str, b: &str, json: bool, details: usize, strict: bool) -> Result<(), String> {
+    let ba = std::fs::read(a).map_err(|e| format!("read {a}: {e}"))?;
+    let bb = std::fs::read(b).map_err(|e| format!("read {b}: {e}"))?;
+    let d = bokai::formats::kfx::diff::diff(a, &ba, b, &bb).map_err(|e| e.to_string())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&d).map_err(|e| e.to_string())?
+        );
+    } else {
+        print_kfx_diff(&d, details);
+    }
+    if strict && !d.is_clean() {
+        return Err("containers differ".into());
+    }
+    Ok(())
+}
+
+fn print_kfx_diff(d: &bokai::formats::kfx::diff::Diff, details: usize) {
+    let side = |s: &bokai::formats::kfx::diff::Side, tag: &str| {
+        println!(
+            "{tag}  {}\n   {} bytes, {} entities, {}{}",
+            s.label,
+            thousands(s.bytes),
+            thousands(s.entities),
+            s.container_id,
+            if s.generator.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", s.generator)
+            }
+        );
+    };
+    side(&d.a, "A");
+    side(&d.b, "B");
+
+    println!("\nfragment types");
+    println!(
+        "  {:<26} {:>17}  {:>19}",
+        "", "count  A → B", "bytes  A → B"
+    );
+    for t in &d.types {
+        if t.count.same() && t.bytes.same() {
+            continue;
+        }
+        println!(
+            "  {:<26} {:>7} → {:>7}  {:>8} → {:>8}{}",
+            t.name,
+            thousands(t.count.a),
+            thousands(t.count.b),
+            human_bytes(t.bytes.a),
+            human_bytes(t.bytes.b),
+            if t.dropped() { "   DROPPED" } else { "" }
+        );
+    }
+
+    let f = &d.fragments;
+    println!(
+        "\nfragments   {} identical, {} changed, {} dropped, {} added",
+        thousands(f.identical),
+        thousands(f.changed),
+        thousands(f.dropped.len()),
+        thousands(f.added.len())
+    );
+    for (label, list) in [("dropped", &f.dropped), ("added", &f.added)] {
+        for name in list.iter().take(details) {
+            println!("  {label}  {name}");
+        }
+        if list.len() > details {
+            println!("  {label}  … {} more", list.len() - details);
+        }
+    }
+
+    let t = &d.text;
+    println!(
+        "\nprose       {} → {} characters, {}",
+        thousands(t.chars.a),
+        thousands(t.chars.b),
+        if t.identical {
+            "identical".to_string()
+        } else {
+            "CHANGED".to_string()
+        }
+    );
+    if t.zwsp.a != t.zwsp.b {
+        println!(
+            "            zero-width spaces {} → {}",
+            thousands(t.zwsp.a),
+            thousands(t.zwsp.b)
+        );
+    }
+    if let Some(div) = &t.divergence {
+        println!("  first difference at character {}", thousands(div.at));
+        println!("    A  …{}…", div.a);
+        println!("    B  …{}…", div.b);
+    }
+
+    let e = &d.eids;
+    println!(
+        "\nelement ids {} → {}, {} survive, {} keep their text ({})",
+        thousands(e.count.a),
+        thousands(e.count.b),
+        thousands(e.surviving),
+        thousands(e.same_text),
+        percent(e.same_text, e.count.a)
+    );
+
+    let p = &d.positions;
+    println!("\npositions");
+    println!(
+        "  location_map           {} → {} boundaries, {} → {} inside the text ({} → {})",
+        thousands(p.locations.a),
+        thousands(p.locations.b),
+        thousands(p.locations_inside_text.a),
+        thousands(p.locations_inside_text.b),
+        percent(p.locations_inside_text.a, p.locations.a),
+        percent(p.locations_inside_text.b, p.locations.b),
+    );
+    println!(
+        "  yj.location_pid_map    {} → {} pids{}",
+        thousands(p.location_pids.a),
+        thousands(p.location_pids.b),
+        match (p.pids_ordered.a, p.pids_ordered.b) {
+            (_, false) if p.location_pids.b > 0 => "   B: NOT NON-DECREASING",
+            _ => "",
+        }
+    );
+    println!(
+        "  word_boundary_list     {} → {} elements",
+        thousands(p.word_boundaries.a),
+        thousands(p.word_boundaries.b)
+    );
+    println!(
+        "  style_events           {} → {} entries",
+        thousands(p.style_events.a),
+        thousands(p.style_events.b)
+    );
+
+    let r = &d.ruby;
+    if r.readings.a > 0 || r.readings.b > 0 {
+        println!(
+            "\nruby        {} → {} distinct readings ({} lost), {} → {} attachments",
+            thousands(r.readings.a),
+            thousands(r.readings.b),
+            thousands(r.lost),
+            thousands(r.attachments.a),
+            thousands(r.attachments.b)
+        );
+    }
+
+    let m = &d.media;
+    if m.count.a > 0 || m.count.b > 0 {
+        println!(
+            "\nmedia       {} → {} files, {} → {}, {} carried across byte for byte ({})",
+            thousands(m.count.a),
+            thousands(m.count.b),
+            human_bytes(m.bytes.a),
+            human_bytes(m.bytes.b),
+            thousands(m.identical),
+            percent(m.identical, m.count.a)
+        );
+        for f in &m.formats {
+            println!(
+                "  {:<10} {:>6} → {:>6} files, {:>8} → {:>8}",
+                f.name,
+                thousands(f.count.a),
+                thousands(f.count.b),
+                human_bytes(f.bytes.a),
+                human_bytes(f.bytes.b)
+            );
+        }
+    }
+
+    let headlines = d.headlines();
+    if headlines.is_empty() {
+        println!("\nclean: nothing the differ measures moved.");
+    } else {
+        println!("\n{} finding(s):", headlines.len());
+        for h in &headlines {
+            println!("  - {h}");
+        }
+    }
+}
+
+/// `1234567` → `"1,234,567"`.
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn human_bytes(n: usize) -> String {
+    const UNITS: [&str; 4] = ["B", "K", "M", "G"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n}B")
+    } else {
+        format!("{v:.1}{}", UNITS[u])
+    }
+}
+
+fn percent(part: usize, whole: usize) -> String {
+    if whole == 0 {
+        return "—".into();
+    }
+    format!("{:.0}%", part as f64 * 100.0 / whole as f64)
+}
+
+fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
 }

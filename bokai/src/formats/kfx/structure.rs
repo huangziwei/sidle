@@ -206,3 +206,152 @@ pub fn eid_text_map(book: &BookData) -> HashMap<i64, String> {
     }
     out
 }
+
+/// The text one element contributes, its inline children included, in reading
+/// order: its `$145 content` (a literal or a reference), then every entry of
+/// its `$146 content_list` — literal runs and nested elements alike.
+///
+/// A `content_list` **mixes** the two: an element's own prose is interleaved
+/// with the inline elements sitting in it (a ruby base, an emphasized run). A
+/// walk that reads only `$145` references sees neither the literal runs nor
+/// their order.
+pub fn element_text(value: &IonValue, source: &impl ContentSource) -> String {
+    let inner = value.unwrap_annotated();
+    if let Some(s) = inner.as_string() {
+        return s.to_string();
+    }
+    let Some(fields) = inner.as_struct() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(content) = get_field(fields, KfxSymbol::Content as u64) {
+        out.push_str(&resolve_content_text_from(content, source));
+    }
+    if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
+        for child in list {
+            out.push_str(&element_text(child, source));
+        }
+    }
+    out
+}
+
+/// The book's prose in reading order: every section named by a reading order,
+/// then any section none names, each walked into its storylines.
+///
+/// Every text-bearing element contributes once — the walk takes an element's
+/// whole text via [`element_text`] and does not descend into its content
+/// again, so a nested inline run is neither missed nor counted twice.
+pub fn reading_text(book: &BookData) -> String {
+    let mut out = String::new();
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let empty = HashMap::new();
+    let sections = book
+        .by_type
+        .get(&(KfxSymbol::Section as u64))
+        .unwrap_or(&empty);
+
+    let ordered: Vec<String> = reading_orders(book).into_iter().flatten().collect();
+    let mut walked: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for name in &ordered {
+        if let Some(section) = sections.get(name) {
+            walked.insert(name.as_str());
+            walk_text(section, book, &mut visited, &mut out);
+        }
+    }
+    // A section no reading order names is still the book's text; a container
+    // that states no reading order at all is read entirely this way.
+    let mut rest: Vec<&String> = sections
+        .keys()
+        .filter(|n| !walked.contains(n.as_str()))
+        .collect();
+    rest.sort_unstable();
+    for name in rest {
+        walk_text(&sections[name], book, &mut visited, &mut out);
+    }
+    out
+}
+
+fn walk_text(
+    value: &IonValue,
+    book: &BookData,
+    visited: &mut std::collections::HashSet<String>,
+    out: &mut String,
+) {
+    let inner = value.unwrap_annotated();
+    match inner {
+        IonValue::Struct(fields) => {
+            let is_element = fields.iter().any(|(k, _)| {
+                *k == KfxSymbol::Content as u64 || *k == KfxSymbol::ContentList as u64
+            });
+            if is_element {
+                out.push_str(&element_text(inner, book));
+            }
+            for (key, v) in fields {
+                if *key == KfxSymbol::StoryName as u64 {
+                    if let Some(name) = book.symbols.text_of(v)
+                        && visited.insert(name.to_string())
+                        && let Some(story) = lookup_fragment(book, KfxSymbol::Storyline, name)
+                    {
+                        walk_text(story, book, visited, out);
+                    }
+                } else if !is_element
+                    || (*key != KfxSymbol::Content as u64 && *key != KfxSymbol::ContentList as u64)
+                {
+                    walk_text(v, book, visited, out);
+                }
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                walk_text(item, book, visited, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every element's text, keyed by its `$155 id`, inline children included.
+///
+/// A *content* map, not a position-aligned one: a parent's entry holds the
+/// text of the inline runs sitting inside it, so a nested element's words
+/// appear twice — once under its own id, once inside its parent's. That is
+/// what a container-to-container comparison wants ("does this id still name
+/// the same words"), and not what slicing at a position offset wants —
+/// [`eid_text_map`] is the one indexed against the position scale.
+pub fn eid_content_map(book: &BookData) -> HashMap<i64, String> {
+    fn walk(value: &IonValue, book: &BookData, out: &mut HashMap<i64, String>) {
+        match value.unwrap_annotated() {
+            IonValue::Struct(fields) => {
+                let has_text = fields.iter().any(|(k, _)| {
+                    *k == KfxSymbol::Content as u64 || *k == KfxSymbol::ContentList as u64
+                });
+                if has_text
+                    && let Some(eid) =
+                        get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+                {
+                    let text = element_text(value.unwrap_annotated(), book);
+                    if !text.is_empty() {
+                        out.insert(eid, text);
+                    }
+                }
+                for (_, v) in fields {
+                    walk(v, book, out);
+                }
+            }
+            IonValue::List(items) => {
+                for item in items {
+                    walk(item, book, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = HashMap::new();
+    if let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) {
+        for story in storylines.values() {
+            walk(story, book, &mut out);
+        }
+    }
+    out
+}

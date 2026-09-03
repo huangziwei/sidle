@@ -48,6 +48,11 @@ pub struct SemanticMap {
     /// namespace (a KFX `eid`). This is the identifier a reading device
     /// persists in an annotation — the same key [`crate::model::PositionMap`]
     source_element: HashMap<NodeId, i64>,
+    /// The source's own word segmentation for this node, carried verbatim.
+    /// KFX states it as `$696 word_boundary_list`, a run-length list over the
+    /// element's offset space; the device reads it for double-tap selection
+    /// and dictionary lookup. Provenance, not something bokai can derive.
+    word_boundaries: HashMap<NodeId, Vec<i64>>,
     /// Per-node inline style declarations (`"k: v; k2: v2"` — the
     style: HashMap<NodeId, TextRange>,
 }
@@ -233,6 +238,21 @@ impl SemanticMap {
     /// The source's own element id for a node, if the format has one.
     pub fn source_element(&self, node: NodeId) -> Option<i64> {
         self.source_element.get(&node).copied()
+    }
+
+    /// Record the source's word segmentation for `node`. An empty list clears
+    /// it — a node the source segmented into nothing is a node with none.
+    pub fn set_word_boundaries(&mut self, node: NodeId, boundaries: Vec<i64>) {
+        if boundaries.is_empty() {
+            self.word_boundaries.remove(&node);
+        } else {
+            self.word_boundaries.insert(node, boundaries);
+        }
+    }
+
+    /// The source's word segmentation for `node`, if it stated one.
+    pub fn word_boundaries(&self, node: NodeId) -> Option<&[i64]> {
+        self.word_boundaries.get(&node).map(Vec::as_slice)
     }
 
     // --- row_span ---

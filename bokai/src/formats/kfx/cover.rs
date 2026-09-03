@@ -113,7 +113,7 @@ pub fn build_cover_section(
     // Content ID for position_map and location_map. A standalone cover has no
     // active chapter context; `cover_content_id` holds it for
     // `build_position_id_map_fragment` and `build_location_map_fragment`.
-    ctx.record_content_length(cover_content_id, 1);
+    ctx.record_content_slot(cover_content_id);
 
     // Build storyline content: [{ id, type: image, resource_name, style }]
     let content_list = IonValue::List(vec![IonValue::Struct(vec![

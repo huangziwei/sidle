@@ -39,14 +39,36 @@ pub struct TextRun {
 }
 
 /// One `style_events` entry: a `[offset, offset+length)` slice of the run's
-/// `content` with its rendered `width` (pt×100). Offsets/lengths are **UTF-16
-/// code units** (KFX's string-indexing convention — and PDFKit's native unit).
+/// `content` with its rendered `width` (pt×100). Offsets/lengths are
+/// **characters**, the unit KFX states every offset and span in. PDFKit
+/// indexes its glyph bounds by UTF-16 code unit, so the segmentation runs in
+/// that unit and is converted before it leaves [`extract_page`].
 #[derive(Debug, Clone)]
 pub struct StyleSeg {
     pub offset: usize,
     pub length: usize,
     pub width: i64,
     pub is_word: bool,
+}
+
+/// UTF-16 index → character index in `s`: one entry per code unit, plus the
+/// end. A surrogate pair's two units share one index, so converting a slice
+/// that runs past an astral character lands on the right character.
+///
+/// PDFKit indexes its glyph bounds by UTF-16 code unit and KFX states every
+/// offset and span in characters, so the text layer is segmented in the first
+/// unit and converted through this into the second.
+fn utf16_to_char_index(s: &str) -> Vec<usize> {
+    let mut out = Vec::with_capacity(s.len() + 1);
+    let mut chars = 0usize;
+    for ch in s.chars() {
+        for _ in 0..ch.len_utf16() {
+            out.push(chars);
+        }
+        chars += 1;
+    }
+    out.push(chars);
+    out
 }
 
 /// Why a render/extract didn't produce output. Callers treat every variant as
@@ -417,6 +439,11 @@ mod macos {
                 });
             }
 
+            // `from_utf16_lossy` turns an unpaired surrogate into one U+FFFD,
+            // one unit and one character, so this map stays as long as `raw`.
+            let char_at = super::utf16_to_char_index(&content);
+            let to_chars = |unit: usize| char_at[unit.min(char_at.len() - 1)];
+
             // A word's width is its own ink extent; a space's width is the gap
             // between the neighbouring words (PDFKit gives spaces no ink box, so
             // their advance has to come from the surrounding glyphs).
@@ -439,9 +466,10 @@ mod macos {
                 } else {
                     0
                 };
+                let offset = to_chars(s.start);
                 words.push(StyleSeg {
-                    offset: s.start,
-                    length: s.len,
+                    offset,
+                    length: to_chars(s.start + s.len) - offset,
                     width,
                     is_word: !s.space,
                 });
@@ -498,6 +526,33 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
+
+    /// KFX counts characters; PDFKit counts UTF-16 units. A surrogate pair is
+    /// two units and one character, so every offset past one shifts.
+    #[test]
+    fn utf16_indices_convert_to_character_indices() {
+        // "a𠮟b" — 'a', an astral character (two units), 'b'.
+        let s = "a\u{20B9F}b";
+        assert_eq!(s.chars().count(), 3);
+        assert_eq!(s.encode_utf16().count(), 4);
+
+        let map = super::utf16_to_char_index(s);
+        assert_eq!(
+            map,
+            vec![0, 1, 1, 2, 3],
+            "both units of the pair are character 1"
+        );
+
+        // A word segment covering the astral character and 'b' is units
+        // [1, 4) — two characters, not three.
+        assert_eq!(map[1], 1);
+        assert_eq!(map[4] - map[1], 2);
+
+        // Pure BMP text is one unit per character throughout.
+        let plain = "hello";
+        assert_eq!(super::utf16_to_char_index(plain), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(super::utf16_to_char_index(""), vec![0]);
+    }
     /// Assemble a one-page PDF with the given MediaBox and `/Rotate`, drawing a
     fn one_page_pdf(media: [i32; 4], rotate: i64) -> Vec<u8> {
         let content = "BT /F1 24 Tf 40 30 Td (Hi) Tj ET\n";
