@@ -47,6 +47,7 @@ pub struct ReaderResourceDto {
 }
 
 /// Manifest entry for an image the frontend fetches on demand via
+/// [`reader_fetch_resources`]. `width`/`height` let it reserve layout space.
 #[derive(Debug, Serialize)]
 pub struct ReaderImageDto {
     pub href: String,
@@ -63,7 +64,8 @@ pub struct ReaderTocDto {
     pub children: Vec<ReaderTocDto>,
 }
 
-/// What `reader_open` returns: either today's reflowable HTML book or a
+/// What `reader_open` returns: a reflowable HTML book or a fixed-layout PDF-backed
+/// one. Internally tagged, so the frontend branches on `mode`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReaderOpen {
@@ -92,7 +94,8 @@ pub struct ReaderPdfDto {
     pub page_progression_direction: String,
 }
 
-/// One PDF page's display size in points plus its selectable text layer: the
+/// One PDF page's display size in points plus its selectable text layer: the runs
+/// to overlay as `data-eid` spans, and every eid anchored on the page.
 #[derive(Debug, Serialize)]
 pub struct ReaderPdfPageDto {
     pub width: f32,
@@ -171,7 +174,8 @@ fn map_toc(points: Vec<sidle_core::reader::ReaderTocEntry>) -> Vec<ReaderTocDto>
         .collect()
 }
 
-/// Total section-HTML bytes above which a reflowable book's open DTO is
+/// Total section-HTML bytes above which a reflowable book's open DTO is windowed
+/// to the resume neighbourhood, the rest streaming via [`reader_fetch_sections`].
 const SECTION_WINDOW_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// The open DTO plus the store-side pieces a lazy open leaves behind.
@@ -185,7 +189,8 @@ struct BuiltReaderOpen {
     withheld: bool,
 }
 
-/// Build the reader-open DTO, windowing large reflowable books around the
+/// Build the reader-open DTO, windowing large reflowable books around
+/// `resume_eid`'s section: back 1 section, forward 2.
 fn build_reader_open(
     b: sidle_core::reader::ReaderBook,
     resume_eid: Option<i64>,
@@ -263,10 +268,11 @@ fn build_reader_open(
     }
 }
 
-/// Open a library book for the reader. A PDF-backed (container) book opens in
+/// Open a library book for the reader.
 #[tauri::command]
 pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
-    // Snapshot the paths + display metadata + saved Sidle position under the
+    // Snapshot paths, display metadata and the saved Sidle position under the lock,
+    // then release it before the CPU-bound parse/render.
     let (kfx_path, pdf_path, title, author, ppd, resume_eid) = {
         let conn = state.db.lock().await;
         let row = db::get_book(&conn, book_id)
@@ -364,7 +370,8 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
     Ok(open)
 }
 
-/// Fetch a batch of deferred images for the open book: each href from the
+/// Fetch a batch of deferred images for the open book: each manifest href → mime
+/// and base64 bytes. Hrefs that fail are omitted from the reply.
 #[tauri::command]
 pub async fn reader_fetch_resources(
     state: State<'_, AppState>,
@@ -649,7 +656,8 @@ pub struct AnnotationDto {
     pub color: Option<String>,
     /// `"yjr"` | `"clippings"` — provenance.
     pub source: String,
-    /// When the device says the annotation was made (ISO-8601), when it kept a
+    /// When the device says the annotation was made (ISO-8601), when it kept a stamp.
+    /// `None` on a row that carries none — never a guess from the import time.
     pub added_at: Option<String>,
     /// Reversible "hidden from the reader" flag (kept in the backup).
     pub hidden: bool,
@@ -708,7 +716,8 @@ pub async fn annotations_for_book(
     Ok(with_attachments(rows))
 }
 
-/// One stored last-read position. `source` = `"sidle"` (the reader's own) or
+/// One stored last-read position. `source` is `"sidle"` or `"device"`; the anchor
+/// is an `(eid, offset)` pair, and `linear_pos` the human "Location".
 #[derive(Debug, Serialize)]
 pub struct ReadingPositionDto {
     pub eid: Option<i64>,
@@ -849,7 +858,8 @@ pub async fn book_search(
 // ---------------------------------------------------------------------------
 // Native annotations (T0): create / edit / delete the reader's own annotations.
 
-/// Create a native annotation. Salts the **shared** content dedup hash with the
+/// Create a native annotation, salting the shared content dedup hash with the
+/// book's title key. Returns the stored row, or the one already present.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn annotation_create(
@@ -916,7 +926,8 @@ pub async fn annotation_create(
     Ok(AnnotationDto::from(stored))
 }
 
-/// Edit a native annotation's `kind` / `note_body` / `color` (e.g. promote a
+/// Edit a native annotation's `kind` / `note_body` / `color`. The content hash
+/// folds those in, so it is recomputed and moved with the edit.
 #[tauri::command]
 pub async fn annotation_update(
     state: State<'_, AppState>,

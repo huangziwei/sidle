@@ -408,7 +408,8 @@ pub fn inline_svg_flows(
             .unwrap_or(html.len());
         let flow_num = parse_base32(&html[num_start..num_end]);
 
-        // Locate `<svg` within the flow content. Inline from there to the
+        // Locate `<svg` in the flow and inline from there to the flow's end, which strips
+        // any leading `<?xml-stylesheet?>` PI that KF8 prepends.
         let svg_range = flow_table.get(flow_num).and_then(|&(start, end)| {
             let end = end.min(decompressed_text.len());
             if start > end {
@@ -624,7 +625,8 @@ pub fn escape_bare_ampersands(html: &[u8]) -> Vec<u8> {
     out
 }
 
-/// End offset of a comment / CDATA / processing-instruction span opening at
+/// End offset of a comment / CDATA / PI span opening at `pos`, or `None` when
+/// none starts there. An unterminated span runs to end of input.
 fn verbatim_span(html: &[u8], pos: usize) -> Option<usize> {
     const SPANS: [(&[u8], &[u8]); 3] = [(b"<!--", b"-->"), (b"<![CDATA[", b"]]>"), (b"<?", b"?>")];
     let rest = &html[pos..];
@@ -1221,7 +1223,8 @@ pub fn strip_kindle_embed_font_faces(css: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Strip Amazon-specific attributes (`aid`, `data-Amzn*`) from every tag —
+/// Strip Amazon-specific attributes (`aid`, `data-Amzn*`) from every tag, except
+/// an `aid` in `linked_aids`, which becomes `id="aid-{value}"` for link targets.
 pub fn strip_kindle_attributes_fast(
     html: &[u8],
     linked_aids: &std::collections::HashSet<String>,
@@ -1386,7 +1389,8 @@ fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec
     result
 }
 
-/// Whether a raw tag slice carries a real `id` attribute. Attribute-walk,
+/// Whether a raw tag slice carries a real `id` attribute. An attribute walk, not a
+/// substring search: a false negative would inject a second id and break the XML.
 fn tag_has_id_attr(tag: &[u8]) -> bool {
     let mut i = 1; // past '<'
     while i < tag.len()
@@ -1547,7 +1551,11 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
 
     #[test]
     fn test_lang_as_first_attribute_is_found() {
-        // `<html lang=… xml:lang=…>` with lang as the FIRST attribute: the
+        // `<html lang=… xml:lang=…>` with lang as the FIRST attribute. The
+        // attribute walk must see it — the attrs slice starts with the
+        // separator space — or `lang` reads as absent and a duplicate is
+        // appended, an XML well-formedness error (epubcheck RSC-016) on every
+        // retail AZW3 whose html tag leads with lang.
         let html = b"<html lang=\"en-US\" xml:lang=\"en-US\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head></html>";
         assert_eq!(ensure_html_lang_dual(html, "en"), html);
     }
@@ -1936,7 +1944,8 @@ srcset=\"../images/logo-2x.png 2x, ../images/logo.png 1x\" alt=\"Logo\"/>";
 <p aid=\"AA\">first</p><p aid=\"BB\">second</p></body>";
         let first_p = memmem::find(html, b"<p aid=\"AA\"").unwrap() as u32;
         let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
-        // `reassembled_pos` is where the chunk's content lands in the
+        // The body is one flat block here (no skeleton/chunk split), so
+        // `reassembled_pos` equals the byte position. An `off` of 0 is the opening tag.
         let elem = |reassembled_pos: u32| DivElement {
             insert_pos: reassembled_pos,
             toc_text: None,

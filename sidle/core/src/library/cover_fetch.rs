@@ -17,7 +17,8 @@ pub fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
         return None;
     }
     if !looks_like_real_amazon_asin(asin) {
-        // bokai stamps a 32-char Crockford-Base32 identifier on
+        // bokai stamps a 32-char Crockford-Base32 id on EPUB→KFX conversions, which is no
+        // catalogue ASIN. Real ASINs are 10 chars `[A-Z0-9]` — gate on that shape.
         eprintln!("[sidle/cover-fetch] skip: not a real ASIN ({asin:?})");
         return None;
     }
@@ -47,7 +48,8 @@ pub fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Fetch one cover-URL variant. Returns the bytes only when the response is a
+/// Fetch one cover-URL variant. Returns bytes only for a 2xx body clearing
+/// `PLACEHOLDER_THRESHOLD`; anything else is `None` so the caller tries the next.
 fn fetch_variant(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
     eprintln!("[sidle/cover-fetch] GET {url}");
     let resp = match client.get(url).send() {
@@ -101,7 +103,8 @@ fn locale_for_language(lang: &str) -> &'static str {
     }
 }
 
-/// Map a book language to the Amazon marketplace hostname to search for its
+/// The Amazon marketplace hostname to search for a book's ASIN, by language: the
+/// browseable domain, not the `/images/P/` segment. Defaults to amazon.com.
 pub fn amazon_search_domain(lang: &str) -> &'static str {
     let prefix: String = lang.chars().take(2).flat_map(char::to_lowercase).collect();
     match prefix.as_str() {

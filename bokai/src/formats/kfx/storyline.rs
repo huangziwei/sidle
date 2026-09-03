@@ -2041,8 +2041,8 @@ fn walk_node_for_export(
     // symbol. The source class attribute is a name hint, carrying an
     // identifier like "bold" / "vrtl" into the symbol table over an `s<N>`.
     let class_hint = chapter.semantics.class(node_id);
-    // A cell's span joins its style, not its element — that is where
-    // Amazon writes it, and it is the only place the corpus attests.
+    // A cell's span joins its style, not its element — that is where Amazon
+    // writes it.
     let spans = cell_span_properties(chapter, node_id);
     let style_symbol =
         ctx.register_style_id_with_extras(node.style, &chapter.styles, class_hint, &spans);

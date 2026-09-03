@@ -154,7 +154,8 @@ impl Transport for MtpTransport {
             let handle = resolve(storage, path)
                 .await?
                 .ok_or_else(|| anyhow!("MTP read: object not found at `{path}`"))?;
-            // Stream the object in bounded (64 KiB) chunks instead of `download()`,
+            // Stream the object in bounded 64 KiB chunks: the Scribe stalls a multi-MB
+            // single-transfer GetObject, and the transport is then evicted.
             let mut dl = storage.download_stream(handle).await.map_err(map_mtp_err)?;
             let total = dl.size();
             let mut buf = Vec::with_capacity(total as usize);

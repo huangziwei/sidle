@@ -1,4 +1,5 @@
-//! Pull Scribe handwritten notebooks off the connected Kindle through the
+//! Pull Scribe handwritten notebooks off the connected Kindle through
+//! [`Transport`]. Only standalone (dashed-uuid) notebooks are imported.
 
 use anyhow::{Context, Result};
 
@@ -16,7 +17,10 @@ struct Pulled {
     updated_at: String,
 }
 
-/// The standalone notebook directories under `.notebooks/`, identified by their
+/// The standalone notebook directories under `.notebooks/`, by dashed-UUID name.
+/// One `list` of `.notebooks/` is enough — no round-trip into each child.
+/// single `list` of `.notebooks/` is enough — listing every child to find an
+/// `nbk` would walk `page_cache/`, which is large and slow over USB.
 fn list_candidates(transport: &dyn Transport, root: &TPath) -> Result<Vec<String>> {
     Ok(transport
         .list(root)?

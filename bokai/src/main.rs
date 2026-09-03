@@ -702,7 +702,7 @@ enum ValidateCheck {
         json: bool,
     },
 
-    /// Strict A/B tree diff of two EPUBs (byte-exact per zip entry) — the
+    /// Strict A/B tree diff of two EPUBs, byte-exact per zip entry.
     EpubDiff {
         /// Reference EPUB (A — the before)
         a: String,

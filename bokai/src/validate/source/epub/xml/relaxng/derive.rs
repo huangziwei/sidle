@@ -364,6 +364,7 @@ impl<'a> Validator<'a> {
     }
 
     /// `att_deriv` with the value check removed: would this attribute *name* be
+    /// accepted here at all? An unknown name is the defect worth listing names for.
     fn att_name_deriv(&mut self, p: PatternId, ns: Option<&str>, local: &str) -> PatternId {
         match self.arena.pattern(p).clone() {
             Pattern::After(a, b) => {
@@ -402,7 +403,8 @@ impl<'a> Validator<'a> {
         }
     }
 
-    /// What the grammar wanted the attribute's value to be, worded from the
+    /// What the grammar wanted the attribute's value to be, worded from the declared
+    /// datatype or, for an enumeration, the permitted literals.
     fn attribute_datatype(
         &self,
         p: PatternId,

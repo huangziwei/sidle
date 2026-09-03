@@ -683,7 +683,8 @@ fn named_as_a_series(
     title: &str,
     authors: &[String],
 ) -> Vec<Start> {
-    // A count of two is the commonest shape in publishing — every novel with a
+    // A count of two is the commonest shape in publishing, so it takes three to read
+    // as a series. A repeated work name needs no such margin.
     for (chosen, least) in [
         (counted_labels(candidates), 3),
         (title_bearing_labels(candidates, title, authors), 2),
@@ -767,7 +768,7 @@ fn counted_labels(candidates: &[Candidate<'_>]) -> Vec<Start> {
         .unwrap_or_default()
 }
 
-/// The words a Latin-script label numbers *volumes* with. `part`, `chapter`,
+/// The words a Latin-script label numbers *volumes* with.
 const VOLUME_WORDS: [&str; 3] = ["book", "volume", "vol"];
 
 /// What a label reads as a counted volume: the stem it counts from, and the
@@ -1271,7 +1272,7 @@ mod tests {
         );
     }
 
-    /// The same book, named one page later. A cover has no text to name it by,
+    /// The same book, named one page later.
     #[test]
     fn a_volume_named_by_its_contents_page_still_begins_at_its_cover() {
         let mut docs: Vec<Doc<'static>> = vec![
@@ -1309,7 +1310,7 @@ mod tests {
         );
     }
 
-    /// The walk back onto a cover is a fact about the collection, not about one
+    /// The walk back onto a cover is a fact about the collection, not one volume.
     #[test]
     fn a_picture_ending_a_volume_is_not_the_next_volumes_cover() {
         let mut docs = collection_documents();
@@ -1330,7 +1331,8 @@ mod tests {
         );
     }
 
-    /// A publisher's own nesting is kept exactly as declared, order included —
+    /// A publisher's own nesting is kept as declared; the spine's order, not the
+    /// chapter list's, decides where a volume ends.
     #[test]
     fn a_chapter_list_out_of_order_is_read_in_the_books_order() {
         let docs = collection_documents();
@@ -1430,7 +1432,8 @@ mod tests {
         );
     }
 
-    /// A boxed set the Western way: every volume keeps the copyright page it
+    /// A boxed set the Western way: each volume keeps its own copyright page, run onto
+    /// its cover plate's document, and the set's Contents page lists every chapter.
     #[test]
     fn a_boxed_set_cuts_where_each_work_states_its_own_rights() {
         let works = [

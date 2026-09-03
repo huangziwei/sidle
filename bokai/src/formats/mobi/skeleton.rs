@@ -475,7 +475,8 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
 
         i = tag_end;
 
-        // Cut at the first element-closing boundary once we've reached the
+        // Cut at the first element-closing boundary past the target size — first-fit. A
+        // deep run must not grow past the limit, which the renderer cannot handle.
         if (is_close || self_closing) && (i - chunk_start) >= max_size {
             chunks.push(body[chunk_start..i].to_vec());
             chunk_start = i;
@@ -501,7 +502,8 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
     chunks
 }
 
-/// Split an HTML document into `(scaffold_before_body_content, body_content,
+/// Split an HTML document into `(before_body, body_content, after_body)`, cutting
+/// past `<body…>` and before `</body>`. All scaffold when either tag is absent.
 fn split_body(html: &[u8]) -> (&[u8], &[u8], &[u8]) {
     use memchr::memmem;
 

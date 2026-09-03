@@ -54,7 +54,8 @@ impl Format {
     }
 }
 
-/// A purchased DRM book found on the device — the app-layer view-model that
+/// A purchased DRM book found on the device: local paths and cover alongside the
+/// pipeline [`Book`]. `book.id` is this entry's index in [`scan`]'s `Vec`.
 #[derive(Debug, Clone)]
 pub struct DrmBook {
     pub book: Book,
@@ -114,6 +115,7 @@ fn out_in(dir: &Path, path: &Path, format: Format) -> Option<PathBuf> {
 }
 
 /// The inverse of [`out_path`]: the encrypted book under [`ITEMS_DIR`] that
+/// produced a given output. `None` if `out` is not an engine output.
 pub fn source_book(out: &Path) -> Option<PathBuf> {
     let items = Path::new(ITEMS_DIR);
     let name = out.file_name()?.to_str()?;
@@ -123,7 +125,8 @@ pub fn source_book(out: &Path) -> Option<PathBuf> {
     }
 }
 
-/// A purchased book's sidecar dir: the `<stem>.sdr/` sitting beside it (for a
+/// A purchased book's sidecar dir: the `<stem>.sdr/` beside it, holding a KFX's
+/// `assets/voucher` decrypt key. Derived from the book path's own parent + stem.
 fn sdr_dir(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -158,7 +161,8 @@ fn is_output(path: &Path) -> bool {
         || Format::of_path(path) == Some(Format::Mobi)
 }
 
-/// Remove one purchased book's entire on-device footprint once it's confirmed on
+/// Remove one purchased book's whole on-device footprint — encrypted input,
+/// `<stem>.sdr/`, decrypted output — once the desktop has it. Idempotent.
 pub fn cleanup_synced(path: &Path) -> Vec<(PathBuf, std::io::Error)> {
     cleanup_paths(path, &sdr_dir(path), out_path(path).as_deref())
 }
@@ -282,7 +286,8 @@ const RECORD_LIST_OFF: usize = 78;
 /// Where `encryption_type` sits in the PalmDOC header that opens record 0.
 const ENCRYPTION_OFF: usize = 12;
 
-/// The `encryption_type` field of a MOBI-family book, as two short reads — the
+/// The `encryption_type` field of a MOBI-family book, as two short reads. `None`
+/// on I/O error, a truncated file, or a database that is not Mobipocket.
 fn palmdoc_encryption(path: &Path) -> Option<u16> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -358,7 +363,8 @@ fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_a
         publisher: None,
         series_name: None,
         series_index: None,
-        // The conversion kind this book's library row carries once imported: a
+        // The conversion kind this book's row carries once imported: a KFX converts to
+        // EPUB, a MOBI-family book imports through its EPUB side.
         kind: Some(
             match format {
                 Format::Kfx => "kfx_to_epub",
@@ -519,7 +525,8 @@ mod tests {
 
     #[test]
     fn scan_in_applies_the_recon_rules() {
-        // A fake Items01 exercising every scan rule across both families: a
+        // A fake Items01 exercising every scan rule across both families: covered and
+        // voucher-less KFX, a macOS shadow, a no-ASIN sideload, azw3, mobi, Topaz.
         let base = scratch("scan");
         let items = base.join("Items01");
         let thumbs = base.join("thumbnails");

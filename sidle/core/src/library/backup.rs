@@ -104,6 +104,7 @@ pub fn create_archive(
 }
 
 /// Like [`create_archive`], but ticks `on_progress(dirs_done, dirs_total)` after
+/// each book/notebook directory is zipped.
 pub fn create_archive_with_progress(
     snapshot: &TempSnapshot,
     books_dir: &Path,
@@ -316,7 +317,8 @@ pub fn restore_with_progress(
     let staging = sibling(dest_root, "restoring")?;
     let manifest = stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
-    // (3) Restore-specific verify: the staged DB opens as a sidle library with
+    // (3) Restore-specific verify: the staged DB opens as a sidle library with the
+    //     manifest's book count. Failure clears staging, leaving the target untouched.
     let staged_books = match relocate::validate_existing(&staging) {
         Ok(n) => n,
         Err(e) => {
@@ -333,7 +335,8 @@ pub fn restore_with_progress(
         );
     }
 
-    // (4) Swap. Move the current payload aside, then the staged payload into
+    // (4) Swap: move the current payload aside, then the staged payload into place.
+    //     Aside first, so a failure in the second move leaves every original intact.
     let safety = sibling(
         dest_root,
         &format!("bak-{}", Utc::now().format("%Y%m%d-%H%M%S")),
@@ -366,7 +369,8 @@ pub fn restore_with_progress(
 // internals
 // ---------------------------------------------------------------------------
 
-/// A temp file holding the `VACUUM INTO` snapshot, removed on drop (success or
+/// A temp file holding the `VACUUM INTO` snapshot, removed on drop. Produced by
+/// [`snapshot`], consumed by [`create_archive`].
 pub struct TempSnapshot {
     path: PathBuf,
 }
@@ -781,8 +785,8 @@ mod tests {
             assert_eq!(pos[0].eid, Some(2));
         }
 
-        // The notebook row AND its rendered page survive — the v2 gap fix (a v1
-        // archive carried the row in the DB but lost the files).
+        // The notebook row AND its rendered page survive: a row in the DB with no
+        // files behind it is a notebook that opens to nothing.
         let nb = db::get_notebook_by_uuid(&rconn, "nb-1")
             .unwrap()
             .expect("notebook row carried");

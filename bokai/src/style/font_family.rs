@@ -24,7 +24,8 @@ fn generic_category(name: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// The category a whole stack asks for: the first generic in it, wherever the
+/// The category a whole stack asks for: its first generic, wherever the author put
+/// it. `None` when a stack names only typefaces and no category at all.
 pub fn font_stack_category(stack: &str) -> Option<&'static str> {
     stack.split(',').find_map(generic_category)
 }

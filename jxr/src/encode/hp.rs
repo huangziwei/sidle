@@ -1,4 +1,5 @@
 //! HP band encoder — inverse of the decoder's `mb_cbphp` + `mb_hp_flex` for
+//! grayscale ALL_BANDS. The coefficient is `(vlc << model_bits) + flex`.
 
 use super::bitstream::BitWriter;
 use super::coeff;

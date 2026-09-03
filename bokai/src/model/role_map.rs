@@ -14,7 +14,8 @@ pub fn element_to_role(local_name: &LocalName) -> Role {
 /// Like `element_to_role` but returns `None` for elements not explicitly
 pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
     Some(match local_name.as_ref() {
-        // Block containers. `center` is the deprecated presentational one —
+        // Block containers. `center` is the deprecated presentational one, which the UA
+        // stylesheet gives `display: block; text-align: center`.
         "div" | "section" | "article" | "nav" | "header" | "footer" | "main" | "address"
         | "details" | "summary" | "hgroup" | "center" => Role::Container,
 
@@ -87,13 +88,15 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
 
         "label" | "legend" | "output" | "data" | "bdi" | "bdo" | "wbr" => Role::Inline,
 
-        // Document roots. `transform()` treats <html>/<body> specially and
+        // Document roots. `transform()` attaches their children to the chapter root, so
+        // mapping them here is for the tag-coverage validator's sake.
         "html" | "body" => Role::Container,
 
         // <head> and metadata children — content here is not user-visible
         "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" => Role::Container,
 
-        // SVG/MathML/embedded media — bokai has no specialised handling for
+        // SVG/MathML/embedded media flow as generic Containers, so only their text leaves
+        // survive. Listed so the validator tells known-untreated from unknown.
         "svg" | "math" | "audio" | "video" | "source" | "track" | "object" | "embed" | "iframe"
         | "canvas" => Role::Container,
 

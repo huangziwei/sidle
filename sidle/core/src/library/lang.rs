@@ -1,4 +1,5 @@
-//! Harmonize the diverse language tags books arrive with — `en`, `en-US`,
+//! Harmonize the language tags books arrive with into one canonical code, so the
+//! library facet collapses them. ISO 639-1 where one exists; `zh` keeps script.
 
 /// Normalize a raw language tag to its canonical code. Empty (or whitespace) in
 /// → empty out, so a book with no language stays blank rather than gaining one.

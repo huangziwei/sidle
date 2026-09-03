@@ -137,7 +137,8 @@ pub fn swap_or_insert_kfx_cover(
     match kfx_cover::replace_cover(kfx_path, bytes) {
         Ok(sha) => Some(sha),
         Err(e) => {
-            // The KFX may be rebuilt from its EPUB only when the EPUB is the
+            // The KFX may be rebuilt from its EPUB only when the EPUB is the SOURCE
+            // (`kind == "epub_to_kfx"`): a KFX-sourced book's KFX is authoritative.
             let epub_is_source = book.kind.as_deref() == Some("epub_to_kfx");
             let Some(epub) = book.epub_path.as_deref().filter(|_| epub_is_source) else {
                 eprintln!(

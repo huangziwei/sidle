@@ -1,4 +1,5 @@
-//! Additive backup of the folders a Kindle is configured to share — screenshots,
+//! Additive backup of the folders a Kindle is configured to share, pulled
+//! through [`Transport`] so one path covers both mass-storage and MTP.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +38,7 @@ impl MiscBackupReport {
 }
 
 /// Back up the connected device's configured collections into
+/// `device-backup/<serial>/`. Best-effort; only a local-fs failure propagates.
 pub fn backup_device_misc(
     transport: &dyn Transport,
     serial: &str,

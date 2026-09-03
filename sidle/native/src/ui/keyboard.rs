@@ -253,7 +253,8 @@ fn draw_band(
     );
 }
 
-/// Draw one key. `pressed` inverts it — filled black with a white label — which
+/// Draw one key. `pressed` inverts it, which is the only acknowledgement a tap
+/// gets while the finger is still down.
 fn draw_key(fb: &mut Framebuffer, renderer: &mut TextRenderer, kb: &KeyButton, pressed: bool) {
     let (x, y, w, h) = face(kb);
     let (top, left) = (y.max(0) as u32, x.max(0) as u32);

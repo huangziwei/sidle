@@ -38,11 +38,12 @@ pub struct SemanticMap {
     col_span: HashMap<NodeId, u32>,
     /// Whether a table cell is a header cell (th vs td).
     is_header_cell: HashMap<NodeId, bool>,
-    /// KFX `render: inline` — an element demoted to inline flow (span) at
+    /// KFX `render: inline` — an element demoted to inline flow at import because
+    /// every descendant is inline-only. The epub→kfx direction re-emits it.
     render_inline: HashMap<NodeId, bool>,
     /// Programming language for code blocks.
     language: HashMap<NodeId, TextRange>,
-    /// Original `class` attribute string (verbatim, space-separated). Used to
+    /// Original `class` attribute string (verbatim, space-separated).
     class: HashMap<NodeId, TextRange>,
     /// The source's own element id for this node, when the format has such a
     /// namespace (a KFX `eid`). This is the identifier a reading device
@@ -53,7 +54,8 @@ pub struct SemanticMap {
     /// element's offset space; the device reads it for double-tap selection
     /// and dictionary lookup. Provenance, not something bokai can derive.
     word_boundaries: HashMap<NodeId, Vec<i64>>,
-    /// Per-node inline style declarations (`"k: v; k2: v2"` — the
+    /// Per-node inline style declarations, the `style="…"` attribute form. Carries
+    /// source styling that has no named rule.
     style: HashMap<NodeId, TextRange>,
 }
 

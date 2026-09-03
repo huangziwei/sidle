@@ -17,7 +17,8 @@ pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static s
         return Ok(None);
     };
 
-    // Find the external_resource whose resource_name matches the declared cover,
+    // Find the external_resource whose resource_name matches the declared cover and
+    // read its `location` + `format`. Match on the field: `by_type` keys on fid.
     let mut location: Option<String> = None;
     let mut format: Option<String> = None;
     for v in resources.values() {

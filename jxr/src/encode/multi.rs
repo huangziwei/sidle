@@ -1,4 +1,5 @@
-//! Multi-component plane encoder (`INT_YUVK` / `INT_NCOMPONENT`) — the
+//! Multi-component plane encoder (`INT_YUVK` / `INT_NCOMPONENT`): each component
+//! is coded as an independent YONLY-style channel sharing one plane's state.
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;

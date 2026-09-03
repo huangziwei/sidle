@@ -17,7 +17,8 @@ pub fn detect() -> Option<DeviceInfo> {
 
     let dev = devices.into_iter().find(|d| d.vendor_id == AMAZON_VID)?;
 
-    // Identity priority: USB serial number first (survives reconnection to a
+    // Identity priority: the USB serial first, which survives reconnection to another
+    // port, then `location_id`, which holds only while the device stays put.
     let serial = dev
         .serial_number
         .clone()

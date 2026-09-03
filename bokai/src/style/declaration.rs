@@ -153,7 +153,9 @@ pub enum Declaration {
     BorderCollapse(BorderCollapse),
     BorderSpacing(Length),
 
-    /// CSS-wide keyword (`inherit` | `initial` | `unset` | `revert`) — the
+    /// CSS-wide keyword (`inherit` | `initial` | `unset` | `revert`). The cascade
+    /// no-ops on it, so an explicit `inherit` on a non-inherited property is ignored.
+    /// won't behave per spec, but that case is vanishingly rare in real EPUBs.
     UniversalKeyword {
         property: String,
         keyword: UniversalKeyword,

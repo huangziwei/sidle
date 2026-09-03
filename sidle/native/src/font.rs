@@ -141,7 +141,8 @@ pub struct FontChain {
     rest: Vec<Face>,
 }
 
-/// A fallback slot. Candidates this firmware doesn't have are dropped when
+/// A fallback slot. Candidates this firmware lacks are dropped as the chain loads,
+/// so the chain is exactly the font files the device offers, in order.
 struct Face {
     path: PathBuf,
     script: Script,

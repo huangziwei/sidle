@@ -46,7 +46,8 @@ use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
 
-/// Where every app on this Kindle that follows the convention keeps its logs —
+/// Where every app on this Kindle that follows the convention keeps its logs, and
+/// what the desktop's default `logs` sync collection scans.
 const LOG_DIR: &str = "/mnt/us/logs";
 const LOG_PATH: &str = "/mnt/us/logs/sidle-native.log";
 /// Dedicated log for the LAN self-update, so its trail isn't interleaved with
@@ -108,7 +109,7 @@ struct Armed {
     down_at: Instant,
 }
 
-/// Which library the picker is showing. `Library` is the LAN server library (the
+/// Which library the picker is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Library,
@@ -183,7 +184,8 @@ fn main() {
 /// already holds, and add it.
 fn archive_once(verbose: bool) {
     let us = std::path::Path::new(MNT_US);
-    // `seen` is empty: that list is the *desktop's* record of dumps it has read,
+    // `seen` is empty: that list is the desktop's record of dumps it has read, which
+    // says nothing about this archive. Our own watermark decides here.
     let found = readinglog::collect(us, &readinglog::archive_watermark(us), &[]);
     match readinglog::archive(us, &found.lines) {
         Ok(Some(name)) => log(format!("archived {} lines → {name}", found.lines.len())),
@@ -193,7 +195,8 @@ fn archive_once(verbose: bool) {
     }
 }
 
-/// Paint a clean centered banner panel: white-fill the screen, draw `message`,
+/// Paint a clean centered banner panel: white-fill, draw `message`, then one
+/// full-screen GC16 refresh so it lands without DU ghosting.
 fn draw_panel(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -422,7 +425,8 @@ fn run() -> anyhow::Result<()> {
     };
     let total_from_server = books.len();
 
-    // Hide books that already live on this Kindle. The picker is a
+    // Hide books that already live on this Kindle: the picker is a transfer queue.
+    // The sha8 in each on-device filename is the source of truth.
     let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
     // `mut`: a mid-session download removes its book from this master set so the
     // tile hides immediately (see the long-press handler), matching the
@@ -474,7 +478,8 @@ fn run() -> anyhow::Result<()> {
         t0.elapsed()
     ));
 
-    // Lazy cover fetch: start with all None, populate per-page as the
+    // Lazy cover fetch: all `None` to start, filled per page as the user navigates.
+    // `covers` is parallel to `cells`; the first paint shows placeholders and titles.
     let mut covers: Vec<Option<DynamicImage>> = vec![None; cells.len()];
 
     let mut page: usize = 0;
@@ -503,7 +508,8 @@ fn run() -> anyhow::Result<()> {
     // `armed`, since a swipe can start anywhere, not just on a cover cell.
     let mut down_pos: Option<(u32, u32)> = None;
     loop {
-        // While a *book* cell is held, wake the loop at the arm threshold so the
+        // While a *book* cell is held, wake at the arm threshold so the tile can flip and
+        // auto-fire; finger jitter keeps `poll` busy, so no `Tick` arrives on its own.
         let deadline = match armed.as_ref() {
             Some(a) if matches!(cells.get(a.cell_idx).map(|c| &c.kind), Some(CellKind::Book)) => {
                 Some(a.down_at + ARM_THRESHOLD)
@@ -716,7 +722,8 @@ fn run() -> anyhow::Result<()> {
                             continue;
                         }
                         ui::searchbar::Tap::DecryptAll => {
-                            // DRM view's right disc (the library view's Update slot,
+                            // DRM view's right disc: decrypt every on-device purchase, push each to the
+                            // desktop behind an `n/total` bar, then re-scan so the synced tiles drop out.
                             log("decrypt-all button tap");
                             if drm_books.is_empty() {
                                 let dirty =
@@ -799,7 +806,8 @@ fn run() -> anyhow::Result<()> {
                                     let dirty = toast::draw(&mut fb, &mut renderer, "Syncing…");
                                     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                     let sync_t0 = Instant::now();
-                                    // One walk of `.notebooks/` feeds both halves of the
+                                    // One walk of `.notebooks/` feeds both halves of the handwriting sync: ink rides
+                                    // with the annotations (it needs their anchors), notebooks go afterwards.
                                     let hw_t0 = Instant::now();
                                     let pen = handwriting::scan(
                                         std::path::Path::new(NOTEBOOKS_DIR),
@@ -870,7 +878,8 @@ fn run() -> anyhow::Result<()> {
                                                     log(format!("notebook backup failed: {err}"));
                                                 }
                                             }
-                                            // Same Sync tap sends the reading sessions the
+                                            // The same Sync tap sends the reading sessions the firmware logged. The desktop
+                                            // says how far it has read, so everything older is skipped unopened.
                                             let rl_t0 = Instant::now();
                                             // Archive first, then push. The
                                             archive_once(false);
@@ -1185,7 +1194,8 @@ fn run() -> anyhow::Result<()> {
                             let before = source;
                             match source {
                                 Source::Library => {
-                                    // → DRM. Gate on the engine being installed (a
+                                    // → DRM. Gate on the engine being installed, then on at least one purchase
+                                    // present. Any miss toasts and stays.
                                     if !dedrm::available() {
                                         let dirty = toast::draw(
                                             &mut fb,
@@ -1222,7 +1232,8 @@ fn run() -> anyhow::Result<()> {
                                     log(format!("→ Library source: {} books", all_books.len()));
                                 }
                             }
-                            // Only rebuild when the source actually flipped — a
+                            // Only rebuild when the source actually flipped: a failed switch leaves the view
+                            // untouched. Fresh query and facets for the new set; the sort key carries over.
                             if source != before {
                                 query.clear();
                                 filters = Filters::default();
@@ -1271,7 +1282,8 @@ fn run() -> anyhow::Result<()> {
             }
             InputEvent::Page(pb) => {
                 log(format!("page button: {pb:?}"));
-                // A hardware page-turn cancels any in-progress long-press: the
+                // A hardware page-turn cancels an in-progress long-press: the finger may still be
+                // down on a now-stale cell, so drop the armed state and the landing point.
                 armed = None;
                 down_pos = None;
                 let new_page = match pb {
@@ -1353,7 +1365,8 @@ fn run() -> anyhow::Result<()> {
                             )?;
                             thread::sleep(ARM_DWELL);
                         }
-                        // Auto-fire: act on the book — download it (library) or
+                        // Auto-fire: act on the book — download it (library) or decrypt it (DRM). The
+                        // finger is still down, and its eventual lift is inert.
                         let book = &cells[a.cell_idx].cover_book;
                         // Grab the identity now: `book` borrows `cells`, and the
                         // hide-on-success rebuild below reassigns `cells`.
@@ -1406,7 +1419,8 @@ fn run() -> anyhow::Result<()> {
                         };
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
-                        // Hide the just-acted book: on the device now, and the
+                        // Hide the just-acted book: it is on the device now, so drop it from the master
+                        // set and re-derive the current view. The page is kept, clamped if it emptied.
                         if saved {
                             all_books.retain(|b| b.id != dl_id);
                             entries = series::group_by_series(rebuild_view(
@@ -1747,13 +1761,15 @@ fn fetch_and_paint_page(
     Ok(())
 }
 
-/// Decode a DRM book's local device thumbnail into a grid image, or `None` if
+/// Decode a DRM book's local device thumbnail into a grid image, or `None` when
+/// missing or undecodable. The local twin of [`load_cover`]'s LAN fetch.
 fn dedrm_cover(path: &Path) -> Option<DynamicImage> {
     let bytes = std::fs::read(path).ok()?;
     grid::decode_resize(&bytes).ok()
 }
 
-/// Load one book's cover into a decoded image: disk cache first (instant, no
+/// Load one book's cover into a decoded image: disk cache first, then the LAN with
+/// a write-through. `None` on a fetch or decode failure.
 fn load_cover(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
@@ -1799,7 +1815,8 @@ fn load_cover(
     }
 }
 
-/// The content_ids of every book in the library, which is what tells the
+/// The content_ids of every book in the library, which tells the handwriting scan
+/// whose ink is whose: an ink notebook is named after its host book's content_id.
 fn library_asins(books: &[api::Book]) -> std::collections::HashSet<String> {
     books.iter().filter_map(|b| b.asin.clone()).collect()
 }
@@ -1953,7 +1970,8 @@ fn decrypt_flow(
     Ok((msg, true))
 }
 
-/// Decrypt every on-device DRM purchase in `books` and push each result to the
+/// Decrypt every DRM purchase in `books` and push each result to the desktop, the
+/// batch twin of [`decrypt_flow`]. Interruptible between books, not within one.
 fn decrypt_all_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -2067,7 +2085,8 @@ fn decrypt_all_flow(
             break;
         }
     }
-    // Settle the bar where the batch got to — `total` when it ran out, short of
+    // Settle the bar where the batch got to — `total`, or short of it after a stop —
+    // so it visibly completes before the summary panel replaces it.
     let ran = (decrypted + failed) as usize;
     let rect = toast::draw_progress(fb, renderer, "Done", ran, total);
     fb.send_update(rect, WAVEFORM_MODE_GC16)?;
@@ -2214,7 +2233,8 @@ fn download_flow(
             last_draw = Instant::now();
         }
 
-        // Drain ALL pending input between chunks, not just one event: a
+        // Drain ALL pending input between chunks: a two-corner screenshot is two contacts
+        // and both may queue during one network read.
         while let Some(ev) = input.poll_now()? {
             log(format!("dl input (chunk {chunks}): {ev:?}"));
             match ev {
@@ -2279,7 +2299,8 @@ fn download_flow(
     // this book until the desktop actually reconverts it (bumping `kfx_rev`).
     updates::record_download(Path::new(SYNCED_REVS_PATH), safe_name, book.kfx_rev);
     log(format!("downloaded {written} bytes to {}", path.display()));
-    // Land whatever the library already knows about this book — highlights,
+    // Land what the library knows about this book — highlights, notes, position —
+    // while it is certain no reader has it open.
     match api::pull_sidecar(agent, cfg, book.id, Path::new(DOWNLOAD_DIR), safe_name) {
         Ok(true) => log("sidecar written with the download"),
         Ok(false) => {}

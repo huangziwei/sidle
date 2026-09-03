@@ -65,6 +65,7 @@ fn strip_markup(s: &str) -> String {
 }
 
 /// Where every stamp landed: section, id, the tag it marked, and the text that
+/// element encloses.
 fn placements(kfx: &[u8]) -> (usize, usize, u64) {
     let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let content = bokai::export::normalize_book_with(&mut book, SourceElements::Mark)

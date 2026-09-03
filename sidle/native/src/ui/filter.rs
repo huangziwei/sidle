@@ -147,7 +147,10 @@ fn non_empty_or_sentinel(s: &str) -> String {
     }
 }
 
-/// AND across active facets, OR within (`matchesFacets` + `activeFacetsExcept`,
+/// AND across active facets, OR within (`library.js`'s `matchesFacets` +
+/// `activeFacetsExcept`). `skip` excludes one facet from the test — used by
+/// [`facet_options`] for the leave-one-out cascade; pass `None` for the real
+/// visibility test.
 pub fn matches(book: &Book, filters: &Filters, skip: Option<Facet>) -> bool {
     for facet in Facet::ALL {
         if Some(facet) == skip {

@@ -7,7 +7,8 @@ use std::collections::VecDeque;
 use super::HyphenationError;
 use super::automaton::{Level, State};
 
-/// The level that finds the breaks a word already carries, generated for a
+/// The level that finds the breaks a word already carries, for a dictionary that
+/// declares patterns alone. `NOHYPHEN` keeps a soft hyphen off a visible mark.
 const COMPOUND_LEVEL: &str = "\
 NOHYPHEN ',–,’,-
 1-1

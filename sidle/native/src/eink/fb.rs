@@ -64,8 +64,8 @@ fn wire_channels(conn: &RustConnection, screen: &Screen, bpp: usize) -> Option<[
     ])
 }
 
-/// A rectangle to present, in screen coords. Name kept (`MxcfbRect`) so the
-/// renderer call sites are unchanged; it's no longer an MXCFB struct.
+/// A rectangle to present, in screen coords. Despite the name it is not a
+/// kernel ABI struct and must not be handed to an ioctl.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct MxcfbRect {
     pub top: u32,

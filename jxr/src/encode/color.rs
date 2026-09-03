@@ -744,8 +744,8 @@ impl ColorPlane {
                         0
                     }
                 } else if self.fmt == INT_YUV420 {
-                    // Table 133, 420 chroma in our transposed storage
-                    // (decoder.rs:1184-1195): ours j=1 from left, j=2 from top.
+                    // Table 133, 420 chroma in our transposed storage, as the
+                    // decoder's `mb_lp` reads it: ours j=1 from left, j=2 from top.
                     if lp_mode == PREDICT_FROM_LEFT && j == 1 {
                         self.dclp[mbx - 1][mby][comp][1]
                     } else if lp_mode == PREDICT_FROM_TOP && j == 2 {
@@ -754,7 +754,7 @@ impl ColorPlane {
                         0
                     }
                 } else {
-                    // Table 133, 422 chroma (decoder.rs:1196-1218): LEFT predicts
+                    // Table 133, 422 chroma, as the decoder's `mb_lp` reads it: LEFT predicts
                     if lp_mode == PREDICT_FROM_LEFT && matches!(j, 4 | 1 | 5) {
                         self.dclp[mbx - 1][mby][comp][j]
                     } else if lp_mode == PREDICT_FROM_TOP {
@@ -788,7 +788,7 @@ impl ColorPlane {
             ];
             let i_cbplp = (cbp[0] as i32) | ((cbp[1] as i32) << 1) | ((cbp[2] as i32) << 2);
             // cbplp coding: Huffman (with optional inversion) when the count
-            // state says so, else 3 raw bits — mirrors `mb_lp` (decoder.rs:940).
+            // state says so, else 3 raw bits — mirrors the decoder's `mb_lp`.
             let i_max = 3 * 4 - 5; // = 7 (all bits set)
             if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
                 let cbplp_yuv1 = if self.count_max_cbplp < self.count_zero_cbplp {
@@ -927,7 +927,7 @@ impl ColorPlane {
                 );
             }
             // Chroma refinement interleaves U,V per coefficient (linear order
-            // in our transposed storage; decoder.rs:1120-1129).
+            // in our transposed storage), mirroring the decoder's `mb_lp`.
             let mb_chr = self.model_lp.m_bits[1];
             if mb_chr > 0 {
                 for k in 1..jmax {
@@ -2518,8 +2518,8 @@ mod tests {
     }
 
     /// Clean synthetic color master with all-band energy per channel: coarser
-    /// quant ⇒ strictly more error (rules out a deadzone/rounding bug the
-    /// fixpoint alone wouldn't catch).
+    /// quant ⇒ strictly more error, which a deadzone or rounding fault would
+    /// break while still passing the fixpoint check.
     #[test]
     fn lossy_color_error_grows_with_qp() {
         let (w, h) = (64usize, 64usize);

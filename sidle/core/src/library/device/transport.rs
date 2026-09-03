@@ -117,7 +117,8 @@ pub trait Transport: Send + Sync {
     /// directory was already absent. Used to wipe the Kindle-created
     /// `<basename>.sdr/` sidecar (reading progress, annotations, highlights)
     fn delete_dir(&self, path: &TPath) -> Result<bool>;
-    /// For each immediate child directory of `dir` whose name passes `pick_dir`,
+    /// For each immediate child of `dir` passing `pick_dir`, read every file in it
+    /// passing `pick_file`. Resolves `dir` and each child once, so MTP stays linear.
     fn read_files_in_children(
         &self,
         dir: &TPath,

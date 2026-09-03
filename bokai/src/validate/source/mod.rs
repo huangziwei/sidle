@@ -45,7 +45,9 @@ pub fn validate(bytes: &[u8]) -> Report {
     report
 }
 
-/// The KFX side of [`validate`]: structural checks (rules 1–9) + the cross-
+/// The KFX side of [`validate`]: structural checks (rules 1–9) plus the
+/// cross-format TOC audit (rule 10), over one already-merged container.
+/// Both `kfx::validate` and the TOC audit load the container once each.
 fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
     let mut findings = kfx::validate(bytes);
     let unreadable = findings.iter().any(|f| f.rule == "container-unreadable");

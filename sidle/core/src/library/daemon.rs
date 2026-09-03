@@ -225,7 +225,8 @@ mod tests {
         std::fs::write(pid_path(&paths), "not-a-pid").unwrap();
         assert_eq!(read_pid(&paths), None);
 
-        // `kill(2)` treats these as broadcasts — 0 hits our own process group,
+        // `kill(2)` treats these as broadcasts — 0 the process group, -1 every process
+        // the user owns — so a corrupt PID file must never reach it.
         for broadcast in ["0", "-1", "-4321"] {
             std::fs::write(pid_path(&paths), broadcast).unwrap();
             assert_eq!(

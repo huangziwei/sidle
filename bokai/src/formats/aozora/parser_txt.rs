@@ -241,7 +241,8 @@ static PAGE_BREAK_LINE_ONLY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^［＃(改ページ|改丁|ページの左右中央)］\s*$").unwrap());
 static HEADING_PRECEDES_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃[大中小]見出し］").unwrap());
-/// Postfix heading marker (Aozora's *other* heading convention, not
+/// Postfix heading marker: `［＃「TEXT」は<大|中|小>見出し］` makes the preceding
+/// `TEXT` a heading. The quoted capture is greedy, so a nested `「…」` matches.
 static POSTFIX_HEADING_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃「(.+)」は([大中小])見出し］").unwrap());
 static HEADING_OOMIDASHI_RE: LazyLock<Regex> =
@@ -257,7 +258,8 @@ static INDENT_SINGLE_PREFIX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃(?:天から)?([０-９0-9]+)字下げ］").unwrap());
 static EDITORIAL_BASE_NOTE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃「[^」]*」は底本では[^］]*］").unwrap());
-/// Notes the input made about the 底本 rather than about setting: what the
+/// Notes the input made about the 底本 rather than about setting. They address the
+/// reader of the source file, so they carry no markup and are removed.
 static EDITORIAL_NOTE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"［＃(?:ルビの)?「[^」]*」は底本では[^］]*］|［＃(?:「[^」]*」は)?ママ］").unwrap()
 });
@@ -659,7 +661,8 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
         // Strip editorial notes and heading-reference notes.
         s = re_replace_str_cow(&EDITORIAL_BASE_NOTE_RE, s, "");
-        // Greedy `.*` mirrors POSTFIX_HEADING_RE so a heading-ref marker whose
+        // Greedy `.*` mirrors POSTFIX_HEADING_RE, so a heading-ref marker whose quoted
+        // text nests `「…」` is stripped by this pass and not left to the catch-all.
         static HEADING_REF_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃「.*」は[大中小]見出し］").unwrap());
         s = re_replace_str_cow(&HEADING_REF_RE, s, "");

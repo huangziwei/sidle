@@ -336,8 +336,8 @@ mod tests {
             },
         );
 
-        // Precondition: the compressed objects are unresolved (as after a real
-        // lopdf load that hit the NUL-index bug).
+        // Precondition: the compressed objects are unresolved, the state a
+        // lopdf load leaves behind when an object stream carries a NUL index.
         assert!(!doc.objects.contains_key(&(10, 0)));
 
         recover_nul_object_streams(&mut doc);

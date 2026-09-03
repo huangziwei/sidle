@@ -34,7 +34,8 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
         return Ok(Reanchored::default());
     }
     let mut stmt = conn.prepare(
-        // Text-less rows are selected too, so they are counted rather than
+        // Text-less rows are selected too, so they are counted rather than passed over: a
+        // bookmark with no text to search for sits on a handle the rebuild may have moved.
         "SELECT id, eid_start, off_start, text FROM annotations WHERE book_id = ?1",
     )?;
     let rows: Vec<Stored> = stmt

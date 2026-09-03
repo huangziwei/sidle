@@ -33,7 +33,7 @@ struct Args {
     #[arg(short, long)]
     stat: bool,
 
-    /// Print a detailed report for one field/fragment; repeatable. One of: anchors, container,
+    /// Print a detailed report for one field or fragment; repeatable.
     #[arg(short = 'f', long = "field")]
     field: Vec<String>,
 }
@@ -6151,7 +6151,8 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
         }
     }
 
-    // Pass 2: walk storylines, find every style_event with ruby_name+ruby_id,
+    // Pass 2: walk storylines and print base<TAB>annotation for every style_event
+    // carrying ruby_name + ruby_id.
     let mut total_pairs: usize = 0;
     for &storyline_id in &storyline_ids {
         // Find storyline entity again

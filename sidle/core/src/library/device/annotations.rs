@@ -25,7 +25,11 @@ pub struct SyncProgress {
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
 pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
-    // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in
+    // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in one
+    // session, not a path-based `list` + `read` per `.sdr`, which is O(books²).
+    // every call (O(books²)). `.yjr.bad_file` is
+    // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a
+    // pure pagination cache) yields no matching files and is dropped.
     let pulled =
         transport.read_files_in_children(&sidle, &|name| name.ends_with(".sdr"), &|file| {
             file.ends_with(".yjr") || file.ends_with(".yjf")
@@ -160,7 +164,8 @@ pub fn import_device_annotations(
                 Ok::<_, anyhow::Error>(report)
             })?;
 
-            // No on-device cleanup: Sidle never deletes data on the device (a
+            // No on-device cleanup: Sidle never deletes data on the device, and the push
+            // below only ever adds to a sidecar.
             let mut report = report;
             if let Err(e) = push_device_annotations(
                 transport,
@@ -177,7 +182,8 @@ pub fn import_device_annotations(
         }
     }?;
 
-    // Additive backup of the device folders the library is configured to sync,
+    // Additive backup of the device folders the library syncs, over whichever
+    // transport this Kindle uses. It must never fail the annotation sync it rides on.
     match device_backup::SyncCollections::load(paths) {
         Ok(config) => match misc::backup_device_misc(transport, &device.serial, paths, &config) {
             Ok(m) => {

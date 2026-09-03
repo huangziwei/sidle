@@ -77,7 +77,10 @@ impl Input {
         if unsafe { libc::poll(fds.as_mut_ptr(), nfds, 0) } <= 0 {
             return Ok(None);
         }
-        // Touch first, unlike `next` (which prioritizes bezel presses for
+        // Touch first, unlike `next`, which prioritizes bezel presses: the callers are
+        // blocking flows whose touch fd carries Cancel and the screenshot gesture.
+        // button read return early and *shadow* a pending touch event,
+        // stalling the gesture until the main loop resumes.
         if fds[0].revents & libc::POLLIN != 0
             && let Some(ev) = self.touch.next_event()?
         {
@@ -149,7 +152,8 @@ impl Input {
             if rc == 0 {
                 return Ok(InputEvent::Tick); // deadline reached, or idle timeout.
             }
-            // The deadline passed while poll was blocked and an event happened to
+            // The deadline passed while poll was blocked and an event arrived in the same
+            // wake: the arm wins, the event stays queued, so the caller fires from one path.
             if let Some(d) = deadline
                 && Instant::now() >= d
             {
@@ -169,7 +173,8 @@ impl Input {
             }
 
             if fds[0].revents & libc::POLLIN != 0 {
-                // Drain non-blocking. `next_event` returns None when the
+                // Drain non-blocking: `next_event` returns None when the available bytes complete
+                // no Down/Up boundary, so re-poll rather than block and starve the button fd.
                 if let Some(ev) = self.touch.next_event()? {
                     return Ok(InputEvent::Touch(ev));
                 }

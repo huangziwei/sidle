@@ -2,7 +2,8 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 fn main() {
-    // `generate_context!` embeds the frontend (`frontendDist = ../web`) into the
+    // `generate_context!` embeds the frontend at compile time, and Cargo does not
+    // treat those files as inputs, so the tree is fingerprinted into a rustc env var.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     fingerprint_dir(Path::new("../web"), &mut hasher);
     println!(

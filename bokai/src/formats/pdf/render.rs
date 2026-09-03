@@ -11,7 +11,8 @@ pub const COVER_TARGET_WIDTH_PX: u32 = 1000;
 /// JPEG quality (1..=100) for the rendered cover.
 pub const COVER_JPEG_QUALITY: u8 = 85;
 
-/// One PDF page's extracted text as positioned runs — the **invisible,
+/// One PDF page's extracted text as positioned runs: the invisible, selectable
+/// overlay drawn over the page image. Geometry is points × 100, origin top-left.
 #[derive(Debug, Clone, Default)]
 pub struct PageText {
     /// Text runs (≈ visual lines), in reading order.
@@ -200,7 +201,8 @@ mod macos {
                 .ok_or_else(|| RenderError::Render(format!("no page {page_index}")))?;
             // The MediaBox is the page a viewer shows (= Preview): its origin may be
             let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
-            // `boundsForBox` reports the page's own box, *un*rotated, while
+            // `boundsForBox` reports the page's own box unrotated, while `drawWithBox` draws
+            // it as displayed, so a quarter-turn page must be measured with axes swapped.
             let (mut pw, mut ph) = (bounds.size.width, bounds.size.height);
             if quarter_turns(&page) % 2 == 1 {
                 std::mem::swap(&mut pw, &mut ph);
@@ -237,7 +239,8 @@ mod macos {
             .ok_or_else(|| RenderError::Render("CGBitmapContext create failed".into()))?;
             let ctx: &CGContext = &ctx_owned;
 
-            // Scale points → pixels. `drawWithBox(MediaBox)` already maps the
+            // Scale points → pixels. `drawWithBox(MediaBox)` already maps the displayed box's
+            // lower-left to the context origin, so do NOT also translate by it.
             CGContext::scale_ctm(Some(ctx), scale, scale);
             unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) };
             drop(ctx_owned); // flush + release before we read `buf`
@@ -321,7 +324,8 @@ mod macos {
 
     fn extract_page(page: &PDFPage) -> PageText {
         let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
-        // KFX positions are measured from the **MediaBox** top-left, Y down —
+        // KFX positions are measured from the MediaBox top-left, Y down. Glyph boxes are
+        // mapped into displayed space first, so `/Rotate` is already applied.
         let turns = quarter_turns(page);
         let (x0, y0) = (bounds.origin.x as f32, bounds.origin.y as f32);
         let (bw, bh) = (bounds.size.width as f32, bounds.size.height as f32);
@@ -334,7 +338,8 @@ mod macos {
             Some(s) => s.to_string(),
             None => return PageText::default(),
         };
-        // PDFKit's `string` inserts line/fragment separators (\n, \r) that the
+        // PDFKit's `string` inserts separators the `characterBoundsAtIndex` index space
+        // does not contain; drop them so `utf16[i]` lines up with bounds `i`.
         let utf16: Vec<u16> = text
             .encode_utf16()
             .filter(|&u| u != 0x000A && u != 0x000D)
@@ -553,7 +558,8 @@ mod tests {
         assert_eq!(super::utf16_to_char_index(plain), vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(super::utf16_to_char_index(""), vec![0]);
     }
-    /// Assemble a one-page PDF with the given MediaBox and `/Rotate`, drawing a
+    /// Assemble a one-page PDF with the given MediaBox and `/Rotate`, drawing a short
+    /// line of Helvetica near the lower left.
     fn one_page_pdf(media: [i32; 4], rotate: i64) -> Vec<u8> {
         let content = "BT /F1 24 Tf 40 30 Td (Hi) Tj ET\n";
         let objects: Vec<String> = vec![

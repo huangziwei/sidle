@@ -93,7 +93,8 @@ pub(crate) fn parse_text_emphasis_position(
     })
 }
 
-/// Parse `text-emphasis-style`. CSS allows one or two idents (a fill and a
+/// Parse `text-emphasis-style`: one or two idents (fill and shape) in either
+/// order, or `none`. Unknown idents are ignored; a bare shape means `filled`.
 pub(crate) fn parse_text_emphasis_style(input: &mut Parser<'_, '_>) -> Option<TextEmphasisStyle> {
     use TextEmphasisStyle as T;
     let first = input.expect_ident_cloned().ok()?;

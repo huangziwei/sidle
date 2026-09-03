@@ -335,7 +335,8 @@ impl<'a> RenderContext<'a> {
             Role::Link => {
                 self.ensure_line_started();
 
-                // Resolve the link's destination. Internal references to
+                // Resolve the link's destination. An internal reference to a non-heading node
+                // renders as plain text: a flat Markdown file carries no `<a id>` targets.
                 let global_id = GlobalNodeId::new(self.chapter_id, id);
                 let anchor = match self.resolved.get(global_id) {
                     Some(AnchorTarget::External(url)) => Some(url.clone()),
@@ -550,7 +551,8 @@ impl<'a> RenderContext<'a> {
                 self.output.push('）');
             }
 
-            // A `<div>`/`<section>` is block-level. Separate it from its
+            // A `<div>`/`<section>` is block-level, so separate it from its siblings with a
+            // blank line. Pure wrappers collapse to one separation via `pending_newline`.
             Role::Container => {
                 self.start_block();
                 self.walk_children(id);

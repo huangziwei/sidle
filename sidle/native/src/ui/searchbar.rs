@@ -1,4 +1,5 @@
-//! The library search bar — **one** widget, drawn in both the grid view and the
+//! The library search bar — one widget, drawn in both the grid view and the
+//! keyboard overlay. Only the right edge differs, by `with_button`.
 
 use crate::eink::fb::Framebuffer;
 use crate::ui::grid;
@@ -60,7 +61,8 @@ pub enum Tap {
     DecryptAll,
 }
 
-/// Hit-test the bar. `query_active` enables the right-hand `✕` (clear) zone,
+/// Hit-test the bar. `query_active` enables the `✕` zone; `with_button` must match
+/// what [`draw`] was called with for this view, and `drm` selects that button.
 pub fn hit(
     tx: u32,
     ty: u32,
@@ -96,7 +98,8 @@ pub fn hit(
     Some(Tap::Open)
 }
 
-/// Draw the search field: a rounded pill + magnifier glyph + the
+/// Draw the search field: rounded pill, magnifier, placeholder or query, plus an
+/// `✕` when a query is set. `with_button` sets the width; the left edge is fixed.
 pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str, with_button: bool) {
     let xres = fb.var.xres;
     let x = MARGIN_X;

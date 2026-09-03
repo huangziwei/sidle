@@ -431,7 +431,8 @@ pub fn rewrite_css_references_fast(
     css_flow_map: &HashMap<String, usize>,
     css_href: &str,
 ) -> Vec<u8> {
-    // Strip CSS at-rules that Kindle's parser doesn't support: `@charset`,
+    // Strip CSS at-rules Kindle's parser does not support: `@charset`, `@namespace`.
+    // Leaving them in is correlated with the renderer freezing on valid books.
     let css = strip_unsupported_css_at_rules(css);
 
     // Directory the stylesheet lives in, for resolving relative `@import`s.
@@ -715,7 +716,10 @@ fn should_drop_attr(name: &[u8]) -> bool {
         b"dcterms:",
         b"xsi:",
         b"xml:",
-        // ARIA — Kindle's KF8 parser doesn't implement WAI-ARIA, and
+        // ARIA — Kindle's KF8 parser implements no WAI-ARIA, and ARIA-DPUB roles come
+        // from the same EPUB3 vocabulary family as `epub:type`, so they go with it.
+        // Ebooks files emit them on every link/section, so they are stripped
+        // with it: same firmware sensitivity class.
         b"aria-",
     ];
     for prefix in DROP_PREFIXES {
@@ -907,7 +911,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_css_import_to_flow() {
-        // A stylesheet `@import` referencing a sibling CSS resolves to the
+        // A stylesheet `@import` of a sibling CSS resolves to the target flow's CURRENT
+        // index as a `kindle:flow` ref; the literal `styleNNNN.css` dangles (RSC-007).
         let mut css_flow_map = HashMap::new();
         css_flow_map.insert("styles/style0000.css".to_string(), 1usize);
         css_flow_map.insert("styles/style0002.css".to_string(), 2usize);

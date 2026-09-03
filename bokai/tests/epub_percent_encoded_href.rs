@@ -107,9 +107,9 @@ fn build_percent_encoded_epub() -> tempfile::TempDir {
     dir
 }
 
-/// The exact failure the user hit: dragging this EPUB in crashed conversion
-/// because the spine path stayed percent-encoded and missed the ZIP entry.
-/// `load_raw` walks that same path, so it stands in for the convert step.
+/// A spine path left percent-encoded matches no ZIP entry, so the chapter is
+/// not found. `load_raw` walks the same path a conversion does, so it stands
+/// in for the convert step.
 #[test]
 fn percent_encoded_spine_path_loads() {
     let dir = build_percent_encoded_epub();

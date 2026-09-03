@@ -18,7 +18,8 @@ const BOOK_PULSE_FILE: &str = ".book-pulse.json";
 /// The reading-log sidecar the daemon writes after a push that stored sessions.
 const READING_PULSE_FILE: &str = ".reading-pulse.json";
 
-/// Spawn the pulse watcher on a dedicated thread (it blocks on a channel recv, so
+/// Spawn the pulse watcher on a dedicated thread; it blocks on a channel recv, so
+/// it cannot share the async runtime. A setup error logs and ends the thread.
 pub fn spawn(app: AppHandle, paths: LibraryPaths, queue: QueueHandle) {
     std::thread::spawn(move || {
         if let Err(e) = run(&app, &paths, &queue) {
@@ -120,7 +121,7 @@ fn apply_book_pulse(app: &AppHandle, queue: &QueueHandle, books: &[BookEntry]) {
     );
 }
 
-/// Extract `(ts, report)` from a pulse blob — the bits [`run`] emits. Split out so
+/// Extract `(ts, report)` from a pulse blob — the bits [`run`] emits.
 fn parse_pulse(bytes: &[u8]) -> Option<(Option<String>, serde_json::Value)> {
     let pulse: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let ts = pulse.get("ts").and_then(|v| v.as_str()).map(str::to_owned);

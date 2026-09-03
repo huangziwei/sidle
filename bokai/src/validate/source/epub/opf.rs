@@ -18,7 +18,8 @@ pub struct Package {
     pub identifier_ids: Vec<String>,
     /// The trimmed text of the `<dc:identifier>` whose `id` matches
     pub unique_identifier_value: Option<String>,
-    /// Every Dublin Core metadata element (`<dc:*>`) under `<metadata>`, in
+    /// Every Dublin Core metadata element (`<dc:*>`) under `<metadata>`, in document
+    /// order. Drives the metadata-value checks.
     pub metadata: Vec<DcMeta>,
     /// The `<spine toc>` attribute (a manifest id for the NCX), if present.
     pub spine_toc: Option<String>,
@@ -30,9 +31,11 @@ pub struct Package {
     pub property_tokens: Vec<String>,
     /// The `property` of every publication-level `<meta>` — one directly under
     pub publication_properties: HashSet<String>,
-    /// Every property-bearing attribute in the package document, with the
+    /// Every property-bearing attribute in the package document, with the context
+    /// that decides its vocabulary. Drives OPF-012/025/026/027.
     pub property_attrs: Vec<PropertyAttr>,
-    /// `(id, refined-id)` for every metadata expression that both carries an
+    /// `(id, refined-id)` for every metadata expression that carries an `id` and
+    /// refines another. The refines graph must be acyclic (OPF-065).
     pub refines_edges: Vec<(String, String)>,
     /// Every `<meta property=…>` expression under `<metadata>`, with its text.
     /// The `<dc:*>` elements are [`Self::metadata`]; this is the other half of

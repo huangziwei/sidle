@@ -5,7 +5,8 @@ use std::io::Write;
 use bokai::Book;
 use bokai::model::AnchorTarget;
 
-/// Build a 3-entry EPUB whose NCX points two chapters at the same file (no
+/// Build a 3-entry EPUB whose NCX points two chapters at one file and a third at
+/// its own. Bodies carry the ids the TOC omitted; one heading adds a U+3000.
 fn build_flat_toc_epub() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
     let file = std::fs::File::create(dir.path().join("book.epub")).expect("create epub");

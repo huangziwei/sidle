@@ -133,7 +133,8 @@ pub fn nav_unit_target(fields: &[(u64, IonValue)]) -> Option<i64> {
 /// points.
 pub struct Landmark {
     pub landmark_type: LandmarkType,
-    /// The landmark's own label, or the type's name when it carried none —
+    /// The landmark's own label, or the type's name when it carried none:
+    /// `cover-nav-unit` is a pipeline placeholder, not a display label.
     pub label: String,
     /// The element the landmark targets, when it names one.
     pub eid: Option<i64>,

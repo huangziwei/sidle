@@ -29,7 +29,8 @@ const PICKER_ID: &str = "sidle";
 /// built yet", and the rule that stages it.
 const PICKER_BINARY_REL: &str = "extensions/sidle/bin/sidle";
 
-/// The tree that ships with the desktop app: the `device/` mirror in a dev
+/// Where a deploy reads from: the `device/` mirror that ships with the desktop
+/// app, plus the built picker binary staged out of it.
 #[derive(Debug, Clone)]
 pub struct DeploySource {
     pub mount_dir: PathBuf,
@@ -37,9 +38,8 @@ pub struct DeploySource {
 }
 
 impl DeploySource {
-    /// Resolve the source paths from a workspace root. The workspace
-    /// root is the directory containing the `[workspace]` Cargo.toml
-    /// (`/Users/.../sidle/` for the developer machine).
+    /// Resolve the source paths from a workspace root — the directory holding
+    /// the `[workspace]` Cargo.toml.
     pub fn from_workspace_root(repo: &Path) -> Self {
         Self {
             mount_dir: repo.join("device"),
@@ -94,7 +94,8 @@ impl DeploySource {
         Ok(())
     }
 
-    /// Build time (unix seconds) of `binary_path`, read from the
+    /// Build time (unix seconds) of `binary_path`, from its `.build-ts` sidecar.
+    /// Feeds the manifest's `built_at`; `0` when there is no sidecar.
     pub fn build_ts(&self) -> u64 {
         let mut sidecar = self.binary_path.clone().into_os_string();
         sidecar.push(".build-ts");
@@ -301,7 +302,8 @@ fn slots(plan: &DevicePlan, conf: Option<&ServerConfRender>, ca_cert: &Path) -> 
     // Both belong to the picker. A plan narrowed to any other app carries
     // neither of them.
     if plan.app(PICKER_ID).is_some() {
-        // The CA lives in the library root, in no tree. It is the one root the
+        // The CA lives in the library root, in no tree: it is the one root the picker
+        // pins, and a device without it completes no handshake.
         out.push(plain(
             "extensions/sidle/etc/ca.pem",
             Source::File(ca_cert.to_path_buf()),
@@ -1320,6 +1322,7 @@ mod tests {
         )
         .unwrap();
         // extensions/sidle/{bin/sidle, bin/sidle.sh, config.xml, menu.json,
+        // etc/server.conf, etc/ca.pem} + documents/Sidle.sh
         assert_eq!(events, 7);
     }
 
@@ -1400,7 +1403,7 @@ mod tests {
         }
     }
 
-    /// The rule the receipt exists for. A user sets `[device] name` on the
+    /// The rule the receipt exists for.
     #[test]
     fn a_file_changed_on_the_device_is_kept_when_the_source_moves_on() {
         let tmp = tempfile::tempdir().unwrap();

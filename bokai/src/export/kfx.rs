@@ -219,7 +219,7 @@ fn build_kfx_container(
     ctx.reserve_beyond_source_ids();
 
     // 1d. Resolve landmarks: IR landmarks, then Cover/StartReading heuristics
-    resolve_landmarks_from_ir(book, &source_to_chapter, &resolved, &mut ctx);
+    resolve_landmarks_from_ir(book, &source_to_chapter, &mut ctx);
 
     // Fall back to heuristics if IR didn't provide Cover or StartReading
     let has_cover = ctx.landmark_fragments.contains_key(&LandmarkType::Cover);
@@ -2980,10 +2980,9 @@ fn build_section_position_id_map_fragments(secs: &[SectionPos]) -> Vec<KfxFragme
 ///
 /// Amazon's own boundaries cannot be reproduced exactly: they are placed at
 /// ingest from the publisher's source file, which a KFX does not carry, and no
-/// fragment states the count. Over the 30-book Japanese corpus their spacing
-/// works out at 95–136 bytes of *rendered* text per Location (mean 112), so
-/// 128 — the conventional Kindle location size — puts ours inside the observed
-/// range without being fitted to one language.
+/// fragment states the count. 128 is the conventional Kindle location size,
+/// which lands in the range Amazon's own spacing occupies without being fitted
+/// to one language.
 const LOCATION_TEXT_BYTES: usize = 128;
 
 /// One location boundary: where it sits on the pid axis, and the
@@ -3206,13 +3205,14 @@ fn is_font_asset(path: &std::path::Path) -> bool {
     )
 }
 
-/// Resolve landmarks from the Book's IR into `landmark_fragments`, taking both
-/// chapter-level targets (`chapter.xhtml`) and anchor-level ones
-/// (`chapter.xhtml#section1`) through ResolvedLinks.
+/// Resolve landmarks from the Book's IR into `landmark_fragments`. A landmark
+/// names a section, never a point inside one: whichever chapter its target —
+/// or failing that, its href — resolves to, the fragment is that chapter's and
+/// the offset is 0. The first landmark of a type wins, and `BodyMatter` doubles
+/// as `StartReading` when the book declares no reading start.
 fn resolve_landmarks_from_ir(
     book: &Book,
     source_to_chapter: &HashMap<String, ChapterId>,
-    resolved: &ResolvedLinks,
     ctx: &mut ExportContext,
 ) {
     for landmark in book.landmarks() {
@@ -3278,9 +3278,6 @@ fn resolve_landmarks_from_ir(
             }
         }
     }
-
-    // Suppress unused variable warning - resolved is used for consistency
-    let _ = resolved;
 }
 
 /// Serialize fragments to entities. A named fragment's `fid` must be in
@@ -6688,7 +6685,7 @@ mod tests {
             let max_id_field = fields.iter().find(|(id, _)| *id == KfxSymbol::MaxId as u64);
 
             if let Some((_, IonValue::Int(max_id))) = max_id_field {
-                // max_id covers the 100 generated IDs; ExportContext starts at
+                // max_id covers the 100 generated IDs; ExportContext starts at 866.
                 assert!(
                     *max_id >= 100,
                     "max_id ({}) should reflect all generated fragment IDs",
@@ -7168,7 +7165,8 @@ mod entity_structure_tests {
         fragments.extend(storyline_fragments);
         fragments.extend(content_fragments);
 
-        // Entity type order: content_features, book_metadata, metadata,
+        // Entity type order: content_features, book_metadata, metadata, document_data,
+        // book_navigation, then grouped sections, storylines, content.
 
         let types: Vec<u64> = fragments.iter().map(|f| f.ftype).collect();
 

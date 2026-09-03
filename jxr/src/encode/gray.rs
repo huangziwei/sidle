@@ -1,4 +1,5 @@
-//! Grayscale codestream-body encoder: DC + LP + HP (ALL_BANDS), spatial mode,
+//! Grayscale codestream-body encoder: DC + LP + HP, spatial mode, single tile, no
+//! overlap, uniform QP = 0 — lossless for any grayscale image.
 
 use super::quant::{QpSet, quantize};
 use super::{codestream, coeff, container, hp, transform};
@@ -389,6 +390,7 @@ impl codestream::TileEncode for YOnlyPlane {
 }
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
+/// `bands_present`, `trim_flexbits`, explicit window margins, and a tile grid.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_grayscale_options(
     luma: &[u8],

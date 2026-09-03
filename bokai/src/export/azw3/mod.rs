@@ -185,7 +185,8 @@ impl BookContext {
             normalized.chapters.iter().map(|c| c.source_path.as_str()),
         );
 
-        // Resolve TOC + landmark hrefs (`#eid[:offset]` placeholders) to
+        // Resolve TOC + landmark hrefs (`#eid[:offset]`) to `file#frag` against the
+        // normalized spine, as the EPUB nav emitter does, so each entry keeps a position.
         if !toc.is_empty() || !landmarks.is_empty() {
             let spine_ids: Vec<crate::import::ChapterId> =
                 book.spine().iter().map(|e| e.id).collect();
@@ -229,7 +230,8 @@ impl BookContext {
             );
         }
 
-        // Build spine from normalized chapters; bytes stored once in
+        // Build the spine from normalized chapters, bytes stored once in `resources`.
+        // Files take `chapter_filenames`' scheme, which the resolved links agree with.
         let mut spine = Vec::with_capacity(normalized.chapters.len());
         for (chapter, href) in normalized.chapters.iter().zip(&filenames) {
             resources.insert(

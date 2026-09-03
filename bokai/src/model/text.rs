@@ -124,7 +124,10 @@ mod tests {
         assert_eq!(t.extract(30, 0, 10, 5).as_deref(), Some("alphabetagamma"));
     }
 
-    /// A Kindle anchors a highlight at whichever element holds the boundary,
+    /// A Kindle anchors a highlight at whichever element holds the boundary, often a
+    /// structural one with no text; the range must still yield the words it spans.
+    /// range must still yield the words it spans: start on a placed-but-textless
+    /// element, end on the element actually holding the passage.
     #[test]
     fn a_range_starting_on_a_textless_element_still_yields_its_text() {
         let positions = PositionMap::new(

@@ -273,7 +273,8 @@ fn chars_between(s: &str, from: usize, to: usize) -> usize {
     s[from..to].chars().count()
 }
 
-/// `word` in lower case, and where each byte offset of it sits in the
+/// `word` in lower case, and where each byte offset of it sits in the original. A
+/// character whose lower case spells out longer has no offset past its first byte.
 fn lowercase_with_origins(word: &str) -> (String, Vec<Option<usize>>) {
     let mut lowered = String::with_capacity(word.len());
     let mut origin = Vec::with_capacity(word.len() + 1);

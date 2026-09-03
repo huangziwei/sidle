@@ -9,7 +9,8 @@ use image::{ExtendedColorType, ImageEncoder, codecs::jpeg::JpegEncoder, imageops
 use super::LibraryPaths;
 use super::import::write_bytes_atomic;
 
-/// Thumbnail bounding box. A touch larger than the picker's 360×440 cell so
+/// Thumbnail bounding box, a touch larger than the picker's cell so the device
+/// downsamples rather than upscales, and decoupled from the exact cell dims.
 pub const THUMB_W: u32 = 400;
 pub const THUMB_H: u32 = 520;
 /// JPEG quality. 80 keeps a color e-ink thumbnail visually clean while holding
@@ -66,7 +67,8 @@ fn ensure_thumbnail_inner(
     Ok(true)
 }
 
-/// True when `thumb` exists and its mtime is at or after the cover's — i.e. the
+/// True when `thumb` exists and its mtime is at or after the cover's, i.e. the
+/// cover has not been replaced since. Anything unreadable reads as not fresh.
 fn is_fresh(thumb: &Path, cover: &Path) -> bool {
     match (mtime(thumb), mtime(cover)) {
         (Ok(tm), Ok(cm)) => tm >= cm,
@@ -78,7 +80,14 @@ fn mtime(p: &Path) -> std::io::Result<SystemTime> {
     std::fs::metadata(p)?.modified()
 }
 
-/// Generate any missing or stale thumbnails across the whole library. Run in a
+/// Generate any missing or stale thumbnails across the whole library.
+/// background task at server startup, so a book with no thumbnail gets one
+/// without a manual step. Idempotent and mtime-gated, so
+/// it's a near-instant no-op once warm. Returns the count (re)generated.
+///
+/// When the on-disk format version is behind [`THUMB_FORMAT_VERSION`] (e.g. the
+/// grayscale→color flip), every thumbnail is rebuilt once regardless of mtime,
+/// then the version marker is advanced so subsequent boots are warm again.
 pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
     let conn = super::db::open(&paths.db()).context("open library.db")?;
     let books = super::db::list_books(&conn).context("list books")?;
@@ -108,7 +117,8 @@ pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
     Ok(generated)
 }
 
-/// True when the library's recorded thumbnail format is older than
+/// True when the library's recorded thumbnail format is behind
+/// [`THUMB_FORMAT_VERSION`], so the backfill forces a one-time rebuild.
 fn format_outdated(paths: &LibraryPaths) -> bool {
     let recorded = std::fs::read_to_string(paths.cover_thumb_format())
         .ok()

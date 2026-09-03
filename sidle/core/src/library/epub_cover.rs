@@ -91,7 +91,8 @@ fn kfx_declares_cover(kfx_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Insert a cover into an EPUB that declares none: write the image next to the
+/// Insert a cover into an EPUB that declares none: write the image beside the OPF,
+/// add a manifest item and a `<meta name="cover">`. Adds, never overwrites.
 pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
     let epub_bytes =
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
@@ -144,6 +145,7 @@ pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result
 }
 
 /// Add a cover manifest item (+ legacy `<meta name="cover">`) to an OPF that
+/// declares none. `properties="cover-image"` is EPUB 3 only — RSC-005 in a 2.0.
 fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> String {
     let properties = if package_is_epub3(opf) {
         " properties=\"cover-image\""
@@ -276,7 +278,8 @@ fn media_type_for_ext(ext: &str) -> &'static str {
     }
 }
 
-/// Rewrite the OPF so the manifest `<item>` whose `href` ends with
+/// Rewrite the manifest `<item>` whose `href` ends with `cover_basename` to carry
+/// the new `media-type`. The href is unchanged, so internal references survive.
 fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) -> String {
     let mut out = String::with_capacity(opf.len() + 16);
     let href_needle = format!("href=\"{cover_basename}\"");
@@ -363,7 +366,17 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    /// Editing a book must not make it *less* valid than it was — the one
+    /// Editing a book must not make it *less* valid than it was. This asks the
+    /// validator, which is what catches a new defect anywhere in the archive.
+    /// `properties="cover-image"` injected into an EPUB 2 manifest violates
+    /// exactly this. The sibling unit test above pins the OPF text; this one asks
+    /// the validator, which is the question that actually matters and the only
+    /// way a *new* defect in any other part of the archive would be caught.
+    ///
+    /// It lives here rather than in the product: sidle runs no validator (a
+    /// finding on a user's machine reaches a stderr nobody reads, having cost a
+    /// full validation pass to produce), so the differential belongs where a
+    /// failure is read — a test.
     #[test]
     fn a_cover_edit_introduces_no_validator_finding() {
         // A real 1×1 PNG: the validator decodes every declared raster resource

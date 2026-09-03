@@ -215,7 +215,8 @@ mod tests {
     use super::*;
     use crate::model::NodeId;
 
-    /// An HTML parser that infers a `<tbody>` around a table's contents can
+    // A parser that infers a `<tbody>` can sweep the `<colgroup>` in with the rows,
+    // which no reader accepts and the row-section walk would count as a row.
     #[test]
     fn a_column_group_swept_into_a_section_returns_to_the_table() {
         let mut chapter = Chapter::new();

@@ -14,7 +14,8 @@ enum DictEntry {
 
 /// HUFF/CDIC decompressor
 pub struct HuffCdicReader {
-    /// dict1: 256 entries of (codelen, term, maxcode). `maxcode` is held in
+    /// dict1: 256 entries of (codelen, term, maxcode). `maxcode` is held in `u64`
+    /// because `((maxcode + 1) << (32 - codelen)) - 1` exceeds 32 bits.
     dict1: Vec<(u8, bool, u64)>,
     /// mincode indexed by code length `0..=32` (33 entries: a codelen-0
     /// sentinel plus calibre's `(0,) + dict2[0::2]` layout).
@@ -388,9 +389,9 @@ mod tests {
 
     #[test]
     fn test_load_cdic_rejects_jpeg_bytes() {
-        // This is exactly what happens with the off-by-one bug:
-        // the loop reads one record past the CDICs, hits a JPEG image,
-        // and load_cdic() fails because 0xFF 0xD8 != "CDIC".
+        // A caller that reads one record past the CDICs hands over an
+        // image; `load_cdic` must reject it, because 0xFF 0xD8 is not
+        // "CDIC".
         let jpeg = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00";
         let mut reader = HuffCdicReader {
             dict1: Vec::new(),
@@ -418,8 +419,8 @@ mod tests {
 
     #[test]
     fn test_reader_new_with_poison_record_fails() {
-        // Simulates the off-by-one bug: the caller passes an extra
-        // non-CDIC record (JPEG image bytes) after the real CDICs.
+        // An extra non-CDIC record (JPEG image bytes) after the real
+        // CDICs must fail the whole load, not be skipped.
         let huff = make_huff();
         let cdic = make_cdic();
         let jpeg = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00";

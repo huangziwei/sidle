@@ -31,7 +31,7 @@ pub struct MetadataPatch {
     /// Publication date (KFX stores `YYYY-MM-DD`). Carried in the $490 shape.
     pub issue_date: Option<String>,
     pub asin: Option<String>,
-    /// The device-internal key (`.sdr` directory, catalog entry). Carried in
+    /// The device-internal key (`.sdr` directory, catalog entry).
     pub content_id: Option<String>,
 }
 

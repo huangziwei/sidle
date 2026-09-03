@@ -16,7 +16,8 @@ pub fn load(dir: &Path, id: i64, rev: i64) -> Option<Vec<u8>> {
     std::fs::read(cache_file(dir, id, rev)).ok()
 }
 
-/// Write a thumbnail to the cache. Atomic via temp+rename so a concurrent or
+/// Write a thumbnail to the cache, atomic via temp+rename. Best-effort: the
+/// `io::Result` is for logging, and older revisions are pruned after a write.
 pub fn store(dir: &Path, id: i64, rev: i64, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let dest = cache_file(dir, id, rev);

@@ -128,7 +128,8 @@ fn anon_serial(mount: &Path) -> String {
     format!("anon-{name}")
 }
 
-/// The Kindle's real serial, read from its USB `iSerial` descriptor — the same
+/// The Kindle's real serial, from its USB `iSerial` descriptor — the only
+/// on-device source. Prefers the mass-storage device when two are attached.
 fn usb_kindle_serial() -> Option<String> {
     let amazon: Vec<nusb::DeviceInfo> = nusb::list_devices()
         .wait()

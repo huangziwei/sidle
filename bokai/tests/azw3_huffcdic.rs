@@ -13,7 +13,7 @@ fn collect_titles(entries: &[TocEntry], out: &mut Vec<String>) {
 #[test]
 fn huff_azw3_imports_and_decompresses_toc_text() {
     // Opening drives Azw3Importer::extract_text → HuffCdicReader over the
-    // HUFF/CDIC records — the call that panicked before the u64 rewrite.
+    // HUFF/CDIC records, where a `maxcode` computed in 32 bits overflows.
     let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.azw3")
         .expect("HUFF/CDIC AZW3 must import without panicking");
     let _ = book.resolve_links();

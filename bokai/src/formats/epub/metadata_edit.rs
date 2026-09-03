@@ -361,7 +361,7 @@ mod tests {
         assert!(edit_metadata(b"not an epub", &patch).is_err());
     }
 
-    /// XML metacharacters in a value are escaped so the OPF stays well-formed and
+    /// XML metacharacters in a value are escaped, so the OPF stays well-formed.
     #[test]
     fn escapes_xml_metacharacters() {
         let epub = std::fs::read(FIXTURE).expect("read fixture");
@@ -407,6 +407,9 @@ mod tests {
     }
 
     /// Replacing authors prunes the `<meta refines="#creatorN">` refinements that
+    /// pointed at the old creators, leaving no `refines` fragment dangling.
+    /// pointed at the old creators, so no `refines` fragment is left dangling.
+    /// This is the exact shape the exporter emits.
     #[test]
     fn set_creators_prunes_orphaned_refines() {
         let opf = "<metadata>\n    \

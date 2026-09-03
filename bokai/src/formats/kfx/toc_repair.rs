@@ -22,6 +22,7 @@ use crate::model::LandmarkType;
 use crate::model::toc_shape::{TocNode, merge_by_document_order, nest_by_label_indent};
 
 /// One chapter in an edited TOC. `eid` is the target element's `$155 id`; the
+/// offset is always written as 0, the Kindle convention. Nesting is supported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocEntry {
     pub label: String,
@@ -419,6 +420,7 @@ pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, KfxError> {
 }
 
 /// One-call TOC repair: derive the chapter list ([`propose_toc`]) and write it
+/// with [`set_toc`]. Errors if nothing derives, or the book has no navigation.
 pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let entries = propose_from_book(&book);
@@ -636,7 +638,8 @@ impl ContentsPage {
     }
 }
 
-/// Walk a storyline tree in document order, recording `(display_text,
+/// Walk a storyline in document order, recording `(display_text, target_eid)` for
+/// every internal `link_to`, plus how many elements carry text and how many a link.
 fn collect_chapter_links(
     value: &IonValue,
     book: &BookData,
@@ -776,7 +779,8 @@ fn clean_label(raw: &str) -> String {
     crate::util::trim_markup_space(&s).to_string()
 }
 
-/// Collapse `(label, eid)` pairs to one [`TocEntry`] per distinct target eid,
+/// Collapse `(label, eid)` pairs to one [`TocEntry`] per target eid, keeping
+/// document order and the first label seen.
 fn dedup_entries(links: Vec<(String, i64)>) -> Vec<TocEntry> {
     let mut seen: HashSet<i64> = HashSet::new();
     let mut out = Vec::new();
@@ -1024,7 +1028,8 @@ mod tests {
         );
     }
 
-    /// The invariant every caller leans on: whatever else the proposal does, it
+    /// The invariant every caller leans on: a proposal never drops an entry the book
+    /// already declares.
     #[test]
     fn a_proposal_never_loses_a_declared_entry() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -1056,7 +1061,8 @@ mod tests {
             .collect()
     }
 
-    /// The synthesize path's core: given a `book_navigation` holding only a
+    /// The synthesize path's core: given a `book_navigation` holding only landmarks,
+    /// `add_toc_container` prepends an inline toc container and leaves landmarks be.
     #[test]
     fn add_toc_container_prepends_inline_toc() {
         let landmarks = IonValue::Annotated(

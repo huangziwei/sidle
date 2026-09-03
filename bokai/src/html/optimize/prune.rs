@@ -71,7 +71,8 @@ fn should_prune(chapter: &Chapter, node_id: NodeId) -> bool {
         return false;
     }
 
-    // An empty box still paints when it carries a style (margins, height,
+    // An empty box still paints when it carries a style or a class, so only a
+    // default-styled, classless empty container is dead.
     if node.style != crate::style::StyleId::DEFAULT {
         return false;
     }

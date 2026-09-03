@@ -732,7 +732,8 @@ impl<'a> Parser<'a> {
                     &esc(&local),
                 ))
             }
-            // An unprefixed name. On an element it takes the default namespace —
+            // An unprefixed name takes the default namespace on an element — left implicit so
+            // an including grammar can supply it — and no namespace on an attribute.
             Tok::Name(local) | Tok::Escaped(local) => {
                 let ns = if is_attribute {
                     " ns=\"\"".to_string()

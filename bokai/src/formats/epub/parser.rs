@@ -164,7 +164,8 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                     {
                         current_element = Some(String::from_utf8_lossy(local).to_string());
                         buf_text.clear();
-                        // The `id` attribute, plus `opf:scheme` / `scheme` on
+                        // The `id` attribute, plus `opf:scheme` / `scheme` on `<dc:identifier>`: an
+                        // `opf:scheme="ASIN"` identifier routes into `Metadata::asin`.
                         current_element_id = None;
                         current_identifier_scheme = None;
                         current_file_as = None;
@@ -946,7 +947,8 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
     let mut in_toc_nav = false;
     let mut nav_depth = 0u32;
 
-    // The TOC tree is built bottom-up: each <li> pushes a frame, its
+    // The TOC tree is built bottom-up: each `<li>` pushes a frame, its child `<ol>`
+    // fills that frame, and `</li>` folds it into the parent's children.
     struct ListItem {
         href: Option<String>,
         label: String,

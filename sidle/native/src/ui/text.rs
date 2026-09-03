@@ -106,7 +106,7 @@ impl TextRenderer {
 }
 
 impl TextRenderer {
-    /// Draw `s` starting at baseline (x, y_baseline). Returns the
+    /// Draw `s` starting at baseline (x, y_baseline).
     pub fn draw(
         &mut self,
         fb: &mut Framebuffer,
@@ -202,7 +202,8 @@ fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
     }
 }
 
-/// Advance of the missing-glyph mark: an ideograph's share of the line, so a
+/// Advance of the missing-glyph mark: an ideograph's share of the line, so a run
+/// of unmappable characters keeps the text's rhythm.
 fn missing_advance(px: f32) -> u32 {
     (px * 0.72).round().max(6.0) as u32
 }

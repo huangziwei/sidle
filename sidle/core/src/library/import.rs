@@ -37,7 +37,8 @@ pub fn detect_kind(src: &Path) -> Result<SourceKind> {
 /// A progress callback that reports nothing, for the callers that don't watch.
 fn no_progress(_: &str, _: usize, _: usize, _: &str) {}
 
-/// Import a book that exists only in memory — a volume carved out of a
+/// Import a book that exists only in memory. `name` stands in for a filename:
+/// extension picks the format, stem is the title fallback. Stored formats only.
 pub fn import_bytes(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
@@ -311,12 +312,14 @@ fn stage(
             extract_meta(book.metadata(), stem.as_deref())
         }
     };
-    // The row must carry the ASIN actually stamped inside the produced KFX —
+    // The row must carry the ASIN actually stamped inside the produced KFX, which is
+    // what device-delete keys the `.sdr` catalog cleanup on.
     if let Some(stamped) = direct_kfx.as_ref().and_then(|k| k.asin.as_deref()) {
         meta.asin = Some(stamped.to_string());
     }
 
-    // A KFX imported directly is the file Amazon shipped, and it carries the
+    // A directly imported KFX carries Amazon's catalogue ASIN, which a Kindle keys
+    // its catalog and `.sdr` on. Re-key it here; `meta.amazon_asin` keeps the original.
     let canonical_bytes = match key_to_mint(canonical, &meta, derived_key, &sha) {
         Some(key) => match rekey_kfx(&canonical_bytes, &key) {
             Ok(bytes) => {
@@ -367,7 +370,8 @@ fn stage(
     if !own_dest.exists() {
         write_bytes_atomic(own_dest, &canonical_bytes)?;
     }
-    // The direct-derived KFX sibling (azw3 import). Written before the
+    // The direct-derived KFX sibling (azw3 import), written before the `other_ready`
+    // probe so the row lands with a `done` job. An existing file wins.
     if let Some(kfx) = &direct_kfx
         && !dest_kfx.exists()
     {
@@ -467,7 +471,8 @@ pub struct StagedImport {
 /// part of an import that needs the database, and it is a few milliseconds of
 /// it — see [`stage_file`] for why the two are separable.
 pub fn record(conn: &rusqlite::Connection, staged: StagedImport) -> Result<ImportOutcome> {
-    // The dedupe probe that cleared this import ran before the conversion, which
+    // The dedupe probe ran before the conversion, minutes ago for a large `.azw3`.
+    // Re-check inside the insert's window: `books.sha256` is UNIQUE.
     if let Some(existing) = db::find_by_sha(conn, &staged.sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
     }
@@ -609,7 +614,8 @@ struct BookMeta {
     /// Yomigana for the first author — the first entry of bokai's per-author
     /// `Metadata.author_sorts`. Only used when the book has a single creator.
     author_reading: Option<String>,
-    /// The series the source declares it belongs to, and its position in it —
+    /// The series the source declares it belongs to, and its position in it — bokai's
+    /// `Metadata.collection`. A split volume carries this and lands with its siblings.
     series: Option<(String, Option<f64>)>,
 }
 
@@ -769,7 +775,8 @@ fn insert_row(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
-            // The series the source declares, verbatim — grouping is by the
+            // The series the source declares, verbatim — grouping is by the exact string.
+            // Tags are not populated from the source format; the metadata editor sets them.
             series_name: meta.series.as_ref().map(|(name, _)| name.as_str()),
             series_index: meta.series.as_ref().and_then(|(_, index)| *index),
             tags: &[],
@@ -812,7 +819,8 @@ struct Azw3Derived {
     kfx: DirectKfx,
 }
 
-/// Convert a decrypted `.azw3` into BOTH library sides — EPUB and KFX — each
+/// Convert a decrypted `.azw3` into both library sides, EPUB and KFX, each exported
+/// from its parsed IR. Validity is not gated: an import must still produce a book.
 fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Azw3Derived> {
     on_progress("epub/parse", 0, 1, "Reading AZW3");
     let mut book = bokai::Book::open_format(src, bokai::Format::Azw3)
@@ -862,7 +870,10 @@ fn leg<'a>(
     move |phase, cur, total, label| on_progress(&format!("{prefix}{phase}"), cur, total, label)
 }
 
-/// Open an Aozora Bunko `.zip`, sniff for the markers, run the
+/// Open an Aozora Bunko `.zip`, sniff the markers, and return EPUB bytes. Any zip
+/// that does not look like Aozora bails, surfacing as a normal import failure.
+/// Pipeline mirrors `aozora_dispatch` in `bokai/src/main.rs` so
+/// the CLI and the GUI produce byte-identical EPUBs from the same input.
 fn convert_aozora_zip(
     src: &Path,
     on_progress: &dyn Fn(&str, usize, usize, &str),
@@ -1094,7 +1105,8 @@ pub(crate) mod tests {
             panic!("expected a fresh import, got a duplicate");
         };
 
-        // The canonical side is persisted and the partner side is left to the
+        // The canonical side is persisted and the partner side left to the queue: one job
+        // pending, the missing side null until the worker fills it.
         assert_eq!(book.kind.as_deref(), Some("pdf_to_kfx"));
         assert!(needs_enqueue);
         assert!(book.pdf_path.is_some(), "canonical side must be persisted");
@@ -1167,6 +1179,4 @@ pub(crate) mod tests {
         assert_eq!(existing.id, book.id);
         assert_eq!(db::list_books(&conn).unwrap().len(), 1);
     }
-
-    // The azw3 arm — deriving both sides up front, so the job lands `done` with
 }

@@ -12,7 +12,7 @@ use rcgen::{
 
 use super::LibraryPaths;
 
-/// How long the CA is good for. Long, because rotating it means re-deploying to
+/// How long the CA is good for.
 const CA_VALID_YEARS: i32 = 10;
 
 /// How long a server leaf is good for. Shorter than the CA, but still long

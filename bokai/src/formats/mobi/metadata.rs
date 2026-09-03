@@ -88,7 +88,8 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
         .or_else(|| exth.asin.clone())
         .or_else(|| exth.source.clone())
         .unwrap_or_default();
-    // EXTH 113 nominally holds an ASIN, but calibre's exporter writes a
+    // EXTH 113 nominally holds an ASIN, but calibre's exporter writes a fresh UUID.
+    // Promote to `metadata.asin` only when the value looks like a real one.
     metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
     // The series a store title states inline (EXTH 503) — the format has no
     // field of its own for it. No position comes with it: the annotation names
@@ -100,7 +101,7 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
     });
     // Writing-mode signals (EXTH 525 / 527). Both calibre-exported and native
     // Amazon files carry these; no fallback to inline HTML class needed.
-    // Calibre's `reader/headers.py:96-108` is the spec.
+    // Calibre's `reader/headers.py` is the spec.
     metadata.primary_writing_mode = exth.primary_writing_mode.clone();
     metadata.page_progression_direction = exth
         .page_progression_direction

@@ -92,6 +92,7 @@ impl PositionMap {
     }
 
     /// Whether the source defined the numbered location scale on top of the
+    /// coordinate axis. False for a [`synthesized`](Self::synthesized) map.
     pub fn has_locations(&self) -> bool {
         !self.boundaries.is_empty()
     }

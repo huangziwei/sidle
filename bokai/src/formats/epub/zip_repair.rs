@@ -94,7 +94,8 @@ fn relabel_extra(buf: &mut [u8], start: usize, len: usize, zip64_needed: bool) -
     relabeled
 }
 
-/// Relabel every spurious ZIP64 extended-information field in `bytes` (both
+/// Relabel every spurious ZIP64 extended-information field, in central and local
+/// headers. `None` when there was nothing to fix. Offset- and length-preserving.
 pub fn neutralize_spurious_zip64(bytes: &[u8]) -> Option<Vec<u8>> {
     let (cd_offset, entries) = locate_central_directory(bytes)?;
     let mut out = bytes.to_vec();

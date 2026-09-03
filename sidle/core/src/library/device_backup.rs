@@ -31,7 +31,8 @@ pub struct SyncCollection {
     pub id: String,
     /// Heading shown above this collection's files.
     pub label: String,
-    /// Device folders to scan, relative to `/mnt/us`. `"."` (or `""`) is the
+    /// Device folders to scan, relative to `/mnt/us`; `"."` is the USB root. More than
+    /// one when a firmware generation puts the same kind of file elsewhere.
     pub dirs: Vec<String>,
     /// Filenames to back up, as [`glob_match`] patterns. Empty takes nothing.
     pub include: Vec<String>,
@@ -185,7 +186,8 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
     pat[p..].iter().all(|&c| c == '*')
 }
 
-/// Reduce a collection id to a single safe path component, or `None` when
+/// Reduce a collection id to one safe path component, or `None` when nothing
+/// usable is left. Keeps a hand-edited or pushed config inside the backup tree.
 pub fn sanitize_id(id: &str) -> Option<String> {
     let base = Path::new(id).file_name()?.to_str()?;
     if base.is_empty() || base == "." || base == ".." {
@@ -195,7 +197,8 @@ pub fn sanitize_id(id: &str) -> Option<String> {
     }
 }
 
-/// Split a device-relative path (`2026/draft.md`) into safe components, or
+/// Split a device-relative path into safe components, or `None` if any is
+/// unusable. The guard on a path a network client chose.
 pub fn sanitize_rel_path(rel: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     for seg in rel.split(['/', '\\']) {
@@ -213,7 +216,8 @@ pub fn sanitize_rel_path(rel: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Store one file for `serial` under `device-backup/<serial>/<collection>/`,
+/// Store one file for `serial` under `device-backup/<serial>/<collection>/`, at
+/// `rel`. Empty bytes are skipped; [`UpdatePolicy::Once`] leaves a copy alone.
 pub fn store_collection_file(
     paths: &LibraryPaths,
     serial: &str,

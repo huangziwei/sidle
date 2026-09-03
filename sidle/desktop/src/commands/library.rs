@@ -17,7 +17,8 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportResult {
-    /// `needs_enqueue` is true when the row was inserted with a pending job —
+    /// `needs_enqueue` is true when the row was inserted with a pending job. False on
+    /// an idempotent re-import where the other side was already on disk.
     Imported {
         book: BookRow,
         needs_enqueue: bool,
@@ -37,7 +38,7 @@ pub async fn library_list(state: State<'_, AppState>) -> Result<Vec<BookRow>, St
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
-/// A live tick from an import in flight. Keyed by the source path (there is no
+/// A live tick from an import in flight.
 #[derive(Clone, Serialize)]
 struct ImportProgress<'a> {
     path: &'a str,
@@ -83,7 +84,8 @@ pub async fn library_import(
         let raw_for_err = raw.clone();
         let app_handle = app.clone();
 
-        // Three phases, two of them short-lived under the database lock and the
+        // Three phases: two short-lived under the database lock, and the conversion —
+        // minutes on a big book — outside it, so it stalls no reader.
         let result = tokio::task::spawn_blocking(move || {
             let kind = import::detect_kind(&path)?;
             let identity = import::identify_file(&path)?;
@@ -94,7 +96,8 @@ pub async fn library_import(
                 }
             }
 
-            // Every file opens with a tick, whatever its format: it names the
+            // Every file opens with a tick, whatever its format: it names the file being
+            // worked on and clears what the file before it left on the bar.
             emit_import_progress(&app_handle, &raw, index, file_count, 0.0, "");
 
             let pipeline = progress::import_pipeline(kind);
@@ -224,7 +227,8 @@ pub async fn library_amazon_search(
         .map_err(|e| e.to_string())
 }
 
-/// Minimal `application/x-www-form-urlencoded` encoding for a search query, so
+/// Minimal `application/x-www-form-urlencoded` encoding for a search query.
+/// Spaces → `+`, RFC 3986 unreserved pass through, everything else per byte.
 fn percent_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -635,7 +639,8 @@ pub async fn library_backup_pick_dest(app: AppHandle) -> Result<Option<String>, 
     Ok(result.map(|p| p.to_string()))
 }
 
-/// Per-unit progress for a long file operation (backup / restore / merge),
+/// Per-unit progress for a long file operation, emitted as
+/// `library:fileop-progress`. `done`/`total` count archived dirs or zip entries.
 #[derive(Clone, Serialize)]
 struct FileopProgress {
     op: &'static str,
@@ -644,6 +649,7 @@ struct FileopProgress {
 }
 
 /// Write a full backup of the current library to `dest`. Holds the DB lock only
+/// for the snapshot, then zips `books/` lock-free. Non-destructive.
 #[tauri::command]
 pub async fn library_backup(
     app: AppHandle,
@@ -663,7 +669,8 @@ pub async fn library_backup(
         (snap, uv)
     };
 
-    // Zip on a blocking thread — lock-free (it reads only the snapshot file + the
+    // Zip on a blocking thread: lock-free and off the async runtime, so a large
+    // backup stalls no command and freezes no UI. The snapshot guard cleans up there.
     let manifest = tokio::task::spawn_blocking(move || {
         // Cap IPC chatter: emit only when the integer percentage changes (plus
         // the final tick). The book/notebook loop can run into the hundreds, and
@@ -718,7 +725,7 @@ pub async fn library_restore_pick_src(app: AppHandle) -> Result<Option<String>, 
     Ok(result.map(|p| p.to_string()))
 }
 
-/// Restore a `.sidlebak` over the current library, then relaunch. Refuses while
+/// Restore a `.sidlebak` over the current library, then relaunch.
 #[tauri::command]
 pub async fn library_restore(
     app: AppHandle,

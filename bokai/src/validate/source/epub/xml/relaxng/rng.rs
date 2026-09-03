@@ -589,7 +589,8 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         acc.ok_or_else(|| CompileError("empty name class".into()))
     }
 
-    /// §4.8: a `QName` resolves its prefix through the namespace declarations in
+    /// §4.8: a `QName` resolves its prefix through the schema document's own namespace
+    /// declarations; the name sits in an attribute value. Unbound leaves no namespace.
     fn qname(
         &mut self,
         doc: &Document,

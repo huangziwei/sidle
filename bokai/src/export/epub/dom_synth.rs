@@ -225,7 +225,8 @@ struct Builder<'a, 'b> {
 }
 
 impl Builder<'_, '_> {
-    /// Append IR text lxml-style: onto the parent's leading text when it has
+    /// Append IR text lxml-style: onto the parent's leading text when it has no
+    /// element children yet, else onto the last child's tail.
     fn append_text(&mut self, parent: dom::NodeId, text: &str) {
         if text.is_empty() {
             return;

@@ -183,7 +183,8 @@ pub async fn notebook_import_device(
     Ok(summary)
 }
 
-/// Export each notebook in `notebook_ids` to a multi-page PDF in `dest_dir` —
+/// Export each notebook in `notebook_ids` to `<title>.pdf` in `dest_dir`. A
+/// collision gets a ` (n)` suffix; a failed render is skipped and counted.
 #[tauri::command]
 pub async fn notebook_export_pdf(
     state: State<'_, AppState>,

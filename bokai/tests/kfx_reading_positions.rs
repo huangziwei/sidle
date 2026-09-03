@@ -70,7 +70,7 @@ fn an_offset_advances_from_the_elements_coordinate() {
     );
 }
 
-/// The scale is reported, not invented. EPUB addresses text structurally and
+/// The scale is reported, not invented.
 #[test]
 fn epub_defines_no_reading_position_scale() {
     let Ok(epub) = std::fs::read(EPUB) else {

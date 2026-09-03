@@ -1,8 +1,7 @@
 //! What a KFX → IR → KFX round trip costs, measured entity by entity.
 //!
 //! `validate source` asks whether a container is self-consistent; this asks
-//! whether it is still the same book. The corpus run lives outside the repo,
-//! so this pins the same measures on the fixture.
+//! whether it is still the same book.
 
 use bokai::Book;
 use bokai::formats::kfx::diff;
@@ -49,19 +48,16 @@ fn a_round_trip_keeps_the_prose_element_ids_and_media() {
         d.eids.count.a
     );
 
-    // No picture is dropped or invented. The fixture stores JPEG, which the
-    // export re-encodes into the JPEG-XR plates a device reads, so the bytes
-    // are expected to move; a **JPEG-XR** source is instead copied verbatim,
-    // which the corpus measures and `a_swapped_media_payload_is_reported`
-    // pins.
+    // No picture is dropped or invented. This fixture stores JPEG, which the
+    // export re-encodes into the JPEG-XR plates a device reads, so its bytes
+    // are expected to move; a JPEG-XR source is copied verbatim instead.
     assert_eq!(
         d.media.count.a, d.media.count.b,
         "no media file added or dropped"
     );
 
-    // Ruby survives essentially intact. The fixture still loses a handful of
-    // readings; that residue is an open item, so this pins it from growing
-    // rather than asserting zero.
+    // Ruby survives essentially intact. A handful of readings are lost, so
+    // the bound keeps that from growing rather than asserting zero.
     assert!(
         d.ruby.lost * 100 <= d.ruby.readings.a,
         "at most 1% of ruby readings may be lost, got {} of {}",
@@ -97,11 +93,10 @@ fn a_round_trip_keeps_the_position_fragments() {
         p.locations.b
     );
 
-    // Carrying `word_boundary_list` through is measured on the Amazon corpus,
-    // where 99.98% survive. This fixture is bokai's own older output and its
-    // lists sum to one less than the text they describe, so the exporter
-    // correctly refuses most of them — a list that does not sum to the span
-    // segments the wrong characters. What must hold here is that nothing is
+    // A `word_boundary_list` is a run-length walk of the element's offset
+    // space, so one that does not sum to the span would segment the wrong
+    // characters and must be dropped. This fixture's lists sum to one short of
+    // their text, so most are refused; what has to hold is that none is
     // invented for an element the source never segmented.
     assert!(
         p.word_boundaries.b <= p.word_boundaries.a,

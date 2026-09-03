@@ -75,7 +75,8 @@ pub struct Azw3Importer {
     /// Discovered asset paths.
     assets: Vec<PathBuf>,
 
-    /// Resource index → extracted asset path, built from `assets` once the
+    /// Resource index → extracted asset path. Both `kindle:embed:` rewrites (HTML and
+    /// CSS) resolve through it, so a reference names the file actually written.
     embed_paths: HashMap<usize, String>,
 
     /// Cached parsed stylesheets.
@@ -194,7 +195,8 @@ impl Importer for Azw3Importer {
                 )
             })?;
             let end = end.min(text.len());
-            // Native Amazon stylesheets often chain-load each other via
+            // Rewrite `@import url(kindle:flow:NNNN)` to sibling-relative `styleNNNN.css` so
+            // Apple Books resolves the chain. `kindle:embed:` becomes the extracted asset.
             let css = transform::rewrite_kindle_flow_in_css(&text[start..end]);
             let css = transform::rewrite_kindle_embed_in_css(&css, &self.embed_paths);
             return Ok(transform::strip_kindle_embed_font_faces(&css));
@@ -596,7 +598,8 @@ impl Azw3Importer {
 
         importer.fill_fixed_layout_spine();
         importer.assets = importer.discover_assets();
-        // Filter out flows that are actually SVG illustration content —
+        // Flows that are SVG illustration content are inlined into chapter HTML by
+        // `inline_svg_flows`, so emitting them as `.css` assets leaks embed URLs.
         importer.prune_svg_flow_assets();
         importer.embed_paths = importer.embed_asset_paths();
 
@@ -705,7 +708,8 @@ impl Azw3Importer {
         Ok(text)
     }
 
-    /// Reassemble flow 0 (materialize each chapter, chunks spliced into their
+    /// Reassemble flow 0 and record every element's offset in the result onto
+    /// `DivElement::reassembled_pos`. Loads the text if needed; idempotent.
     fn ensure_reassembled(&mut self) -> io::Result<()> {
         if self.reassembled.is_some() {
             return Ok(());
@@ -815,7 +819,8 @@ impl Azw3Importer {
         // cover image — an EPUB 3 violation (RSC-010). Keep the label only.
         let transformed = transform::unlink_image_anchors(&transformed);
 
-        // Drop dangling `<link>`s that escape the package root (e.g. the
+        // Drop dangling `<link>`s that escape the package root: `transform_kindle_refs`
+        // rewrites only `kindle:flow:` hrefs, so a verbatim `..` href would survive.
         let delinked = transform::strip_root_escaping_links(&transformed);
 
         // Strip Amazon-specific attributes (aid, data-Amzn*) — except
@@ -1037,7 +1042,7 @@ struct ReassembledFlow {
 }
 
 /// Reassemble flow 0 from its `[skel][chunks]` on-disk layout, tracking where
-/// each chunk's content lands. Mirrors the historical `build_parts` splice
+/// each chunk's content lands. Mirrors calibre's `build_parts` splice
 /// (insert each chunk at `insert_pos - skel_start` into the growing skeleton)
 fn reassemble_flow(text: &[u8], files: &[SkeletonFile], elems: &[DivElement]) -> ReassembledFlow {
     let mut parts = Vec::new();
@@ -1050,8 +1055,8 @@ fn reassemble_flow(text: &[u8], files: &[SkeletonFile], elems: &[DivElement]) ->
         let skel_start = file.start_pos as usize;
         let skel_end = skel_start + file.length as usize;
 
-        // Skip a file whose skeleton runs past the text, exactly as the
-        // historical `build_parts` did (without advancing `div_ptr`), so the
+        // Skip a file whose skeleton runs past the text, exactly as calibre's
+        // `build_parts` does (without advancing `div_ptr`), so the
         // emitted chapter set stays byte-identical.
         if skel_end > text.len() {
             continue;

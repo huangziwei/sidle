@@ -39,7 +39,8 @@ pub struct Misordering {
     /// filename. Books are not authored this way; a packaging tool sorted them.
     /// On its own this decides which side is wrong: the spine.
     pub machine_sorted: bool,
-    /// The first entry the spine reads *late* — the TOC lists it before the
+    /// The first entry the spine reads *late*: the TOC lists it before the entry
+    /// after it, and the spine puts it after.
     pub first_out_of_order: Option<String>,
 }
 
@@ -211,7 +212,8 @@ fn reorder_to(nav_order: &[usize], len: usize) -> Vec<usize> {
     out
 }
 
-/// Whether the spine is its own manifest in lexicographic order — by `idref` or
+/// Whether the spine is its own manifest in lexicographic order, by `idref` or
+/// by filename. Both are checked: a packager sorts whichever string it holds.
 fn is_machine_sorted(opf: &OpfData, docs: &[SpineDoc]) -> bool {
     if docs.len() < 3 {
         return false; // too short for an order to mean anything

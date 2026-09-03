@@ -271,7 +271,7 @@ async fn autopull_on_connect(
 ) {
     let serial = device.serial.clone();
 
-    // 1a. Hash dedrm files OFF the DB lock. Reading several MB-each off a
+    // 1a. Hash dedrm files OFF the DB lock.
     let candidates = {
         let device = device.clone();
         match tokio::task::spawn_blocking(move || dedrm::hash_dedrm_candidates(&device)).await {
@@ -382,7 +382,8 @@ struct AutoPullSummary {
     failed: u32,
 }
 
-/// One-shot MTP session read after the user plugs in: `GetStorageInfo` for
+/// One-shot MTP session read after the user plugs in: `GetStorageInfo` plus the
+/// firmware. The 2s detect poll opens no session, which would race a push.
 async fn refresh_mtp_storage_info(
     app: AppHandle,
     state: DeviceState,

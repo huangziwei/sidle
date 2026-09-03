@@ -118,7 +118,8 @@ impl Context {
                 "narrator",
                 "playback-active-class",
             ]),
-            // The media-overlays vocabulary defines nothing for an `<item>` or
+            // The media-overlays vocabulary defines nothing for an `<item>` or `<itemref>`,
+            // so any `media:` property in those two contexts is undefined.
             ("media", Context::Item | Context::Itemref) => Some(&[]),
             _ => None,
         }

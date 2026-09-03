@@ -345,7 +345,8 @@ fn is_block_tag(tag: &str) -> bool {
     BLOCK_TAGS.contains(&tag)
 }
 
-/// Calibre's `is_inline_only` (`yj_to_epub_content.py`): an element is
+/// Calibre's `is_inline_only`: an `<svg>`, or an inline tag whose every
+/// descendant is inline-only. Decides whether a `<div>` can become a `<span>`.
 pub fn is_inline_only(dom: &Dom, id: NodeId) -> bool {
     let tag = dom.get(id).tag.as_str();
     if tag == "svg" {

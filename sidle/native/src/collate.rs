@@ -31,7 +31,7 @@ pub fn natural_compare(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// Both iterators sit at the first digit of an ASCII-digit run. Consume each
+/// Both iterators sit at the first digit of an ASCII-digit run.
 fn compare_digit_runs(a: &mut Peekable<Chars<'_>>, b: &mut Peekable<Chars<'_>>) -> Ordering {
     let zeros_a = take_zeros(a);
     let zeros_b = take_zeros(b);
@@ -101,8 +101,8 @@ mod tests {
 
     #[test]
     fn non_digit_segments_use_code_point_order() {
-        // Matches the str::cmp this replaces: uppercase before lowercase, and
-        // CJK by code point (the documented native collation choice).
+        // Non-digit segments compare as plain `str::cmp` does: uppercase
+        // before lowercase, CJK by code point (the documented choice).
         assert_eq!(nc("Banana", "apple"), Less); // 'B'(0x42) < 'a'(0x61)
         assert_eq!(nc("夏目漱石", "村上春樹"), Less); // 0x590F < 0x6751
     }
@@ -142,8 +142,8 @@ mod tests {
 
     #[test]
     fn is_a_total_order_usable_for_sort() {
-        // A non-total comparator can make sort_by misbehave; assert a tricky set
-        // sorts the way the fix intends.
+        // A non-total comparator can make sort_by misbehave, so a tricky set
+        // must come out in the stated order.
         let mut v = vec!["v10", "v2", "v1", "v10", "v9", "v100"];
         v.sort_by(|a, b| natural_compare(a, b));
         assert_eq!(v, vec!["v1", "v2", "v9", "v10", "v10", "v100"]);

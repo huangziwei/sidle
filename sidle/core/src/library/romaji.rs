@@ -94,7 +94,8 @@ pub fn search_key(
         parts.push(t.clone());
     }
 
-    // Primary key: NFKD-folded (ä→a, é→e, ß→dropped). Also index the
+    // Primary key: NFKD-folded. Also index the digraph-expanded Latin form, so
+    // `muller` and `mueller` both find "Müller". Appended only when it differs.
     let joined = parts.join(" ");
     let mut key = canon(&joined);
     let expanded = canon(&expand_latin(&joined));
@@ -104,7 +105,8 @@ pub fn search_key(
     key
 }
 
-/// Fold a string to the canonical match form: NFKD ASCII-fold (ō→o, é→e,
+/// Fold a string to the canonical match form: NFKD ASCII-fold, lowercase, then
+/// only `[a-z0-9]`. Space- and punctuation-free, so the keyboard needs neither.
 pub fn canon(s: &str) -> String {
     s.nfkd()
         .filter(|c| !is_combining(*c))
@@ -113,7 +115,8 @@ pub fn canon(s: &str) -> String {
         .collect()
 }
 
-/// Expand the Latin letters whose conventional ASCII spelling is a **digraph**,
+/// Expand the Latin letters whose conventional ASCII spelling is a digraph, so
+/// they survive `canon`, which folds `ä→a` and drops `ß`/`œ`/`ø` outright.
 fn expand_latin(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

@@ -9,7 +9,8 @@ use super::fragment::{YJFragment, fragment_sort_key, is_container_fragment};
 use super::node::IonNode;
 use super::symtab::LocalSymbolTable;
 
-/// Drives the per-fragment walker. Mirrors calibre's `walk_fragment` for the
+/// Drives the per-fragment walker, mirroring calibre's `walk_fragment`: gather
+/// every `IonSymbol` reference in a value, plus the `$165` string-key reference.
 fn collect_symbol_references(fragment: &YJFragment, into: &mut HashSet<String>) {
     walk_node(&fragment.value, into);
     // calibre also adds the ftype itself when used in fragment.is_root.

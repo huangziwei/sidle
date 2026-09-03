@@ -1,4 +1,5 @@
-//! Forward overlap (PRE-)filtering passes — the encode-side inverses of the
+//! Forward overlap (PRE-)filtering passes, the encode-side inverses of the
+//! decoder's first- and second-level overlap filtering. Soft tiles only.
 
 use super::transform::{
     overlap_pre_filter_2, overlap_pre_filter_2x2, overlap_pre_filter_4, overlap_pre_filter_4x4,

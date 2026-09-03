@@ -68,7 +68,8 @@ pub enum IonValue {
     String(String),
     Blob(Vec<u8>),
     List(Vec<IonValue>),
-    /// S-expression (Ion type 12). Encoded exactly like a list but with a
+    /// S-expression (Ion type 12), encoded like a list with a distinct type code, for
+    /// `condition: (isPortrait)` selectors. Read back as `List`, so write-side only.
     Sexp(Vec<IonValue>),
     /// Struct fields as (symbol_id, value) pairs in parse order.
     /// Order is preserved for both parsing and serialization.

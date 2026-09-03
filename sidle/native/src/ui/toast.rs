@@ -5,14 +5,16 @@ use crate::ui::text::TextRenderer;
 
 const BANNER_HEIGHT: u32 = 140;
 const BANNER_MARGIN_X: u32 = 80;
-/// Breathing room above and below the text block, and so the least height a
+/// Breathing room above and below the text block, and the least height a banner
+/// may take beyond the block it holds.
 const BANNER_PAD_Y: u32 = 20;
 
 /// Taller banner for the live download overlay — fits title + progress + the
 /// Cancel button with breathing room.
 const DL_BANNER_HEIGHT: u32 = 300;
 
-/// Banner for the batch-progress overlay ([`draw_progress`]) — fits a title, an
+/// Banner for the batch-progress overlay: title, `n / total`, bar, and the Stop
+/// button [`draw_progress_stop`] adds. Same footprint as the download overlay.
 const PROGRESS_BANNER_HEIGHT: u32 = DL_BANNER_HEIGHT;
 /// Stop button footprint in [`draw_progress_stop`]. Wider than [`CANCEL_W`]
 /// because the label is a sentence, not a word.
@@ -154,7 +156,8 @@ pub fn draw_download_done(
     }
 }
 
-/// Batch-progress overlay: a `title` line, an `n / total` count line, and a
+/// Batch-progress overlay: a `title` line, an `n / total` count, and a bar filled
+/// to `done / total`. No button; `total == 0` draws an empty track.
 pub fn draw_progress(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,

@@ -154,7 +154,8 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
 
     let mut chapters = Vec::with_capacity(splits.len() + 1);
 
-    // If the body opens directly with a split-level heading (no front matter —
+    // A body opening on a split-level heading has no front matter: the title page is
+    // title+author and that heading begins ch1. Otherwise the lead-in shares it.
     let first_is_heading = splits
         .first()
         .is_some_and(|s| s.trim_start().starts_with(tag.as_str()));
@@ -876,7 +877,8 @@ mod tests {
 
     #[test]
     fn body_starting_with_heading_gives_ch1_its_own_file() {
-        // Real Aozora novels (e.g. 不連続殺人事件) carry no front matter: the
+        // A body that opens on its first heading has no front matter: the title page is
+        // title+author only, and that heading begins ch1.
         let doc = Document {
             title: "本".to_string(),
             author: "著".to_string(),

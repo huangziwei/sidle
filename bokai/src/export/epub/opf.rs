@@ -11,7 +11,7 @@ pub struct OpfCreator {
     pub file_as: Option<String>,
 }
 
-/// Per-creator `file-as` values, one per author. Creator `i` gets the
+/// Per-creator `file-as` values, one per author.
 pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
     let joined = authors.join(" & ");
     (0..authors.len())
@@ -521,7 +521,8 @@ pub fn landmark_guide_type(t: LandmarkType) -> &'static str {
     }
 }
 
-/// Point the guide's `cover` reference at the synthesized titlepage (the
+/// Point the guide's `cover` reference at the synthesized titlepage, inserting
+/// one when the source declared no cover landmark.
 pub fn repoint_cover_guide(guide: &mut Vec<OpfGuideRef>, titlepage_href: &str) {
     if let Some(cover_ref) = guide.iter_mut().find(|g| g.guide_type == "cover") {
         cover_ref.href = titlepage_href.to_string();

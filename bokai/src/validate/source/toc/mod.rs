@@ -4,6 +4,7 @@ mod epub;
 mod kfx;
 
 /// Format-neutral evidence extracted from a book — the shared input to
+/// [`classify`], so the KFX and EPUB extractors share one verdict rule.
 #[derive(Debug, Clone, Default)]
 pub struct TocEvidence {
     /// The declared TOC (KFX `nav_container` toc / EPUB nav or NCX) as the tree
@@ -173,7 +174,8 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
 }
 
 impl TocAudit {
-    /// A validation pass = the book's navigation is not deficient, in any of
+    /// A validation pass = the navigation is not deficient in any of the three
+    /// senses: chapterless, shapeless, or contradicted by the reading order.
     pub fn is_clean(&self) -> bool {
         !matches!(
             self.verdict,

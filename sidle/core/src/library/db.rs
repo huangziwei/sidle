@@ -712,7 +712,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // The two end-of-book constants a device states for one book, outliving the
+    // The two end-of-book constants a device states for one book, kept so the
+    // pairing outlives the archive it came from.
+    //
+    // Every event line repeats the last *word* position, but only an occasional
+    // `BookEndPosition` states the last position, which is what
+    // [`books_with_last_position`] joins on. An archive that holds a book's
+    // sessions need not hold that event — one reader stack cuts the field off
+    // the line outright — so a pairing derived per-import is lost and the book
+    // unnameable however many times it is read.
+    //
+    // [`resolve_reading_sessions`] re-keys what it can already name. A session
+    // must never be stored twice under the two constants: the identity index
+    // counts the position, so the second key inserts a row rather than
+    // replacing one, and the same sitting is counted twice.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS reading_log_book_ends (
             last_word_position INTEGER PRIMARY KEY,
@@ -3325,7 +3338,8 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
     // Resolve the stored root-relative cover path up front — it feeds
     // both the struct field and the served-image rev's fallback stat.
     let cover_path = resolve_opt(root, row.get(7)?);
-    // Derived (not columns): the thumbnail sidecar (when present on disk) and
+    // Derived, not columns: the thumbnail sidecar and the served-image cache token,
+    // from one stat. A `None` root or a missing thumb yields `(None, ..)`.
     let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
     Ok(BookRow {
         id: row.get(0)?,
@@ -6617,7 +6631,8 @@ mod tests {
 
     #[test]
     fn relink_ink_carries_every_table_to_the_new_key() {
-        // A re-key changes the identity the device names its
+        // A re-key changes the identity the device names its `.notebooks/<asin>!!PDOC!!`
+        // dir after, so ink collected under the old one has to come along.
         let conn = fresh_db();
         let book = insert_with_asin(&conn, "sha-ink", "Has Ink", "B07PXGQC1Q");
         upsert_book_ink(
@@ -7061,7 +7076,8 @@ mod tests {
 
     #[test]
     fn a_row_spanning_two_midnights_becomes_three_days() {
-        // The widest kind the old parser produced — several sittings glued into
+        // The widest kind a row can hold: several sittings glued into one. Divided by its
+        // own clock, the only thing the row still says.
         let pieces =
             split_across_midnight("2026-06-20T23:06:41", "2026-06-22T00:40:06", 360, 36, 7200);
         assert_eq!(pieces.len(), 3);

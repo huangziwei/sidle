@@ -1,4 +1,6 @@
-//! Library merge — fold a `.sidlebak`'s contents into the *live* library,
+//! Library merge — fold a `.sidlebak`'s contents into the live library,
+//! additively: only inserts, never a delete or an overwrite, so no relaunch.
+//! Identity is content-derived; only the autoincrement `id` is remapped.
 
 use std::path::{Path, PathBuf};
 

@@ -194,7 +194,7 @@ pub fn import_folder(conn: &Connection, paths: &LibraryPaths, folder: &Path) -> 
     summary
 }
 
-/// Locate the device cover thumbnail for a notebook. The device keeps these in
+/// Locate the device cover thumbnail for a notebook.
 fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
     let mut candidates = vec![dir.join("thumbnail.png")];
     if let Some(parent) = dir.parent() {
@@ -206,7 +206,8 @@ fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// The `nbk` file's mtime as a naive local-wall-clock ISO string — the
+/// The `nbk` file's mtime as a naive local-wall-clock ISO string, the notebook's
+/// `updated_at` for a folder import. Falls back to the import time.
 fn folder_updated_at(nbk: &Path) -> String {
     std::fs::metadata(nbk)
         .and_then(|m| m.modified())

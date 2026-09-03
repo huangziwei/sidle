@@ -267,7 +267,8 @@ fn add_cover_image_to_flat_metadata(parsed: &IonValue, cover_name_sym: u64) -> I
     IonValue::Struct(out)
 }
 
-/// Rebuild an `external_resource` Ion value with updated dimensions (and,
+/// Rebuild an `external_resource` Ion value with updated dimensions (and JPEG
+/// `format`/`mime` when `flip_format`), keeping the annotation and field order.
 fn rebuild_external_resource(
     parsed: &IonValue,
     w: u32,
@@ -387,7 +388,8 @@ mod tests {
 
     #[test]
     fn rebuild_updates_dims_and_flips_format() {
-        // external_resource { format: <jxr sym>, mime: "image/jxr",
+        // external_resource { format: <jxr sym>, mime: "image/jxr", location: "resource/r",
+        //   resource_width: 50, resource_height: 53 }
         let jxr_sym = symbol_id_for_name("jxr").unwrap_or(999);
         let original = IonValue::Struct(vec![
             (KfxSymbol::Format as u64, IonValue::Symbol(jxr_sym)),
@@ -558,7 +560,8 @@ mod tests {
 
     #[test]
     fn book_metadata_backfills_cover_image_into_title_category() {
-        // book_metadata { categorised_metadata: [ {category:"kindle_title_metadata",
+        // book_metadata { categorised_metadata: [ {category: "kindle_title_metadata",
+        //   metadata: [{key: "title", value: "T"}]}, … ] }
         let title_cat = IonValue::Struct(vec![
             (
                 KfxSymbol::Category as u64,

@@ -99,7 +99,8 @@ pub struct EditorMetadata {
     /// The Amazon catalogue id, editable. Its one use is fetching the colour
     /// cover; it is never written into a file a device reads.
     pub amazon_asin: Option<String>,
-    /// The identity the file carries — stamped as both `ASIN` and `content_id`,
+    /// The identity the file carries, stamped as both `ASIN` and `content_id`, and
+    /// what a Kindle keys its catalog, `.sdr` and notebook dirs on. Read-only.
     pub content_id: Option<String>,
 }
 

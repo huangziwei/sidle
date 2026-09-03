@@ -858,8 +858,9 @@ mod tests {
         out
     }
 
-    /// The decoder's 422-chroma reconstruction (Table-151 across-block sequence
-    /// from `decoder.rs:2256-2284` + stage-1 + scatter), composed by hand.
+    /// The decoder's 422-chroma reconstruction (the Table-151 across-block
+    /// sequence from its sample-reconstruction stage, plus stage-1 and scatter),
+    /// composed by hand.
     fn decode_chroma_mb_422(buf: &[i32; 128]) -> [i32; 128] {
         let mut buf = *buf;
         let mut d = [0i32; 8];

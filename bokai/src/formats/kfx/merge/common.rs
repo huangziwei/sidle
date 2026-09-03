@@ -2,7 +2,8 @@
 
 use super::node::IonNode;
 
-/// Rewrite the `cde_content_type` field in a `$490` book_metadata value to
+/// Rewrite a `$490` book_metadata `cde_content_type` to `"PDOC"`, so the device
+/// reads the embedded cover instead of probing the ASIN catalog. `true` if changed.
 pub fn rewrite_cde_content_type_pdoc(value: &mut IonNode) -> bool {
     let Some(top) = value.as_struct_mut() else {
         return false;

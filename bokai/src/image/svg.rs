@@ -32,7 +32,8 @@ pub fn cached_fontdb() -> Arc<usvg::fontdb::Database> {
         .clone()
 }
 
-/// Quick sniff: do these bytes look like an SVG document? Checks for an
+/// Quick sniff: do these bytes look like an SVG document? Checks for an `<svg`
+/// start in the first 1 KiB, so non-SVG assets skip the XML parser.
 pub(crate) fn looks_like_svg(data: &[u8]) -> bool {
     let head = &data[..data.len().min(1024)];
     memchr::memmem::find(head, b"<svg").is_some()

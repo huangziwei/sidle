@@ -28,7 +28,8 @@ pub struct Nbk {
 pub struct Standalone {
     pub nbk: Nbk,
     pub cover: Option<PathBuf>,
-    /// The `nbk`'s mtime as naive local ISO (`YYYY-MM-DDTHH:MM:SS`), the same
+    /// The `nbk`'s mtime as naive local ISO, the shape the desktop's device pull
+    /// produces. Local: the picker runs on the device, so this is the Kindle's clock.
     pub updated_at: String,
 }
 

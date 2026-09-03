@@ -660,7 +660,8 @@ fn split_mobi_html_ncx_only(html: &[u8], ncx_positions: &[u32], title: &str) -> 
     }
 }
 
-/// Make a MOBI source head usable as an XHTML chapter head: drop the
+/// Make a MOBI source head usable as an XHTML chapter head: drop the MOBI-only
+/// `<guide>` block and ensure a `<title>` child (RSC-017 without it).
 fn sanitize_mobi_head(head: &str, title: &str) -> String {
     let mut out = String::with_capacity(head.len());
     let lower = head.to_ascii_lowercase();

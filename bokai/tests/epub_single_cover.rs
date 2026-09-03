@@ -29,7 +29,7 @@ fn opf_text(epub: &[u8]) -> String {
 }
 
 /// Every OPF guide `type="cover"` reference href — the page a reader opens on.
-/// The dual-cover bug produced two designated covers; a correct package has one.
+/// A correct package designates exactly one.
 fn cover_reference_hrefs(epub: &[u8]) -> Vec<String> {
     opf_text(epub)
         .split("<reference")

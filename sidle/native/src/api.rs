@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ServerConfig;
 
-/// Errors from talking to sidle-server. `TokenMismatch` is broken out so
+/// Errors from talking to sidle-server.
 #[derive(Debug)]
 pub enum SidleError {
     /// Server returned 401 or 403 — the bearer token in our
@@ -157,7 +157,8 @@ pub(crate) const SHA_INFIX_LEN: usize = 8;
 pub struct Book {
     pub id: i64,
     pub title: String,
-    /// Full sha256 of the KFX bytes (64 hex chars). The first 8 chars are
+    /// Full sha256 of the KFX bytes (64 hex chars). Its first 8 match the sha8 infix
+    /// of files already on the device, which is how a held book is hidden.
     #[serde(default)]
     pub kfx_sha256: Option<String>,
     /// Canonical on-device filename (`<basename>.<sha8>.kfx`), computed
@@ -261,7 +262,8 @@ fn clean(s: &str) -> String {
 }
 
 pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
-    // `?thumb=1` → the server returns the small color thumbnail produced at
+    // `?thumb=1` asks for the small colour thumbnail made at import, ~30–50 KB. The
+    // server falls back to full-res when it is not on disk yet.
     let url = format!("https://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
     let mut res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();
@@ -496,7 +498,8 @@ pub struct SyncReport {
     pub unmatched: Vec<String>,
     #[serde(default)]
     pub annotations: SyncStats,
-    /// Orphaned `.sdr` dirs pruned off the device this sync (a `.sdr` with no
+    /// Orphaned `.sdr` dirs pruned off the device this sync. Set locally by
+    /// [`push_annotations`], not by the server, so it survives the early exit.
     #[serde(default)]
     pub pruned: usize,
     /// Sidecars the desktop wants written onto this device — highlights made in
@@ -697,7 +700,15 @@ pub fn push_annotations(
     Ok(report)
 }
 
-/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir` that
+/// Write the sidecars the desktop sent back, returning how many landed.
+///
+/// Best-effort per file: a sidecar that fails to write is logged and skipped,
+/// never fatal — the pull half of this sync already succeeded, and the desktop
+/// will offer the same file again next time.
+///
+/// Only ever writes into an existing `.sdr`; it never creates one. A directory
+/// that isn't there means the device hasn't opened that book, and a sidecar
+/// sitting in a folder the reader never made is a file nothing will read.
 fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize {
     let mut written = 0;
     for item in outgoing {
@@ -724,6 +735,12 @@ fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize 
     written
 }
 
+/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` that still has its book,
+/// base64 each. Returns them plus the count of orphaned `.sdr` pruned.
+/// with no matching `<stem>.kfx` is a copy the user deleted on the device.
+/// Those are removed and not synced: only a live book's reading-state belongs
+/// in the library. A live `.sdr` with neither sidecar (a pagination cache) is
+/// kept but not pushed.
 fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
     let mut sdrs = Vec::new();
     let mut pruned = 0usize;
@@ -957,6 +974,7 @@ struct BookPushReply {
 }
 
 /// Push one decrypted book to sidle-server's `POST /sync/book`, which imports it
+/// as the USB `/dedrm` pull does. Streamed from disk, never held in RAM.
 pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result<BookPush> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let ext = path
@@ -1101,7 +1119,7 @@ impl MiscReport {
     }
 }
 
-/// Ask the desktop which folders it wants backed up. Falls back to
+/// Ask the desktop which folders it wants backed up.
 fn fetch_collections(agent: &ureq::Agent, cfg: &ServerConfig) -> Vec<Collection> {
     let url = format!("https://{}:{}/sync/misc", cfg.host, cfg.port);
     let fetched = (|| -> Result<Vec<Collection>> {
@@ -1298,7 +1316,7 @@ pub struct ReadingLogReport {
     /// locally so the log can show that the watermark did its job.
     #[serde(skip)]
     pub skipped: usize,
-    /// Which of this device's four log sources the lines came from. Local, and
+    /// Which of this device's four log sources the lines came from.
     #[serde(skip)]
     pub from: crate::readinglog::Sources,
     /// Archive files deleted because the library confirmed it holds them.
@@ -1445,7 +1463,8 @@ fn collect_misc_files(us_root: &Path, collections: &[Collection]) -> MiscScan {
     scan
 }
 
-/// Append one directory's matching files to `scan`, recursing when the
+/// Append one directory's matching files to `scan`, recursing when the collection
+/// asks. `rel` is the path the file is stored under, which `seen` keys on.
 fn gather_misc(
     dir: &Path,
     rel: &str,
@@ -1498,7 +1517,8 @@ fn is_never_sent(name: &str) -> bool {
     name.starts_with('.') || name.to_ascii_lowercase().ends_with(".partial")
 }
 
-/// Case-insensitive glob over a bare filename, `*` being the only
+/// Case-insensitive glob over a bare filename, `*` the only metacharacter.
+/// Mirrors `sidle_core::library::device_backup::glob_match`; the two must agree.
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = name.to_lowercase().chars().collect();
@@ -1594,10 +1614,10 @@ mod tests {
 
     #[test]
     fn clean_strips_bom_and_zero_width() {
-        // The real bug: a leading BOM (U+FEFF) made a title code-point-sort to
-        // the end. Stripped → the digit leads → correct order.
+        // A leading BOM (U+FEFF) code-point-sorts a title to the end.
+        // Stripped → the digit leads → correct order.
         assert_eq!(clean("\u{FEFF}01 〝文学少女〟"), "01 〝文学少女〟");
-        // A BOM buried mid-title (vol 07's case) is removed too.
+        // A BOM buried mid-title is removed too.
         assert_eq!(clean("07 \u{FEFF}〝x"), "07 〝x");
         // Other zero-width junk + surrounding whitespace.
         assert_eq!(clean("  \u{200B}Hello\u{200D} "), "Hello");
@@ -1613,7 +1633,8 @@ mod tests {
         dir
     }
 
-    /// Batching is what keeps a first sync from a well-used Scribe inside the
+    // Batching keeps a first sync from a well-used Scribe inside the device's RAM: a
+    // run splits at the budget, and one notebook bigger than the budget still goes.
     #[test]
     fn notebooks_batch_by_bytes_and_never_drop_an_oversized_one() {
         let base = scratch("batches");

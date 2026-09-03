@@ -405,7 +405,8 @@ pub struct NcxEntry {
     pub description: Option<String>,
     /// Tag 70 — the article's byline.
     pub author: Option<String>,
-    /// Tag 71 — the article's thumbnail, as a raw record offset from
+    /// Tag 71 — the article's thumbnail, a raw record offset from `first_image_index`
+    /// in the 0-based numbering EXTH 201/202 use, not 1-based `recindex`.
     pub image: Option<u32>,
 }
 
@@ -976,7 +977,7 @@ const CHUNK_TAG_EOF: TagDef = TagDef {
     eof: 1,
 };
 
-/// Flush threshold for a CNCX record. PDB records are capped at 64 KB and the
+/// Flush threshold for a CNCX record.
 const CNCX_RECORD_LIMIT: usize = 0xFBF8;
 
 /// Build CNCX record(s) from labels, together with the offset each label is

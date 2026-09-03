@@ -41,10 +41,10 @@ fn both_location_maps_are_written_and_parallel() {
     );
 }
 
-/// A Location is a place in the text, not a paragraph number. Amazon puts 87%
-/// of its boundaries at a non-zero offset; a generator that can only start one
-/// at a block boundary reports zero here and its Location numbers line up with
-/// nothing.
+/// A Location is a place in the text, not a paragraph number: Amazon states
+/// most of its boundaries at a non-zero offset. A generator that can only
+/// start one at a block boundary reports zero here, and its Location numbers
+/// line up with nothing.
 #[test]
 fn location_boundaries_sit_inside_the_text() {
     let Some(kfx) = export_kfx(EPUB) else {

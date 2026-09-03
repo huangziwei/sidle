@@ -89,7 +89,8 @@ impl ResourceKind {
                 "20/sch/id-unique.sch",
             ],
             (ResourceKind::Xhtml, true) => &["30/epub-xhtml-30.nvdl"],
-            // A navigation document takes the navigation grammar in place of
+            // A navigation document takes the navigation grammar in place of the XHTML one,
+            // and both assertion sets. The version does not gate it (see NAV-001).
             (ResourceKind::Nav, _) => &[
                 "30/epub-nav-30.rnc",
                 "30/epub-xhtml-30.sch",

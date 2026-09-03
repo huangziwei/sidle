@@ -34,7 +34,8 @@ pub enum PushResult {
     Failed { book_id: i64, error: String },
 }
 
-/// Push one book's KFX to the device, streaming byte-progress for the copy via
+/// Push one book's KFX to the device, reporting copy progress via
+/// `on_progress(bytes_sent, total_bytes)`. Pass `&|_, _| {}` to stay silent.
 pub fn push_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
@@ -125,7 +126,8 @@ pub enum DeleteResult {
         file_existed: bool,
         sdr_existed: bool,
     },
-    /// Filename didn't look like one of ours (no `.<sha8>.kfx` suffix), or
+    /// Filename didn't look like one of ours (no `.<sha8>.kfx` suffix), or it tried to
+    /// climb out of `Sidle/`. A hard refusal rather than a silent wrong target.
     NotOurs {
         filename: String,
     },
@@ -180,7 +182,8 @@ pub fn delete_one(
         }
     };
 
-    // Kindle also drops a *catalog-style* `<title>_<ASIN>.sdr/` next to
+    // Kindle also drops a catalog-style `<title>_<ASIN>.sdr/` beside the file. The
+    // title segment is Kindle-normalized, so scan for the `_<ASIN>.sdr` suffix.
     let catalog_sdr_existed = match asin {
         Some(asin) if !asin.is_empty() => wipe_catalog_sdrs(transport, &dir, asin, &sdr_name),
         _ => false,

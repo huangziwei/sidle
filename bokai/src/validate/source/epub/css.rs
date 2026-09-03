@@ -137,7 +137,8 @@ pub fn find_ascii_ci(hay: &str, kw: &[u8]) -> Option<usize> {
     (0..=hb.len() - kw.len()).find(|&i| hb[i..i + kw.len()].eq_ignore_ascii_case(kw))
 }
 
-/// Every raw `url(...)` / `@import` target in a CSS resource (comments stripped,
+/// Every raw `url(...)` / `@import` target in a CSS resource, unclassified —
+/// comments stripped, one layer of quotes removed, empties dropped.
 pub fn url_tokens(css_raw: &str) -> Vec<String> {
     url_tokens_with_empties(css_raw).0
 }

@@ -9,7 +9,8 @@ use crate::api::{self, Book};
 use crate::config::ServerConfig;
 use crate::device_state;
 
-/// The picker's record of the KFX revision (`Book::kfx_rev`) it last wrote for
+/// The picker's record of the KFX revision it last wrote for each on-device file,
+/// keyed by the frozen filename. Lives under `extensions/sidle/`, not the book dir.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Revs(pub HashMap<String, i64>);

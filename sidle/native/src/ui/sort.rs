@@ -105,7 +105,9 @@ impl SortState {
     }
 }
 
-/// A book's comparable value for one key. `Missing` always sorts *after* any
+/// A book's comparable value for one key.
+/// `library.js`'s `sortedBooks`: a book with no value for the active
+/// key sinks to the bottom whether ascending or descending.
 enum SortVal<'a> {
     Text(Cow<'a, str>),
     Num(i64),
@@ -130,7 +132,7 @@ fn value<'a>(book: &'a Book, key: SortKey) -> SortVal<'a> {
     }
 }
 
-/// Composite series key, port of `seriesSortKey` (`library.js:477-487`):
+/// Composite series key, port of `library.js`'s `seriesSortKey`:
 fn series_key(book: &Book) -> SortVal<'static> {
     let name = book
         .series_name

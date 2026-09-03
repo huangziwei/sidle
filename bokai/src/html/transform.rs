@@ -112,7 +112,10 @@ impl<'a> TransformContext<'a> {
             }
         }
 
-        // The IR root *is* `<body>`, so it carries body's own computed style,
+        // The IR root *is* `<body>`, so it carries body's own computed style, not just
+        // the inheritable part: `body { background: url(…) }` must survive.
+        // page texture is the case in the wild — is computed here and must not
+        // be dropped.
         let root_style = self.chapter.styles.intern(body_style.clone());
         if let Some(root) = self.chapter.node_mut(NodeId::ROOT) {
             root.style = root_style;

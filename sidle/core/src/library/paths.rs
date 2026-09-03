@@ -391,7 +391,8 @@ pub fn kfx_device_filename(kfx_path: &str, kfx_sha256: &str) -> String {
     format!("{stem}.{}.kfx", sha_infix(kfx_sha256))
 }
 
-/// Parse the `<sha8>` out of an on-device filename matching the
+/// Parse the `<sha8>` out of an on-device `<basename>.<sha8>.kfx` filename, or
+/// `None`. Both the "is this ours?" gate and the library-row lookup.
 pub fn parse_sha_infix(filename: &str) -> Option<String> {
     let stem = filename.strip_suffix(".kfx")?;
     let (_, sha) = stem.rsplit_once('.')?;
@@ -458,7 +459,8 @@ pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> S
     truncate_chars(&out, 180)
 }
 
-/// Make `s` safe to use as a single filesystem path segment: replace the
+/// Make `s` safe as a single filesystem path segment: replace the characters
+/// macOS rejects (and NUL) with `_`, control chars with spaces, collapse runs.
 pub fn sanitize_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

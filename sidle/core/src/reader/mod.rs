@@ -78,7 +78,8 @@ pub struct ReaderBook {
     pub locations: Vec<(i64, i64)>,
     /// Denominator for whole-book percentage and "N of M".
     pub max_location: i64,
-    /// Whether [`Self::locations`] are the device's own Location numbers (the
+    /// Whether [`Self::locations`] are the device's own Location numbers or characters
+    /// along a synthesized axis. The percentage is faithful either way.
     pub real_locations: bool,
     /// Image-based fixed layout (manga / comic): pre-paginated rendering, one
     /// page per section, two-up spreads.
@@ -154,7 +155,7 @@ impl ReaderBook {
         }
 
         let writing_mode = package.writing_mode.clone();
-        // A source that ships a position scale is measured on it. One that
+        // A source that ships a position scale is measured on it.
         let positions = if positions.is_empty() {
             let text = book.source_text();
             let order: Vec<i64> = sections

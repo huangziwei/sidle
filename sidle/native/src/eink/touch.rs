@@ -33,7 +33,8 @@ const EVENT_BYTES: usize = 16;
 /// without demanding pixel precision.
 const SCREENSHOT_CORNER_PX: u32 = 180;
 
-/// Boundary touch events surfaced to the main loop. `Down` fires when
+/// Boundary touch events surfaced to the main loop.
+/// emit — only the timing between Down and Up matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchEvent {
     Down {
@@ -152,7 +153,8 @@ impl Touch {
         self.orientation = orientation;
     }
 
-    /// Drain currently-available events (non-blocking). Returns `Some` when a
+    /// Drain currently-available events, non-blocking. `Some` when a `Down`/`Up`
+    /// boundary completes, in orientation-corrected framebuffer coords, else `None`.
     pub fn next_event(&mut self) -> Result<Option<TouchEvent>> {
         let mut buf = [0u8; EVENT_BYTES];
         loop {
@@ -448,6 +450,7 @@ fn has_bitmap_bit(block: &str, prefix: &str, bit: u32, word_bits: u32) -> bool {
 }
 
 /// First whitespace-separated hex word of the `prefix` line in a
+/// `/proc/bus/input/devices` block (`B: EV=b` → `0xb`). `0` when unparseable.
 fn first_hex_word(block: &str, prefix: &str) -> u64 {
     block
         .lines()

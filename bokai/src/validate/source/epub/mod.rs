@@ -26,7 +26,8 @@ impl Report {
         self.violations.is_empty()
     }
 
-    /// Any error-level violation. [`is_clean`](Self::is_clean) is true only
+    /// Any error-level violation, tracking epubcheck's exit code, which is 0 for a
+    /// book whose violations are all warnings. `is_clean` requires zero of any.
     pub fn has_errors(&self) -> bool {
         self.violations
             .iter()
@@ -42,6 +43,7 @@ impl Report {
     }
 
     /// A [`fmt::Display`] view of only the error-level violations, for the
+    /// conversion/repair flags. Same per-violation lines as the full report.
     pub fn errors_display(&self) -> ErrorsDisplay<'_> {
         ErrorsDisplay(self)
     }
@@ -233,7 +235,8 @@ pub enum Rule {
     /// The schema channel: a RELAX NG grammar or a Schematron assertion
     SchemaViolation,
     SchemaWarning,
-    /// The two defects epubcheck reports from its document-rewrite step, not
+    /// The two defects epubcheck reports from its document-rewrite step: an invalid
+    /// `data-` attribute name (`HTM-061`) and a reserved namespace (`HTM-054`).
     InvalidDataAttribute,
     ReservedCustomNamespace,
     /// Fixed-layout viewport metadata (`HTM-047/056/057/059`) and the SVG
@@ -253,7 +256,9 @@ pub enum Rule {
     /// A narrated content document with no stylesheet, in a publication that
     /// declares a media-overlay styling class (`CSS-030`).
     OverlayStylingWithoutCss,
-    /// Package-document property rules ([`vocab`]): a list where one value is
+    /// Package-document property rules ([`vocab`]): a required value missing
+    /// (OPF-025), a malformed `prefix:name` (OPF-026), an undefined name (OPF-027),
+    /// and a property wrong for the item's media type (OPF-012).
     PropertyListNotAllowed,
     PropertyMalformed,
     PropertyUndefined,
@@ -306,7 +311,9 @@ pub enum Rule {
     /// document (`NAV-003`), and no identified pagination source (`OPF-066`).
     NavNoPageList,
     PaginationSourceMissing,
-    /// Media overlay (SMIL) rules. An `<audio src>` naming a resource that is
+    /// Media overlay (SMIL) rules: a non-core `<audio src>` (MED-005) or one carrying
+    /// a fragment (MED-014), clip bounds out of order (MED-008/009), and the four ways
+    /// an overlay and its content document can disagree (MED-010…013).
     OverlayAudioNotCoreType,
     OverlayAudioSrcHasFragment,
     ClipBeginAfterEnd,
@@ -463,7 +470,8 @@ impl Rule {
         Rule::ReservedCustomNamespace,
     ];
 
-    /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
+    /// This rule's epubcheck message id (e.g. `"RSC-007"`), the identity a
+    /// [`crate::validate::Finding`] carries. `XXX-NNN` ids are real epubcheck messages.
     pub fn message_id(self) -> &'static str {
         match self {
             Rule::ZipMalformed => "PKG-004",
@@ -897,7 +905,8 @@ fn check_xml_resources(
             check_xml_conformance(text, &path, report);
             check_doctype_rules(text, &path, &item.media_type, epub2, epub3, report);
         }
-        // Well-formedness runs on the lossy decode when the resource is (or
+        // Well-formedness runs on the lossy decode for a UTF-8 resource: U+FFFD keeps the
+        // garbage Xerces stops on. A declared non-UTF-8 charset is RSC-028.
         let declares_utf8 = sniff_xml_encoding(&bytes).is_none_or(|enc| enc == "UTF-8");
         if declares_utf8 {
             check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, epub3, report);
@@ -1049,6 +1058,7 @@ fn check_xml_encoding(buf: &[u8], path: &str, media_type: &str, report: &mut Rep
 }
 
 /// The declared/detected character encoding of an XML document (uppercased), or
+/// `None` when none is declared, which the XML spec treats as UTF-8.
 fn sniff_xml_encoding(buf: &[u8]) -> Option<String> {
     let buf = &buf[..buf.len().min(256)];
     if buf.len() < 4 {
@@ -1509,7 +1519,7 @@ enum RefUse {
     Paint,
     /// `<use>`: a symbol, or any ordinary element (`<use>` may instantiate one).
     Symbol,
-    /// A reference `RSC-014` does not type-check — an image, a stylesheet, the
+    /// A reference kind `RSC-014` does not type-check: image, stylesheet, guide.
     Untyped,
 }
 
@@ -1536,7 +1546,7 @@ impl RefUse {
     }
 }
 
-/// **RSC-015** and the SVG half of **RSC-014** over one document. SVG reaches a
+/// **RSC-015** and the SVG half of **RSC-014** over one document.
 fn check_svg_references(text: &str, path: &str, svg_document: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
@@ -1655,7 +1665,8 @@ fn check_opf_structure(
 ) {
     let manifest_ids: HashSet<&str> = pkg.manifest.iter().map(|m| m.id.as_str()).collect();
 
-    // OPF-048 / OPF-030: the package must declare a unique-identifier that
+    // OPF-048 / OPF-030: the package must declare a unique-identifier resolving to a
+    // `<dc:identifier id="…">`. A version-less or OEB-1.x package is out of scope.
     match pkg.unique_identifier.as_deref() {
         None | Some("") => report.push(Violation::new(
             Rule::UniqueIdentifierMissing,
@@ -1844,7 +1855,8 @@ fn check_fallback_chain_and_spine(
         }
     }
 
-    // OPF-043 / OPF-044: a spine item with a non-blessed media type needs a
+    // OPF-043 / OPF-044: a spine item with a non-blessed media type needs a fallback
+    // chain reaching a content document. EPUB 3 only.
     for s in pkg.spine.iter().filter(|_| epub3) {
         let Some(item) = by_id.get(s.idref.as_str()) else {
             continue; // unknown idref is OPF-049
@@ -2290,7 +2302,8 @@ fn language_tag_wellformed(tag: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The RFC 5646 grandfathered tags (irregular + regular). Java's parser maps each
+/// The RFC 5646 grandfathered tags, irregular and regular. All are well-formed,
+/// though several irregular ones fail `langtag`. Matched case-insensitively.
 fn is_grandfathered_langtag(tag: &str) -> bool {
     const GRANDFATHERED: &[&str] = &[
         "art-lojban",
@@ -2610,7 +2623,8 @@ fn walk_foreign_resources(
                         }
                     }
                     b"source" => {
-                        // MED-007: a `<picture>` `<source>` offers an
+                        // MED-007: a `<picture>` `<source>` offers an alternative rendering, and its
+                        // format is known before fetching only from a core type or a `type` attribute.
                         if in_picture
                             && attr(b"type").is_none_or(|t| t.trim().is_empty())
                             && let Some(src) = href_attr(b"srcset").or_else(|| href_attr(b"src"))
@@ -2743,7 +2757,8 @@ fn remove_media_params(mt: &str) -> &str {
     mt.split(';').next().unwrap_or(mt).trim()
 }
 
-/// The lowercased scheme of an absolute URL reference (`"http"`, `"data"`,
+/// The lowercased scheme of an absolute URL reference, or `None` for a relative
+/// one. RFC 3986: ALPHA then ALPHA/DIGIT/`+`/`-`/`.`, then `:`.
 fn url_scheme(href: &str) -> Option<String> {
     let colon = href.find(':')?;
     let scheme = &href[..colon];
@@ -2909,7 +2924,8 @@ fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &m
                 format!("<link rel=\"voicing\"> has media-type {mt:?}, not an audio type"),
             ));
         }
-        // OPF-067: a *metadata* link resolving to a manifest item that is not in
+        // OPF-067: a metadata link resolving to a manifest item outside the spine. Only
+        // metadata `<link>`s populate the linked-resources set.
         if link.in_metadata
             && let Some(target) = resolve_href(opf_path, href)
         {
@@ -3179,7 +3195,8 @@ fn check_content_conformance(
                 ));
             }
         }
-        // OPF-015 is OPF-014 read backwards: a property declared that the
+        // OPF-015 is OPF-014 read backwards: a property declared that the content does
+        // not require. Runs only on the two properties detected exhaustively.
         for (required, property) in [(features.inline_svg, "svg"), (features.mathml, "mathml")] {
             if !required && item.properties.iter().any(|p| p == property) {
                 report.push(Violation::new(
@@ -3479,7 +3496,7 @@ fn is_epub2(pkg: &opf::Package) -> bool {
         .is_some_and(|v| v.trim().starts_with('2'))
 }
 
-/// True only when the package explicitly declares an EPUB 3 version. EPUB-3-
+/// True only when the package explicitly declares an EPUB 3 version.
 fn is_epub3(pkg: &opf::Package) -> bool {
     pkg.version
         .as_deref()
@@ -3749,7 +3766,8 @@ fn check_manifest_files(
     report: &mut Report,
 ) {
     for item in &pkg.manifest {
-        // Remote (http[s]:, …) and data: resources are not expected in the
+        // Remote and `data:` resources are not expected in the container, so their
+        // absence is never RSC-001. Container-escaping hrefs are RSC-026/030.
         if is_remote_href(&item.href)
             || is_data_url(&item.href)
             || url_scheme(&item.href).as_deref() == Some("file")
@@ -3817,7 +3835,8 @@ fn check_spine_idrefs(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
 
 // =========================================================================
 
-/// NAV-010: within the EPUB 3 navigation document, a hyperlink inside a `toc`,
+/// NAV-010: a hyperlink inside a `toc`, `page-list` or `landmarks` nav must not
+/// point at a remote resource. Out-of-spine container items are RSC-011.
 fn check_nav_remote_links(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -3907,7 +3926,8 @@ fn epub_type_attr(e: &quick_xml::events::BytesStart) -> String {
     String::new()
 }
 
-/// An attribute's value as the document *means* it: quick-xml hands back the
+/// An attribute's value as the document *means* it: quick-xml returns the bytes
+/// between the quotes, where character references are still markup.
 fn attr_value(a: &quick_xml::events::attributes::Attribute) -> String {
     xml::tree::expand_entities_in(&String::from_utf8_lossy(&a.value))
 }
@@ -3922,6 +3942,7 @@ fn attr_by_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<Stri
 }
 
 /// PKG-026: a resource obfuscated with the IDPF Font Obfuscation algorithm must be
+/// a font. Reads `META-INF/encryption.xml` and checks each against the manifest.
 fn check_obfuscated_fonts(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -4851,7 +4872,8 @@ fn check_css_encoding(bytes: &[u8], css_path: &str, report: &mut Report) {
     report.push(Violation::new(rule, css_path.to_string(), message));
 }
 
-/// RSC-007 / RSC-026 for the references *inside* CSS resources — `url(...)` and
+/// RSC-007 / RSC-026 for references inside CSS resources — `url(...)` and
+/// `@import` targets, resolved relative to the CSS file they appear in.
 fn check_css_references(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -5272,7 +5294,8 @@ fn check_xhtml_hrefs_and_reachability(
             let mut ncx_broken_reported: HashSet<String> = HashSet::new();
             for src in collect_ncx_content_srcs(&text) {
                 if let Some(target) = resolve_href(&ncx_path, &src) {
-                    // RSC-007: an NCX `<content src>` target must exist in the
+                    // RSC-007: an NCX `<content src>` target must exist in the container, exactly as a
+                    // nav `<a href>` target must. Reported once per missing target.
                     if !zip_paths.contains(&target)
                         && !manifest_paths.contains(&target)
                         && ncx_broken_reported.insert(target.clone())
@@ -5652,6 +5675,7 @@ fn fragment_id(fragment: &str, svg: bool) -> Option<&str> {
 }
 
 /// Content-document features epubcheck's `OPSHandler30` derives to decide the
+/// required manifest properties (OPF-014) and the viewport requirement (HTM-046).
 #[derive(Default)]
 struct ContentFeatures {
     /// An inline `<svg>` element → the `svg` property is required.
@@ -5943,7 +5967,8 @@ fn check_viewport_meta(content: &str, path: &str, report: &mut Report) {
     }
 }
 
-/// True if a `<script>` element's `type` makes it executable JavaScript — a
+/// True if a `<script>` element's `type` makes it executable JavaScript. A missing
+/// `type` defaults to JavaScript; a data block is not scripting.
 fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
     let Some(ty) = e
         .attributes()
@@ -7916,7 +7941,8 @@ mod tests {
         assert_eq!(empties, 2);
     }
 
-    /// An attribute value is markup until it is decoded, and the checks that
+    /// An attribute value decoded to what the document means by it, so a check reads
+    /// text and not markup. The RSC-016 entity scan is the one exception.
     #[test]
     fn a_character_reference_in_an_attribute_is_decoded_before_it_is_judged() {
         let doc = |style: &str| {
@@ -9461,7 +9487,8 @@ mod tests {
 
         #[test]
         fn detects_dangling_fragment_in_ncx() {
-            // RSC-012 must also fire on an NCX `<content src="…#frag">` whose
+            // RSC-012 must also fire on an NCX `<content src="…#frag">` whose fragment names
+            // no id in the target; epubcheck resolves NCX targets as it does nav hrefs.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/toc.ncx", |ncx| {
                 ncx.replace(
@@ -9474,7 +9501,7 @@ mod tests {
                 report.has_rule(Rule::FragmentNotDefined),
                 "expected RSC-012 from the NCX, got:\n{report}"
             );
-            // …and only under the spine naming it. Which manifest item *is* the
+            // …and only under the spine naming it.
             let orphaned = rewrite_zip_entry(&mutated, "OEBPS/content.opf", |opf| {
                 let stripped = opf.replace(" toc=\"ncx\"", "");
                 assert_ne!(stripped, opf, "the sample spine should name the NCX");

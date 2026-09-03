@@ -14,7 +14,7 @@ pub fn page_to_svg(page: &Page) -> String {
     let mut s = svg_open(page);
     // White page background.
     s.push_str("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"white\"/>");
-    // Ruled/grid/margin template, composited under the ink. It is authored at
+    // Ruled/grid/margin template, composited under the ink.
     if let Some(t) = &page.template {
         let _ = write!(
             s,
@@ -28,7 +28,8 @@ pub fn page_to_svg(page: &Page) -> String {
     s
 }
 
-/// Render one page as a **transparent ink-only overlay** — no white background,
+/// Render one page as a transparent ink-only overlay — no background, no ruled
+/// template — keeping both the vector strokes and the raster pencil image.
 pub fn page_to_overlay_svg(page: &Page) -> String {
     let mut s = svg_open(page);
     render_ink(&mut s, page);

@@ -42,6 +42,7 @@ struct Entry {
 }
 
 /// An EPUB opened for surgical editing: every zip member decompressed in memory,
+/// in original order. [`into_bytes`](Self::into_bytes) repackages, mimetype first.
 pub struct EpubPackage {
     entries: Vec<Entry>,
 }

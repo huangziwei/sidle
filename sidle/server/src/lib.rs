@@ -85,7 +85,8 @@ pub async fn serve_with_shutdown(
     // rustls 0.23 needs a process-wide default provider before any config is
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Fail loudly when the material is missing rather than falling back to
+    // Fail loudly when the TLS material is missing rather than falling back to
+    // plaintext, which would put the token in the clear on every request.
     let tls = RustlsConfig::from_pem_file(paths.server_cert(), paths.server_key())
         .await
         .with_context(|| {
@@ -201,6 +202,7 @@ const NOTEBOOK_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// single-user LAN, and the transient RAM is fine.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
 /// Body cap on `POST /sync/misc` — one batch of the Kindle's configured folders,
+/// base64 in one JSON bundle. The headroom is for a single outsized file.
 const MISC_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// The axum app: routes + per-route layers. Factored out of
@@ -233,7 +235,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/sync/book",
             post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
         )
-        // The Kindle pushes the folders this library asked for here on Sync — a
+        // The Kindle pushes the folders this library asked for here on Sync, stored under
+        // `device-backup/<serial>/`. The GET is what it asks with. Token-gated.
         .route(
             "/sync/misc",
             get(misc_collections)
@@ -351,7 +354,10 @@ struct BookListEntry {
     #[serde(flatten)]
     row: db::BookRow,
     device_filename: Option<String>,
-    // The Kindle picker's cover cache token (`cover_rev`) now rides in on the
+    // The Kindle picker's cover cache token (`cover_rev`) rides in on the
+    // flattened `row` — `db::BookRow::cover_rev`, the ms mtime of the served
+    // image, computed once in `row_to_book`. No separate field here (a sibling
+    // would collide with the flattened key).
     kfx_rev: i64,
 }
 
@@ -496,7 +502,8 @@ async fn get_cover(
 // Write surface — POST /sync/annotations
 // ---------------------------------------------------------------------------
 
-/// The push bundle the Kindle picker (or any USB-less client) sends: each
+/// The push bundle a USB-less client sends: each `.sdr`'s reading-state sidecars,
+/// base64 in JSON. Standard alphabet, with padding.
 #[derive(serde::Deserialize)]
 struct SyncRequest {
     /// The Kindle's own serial — annotations are keyed per device (delete
@@ -634,7 +641,8 @@ async fn sync_annotations(
             tracing::error!(?err, "sync: open library.db failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        // Plan the write-back from the sidecars as they arrived, before the
+        // Plan the write-back from the sidecars as they arrived, before the import folds
+        // them into the library. Cloned because the import consumes them.
         let for_push = collected.clone();
         // The ink anchors live in the very sidecars that just arrived — read
         // them before the import consumes the collection.
@@ -1251,7 +1259,8 @@ fn write_reading_pulse(paths: &LibraryPaths, device_serial: &str, stored: &readi
     }
 }
 
-/// Atomically write `<root>/.book-pulse.json` — the book twin of
+/// Atomically write `<root>/.book-pulse.json`, the book twin of
+/// [`write_sync_pulse`]. Only a new import writes one. Best-effort.
 fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     let pulse = serde_json::json!({
         "ts": db::now_iso(),
@@ -1390,7 +1399,8 @@ mod tests {
             .new_agent()
     }
 
-    /// [`follow_lan_address`] over a real handshake: `axum_server` starts on a
+    /// [`follow_lan_address`] over a real handshake: a pinned client is refused by a
+    /// leaf that does not cover its name, and accepts the re-issued one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_moved_machine_re_issues_and_hot_swaps_its_leaf() {
         use std::net::Ipv4Addr;

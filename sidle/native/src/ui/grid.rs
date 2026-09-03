@@ -8,7 +8,8 @@ use crate::eink::fb::Framebuffer;
 use crate::font::Script;
 use crate::ui::text::TextRenderer;
 
-/// The text in a tile's name band, together with the convention it should be
+/// The text in a tile's name band, with the convention it should be set in. The
+/// two travel as a pair: a title without its language draws Chinese as Japanese.
 #[derive(Clone, Copy)]
 pub struct Label<'a> {
     pub text: &'a str,
@@ -28,7 +29,10 @@ pub const CELL_H_MIN: u32 = 420;
 pub const COL_GAP: u32 = 32;
 pub const ROW_GAP: u32 = 20;
 
-/// The grid as it fits *this* panel: how many cells, how tall, and where the
+/// The grid as it fits *this* panel: how many cells, how tall, and where the block
+/// sits. Computed once at startup from the framebuffer geometry.
+/// block sits. Computed once at startup from the framebuffer geometry and
+/// passed around whole, so no call site assembles it from parts.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub cols: usize,
@@ -146,6 +150,7 @@ pub fn fit_rect(
 }
 
 /// Aspect-fit `img` into the box `(box_x, box_y, box_w × box_h)`, centered, and
+/// blit its RGB. Returns the painted rect.
 pub fn blit_fit(
     fb: &mut Framebuffer,
     box_x: i32,
@@ -230,7 +235,8 @@ pub fn outline_rect(
     fb.fill_rect(yu, xu + w - t, t, h, shade); // right
 }
 
-/// Stroke a **rounded-rectangle** border (`thickness` px, corner `radius`) in
+/// Stroke a rounded-rectangle border (`thickness` px, corner `radius`) in `shade`.
+/// `radius == h/2` gives a full pill.
 #[allow(clippy::too_many_arguments)] // positional geometry; a struct just moves the list
 pub fn stroke_round_rect(
     fb: &mut Framebuffer,
@@ -418,7 +424,8 @@ pub fn draw_download_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade
     );
 }
 
-/// Draw a **key** glyph — a ring bow on the left, a horizontal shaft, and two
+/// Draw a key glyph — ring bow, shaft, two teeth — centered at `(cx, cy)`, scale
+/// `s`. The font carries no 🔑. The DRM view's right-hand action button.
 pub fn draw_key_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade: u8) {
     const T: i32 = 5;
     // Bow: a ring on the left, a hair inside where the shaft meets it.
@@ -460,7 +467,8 @@ pub fn draw_key_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade: u8)
     }
 }
 
-/// Clear the cell to white, aspect-fit the cover into the region between
+/// Clear the cell, aspect-fit the cover between `top_inset` and the name band,
+/// then draw the band with `label`. Returns the painted cover rect.
 #[allow(clippy::too_many_arguments)]
 fn draw_cover_tile(
     fb: &mut Framebuffer,

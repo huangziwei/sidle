@@ -18,7 +18,8 @@ use crate::model::toc_shape::{TocTree, merge_by_document_order, nest_by_label_in
 use crate::model::{LandmarkType, TocEntry};
 use crate::util::{decode_text, extract_xml_encoding, percent_decode};
 
-/// Minimum distinct chapter links for a page to count as a real Contents page (or
+/// Minimum distinct chapter links for a page to count as a real Contents page
+/// (or headings, for the fallback). Below it, a stray cross-reference is noise.
 const MIN_CHAPTER_LINKS: usize = 3;
 
 // `MIN_SECTION_CONTENTS_LINKS` is the threshold for the Contents page *inside*
@@ -27,7 +28,7 @@ const MIN_CHAPTER_LINKS: usize = 3;
 // Proposer
 // ---------------------------------------------------------------------------
 
-/// Derive a chapter list from the EPUB's own structure, for [`set_toc`]. Uses the
+/// Derive a chapter list from the EPUB's own structure, for [`set_toc`].
 pub fn propose_toc(epub_bytes: &[u8]) -> io::Result<Vec<TocEntry>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -83,7 +84,8 @@ pub(super) fn propose_from_pkg(
     // 1. The book's own authored TOC (NCX / nav doc). Whatever else is found, it
     let declared = existing_declared_toc(pkg, opf, opf_base);
 
-    // 2. The densest in-body Contents-page link cluster, else — only when
+    // 2. The densest in-body Contents-page link cluster, else — only when neither it
+    //    nor the declared TOC knows any chapters — one entry per heading-led spine doc.
     let spine = spine_documents(opf, opf_base);
     let contents = contents_page_links(pkg, opf, opf_base, opf_str);
     let derived = if contents.len() >= MIN_CHAPTER_LINKS {
@@ -251,7 +253,8 @@ fn contents_page_links(
     landmark_hit.unwrap_or(best)
 }
 
-/// The book's declared TOC as each of the two documents a reader may consult has
+/// The book's declared TOC as `(NCX, EPUB-3 nav doc)`, every href resolved to
+/// an absolute zip path. Either may be empty, and the two can disagree.
 fn declared_toc_documents(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -351,6 +354,7 @@ fn dedup_entries(links: Vec<(String, String)>) -> Vec<TocEntry> {
 }
 
 /// Every landmark the book declares, hrefs resolved to absolute zip paths: the
+/// nav doc's `landmarks` first, then the EPUB 2 `<guide>`. First per target wins.
 fn book_landmarks(
     pkg: &EpubPackage,
     opf: &OpfData,
@@ -482,7 +486,8 @@ fn defines_fragment(xhtml: &str, id: &str) -> bool {
     false
 }
 
-/// Write `entries` into the EPUB's nav doc and NCX, in place — splicing over an
+/// Write `entries` into the EPUB's nav doc and NCX in place, synthesizing (and
+/// registering in the OPF) when the book has none. Hrefs are absolute zip paths.
 pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
     if entries.is_empty() {
         return Err(io::Error::new(
@@ -820,6 +825,7 @@ mod tests {
     const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
     /// Build an EPUB whose Contents page links chapters by `#fragment`, some of
+    /// which the chapter documents do not define.
     fn epub_with_broken_anchors(version: &str, identifiers: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -1326,7 +1332,8 @@ mod tests {
         assert!(proposed[3].children.is_empty());
     }
 
-    /// Two entries on one target keep distinct navPoint ids but share a
+    /// Two entries on one target keep distinct navPoint ids but share a playOrder,
+    /// the NCX rule epubcheck fails as RSC-005.
     #[test]
     fn repeated_ncx_targets_share_one_play_order() {
         let entries = vec![
@@ -1426,7 +1433,9 @@ mod tests {
         assert!(proposed.iter().all(|e| e.children.is_empty()));
     }
 
-    /// An ordinary novel: a title page of two publisher logos and a plate, both
+    /// An ordinary novel: two picture pages the TOC points at, and a back-matter book
+    /// list as link-dense as a Contents page. One group can form, and that is no set.
+    /// group can form — and a book is not a collection of one.
     fn novel_with_a_pictorial_title_page() -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -1529,7 +1538,8 @@ mod tests {
         assert!(proposed.iter().all(|e| e.children.is_empty()));
     }
 
-    /// A book with an image 目次 and image chapter headings (no
+    /// A book with an image 目次 and image chapter headings still proposes its
+    /// chapters from the declared NCX instead of coming up empty.
     #[test]
     fn proposes_from_declared_ncx_when_body_is_images() {
         let epub = image_toc_and_ncx_epub();

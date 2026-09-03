@@ -199,7 +199,8 @@ impl Exporter for EpubExporter {
 }
 
 impl EpubExporter {
-    /// Like [`Exporter::export`], but reports coarse phase progress to
+    /// Like [`Exporter::export`], but reports coarse phase progress to `on_progress`
+    /// as `(phase_key, current, total, human_label)`: content, resources, nav, finalize.
     pub fn export_with_progress<W: Write + Seek>(
         &self,
         book: &mut Book,
@@ -249,7 +250,8 @@ impl EpubExporter {
         let mut manifest_items: Vec<OpfItem> = Vec::new();
         let mut spine_items: Vec<OpfItemref> = Vec::new();
 
-        // Add chapters to manifest. Chapter bytes load once here — the
+        // Chapter bytes load once here: the OPF-014 property scan needs the text, and the
+        // zip write below emits the same bytes.
         let mut chapter_bytes: Vec<Vec<u8>> = Vec::with_capacity(spine.len());
         for (i, entry) in spine.iter().enumerate() {
             on_progress("content", i + 1, spine.len(), "Reading chapters");
@@ -751,7 +753,8 @@ pub fn build_package_into(
             chapter_files[idx] = "cover.xhtml".to_string();
         }
 
-        // Build manifest, in calibre's registration order —
+        // Build manifest in calibre's registration order — images, stylesheet, chapters,
+        // titlepage — with ids from filenames. Manifest ids depend on this order.
         let mut taken_ids: HashSet<String> = HashSet::new();
         let next_id = |taken: &mut HashSet<String>, name: &str| -> String {
             let id = opf::make_manifest_id(name, |candidate| taken.contains(candidate));
@@ -763,7 +766,8 @@ pub fn build_package_into(
 
         // Assets first. When the importer declares an authoritative bundle
         let asset_bytes: Vec<PackageAsset> = if let Some(asset_list) = book.bundled_assets() {
-            // Fixed-layout books bundle a full page-thumbnail set the
+            // Fixed-layout books bundle page thumbnails the reading order never references;
+            // ship only the images the pages use, pruned before the bulk load.
             let asset_list: Vec<std::path::PathBuf> = if book.metadata().fixed_layout {
                 let cover = book.metadata().cover_image.clone();
                 asset_list
@@ -891,7 +895,8 @@ pub fn build_package_into(
             });
         }
 
-        // 4. Build titlepage from the cover (same rationale as export_raw —
+        // 4. Build the titlepage from the cover: Apple Books needs a spine-positioned
+        // cover document to render the cover in the reading flow.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         if let Some(cid) = &cover_id
             && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
@@ -1012,7 +1017,8 @@ pub fn build_package_into(
         if titlepage_xhtml.is_some() {
             opf::repoint_cover_guide(&mut guide, "cover.xhtml");
         }
-        // Fixed-layout `original-resolution` fallback for sources with
+        // Fixed-layout `original-resolution` fallback for per-page-viewport sources: the
+        // most common page size, tie-broken by (count, then size) for determinism.
         let derived_resolution = {
             let mut counts: Vec<((u32, u32), usize)> = Vec::new();
             for entry in &spine {
@@ -1329,6 +1335,7 @@ fn ensure_viewport_meta(s: &str, w: u32, h: u32) -> Option<String> {
 }
 
 /// Byte span of the document's `<!DOCTYPE …>` declaration, or `None` if it has
+/// none. Both casings are matched directly, never by slicing at a byte offset.
 fn doctype_span(s: &str) -> Option<(usize, usize)> {
     let start = s.find("<!DOCTYPE").or_else(|| s.find("<!doctype"))?;
     let end = start + s[start..].find('>')? + 1;
@@ -1514,7 +1521,8 @@ fn sanitize_path(path: &str) -> String {
         .replace("//", "/")
 }
 
-/// Output filename for each normalized chapter: `{source_id}.xhtml` (for KFX,
+/// Output filename for each normalized chapter: `{source_id}.xhtml` (the section
+/// name, for KFX), made unique with a `-N` suffix. Shared with the AZW3 exporter.
 pub(crate) fn chapter_filenames<'a, I>(source_paths: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
@@ -1545,7 +1553,8 @@ where
     names
 }
 
-/// Resolve an IR navigation href (`#eid[:offset]` placeholder) to a
+/// Resolve an IR navigation href (`#eid[:offset]`) to a `file#frag` target, or a
+/// bare `file`, against the spine. `None` when it names no spine chapter.
 pub(crate) fn resolve_nav_href(
     book: &Book,
     href: &str,
@@ -1634,7 +1643,7 @@ pub(crate) fn guess_media_type(path: &str) -> String {
     }
 }
 
-/// Sniff an image MIME type from the leading bytes. Returns `None` if the
+/// Sniff an image MIME type from the leading bytes.
 fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 3 && &bytes[..3] == b"\xFF\xD8\xFF" {
         return Some("image/jpeg");

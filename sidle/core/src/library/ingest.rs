@@ -73,7 +73,8 @@ fn match_key(title: &str) -> String {
         .to_string()
 }
 
-/// The `book_key` an annotation's [`annotation_dedup_hash`] is salted with —
+/// The `book_key` an annotation's [`annotation_dedup_hash`] is salted with, so a
+/// passage highlighted in Sidle and on a Kindle hashes identically.
 pub fn book_match_key(title: &str) -> String {
     match_key(title)
 }
@@ -140,6 +141,7 @@ pub fn annotation_dedup_hash(
 }
 
 /// Stable identity for a device-resolved annotation, so re-importing the same
+/// device state is a no-op. Extending a highlight is correctly a new record.
 fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
     annotation_dedup_hash(
         book_key,
@@ -177,7 +179,8 @@ pub fn import_yjr(
     let mut current_hashes = Vec::with_capacity(annotations.len());
 
     for ann in annotations {
-        // Handwritten ink is routed to the ink path ([`crate::library::ink`]),
+        // Handwritten ink routes to the ink path, never the text `annotations` table: it
+        // covers no text, so a row there would be a bodyless entry in the sidebar.
         if matches!(ann.kind, Kind::Handwritten(_)) {
             continue;
         }
@@ -224,7 +227,8 @@ pub fn import_yjr(
             stats.inserted += 1;
         } else {
             stats.duplicate += 1;
-            // A row that predates this stamp being kept has none. Fill it from
+            // A row that carries no such stamp gets it from the device, which still holds it.
+            // Only ever fills an absent value, so a recorded date is never overwritten.
             if let Some(iso) = added_at.as_deref() {
                 db::fill_missing_added_at(conn, &hash, iso)?;
             }
@@ -349,7 +353,8 @@ pub struct DeviceImportReport {
     pub pushed_annotations: usize,
 }
 
-/// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
+/// The reading-state sidecars pulled from one `.sdr` directory, tagged with its
+/// name, whose `kfx_sha256` infix matches it to a library book.
 #[derive(Clone)]
 pub struct CollectedYjr {
     pub sdr_name: String,
@@ -394,6 +399,7 @@ pub fn import_collected(
 }
 
 /// As [`import_collected`], but reports per-book progress via `on_book(current,
+/// total, label)`. `label` is the book title when matched, else the `.sdr` stem.
 pub fn import_collected_with_progress(
     conn: &Connection,
     collected: Vec<CollectedYjr>,
@@ -421,7 +427,8 @@ pub fn import_collected_with_progress(
             .unwrap_or_else(|| sdr_stem(&sdr_name));
         on_book(i + 1, total, &label);
 
-        // Last-read position (`.yjf` `lpr`) — stored for every matched book on
+        // Last-read position (`.yjf` `lpr`), stored for every matched book on every sync,
+        // before the unchanged-`.yjr` skip: position moves independently of highlights.
         if let (Some(book), Some(yjf)) = (book.as_ref(), yjf_bytes.as_ref())
             && let Some(h) = super::yjr::position(yjf, "lpr")
         {
@@ -535,7 +542,8 @@ pub fn import_from_device(
     import_collected(conn, collected, device_serial, now)
 }
 
-/// The `.sdr` dir's stem: the `<basename>` with the `.sdr` suffix and the
+/// The `.sdr` dir's stem: the basename with the `.sdr` suffix and `.<sha-infix>`
+/// dropped. The stable key for the stem fallback, and the human sync label.
 fn sdr_stem(sdr_name: &str) -> String {
     let stem = sdr_name.strip_suffix(".sdr").unwrap_or(sdr_name);
     match stem.rsplit_once('.') {
@@ -723,7 +731,10 @@ mod tests {
         assert_eq!(device, native);
     }
 
-    /// The round trip that broke: a highlight made in Sidle, pushed to a Kindle,
+    /// The full round trip: a highlight made in Sidle, pushed to a Kindle,
+    /// and re-imported comes back with the *device's* linear scale rather than
+    /// the reader's. Identity must not notice — the anchor is the same passage,
+    /// so it is the same annotation and must not land as a second row.
     #[test]
     fn identity_ignores_the_linear_scale() {
         let anchored = |loc: Option<i64>| Resolved {
@@ -1001,7 +1012,8 @@ mod tests {
         assert_eq!(sdr_infix("nope"), None);
     }
 
-    /// A second connect with an unchanged `.yjr` is skipped wholesale — no
+    /// A second connect with an unchanged `.yjr` is skipped wholesale by the per-book
+    /// content-hash checkpoint — no re-parse, no text-index rebuild.
     #[test]
     fn device_import_skips_unchanged_yjr() {
         let yjr = device_yjr(&[Annotation {

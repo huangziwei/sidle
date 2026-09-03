@@ -208,7 +208,8 @@ mod tests {
             handle.inner.lock().await.child.is_none(),
             "never spawn a second server onto an occupied port"
         );
-        // The port is still held, so binding a second daemon would have failed —
+        // The port is still held, so binding a second daemon must fail. Whether the
+        // survivor is usable is the TLS probe's question.
         assert!(!s.running);
     }
 }

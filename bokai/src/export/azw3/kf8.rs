@@ -186,7 +186,8 @@ impl Kf8Builder {
         }
         self.link_counter = link_counter;
 
-        // Rewrite CSS. `self.css_flows` was collected from `css_hrefs` in the
+        // `self.css_flows` was collected from `css_hrefs` in the same sorted order, so
+        // zipping pairs each flow with its own href, which `@import` refs resolve against.
         let rewritten_css: Vec<Vec<u8>> = self
             .css_flows
             .iter()
@@ -224,9 +225,9 @@ impl Kf8Builder {
             record.push(0); // multibyte indicator (0 = no UTF-8 overlap)
             record
         }
-        // Sequential PalmDoc compression. This is the bulk of AZW3 export time
-        // on large books; a rayon fan-out over `RECORD_SIZE` chunks is a
-        // straightforward future optimization (records compress independently).
+        // Sequential PalmDoc compression, the bulk of AZW3 export time on large
+        // books. Each `RECORD_SIZE` chunk compresses independently of its
+        // neighbours.
         self.records
             .extend(all_flows.chunks(RECORD_SIZE).map(compress_record));
 
@@ -341,7 +342,8 @@ impl Kf8Builder {
             self.first_resource_record = self.records.len() as u32;
         }
 
-        // Write images. This is the last reader of `ctx.resources` (the
+        // The last reader of `ctx.resources`, so each image's bytes are moved out rather
+        // than cloned.
         for i in 0..self.image_hrefs.len() {
             if let Some(resource) = self.ctx.resources.get_mut(&self.image_hrefs[i]) {
                 self.records.push(std::mem::take(&mut resource.data));
@@ -684,7 +686,8 @@ impl Kf8Builder {
             records.push((100, author.as_bytes().to_vec()));
         }
 
-        // Author pronunciation (517) — one per author, positional with the
+        // Author pronunciation (517) — one per author, positional with the EXTH 100
+        // authors above. Omitting them flattens the author sort keys on a round-trip.
         for sort in &self.ctx.metadata.author_sorts {
             records.push((517, sort.as_bytes().to_vec()));
         }

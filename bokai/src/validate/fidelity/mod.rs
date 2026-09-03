@@ -1,4 +1,5 @@
-//! Conversion-fidelity validation — did EPUB ⇄ KFX conversion preserve the
+//! Conversion-fidelity validation: does EPUB ⇄ KFX conversion preserve the
+//! source's semantics? Each check diffs one feature across an `(epub, kfx)` pair.
 
 // Shared by every child module's `super::Direction` references.
 pub(crate) use super::Direction;

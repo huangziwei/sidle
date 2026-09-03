@@ -14,7 +14,8 @@ use crate::collate::natural_compare;
 pub enum Entry {
     /// A book with no series — rendered and downloaded as itself.
     Standalone(Book),
-    /// A series collection. `books` are the available-to-download members,
+    /// A series collection. `books` is in canonical within-series order, so `books[0]`
+    /// is the lead and a drill-in renders them in reading order.
     Series { name: String, books: Vec<Book> },
 }
 
@@ -95,7 +96,8 @@ pub fn group_by_series(view: Vec<Book>) -> Vec<Entry> {
     out
 }
 
-/// Build the top-level tiles from the grouped entries: a standalone book → a
+/// Build the top-level tiles: a standalone book becomes a [`CellKind::Book`] cell,
+/// a series a [`CellKind::Series`] cell covered by its lead member.
 pub fn cells_for_top(entries: &[Entry]) -> Vec<Cell> {
     entries
         .iter()

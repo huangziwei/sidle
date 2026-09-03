@@ -105,7 +105,8 @@ fn reserve<'a>(pkg: &mut PdfPackage, items: &'a [PdfOutlineItem]) -> Vec<Node<'a
         .collect()
 }
 
-/// The outline root to write into: the catalog's existing `/Outlines` when it
+/// The outline root to write into: the catalog's `/Outlines` when it resolves to a
+/// dictionary, else a fresh object. The bool means the caller must wire it in.
 fn outline_root(pkg: &mut PdfPackage) -> io::Result<(ObjectId, bool)> {
     let catalog_id = pkg.catalog_id()?;
     let existing = pkg

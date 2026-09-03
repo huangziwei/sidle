@@ -1,4 +1,5 @@
 //! Author-drawn comic panels read out of a fixed-layout page's own markup: an
+//! `app-amzn-magnify` region per panel, each rect against its containing block.
 
 use std::collections::HashMap;
 
