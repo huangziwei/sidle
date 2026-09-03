@@ -8,8 +8,8 @@ pub mod panels;
 mod transform;
 mod tree_sink;
 
-// CSS Text 3 §3 collapsible-whitespace set — narrower than `char::is_whitespace`,
-// which would collapse U+3000 IDEOGRAPHIC SPACE and break JP paragraph indents.
+// CSS Text 3 §3 collapsible whitespace; `char::is_whitespace` also matches
+// U+3000 IDEOGRAPHIC SPACE, the JP paragraph indent.
 pub(crate) fn is_html_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r')
 }
@@ -20,6 +20,7 @@ pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
 
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
 pub use css_imports::{css_import_targets, inline_css_imports};
+pub(crate) use element_ref::any_element_matches;
 pub use element_ref::{BokoSelectors, ElementRef};
 pub use optimize::optimize;
 pub use panels::parse_panels;
@@ -71,13 +72,11 @@ pub(crate) fn parse_dom(html: &str) -> ArenaDom {
 }
 
 /// Compile HTML content to IR.
-///
-/// This is the main entry point for the compiler pipeline.
 pub fn compile_html(html: &str, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     compile_dom(&parse_dom(html), author_stylesheets)
 }
 
-/// Compile an already-parsed DOM to IR.
+/// Compile a parsed DOM to IR.
 pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     // Build complete stylesheet list with UA defaults
     let ua = transform::user_agent_stylesheet();
@@ -111,7 +110,7 @@ pub fn extract_stylesheets(html: &str) -> (Vec<String>, Vec<String>) {
     extract_stylesheets_from_dom(&parse_dom(html))
 }
 
-/// Extract stylesheet references from an already-parsed DOM.
+/// Extract stylesheet references from a parsed DOM.
 pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<String>) {
     let mut linked = Vec::new();
     let mut inline = Vec::new();
@@ -330,11 +329,9 @@ mod tests {
 
     #[test]
     fn test_optimizer_merges_sibling_text_nodes() {
-        // The optimizer merges adjacent sibling Text nodes with the same style.
+        // The optimizer merges adjacent sibling Text nodes with the same style;
+        // the tree shape survives.
 
-        // Direct test of the optimizer unit tests cover the merge logic.
-        // This integration test verifies the optimizer runs without corrupting
-        // the tree structure.
         let html = r#"
             <html><body>
                 <p>Hello, <b>World</b>!</p>
@@ -481,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_plain_html_still_works() {
-        // Plain HTML without xmlns should use html5ever and still work fine
+        // Plain HTML without xmlns parses through html5ever.
         let html = "<html><body><p>Plain HTML</p></body></html>";
         let chapter = compile_html(html, &[]);
 

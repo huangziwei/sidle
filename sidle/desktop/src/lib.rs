@@ -128,6 +128,7 @@ pub fn run() {
             commands::editor::editor_text_read,
             commands::editor::editor_text_read_bytes,
             commands::editor::editor_text_save,
+            commands::editor::editor_text_op,
             commands::editor::editor_text_validate,
             commands::editor::editor_style_candidates,
             commands::editor::editor_restore_styles,

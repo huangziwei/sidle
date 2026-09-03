@@ -1,12 +1,11 @@
-//! Style system for CSS property types, computed styles, and cascade.
-//!
-//! This module contains:
+//! `style`: CSS property types, computed styles and the cascade.
 
 mod cascade;
 mod declaration;
 mod font_family;
 pub(crate) mod parse;
 mod properties;
+pub(crate) mod source;
 mod style_pool;
 mod to_css;
 mod types;

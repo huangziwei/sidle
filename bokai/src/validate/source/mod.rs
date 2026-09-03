@@ -1,4 +1,5 @@
-//! Source validation — is one book file well-formed on its own? Each check
+//! `validate` answers whether one book file is well-formed on its own; each
+//! check lowers its result into [`Finding`]s.
 
 pub mod epub;
 pub mod kfx;
@@ -34,6 +35,7 @@ pub fn validate(bytes: &[u8]) -> Report {
                 .extend(epub::validate(bytes).into_findings());
             report.findings.extend(toc_findings(bytes));
             report.findings.extend(style_findings(bytes));
+            report.findings.extend(package_findings(bytes));
         }
     } else {
         // A single KFX container (or an unknown blob → container-unreadable).
@@ -53,8 +55,8 @@ fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
     findings
 }
 
-/// The error-level findings an edit **introduced** — everything [`validate`]
-/// reports on `after` that it did not already report on `before`.
+/// The error-level findings an edit introduced: everything [`validate`]
+/// reports on `after` and not on `before`.
 pub fn added_errors(before: &[u8], after: &[u8]) -> Vec<Finding> {
     use std::collections::HashMap;
     let key = |f: &Finding| {
@@ -87,9 +89,8 @@ pub fn added_errors(before: &[u8], after: &[u8]) -> Vec<Finding> {
         .collect()
 }
 
-/// Does this `PK` zip bundle `.kfx` containers (an Amazon `.kfx-zip`) rather
-/// than being an EPUB? Peeks the entry names — a `.kfx-zip` carries `.kfx`
-/// entries and no EPUB `mimetype`, so one `.kfx` entry is a reliable tell.
+/// True when this `PK` zip is an Amazon `.kfx-zip`: its entry names include
+/// a `.kfx` member and no EPUB `mimetype`.
 fn zip_bundles_kfx(zip_bytes: &[u8]) -> bool {
     let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)) else {
         return false;
@@ -102,9 +103,9 @@ fn zip_bundles_kfx(zip_bytes: &[u8]) -> bool {
     })
 }
 
-/// Run the cross-format TOC audit and lower it to findings. A read failure — a
-/// malformed EPUB the structural check has already flagged — becomes one
-/// `source/unreadable` finding rather than an `Err`, keeping [`validate`]
+/// Run the cross-format TOC audit and lower it to findings. A read failure
+/// becomes one `source/unreadable` finding; [`validate`] returns a report
+/// either way.
 fn toc_findings(bytes: &[u8]) -> Vec<Finding> {
     match toc::validate(bytes) {
         Ok(audit) => audit.into_findings(),
@@ -117,6 +118,37 @@ fn toc_findings(bytes: &[u8]) -> Vec<Finding> {
             fix: None,
         }],
     }
+}
+
+fn package_findings(bytes: &[u8]) -> Vec<Finding> {
+    let Ok(pkg) = crate::formats::epub::EpubPackage::parse(bytes) else {
+        return Vec::new();
+    };
+    let (Ok(opf_path), Ok(opf_bytes)) = (pkg.opf_path(), pkg.opf_bytes()) else {
+        return Vec::new();
+    };
+    let opf_text =
+        crate::util::decode_text(opf_bytes, crate::util::extract_xml_encoding(opf_bytes));
+    let Ok(opf) = crate::formats::epub::parse_opf(&opf_text) else {
+        return Vec::new();
+    };
+    if !opf.version.starts_with('2') {
+        return Vec::new();
+    }
+    vec![Finding {
+        check: "package",
+        rule: "epub2".to_string(),
+        severity: Severity::Info,
+        location: opf_path,
+        message: format!(
+            "EPUB {} package: refinement attributes, NCX-only navigation and XHTML 1.1 DOCTYPEs are what EPUB 3 readers and validators reject",
+            opf.version
+        ),
+        fix: Some(FixHint::new(
+            "upgrade-epub3",
+            "Upgrade the package to EPUB 3: version, refining metadata, a navigation document from the NCX and guide, manifest properties, HTML DOCTYPEs",
+        )),
+    }]
 }
 
 fn style_findings(bytes: &[u8]) -> Vec<Finding> {

@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use sidle_core::library::db::BookRow;
-use sidle_core::library::editor::{self, EpubSession};
+use sidle_core::library::editor::{self, EpubSession, Operation};
 use sidle_core::library::styles;
 
 use crate::ctx::Ctx;
@@ -51,6 +51,54 @@ pub enum EditOp {
         #[arg(long)]
         no_reconvert: bool,
     },
+    /// Rename a CSS class in every stylesheet, style block and class attribute.
+    RenameClass {
+        from: String,
+        to: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Remove stylesheet rules no document can match.
+    RemoveUnusedCss {
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Re-indent XHTML and CSS members (one member, or every text member).
+    Beautify {
+        member: Option<String>,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Split a document before the block at LINE, moving ids, links, manifest and spine entries.
+    SplitDocument {
+        member: String,
+        #[arg(long)]
+        line: usize,
+        #[arg(long, default_value_t = 1)]
+        col: usize,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Fold the next spine document into MEMBER.
+    MergeDocument {
+        member: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Upgrade an EPUB 2 package to EPUB 3.
+    Upgrade {
+        #[command(flatten)]
+        apply: Apply,
+    },
+}
+
+#[derive(Args)]
+pub struct Apply {
+    /// Report the changes without writing.
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    no_reconvert: bool,
 }
 
 pub fn run(ctx: &Ctx, args: EditArgs) -> Result<()> {
@@ -72,7 +120,73 @@ pub fn run(ctx: &Ctx, args: EditArgs) -> Result<()> {
             out,
             no_reconvert,
         } => restore_styles(ctx, &book, from, dry_run, force, out, no_reconvert),
+        EditOp::RenameClass { from, to, apply } => {
+            operate(ctx, &book, Operation::RenameClass { from, to }, apply)
+        }
+        EditOp::RemoveUnusedCss { apply } => operate(ctx, &book, Operation::RemoveUnusedCss, apply),
+        EditOp::Beautify { member, apply } => {
+            operate(ctx, &book, Operation::Beautify { member }, apply)
+        }
+        EditOp::SplitDocument {
+            member,
+            line,
+            col,
+            apply,
+        } => operate(
+            ctx,
+            &book,
+            Operation::SplitDocument { member, line, col },
+            apply,
+        ),
+        EditOp::MergeDocument { member, apply } => {
+            operate(ctx, &book, Operation::MergeWithNext { member }, apply)
+        }
+        EditOp::Upgrade { apply } => operate(ctx, &book, Operation::UpgradeEpub3, apply),
     }
+}
+
+fn operate(ctx: &Ctx, book: &BookRow, op: Operation, apply: Apply) -> Result<()> {
+    let mut session = EpubSession::open(book)?;
+    let outcome = session.apply(&op)?;
+    let written = if apply.dry_run {
+        Vec::new()
+    } else {
+        session.save(&ctx.conn())?
+    };
+    ctx.report(&outcome, || {
+        println!("{}", outcome.operation);
+        for n in &outcome.notes {
+            println!("  {n}");
+        }
+        for m in &outcome.changed {
+            println!("  changed  {}", m.path);
+        }
+        for m in &outcome.added {
+            println!("  added    {}", m.path);
+        }
+        for p in &outcome.removed {
+            println!("  removed  {p}");
+        }
+        if apply.dry_run {
+            println!("dry run: nothing written");
+        } else {
+            println!("wrote {} member(s) to {}", written.len(), session.path());
+        }
+    })?;
+    if !written.is_empty() && !apply.no_reconvert {
+        crate::cmd::convert::run(
+            ctx,
+            crate::cmd::convert::ConvertArgs::sweep(
+                Select {
+                    ids: vec![book.id],
+                    ..Default::default()
+                },
+                true,
+                None,
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 fn one_book(ctx: &Ctx, select: &Select) -> Result<BookRow> {

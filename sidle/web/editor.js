@@ -1,4 +1,4 @@
-// Book editor — a Calibre "Edit book"-style surface built into Sidle. Full-screen
+// Book editor: a full-screen surface over `#editor-view`, one panel per rail item.
 
 import { mountTextPanel } from "./editor-text-panel.js";
 
@@ -7,8 +7,8 @@ const toast = (msg, isError) => window.showToast?.(msg, isError);
 
 let textPanel = null;
 
-// Live editor session, or null when closed. `open` snapshots the opening values
-// so Revert can restore them and Save can diff against them.
+// Live editor session, or null when closed. `open` snapshots the opening
+// values; Revert restores them and Save diffs against them.
 let session = null;
 
 const view = () => $("#editor-view");
@@ -34,12 +34,11 @@ async function open(bookId) {
 
   view().hidden = false;
   installKeys();
-  // Focus the first field so keyboard editing starts immediately.
+  // Focus the first field.
   requestAnimationFrame(() => $("#editor-center input")?.focus());
 }
 
-// Returns true if the editor is now closed, false if the user chose to keep
-// unsaved edits (so callers like `open` can abort).
+// Returns true if the editor is closed, false if the user kept unsaved edits.
 function close() {
   if (!session) return true;
   if (session.dirty && !confirm("Discard unsaved changes?")) return false;
@@ -88,11 +87,10 @@ function removeKeys() {
 
 // --- left rail -------------------------------------------------------------
 
-// Metadata, Cover, Images and Table of Contents are live for every editable
+// Enable the rail items `session.data.panels` names; every other item stays disabled.
 function configureRail() {
   const editable = session.data.editable;
-  // The backend reports which panels this source format can actually back, so
-  // the rail follows capability rather than re-deriving it from the format name.
+  // `panels` is the backend's list of what this source format can back.
   const panels = new Set(session.data.panels || []);
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
@@ -113,7 +111,7 @@ function configureRail() {
 }
 
 function selectPanel(panel) {
-  // Switching away from the metadata panel with unsaved edits would drop them.
+  // Switching away from the metadata panel drops its unsaved edits.
   if (
     session.panel !== panel &&
     session.dirty &&
@@ -137,11 +135,12 @@ function selectPanel(panel) {
       onSaved: (res) => {
         if (res.toc) renderTocChip(res.toc);
       },
+      showPanel: selectPanel,
     });
     return;
   }
-  // Every panel except Metadata commits via its own in-panel buttons, so the
-  // top-bar Save/Revert (the metadata panel's) are disabled for them.
+  // Every panel except Metadata commits via its own in-panel buttons; the
+  // top-bar Save/Revert belong to the metadata panel.
   if (panel === "metadata") {
     renderMetadataPanel();
     markDirty(false);
@@ -204,8 +203,8 @@ function renderMetadataPanel() {
   const center = $("#editor-center");
   center.replaceChildren();
 
-  // All three source formats are editable; the only way here is a book whose
-  // source file is missing from disk, so say that rather than blaming the format.
+  // All three source formats are editable; the only way here is a missing
+  // source file.
   const notice = editable
     ? ""
     : `<div class="editor-notice">This book's ${session.data.format.toUpperCase()} source
@@ -330,7 +329,7 @@ async function saveMetadata() {
 
 // --- cover panel -----------------------------------------------------------
 
-// The cover flow reuses the library's proven, battle-tested commands
+// The cover flow runs on the library's cover commands (`library_set_cover`, fetch, clear).
 async function renderCoverPanel() {
   const center = $("#editor-center");
   center.replaceChildren(el("div", "editor-panel editor-muted", "Loading cover…"));
@@ -349,9 +348,8 @@ function paintCoverPanel(coverPath) {
   session.coverPath = coverPath;
   const pdfCover = session.data.format === "pdf";
   const panel = el("div", "editor-panel");
-  // For a PDF this preview *is* the book's first page (the library tile is a
-  // render of it), and seeing it is how you decide between Replace and Insert —
-  // so name it for what it is rather than "Cover image".
+  // For a PDF this preview is the book's first page, which the library tile
+  // renders; the heading names it as the first page.
   panel.append(
     el("div", "field-group-title", pdfCover ? "Current first page" : "Cover image"),
   );
@@ -359,7 +357,7 @@ function paintCoverPanel(coverPath) {
   const preview = el("div", "cover-preview");
   if (coverPath) {
     const img = el("img", "cover-art");
-    // Cache-bust: the sidecar path is stable across swaps, so force a re-fetch.
+    // Cache-bust: the sidecar path is stable across swaps.
     img.src = `${window.api.fileUrl(coverPath)}?v=${Date.now()}`;
     img.alt = pdfCover ? "The book's current first page" : "Current cover";
     preview.append(img);
@@ -368,9 +366,8 @@ function paintCoverPanel(coverPath) {
   }
   panel.append(preview);
 
-  // A PDF's cover isn't an embeddable resource like the EPUB/KFX one — it *is*
-  // the book's first page. So the choice is which page edit to make, and the
-  // wording says so rather than pretending it's the same operation.
+  // A PDF's cover is the book's first page, not an embeddable resource; the
+  // choice is which page edit to make.
   const pdf = session.data.format === "pdf";
   panel.append(
     el(
@@ -402,8 +399,8 @@ function paintCoverPanel(coverPath) {
     change.addEventListener("click", changeCover);
     actions.append(change);
 
-    // Fetching is by catalogue id — the file's own identity names nothing on
-    // Amazon, so a book without one has nothing to re-fetch with.
+    // Fetching is by catalogue id: the file's own identity names nothing on
+    // Amazon.
     const asin = session.data.metadata.amazon_asin;
     if (asin) {
       const refetch = el("button", "btn", "Re-fetch from Amazon");
@@ -483,9 +480,8 @@ async function runCoverWrite(invoke) {
 
 // --- images panel ----------------------------------------------------------
 
-// KFX and EPUB carry a list of embedded images to pull out. A PDF doesn't: its
-// pages *are* its images, so it gets a different panel entirely — a page grid
-// you select from and export (see `renderPdfPagesPanel`).
+// KFX and EPUB carry a list of embedded images. A PDF's pages are its images:
+// `renderPdfPagesPanel` shows a page grid to select from and export.
 
 async function renderImagesPanel() {
   if (session.data.format === "pdf") return renderPdfPagesPanel();
@@ -597,9 +593,8 @@ async function exportAllImages() {
 
 // --- PDF pages panel -------------------------------------------------------
 
-// The PDF arm of Images: a grid of pages to select and export. Thumbnails load
-// lazily — a scanned novel runs to hundreds of pages, and rendering them all up
-// front would stall the panel for seconds to draw what's mostly off-screen.
+// The PDF arm of Images: a grid of pages to select and export; thumbnails
+// load as their cards near the viewport.
 
 const PDF_EXPORT_DPI = [150, 300, 600];
 const PDF_THUMB_WIDTH = 200;
@@ -619,9 +614,8 @@ async function renderPdfPagesPanel() {
   paintPdfPagesPanel();
 }
 
-// Painted once. Selection and DPI changes patch the affected nodes in place
-// rather than repainting: a repaint would drop every rendered thumbnail and
-// re-render it, so ticking one checkbox would cost as much as opening the panel.
+// Painted once. Selection and DPI changes patch the affected nodes in place;
+// a repaint drops every rendered thumbnail.
 function paintPdfPagesPanel() {
   const st = session.pdfPages;
   const panel = el("div", "editor-panel");
@@ -759,9 +753,8 @@ function pdfPageCard(p, st) {
   return card;
 }
 
-// Render each page's thumbnail only once its card nears the viewport. Each
-// render is a ~15ms PDFKit call, so a few dozen on screen is nothing, while
-// eagerly doing all of them would not be.
+// Render each page's thumbnail once its card nears the viewport; each render
+// is a ~15ms PDFKit call.
 function observePdfThumbs(grid) {
   const io = new IntersectionObserver(
     (entries) => {
@@ -779,8 +772,7 @@ function observePdfThumbs(grid) {
 async function loadPdfThumb(img) {
   const page = Number(img.dataset.page);
   try {
-    // `reader_pdf_page` is 0-based and stateless — it re-resolves the PDF per
-    // call rather than needing an open reader session.
+    // `reader_pdf_page` is 0-based and stateless: it re-resolves the PDF per call.
     const b64 = await window.api.invoke("reader_pdf_page", {
       bookId: session.bookId,
       page: page - 1,
@@ -789,8 +781,7 @@ async function loadPdfThumb(img) {
     if (!img.isConnected) return; // panel repainted or closed mid-render
     img.src = `data:image/jpeg;base64,${b64}`;
   } catch {
-    // A page that won't render shouldn't take the grid down with it; the empty
-    // frame is the message.
+    // A page that fails to render leaves an empty frame; the grid stands.
   }
 }
 
@@ -871,11 +862,11 @@ function wrapPanel(...children) {
 }
 
 function paintTocPanel(detail) {
-  // The editable model — a deep copy so edits and Reset don't mutate the cached
+  // The editable model: a deep copy of the cached detail.
   session.tocTree = JSON.parse(JSON.stringify(detail.proposed || []));
 
-  // PDF has no proposer, so its panel is a hand-authoring surface instead: each
-  // row targets a page number the user types, and rows can be added.
+  // PDF has no proposer: its panel is a hand-authoring surface; each row
+  // targets a typed page number, and rows can be added.
   const pdf = detail.page_count != null;
   const pageCount = detail.page_count || 0;
 
@@ -943,7 +934,7 @@ function paintTocPanel(detail) {
         session.tocTree.push({ label: "", eid: 0, href: "", page: 1, children: [] });
         // Must pass pageCount — a bare re-render drops every row's page input.
         renderProposedTree(pageCount);
-        // Focus the row just added so typing can start immediately.
+        // Focus the row just added.
         const rows = $("#toc-tree").querySelectorAll(".toc-label");
         rows[rows.length - 1]?.focus();
       });
@@ -983,8 +974,7 @@ function chipText(verdict) {
   return "TOC sparse";
 }
 
-// The declared TOC as a nested list, so a book that declares Part → chapter →
-// section reads as one. Read-only: this is what the book has today.
+// The declared TOC as a nested list, read-only.
 function declaredList(nodes) {
   const ul = el("ul", "toc-current");
   for (const node of nodes) {
@@ -995,9 +985,8 @@ function declaredList(nodes) {
   return ul;
 }
 
-// What the proposal would change, in one line. The proposal always keeps every
-// declared entry, so the only things it can do are add entries and add levels —
-// and a user deciding whether to apply it needs to see which.
+// What the proposal changes, in one line: added entries and added levels;
+// every declared entry stays.
 function proposalSummary(detail, tree) {
   const added = countEntries(tree) - detail.nav_count;
   const levels = treeDepth(tree);
@@ -1013,7 +1002,7 @@ function treeDepth(nodes) {
   return (nodes || []).reduce((d, n) => Math.max(d, 1 + treeDepth(n.children)), 0);
 }
 
-// The tree as a flat run of `{node, depth}` in reading order. Indent/outdent and
+// The tree as a flat run of `{node, depth}` in reading order.
 function flattenTree(nodes, depth = 0, out = []) {
   for (const node of nodes) {
     out.push({ node, depth });
@@ -1024,7 +1013,7 @@ function flattenTree(nodes, depth = 0, out = []) {
 
 // Rebuild a tree from `{node, depth}` rows. Each row attaches under the nearest
 // preceding row with a shallower depth; a depth deeper than one below its
-// predecessor clamps, so no rebuild can invent a level that isn't reachable.
+// predecessor clamps.
 function rebuildTree(rows) {
   const roots = [];
   const open = []; // ancestors of the current row, outermost first
@@ -1045,7 +1034,7 @@ function subtreeEnd(rows, index) {
   return end;
 }
 
-// Move entry `index` (and its sub-entries) one level in or out. Indenting makes
+// Move entry `index` (and its sub-entries) one level in or out.
 function shiftTocDepth(index, delta, pageCount) {
   const rows = flattenTree(session.tocTree);
   const row = rows[index];
@@ -1088,16 +1077,16 @@ function moveTocEntry(index, delta, pageCount) {
   const target = delta < 0 ? prevSibling(rows, index) : nextSibling(rows, index);
   if (target < 0) return;
   const block = rows.splice(index, subtreeEnd(rows, index) - index);
-  // Moving up, the target sits above the cut and its index still stands.
-  // Moving down, the next sibling has slid into the vacated slot, and the block
-  // belongs after the whole of it — sub-entries included.
+  // Moving up, the target sits above the cut at an unchanged index. Moving
+  // down, the next sibling slides into the vacated slot; the block belongs
+  // after the whole of it, sub-entries included.
   const at = delta < 0 ? target : subtreeEnd(rows, index);
   rows.splice(at, 0, ...block);
   session.tocTree = rebuildTree(rows);
   renderProposedTree(pageCount, at);
 }
 
-// Render #toc-tree from session.tocTree, indenting by depth so the book's
+// Render #toc-tree from session.tocTree, indented by depth.
 function renderProposedTree(pageCount = 0, focusIndex = -1) {
   const tree = $("#toc-tree");
   if (!tree) return;
@@ -1124,7 +1113,7 @@ function renderProposedTree(pageCount = 0, focusIndex = -1) {
   if (focusIndex >= 0) tree.querySelectorAll(".toc-label")[focusIndex]?.focus();
 }
 
-// One editable row bound to its model node: a label input (writes back to the
+// One editable row bound to its model node: a label input, a page input for PDF, the move controls.
 function tocRow(node, depth, pageCount, ops) {
   const row = el("div", "toc-row");
   if (depth) {
@@ -1137,7 +1126,7 @@ function tocRow(node, depth, pageCount, ops) {
   input.addEventListener("input", () => {
     node.label = input.value;
   });
-  // Tab / Shift+Tab change an entry's level, Alt+↑ / Alt+↓ its order among its
+  // Tab / Shift+Tab change an entry's level, Alt+↑ / Alt+↓ its order among its siblings.
   input.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       const shift = e.shiftKey ? ops.onOutdent : ops.onIndent;
@@ -1163,8 +1152,7 @@ function tocRow(node, depth, pageCount, ops) {
     page.value = String(node.page || 1);
     page.title = `Page this entry jumps to (1–${pageCount})`;
     page.addEventListener("input", () => {
-      // Clamp here so an out-of-range page can't reach the writer, which would
-      // reject the whole TOC over one bad row.
+      // Clamp here: the writer rejects the whole TOC over one out-of-range page.
       const n = Math.min(Math.max(parseInt(page.value, 10) || 1, 1), pageCount);
       node.page = n;
     });
@@ -1204,8 +1192,7 @@ function tocRow(node, depth, pageCount, ops) {
   remove.title = `Remove this entry${sub}`;
   remove.addEventListener("click", ops.onRemove);
 
-  // One cluster, so five controls read as the row's toolbar rather than as five
-  // things competing with the label for width.
+  // One cluster: five controls as the row's toolbar.
   const toolbar = el("div", "toc-ops");
   toolbar.append(moveUp, moveDown, outdent, indent, remove);
   row.append(toolbar);
@@ -1292,7 +1279,7 @@ async function renderSpinePanel() {
 }
 
 function paintSpinePanel(detail) {
-  // A deep copy, so reordering and Reset don't mutate the cached detail.
+  // A deep copy of the cached detail.
   session.spineOrder = JSON.parse(JSON.stringify(detail.proposed || []));
 
   const panel = el("div", "editor-panel");
@@ -1305,7 +1292,7 @@ function paintSpinePanel(detail) {
   head.append(el("p", "editor-muted", spineSummary(detail)));
   panel.append(head);
 
-  // The consequence, stated before the controls rather than after the click.
+  // The consequence, stated before the controls.
   panel.append(
     el(
       "div",
@@ -1365,8 +1352,8 @@ function spineSummary(detail) {
   );
 }
 
-// Full re-render after every move, so each row's closure is bound to the right
-// index — the same rule the TOC tree follows.
+// Full re-render after every move; each row's closure binds its index, the
+// same rule the TOC tree follows.
 function renderSpineList(focusIndex = -1) {
   const list = $("#spine-list");
   if (!list) return;
@@ -1383,8 +1370,8 @@ function renderSpineList(focusIndex = -1) {
   );
   const apply = $("#spine-apply");
   if (apply) {
-    // Writing an order the book already has would re-hash the file and renumber
-    // every position for nothing — the backend refuses it, so don't offer it.
+    // The backend refuses an order the book declares; the button stays
+    // disabled for it.
     const current = (session.spineDetail.current || []).map((d) => d.idref);
     apply.disabled = order.every((d, i) => d.idref === current[i]);
     apply.title = apply.disabled
@@ -1424,8 +1411,7 @@ function spineRow(doc, ops) {
   return row;
 }
 
-// A spine is flat, so a move is a swap with the neighbour — no subtree to carry
-// and no level to preserve.
+// A spine is flat: a move is a swap with the neighbour.
 function moveSpineDoc(index, delta) {
   const order = session.spineOrder;
   const to = index + delta;

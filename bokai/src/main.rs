@@ -176,6 +176,76 @@ enum Command {
         #[arg(long = "series")]
         series: Option<String>,
     },
+
+    /// Rename a CSS class across an EPUB: every selector, `<style>` block and
+    /// `class` attribute.
+    RenameClass {
+        /// Input EPUB file.
+        input: String,
+        /// The class to rename.
+        from: String,
+        /// Its new name.
+        to: String,
+        /// Output path. Omit to only report the changes (dry run).
+        output: Option<String>,
+    },
+
+    /// Remove stylesheet rules no document in the EPUB can match. Prints the
+    /// rules; with `output`, writes the trimmed book.
+    RemoveUnusedCss {
+        /// Input EPUB file.
+        input: String,
+        /// Output path. Omit to only list the unused rules (dry run).
+        output: Option<String>,
+    },
+
+    /// Re-indent an EPUB's XHTML and CSS members without changing what they
+    /// render.
+    Beautify {
+        /// Input EPUB file.
+        input: String,
+        /// Output path. Omit to only report the members that change.
+        output: Option<String>,
+        /// Only this member (zip path).
+        #[arg(long)]
+        member: Option<String>,
+    },
+
+    /// Split a content document in two before the block at a line, moving
+    /// ids, links, manifest and spine entries with it.
+    SplitDocument {
+        /// Input EPUB file.
+        input: String,
+        /// The document to split (zip path).
+        member: String,
+        /// Line of the block that starts the new document.
+        #[arg(long)]
+        line: usize,
+        /// Column on that line (1-based characters).
+        #[arg(long, default_value_t = 1)]
+        col: usize,
+        /// Output path. Omit to only report the changes.
+        output: Option<String>,
+    },
+
+    /// Fold the next spine document into this one, retargeting every link.
+    MergeDocument {
+        /// Input EPUB file.
+        input: String,
+        /// The document that absorbs its successor (zip path).
+        member: String,
+        /// Output path. Omit to only report the changes.
+        output: Option<String>,
+    },
+
+    /// Upgrade an EPUB 2 package to EPUB 3 in place: version, metadata,
+    /// navigation document, manifest properties, DOCTYPEs.
+    Upgrade {
+        /// Input EPUB file.
+        input: String,
+        /// Output path. Omit to only report the changes.
+        output: Option<String>,
+    },
 }
 
 #[cfg(feature = "validate")]
@@ -297,6 +367,46 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
 /// `bokai split <input> [--out DIR] [--series NAME]` — print where a
 /// collection divides into volumes, one line per proposed cut; with `--out`,
 /// write the volumes.
+/// Run one in-place EPUB operation: print what changed; with `output`, write
+/// the edited book and report any validator errors the edit introduced.
+fn epub_op_cmd<F>(input: &str, output: Option<&str>, what: &str, op: F) -> Result<(), String>
+where
+    F: FnOnce(
+        &mut bokai::formats::epub::EpubPackage,
+    ) -> std::io::Result<bokai::formats::epub::Changes>,
+{
+    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    if !bytes.starts_with(b"PK") {
+        return Err(format!("{what} reads an EPUB"));
+    }
+    let mut pkg = bokai::formats::epub::EpubPackage::parse(&bytes).map_err(|e| e.to_string())?;
+    let changes = op(&mut pkg).map_err(|e| e.to_string())?;
+    for note in &changes.notes {
+        println!("{note}");
+    }
+    for path in &changes.changed {
+        println!("  changed  {path}");
+    }
+    for (path, _) in &changes.added {
+        println!("  added    {path}");
+    }
+    for path in &changes.removed {
+        println!("  removed  {path}");
+    }
+    let Some(out) = output else {
+        if !changes.is_empty() {
+            println!("dry run: nothing written");
+        }
+        return Ok(());
+    };
+    let edited = pkg.into_bytes().map_err(|e| e.to_string())?;
+    std::fs::write(out, &edited).map_err(|e| format!("write {out}: {e}"))?;
+    println!("wrote EPUB → {out} ({} bytes)", edited.len());
+    #[cfg(feature = "validate")]
+    report_edit_regressions(&bytes, &edited, what);
+    Ok(())
+}
+
 fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(), String> {
     use bokai::formats::epub::split::{Numbering, propose_cuts, split};
 
@@ -687,6 +797,50 @@ fn main() -> ExitCode {
         Command::ReorderSpine { input, output } => reorder_spine_cmd(&input, output.as_deref()),
         Command::Split { input, out, series } => {
             split_cmd(&input, out.as_deref(), series.as_deref())
+        }
+        Command::RenameClass {
+            input,
+            from,
+            to,
+            output,
+        } => epub_op_cmd(&input, output.as_deref(), "rename class", |pkg| {
+            bokai::formats::epub::rename_class(pkg, &from, &to)
+        }),
+        Command::RemoveUnusedCss { input, output } => {
+            epub_op_cmd(&input, output.as_deref(), "remove unused CSS", |pkg| {
+                for r in bokai::formats::epub::unused_css(pkg)? {
+                    println!("  {}:{}  {}", r.sheet, r.line, r.selector);
+                }
+                bokai::formats::epub::remove_unused_css(pkg)
+            })
+        }
+        Command::Beautify {
+            input,
+            output,
+            member,
+        } => epub_op_cmd(&input, output.as_deref(), "beautify", |pkg| {
+            bokai::formats::epub::beautify(pkg, member.as_deref())
+        }),
+        Command::SplitDocument {
+            input,
+            member,
+            line,
+            col,
+            output,
+        } => epub_op_cmd(&input, output.as_deref(), "split document", |pkg| {
+            bokai::formats::epub::split_document(pkg, &member, line, col)
+        }),
+        Command::MergeDocument {
+            input,
+            member,
+            output,
+        } => epub_op_cmd(&input, output.as_deref(), "merge document", |pkg| {
+            bokai::formats::epub::merge_with_next(pkg, &member)
+        }),
+        Command::Upgrade { input, output } => {
+            epub_op_cmd(&input, output.as_deref(), "upgrade", |pkg| {
+                bokai::formats::epub::upgrade_to_epub3(pkg)
+            })
         }
     };
 

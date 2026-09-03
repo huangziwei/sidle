@@ -15,8 +15,8 @@ const MIMETYPE_BODY: &[u8] = b"application/epub+zip";
 /// The OCF container descriptor that names the OPF package document.
 const CONTAINER_PATH: &str = "META-INF/container.xml";
 
-/// One EPUB zip member, decompressed, carrying the storage method it had on disk
-/// so an untouched member re-serializes with the same compression choice.
+/// One EPUB zip member, decompressed, with the storage method it had on disk;
+/// an untouched member re-serializes with that method.
 #[derive(Clone)]
 struct Entry {
     name: String,
@@ -174,6 +174,39 @@ impl EpubPackage {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct Changes {
+    pub changed: Vec<String>,
+    pub added: Vec<(String, String)>,
+    pub removed: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+impl Changes {
+    pub(crate) fn touch(&mut self, path: &str) {
+        if !self.changed.iter().any(|p| p == path) && !self.added.iter().any(|(p, _)| p == path) {
+            self.changed.push(path.to_string());
+        }
+    }
+
+    pub(crate) fn add(&mut self, path: &str, media_type: &str) {
+        self.added.push((path.to_string(), media_type.to_string()));
+    }
+
+    pub(crate) fn drop(&mut self, path: &str) {
+        self.changed.retain(|p| p != path);
+        self.removed.push(path.to_string());
+    }
+
+    pub(crate) fn note(&mut self, note: impl Into<String>) {
+        self.notes.push(note.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
 pub fn read_member(bytes: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
     match read_member_inner(bytes, name) {
         Ok(found) => Ok(found),
@@ -196,9 +229,8 @@ fn read_member_inner(bytes: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(data))
 }
 
-/// Map a parsed member's compression to one the writer can always emit. The data
-/// is already decompressed, so anything that isn't `Stored` re-deflates cleanly
-/// (an exotic method that survived read would otherwise fail on write).
+/// The compression method the writer emits for a parsed member: `Stored` stays
+/// `Stored`; every other method becomes `Deflated`.
 fn writable_method(m: CompressionMethod) -> CompressionMethod {
     if m == CompressionMethod::Stored {
         CompressionMethod::Stored
@@ -221,9 +253,8 @@ pub(crate) fn escape_attr(s: &str) -> String {
     escape_text(s).replace('"', "&quot;")
 }
 
-/// The value of `name="…"`/`name='…'` in a start tag, respecting attribute
-/// boundaries (so `type` doesn't match inside `epub:type`). Shared by the EPUB
-/// surgical-write primitives ([`super::toc_repair`], [`super::metadata_edit`]).
+/// The value of `name="…"`/`name='…'` in a start tag, at an attribute
+/// boundary: `type` does not match inside `epub:type`.
 pub(crate) fn attr_value(tag: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=");
     let mut from = 0;
@@ -244,18 +275,40 @@ pub(crate) fn attr_value(tag: &str, name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
+
+    pub(crate) fn package_from(members: &[(&str, &str)]) -> EpubPackage {
+        let mut entries = vec![
+            Entry {
+                name: MIMETYPE_NAME.to_string(),
+                data: MIMETYPE_BODY.to_vec(),
+                method: CompressionMethod::Stored,
+            },
+            Entry {
+                name: CONTAINER_PATH.to_string(),
+                data: br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.to_vec(),
+                method: CompressionMethod::Deflated,
+            },
+        ];
+        for (name, body) in members {
+            entries.push(Entry {
+                name: name.to_string(),
+                data: body.as_bytes().to_vec(),
+                method: CompressionMethod::Deflated,
+            });
+        }
+        EpubPackage { entries }
+    }
 
     fn read_fixture() -> Vec<u8> {
         std::fs::read(FIXTURE).expect("read EPUB fixture")
     }
 
     /// An untouched parse→repackage round-trip preserves every member's bytes
-    /// and reopens as a valid `Book`. This is the harness's core guarantee:
-    /// anything not explicitly changed survives verbatim.
+    /// and reopens as a valid `Book`.
     #[test]
     fn roundtrip_is_faithful_and_reopens() {
         let epub = read_fixture();
@@ -283,7 +336,7 @@ mod tests {
             "image bytes pass through unchanged"
         );
 
-        // The repackaged bytes still open + parse as an EPUB.
+        // The repackaged bytes open and parse as an EPUB.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("out.epub");
         std::fs::write(&path, &out).expect("write");

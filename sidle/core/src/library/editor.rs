@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bokai::formats::epub::{self as epub, EpubPackage, MemberRole};
 use bokai::validate::Severity;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::library::db::BookRow;
 use crate::library::source::{self, Source};
@@ -47,6 +47,60 @@ pub struct FindingInfo {
     pub line: Option<u32>,
     pub fix_action: Option<String>,
     pub fix_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Operation {
+    RenameClass {
+        from: String,
+        to: String,
+    },
+    RemoveUnusedCss,
+    Beautify {
+        member: Option<String>,
+    },
+    SplitDocument {
+        member: String,
+        line: usize,
+        col: usize,
+    },
+    MergeWithNext {
+        member: String,
+    },
+    UpgradeEpub3,
+}
+
+impl Operation {
+    pub fn describe(&self) -> String {
+        match self {
+            Operation::RenameClass { from, to } => format!("rename class {from} to {to}"),
+            Operation::RemoveUnusedCss => "remove unused CSS".to_string(),
+            Operation::Beautify { member: Some(m) } => format!("beautify {m}"),
+            Operation::Beautify { member: None } => "beautify every text member".to_string(),
+            Operation::SplitDocument { member, line, .. } => {
+                format!("split {member} at line {line}")
+            }
+            Operation::MergeWithNext { member } => format!("merge the next document into {member}"),
+            Operation::UpgradeEpub3 => "upgrade to EPUB 3".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberText {
+    pub path: String,
+    pub media_type: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Outcome {
+    pub operation: String,
+    pub changed: Vec<MemberText>,
+    pub added: Vec<MemberText>,
+    pub removed: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 pub struct EpubSession {
@@ -127,6 +181,57 @@ impl EpubSession {
         self.dirty.insert(member.to_string());
         self.dirty.insert(opf);
         Ok(id)
+    }
+
+    pub fn remove(&mut self, member: &str) -> Result<()> {
+        if !self.package.remove(member) {
+            anyhow::bail!("no member {member} in {}", self.path);
+        }
+        self.dirty.remove(member);
+        self.dirty.insert(self.opf_path()?);
+        Ok(())
+    }
+
+    pub fn apply(&mut self, op: &Operation) -> Result<Outcome> {
+        let pkg = &mut self.package;
+        let changes = match op {
+            Operation::RenameClass { from, to } => epub::rename_class(pkg, from, to),
+            Operation::RemoveUnusedCss => epub::remove_unused_css(pkg),
+            Operation::Beautify { member } => epub::beautify(pkg, member.as_deref()),
+            Operation::SplitDocument { member, line, col } => {
+                epub::split_document(pkg, member, *line, *col)
+            }
+            Operation::MergeWithNext { member } => epub::merge_with_next(pkg, member),
+            Operation::UpgradeEpub3 => epub::upgrade_to_epub3(pkg),
+        }
+        .with_context(|| op.describe())?;
+        let mut outcome = Outcome {
+            operation: op.describe(),
+            changed: Vec::new(),
+            added: Vec::new(),
+            removed: changes.removed.clone(),
+            notes: changes.notes.clone(),
+        };
+        for path in &changes.changed {
+            self.dirty.insert(path.clone());
+            outcome.changed.push(MemberText {
+                path: path.clone(),
+                media_type: None,
+                text: self.read_text(path)?,
+            });
+        }
+        for (path, media_type) in &changes.added {
+            self.dirty.insert(path.clone());
+            outcome.added.push(MemberText {
+                path: path.clone(),
+                media_type: Some(media_type.clone()),
+                text: self.read_text(path)?,
+            });
+        }
+        for path in &changes.removed {
+            self.dirty.remove(path);
+        }
+        Ok(outcome)
     }
 
     pub fn dirty(&self) -> Vec<String> {

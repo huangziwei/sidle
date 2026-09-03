@@ -337,3 +337,25 @@ export function snippetAround(text, start, end, radius = 40) {
   to = Math.min(to, end + radius);
   return { before: text.slice(from, start), match: text.slice(start, end), after: text.slice(end, to) };
 }
+
+export function relativePath(fromPath, toPath) {
+  const from = fromPath.split("/").slice(0, -1);
+  const to = toPath.split("/");
+  const name = to.pop();
+  let i = 0;
+  while (i < from.length && i < to.length && from[i] === to[i]) i++;
+  const parts = [];
+  for (let k = i; k < from.length; k++) parts.push("..");
+  parts.push(...to.slice(i), name);
+  return parts.join("/").replace(/ /g, "%20");
+}
+
+export function classAtCursor(text, pos) {
+  const lt = text.lastIndexOf("<", pos);
+  if (lt < 0) return "";
+  const gt = text.indexOf(">", lt);
+  if (gt < 0 || text.lastIndexOf(">", pos - 1) > lt) return "";
+  const tag = text.slice(lt, gt + 1);
+  const m = /\sclass\s*=\s*["']([^"']*)["']/.exec(tag);
+  return m ? m[1].trim().split(/\s+/)[0] || "" : "";
+}

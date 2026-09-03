@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr};
+use crate::formats::epub::markup::{rewrite_tags, set_attr};
 use crate::formats::epub::spine_repair::flatten_declared;
 use crate::formats::epub::structure::{basename, dir_of, relativize};
 use crate::formats::epub::{OpfData, parse_opf};
@@ -316,6 +317,66 @@ pub fn remove_manifest_item(pkg: &mut EpubPackage, path: &str) -> io::Result<boo
         return Ok(true);
     }
     Ok(false)
+}
+
+pub(crate) fn set_item_properties(opf: &str, id: &str, properties: &str) -> String {
+    rewrite_tags(opf, |name, tag| {
+        (name == "item" && attr_value(tag, "id").as_deref() == Some(id))
+            .then(|| set_attr(tag, "properties", Some(properties)))
+    })
+}
+
+pub(crate) fn itemref_span(opf: &str, id: &str) -> Option<(usize, usize)> {
+    let mut from = 0;
+    while let Some(rel) = opf[from..].find("<itemref") {
+        let start = from + rel;
+        let end = start + opf[start..].find('>')? + 1;
+        if attr_value(&opf[start..end], "idref").as_deref() == Some(id) {
+            return Some((start, end));
+        }
+        from = end;
+    }
+    None
+}
+
+pub(crate) fn insert_itemref_after(opf: &str, after_id: &str, new_id: &str) -> io::Result<String> {
+    let (start, end) = itemref_span(opf, after_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the spine has no itemref for {after_id}"),
+        )
+    })?;
+    let tag = &opf[start..end];
+    let linear = attr_value(tag, "linear")
+        .map(|l| format!(" linear=\"{}\"", escape_attr(&l)))
+        .unwrap_or_default();
+    let line_start = opf[..start].rfind('\n').map_or(0, |i| i + 1);
+    let indent = &opf[line_start..start];
+    let sep = if indent.chars().all(char::is_whitespace) {
+        format!("\n{indent}")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "{}{sep}<itemref idref=\"{}\"{linear}/>{}",
+        &opf[..end],
+        escape_attr(new_id),
+        &opf[end..]
+    ))
+}
+
+pub(crate) fn remove_itemref(opf: &str, id: &str) -> String {
+    let Some((start, end)) = itemref_span(opf, id) else {
+        return opf.to_string();
+    };
+    let line_start = opf[..start].rfind('\n').map_or(0, |i| i + 1);
+    let alone = opf[line_start..start].chars().all(char::is_whitespace);
+    let rest = &opf[end..];
+    let after_nl = rest.find('\n').filter(|&i| rest[..i].trim().is_empty());
+    match (alone, after_nl) {
+        (true, Some(i)) => format!("{}{}", &opf[..line_start], &rest[i + 1..]),
+        _ => format!("{}{}", &opf[..start], rest),
+    }
 }
 
 #[cfg(test)]

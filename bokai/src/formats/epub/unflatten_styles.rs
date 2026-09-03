@@ -3,8 +3,9 @@ use std::io;
 
 use selectors::parser::{Combinator, Component, Selector};
 
-use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr};
+use crate::formats::epub::edit::{EpubPackage, attr_value};
 use crate::formats::epub::manifest::{add_manifest_item, remove_manifest_item};
+use crate::formats::epub::markup::{Tok, VOID, class_list, set_attr, tokens};
 use crate::formats::epub::parse_opf;
 use crate::formats::epub::structure::{
     basename, dir_of, relativize, resolve_href, spine_documents,
@@ -1021,9 +1022,8 @@ impl<'a> Mapper<'a> {
                 .classes
                 .iter()
                 .find(|x| !is_generated(x))
-                .or_else(|| key.classes.first())
                 .cloned()
-                .unwrap_or_else(|| key.tag.clone());
+                .unwrap_or_else(|| format!("{}-flat", key.tag));
             (base, target.clone())
         });
         let mut own: Decls = free
@@ -1063,150 +1063,6 @@ struct DocPlan {
     axis: Option<String>,
     entry: String,
     scores: BTreeMap<Option<String>, (Score, String)>,
-}
-
-const VOID: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
-    "track", "wbr",
-];
-
-enum Tok {
-    Text {
-        start: usize,
-        end: usize,
-    },
-    Tag {
-        start: usize,
-        end: usize,
-        name: String,
-        closing: bool,
-        self_closing: bool,
-    },
-}
-
-fn tokens(text: &str) -> Vec<Tok> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut text_start = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        let rest = &text[i..];
-        let skip = if rest.starts_with("<!--") {
-            rest.find("-->").map(|e| e + 3)
-        } else if rest.starts_with("<![CDATA[") {
-            rest.find("]]>").map(|e| e + 3)
-        } else if rest.starts_with("<?") {
-            rest.find("?>").map(|e| e + 2)
-        } else if rest.starts_with("<!") {
-            rest.find('>').map(|e| e + 1)
-        } else {
-            None
-        };
-        if let Some(n) = skip {
-            i += n;
-            continue;
-        }
-        let closing = rest.starts_with("</");
-        let name_start = if closing { 2 } else { 1 };
-        let name_len = rest[name_start..]
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_'))
-            .unwrap_or(rest.len() - name_start);
-        if name_len == 0 {
-            i += 1;
-            continue;
-        }
-        let mut j = name_start + name_len;
-        let mut quote: Option<u8> = None;
-        let rb = rest.as_bytes();
-        while j < rb.len() {
-            match (quote, rb[j]) {
-                (Some(q), c) if c == q => quote = None,
-                (Some(_), _) => {}
-                (None, b'"') | (None, b'\'') => quote = Some(rb[j]),
-                (None, b'>') => break,
-                _ => {}
-            }
-            j += 1;
-        }
-        if j >= rb.len() {
-            break;
-        }
-        if text_start < i {
-            out.push(Tok::Text {
-                start: text_start,
-                end: i,
-            });
-        }
-        let end = i + j + 1;
-        out.push(Tok::Tag {
-            start: i,
-            end,
-            name: rest[name_start..name_start + name_len].to_ascii_lowercase(),
-            closing,
-            self_closing: rb[..j].ends_with(b"/"),
-        });
-        i = end;
-        text_start = end;
-    }
-    if text_start < text.len() {
-        out.push(Tok::Text {
-            start: text_start,
-            end: text.len(),
-        });
-    }
-    out
-}
-
-fn set_attr(tag: &str, name: &str, value: Option<&str>) -> String {
-    let needle = format!("{name}=");
-    let mut from = 0;
-    while let Some(rel) = tag[from..].find(&needle) {
-        let pos = from + rel;
-        let boundary = pos > 0 && tag.as_bytes()[pos - 1].is_ascii_whitespace();
-        if boundary {
-            let after = &tag[pos + needle.len()..];
-            if let Some(q) = after.chars().next().filter(|q| *q == '"' || *q == '\'')
-                && let Some(end) = after[1..].find(q)
-            {
-                let value_start = pos + needle.len() + 1;
-                let value_end = value_start + end;
-                return match value {
-                    Some(v) => format!(
-                        "{}{}{}",
-                        &tag[..value_start],
-                        escape_attr(v),
-                        &tag[value_end..]
-                    ),
-                    None => {
-                        let ws_start = tag[..pos].trim_end().len();
-                        format!("{}{}", &tag[..ws_start], &tag[value_end + 1..])
-                    }
-                };
-            }
-        }
-        from = pos + needle.len();
-    }
-    match value {
-        None => tag.to_string(),
-        Some(v) => {
-            let trimmed = tag.trim_end_matches('>');
-            let (head, tail) = match trimmed.strip_suffix('/') {
-                Some(h) => (h.trim_end(), "/>"),
-                None => (trimmed, ">"),
-            };
-            format!("{head} {name}=\"{}\"{tail}", escape_attr(v))
-        }
-    }
-}
-
-fn class_list(tag: &str) -> Vec<String> {
-    attr_value(tag, "class")
-        .map(|c| c.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_default()
 }
 
 fn only_class_attr(tag: &str, name: &str) -> bool {
@@ -2057,48 +1913,5 @@ mod tests {
     fn refuses_a_flattened_reference() {
         assert!(restore_styles(&flattened(), &flattened()).is_err());
         assert!(restore_styles(&reference(), &reference()).is_err());
-    }
-
-    #[test]
-    fn set_attr_replaces_removes_and_adds() {
-        assert_eq!(
-            set_attr(r#"<p class="a b">"#, "class", Some("c")),
-            r#"<p class="c">"#
-        );
-        assert_eq!(
-            set_attr(r#"<p id="x" class="a">"#, "class", None),
-            r#"<p id="x">"#
-        );
-        assert_eq!(set_attr(r#"<p>"#, "class", Some("c")), r#"<p class="c">"#);
-        assert_eq!(
-            set_attr(r#"<img src="a"/>"#, "class", Some("c")),
-            r#"<img src="a" class="c"/>"#
-        );
-        assert_eq!(
-            set_attr(r#"<link href="a" rel="stylesheet"/>"#, "href", Some("b")),
-            r#"<link href="b" rel="stylesheet"/>"#
-        );
-    }
-
-    #[test]
-    fn tokens_skip_comments_and_track_closing_tags() {
-        let t = tokens("<a><!-- <b> --><br/>x</a>");
-        let names: Vec<String> = t
-            .iter()
-            .filter_map(|tok| match tok {
-                Tok::Tag {
-                    name,
-                    closing,
-                    self_closing,
-                    ..
-                } => Some(format!(
-                    "{name}{}{}",
-                    if *closing { "/" } else { "" },
-                    if *self_closing { "!" } else { "" }
-                )),
-                Tok::Text { .. } => None,
-            })
-            .collect();
-        assert_eq!(names, vec!["a", "br!", "a/"]);
     }
 }

@@ -124,9 +124,9 @@ button {
   border-radius: 6px;
   overflow: hidden;
 }
-/* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`.
-   This restores it for `$("#view-seg").hidden = true` on the Misc and Kindle pages,
-   which have no Gallery/List. */
+/* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`;
+   `.seg[hidden]` restores it for `$("#view-seg").hidden = true` on the Misc and
+   Kindle pages, which have no Gallery/List. */
 .seg[hidden] {
   display: none;
 }
@@ -179,7 +179,8 @@ button {
 }
 
 /* applySection() hides the book-only filter pills with `hidden`. The author
-   `display: flex` above wins over the UA `[hidden]` rule; this restores it. */
+   `display: flex` above wins over the UA `[hidden]` rule; `.filter-bar[hidden]`
+   restores it. */
 .filter-bar[hidden] {
   display: none;
 }
@@ -2035,8 +2036,8 @@ kbd {
 }
 
 /* Import-failure report: a persistent, dismissable panel that lists each
-   failed file and its full reason. The toast only shows a count; this is the
-   "why". Sits just above where the toast appears. */
+   failed file and its full reason. The toast shows the count; the panel shows
+   each reason. Sits just above where the toast appears. */
 .error-report {
   position: fixed;
   /* Sits above the toast at bottom: 16px, which shows the count summary. */
@@ -2055,8 +2056,9 @@ kbd {
   overflow: hidden;
 }
 
-/* Author `display: flex` shadows the UA `[hidden]{display:none}`. This restores
-   it, for the launch state and for the ✕ that sets `hidden`. */
+/* Author `display: flex` shadows the UA `[hidden]{display:none}`;
+   `.error-report[hidden]` restores it for the launch state and for the ✕ that
+   sets `hidden`. */
 .error-report[hidden] {
   display: none;
 }
@@ -2220,7 +2222,7 @@ kbd {
 }
 
 /* Drag-and-drop cover target: lit while an image is dragged over the open
-   editor. The whole editor accepts the drop; this is the "drop here" cue. */
+   editor. The whole editor accepts the drop; the target is the cue. */
 .metadata-cover-preview.drag-over {
   border: 2px dashed var(--accent);
   background: var(--accent-soft);
@@ -2710,8 +2712,8 @@ kbd {
   width: 8%;
 }
 
-/* .queue-progress-fill carries the live progress fraction. This hides the
-   default ::after that sits behind it. */
+/* .queue-progress-fill carries the live progress fraction; the rule hides the
+   default ::after behind it. */
 .queue-progress.converting::after {
   display: none;
 }
@@ -4138,8 +4140,7 @@ kbd {
   flex-direction: column;
   gap: 12px;
 }
-/* Info banner atop a read-only panel (e.g. an EPUB/PDF source before its editor
-   ships). */
+/* Info banner atop a read-only panel. */
 .editor-notice {
   font-size: 13px;
   line-height: 1.5;
@@ -4556,9 +4557,9 @@ kbd {
   border-radius: var(--radius);
 }
 
-/* The author `display: flex` above shadows the UA `[hidden]{display:none}`. This
-   restores it for `q(".rl-clock-wrap").hidden = true` on a year whose sessions all
-   predate the timestamps. */
+/* The author `display: flex` above shadows the UA `[hidden]{display:none}`;
+   `.rl-clock-wrap[hidden]` restores it for `q(".rl-clock-wrap").hidden = true`
+   on a year whose sessions all predate the timestamps. */
 .rl-clock-wrap[hidden] {
   display: none;
 }
@@ -5216,7 +5217,7 @@ kbd {
 
 /* Identity down one side, the book's own records filling the rest. The side
    column is sized to a readable cover; the calendar and the annotations under it
-   take everything left over, which is what the old fixed-width one was wasting. */
+   take everything left over. */
 .rl-book-layout {
   display: grid;
   grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
@@ -5708,6 +5709,7 @@ kbd {
   align-items: center;
   gap: 8px;
 }
+.tx-image[hidden] { display: none; }
 .tx-image img { max-width: 100%; max-height: 80vh; box-shadow: var(--shadow); }
 .tx-empty { padding: 24px; }
 

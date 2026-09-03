@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::formats::epub::edit::{escape_attr, escape_text};
 use crate::formats::epub::structure::relativize;
-use crate::model::TocEntry;
+use crate::model::{Landmark, LandmarkType, TocEntry};
 use crate::util::trim_markup_space;
 
 /// Render `<nav epub:type="toc">…</nav>`, hrefs rebased relative to `base_dir`.
@@ -36,6 +36,47 @@ fn render_ol(entries: &[TocEntry], base_dir: &str, out: &mut String) {
     out.push_str("</ol>\n");
 }
 
+pub(crate) fn landmark_epub_type(t: LandmarkType) -> &'static str {
+    match t {
+        LandmarkType::Cover => "cover",
+        LandmarkType::TitlePage => "titlepage",
+        LandmarkType::Toc => "toc",
+        LandmarkType::StartReading | LandmarkType::BodyMatter => "bodymatter",
+        LandmarkType::FrontMatter => "frontmatter",
+        LandmarkType::BackMatter => "backmatter",
+        LandmarkType::Acknowledgements => "acknowledgments",
+        LandmarkType::Bibliography => "bibliography",
+        LandmarkType::Glossary => "glossary",
+        LandmarkType::Index => "index",
+        LandmarkType::Preface => "preface",
+        LandmarkType::Endnotes => "endnotes",
+        LandmarkType::Loi => "loi",
+        LandmarkType::Lot => "lot",
+    }
+}
+
+/// Render `<nav epub:type="landmarks">…</nav>`, hrefs rebased to `base_dir`.
+pub(crate) fn render_landmarks_nav(landmarks: &[Landmark], base_dir: &str) -> String {
+    let mut s = String::from(
+        "<nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"hidden\">\n<h2>Landmarks</h2>\n<ol>\n",
+    );
+    for l in landmarks {
+        let label = if l.label.trim().is_empty() {
+            l.landmark_type.default_label()
+        } else {
+            l.label.trim()
+        };
+        s.push_str(&format!(
+            "<li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
+            landmark_epub_type(l.landmark_type),
+            escape_attr(&relativize(base_dir, &l.href)),
+            escape_text(trim_markup_space(label))
+        ));
+    }
+    s.push_str("</ol>\n</nav>");
+    s
+}
+
 /// A minimal EPUB 3 nav document wrapping `toc_nav`.
 pub(crate) fn render_nav_doc(toc_nav: &str, lang: &str, title: &str) -> String {
     format!(
@@ -57,7 +98,8 @@ pub(crate) fn render_navmap(entries: &[TocEntry], base_dir: &str) -> String {
     s
 }
 
-/// Numbering state for the NCX: element ids are unique per navPoint, while
+/// Numbering state for the NCX: element ids are unique per navPoint;
+/// playOrder repeats for navPoints on one target.
 #[derive(Default)]
 struct NavOrder {
     next_id: usize,

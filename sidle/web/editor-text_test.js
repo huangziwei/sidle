@@ -3,6 +3,8 @@ import {
   elementAddressAt,
   findAll,
   highlight,
+  classAtCursor,
+  relativePath,
   renderLines,
   langOf,
   lineAt,
@@ -91,4 +93,18 @@ Deno.test("renderLines splits tokens at newlines and numbers every line", () => 
   assert(html.includes('<div class="line"><span class="ln">3</span><span class="hl-c">lines --&gt;</span>\n</div>'));
   const stripped = html.replace(/<span class="ln">\d+<\/span>/g, "").replace(/<[^>]+>/g, "").replace(/\n<\/div>|\n$/g, "");
   assertEquals(stripped.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\n/g, ""), xml.replace(/\n/g, ""));
+});
+
+Deno.test("relativePath walks up and down between member directories", () => {
+  assertEquals(relativePath("OEBPS/text/a.xhtml", "OEBPS/images/x y.png"), "../images/x%20y.png");
+  assertEquals(relativePath("OEBPS/a.xhtml", "OEBPS/b.xhtml"), "b.xhtml");
+  assertEquals(relativePath("a.xhtml", "OEBPS/b.xhtml"), "OEBPS/b.xhtml");
+  assertEquals(relativePath("OEBPS/text/a.xhtml", "nav.xhtml"), "../../nav.xhtml");
+});
+
+Deno.test("classAtCursor reads the first class of the tag around the cursor", () => {
+  const text = '<p class="a b">x</p><span>y</span>';
+  assertEquals(classAtCursor(text, 5), "a");
+  assertEquals(classAtCursor(text, 16), "");
+  assertEquals(classAtCursor(text, 22), "");
 });

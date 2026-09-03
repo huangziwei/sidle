@@ -1,6 +1,4 @@
-//! selectors crate Element implementation for ArenaDom.
-//!
-//! This enables CSS selector matching against our arena DOM.
+//! `ElementRef`: the selectors-crate `Element` implementation over `ArenaDom`.
 
 use std::fmt;
 
@@ -15,7 +13,7 @@ use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 
 // ============================================================================
 
-/// Our selector implementation for the selectors crate.
+/// `SelectorImpl` for `ArenaDom` matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BokoSelectors;
 
@@ -120,7 +118,7 @@ impl<'a> From<&'a str> for CssNamespace {
     }
 }
 
-/// Pseudo-element type (not used but required by trait).
+/// Pseudo-element type; `ElementRef` matches none.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PseudoElement {}
 
@@ -222,7 +220,7 @@ impl<'a> selectors::Element for ElementRef<'a> {
     type Impl = BokoSelectors;
 
     fn opaque(&self) -> OpaqueElement {
-        // Key on the arena node, not on this transient ElementRef: the selector
+        // Keyed on the arena node, not on this transient `ElementRef`.
         match self.dom.get(self.id) {
             Some(node) => OpaqueElement::new(node),
             None => OpaqueElement::new(self),
@@ -434,17 +432,44 @@ impl<'a> selectors::Element for ElementRef<'a> {
     }
 
     fn apply_selector_flags(&self, _flags: ElementSelectorFlags) {
-        // We don't need to track selector flags for our use case
+        // Selector flags are unused.
     }
 
     fn add_element_unique_hashes(&self, _filter: &mut selectors::bloom::BloomFilter) -> bool {
-        // No bloom filter support needed
+        // No bloom filter.
         false
     }
 
     fn has_custom_state(&self, _name: &IdentStr) -> bool {
         false
     }
+}
+
+pub(crate) fn any_element_matches(
+    dom: &ArenaDom,
+    selectors: &[selectors::parser::Selector<BokoSelectors>],
+) -> bool {
+    let mut caches = selectors::context::SelectorCaches::default();
+    let mut context = MatchingContext::new(
+        selectors::matching::MatchingMode::Normal,
+        None,
+        &mut caches,
+        selectors::context::QuirksMode::NoQuirks,
+        selectors::matching::NeedsSelectorFlags::No,
+        selectors::matching::MatchingForInvalidation::No,
+    );
+    (0..dom.len() as u32).map(ArenaNodeId).any(|id| {
+        dom.is_element(id)
+            && selectors.iter().any(|s| {
+                selectors::matching::matches_selector(
+                    s,
+                    0,
+                    None,
+                    &ElementRef::new(dom, id),
+                    &mut context,
+                )
+            })
+    })
 }
 
 #[cfg(test)]

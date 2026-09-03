@@ -1,9 +1,11 @@
 import {
+  classAtCursor,
   elementAddressAt,
   findAll,
   langOf,
   lineAt,
   lineStart,
+  relativePath,
   renderLines,
   replaceAll,
   snippetAround,
@@ -53,12 +55,13 @@ function b64ToBytes(b64) {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
+export function mountTextPanel({ bookId, center, toast, onDirty, onSaved, showPanel }) {
   const api = window.api;
   const st = {
     members: [],
     opf: null,
     buffers: new Map(),
+    removed: new Set(),
     current: null,
     previewDoc: null,
     tab: "preview",
@@ -84,7 +87,8 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
   const posLabel = el("span", "tx-pos");
   const gotoBtn = button("btn btn-small", "Go to line…", promptGoToLine, "⌘G");
   const findBtn = button("btn btn-small", "Find…", () => showTab("search", true), "⌘F");
-  toolbar.append(pathLabel, posLabel, findBtn, gotoBtn);
+  const toolsBtn = button("btn btn-small", "Tools ▾", openTools, "Book-wide operations");
+  toolbar.append(pathLabel, posLabel, toolsBtn, findBtn, gotoBtn);
   const editor = el("div", "tx-editor");
   const hl = el("pre", "tx-hl");
   hl.setAttribute("aria-hidden", "true");
@@ -225,7 +229,7 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
   }
 
   function reportDirty() {
-    onDirty([...st.buffers.values()].some((b) => b.dirty));
+    onDirty(st.removed.size > 0 || [...st.buffers.values()].some((b) => b.dirty));
   }
 
   async function buffer(path) {
@@ -520,9 +524,183 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
         text.append(el("span", "tx-finding-loc", `${f.rule}${f.line ? ` · line ${f.line}` : ""}${f.fix_detail ? ` · ${f.fix_detail}` : ""}`));
         row.append(text);
         body.append(row);
-        if (f.fix_action === "restore-styles") body.append(restoreStylesAction());
+        const fix = fixAction(f);
+        if (fix) body.append(fix);
       }
     }
+  }
+
+  function fixAction(f) {
+    switch (f.fix_action) {
+      case "restore-styles":
+        return restoreStylesAction();
+      case "upgrade-epub3":
+        return fixButton("Upgrade to EPUB 3", upgradeBook);
+      case "rebuild-toc":
+        return showPanel ? fixButton("Open the Table of Contents panel", () => showPanel("toc")) : null;
+      case "reorder-spine":
+        return showPanel ? fixButton("Open the Reading Order panel", () => showPanel("spine")) : null;
+      default:
+        return null;
+    }
+  }
+
+  function fixButton(label, fn) {
+    const box = el("div", "tx-fix");
+    box.append(button("btn btn-small", label, fn));
+    return box;
+  }
+
+  function openTools(e) {
+    const menu = window.ActionMenu;
+    if (!menu?.openChoices) return;
+    const cur = st.members.find((m) => m.path === st.current);
+    const isDoc = cur && (cur.role === "text" || cur.role === "nav");
+    const isText = cur && (isDoc || cur.role === "style");
+    const items = [
+      ["Rename class…", renameClass],
+      ["Remove unused CSS", () => runOp({ kind: "remove-unused-css" })],
+    ];
+    if (isText) items.push([`Beautify ${basename(cur.path)}`, () => runOp({ kind: "beautify", member: cur.path })]);
+    items.push(["Beautify all text files", () => runOp({ kind: "beautify", member: null })]);
+    if (isDoc) {
+      items.push(["Split at cursor", splitAtCursor]);
+      if (cur.spine_index != null) items.push(["Merge with next file", () => runOp({ kind: "merge-with-next", member: cur.path })]);
+      items.push(["Insert image…", insertImage], ["Insert link…", insertLink]);
+    }
+    items.push(["Upgrade to EPUB 3", upgradeBook]);
+    const r = e.currentTarget.getBoundingClientRect();
+    menu.openChoices(items, { x: r.left, y: r.bottom + 4 });
+  }
+
+  function dirtyEdits() {
+    return [...st.buffers.entries()].filter(([, b]) => b.dirty).map(([member, b]) => ({ member, text: b.text, media_type: null }));
+  }
+
+  async function runOp(op) {
+    let out;
+    try {
+      out = await api.invoke("editor_text_op", { bookId, edits: dirtyEdits(), removed: [...st.removed], op });
+    } catch (err) {
+      toast(`${err}`, true);
+      return null;
+    }
+    if (st.destroyed) return null;
+    await applyOutcome(out);
+    return out;
+  }
+
+  async function applyOutcome(out) {
+    const touched = new Set();
+    for (const m of out.changed) {
+      let buf;
+      try {
+        buf = await buffer(m.path);
+      } catch {
+        buf = { text: m.text, saved: null, dirty: true, isNew: false };
+        st.buffers.set(m.path, buf);
+      }
+      buf.text = m.text;
+      buf.dirty = buf.saved == null || m.text !== buf.saved;
+      touched.add(m.path);
+      preview.forget(m.path);
+    }
+    for (const m of out.added) {
+      const ext = m.path.split(".").pop().toLowerCase();
+      if (!st.members.some((x) => x.path === m.path)) {
+        st.members.push({ path: m.path, id: null, media_type: m.media_type, role: ROLE_BY_EXT[ext] || "other", spine_index: null, label: null, size: 0, text: true });
+      }
+      st.buffers.set(m.path, { text: m.text, saved: null, dirty: true, isNew: true });
+      st.removed.delete(m.path);
+      touched.add(m.path);
+    }
+    for (const path of out.removed) {
+      st.removed.add(path);
+      st.buffers.delete(path);
+      st.members = st.members.filter((x) => x.path !== path);
+      preview.forget(path);
+    }
+    renderFiles();
+    reportDirty();
+    const current = st.current;
+    if (current && out.removed.includes(current)) {
+      const next = out.changed[0]?.path || spineMembers()[0]?.path;
+      if (next) await open(next);
+    } else if (current && touched.has(current)) {
+      const buf = st.buffers.get(current);
+      const pos = ta.selectionStart;
+      ta.value = buf.text;
+      ta.setSelectionRange(Math.min(pos, buf.text.length), Math.min(pos, buf.text.length));
+      highlightNow();
+      if (affectsPreview(current)) schedule("preview", 0, renderPreview);
+    } else if ([...touched].some((p) => affectsPreview(p))) {
+      schedule("preview", 0, renderPreview);
+    }
+    const n = out.changed.length + out.added.length + out.removed.length;
+    toast(`${out.notes.join("; ") || out.operation}${n ? ` — ${n} file${n === 1 ? "" : "s"} changed, save to keep` : ""}`);
+  }
+
+  function renameClass() {
+    const guess = st.current && !editor.hidden ? classAtCursor(ta.value, ta.selectionStart) : "";
+    const from = prompt("Class to rename", guess);
+    if (!from) return;
+    const to = prompt(`Rename “${from.trim()}” to`, from.trim());
+    if (!to || to.trim() === from.trim()) return;
+    runOp({ kind: "rename-class", from: from.trim(), to: to.trim() });
+  }
+
+  function splitAtCursor() {
+    if (!st.current || editor.hidden) return;
+    const pos = ta.selectionStart;
+    const line = lineAt(ta.value, pos);
+    const col = pos - lineStart(ta.value, line) + 1;
+    runOp({ kind: "split-document", member: st.current, line, col }).then((out) => {
+      const added = out?.added?.[0];
+      if (added) open(added.path);
+    });
+  }
+
+  function upgradeBook() {
+    if (!confirm("Upgrade this book to EPUB 3? The package, metadata, navigation document and DOCTYPEs are rewritten; bodies and styles stay as they are.")) return;
+    runOp({ kind: "upgrade-epub3" });
+  }
+
+  function pickMember(list, at, onPick) {
+    const menu = window.ActionMenu;
+    if (!menu?.openChoices || !list.length) {
+      toast("Nothing to pick from.", true);
+      return;
+    }
+    menu.openChoices(list.map((m) => [m.label ? `${m.label} · ${basename(m.path)}` : basename(m.path), () => onPick(m)]), at);
+  }
+
+  function menuAt() {
+    const r = toolsBtn.getBoundingClientRect();
+    return { x: r.left, y: r.bottom + 4 };
+  }
+
+  function insertImage() {
+    if (!st.current || editor.hidden) return;
+    const here = st.current;
+    pickMember(st.members.filter((m) => m.role === "image"), menuAt(), (m) => {
+      const rel = relativePath(here, m.path);
+      ta.focus();
+      insertAtCursor(`<img src="${rel}" alt=""/>`);
+    });
+  }
+
+  function insertLink() {
+    if (!st.current || editor.hidden) return;
+    const here = st.current;
+    const targets = spineMembers().concat(st.members.filter((m) => m.role === "nav" && m.spine_index == null));
+    pickMember(targets, menuAt(), (m) => {
+      const rel = m.path === here ? "" : relativePath(here, m.path);
+      const s = ta.selectionStart;
+      const e = ta.selectionEnd;
+      const label = ta.value.slice(s, e) || m.label || basename(m.path);
+      ta.focus();
+      insertAtCursor(`<a href="${rel}">${label}</a>`);
+    });
   }
 
   function restoreStylesAction() {
@@ -751,16 +929,18 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
   }
 
   async function save() {
-    const edits = [...st.buffers.entries()].filter(([, b]) => b.dirty).map(([member, b]) => ({ member, text: b.text, media_type: null }));
-    if (!edits.length) return;
+    const edits = dirtyEdits();
+    const removed = [...st.removed];
+    if (!edits.length && !removed.length) return;
     let res;
     try {
-      res = await api.invoke("editor_text_save", { bookId, edits });
+      res = await api.invoke("editor_text_save", { bookId, edits, removed });
     } catch (err) {
       toast(`Save failed: ${err}`, true);
       return;
     }
     if (st.destroyed) return;
+    st.removed.clear();
     for (const [, b] of st.buffers) {
       if (b.dirty) {
         b.saved = b.text;
@@ -812,7 +992,7 @@ export function mountTextPanel({ bookId, center, toast, onDirty, onSaved }) {
     save,
     revert,
     destroy,
-    isDirty: () => [...st.buffers.values()].some((b) => b.dirty),
+    isDirty: () => st.removed.size > 0 || [...st.buffers.values()].some((b) => b.dirty),
     onKey(e) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
