@@ -421,14 +421,18 @@ fn format_length_struct(fields: &[(u64, IonValue)], symbols: &SymbolTable) -> Op
     }
 }
 
-/// Format an ARGB-packed color int as `#RRGGBB` or `rgba(r,g,b,a)`.
+/// Format an ARGB-packed color int as `#RRGGBB`, `transparent` (alpha `0x00`)
+/// or `rgba(r,g,b,a)`.
 fn color_str_argb(n: i64) -> String {
     let v = n as u32;
     let alpha = (v >> 24) & 0xff;
     let r = (v >> 16) & 0xff;
     let g = (v >> 8) & 0xff;
     let b = v & 0xff;
-    if alpha == 0xff || alpha == 0 {
+    if alpha == 0 {
+        return "transparent".to_string();
+    }
+    if alpha == 0xff {
         let hex = format!("#{:02x}{:02x}{:02x}", r, g, b);
         if let Some(name) = COLOR_NAME
             .iter()
@@ -1615,8 +1619,31 @@ mod tests {
         convert_yj_properties(fields, &SymbolTable::from_fragment(None))
     }
 
-    /// Superscript and subscript are the reason `baseline_style` matters:
-    /// dropped, a footnote marker or an ordinal arrives as ordinary text.
+    /// Alpha `0x00` reads back as `transparent`, `0xff` as a colour name, and
+    /// any other alpha as `rgba()`.
+    #[test]
+    fn a_zero_alpha_colour_reads_back_as_transparent() {
+        let colour = |property: &str, argb: i64| {
+            (
+                symbol_id_for_name(property).unwrap_or_else(|| panic!("unknown {property}")),
+                IonValue::Int(argb),
+            )
+        };
+        let decl = convert(&[colour("border_color_top", 0x0000_0000)]);
+        assert_eq!(decl.get("border-top-color"), Some("transparent"));
+
+        let decl = convert(&[colour("border_color_top", 0x00FF_FFFF)]);
+        assert_eq!(decl.get("border-top-color"), Some("transparent"));
+
+        let decl = convert(&[colour("text_color", 0xFF00_0000u32 as i64)]);
+        assert_eq!(decl.get("color"), Some("black"));
+
+        let decl = convert(&[colour("text_color", 0x80FF_0000u32 as i64)]);
+        assert_eq!(decl.get("color"), Some("rgba(255, 0, 0, 0.502)"));
+    }
+
+    /// `baseline_style` maps `superscript`, `subscript` and `text_bottom` to
+    /// `vertical-align`.
     #[test]
     fn baseline_style_carries_super_and_subscript() {
         assert_eq!(

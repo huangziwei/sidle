@@ -1425,21 +1425,8 @@ impl ValueTransform {
             ValueTransform::ParseColor { output_format } => {
                 let color = parse_css_color(raw)?;
                 match output_format {
-                    ColorFormat::PackedInt => {
-                        // KFX uses ARGB format with 0xFF alpha for opaque colors
-                        let packed = (0xFF_i64 << 24)
-                            | ((color.0 as i64) << 16)
-                            | ((color.1 as i64) << 8)
-                            | (color.2 as i64);
-                        Some(KfxValue::Integer(packed))
-                    }
-                    ColorFormat::RgbStruct => {
-                        // Alpha is packed at 0xFF.
-                        let packed = (0xFF_i64 << 24)
-                            | ((color.0 as i64) << 16)
-                            | ((color.1 as i64) << 8)
-                            | (color.2 as i64);
-                        Some(KfxValue::Integer(packed))
+                    ColorFormat::PackedInt | ColorFormat::RgbStruct => {
+                        Some(KfxValue::Integer(pack_argb(color)))
                     }
                 }
             }
@@ -1602,15 +1589,30 @@ fn convert_to_pixels(value: f64, unit: &str, base_font_size: f64) -> f64 {
     }
 }
 
-/// Parse a CSS color into (r, g, b).
-fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
+/// Pack `(r, g, b, a)` into one 0xAARRGGBB integer.
+fn pack_argb((r, g, b, a): (u8, u8, u8, u8)) -> i64 {
+    ((a as i64) << 24) | ((r as i64) << 16) | ((g as i64) << 8) | (b as i64)
+}
+
+/// Format a 0xAARRGGBB integer as a CSS color, keeping the alpha byte.
+fn unpack_argb_to_css(packed: u32) -> String {
+    let a = (packed >> 24) & 0xFF;
+    let r = (packed >> 16) & 0xFF;
+    let g = (packed >> 8) & 0xFF;
+    let b = packed & 0xFF;
+    match a {
+        0 => "transparent".to_string(),
+        0xFF => format!("#{r:02x}{g:02x}{b:02x}"),
+        _ => format!("rgba({r},{g},{b},{:.3})", a as f32 / 255.0),
+    }
+}
+
+/// Parse a CSS color into (r, g, b, a).
+fn parse_css_color(s: &str) -> Option<(u8, u8, u8, u8)> {
     let s = s.trim().to_lowercase();
 
-    // `transparent` has no packed-int representation: the color packer sets
-    // alpha to 0xFF. `None` drops the property, which is what
-    // `background: transparent` states.
     if s == "transparent" {
-        return None;
+        return Some((0, 0, 0, 0));
     }
 
     // Named colors
@@ -1641,8 +1643,8 @@ fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
         _ => None,
     };
 
-    if let Some(color) = named {
-        return Some(color);
+    if let Some((r, g, b)) = named {
+        return Some((r, g, b, 255));
     }
 
     // Hex colors
@@ -1658,41 +1660,28 @@ fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
     None
 }
 
-fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
+fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8, u8)> {
+    // `widen` repeats a digit: #abc -> #aabbcc.
+    let widen = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).ok().map(|v| v * 17);
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
     match hex.len() {
-        3 => {
-            // #RGB -> #RRGGBB
-            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
-            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
-            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-            Some((r, g, b))
-        }
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some((r, g, b))
-        }
-        8 => {
-            // #RRGGBBAA - ignore alpha
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some((r, g, b))
-        }
+        3 => Some((widen(0)?, widen(1)?, widen(2)?, 255)),
+        4 => Some((widen(0)?, widen(1)?, widen(2)?, widen(3)?)),
+        6 => Some((byte(0)?, byte(2)?, byte(4)?, 255)),
+        8 => Some((byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
         _ => None,
     }
 }
 
-fn parse_rgb_function(s: &str) -> Option<(u8, u8, u8)> {
+fn parse_rgb_function(s: &str) -> Option<(u8, u8, u8, u8)> {
     // Extract content between parentheses
     let start = s.find('(')?;
     let end = s.find(')')?;
     let content = &s[start + 1..end];
 
-    // Split by comma or space
+    // Split on ',', ' ' and '/'.
     let parts: Vec<&str> = content
-        .split([',', ' '])
+        .split([',', ' ', '/'])
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -1703,8 +1692,22 @@ fn parse_rgb_function(s: &str) -> Option<(u8, u8, u8)> {
     let r = parse_color_component(parts[0])?;
     let g = parse_color_component(parts[1])?;
     let b = parse_color_component(parts[2])?;
+    let a = match parts.get(3) {
+        Some(v) => parse_alpha_component(v)?,
+        None => 255,
+    };
 
-    Some((r, g, b))
+    Some((r, g, b, a))
+}
+
+/// Parse an alpha component: 0..1 or a percentage, scaled to 0..255.
+fn parse_alpha_component(s: &str) -> Option<u8> {
+    let s = s.trim();
+    let unit = match s.strip_suffix('%') {
+        Some(pct) => pct.parse::<f32>().ok()? / 100.0,
+        None => s.parse::<f32>().ok()?,
+    };
+    Some((unit.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 fn parse_color_component(s: &str) -> Option<u8> {
@@ -2426,12 +2429,8 @@ impl ValueTransform {
             }
 
             ValueTransform::ParseColor { .. } => {
-                // Packed integer: 0xRRGGBB
                 let packed = value.as_int()? as u32;
-                let r = (packed >> 16) & 0xFF;
-                let g = (packed >> 8) & 0xFF;
-                let b = packed & 0xFF;
-                Some(format!("#{:02x}{:02x}{:02x}", r, g, b))
+                Some(unpack_argb_to_css(packed))
             }
 
             ValueTransform::ScaleFloat { factor, .. } => {
@@ -2556,13 +2555,13 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
             }
         }
         IrField::Color => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.color = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.color = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BackgroundColor => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.background_color = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.background_color = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BackgroundRepeat => {
@@ -2660,8 +2659,8 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
             ir_style.overline = css_value == "solid" || css_value == "true";
         }
         IrField::UnderlineColor => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.underline_color = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.underline_color = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         // Layout properties
@@ -2759,23 +2758,23 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
             }
         }
         IrField::BorderColorTop => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.border_color_top = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.border_color_top = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BorderColorRight => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.border_color_right = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.border_color_right = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BorderColorBottom => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.border_color_bottom = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.border_color_bottom = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BorderColorLeft => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.border_color_left = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.border_color_left = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::BorderRadiusTopLeft => {
@@ -2908,8 +2907,8 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
             };
         }
         IrField::TextEmphasisColor => {
-            if let Some((r, g, b)) = parse_css_color(css_value) {
-                ir_style.text_emphasis_color = Some(ir_style::Color::rgb(r, g, b));
+            if let Some((r, g, b, a)) = parse_css_color(css_value) {
+                ir_style.text_emphasis_color = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
         IrField::TextCombineUpright => {
@@ -3011,17 +3010,19 @@ mod tests {
 
     #[test]
     fn test_parse_hex_color() {
-        assert_eq!(parse_hex_color("fff"), Some((255, 255, 255)));
-        assert_eq!(parse_hex_color("000"), Some((0, 0, 0)));
-        assert_eq!(parse_hex_color("ff0000"), Some((255, 0, 0)));
-        assert_eq!(parse_hex_color("00ff00"), Some((0, 255, 0)));
+        assert_eq!(parse_hex_color("fff"), Some((255, 255, 255, 255)));
+        assert_eq!(parse_hex_color("000"), Some((0, 0, 0, 255)));
+        assert_eq!(parse_hex_color("ff0000"), Some((255, 0, 0, 255)));
+        assert_eq!(parse_hex_color("00ff00"), Some((0, 255, 0, 255)));
+        assert_eq!(parse_hex_color("0f08"), Some((0, 255, 0, 136)));
+        assert_eq!(parse_hex_color("00ff0080"), Some((0, 255, 0, 128)));
     }
 
     #[test]
     fn test_parse_named_color() {
-        assert_eq!(parse_css_color("red"), Some((255, 0, 0)));
-        assert_eq!(parse_css_color("BLACK"), Some((0, 0, 0)));
-        assert_eq!(parse_css_color("White"), Some((255, 255, 255)));
+        assert_eq!(parse_css_color("red"), Some((255, 0, 0, 255)));
+        assert_eq!(parse_css_color("BLACK"), Some((0, 0, 0, 255)));
+        assert_eq!(parse_css_color("White"), Some((255, 255, 255, 255)));
     }
 
     #[test]
@@ -3380,24 +3381,51 @@ mod tests {
 
     #[test]
     fn test_parse_color_with_whitespace() {
-        assert_eq!(parse_css_color("  red  "), Some((255, 0, 0)));
-        assert_eq!(parse_css_color("  #ff0000  "), Some((255, 0, 0)));
+        assert_eq!(parse_css_color("  red  "), Some((255, 0, 0, 255)));
+        assert_eq!(parse_css_color("  #ff0000  "), Some((255, 0, 0, 255)));
     }
 
     #[test]
     fn test_rgb_function_parsing() {
-        assert_eq!(parse_css_color("rgb(255, 0, 0)"), Some((255, 0, 0)));
-        assert_eq!(parse_css_color("rgb(0, 128, 255)"), Some((0, 128, 255)));
+        assert_eq!(parse_css_color("rgb(255, 0, 0)"), Some((255, 0, 0, 255)));
+        assert_eq!(
+            parse_css_color("rgb(0, 128, 255)"),
+            Some((0, 128, 255, 255))
+        );
         assert_eq!(
             parse_css_color("rgba(255, 255, 255, 0.5)"),
-            Some((255, 255, 255))
+            Some((255, 255, 255, 128))
+        );
+        assert_eq!(
+            parse_css_color("rgb(255 255 255 / 0%)"),
+            Some((255, 255, 255, 0))
         );
     }
 
     #[test]
     fn test_rgb_percentage_parsing() {
-        assert_eq!(parse_css_color("rgb(100%, 0%, 0%)"), Some((255, 0, 0)));
-        assert_eq!(parse_css_color("rgb(50%, 50%, 50%)"), Some((128, 128, 128)));
+        assert_eq!(parse_css_color("rgb(100%, 0%, 0%)"), Some((255, 0, 0, 255)));
+        assert_eq!(
+            parse_css_color("rgb(50%, 50%, 50%)"),
+            Some((128, 128, 128, 255))
+        );
+    }
+
+    /// `transparent` packs to alpha 0, and `border-top-color` carries it.
+    #[test]
+    fn transparent_border_colour_survives_as_alpha_zero() {
+        assert_eq!(parse_css_color("transparent"), Some((0, 0, 0, 0)));
+        assert_eq!(pack_argb((0, 0, 0, 0)), 0);
+        assert_eq!(unpack_argb_to_css(0), "transparent");
+
+        let rule = StyleSchema::standard()
+            .get_first("border-top-color")
+            .expect("border-top-color rule");
+        assert_eq!(rule.kfx_symbol, KfxSymbol::BorderColorTop);
+        assert_eq!(
+            rule.transform.apply("transparent"),
+            Some(KfxValue::Integer(0))
+        );
     }
 
     #[test]
@@ -3603,18 +3631,30 @@ mod tests {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("color").unwrap();
 
-        // 0xFF0000 → "#ff0000"
-        let kfx_value = IonValue::Int(0xFF0000);
+        // 0xFFFF0000 → "#ff0000"
+        let kfx_value = IonValue::Int(0xFFFF0000u32 as i64);
         assert_eq!(
             rule.transform.inverse(&kfx_value),
             Some("#ff0000".to_string())
         );
 
-        // 0x00FF00 → "#00ff00"
-        let kfx_value = IonValue::Int(0x00FF00);
+        // 0xFF00FF00 → "#00ff00"
+        let kfx_value = IonValue::Int(0xFF00FF00u32 as i64);
         assert_eq!(
             rule.transform.inverse(&kfx_value),
             Some("#00ff00".to_string())
+        );
+
+        let kfx_value = IonValue::Int(0x00FFFFFF);
+        assert_eq!(
+            rule.transform.inverse(&kfx_value),
+            Some("transparent".to_string())
+        );
+
+        let kfx_value = IonValue::Int(0x80FF0000u32 as i64);
+        assert_eq!(
+            rule.transform.inverse(&kfx_value),
+            Some("rgba(255,0,0,0.502)".to_string())
         );
     }
 

@@ -175,13 +175,16 @@ fn ref_name(v: &IonValue, sym: &SymTab) -> Option<String> {
     }
 }
 
-/// ARGB integer → SVG color. Opaque alpha (`0xff`) emits `#rrggbb`; otherwise
-/// `rgba(...)`. Mirrors kfxlib `color_str`. Shared with [`super::shapes`].
+/// ARGB integer → an SVG paint value for `fill`/`stroke`: alpha `0xff` emits
+/// `#rrggbb`, alpha `0x00` emits `none`, other alpha emits `rgba(...)`.
+/// Shared with [`super::shapes`].
 pub(super) fn argb_str(c: i64) -> String {
     let c = c as u64;
     let alpha = ((c >> 24) & 0xff) as u8;
     let rgb = (c & 0x00ff_ffff) as u32;
-    if alpha == 0xff || alpha == 0 {
+    if alpha == 0 {
+        "none".to_string()
+    } else if alpha == 0xff {
         format!("#{rgb:06x}")
     } else {
         let r = (rgb >> 16) & 0xff;

@@ -706,8 +706,47 @@ mod tests {
         assert_ne!(BorderStyle::None, BorderStyle::default());
     }
 
-    /// A shorthand that names a style keeps it; the fill-in is only for the
-    /// component the author left out.
+    /// `border-top: transparent solid 4em` states colour, style then width.
+    #[test]
+    fn border_shorthand_reads_a_leading_transparent_colour() {
+        let decls = parse_decl("border-top", "transparent solid 4em");
+        assert!(decls.iter().any(|d| matches!(
+            d,
+            Declaration::BorderTopColor(c) if *c == Color::TRANSPARENT
+        )));
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BorderTopStyle(BorderStyle::Solid)))
+        );
+        assert!(
+            decls
+                .iter()
+                .any(|d| matches!(d, Declaration::BorderTopWidth(Length::Em(w)) if *w == 4.0))
+        );
+    }
+
+    /// `rgba()`, `rgb(… / …)`, `#RGBA` and `#RRGGBBAA` all carry alpha.
+    #[test]
+    fn colour_alpha_survives_every_spelling() {
+        let alpha = |value: &str| {
+            parse_decl("color", value)
+                .into_iter()
+                .find_map(|d| match d {
+                    Declaration::Color(c) => Some(c),
+                    _ => None,
+                })
+        };
+        assert_eq!(alpha("rgba(1,2,3,0)"), Some(Color::rgba(1, 2, 3, 0)));
+        assert_eq!(alpha("rgba(1,2,3,0.5)"), Some(Color::rgba(1, 2, 3, 128)));
+        assert_eq!(alpha("rgb(1 2 3 / 50%)"), Some(Color::rgba(1, 2, 3, 128)));
+        assert_eq!(alpha("rgb(1,2,3)"), Some(Color::rgb(1, 2, 3)));
+        assert_eq!(alpha("#0f08"), Some(Color::rgba(0, 255, 0, 136)));
+        assert_eq!(alpha("#00ff0080"), Some(Color::rgba(0, 255, 0, 128)));
+        assert_eq!(alpha("transparent"), Some(Color::TRANSPARENT));
+    }
+
+    /// `border` and `border-bottom` keep a named `BorderStyle`.
     #[test]
     fn border_shorthand_keeps_a_named_style() {
         let decls = parse_decl("border", "1px solid black");

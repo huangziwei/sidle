@@ -349,48 +349,63 @@ fn parse_position_component(input: &mut Parser<'_, '_>) -> Option<PositionCompon
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
+    // `widen` repeats a digit: #abc -> #aabbcc.
+    let widen = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).ok().map(|v| v * 17);
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
     match hex.len() {
-        3 => {
-            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
-            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
-            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-            Some(Color::rgb(r, g, b))
-        }
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(Color::rgb(r, g, b))
-        }
-        8 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            Some(Color::rgba(r, g, b, a))
-        }
+        3 => Some(Color::rgb(widen(0)?, widen(1)?, widen(2)?)),
+        4 => Some(Color::rgba(widen(0)?, widen(1)?, widen(2)?, widen(3)?)),
+        6 => Some(Color::rgb(byte(0)?, byte(2)?, byte(4)?)),
+        8 => Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
         _ => None,
     }
 }
 
+/// Parse `rgb()` or `rgba()`, with an optional alpha after a `,` or a `/`.
 fn parse_rgb_function<'i, 't>(input: &mut Parser<'i, 't>) -> Result<Color, ParseError<'i, ()>> {
-    input.expect_function_matching("rgb")?;
+    let location = input.current_source_location();
+    let name = input.expect_function()?.clone();
+    if !name.eq_ignore_ascii_case("rgb") && !name.eq_ignore_ascii_case("rgba") {
+        return Err(location.new_custom_error(()));
+    }
     input.parse_nested_block(|input| {
         let r = parse_color_component(input)?;
-        input.expect_comma()?;
+        let commas = input.try_parse(|i| i.expect_comma()).is_ok();
         let g = parse_color_component(input)?;
-        input.expect_comma()?;
+        if commas {
+            input.expect_comma()?;
+        }
         let b = parse_color_component(input)?;
-        Ok(Color::rgb(r, g, b))
+
+        let has_alpha = if commas {
+            input.try_parse(|i| i.expect_comma()).is_ok()
+        } else {
+            input.try_parse(|i| i.expect_delim('/')).is_ok()
+        };
+        let a = if has_alpha {
+            parse_alpha_component(input)?
+        } else {
+            255
+        };
+        Ok(Color::rgba(r, g, b, a))
     })
+}
+
+/// Parse an alpha component: 0..1 or a percentage, scaled to 0..255.
+fn parse_alpha_component<'i, 't>(input: &mut Parser<'i, 't>) -> Result<u8, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let unit = match input.next()? {
+        Token::Number { value, .. } => *value,
+        Token::Percentage { unit_value, .. } => *unit_value,
+        _ => return Err(location.new_custom_error(())),
+    };
+    Ok((unit.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 fn parse_color_component<'i, 't>(input: &mut Parser<'i, 't>) -> Result<u8, ParseError<'i, ()>> {
     let location = input.current_source_location();
     match input.next()? {
-        Token::Number {
-            int_value: Some(v), ..
-        } => Ok((*v).clamp(0, 255) as u8),
+        Token::Number { value, .. } => Ok(value.round().clamp(0.0, 255.0) as u8),
         Token::Percentage { unit_value, .. } => {
             Ok((unit_value * 255.0).round().clamp(0.0, 255.0) as u8)
         }
