@@ -16,7 +16,7 @@ exclude = ["jxr/fuzz"]
 # The sidle-* crates take this value through `version.workspace = true`.
 # bokai carries its own.
 [workspace.package]
-version = "0.1.12"
+version = "0.1.13"
 # bokai sets its own GPL-3.0-or-later and takes nothing from here. GPLv3 §13
 # permits the combined work.
 license = "AGPL-3.0-or-later"
