@@ -106,7 +106,7 @@ fn file_name(src: &str) -> &str {
     src.rsplit('/').next().unwrap_or(src)
 }
 
-/// `bytes` as pixels. A JPEG-XR goes through [`jxr`]; everything else
+/// `bytes` as pixels. A JPEG-XR goes through [`bokai::jxr`]; everything else
 /// through [`image`].
 fn decode(bytes: &[u8], format: Option<&str>) -> Option<Bitmap> {
     if format == Some("jxr") || bytes.starts_with(&[0x49, 0x49, 0xBC]) {
@@ -122,8 +122,8 @@ fn decode(bytes: &[u8], format: Option<&str>) -> Option<Bitmap> {
 
 /// A JPEG-XR straight to RGBA, with no re-encode on the way.
 fn decode_jxr(bytes: &[u8]) -> Option<Bitmap> {
-    use jxr::decode::pixels::{ColorModel, SampleType};
-    use jxr::decode::{container, decoder};
+    use bokai::jxr::decode::pixels::{ColorModel, SampleType};
+    use bokai::jxr::decode::{container, decoder};
 
     let container = container::parse(bytes).ok()?;
     let decoded = decoder::Decoder::new(container.image_data).decode().ok()?;

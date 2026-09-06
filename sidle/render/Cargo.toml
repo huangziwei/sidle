@@ -42,10 +42,6 @@ unicode-linebreak = "0.1"
 # Image decoding for the resources a book carries.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
 
-# JPEG-XR, which a KFX stores its pictures as. Decoded straight to pixels:
-# a re-encode on the way costs more than the decode.
-jxr = { path = "../../jxr" }
-
 # A Skia subset — paths, fills, strokes, gradients, blends, clips — matching
 # what the device paints through. Already in the tree via resvg.
 tiny-skia = { version = "0.12", optional = true }

@@ -189,7 +189,7 @@ pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 
     // JPEG XR / HD Photo (II-BC): IMAGE_WIDTH/IMAGE_HEIGHT in the TIFF IFD.
     if data[0] == 0x49 && data[1] == 0x49 && data[2] == 0xBC {
-        return jxr::decode::container::parse(data)
+        return crate::jxr::decode::container::parse(data)
             .ok()
             .map(|c| (c.image_width, c.image_height));
     }

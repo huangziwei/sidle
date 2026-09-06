@@ -235,7 +235,7 @@ pub struct ExthHeader {
     pub kf8_boundary: Option<u32>,
     /// The series the book belongs to, as EXTH 503 states it: the store writes
     /// it inside the title, in ASCII angle brackets. See
-    /// [`split_series_annotation`].
+    /// `split_series_annotation`.
     pub series: Option<String>,
     /// EXTH 508 — title pronunciation (katakana yomigana on Amazon JP
     /// books; the sort key the Kindle library uses).

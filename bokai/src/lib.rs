@@ -10,7 +10,12 @@ pub mod model;
 pub mod style;
 pub mod text;
 
-pub use jxr;
+#[path = "jxr/src/lib.rs"]
+pub mod jxr;
+// `jxr` names `decode`, `ImageInput` and `encode_typed` as `crate::` paths.
+pub(crate) use crate::jxr::decode;
+#[allow(unused_imports)]
+pub(crate) use crate::jxr::{ImageInput, encode_typed};
 
 #[cfg(feature = "validate")]
 pub mod validate;

@@ -19,7 +19,7 @@ const T_OBJECT_END: u8 = 0xFF;
 
 /// The object holding a book's annotations, keyed by kind.
 const ANNOTATION_CACHE: &str = "annotation.cache.object";
-/// One kind's annotation list inside [`ANNOTATION_CACHE`].
+/// One kind's annotation list inside `ANNOTATION_CACHE`.
 const INTERVAL_TREE: &str = "saved.avl.interval.tree";
 /// Prefix every annotation record's object name carries.
 const PERSONAL: &str = "annotation.personal.";
@@ -383,8 +383,7 @@ impl Kind {
         format!("{PERSONAL}{}", self.as_str())
     }
 
-    /// The int key this kind occupies in [`ANNOTATION_CACHE`]'s map. `None` for
-    /// a kind whose slot this crate hasn't seen a device use.
+    /// The int key this kind occupies in `ANNOTATION_CACHE`'s map, or `None`.
     pub fn cache_key(&self) -> Option<i32> {
         Some(match self {
             Self::Bookmark => 0,

@@ -1,8 +1,8 @@
-//! Bundled JPEG-XR images: decode with the pure-Rust [`jxr`] codec crate, then
+//! Bundled JPEG-XR images: decode with the pure-Rust [`crate::jxr`] codec, then
 //! re-encode as JPEG, which is what every downstream reader can display.
 
 use crate::formats::kfx::error::KfxError;
-use jxr::decode::{container, decoder};
+use crate::jxr::decode::{container, decoder};
 
 /// Per-stage timing for one transcode call. Always collected — `Instant`'s
 /// read cost is ~10 ns. Caller may aggregate or ignore.
@@ -53,8 +53,8 @@ pub fn transcode(
 }
 
 fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, KfxError> {
+    use crate::jxr::decode::pixels::{ColorModel, SampleType};
     use jpeg_encoder::{ColorType, Encoder};
-    use jxr::decode::pixels::{ColorModel, SampleType};
 
     let buf = img
         .to_pixel_buffer()

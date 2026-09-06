@@ -53,6 +53,7 @@ pub struct StyleSeg {
 /// UTF-16 index → character index in `s`: one entry per code unit, plus the end.
 /// A surrogate pair's two units share one index. PDFKit indexes glyph bounds by
 /// unit and KFX counts characters, so the text layer converts through this.
+#[cfg(any(target_os = "macos", test))]
 fn utf16_to_char_index(s: &str) -> Vec<usize> {
     let mut out = Vec::with_capacity(s.len() + 1);
     let mut chars = 0usize;

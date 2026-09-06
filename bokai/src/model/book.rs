@@ -395,7 +395,7 @@ pub struct Book {
     /// How raster images are encoded into a KFX export: `Color` (default,
     /// `24bppRGB` JXR, collapsed to `8bppGray` when the channels are
     /// identical) or `Grayscale` (`8bppGray`).
-    image_color_mode: jxr::ColorMode,
+    image_color_mode: crate::jxr::ColorMode,
     /// Worker-thread cap for every parallel stage of an import or export off
     /// this handle. `0` = the platform's reported parallelism. Set via
     /// [`Book::set_max_workers`].
@@ -498,7 +498,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: jxr::ColorMode::Color,
+            image_color_mode: crate::jxr::ColorMode::Color,
             max_workers: 0,
         })
     }
@@ -540,7 +540,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: jxr::ColorMode::Color,
+            image_color_mode: crate::jxr::ColorMode::Color,
             max_workers: 0,
         })
     }
@@ -553,7 +553,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: jxr::ColorMode::Color,
+            image_color_mode: crate::jxr::ColorMode::Color,
             max_workers: 0,
         }
     }
@@ -574,7 +574,7 @@ impl Book {
     }
 
     /// How raster images are encoded into a KFX export (default `Color`).
-    pub fn image_color_mode(&self) -> jxr::ColorMode {
+    pub fn image_color_mode(&self) -> crate::jxr::ColorMode {
         self.image_color_mode
     }
 
@@ -595,7 +595,7 @@ impl Book {
     /// Choose how raster images encode into a KFX export. `Grayscale` emits
     /// `8bppGray` JXR, `Color` emits `24bppRGB` JXR, and an image whose
     /// channels match everywhere collapses to grayscale. The cover stays JPEG.
-    pub fn set_image_color_mode(&mut self, mode: jxr::ColorMode) {
+    pub fn set_image_color_mode(&mut self, mode: crate::jxr::ColorMode) {
         self.image_color_mode = mode;
     }
 

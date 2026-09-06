@@ -1,11 +1,24 @@
 [package]
 name = "bokai"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2024"
 description = "Ebook conversion engine (EPUB/KFX/AZW3/MOBI/PDF) with CJK typography support; a modified (改 kai) fork of boko"
 license = "GPL-3.0-or-later"
-publish = false
 readme = "README.md"
+repository = "https://github.com/huangziwei/sidle"
+homepage = "https://github.com/huangziwei/sidle/tree/main/bokai"
+keywords = ["ebook", "epub", "kfx", "kindle", "azw3"]
+categories = ["command-line-utilities", "encoding", "parsing", "text-processing"]
+rust-version = "1.97"
+# Sample books.
+exclude = [
+    "tests/fixtures/*.azw3",
+    "tests/fixtures/*.epub",
+    "tests/fixtures/*.gz",
+    "tests/fixtures/*.kfx",
+    "tests/fixtures/*.kfx-zip",
+    "tests/fixtures/*.mobi",
+]
 
 [lib]
 crate-type = ["rlib"]
@@ -81,11 +94,6 @@ base64 = "0.22"
 # and `image::jpeg` re-encode decoded JPEG-XR through it, and it writes the
 # Aozora cover and PDF page plates.
 jpeg-encoder = { version = "0.6", default-features = false }
-
-# Pure-Rust JPEG-XR codec (top-level workspace crate; zero deps). Decodes KFX
-# raw media (KFX→EPUB + reader) and encodes EPUB→KFX interior plates.
-# Re-exported as `bokai::jxr`; `model::Book`'s API exposes its types.
-jxr = { path = "../jxr" }
 
 # Pure-Rust multi-format image decoder. The EPUB→KFX path transcodes every
 # non-JPEG image (GIF, PNG, WebP, BMP) to JPEG through it before bundling.

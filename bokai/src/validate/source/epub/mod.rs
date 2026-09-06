@@ -1437,9 +1437,9 @@ fn xmlns_frame(e: &quick_xml::events::BytesStart) -> Vec<(Vec<u8>, Vec<u8>)> {
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
         if key == b"xmlns" {
-            frame.push((Vec::new(), attr.value.as_ref().to_vec()));
+            frame.push((Vec::new(), attr.value.to_vec()));
         } else if let Some(p) = key.strip_prefix(b"xmlns:") {
-            frame.push((p.to_vec(), attr.value.as_ref().to_vec()));
+            frame.push((p.to_vec(), attr.value.to_vec()));
         }
     }
     frame

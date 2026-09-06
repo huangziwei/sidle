@@ -2434,7 +2434,7 @@ fn build_format_capabilities_ion() -> Vec<u8> {
 /// Build an external_resource fragment ($164) - metadata about a resource.
 /// Default per-band quantizer for grayscale-JXR plates: ~Amazon's per-image
 /// size on LN content at high fidelity (the `8/16/32` point of a QP sweep).
-const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
+const JXR_DEFAULT_QP: crate::jxr::QpSet = crate::jxr::QpSet {
     dc: 8,
     lp: 16,
     hp: 32,
@@ -2477,7 +2477,7 @@ fn reject_unrasterizable_svg(_href: &str, _data: &[u8]) -> io::Result<()> {
 /// Prepare a media asset's bytes for KFX bundling: a raster image is re-encoded
 /// as JPEG-XR in `mode`, and an SVG is rasterized onto the same path. A font or
 /// an encode failure takes the JPEG sanitize path.
-fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
+fn encode_asset_for_kfx(data: &[u8], mode: crate::jxr::ColorMode) -> Vec<u8> {
     if let Some(jxr) = encode_jxr_asset(data, mode) {
         return jxr;
     }
@@ -2491,18 +2491,18 @@ fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
 }
 
 /// Decode a raster image and re-encode it as JPEG-XR in the requested
-/// [`ColorMode`][jxr::ColorMode]: `8bppGray` or `24bppRGB`. `None` for bytes that
+/// [`ColorMode`][crate::jxr::ColorMode]: `8bppGray` or `24bppRGB`. `None` for bytes that
 /// aren't a decodable raster or exceed the encoder's range.
-fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
+fn encode_jxr_asset(data: &[u8], mode: crate::jxr::ColorMode) -> Option<Vec<u8>> {
     let img = ::image::load_from_memory(data).ok()?;
     encode_dynimg_jxr(&img, mode)
 }
 
 /// Encode a decoded raster as JPEG-XR in the requested
-/// [`ColorMode`][jxr::ColorMode]. Shared by [`encode_jxr_asset`] and the
+/// [`ColorMode`][crate::jxr::ColorMode]. Shared by [`encode_jxr_asset`] and the
 /// fixed-layout manga thumbnailer.
-fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Option<Vec<u8>> {
-    use jxr::{ChromaSampling, ColorMode, EncodeOptions, ImageInput, encode_with_options};
+fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: crate::jxr::ColorMode) -> Option<Vec<u8>> {
+    use crate::jxr::{ChromaSampling, ColorMode, EncodeOptions, ImageInput, encode_with_options};
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
@@ -3961,7 +3961,7 @@ fn is_facing_spread_image(
 /// when `raw` doesn't decode.
 fn split_spread_image(
     raw: &[u8],
-    mode: jxr::ColorMode,
+    mode: crate::jxr::ColorMode,
     direction: KfxSymbol,
 ) -> Option<(MangaEnc, MangaEnc)> {
     let img = ::image::load_from_memory(raw).ok()?;
@@ -3994,7 +3994,7 @@ fn split_spread_image(
 /// Downscale a page image to a thumbnail (aspect preserved, within
 /// [`MANGA_THUMB_W`]×[`MANGA_THUMB_H`]) and JXR-encode it. `None` for an
 /// undecodable raster or a rejected encode; the page ships without one.
-fn make_manga_thumbnail(data: &[u8], mode: jxr::ColorMode) -> Option<(Vec<u8>, u32, u32)> {
+fn make_manga_thumbnail(data: &[u8], mode: crate::jxr::ColorMode) -> Option<(Vec<u8>, u32, u32)> {
     manga_thumbnail_of(&::image::load_from_memory(data).ok()?, mode)
 }
 
@@ -4010,7 +4010,7 @@ fn make_cover_thumbnail(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 /// [`make_manga_thumbnail`] over a decoded image.
 fn manga_thumbnail_of(
     img: &::image::DynamicImage,
-    mode: jxr::ColorMode,
+    mode: crate::jxr::ColorMode,
 ) -> Option<(Vec<u8>, u32, u32)> {
     let thumb = img.thumbnail(MANGA_THUMB_W, MANGA_THUMB_H);
     let (tw, th) = (thumb.width(), thumb.height());
@@ -7395,7 +7395,7 @@ mod resource_export_tests {
         ::image::DynamicImage::ImageLuma8(img)
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
-        let jxr = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale)
+        let jxr = encode_jxr_asset(png.get_ref(), crate::jxr::ColorMode::Grayscale)
             .expect("interior plate → JXR");
         assert_eq!(
             &jxr[0..3],
@@ -7422,7 +7422,8 @@ mod resource_export_tests {
         ::image::DynamicImage::ImageLuma8(gray)
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
-        let jxr = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale).expect("plate → JXR");
+        let jxr =
+            encode_jxr_asset(png.get_ref(), crate::jxr::ColorMode::Grayscale).expect("plate → JXR");
 
         let cover = cover_jpeg_for_kfx(&jxr).expect("a JPEG-XR cover transcodes");
         assert_eq!(
@@ -7437,7 +7438,7 @@ mod resource_export_tests {
 
     #[test]
     fn encode_jxr_asset_honors_color_mode() {
-        use jxr::ColorMode;
+        use crate::jxr::ColorMode;
         // A genuinely-colorful plate, distinct R/G/B against the auto-gray path
         let rgb: ::image::RgbImage = ::image::ImageBuffer::from_fn(32, 32, |x, y| {
             ::image::Rgb([(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8])
@@ -7447,8 +7448,8 @@ mod resource_export_tests {
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
         let dec = |bytes: &[u8]| -> (String, usize) {
-            let c = jxr::decode::container::parse(bytes).unwrap();
-            let n = jxr::decode::decoder::Decoder::new(c.image_data)
+            let c = crate::jxr::decode::container::parse(bytes).unwrap();
+            let n = crate::jxr::decode::decoder::Decoder::new(c.image_data)
                 .decode()
                 .unwrap()
                 .num_components;
@@ -7476,8 +7477,8 @@ mod resource_export_tests {
 
     /// Decode a grayscale JXR plate into (width, height, luma bytes).
     fn decode_gray_jxr(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
-        let c = jxr::decode::container::parse(bytes).unwrap();
-        let d = jxr::decode::decoder::Decoder::new(c.image_data)
+        let c = crate::jxr::decode::container::parse(bytes).unwrap();
+        let d = crate::jxr::decode::decoder::Decoder::new(c.image_data)
             .decode()
             .unwrap();
         let buf = d.to_pixel_buffer().unwrap();
@@ -7501,7 +7502,7 @@ mod resource_export_tests {
         ::image::DynamicImage::ImageRgba8(rgba)
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
-        let out = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale).unwrap();
+        let out = encode_jxr_asset(png.get_ref(), crate::jxr::ColorMode::Grayscale).unwrap();
         let (w, _h, luma) = decode_gray_jxr(&out);
         let px = |x: u32, y: u32| luma[(y * w + x) as usize];
         // Sample away from the square's edge (JXR is lossy; avoid ringing).
@@ -7522,7 +7523,7 @@ mod resource_export_tests {
     fn svg_asset_rasterizes_to_jxr_plate() {
         // 20×10 CSS px SVG, left half black on a transparent background.
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10"><rect x="0" y="0" width="10" height="10" fill="black"/></svg>"#;
-        let out = encode_asset_for_kfx(svg, jxr::ColorMode::Grayscale);
+        let out = encode_asset_for_kfx(svg, crate::jxr::ColorMode::Grayscale);
         assert_eq!(
             &out[0..3],
             &[0x49, 0x49, 0xBC],

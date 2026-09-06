@@ -1,0 +1,28 @@
+bokai
+Copyright (C) 2026 Ziwei Huang
+
+Licensed under the GNU General Public License, version 3 or later. The full
+text is in LICENSE.
+
+bokai is a fork of boko (https://github.com/zacharydenton/boko) by Zachary
+Denton, distributed under the same license. README.md names the upstream commit
+this fork left.
+
+The JPEG-XR codec under src/jxr/ is the `jxr` crate, carried here as sources
+rather than as a dependency, under the same license.
+
+
+Third-party material bundled in this crate
+==========================================
+
+src/validate/source/epub/xml/schema/30/
+    EPUB 3 RELAX NG grammars and Schematron rules from the International
+    Digital Publishing Forum, under the permission notice in that directory's
+    LICENSE file. Subdirectories covering HTML5, MathML and the security module
+    carry their own LICENSE files, which override it.
+
+src/validate/source/epub/xml/schema/20/
+    EPUB 2 DTDs and Schematron rules: XHTML 1.0 and SVG 1.1 from the W3C, NCX
+    and DTBook from the DAISY Consortium, OPF and OEB from the Open eBook Forum
+    and its successor the IDPF. Each file states its own copyright and
+    permission notice in its header.

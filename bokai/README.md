@@ -2,6 +2,22 @@
 
 `bokai` is a diverged fork of [boko](https://github.com/zacharydenton/boko) [^1]. `boko` is a fast ebook converter for EPUB, KFX, AZW3, and MOBI, written in Rust. `bokai` improves upon it with the focus on CJK typography.
 
+## Install
+
+```sh
+cargo install bokai          # the `bokai` and `kfx-dump` binaries
+```
+
+As a library:
+
+```sh
+cargo add bokai --no-default-features
+```
+
+The default features build the complete CLI. A library consumer wants
+`--no-default-features` plus the formats it needs (`aozora`, `pdf`, `validate`,
+`nbk`); `kfx` and `epub` are always present.
+
 ## Build
 
 ```sh
