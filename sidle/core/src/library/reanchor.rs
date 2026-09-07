@@ -7,18 +7,24 @@ use super::anchor::BookIndex;
 /// What one [`book`] pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Reanchored {
-    /// Annotations whose handles already landed on their own text.
+    /// Annotations whose handles land on their own text.
     pub intact: usize,
     /// Annotations moved onto the rebuilt book.
     pub moved: usize,
     /// Annotations whose text was not found, or found in several places. Left
     /// exactly as they were.
     pub stranded: usize,
+    /// Of the intact ones, those whose stored positions were put back on the
+    /// book's current scale.
+    pub refreshed: usize,
 }
 
 /// One annotation's stored anchor, as far as re-anchoring cares.
 struct Stored {
     id: i64,
+    /// `bookmark`, `highlight` or `note`. A bookmark's `text` is the whole
+    /// element it sits in, from that element's first character.
+    kind: String,
     eid_start: Option<i64>,
     off_start: Option<i64>,
     eid_end: Option<i64>,
@@ -28,32 +34,29 @@ struct Stored {
     text: String,
 }
 
-/// Re-anchor every annotation on `book_id` against `index`, the book as it now
-/// is.
+/// Re-anchor every annotation on `book_id` against `index`.
 pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Result<Reanchored> {
-    // A book with no text index can only strand every annotation it is asked
-    // about, and would report that as a finding. It is a container we cannot
-    // read, not a book whose highlights moved.
+    // An empty index strands every annotation, and reports nothing.
     if index.is_empty() {
         return Ok(Reanchored::default());
     }
     let mut stmt = conn.prepare(
-        // Text-less rows are selected too, so they are counted rather than passed over: a
-        // bookmark with no text to search for sits on a handle the rebuild may have moved.
-        "SELECT id, eid_start, off_start, eid_end, off_end, loc_start, loc_end, text
+        // Text-less rows are selected too: a bookmark's handle can move with a rebuild.
+        "SELECT id, kind, eid_start, off_start, eid_end, off_end, loc_start, loc_end, text
            FROM annotations WHERE book_id = ?1",
     )?;
     let rows: Vec<Stored> = stmt
         .query_map(params![book_id], |r| {
             Ok(Stored {
                 id: r.get(0)?,
-                eid_start: r.get(1)?,
-                off_start: r.get(2)?,
-                eid_end: r.get(3)?,
-                off_end: r.get(4)?,
-                loc_start: r.get(5)?,
-                loc_end: r.get(6)?,
-                text: r.get(7)?,
+                kind: r.get(1)?,
+                eid_start: r.get(2)?,
+                off_start: r.get(3)?,
+                eid_end: r.get(4)?,
+                off_end: r.get(5)?,
+                loc_start: r.get(6)?,
+                loc_end: r.get(7)?,
+                text: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -62,7 +65,7 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     let mut out = Reanchored::default();
     for row in rows {
         if still_lands_on_its_text(&row, index) {
-            refresh_positions(conn, &row, index)?;
+            out.refreshed += usize::from(refresh_positions(conn, &row, index)?);
             out.intact += 1;
             continue;
         }
@@ -91,32 +94,40 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     Ok(out)
 }
 
-/// Put `loc_start`, `loc_end` and `linear_pos` back on `index`'s scale for a
-/// row whose handles it still lands on. A rebuild renumbers the position map
-/// under handles that did not move.
-fn refresh_positions(conn: &Connection, row: &Stored, index: &BookIndex) -> rusqlite::Result<()> {
+/// Put `loc_start`, `loc_end` and `linear_pos` back on `index`'s scale,
+/// reporting whether that changed anything. A rebuild renumbers the position
+/// map under handles that did not move.
+fn refresh_positions(conn: &Connection, row: &Stored, index: &BookIndex) -> rusqlite::Result<bool> {
     let at = |eid: Option<i64>, off: Option<i64>| {
         eid.and_then(|eid| index.position(eid, off.unwrap_or(0)))
     };
-    let loc_start = at(row.eid_start, row.off_start);
-    let loc_end = at(row.eid_end, row.off_end);
-    if (loc_start, loc_end) == (row.loc_start, row.loc_end) {
-        return Ok(());
+    // An element the map does not place leaves the stored positions alone: a
+    // stale coordinate is worth more than a null one.
+    let Some(loc_start) = at(row.eid_start, row.off_start) else {
+        return Ok(false);
+    };
+    let loc_end = at(row.eid_end, row.off_end).or(row.loc_end);
+    if (Some(loc_start), loc_end) == (row.loc_start, row.loc_end) {
+        return Ok(false);
     }
     conn.execute(
         "UPDATE annotations SET loc_start = ?2, loc_end = ?3, linear_pos = ?2 WHERE id = ?1",
         params![row.id, loc_start, loc_end],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// How much of an annotation's text has to line up before a place is a
-/// candidate. Long enough that ordinary prose is unique at this length, short
-/// enough that the scan carries a fixed, tiny window instead of the book.
+/// candidate: long enough for ordinary prose to be unique, short enough for a
+/// fixed window.
 const HEAD_CHARS: usize = 48;
 
-/// The handles an annotation's text now sits at: `(eid, offset)` for each end,
-/// the end being inclusive as the device writes it.
+/// How much of an annotation's head is compared against the element its handle
+/// names.
+const HEAD_MATCH: usize = 16;
+
+/// The handles an annotation's text sits at: `(eid, offset)` for each end, the
+/// end inclusive as the device writes it.
 struct Span {
     start: (i64, i64),
     end: (i64, i64),
@@ -139,8 +150,8 @@ fn significant(index: &BookIndex) -> impl Iterator<Item = Sig> + '_ {
     })
 }
 
-/// Where `text` now lives in the book, or `None` when it is not there or is
-/// there more than once.
+/// Where `text` lives in the book, or `None` when it is absent or in several
+/// places.
 fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
     let needle: Vec<char> = text
         .chars()
@@ -168,9 +179,8 @@ fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
     }
     let (_, start_eid, start_off) = found?;
 
-    // Walk the same stream again from the start to find where the annotation's
-    // last character now sits. A second pass rather than a remembered position,
-    // because the window only ever held the head.
+    // Walk the stream again for the annotation's last character: `window` only
+    // ever held the head.
     let mut seen = 0usize;
     let mut end = None;
     for (_, eid, off) in
@@ -188,7 +198,7 @@ fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
     })
 }
 
-/// Whether the stored handle still points at the stored text.
+/// Whether the stored handle points at the stored text.
 fn still_lands_on_its_text(row: &Stored, index: &BookIndex) -> bool {
     let (Some(eid), Some(offset)) = (row.eid_start, row.off_start) else {
         return false;
@@ -199,13 +209,20 @@ fn still_lands_on_its_text(row: &Stored, index: &BookIndex) -> bool {
     let Some(element) = index.text_of(eid) else {
         return false;
     };
-    // Only the head has to match. An annotation can run past its first element,
-    // and following it across the rest is what `search` already does — this is
-    // the cheap test that decides whether to pay for it.
-    let head: String = row.text.chars().take(16).collect();
-    element
-        .get(offset..)
-        .is_some_and(|tail| tail.starts_with(&head))
+    // A bookmark's text is the whole element, taken from its first character
+    // whatever `off_start` names inside it.
+    if row.kind == "bookmark" {
+        return element == row.text;
+    }
+    // Only the head has to match, and only as far as this element runs: an
+    // annotation can open near the end of one and carry the rest into the next.
+    // Both offsets count characters.
+    let head: Vec<char> = row.text.chars().take(HEAD_MATCH).collect();
+    if head.is_empty() {
+        return true;
+    }
+    let tail: Vec<char> = element.chars().skip(offset).take(HEAD_MATCH).collect();
+    !tail.is_empty() && tail.iter().zip(&head).all(|(a, b)| a == b)
 }
 
 #[cfg(test)]
@@ -213,8 +230,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// A two-element book. `pid_of` gives each element's start on the linear
-    /// axis, as a KFX position map would.
+    /// A book of `parts`, each element placed on the linear axis at the
+    /// running character total ahead of it.
     fn index(parts: &[(i64, &str)]) -> BookIndex {
         let text: HashMap<i64, String> =
             parts.iter().map(|(e, t)| (*e, (*t).to_string())).collect();
@@ -261,6 +278,7 @@ mod tests {
         let idx = index(&[(10, "the surface appearance of reality")]);
         let row = Stored {
             id: 1,
+            kind: "highlight".into(),
             eid_start: Some(10),
             off_start: Some(4),
             eid_end: Some(10),
@@ -272,19 +290,19 @@ mod tests {
         assert!(still_lands_on_its_text(&row, &idx));
     }
 
-    /// A rebuild renumbers the position map under handles that did not move, so
-    /// a row counted `intact` still owes its cached positions.
+    /// A rebuild renumbers the position map under handles that did not move. A
+    /// row counted `intact` owes its cached positions.
     #[test]
     fn an_intact_handle_gets_its_positions_put_back_on_the_scale() {
         let conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(
             "CREATE TABLE annotations (
-                 id INTEGER PRIMARY KEY, book_id INTEGER, eid_start INTEGER,
-                 off_start INTEGER, eid_end INTEGER, off_end INTEGER,
-                 loc_start INTEGER, loc_end INTEGER, linear_pos INTEGER,
-                 text TEXT NOT NULL DEFAULT '');
+                 id INTEGER PRIMARY KEY, book_id INTEGER, kind TEXT NOT NULL,
+                 eid_start INTEGER, off_start INTEGER, eid_end INTEGER,
+                 off_end INTEGER, loc_start INTEGER, loc_end INTEGER,
+                 linear_pos INTEGER, text TEXT NOT NULL DEFAULT '');
              INSERT INTO annotations VALUES
-                 (1, 7, 11, 4, 11, 21, 4, 21, 4, 'surface appearance');",
+                 (1, 7, 'highlight', 11, 4, 11, 21, 4, 21, 4, 'surface appearance');",
         )
         .expect("schema");
 
@@ -295,6 +313,7 @@ mod tests {
             done,
             Reanchored {
                 intact: 1,
+                refreshed: 1,
                 ..Default::default()
             }
         );
@@ -307,5 +326,86 @@ mod tests {
             )
             .expect("row");
         assert_eq!(got, (104, 121, 104));
+    }
+
+    /// An annotation opening near the end of an element carries the rest of
+    /// its head in the next one, and the handle lands.
+    #[test]
+    fn a_head_running_into_the_next_element_still_lands() {
+        let idx = index(&[(10, "the surface"), (11, " appearance of reality")]);
+        let row = Stored {
+            id: 1,
+            kind: "highlight".into(),
+            eid_start: Some(10),
+            off_start: Some(4),
+            eid_end: Some(11),
+            off_end: Some(11),
+            loc_start: Some(4),
+            loc_end: Some(22),
+            text: "surface appearance".into(),
+        };
+        assert!(still_lands_on_its_text(&row, &idx));
+    }
+
+    /// A handle whose element holds something else does not land, however
+    /// little of it is left to compare.
+    #[test]
+    fn a_handle_on_the_wrong_text_does_not_land() {
+        let idx = index(&[(10, "the surface"), (11, " appearance of reality")]);
+        let row = Stored {
+            id: 1,
+            kind: "highlight".into(),
+            eid_start: Some(10),
+            off_start: Some(4),
+            eid_end: Some(10),
+            off_end: Some(10),
+            loc_start: Some(4),
+            loc_end: Some(10),
+            text: "appearance".into(),
+        };
+        assert!(!still_lands_on_its_text(&row, &idx));
+    }
+
+    /// `off_start` counts characters, not bytes: a multibyte element's handle
+    /// lands on the text the offset names.
+    #[test]
+    fn an_offset_past_multibyte_text_still_lands() {
+        let idx = index(&[(10, "　その頃の、家族たちと一緒にうつした写真")]);
+        let row = Stored {
+            id: 1,
+            kind: "highlight".into(),
+            eid_start: Some(10),
+            off_start: Some(6),
+            eid_end: Some(10),
+            off_end: Some(12),
+            loc_start: Some(6),
+            loc_end: Some(12),
+            text: "家族たちと一緒に".into(),
+        };
+        assert!(still_lands_on_its_text(&row, &idx));
+    }
+
+    /// An element the position map does not place keeps the row's stored
+    /// positions.
+    #[test]
+    fn an_unplaced_element_keeps_the_stored_positions() {
+        let text = HashMap::from([(11, "the surface appearance".to_string())]);
+        let idx = BookIndex::from_parts(text, HashMap::new());
+        let row = Stored {
+            id: 1,
+            kind: "highlight".into(),
+            eid_start: Some(11),
+            off_start: Some(4),
+            eid_end: Some(11),
+            off_end: Some(21),
+            loc_start: Some(4),
+            loc_end: Some(21),
+            text: "surface appearance".into(),
+        };
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE annotations (id INTEGER PRIMARY KEY);")
+            .expect("schema");
+        // The absent columns are never reached: no UPDATE runs.
+        refresh_positions(&conn, &row, &idx).expect("left alone");
     }
 }
