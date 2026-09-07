@@ -911,6 +911,16 @@ impl Book {
         self.backend.source_text()
     }
 
+    /// A slice of the source's reading axis, for a source whose axis indexes
+    /// its text directly. See [`crate::import::Importer::axis_slice`].
+    pub fn axis_slice(
+        &mut self,
+        start: i64,
+        end: Option<i64>,
+    ) -> io::Result<Option<crate::model::AxisSlice>> {
+        self.backend.axis_slice(start, end)
+    }
+
     /// Export the book to a different format.
     pub fn export<W: Write + Seek>(&mut self, format: Format, writer: &mut W) -> io::Result<()> {
         self.export_with_progress(format, writer, &|_, _, _, _| {})

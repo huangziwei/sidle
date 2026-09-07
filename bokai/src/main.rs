@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use bokai::model::{Coordinate, Point};
 use bokai::{
     Book, Chapter, ChapterId, Format, NodeId, Role, ToCss, TocEntry, extract_section_tree,
 };
@@ -87,6 +88,26 @@ enum Command {
     Sections {
         /// Input file (EPUB, AZW3, or MOBI)
         file: String,
+    },
+
+    /// Read the source text at a reading position, without converting the
+    /// book. A coordinate is either a position on the book's own reading axis
+    /// (a KFX position id, a byte offset into a MOBI or KF8 text stream) or
+    /// the `<element>:<offset>` pair an anchor and a TOC entry state.
+    Position {
+        /// Input file (KFX, AZW3, or MOBI)
+        file: String,
+
+        /// Position on the reading axis, or `<element>:<offset>`
+        start: String,
+
+        /// End of the span, exclusive of the character at it. Omit for the
+        /// unit `start` lands in.
+        end: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Dump the IR (Intermediate Representation) for a book
@@ -731,6 +752,12 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Info { file, json } => show_info(&file, json),
         Command::Sections { file } => show_sections(&file),
+        Command::Position {
+            file,
+            start,
+            end,
+            json,
+        } => show_position(&file, &start, end.as_deref(), json),
         Command::Convert {
             input,
             output,
@@ -1493,6 +1520,92 @@ fn show_info(path: &str, json: bool) -> Result<(), String> {
         print_json(&mut book, path)
     } else {
         print_human(&mut book, path)
+    }
+}
+
+/// `<position>` or `<element>:<offset>`.
+fn parse_point(text: &str) -> Result<Point, String> {
+    match text.split_once(':') {
+        Some((element, offset)) => Ok(Point::Element {
+            element: element
+                .parse()
+                .map_err(|_| format!("not an element id: {element}"))?,
+            offset: offset
+                .parse()
+                .map_err(|_| format!("not an offset: {offset}"))?,
+        }),
+        None => Ok(Point::Position(
+            text.parse()
+                .map_err(|_| format!("not a position: {text}"))?,
+        )),
+    }
+}
+
+fn show_position(path: &str, start: &str, end: Option<&str>, json: bool) -> Result<(), String> {
+    let start = parse_point(start)?;
+    let end = end.map(parse_point).transpose()?;
+    let mut book = Book::open(path).map_err(|e| e.to_string())?;
+    let found = book.text_at(start, end).map_err(|e| e.to_string())?;
+
+    if json {
+        let report = PositionReport {
+            from: CoordinateReport::from(found.from),
+            to: CoordinateReport::from(found.to),
+            mark: found.mark,
+            text: found.text,
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    println!("from  {}", describe(found.from));
+    println!("to    {}", describe(found.to));
+    if let Some(mark) = found.mark {
+        println!("mark  {mark}");
+    }
+    println!();
+    println!("{}", found.text);
+    Ok(())
+}
+
+/// One end of a resolved range, as a line of the human report.
+fn describe(at: Coordinate) -> String {
+    match at.element {
+        Some((element, offset)) => {
+            format!("{}\telement {element} offset {offset}", at.position)
+        }
+        None => at.position.to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct PositionReport {
+    from: CoordinateReport,
+    to: CoordinateReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mark: Option<usize>,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct CoordinateReport {
+    position: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    element: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<i64>,
+}
+
+impl From<Coordinate> for CoordinateReport {
+    fn from(at: Coordinate) -> Self {
+        Self {
+            position: at.position,
+            element: at.element.map(|(element, _)| element),
+            offset: at.element.map(|(_, offset)| offset),
+        }
     }
 }
 

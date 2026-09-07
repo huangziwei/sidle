@@ -30,7 +30,7 @@ pub use semantic::SemanticMap;
 
 pub use links::{AnchorTarget, GlobalNodeId, InternalLocation, Link, LinkTarget};
 
-pub use position::PositionMap;
+pub use position::{AxisSlice, Coordinate, Point, PositionError, PositionMap, PositionText};
 pub use search::Match;
 pub use text::SourceText;
 

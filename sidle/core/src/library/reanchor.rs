@@ -21,6 +21,10 @@ struct Stored {
     id: i64,
     eid_start: Option<i64>,
     off_start: Option<i64>,
+    eid_end: Option<i64>,
+    off_end: Option<i64>,
+    loc_start: Option<i64>,
+    loc_end: Option<i64>,
     text: String,
 }
 
@@ -36,7 +40,8 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     let mut stmt = conn.prepare(
         // Text-less rows are selected too, so they are counted rather than passed over: a
         // bookmark with no text to search for sits on a handle the rebuild may have moved.
-        "SELECT id, eid_start, off_start, text FROM annotations WHERE book_id = ?1",
+        "SELECT id, eid_start, off_start, eid_end, off_end, loc_start, loc_end, text
+           FROM annotations WHERE book_id = ?1",
     )?;
     let rows: Vec<Stored> = stmt
         .query_map(params![book_id], |r| {
@@ -44,7 +49,11 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
                 id: r.get(0)?,
                 eid_start: r.get(1)?,
                 off_start: r.get(2)?,
-                text: r.get(3)?,
+                eid_end: r.get(3)?,
+                off_end: r.get(4)?,
+                loc_start: r.get(5)?,
+                loc_end: r.get(6)?,
+                text: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -53,6 +62,7 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     let mut out = Reanchored::default();
     for row in rows {
         if still_lands_on_its_text(&row, index) {
+            refresh_positions(conn, &row, index)?;
             out.intact += 1;
             continue;
         }
@@ -79,6 +89,25 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
         out.moved += 1;
     }
     Ok(out)
+}
+
+/// Put `loc_start`, `loc_end` and `linear_pos` back on `index`'s scale for a
+/// row whose handles it still lands on. A rebuild renumbers the position map
+/// under handles that did not move.
+fn refresh_positions(conn: &Connection, row: &Stored, index: &BookIndex) -> rusqlite::Result<()> {
+    let at = |eid: Option<i64>, off: Option<i64>| {
+        eid.and_then(|eid| index.position(eid, off.unwrap_or(0)))
+    };
+    let loc_start = at(row.eid_start, row.off_start);
+    let loc_end = at(row.eid_end, row.off_end);
+    if (loc_start, loc_end) == (row.loc_start, row.loc_end) {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE annotations SET loc_start = ?2, loc_end = ?3, linear_pos = ?2 WHERE id = ?1",
+        params![row.id, loc_start, loc_end],
+    )?;
+    Ok(())
 }
 
 /// How much of an annotation's text has to line up before a place is a
@@ -234,8 +263,49 @@ mod tests {
             id: 1,
             eid_start: Some(10),
             off_start: Some(4),
+            eid_end: Some(10),
+            off_end: Some(21),
+            loc_start: Some(4),
+            loc_end: Some(21),
             text: "surface appearance".into(),
         };
         assert!(still_lands_on_its_text(&row, &idx));
+    }
+
+    /// A rebuild renumbers the position map under handles that did not move, so
+    /// a row counted `intact` still owes its cached positions.
+    #[test]
+    fn an_intact_handle_gets_its_positions_put_back_on_the_scale() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE annotations (
+                 id INTEGER PRIMARY KEY, book_id INTEGER, eid_start INTEGER,
+                 off_start INTEGER, eid_end INTEGER, off_end INTEGER,
+                 loc_start INTEGER, loc_end INTEGER, linear_pos INTEGER,
+                 text TEXT NOT NULL DEFAULT '');
+             INSERT INTO annotations VALUES
+                 (1, 7, 11, 4, 11, 21, 4, 21, 4, 'surface appearance');",
+        )
+        .expect("schema");
+
+        // Element 11 sits 100 along the axis, where the stored 4/21 put it at 0.
+        let idx = index(&[(10, "x".repeat(100).leak()), (11, "the surface appearance")]);
+        let done = book(&conn, 7, &idx).expect("re-anchor");
+        assert_eq!(
+            done,
+            Reanchored {
+                intact: 1,
+                ..Default::default()
+            }
+        );
+
+        let got: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT loc_start, loc_end, linear_pos FROM annotations WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(got, (104, 121, 104));
     }
 }

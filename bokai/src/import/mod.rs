@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use crate::html::{Origin, Stylesheet, compile_dom, extract_stylesheets_from_dom, parse_dom};
 use crate::model::{
-    AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, PositionMap, SourceText,
-    TocEntry,
+    AnchorTarget, AxisSlice, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, PositionMap,
+    SourceText, TocEntry,
 };
 use crate::style::CssDecl;
 
@@ -286,6 +286,16 @@ pub trait Importer: Send + Sync {
     /// annotation slices to recover the words it covers. See [`SourceText`].
     fn source_text(&mut self) -> Option<SourceText> {
         None
+    }
+
+    /// The source's own text over a range of its reading axis, for a source
+    /// whose axis indexes that text directly and states no element ids. `end`
+    /// is `None` for the unit enclosing `start`. `Ok(None)` from a source
+    /// with no such axis — one addressing its text by element reports a
+    /// [`Importer::position_map`] instead.
+    fn axis_slice(&mut self, start: i64, end: Option<i64>) -> std::io::Result<Option<AxisSlice>> {
+        let _ = (start, end);
+        Ok(None)
     }
 
     /// Whether this importer requires normalized export for HTML-based formats.

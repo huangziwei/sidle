@@ -11,14 +11,14 @@ use crate::formats::mobi::parser::{
     DivElement, SkeletonFile, parse_div_index, parse_ncx_index, parse_skel_index, read_index,
 };
 use crate::formats::mobi::{
-    Compression, Encoding, HuffCdicReader, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
-    build_toc_from_ncx, detect_image_type, fonts as mobi_fonts, is_metadata_record, palmdoc,
-    parse_exth, parse_fdst, strip_trailing_data, transform,
+    Encoding, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode, build_toc_from_ncx,
+    detect_image_type, fonts as mobi_fonts, is_metadata_record, parse_exth, parse_fdst,
+    text_stream, transform,
 };
 use crate::html::Stylesheet;
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href, viewport_meta};
 use crate::io::{ByteSource, FileSource};
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::model::{AnchorTarget, AxisSlice, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// AZW3/KF8 format importer with lazy loading.
 pub struct Azw3Importer {
@@ -145,6 +145,12 @@ impl Importer for Azw3Importer {
 
     fn source_id(&self, id: ChapterId) -> Option<&str> {
         self.chapter_paths.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    /// A KF8 book addresses its text by byte offset into the decompressed
+    /// text stream, with no map and no element ids.
+    fn axis_slice(&mut self, start: i64, end: Option<i64>) -> io::Result<Option<AxisSlice>> {
+        text_stream::axis_slice(|idx| self.read_text_record(idx), &self.mobi, start, end).map(Some)
     }
 
     fn load_raw(&mut self, id: ChapterId) -> io::Result<Vec<u8>> {
@@ -658,54 +664,16 @@ impl Azw3Importer {
 
     /// Extract and decompress text content (called on first chapter request).
     fn extract_text(&self) -> io::Result<Vec<u8>> {
-        let mut text = Vec::new();
+        text_stream::whole(|idx| self.read_text_record(idx), &self.mobi)
+    }
 
-        let read_record = |idx: usize| -> io::Result<Vec<u8>> {
-            let actual_idx = idx + self.record_offset;
-            let (start, end) = self.pdb.record_range(actual_idx, self.file_len)?;
-            self.source.read_at(start, (end - start) as usize)
-        };
-
-        // Build decompressor if needed
-        let mut huff_reader = if self.mobi.compression == Compression::Huffman
-            && self.mobi.huff_record_index != NULL_INDEX
-        {
-            let huff_data = read_record(self.mobi.huff_record_index as usize)?;
-            let mut cdics = Vec::new();
-            for i in 0..self.mobi.huff_record_count.saturating_sub(1) {
-                let cdic_idx = self.mobi.huff_record_index as usize + 1 + i as usize;
-                if let Ok(cdic) = read_record(cdic_idx) {
-                    cdics.push(cdic);
-                }
-            }
-            let cdic_refs: Vec<&[u8]> = cdics.iter().map(|c| c.as_slice()).collect();
-            Some(HuffCdicReader::new(&huff_data, &cdic_refs)?)
-        } else {
-            None
-        };
-
-        // Read and decompress text records
-        for i in 1..=self.mobi.text_record_count as usize {
-            let record = read_record(i)?;
-            let stripped = strip_trailing_data(&record, self.mobi.extra_data_flags);
-
-            let decompressed = match self.mobi.compression {
-                Compression::None => stripped.to_vec(),
-                Compression::PalmDoc => palmdoc::decompress(stripped)?,
-                Compression::Huffman => {
-                    if let Some(ref mut reader) = huff_reader {
-                        reader.decompress(stripped)?
-                    } else {
-                        stripped.to_vec()
-                    }
-                }
-                Compression::Unknown(_) => stripped.to_vec(),
-            };
-
-            text.extend_from_slice(&decompressed);
-        }
-
-        Ok(text)
+    /// Read one record of the KF8 part, whose records start at
+    /// `record_offset` in a file that also carries a MOBI6 part.
+    fn read_text_record(&self, idx: usize) -> io::Result<Vec<u8>> {
+        let (start, end) = self
+            .pdb
+            .record_range(idx + self.record_offset, self.file_len)?;
+        self.source.read_at(start, (end - start) as usize)
     }
 
     /// Reassemble flow 0 and record every element's offset in the result onto

@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::formats::mobi::{
-    Compression, Encoding, HuffCdicReader, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
-    asset_record_offset, build_toc_from_ncx, detect_image_type, filepos, is_metadata_record,
-    palmdoc, parse_exth, parse_ncx_index, read_index, strip_trailing_data,
+    Encoding, MobiHeader, NULL_INDEX, PdbInfo, TocNode, asset_record_offset, build_toc_from_ncx,
+    detect_image_type, filepos, is_metadata_record, parse_exth, parse_ncx_index, read_index,
+    text_stream,
 };
 use crate::html::Stylesheet;
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
 use crate::io::{ByteSource, FileSource};
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::model::{AnchorTarget, AxisSlice, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// MOBI6 format importer with chapter splitting.
 pub struct MobiImporter {
@@ -93,6 +93,18 @@ impl Importer for MobiImporter {
 
     fn source_id(&self, id: ChapterId) -> Option<&str> {
         self.chapter_paths.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    /// A MOBI6 book addresses its text by byte offset into the decompressed
+    /// text stream, with no map and no element ids.
+    fn axis_slice(&mut self, start: i64, end: Option<i64>) -> io::Result<Option<AxisSlice>> {
+        text_stream::axis_slice(
+            |idx| read_text_record(&self.source, &self.pdb, self.file_len, idx),
+            &self.mobi,
+            start,
+            end,
+        )
+        .map(Some)
     }
 
     fn load_raw(&mut self, id: ChapterId) -> io::Result<Vec<u8>> {
@@ -454,52 +466,18 @@ fn extract_text_from_source(
     mobi: &MobiHeader,
     file_len: u64,
 ) -> io::Result<Vec<u8>> {
-    let mut text = Vec::new();
+    text_stream::whole(|idx| read_text_record(source, pdb, file_len, idx), mobi)
+}
 
-    let read_record = |idx: usize| -> io::Result<Vec<u8>> {
-        let (start, end) = pdb.record_range(idx, file_len)?;
-        source.read_at(start, (end - start) as usize)
-    };
-
-    // Build decompressor if needed
-    let mut huff_reader =
-        if mobi.compression == Compression::Huffman && mobi.huff_record_index != NULL_INDEX {
-            let huff_data = read_record(mobi.huff_record_index as usize)?;
-            let mut cdics = Vec::new();
-            for i in 0..mobi.huff_record_count.saturating_sub(1) {
-                let cdic_idx = mobi.huff_record_index as usize + 1 + i as usize;
-                if let Ok(cdic) = read_record(cdic_idx) {
-                    cdics.push(cdic);
-                }
-            }
-            let cdic_refs: Vec<&[u8]> = cdics.iter().map(|c| c.as_slice()).collect();
-            Some(HuffCdicReader::new(&huff_data, &cdic_refs)?)
-        } else {
-            None
-        };
-
-    // Read and decompress text records
-    for i in 1..=mobi.text_record_count as usize {
-        let record = read_record(i)?;
-        let stripped = strip_trailing_data(&record, mobi.extra_data_flags);
-
-        let decompressed = match mobi.compression {
-            Compression::None => stripped.to_vec(),
-            Compression::PalmDoc => palmdoc::decompress(stripped)?,
-            Compression::Huffman => {
-                if let Some(ref mut reader) = huff_reader {
-                    reader.decompress(stripped)?
-                } else {
-                    stripped.to_vec()
-                }
-            }
-            Compression::Unknown(_) => stripped.to_vec(),
-        };
-
-        text.extend_from_slice(&decompressed);
-    }
-
-    Ok(text)
+/// Read one text record out of the PDB.
+fn read_text_record(
+    source: &Arc<dyn ByteSource>,
+    pdb: &PdbInfo,
+    file_len: u64,
+    idx: usize,
+) -> io::Result<Vec<u8>> {
+    let (start, end) = pdb.record_range(idx, file_len)?;
+    source.read_at(start, (end - start) as usize)
 }
 
 // ============================================================================

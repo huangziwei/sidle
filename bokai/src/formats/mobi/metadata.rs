@@ -311,6 +311,7 @@ mod tests {
     fn header() -> MobiHeader {
         MobiHeader {
             compression: crate::formats::mobi::Compression::None,
+            text_length: 0,
             text_record_count: 0,
             text_record_size: 0,
             encryption: 0,

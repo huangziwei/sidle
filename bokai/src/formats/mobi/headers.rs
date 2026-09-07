@@ -7,6 +7,8 @@ pub const NULL_INDEX: u32 = 0xFFFFFFFF;
 #[allow(dead_code)] // Fields are part of MOBI format spec, useful for debugging
 pub struct MobiHeader {
     pub compression: Compression,
+    /// Uncompressed length of the whole text stream, as record 0 declares it.
+    pub text_length: u32,
     pub text_record_count: u16,
     pub text_record_size: u16,
     pub encryption: u16,
@@ -63,6 +65,7 @@ impl MobiHeader {
             n => Compression::Unknown(n),
         };
 
+        let text_length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let text_record_count = u16::from_be_bytes([data[8], data[9]]);
         let text_record_size = u16::from_be_bytes([data[10], data[11]]);
         let encryption = u16::from_be_bytes([data[12], data[13]]);
@@ -71,6 +74,7 @@ impl MobiHeader {
         if data.len() <= 16 {
             return Ok(Self {
                 compression,
+                text_length,
                 text_record_count,
                 text_record_size,
                 encryption,
@@ -188,6 +192,7 @@ impl MobiHeader {
 
         Ok(Self {
             compression,
+            text_length,
             text_record_count,
             text_record_size,
             encryption,
