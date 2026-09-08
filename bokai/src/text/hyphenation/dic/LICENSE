@@ -2,8 +2,10 @@ Hyphenation dictionaries in this directory
 ==========================================
 
 Two stock pattern sets, redistributed under their own terms, and one file of
-bokai's own. Each pattern file repeats its licence in its own header; this
-file records where each came from and what was changed.
+bokai's own. hyph_de_1996.dic carries its licence in its own header;
+hyph_en_US.dic carries none, as the LibreOffice collection ships it without
+one and keeps its terms in a separate README. This file records where each
+came from, the terms it carries, and what was changed.
 
 
 hyph_en_US.dic — American English

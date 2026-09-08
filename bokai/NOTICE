@@ -15,6 +15,16 @@ rather than as a dependency, under the same license.
 Third-party material bundled in this crate
 ==========================================
 
+src/text/hyphenation/dic/
+    Hyphenation pattern sets. hyph_en_US.dic comes from the LibreOffice
+    dictionaries collection under BSD-style terms, and is the plain TeX
+    hyphenation table (Copyright Donald E. Knuth) with the TUGboat hyphenation
+    exception log (Copyright 2007 TeX Users Group). hyph_de_1996.dic comes from
+    the hyph-utf8 distribution under MIT, Copyright 2013-2024 the
+    Deutschsprachige Trennmustermannschaft. That directory's LICENSE file names
+    each source, its terms, and what was changed to make a pattern list read as
+    a libhyphen dictionary.
+
 src/validate/source/epub/xml/schema/30/
     EPUB 3 RELAX NG grammars and Schematron rules from the International
     Digital Publishing Forum, under the permission notice in that directory's
