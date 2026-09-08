@@ -1173,9 +1173,12 @@
       toast(`could not name that reading: ${e}`, true);
       return;
     }
+    // `group.sessions` counts sittings of a minute or more; `moved` counts
+    // every row at `position`.
+    const named = group?.sessions ?? moved;
     toast(
-      `${fmtDuration(group?.seconds || 0)} across ${moved} session` +
-        `${moved === 1 ? "" : "s"} → ${book ? book.title : "that book"}`,
+      `${fmtDuration(group?.seconds || 0)} across ${named} session` +
+        `${named === 1 ? "" : "s"} → ${book ? book.title : "that book"}`,
     );
     await refresh();
   }
@@ -1514,12 +1517,13 @@
     q("#rl-notes-list").innerHTML = listed.map(noteRow).join("");
   }
 
-  // A Kindle sends only what is newer than the newest session stored. The
-  // dialog states what goes.
+  // `confirm` names every row `reading_log_clear` deletes; `state.overview`
+  // counts only sittings of a minute or more.
   async function doPurge() {
     const o = state.overview;
     const what = o
-      ? `${fmtDuration(o.total_seconds)} across ${o.books_total} books and ${o.days_read} days`
+      ? `every session stored, ${fmtDuration(o.total_seconds)} across ` +
+        `${o.books_total} books and ${o.days_read} days as the log counts it`
       : "the whole reading log";
     if (
       !confirm(

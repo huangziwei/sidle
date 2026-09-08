@@ -213,9 +213,12 @@ fn clear(ctx: &Ctx, apply: bool) -> Result<()> {
     if !apply {
         let days = db::reading_days(&conn, ALL_TIME.0, ALL_TIME.1)?;
         let seconds: i64 = days.iter().map(|(_, s)| s).sum();
+        // `clear_reading_log` deletes every row; `reading_days` counts only
+        // sittings of a minute or more.
         ctx.say(format!(
-            "{} across {} day(s) would be forgotten. The Kindle does not send its \
-             logs twice, so this cannot be undone by syncing again.\n\nRe-run with --apply.",
+            "every session stored would be forgotten — {} across {} day(s) as the log \
+             counts it. The Kindle does not send its logs twice, so this cannot be \
+             undone by syncing again.\n\nRe-run with --apply.",
             hours(seconds),
             days.len()
         ));

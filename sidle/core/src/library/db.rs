@@ -1994,19 +1994,23 @@ pub fn mark_dump_read(conn: &Connection, device_serial: &str, name: &str) -> rus
     Ok(())
 }
 
-/// Seconds read per day over `[from, to]` (inclusive, `YYYY-MM-DD`), skipping
-/// empty days, for the calendar heatmap. Unattributed sessions are excluded
-/// here as everywhere; [`resolve_reading_sessions`] keeps the rows.
+/// Least `reading_sessions.seconds` the queries below select.
+pub const MIN_SITTING_SECS: i64 = 60;
+
+/// `SUM(seconds)` per `day` over `[from, to]` (inclusive, `YYYY-MM-DD`), for
+/// rows with a `book_id` reaching [`MIN_SITTING_SECS`]. A `day` with no such
+/// row is absent.
 pub fn reading_days(
     conn: &Connection,
     from: &str,
     to: &str,
 ) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT day, SUM(seconds) FROM reading_sessions
           WHERE day BETWEEN ?1 AND ?2 AND book_id IS NOT NULL
+            AND seconds >= {MIN_SITTING_SECS}
           GROUP BY day ORDER BY day",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
 }
@@ -2041,21 +2045,21 @@ enum Booked {
     Whole,
 }
 
-/// Every attributed session's seconds, on the true clock hours of its own day,
-/// past midnight included. `f` takes the day, the hour, the seconds, and the
-/// [`Booked`] regime. [`reading_clock`] and [`reading_day_hours`] consume it.
+/// Each session's `seconds` on the clock hours of its own `day`, past midnight
+/// included, for rows with a `book_id` reaching [`MIN_SITTING_SECS`]. `f` takes
+/// the day, the hour, the seconds and the [`Booked`] regime.
 fn walk_clock_hours(
     conn: &Connection,
     mut f: impl FnMut(&str, u8, i64, Booked),
 ) -> rusqlite::Result<()> {
     let parses = |day: &str| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok();
 
-    let mut measured = conn.prepare(
+    let mut measured = conn.prepare(&format!(
         "SELECT s.day, h.hour, h.seconds
            FROM reading_session_hours h
            JOIN reading_sessions s ON s.id = h.session_id
-          WHERE s.book_id IS NOT NULL",
-    )?;
+          WHERE s.book_id IS NOT NULL AND s.seconds >= {MIN_SITTING_SECS}",
+    ))?;
     for row in measured.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -2069,11 +2073,11 @@ fn walk_clock_hours(
         }
     }
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT day, started_at, ended_at, seconds FROM reading_sessions
-          WHERE book_id IS NOT NULL AND seconds > 0
+          WHERE book_id IS NOT NULL AND seconds >= {MIN_SITTING_SECS}
             AND id NOT IN (SELECT session_id FROM reading_session_hours)",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -2218,21 +2222,21 @@ pub struct SessionRow {
     pub device_serial: String,
 }
 
-/// The sittings over `[from, to]` (inclusive, `YYYY-MM-DD`), earliest first.
-///
-/// Rows carrying a `book_id`, matching every other query here.
+/// One [`SessionRow`] per session over `[from, to]` (inclusive, `YYYY-MM-DD`)
+/// with a `book_id` and `seconds` reaching [`MIN_SITTING_SECS`], earliest
+/// `started_at` first.
 pub fn reading_sessions_on(
     conn: &Connection,
     from: &str,
     to: &str,
 ) -> rusqlite::Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT s.id, s.day, s.started_at, s.ended_at, s.seconds, s.book_id, b.title,
                 s.page_turns, s.words, s.measure, s.device_serial
            FROM reading_sessions s JOIN books b ON b.id = s.book_id
-          WHERE s.day BETWEEN ?1 AND ?2
+          WHERE s.day BETWEEN ?1 AND ?2 AND s.seconds >= {MIN_SITTING_SECS}
           ORDER BY s.started_at",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
@@ -2340,12 +2344,14 @@ pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option
     })
 }
 
-/// Per-day totals for one book, oldest first — the book page's calendar.
+/// `SUM(seconds)` per `day` for `book_id`, oldest first, over rows whose
+/// `seconds` reach [`MIN_SITTING_SECS`].
 pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT day, SUM(seconds) FROM reading_sessions
-          WHERE book_id = ?1 GROUP BY day ORDER BY day",
-    )?;
+          WHERE book_id = ?1 AND seconds >= {MIN_SITTING_SECS}
+          GROUP BY day ORDER BY day",
+    ))?;
     let rows = stmt.query_map(params![book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
 }
@@ -2413,9 +2419,9 @@ impl ReadingBucket {
     }
 }
 
-/// Books read over `[from, to]` (inclusive, `YYYY-MM-DD`), with every figure
-/// summed **within that window** — a book's total for one day, or for one year,
-/// is a different number from its total ever.
+/// One [`ReadingEntry`] per book per `bucket` slice of `[from, to]` (inclusive,
+/// `YYYY-MM-DD`), every figure summed within the slice, over rows whose
+/// `seconds` reach [`MIN_SITTING_SECS`].
 pub fn reading_books(
     conn: &Connection,
     from: &str,
@@ -2439,7 +2445,7 @@ pub fn reading_books(
                     WHERE rp.book_id = s.book_id),
                   b.finished_at
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
-            WHERE s.day BETWEEN ?1 AND ?2
+            WHERE s.day BETWEEN ?1 AND ?2 AND s.seconds >= {MIN_SITTING_SECS}
             GROUP BY {bucket}, s.book_id
             ORDER BY {bucket} {dir}, {} {dir}, MAX(s.ended_at) DESC"#,
         sort.expr()
@@ -2451,14 +2457,15 @@ pub fn reading_books(
 /// How many books ever read [`is_finished`] holds for. The rows fold through
 /// it, keeping one rule for what finished means.
 pub fn reading_finished_count(conn: &Connection) -> rusqlite::Result<i64> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         r#"SELECT b.max_position, b.finished_at,
                   (SELECT MAX(rp.linear_pos) FROM reading_position rp
                     WHERE rp.book_id = b.id)
              FROM books b
             WHERE b.id IN (SELECT DISTINCT book_id FROM reading_sessions
-                            WHERE book_id IS NOT NULL)"#,
-    )?;
+                            WHERE book_id IS NOT NULL
+                              AND seconds >= {MIN_SITTING_SECS})"#,
+    ))?;
     let rows = stmt.query_map([], |r| {
         let max_position: Option<i64> = r.get(0)?;
         let finished_at: Option<String> = r.get(1)?;
@@ -2478,11 +2485,13 @@ pub fn reading_finished_count(conn: &Connection) -> rusqlite::Result<i64> {
     Ok(n)
 }
 
-/// How many distinct books have ever been read. A count, not a list: the
-/// headline figure needs no titles and no cover stats.
+/// Distinct `book_id` over the rows whose `seconds` reach [`MIN_SITTING_SECS`].
 pub fn reading_book_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT COUNT(DISTINCT book_id) FROM reading_sessions WHERE book_id IS NOT NULL",
+        &format!(
+            "SELECT COUNT(DISTINCT book_id) FROM reading_sessions
+              WHERE book_id IS NOT NULL AND seconds >= {MIN_SITTING_SECS}"
+        ),
         [],
         |r| r.get(0),
     )
@@ -2646,17 +2655,17 @@ pub struct UnmatchedReading {
     pub devices: Vec<String>,
 }
 
-/// Every position with reading against it that belongs to no book, newest last
-/// read first.
+/// One [`UnmatchedReading`] per `end_position` whose rows carry no `book_id`
+/// and whose `seconds` reach [`MIN_SITTING_SECS`], newest `ended_at` first.
 pub fn unmatched_reading(conn: &Connection) -> rusqlite::Result<Vec<UnmatchedReading>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT end_position, COUNT(*), SUM(seconds), SUM(page_turns), SUM(words),
                 MIN(started_at), MAX(ended_at), GROUP_CONCAT(DISTINCT device_serial)
            FROM reading_sessions
-          WHERE book_id IS NULL
+          WHERE book_id IS NULL AND seconds >= {MIN_SITTING_SECS}
           GROUP BY end_position
           ORDER BY MAX(ended_at) DESC",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |r| {
         let devices: Option<String> = r.get(7)?;
         Ok(UnmatchedReading {
@@ -7155,7 +7164,7 @@ mod tests {
         // The archive that held this sitting never stated the book's last
         // position, so it is keyed by the last-*word* position every line
         // carries. Nothing in the library ends there.
-        insert_reading_session(&conn, &session("2026-08-11", 9_464_647, 30)).unwrap();
+        insert_reading_session(&conn, &session("2026-08-11", 9_464_647, 1800)).unwrap();
         assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
 
         // A later archive states both constants together.
@@ -7227,6 +7236,117 @@ mod tests {
         assert_eq!(books[0].book_id, book);
         assert_eq!(books[0].title, "読んだ本");
         assert_eq!(reading_book_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_sitting_under_a_minute_is_counted_nowhere() {
+        let conn = fresh_db();
+        let skimmed = insert_minimal(&conn, "sha-skim", "Skimmed");
+        let read = insert_minimal(&conn, "sha-read-on", "Read");
+        // `record_session_hours` feeds the measured branch of `walk_clock_hours`.
+        let glance = sitting("2026-08-01", "09:00:00", "09:00:40", 40, skimmed);
+        insert_reading_session(&conn, &glance).unwrap();
+        record_session_hours(&conn, &glance, &[(9, 40)]).unwrap();
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-02", "09:00:00", "09:30:00", 1800, read),
+        )
+        .unwrap();
+
+        // `2026-08-01` and `skimmed` are absent from every figure.
+        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(days, vec![("2026-08-02".to_string(), 1800)]);
+        assert_eq!(reading_book_count(&conn).unwrap(), 1);
+        assert!(
+            reading_sessions_on(&conn, "2026-08-01", "2026-08-01")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(reading_book_days(&conn, skimmed).unwrap().is_empty());
+        let books = reading_books(
+            &conn,
+            "0000-00-00",
+            "9999-99-99",
+            ReadingSort::default(),
+            false,
+            ReadingBucket::default(),
+        )
+        .unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_id, read);
+
+        // Neither branch of `walk_clock_hours` places its seconds.
+        let hours = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours[0].day, "2026-08-02");
+        assert!(
+            reading_clock(&conn)
+                .unwrap()
+                .iter()
+                .all(|c| c.month == "2026-08")
+        );
+        let clocked: i64 = reading_clock(&conn)
+            .unwrap()
+            .iter()
+            .map(|c| c.seconds)
+            .sum();
+        assert_eq!(clocked, 1800);
+    }
+
+    #[test]
+    fn a_minute_exactly_is_reading() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-minute", "A book");
+        insert_reading_session(
+            &conn,
+            &sitting("2026-08-01", "09:00:00", "09:01:00", MIN_SITTING_SECS, book),
+        )
+        .unwrap();
+        assert_eq!(
+            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap(),
+            vec![("2026-08-01".to_string(), MIN_SITTING_SECS)]
+        );
+    }
+
+    #[test]
+    fn a_skimmed_sitting_keeps_everything_it_witnessed() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-glance", "A book");
+        set_max_position(&conn, book, Some(1000)).unwrap();
+        // A 20-second session at `end_position` 999, which `book` ends at.
+        insert_reading_session(&conn, &session("2026-08-01", 999, 20)).unwrap();
+
+        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
+        let (rows, named, position): (i64, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(book_id), MAX(end_position) FROM reading_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, named, position), (1, Some(book), 999));
+        // `reading_watermark` counts the row.
+        assert_eq!(
+            reading_watermark(&conn, "DEV").unwrap().as_deref(),
+            Some("2026-08-01T21:00:00")
+        );
+    }
+
+    #[test]
+    fn a_position_only_ever_skimmed_at_asks_no_question() {
+        let conn = fresh_db();
+        // A 20-second session at `end_position` 4242, carrying no `book_id`.
+        insert_reading_session(&conn, &session("2026-08-01", 4242, 20)).unwrap();
+        assert!(unmatched_reading(&conn).unwrap().is_empty());
+
+        // 1800 seconds at the same `end_position`.
+        insert_reading_session(&conn, &session("2026-08-02", 4242, 1800)).unwrap();
+        let pending = unmatched_reading(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!((pending[0].sessions, pending[0].seconds), (1, 1800));
+
+        let book = insert_minimal(&conn, "sha-settle", "A book");
+        assert_eq!(attribute_reading_position(&conn, 4242, book).unwrap(), 2);
     }
 
     #[test]

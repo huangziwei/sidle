@@ -1,6 +1,8 @@
 //! Tauri commands over `reading_sessions` (see
 //! [`sidle_core::library::reading_log`]), writing only `books.finished_at` and
-//! the attribution a tie settles.
+//! `reading_sessions.book_id`.
+//!
+//! [`db::MIN_SITTING_SECS`] bounds every figure below.
 
 use serde::Serialize;
 use tauri::State;
@@ -190,9 +192,8 @@ pub struct AmbiguousReading {
     pub candidates: Vec<db::BookRow>,
 }
 
-/// Every unattributed position that **several** library books end at. A
-/// position no book ends at is absent: its book is outside the library, and the
-/// row waits for [`db::resolve_reading_sessions`] to see it.
+/// One [`AmbiguousReading`] per `end_position` [`db::unmatched_reading`]
+/// returns that two or more library books end at.
 #[tauri::command]
 pub async fn reading_log_ambiguous(
     state: State<'_, AppState>,
