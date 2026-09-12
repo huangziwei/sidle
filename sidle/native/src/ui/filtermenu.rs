@@ -9,23 +9,53 @@ use crate::eink::input::{Input, InputEvent};
 use crate::eink::touch::TouchEvent;
 use crate::orientation::Orientation;
 use crate::ui::filter::{self, Facet, Filters};
+use crate::ui::scale::Scale;
 use crate::ui::sort::SortState;
 use crate::ui::sortmenu;
 use crate::ui::text::TextRenderer;
 
+/// Design pixels at `scale::DESIGN_DPI`; every use goes through [`Scale`].
 const STRIP_H: u32 = 120;
 const MARGIN_X: u32 = 60;
 /// Fixed-width left zones in the filter-menu and value-picker strips, each this
 const ZONE_W: u32 = 200;
+/// The floor a tap target never falls below, an ordinary rule, and the gap a
+/// separator leaves at each end of the strip.
+const ROW_FLOOR: u32 = 96;
+const RULE: u32 = 2;
+const RULE_INSET: u32 = 12;
 
-fn row_h(lh: u32) -> u32 {
-    (lh * 2).max(96)
+fn row_h(xres: u32, lh: u32) -> u32 {
+    (lh * 2).max(Scale::of_width(xres).u(ROW_FLOOR))
 }
 fn rows_top(lh: u32) -> u32 {
     lh * 3
 }
-fn strip_top(yres: u32) -> u32 {
-    yres.saturating_sub(STRIP_H)
+fn strip_top(xres: u32, yres: u32) -> u32 {
+    yres.saturating_sub(Scale::of_width(xres).u(STRIP_H))
+}
+
+/// The strip's three rules and two labelled zones, which both screens draw the
+/// same way: `[ leave | second ]` and an empty nav region.
+fn draw_strip(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    leave: &str,
+    second: &str,
+) -> (u32, u32, i32) {
+    let xres = fb.var.xres;
+    let s = Scale::of_width(xres);
+    let (strip_h, zone, rule, inset) = (s.u(STRIP_H), s.u(ZONE_W), s.u(RULE), s.u(RULE_INSET));
+    let top = strip_top(xres, fb.var.yres);
+    let rule_h = strip_h - inset * 2;
+    fb.fill_rect(top, 0, xres, rule, 0x00);
+    fb.fill_rect(top + rule, 0, xres, strip_h - rule, 0xFF);
+    fb.fill_rect(top + inset, zone - rule, rule, rule_h, 0x00);
+    fb.fill_rect(top + inset, zone * 2 - rule, rule, rule_h, 0x00);
+    let baseline = (top + strip_h * 60 / 100) as i32;
+    draw_centered_in(fb, renderer, leave, 0, zone, baseline);
+    draw_centered_in(fb, renderer, second, zone, zone * 2, baseline);
+    (zone, strip_h, baseline)
 }
 fn full_rect(fb: &Framebuffer) -> MxcfbRect {
     MxcfbRect {
@@ -62,15 +92,16 @@ enum MenuTap {
 }
 
 /// Menu rows: `Facet::ALL` then one Sort row.
-fn menu_hit(tx: u32, ty: u32, yres: u32, lh: u32) -> Option<MenuTap> {
-    if ty >= strip_top(yres) {
+fn menu_hit(tx: u32, ty: u32, xres: u32, yres: u32, lh: u32) -> Option<MenuTap> {
+    let zone = Scale::of_width(xres).u(ZONE_W);
+    if ty >= strip_top(xres, yres) {
         // Leave action (Done) leftmost — same ZONE_W slot as the gallery's Exit
         // and the value picker's Back; Clear all in the next zone. The rest of
         // the strip is empty (this menu has no page nav).
-        if tx < ZONE_W {
+        if tx < zone {
             return Some(MenuTap::Done);
         }
-        if tx < ZONE_W * 2 {
+        if tx < zone * 2 {
             return Some(MenuTap::ClearAll);
         }
         return None;
@@ -79,7 +110,7 @@ fn menu_hit(tx: u32, ty: u32, yres: u32, lh: u32) -> Option<MenuTap> {
     if ty < rt {
         return None;
     }
-    let row = ((ty - rt) / row_h(lh)) as usize;
+    let row = ((ty - rt) / row_h(xres, lh)) as usize;
     if row < Facet::ALL.len() {
         Some(MenuTap::Facet(Facet::ALL[row]))
     } else if row == Facet::ALL.len() {
@@ -97,10 +128,12 @@ fn render_menu(
     lh: u32,
 ) {
     let xres = fb.var.xres;
+    let s = Scale::of_width(xres);
+    let margin_x = s.u(MARGIN_X);
     fb.fill_rect(0, 0, xres, fb.var.yres, 0xFF);
     draw_title(fb, renderer, lh, "Filter & sort");
 
-    let rh = row_h(lh);
+    let rh = row_h(xres, lh);
     for (i, facet) in Facet::ALL.iter().enumerate() {
         let row_top = rows_top(lh) + i as u32 * rh;
         let baseline = (row_top + rh * 60 / 100) as i32;
@@ -110,22 +143,22 @@ fn render_menu(
         } else {
             format!("{}  >", facet.label())
         };
-        renderer.draw(fb, MARGIN_X as i32, baseline, &text, false);
+        renderer.draw(fb, margin_x as i32, baseline, &text, false);
     }
 
     // Sort row, set off by a divider so it reads as separate from the facets.
     let sort_top = rows_top(lh) + Facet::ALL.len() as u32 * rh;
     fb.fill_rect(
         sort_top,
-        MARGIN_X,
-        xres.saturating_sub(MARGIN_X * 2),
-        2,
+        margin_x,
+        xres.saturating_sub(margin_x * 2),
+        s.u(RULE),
         0x00,
     );
     let baseline = (sort_top + rh * 60 / 100) as i32;
     renderer.draw(
         fb,
-        MARGIN_X as i32,
+        margin_x as i32,
         baseline,
         &format!("Sort:  {}", sort.header()),
         false,
@@ -134,14 +167,7 @@ fn render_menu(
     // [ Done | Clear all ] strip — leave action leftmost, in the same ZONE_W slot
     // as the value picker's Back and the gallery's Exit; Clear all beside it. Two
     // zones, page-nav region left empty (the menu never pages).
-    let top = strip_top(fb.var.yres);
-    fb.fill_rect(top, 0, xres, 2, 0x00);
-    fb.fill_rect(top + 2, 0, xres, STRIP_H - 2, 0xFF);
-    fb.fill_rect(top + 12, ZONE_W - 2, 2, STRIP_H - 24, 0x00);
-    fb.fill_rect(top + 12, ZONE_W * 2 - 2, 2, STRIP_H - 24, 0x00);
-    let baseline = (top + STRIP_H * 60 / 100) as i32;
-    draw_centered_in(fb, renderer, "[ Done ]", 0, ZONE_W, baseline);
-    draw_centered_in(fb, renderer, "Clear all", ZONE_W, ZONE_W * 2, baseline);
+    draw_strip(fb, renderer, "[ Done ]", "Clear all");
 }
 
 /// Draw `s` horizontally centered within `[x0, x1)`.
@@ -178,7 +204,7 @@ pub fn run(
     loop {
         match input.next()? {
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
-                match menu_hit(x, y, fb.var.yres, lh) {
+                match menu_hit(x, y, fb.var.xres, fb.var.yres, lh) {
                     Some(MenuTap::Facet(f)) => {
                         value_picker(fb, input, renderer, all_books, filters, f, orient)?;
                         // The picker overwrote the screen; repaint the menu
@@ -229,8 +255,8 @@ enum PickTap {
     Next,
 }
 
-fn per_page(lh: u32, yres: u32) -> usize {
-    (strip_top(yres).saturating_sub(rows_top(lh)) / row_h(lh)).max(1) as usize
+fn per_page(lh: u32, xres: u32, yres: u32) -> usize {
+    (strip_top(xres, yres).saturating_sub(rows_top(lh)) / row_h(xres, lh)).max(1) as usize
 }
 
 fn n_pages(n_options: usize, per_page: usize) -> usize {
@@ -251,11 +277,12 @@ fn pick_hit(
     n_options: usize,
     pages: usize,
 ) -> Option<PickTap> {
-    if ty >= strip_top(yres) {
-        if tx < ZONE_W {
+    let zone = Scale::of_width(xres).u(ZONE_W);
+    if ty >= strip_top(xres, yres) {
+        if tx < zone {
             return Some(PickTap::Back);
         }
-        if tx < ZONE_W * 2 {
+        if tx < zone * 2 {
             return Some(PickTap::Clear);
         }
         if pages <= 1 {
@@ -271,7 +298,7 @@ fn pick_hit(
     if ty < rt {
         return None;
     }
-    let slot = ((ty - rt) / row_h(lh)) as usize;
+    let slot = ((ty - rt) / row_h(xres, lh)) as usize;
     if slot >= per_page {
         return None;
     }
@@ -315,7 +342,9 @@ fn render_pick_page(
     };
     draw_title(fb, renderer, lh, &title);
 
-    let rh = row_h(lh);
+    let s = Scale::of_width(xres);
+    let margin_x = s.u(MARGIN_X);
+    let rh = row_h(xres, lh);
     let start = page * per_page;
     let end = (start + per_page).min(options.len());
     for (slot, idx) in (start..end).enumerate() {
@@ -324,7 +353,7 @@ fn render_pick_page(
         let baseline = (row_top + rh * 60 / 100) as i32;
         renderer.draw(
             fb,
-            MARGIN_X as i32,
+            margin_x as i32,
             baseline,
             &row_text(filters, facet, value, *c),
             false,
@@ -332,24 +361,23 @@ fn render_pick_page(
     }
 
     // [ Back | Clear | ← Prev  N/M  Next → ] strip.
-    let top = strip_top(fb.var.yres);
-    fb.fill_rect(top, 0, xres, 2, 0x00);
-    fb.fill_rect(top + 2, 0, xres, STRIP_H - 2, 0xFF);
-    fb.fill_rect(top + 12, ZONE_W - 2, 2, STRIP_H - 24, 0x00);
-    fb.fill_rect(top + 12, ZONE_W * 2 - 2, 2, STRIP_H - 24, 0x00);
-    let baseline = (top + STRIP_H * 60 / 100) as i32;
-    draw_centered_in(fb, renderer, "[ Back ]", 0, ZONE_W, baseline);
-    draw_centered_in(fb, renderer, "Clear", ZONE_W, ZONE_W * 2, baseline);
+    let (zone, _, baseline) = draw_strip(fb, renderer, "[ Back ]", "Clear");
     if pages > 1 {
         if page > 0 {
-            renderer.draw(fb, ZONE_W as i32 * 2 + 40, baseline, "← Prev", false);
+            renderer.draw(fb, zone as i32 * 2 + s.px(40), baseline, "← Prev", false);
         }
         let mid = format!("{} / {}", page + 1, pages);
-        draw_centered_in(fb, renderer, &mid, ZONE_W * 2, xres, baseline);
+        draw_centered_in(fb, renderer, &mid, zone * 2, xres, baseline);
         if page + 1 < pages {
             let next = "Next →";
             let nw = renderer.measure_width(next);
-            renderer.draw(fb, xres as i32 - 80 - nw as i32, baseline, next, false);
+            renderer.draw(
+                fb,
+                xres as i32 - s.px(80) - nw as i32,
+                baseline,
+                next,
+                false,
+            );
         }
     }
 }
@@ -369,14 +397,14 @@ fn redraw_pick_row(
     lh: u32,
 ) -> anyhow::Result<()> {
     let slot = idx - page * per_page;
-    let rh = row_h(lh);
+    let rh = row_h(fb.var.xres, lh);
     let row_top = rows_top(lh) + slot as u32 * rh;
     fb.fill_rect(row_top, 0, fb.var.xres, rh, 0xFF);
     let (value, c) = &options[idx];
     let baseline = (row_top + rh * 60 / 100) as i32;
     renderer.draw(
         fb,
-        MARGIN_X as i32,
+        Scale::of_width(fb.var.xres).u(MARGIN_X) as i32,
         baseline,
         &row_text(filters, facet, value, *c),
         false,
@@ -397,7 +425,7 @@ fn value_picker(
 ) -> anyhow::Result<()> {
     let options = filter::facet_options(all_books, filters, facet);
     let lh = renderer.line_height().max(1);
-    let pp = per_page(lh, fb.var.yres);
+    let pp = per_page(lh, fb.var.xres, fb.var.yres);
     let pages = n_pages(options.len(), pp);
     let mut page = 0usize;
 

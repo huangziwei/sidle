@@ -1,158 +1,264 @@
-//! On-screen Latin keyboard — the romaji search overlay.
+//! The search overlay. [`crate::keyboard`] supplies the keys: a commit arrives
+//! over [`crate::lipc`], every other key as a keysym on
+//! [`crate::eink::fb::Pump`].
+
+use anyhow::Result;
 
 use crate::api::Book;
 use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use crate::eink::input::{Input, InputEvent};
+use crate::eink::keysym::{Typed, of_keysym};
 use crate::eink::touch::TouchEvent;
+use crate::lipc::Service;
 use crate::orientation::Orientation;
 use crate::search;
 use crate::ui::filter::{self, Filters};
-use crate::ui::grid::outline_rect;
+use crate::ui::scale::Scale;
 use crate::ui::searchbar;
 use crate::ui::text::TextRenderer;
 
-/// Letter/digit rows. Row 0 carries `Del` in an eleventh cell at its right end,
-/// appended by [`layout`].
-const ROWS: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
-
-/// Gap between key faces, and the panel margin.
-const GAP: i32 = 8;
-const MARGIN: i32 = 20;
-
-/// Bottom command strip: `[ Back ] | Clear | space | [ Search ]`. Height matches
+/// The foot strip holding `[ Back ]` and `[ Search ]`, and the width of each
+/// slot. Design pixels at `scale::DESIGN_DPI`.
 const STRIP_H: u32 = 120;
 const ZONE_W: u32 = 200;
-/// Thickness of the strip's divider rules, matching the other bottom strips.
 const RULE: u32 = 2;
+/// The gap under the match count.
+const BAND_GAP: u32 = 24;
 
-#[derive(Clone, Copy)]
-enum Key {
-    Char(char),
-    Space,
-    Backspace,
-    Clear,
-    /// Leave without applying, returning the query the overlay opened with, so
-    /// an accidental open costs nothing. Distinct from [`Key::Done`], which is
-    /// this keyboard's Enter.
+/// The query, and the run an IME is composing.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Query {
+    text: String,
+    /// Drawn after `text` and matched on by nothing.
+    preedit: String,
+}
+
+impl Query {
+    /// Takes `said` onto `text`, clearing `preedit`.
+    fn commit(&mut self, said: &str) {
+        self.preedit.clear();
+        self.text.push_str(said);
+    }
+
+    /// Takes `count` characters off the end of `text`.
+    fn delete(&mut self, count: usize) {
+        for _ in 0..count {
+            self.text.pop();
+        }
+    }
+
+    /// `keyboardCommit` carries the text; `keyboardSetPreeditString`
+    /// `position:str`; `keyboardDelete` `before:after`; `keyboardReplace`
+    /// `before:after:str`. Answers whether the query moved.
+    fn set(&mut self, property: &str, value: &str) -> bool {
+        match property {
+            "keyboardCommit" => self.commit(value),
+            "keyboardSetPreeditString" => {
+                let (_, said) = value.split_once(':').unwrap_or(("", value));
+                said.clone_into(&mut self.preedit);
+            }
+            "keyboardDelete" => {
+                let (before, _) = value.split_once(':').unwrap_or((value, ""));
+                self.delete(before.parse().unwrap_or(0));
+            }
+            "keyboardReplace" => {
+                let mut parts = value.splitn(3, ':');
+                let before = parts.next().unwrap_or_default().parse().unwrap_or(0);
+                let said = parts.nth(1).unwrap_or_default().to_string();
+                self.delete(before);
+                self.commit(&said);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// `text` with `preedit` after it.
+    fn shown(&self) -> String {
+        format!("{}{}", self.text, self.preedit)
+    }
+}
+
+/// Where the overlay's rows sit on an `xres` by `yres` panel.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    /// Bottom of the band holding the search bar and the match count. A
+    /// keystroke refreshes `[0, band_bottom]` alone.
+    band_bottom: u32,
+    /// Top of the foot strip, and of the keyboard over it.
+    strip_top: u32,
+    keyboard_top: u32,
+    strip_h: u32,
+    zone_w: u32,
+    rule: u32,
+}
+
+impl Layout {
+    fn compute(lh: u32, xres: u32, yres: u32) -> Self {
+        let s = Scale::of_width(xres);
+        let strip_h = s.u(STRIP_H);
+        let keyboard_h = crate::keyboard::height(yres as i32).clamp(0, yres as i32) as u32;
+        Self {
+            band_bottom: searchbar::below(xres) + lh + s.u(BAND_GAP),
+            strip_top: yres.saturating_sub(strip_h),
+            keyboard_top: yres.saturating_sub(keyboard_h.max(strip_h)),
+            strip_h,
+            zone_w: s.u(ZONE_W).min(xres / 5),
+            rule: s.u(RULE),
+        }
+    }
+
+    /// Which foot-strip slot `(x, y)` lands on.
+    fn hit(&self, x: u32, y: u32, xres: u32) -> Option<Tap> {
+        if y < self.strip_top {
+            return None;
+        }
+        if x < self.zone_w {
+            return Some(Tap::Back);
+        }
+        (x >= xres.saturating_sub(self.zone_w)).then_some(Tap::Search)
+    }
+}
+
+/// A tap on the foot strip.
+enum Tap {
+    /// Answers the query the overlay opened with.
     Back,
-    /// Submit: filter the grid by what has been typed.
-    Done,
+    /// Answers what has been typed.
+    Search,
 }
 
-/// How a key is drawn. Both kinds hit-test the same way.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Style {
-    /// A key in the grid: an outlined face inset from its cell.
-    Face,
-    /// A slot in the bottom strip: a label only, with the strip drawing the
-    /// dividers around it.
-    Zone,
+/// What a batch of keysyms did.
+enum Act {
+    Search,
+    Back,
+    Moved,
+    Nothing,
 }
 
-/// `x`/`y`/`w`/`h` is the **cell** — the whole tappable area, not the drawn
-/// face. A `Face` key draws inset by half a gap on each side, so the gutters
-/// between keys still belong to a key and a tap there registers.
-struct KeyButton {
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    key: Key,
-    label: String,
-    style: Style,
-}
-
-/// Top of the key grid — the band above it holds the title, query, and count.
-/// Bottom of the top band (the shared search bar + the match count below it). A
-/// keystroke refreshes only `[0, band_bottom]`, leaving the keyboard untouched.
-fn band_bottom(lh: u32) -> u32 {
-    searchbar::TOP + searchbar::HEIGHT + lh + 24
-}
-
-fn strip_top(yres: u32) -> u32 {
-    yres.saturating_sub(STRIP_H)
-}
-
-/// Keyboard metrics: `(unit, unit_digits, key_h, keys_top)`.
-fn metrics(xres: u32, yres: u32) -> (i32, i32, i32, i32) {
-    let span = (xres as i32 - 2 * MARGIN).max(1);
-    let unit = (span / 10).max(1);
-    let unit_digits = (span / 11).max(1);
-    let key_h = (unit - GAP).max(1);
-    let block_h = 4 * key_h + 3 * GAP;
-    let keys_top = (yres as i32 - STRIP_H as i32 - MARGIN - block_h).max(MARGIN);
-    (unit, unit_digits, key_h, keys_top)
-}
-
-/// Lay out every key: the four letter/digit rows, then the four strip slots.
-fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
-    let (unit, unit_digits, key_h, top) = metrics(xres, yres);
-    let stride = key_h + GAP;
-    let mut out = Vec::new();
-
-    for (r, row) in ROWS.iter().enumerate() {
-        let digits = r == 0;
-        let u = if digits { unit_digits } else { unit };
-        // The digit row reserves one extra column for `Del`.
-        let n = row.chars().count() as i32 + i32::from(digits);
-        let start_x = (xres as i32 - n * u) / 2;
-        let y = top + r as i32 * stride;
-        for (i, c) in row.chars().enumerate() {
-            out.push(KeyButton {
-                x: start_x + i as i32 * u,
-                y,
-                w: u as u32,
-                h: stride as u32,
-                key: Key::Char(c),
-                label: c.to_string(),
-                style: Style::Face,
-            });
-        }
-        if digits {
-            out.push(KeyButton {
-                x: start_x + (n - 1) * u,
-                y,
-                w: u as u32,
-                h: stride as u32,
-                key: Key::Backspace,
-                label: "Del".to_string(),
-                style: Style::Face,
-            });
+/// Takes `keysyms` into `query`. `Escape` and `Enter` drop the rest of them.
+fn typed(query: &mut Query, keysyms: &[u32]) -> Act {
+    let mut moved = false;
+    for keysym in keysyms {
+        let Some(said) = of_keysym(*keysym) else {
+            continue;
+        };
+        match said {
+            Typed::Char(said) => {
+                query.text.push(said);
+                moved = true;
+            }
+            Typed::Backspace => moved |= query.text.pop().is_some(),
+            Typed::Enter => return Act::Search,
+            Typed::Escape => return Act::Back,
         }
     }
+    match moved {
+        true => Act::Moved,
+        false => Act::Nothing,
+    }
+}
 
-    // Command strip. `[ Back ]` takes the leftmost slot, the one `ui/pager.rs`
-    // gives `Exit` on the gallery and `ui/filtermenu.rs` gives its own leave
-    // action — leaving a screen is the same gesture wherever you are.
-    let sy = strip_top(yres) as i32;
-    let side = ZONE_W.min(xres / 5);
-    for (x, w, key, label) in [
-        (0, side, Key::Back, "[ Back ]"),
-        (side as i32, side, Key::Clear, "Clear"),
-        (
-            (side * 2) as i32,
-            xres.saturating_sub(side * 3),
-            Key::Space,
-            "space",
-        ),
-        (
-            xres.saturating_sub(side) as i32,
-            side,
-            Key::Done,
-            "[ Search ]",
-        ),
+/// Takes every [`Service::drain`] set into `query`, answering whether it
+/// moved.
+fn committed(service: Option<&mut Service>, query: &mut Query) -> bool {
+    let Some(service) = service else {
+        return false;
+    };
+    let mut moved = false;
+    for set in service.drain() {
+        moved |= query.set(&set.property, &set.value);
+    }
+    moved
+}
+
+/// The books `query` names, under the filters in force.
+fn count_matches(all_books: &[Book], filters: &Filters, query: &str) -> usize {
+    all_books
+        .iter()
+        .filter(|b| filter::matches(b, filters, None) && search::matches(b, query))
+        .count()
+}
+
+/// `searchbar::draw` and the [`count_matches`] line below it. The caller
+/// white-fills the band first.
+fn draw_band(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    all_books: &[Book],
+    filters: &Filters,
+    query: &Query,
+    lh: u32,
+) {
+    let xres = fb.var.xres;
+    searchbar::draw(fb, renderer, &query.shown(), false);
+
+    let n = count_matches(all_books, filters, &query.text);
+    let count = if query.text.trim().is_empty() {
+        format!("{n} books")
+    } else if n == 0 {
+        "no matches".to_string()
+    } else if n == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{n} matches")
+    };
+    let cw = renderer.measure_width(&count);
+    let cy = (searchbar::below(xres) + lh) as i32;
+    renderer.draw(
+        fb,
+        ((xres as i32 - cw as i32) / 2).max(0),
+        cy,
+        &count,
+        false,
+    );
+}
+
+/// A rule, then `[ Back ]` at the left end and `[ Search ]` at the right.
+fn draw_strip(fb: &mut Framebuffer, renderer: &mut TextRenderer, layout: &Layout) {
+    let xres = fb.var.xres;
+    let top = layout.strip_top;
+    fb.fill_rect(top, 0, xres, layout.rule, 0x00);
+    fb.fill_rect(
+        top + layout.rule,
+        0,
+        xres,
+        layout.strip_h - layout.rule,
+        0xFF,
+    );
+    let baseline = (top + layout.strip_h * 62 / 100) as i32;
+    for (label, from, to) in [
+        ("[ Back ]", 0, layout.zone_w),
+        ("[ Search ]", xres.saturating_sub(layout.zone_w), xres),
     ] {
-        out.push(KeyButton {
-            x,
-            y: sy,
-            w,
-            h: STRIP_H,
-            key,
-            label: label.to_string(),
-            style: Style::Zone,
-        });
+        let w = renderer.measure_width(label);
+        let x = from as i32 + ((to - from) as i32 - w as i32) / 2;
+        renderer.draw(fb, x.max(from as i32), baseline, label, false);
     }
-    out
+}
+
+/// The band and the strip, over `[0, keyboard_top]`.
+fn render(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    all_books: &[Book],
+    filters: &Filters,
+    query: &Query,
+    layout: &Layout,
+    lh: u32,
+) {
+    fb.fill_rect(0, 0, fb.var.xres, layout.keyboard_top, 0xFF);
+    draw_band(fb, renderer, all_books, filters, query, lh);
+    draw_strip(fb, renderer, layout);
+}
+
+fn band_rect(fb: &Framebuffer, layout: &Layout) -> MxcfbRect {
+    MxcfbRect {
+        top: 0,
+        left: 0,
+        width: fb.var.xres,
+        height: layout.band_bottom,
+    }
 }
 
 fn full_rect(fb: &Framebuffer) -> MxcfbRect {
@@ -164,154 +270,8 @@ fn full_rect(fb: &Framebuffer) -> MxcfbRect {
     }
 }
 
-/// The query+count band at the top — its own rect so a keystroke refreshes only
-/// this with a fast DU instead of the whole panel.
-fn band_rect(fb: &Framebuffer, lh: u32) -> MxcfbRect {
-    MxcfbRect {
-        top: 0,
-        left: 0,
-        width: fb.var.xres,
-        height: band_bottom(lh),
-    }
-}
-
-/// The drawn face of a key: for a grid key the cell inset by half a gap; for a
-/// strip slot the cell inset past the strip's rules on its top and left edges.
-fn face(kb: &KeyButton) -> (i32, i32, u32, u32) {
-    match kb.style {
-        Style::Zone => (
-            kb.x + RULE as i32,
-            kb.y + RULE as i32,
-            kb.w.saturating_sub(RULE).max(1),
-            kb.h.saturating_sub(RULE).max(1),
-        ),
-        Style::Face => {
-            let inset = GAP / 2;
-            (
-                kb.x + inset,
-                kb.y + inset,
-                kb.w.saturating_sub(GAP as u32).max(1),
-                kb.h.saturating_sub(GAP as u32).max(1),
-            )
-        }
-    }
-}
-
-fn key_rect(kb: &KeyButton) -> MxcfbRect {
-    let (x, y, w, h) = face(kb);
-    MxcfbRect {
-        top: y.max(0) as u32,
-        left: x.max(0) as u32,
-        width: w,
-        height: h,
-    }
-}
-
-/// Books passing the active facets **and** the typed query — the same predicate
-/// the grid will use, so the count never lies.
-fn count_matches(all_books: &[Book], filters: &Filters, query: &str) -> usize {
-    let cq = search::canon(query);
-    all_books
-        .iter()
-        .filter(|b| filter::matches(b, filters, None) && search::matches(b, &cq))
-        .count()
-}
-
-/// Draw the **shared** search bar (identical to the grid view — same position,
-/// size, style) and the live match count directly below it. Caller white-fills
-/// the band first.
-fn draw_band(
-    fb: &mut Framebuffer,
-    renderer: &mut TextRenderer,
-    all_books: &[Book],
-    filters: &Filters,
-    query: &str,
-    lh: u32,
-) {
-    let xres = fb.var.xres;
-    searchbar::draw(fb, renderer, query, false);
-
-    // Match count, centered, directly below the bar.
-    let n = count_matches(all_books, filters, query);
-    let count = if query.trim().is_empty() {
-        format!("{n} books")
-    } else if n == 0 {
-        "no matches".to_string()
-    } else if n == 1 {
-        "1 match".to_string()
-    } else {
-        format!("{n} matches")
-    };
-    let cw = renderer.measure_width(&count);
-    let cy = (searchbar::TOP + searchbar::HEIGHT + lh) as i32;
-    renderer.draw(
-        fb,
-        ((xres as i32 - cw as i32) / 2).max(0),
-        cy,
-        &count,
-        false,
-    );
-}
-
-/// Draw one key. `pressed` inverts it, which is the only acknowledgement a tap
-/// gets while the finger is still down.
-fn draw_key(fb: &mut Framebuffer, renderer: &mut TextRenderer, kb: &KeyButton, pressed: bool) {
-    let (x, y, w, h) = face(kb);
-    let (top, left) = (y.max(0) as u32, x.max(0) as u32);
-    fb.fill_rect(top, left, w, h, if pressed { 0x00 } else { 0xFF });
-    if !pressed && kb.style == Style::Face {
-        outline_rect(fb, x, y, w, h, 2, 0x00);
-    }
-    let lw = renderer.measure_width(&kb.label);
-    let tx = x + ((w as i32 - lw as i32) / 2).max(0);
-    let baseline = y + (h * 62 / 100) as i32;
-    renderer.draw(fb, tx, baseline, &kb.label, pressed);
-}
-
-/// The strip's chrome: the rule above it and the slot separators, drawn the same
-/// way `ui/filtermenu.rs` and `ui/pager.rs` draw theirs. [`face`] insets a slot
-/// past these, so pressing one leaves them intact.
-fn draw_strip_chrome(fb: &mut Framebuffer, keys: &[KeyButton]) {
-    let xres = fb.var.xres;
-    let top = strip_top(fb.var.yres);
-    fb.fill_rect(top, 0, xres, RULE, 0x00);
-    for kb in keys.iter().filter(|k| k.style == Style::Zone) {
-        if kb.x > 0 {
-            fb.fill_rect(top + 12, kb.x.max(0) as u32, RULE, STRIP_H - 24, 0x00);
-        }
-    }
-}
-
-fn render_all(
-    fb: &mut Framebuffer,
-    renderer: &mut TextRenderer,
-    all_books: &[Book],
-    filters: &Filters,
-    keys: &[KeyButton],
-    query: &str,
-    lh: u32,
-) {
-    fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
-    draw_band(fb, renderer, all_books, filters, query, lh);
-    for kb in keys {
-        draw_key(fb, renderer, kb, false);
-    }
-    draw_strip_chrome(fb, keys);
-}
-
-/// Index of the key under a touch. Cells tile their row, so a tap in a gutter
-/// lands on a neighbouring key rather than resolving to nothing.
-fn hit_index(keys: &[KeyButton], tx: u32, ty: u32) -> Option<usize> {
-    let (tx, ty) = (tx as i32, ty as i32);
-    keys.iter()
-        .position(|k| tx >= k.x && tx < k.x + k.w as i32 && ty >= k.y && ty < k.y + k.h as i32)
-}
-
-fn hit(keys: &[KeyButton], tx: u32, ty: u32) -> Option<Key> {
-    hit_index(keys, tx, ty).map(|i| keys[i].key)
-}
-
-/// Run the keyboard. Returns the typed query on `[ Search ]`, or `initial`
+/// Answers what was typed, on `[ Search ]` or Enter; `initial` on `[ Back ]` or
+/// Escape. `initial` pre-fills the field.
 pub fn run(
     fb: &mut Framebuffer,
     input: &mut Input,
@@ -320,93 +280,127 @@ pub fn run(
     filters: &Filters,
     initial: &str,
     orient: &mut Orientation,
-) -> anyhow::Result<String> {
-    let lh = renderer.line_height().max(1);
-    let mut query = initial.to_string();
-    let mut keys = layout(fb.var.xres, fb.var.yres);
-    // The key currently held down, so it can be un-inverted on release.
-    let mut pressed: Option<usize> = None;
+) -> Result<String> {
+    // A `Service` that will not open leaves the keysym path, which needs none
+    // of it.
+    let mut service = match Service::open(crate::keyboard::CLIENT) {
+        Ok(service) => {
+            eprintln!("lipc: {} is open", service.name());
+            Some(service)
+        }
+        Err(err) => {
+            eprintln!("?? lipc: {err:#} — Latin typing only");
+            None
+        }
+    };
+    // `EVIOCGRAB` is exclusive against the keyboard's own window.
+    input.set_keyboard(true);
+    crate::keyboard::open();
+    let out = drive(
+        fb,
+        input,
+        renderer,
+        all_books,
+        filters,
+        &mut service,
+        initial,
+        orient,
+    );
+    crate::keyboard::close();
+    // The socket closes with `service`; a descriptor left in `watched`
+    // outlives it.
+    input.watch([None, None]);
+    input.set_keyboard(false);
+    input.retake();
+    out
+}
 
-    render_all(fb, renderer, all_books, filters, &keys, &query, lh);
+#[allow(clippy::too_many_arguments)] // one overlay's state, positional
+fn drive(
+    fb: &mut Framebuffer,
+    input: &mut Input,
+    renderer: &mut TextRenderer,
+    all_books: &[Book],
+    filters: &Filters,
+    service: &mut Option<Service>,
+    initial: &str,
+    orient: &mut Orientation,
+) -> Result<String> {
+    let lh = renderer.line_height().max(1);
+    let mut query = Query {
+        text: initial.to_string(),
+        preedit: String::new(),
+    };
+    let mut layout = Layout::compute(lh, fb.var.xres, fb.var.yres);
+    render(fb, renderer, all_books, filters, &query, &layout, lh);
     fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
 
-    // Refresh just the query+count band after a keystroke (fast DU, no flash).
+    // DU, not GC16: a keystroke must not flash the panel.
     macro_rules! refresh_band {
         () => {{
-            fb.fill_rect(0, 0, fb.var.xres, band_bottom(lh), 0xFF);
+            fb.fill_rect(0, 0, fb.var.xres, layout.band_bottom, 0xFF);
             draw_band(fb, renderer, all_books, filters, &query, lh);
-            fb.send_update(band_rect(fb, lh), WAVEFORM_MODE_DU)?;
+            fb.send_update(band_rect(fb, &layout), WAVEFORM_MODE_DU)?;
         }};
     }
 
     loop {
+        // A `KeyPress` arrives on the X connection and a commit on the lipc
+        // socket, neither of them an input device.
+        input.watch([Some(fb.raw_fd()), service.as_ref().map(|s| s.raw_fd())]);
         match input.next()? {
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
-                if let Some(i) = pressed.take() {
-                    draw_key(fb, renderer, &keys[i], false);
-                    fb.send_update(key_rect(&keys[i]), WAVEFORM_MODE_DU)?;
+                // `keyboard_top` down belongs to the keyboard's own window.
+                if y >= layout.keyboard_top {
+                    continue;
                 }
-                // The search bar stays live in the overlay — its `✕` clears,
-                // consistent with the grid view; a field tap is a no-op (already
-                // open). Otherwise resolve a key.
-                if let Some(tap) =
-                    searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false)
+                let clearable = !query.text.is_empty();
+                if let Some(searchbar::Tap::Clear) =
+                    searchbar::hit(x, y, fb.var.xres, clearable, false, false)
                 {
-                    if matches!(tap, searchbar::Tap::Clear) {
-                        query.clear();
-                        refresh_band!();
-                    }
-                } else {
-                    match hit(&keys, x, y) {
-                        Some(Key::Char(c)) => {
-                            query.push(c);
-                            refresh_band!();
-                        }
-                        Some(Key::Space) => {
-                            // Harmless to matching (`canon` drops it) but lets the
-                            // user separate words visually.
-                            query.push(' ');
-                            refresh_band!();
-                        }
-                        Some(Key::Backspace) => {
-                            query.pop();
-                            refresh_band!();
-                        }
-                        Some(Key::Clear) => {
-                            query.clear();
-                            refresh_band!();
-                        }
-                        Some(Key::Done) => return Ok(query),
-                        // Hand back what the overlay opened with. The caller
-                        // compares against its current query, so an unchanged
-                        // return is a no-op and nothing is re-filtered.
-                        Some(Key::Back) => return Ok(initial.to_string()),
-                        None => {}
-                    }
+                    query = Query::default();
+                    refresh_band!();
+                    continue;
+                }
+                match layout.hit(x, y, fb.var.xres) {
+                    Some(Tap::Search) => return Ok(query.text),
+                    Some(Tap::Back) => return Ok(initial.to_string()),
+                    None => {}
                 }
             }
-            InputEvent::Touch(TouchEvent::Down { x, y }) => {
-                if searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false).is_none()
-                    && let Some(i) = hit_index(&keys, x, y)
-                {
-                    draw_key(fb, renderer, &keys[i], true);
-                    fb.send_update(key_rect(&keys[i]), WAVEFORM_MODE_DU)?;
-                    pressed = Some(i);
-                }
-            }
+            InputEvent::Touch(TouchEvent::Down { .. }) => {}
             InputEvent::Touch(TouchEvent::Screenshot) => {
                 let _ = crate::eink::screenshot::capture(fb);
             }
             InputEvent::Page(_) => {}
             InputEvent::Tick => {
-                let o = Orientation::detect();
-                if o != *orient {
-                    *orient = o;
-                    input.set_orientation(o);
-                    keys = layout(fb.var.xres, fb.var.yres);
-                    pressed = None;
-                    render_all(fb, renderer, all_books, filters, &keys, &query, lh);
+                let pump = fb.pump_events();
+                if let Some(covered) = pump.covered {
+                    input.set_covered(covered);
+                }
+                input.retake();
+                let moved = match typed(&mut query, &pump.typed) {
+                    Act::Search => return Ok(query.text),
+                    Act::Back => return Ok(initial.to_string()),
+                    Act::Moved => true,
+                    Act::Nothing => false,
+                } | committed(service.as_mut(), &mut query);
+
+                let turned = input.follow_orientation();
+                if turned {
+                    *orient = input.orientation();
+                }
+                if turned || pump.resized.is_some() {
+                    layout = Layout::compute(lh, fb.var.xres, fb.var.yres);
+                }
+                if pump.covered == Some(true) {
+                    continue;
+                }
+                if turned || pump.resized.is_some() || pump.repaint || pump.covered.is_some() {
+                    render(fb, renderer, all_books, filters, &query, &layout, lh);
                     fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
+                } else if moved {
+                    refresh_band!();
                 }
             }
         }
@@ -417,138 +411,106 @@ pub fn run(
 mod tests {
     use super::*;
 
-    const XRES: u32 = 1264;
-    const YRES: u32 = 1680;
+    /// Every shipped framebuffer.
+    const PANELS: [(u32, u32); 4] = [(600, 800), (758, 1024), (1264, 1680), (1860, 2480)];
 
-    fn find(keys: &[KeyButton], c: char) -> &KeyButton {
-        keys.iter()
-            .find(|k| matches!(k.key, Key::Char(x) if x == c))
-            .expect("key present")
+    /// [`Query::set`] over the four properties `kb` sets.
+    #[test]
+    fn the_candidate_engine_commits_over_the_service() {
+        let mut q = Query::default();
+        assert!(q.set("keyboardSetPreeditString", "0:ゆめ"));
+        assert_eq!((q.text.as_str(), q.preedit.as_str()), ("", "ゆめ"));
+        assert_eq!(q.shown(), "ゆめ", "a composing run draws after the text");
+        assert!(q.set("keyboardCommit", "夢遊"));
+        assert_eq!((q.text.as_str(), q.preedit.as_str()), ("夢遊", ""));
     }
 
+    /// `keyboardDelete` takes `before` characters off the end.
     #[test]
-    fn layout_covers_every_letter_and_digit() {
-        let keys = layout(XRES, YRES);
-        // 11 (digits + Del) + 10 + 9 + 7 faces, plus the four strip slots.
-        assert_eq!(keys.len(), 37 + 4);
-        for c in "abcdefghijklmnopqrstuvwxyz0123456789".chars() {
-            assert!(
-                keys.iter().any(|k| matches!(k.key, Key::Char(x) if x == c)),
-                "missing key {c}"
-            );
-        }
+    fn a_delete_takes_characters_off_the_end() {
+        let mut q = Query::default();
+        q.set("keyboardCommit", "夢遊病者");
+        assert!(q.set("keyboardDelete", "2:0"));
+        assert_eq!(q.text, "夢遊");
+        // `x` parses as no count.
+        assert!(q.set("keyboardDelete", "x:0"));
+        assert_eq!(q.text, "夢遊");
     }
 
+    /// `keyboardReplace` takes `before` off and commits the third field.
     #[test]
-    fn del_sits_at_the_right_end_of_the_number_row() {
-        let keys = layout(XRES, YRES);
-        let zero = find(&keys, '0');
-        let del = keys
-            .iter()
-            .find(|k| matches!(k.key, Key::Backspace))
-            .expect("Del present");
-        assert_eq!(del.y, zero.y, "Del shares the number row");
-        assert!(del.x > zero.x, "Del sits right of 0");
-        assert_eq!(del.style, Style::Face);
-        // The digit row spans the same width as a letter row, within a column.
-        let q = find(&keys, 'q');
-        let p = find(&keys, 'p');
-        let one = find(&keys, '1');
-        let letter_span = p.x + p.w as i32 - q.x;
-        let digit_span = del.x + del.w as i32 - one.x;
-        assert!(
-            (letter_span - digit_span).abs() <= del.w as i32,
-            "rows span the same width: letters {letter_span}, digits {digit_span}"
+    fn a_replace_swaps_the_tail() {
+        let mut q = Query::default();
+        q.set("keyboardCommit", "むえ");
+        assert!(q.set("keyboardReplace", "2:0:夢絵"));
+        assert_eq!(q.text, "夢絵");
+    }
+
+    /// [`Query::set`] answers false for a property it does not read.
+    #[test]
+    fn an_unknown_property_moves_nothing() {
+        let mut q = Query::default();
+        assert!(!q.set("keyboardBounds", "0:0"));
+        assert_eq!(q, Query::default());
+    }
+
+    /// [`typed`] reaches `Query` with no `Service` open.
+    #[test]
+    fn keysyms_reach_the_query_without_a_service() {
+        let mut q = Query::default();
+        // 'a', 'b', BackSpace, 'c'.
+        assert!(matches!(
+            typed(&mut q, &[0x61, 0x62, 0xFF08, 0x63]),
+            Act::Moved
+        ));
+        assert_eq!(q.text, "ac");
+        assert!(matches!(typed(&mut q, &[0xFF0D]), Act::Search));
+        assert!(matches!(typed(&mut q, &[0xFF1B]), Act::Back));
+        // Shift_L names no character.
+        assert!(matches!(typed(&mut q, &[0xFFE1]), Act::Nothing));
+    }
+
+    /// [`Query::commit`] takes a whole run; a following Backspace takes one
+    /// character of it.
+    #[test]
+    fn a_committed_run_survives_a_backspace_over_x() {
+        let mut q = Query::default();
+        q.set("keyboardCommit", "夢遊病者");
+        assert!(matches!(typed(&mut q, &[0xFF08]), Act::Moved));
+        assert_eq!(
+            q.text, "夢遊病",
+            "backspace takes one character, not one byte"
         );
     }
 
+    /// [`Layout::hit`] answers `Back` and `Search` at the two ends.
     #[test]
-    fn back_takes_the_leftmost_slot_and_search_the_rightmost() {
-        let keys = layout(XRES, YRES);
-        let back = keys
-            .iter()
-            .find(|k| matches!(k.key, Key::Back))
-            .expect("Back present");
-        assert_eq!(back.x, 0, "Back is flush to the left edge, as Exit is");
-        assert_eq!(back.y, strip_top(YRES) as i32);
-        assert_eq!(back.style, Style::Zone);
-        // Left to right: Back, Clear, space, Search — the submit at the far
-        // right, and the space bar between Clear and Search so a mis-tap cannot
-        // wipe the query and submit in one slip.
-        let row = YRES - 10;
-        assert!(matches!(hit(&keys, 10, row), Some(Key::Back)));
-        assert!(matches!(hit(&keys, ZONE_W + 10, row), Some(Key::Clear)));
-        assert!(matches!(hit(&keys, XRES / 2, row), Some(Key::Space)));
-        assert!(matches!(hit(&keys, XRES - 10, row), Some(Key::Done)));
-    }
-
-    #[test]
-    fn pressing_a_strip_slot_cannot_erase_the_chrome() {
-        // A slot's face must stay inside its cell. A face covering the whole
-        let keys = layout(XRES, YRES);
-        let strip = strip_top(YRES) as i32;
-        for kb in keys.iter().filter(|k| k.style == Style::Zone) {
-            let (fx, fy, _, _) = face(kb);
+    fn back_and_search_take_the_two_ends() {
+        for (w, h) in PANELS {
+            let layout = Layout::compute(40, w, h);
+            let row = h - 1;
+            assert!(matches!(layout.hit(1, row, w), Some(Tap::Back)), "{w}x{h}");
             assert!(
-                fy >= strip + RULE as i32,
-                "{} face starts at y={fy}, inside the top rule at {strip}",
-                kb.label
+                matches!(layout.hit(w - 1, row, w), Some(Tap::Search)),
+                "{w}x{h}"
             );
-            if kb.x > 0 {
-                assert!(
-                    fx >= kb.x + RULE as i32,
-                    "{} face starts at x={fx}, inside its own rule at {}",
-                    kb.label,
-                    kb.x
-                );
-            }
+            assert!(layout.hit(w / 2, row, w).is_none(), "{w}x{h}: dead middle");
+            // Above `strip_top` belongs to the band.
+            assert!(layout.hit(1, layout.strip_top - 1, w).is_none(), "{w}x{h}");
         }
     }
 
+    /// `band_bottom` stays above `keyboard_top`.
     #[test]
-    fn back_abandons_the_edit() {
-        // `Back` hands the caller the query the overlay opened with, so the
-        // caller's "did it change?" guard makes it a no-op. Guarding the wiring
-        // rather than the loop: `run` needs a framebuffer to drive.
-        let keys = layout(XRES, YRES);
-        assert!(matches!(hit(&keys, 10, YRES - 10), Some(Key::Back)));
-        assert!(
-            keys.iter().filter(|k| matches!(k.key, Key::Done)).count() == 1,
-            "exactly one submit key"
-        );
-    }
-
-    #[test]
-    fn a_tap_in_a_gutter_still_lands_on_a_key() {
-        let keys = layout(XRES, YRES);
-        let a = find(&keys, 'a');
-        let s = find(&keys, 's');
-        // The seam between two neighbouring keys belongs to one of them.
-        let seam = (a.x + a.w as i32) as u32;
-        assert!(seam <= s.x as u32 + 1, "cells tile the row");
-        let mid = a.y + a.h as i32 / 2;
-        assert!(hit(&keys, seam.saturating_sub(1), mid as u32).is_some());
-        assert!(hit(&keys, seam, mid as u32).is_some());
-        // The drawn face is inset, so it is narrower than the cell it fills.
-        let (_, _, fw, _) = face(a);
-        assert!(fw < a.w, "face {fw} is inset within cell {}", a.w);
-    }
-
-    #[test]
-    fn letter_key_faces_are_square() {
-        let keys = layout(XRES, YRES);
-        let (_, _, fw, fh) = face(find(&keys, 'a'));
-        assert_eq!(fw, fh, "a letter face is {fw}x{fh}, not square");
-    }
-
-    #[test]
-    fn hit_finds_the_tapped_key() {
-        let keys = layout(XRES, YRES);
-        let k0 = &keys[0];
-        let cx = (k0.x + k0.w as i32 / 2) as u32;
-        let cy = (k0.y + k0.h as i32 / 2) as u32;
-        assert!(matches!(hit(&keys, cx, cy), Some(Key::Char('1'))));
-        // Above the key block there is nothing to tap.
-        assert!(hit(&keys, 0, 0).is_none());
+    fn the_band_stays_clear_of_the_keyboard() {
+        for (w, h) in PANELS {
+            let layout = Layout::compute(40, w, h);
+            assert!(
+                layout.band_bottom < layout.keyboard_top,
+                "{w}x{h}: band ends at {}, keyboard starts at {}",
+                layout.band_bottom,
+                layout.keyboard_top
+            );
+        }
     }
 }

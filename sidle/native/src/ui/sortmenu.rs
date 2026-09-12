@@ -4,13 +4,18 @@ use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC
 use crate::eink::input::{Input, InputEvent};
 use crate::eink::touch::TouchEvent;
 use crate::orientation::Orientation;
+use crate::ui::scale::Scale;
 use crate::ui::sort::{SortKey, SortState};
 use crate::ui::text::TextRenderer;
 
 /// Bottom `[ Done ]` strip height — matches `ui/diag.rs`'s generous button row.
+/// Design pixels at `scale::DESIGN_DPI`; [`Layout`] holds what they come to.
 const STRIP_H: u32 = 120;
 /// Left inset for the title and row labels.
 const MARGIN_X: u32 = 60;
+/// The floor a tap target never falls below, and an ordinary rule.
+const ROW_FLOOR: u32 = 96;
+const RULE: u32 = 2;
 
 /// What a tap resolved to.
 enum Tap {
@@ -27,17 +32,26 @@ struct Layout {
     rows_top: u32,
     row_h: u32,
     strip_top: u32,
+    /// This panel's own sizes for the design constants above.
+    strip_h: u32,
+    margin_x: u32,
+    rule: u32,
 }
 
 impl Layout {
-    fn compute(renderer: &TextRenderer, yres: u32) -> Self {
+    fn compute(renderer: &TextRenderer, xres: u32, yres: u32) -> Self {
+        let s = Scale::of_width(xres);
         let lh = renderer.line_height().max(1);
+        let strip_h = s.u(STRIP_H);
         Layout {
             lh,
             rows_top: lh * 3,
-            // Generous tap targets — 96px floor regardless of font size.
-            row_h: (lh * 2).max(96),
-            strip_top: yres.saturating_sub(STRIP_H),
+            // Generous tap targets — a floor regardless of font size.
+            row_h: (lh * 2).max(s.u(ROW_FLOOR)),
+            strip_top: yres.saturating_sub(strip_h),
+            strip_h,
+            margin_x: s.u(MARGIN_X),
+            rule: s.u(RULE),
         }
     }
 
@@ -103,7 +117,7 @@ fn render(fb: &mut Framebuffer, renderer: &mut TextRenderer, state: SortState, l
             fb.fill_rect(row_top, 0, xres, layout.row_h, 0x00);
         }
         let baseline = (row_top + layout.row_h * 60 / 100) as i32;
-        renderer.draw(fb, MARGIN_X as i32, baseline, key.label(), selected);
+        renderer.draw(fb, layout.margin_x as i32, baseline, key.label(), selected);
     }
 
     // Direction toggle row, set off by a divider so it reads as separate from
@@ -111,14 +125,14 @@ fn render(fb: &mut Framebuffer, renderer: &mut TextRenderer, state: SortState, l
     let dir_top = layout.rows_top + SortKey::ALL.len() as u32 * layout.row_h;
     fb.fill_rect(
         dir_top,
-        MARGIN_X,
-        xres.saturating_sub(MARGIN_X * 2),
-        2,
+        layout.margin_x,
+        xres.saturating_sub(layout.margin_x * 2),
+        layout.rule,
         0x00,
     );
     let baseline = (dir_top + layout.row_h * 60 / 100) as i32;
     let dir_text = format!("Direction:  {} {}", state.dir.word(), state.dir.arrow());
-    renderer.draw(fb, MARGIN_X as i32, baseline, &dir_text, false);
+    renderer.draw(fb, layout.margin_x as i32, baseline, &dir_text, false);
 
     draw_done(fb, renderer, layout);
 }
@@ -127,12 +141,13 @@ fn render(fb: &mut Framebuffer, renderer: &mut TextRenderer, state: SortState, l
 fn draw_done(fb: &mut Framebuffer, renderer: &mut TextRenderer, layout: &Layout) {
     let xres = fb.var.xres;
     let top = layout.strip_top;
-    fb.fill_rect(top, 0, xres, 2, 0x00); // top divider
-    fb.fill_rect(top + 2, 0, xres, STRIP_H - 2, 0xFF); // white body
+    let rule = layout.rule;
+    fb.fill_rect(top, 0, xres, rule, 0x00); // top divider
+    fb.fill_rect(top + rule, 0, xres, layout.strip_h - rule, 0xFF); // white body
     let label = "[ Done ]";
     let w = renderer.measure_width(label);
     let x = ((xres as i32 - w as i32) / 2).max(0);
-    let baseline = (top + STRIP_H * 60 / 100) as i32;
+    let baseline = (top + layout.strip_h * 60 / 100) as i32;
     renderer.draw(fb, x, baseline, label, false);
 }
 
@@ -145,7 +160,7 @@ pub fn run(
     orient: &mut Orientation,
 ) -> anyhow::Result<SortState> {
     let mut state = initial;
-    let mut layout = Layout::compute(renderer, fb.var.yres);
+    let mut layout = Layout::compute(renderer, fb.var.xres, fb.var.yres);
     render(fb, renderer, state, &layout);
     fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
 
@@ -179,7 +194,7 @@ pub fn run(
                 if o != *orient {
                     *orient = o;
                     input.set_orientation(o);
-                    layout = Layout::compute(renderer, fb.var.yres);
+                    layout = Layout::compute(renderer, fb.var.xres, fb.var.yres);
                     render(fb, renderer, state, &layout);
                     fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                 }

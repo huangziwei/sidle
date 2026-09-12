@@ -141,7 +141,7 @@ fn content_point(stamp: &str) -> String {
 /// A book `ReadingTimerController` never times is measured page by page, not
 /// bounded by the awake span.
 #[test]
-fn a_book_the_device_never_times_is_measured_by_its_page_dwell() {
+fn a_book_the_device_never_times_is_measured_by_its_pages() {
     let pages = [
         page("260814:112100", 0),
         page("260814:112200", 0),
@@ -158,7 +158,7 @@ fn a_book_the_device_never_times_is_measured_by_its_page_dwell() {
     let out = parse_sessions(all, None);
 
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].measure, Measure::Dwell);
+    assert_eq!(out[0].measure, Measure::Paged);
     assert_eq!(out[0].seconds, 60 + 120 + 120);
     assert_eq!(out[0].end_position, 442);
     assert_eq!(
@@ -182,7 +182,7 @@ fn a_page_turned_before_the_run_opens_is_not_lost() {
     let out = parse_sessions(all, None);
 
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].measure, Measure::Dwell);
+    assert_eq!(out[0].measure, Measure::Paged);
     assert_eq!(out[0].seconds, 60, "11:21:00 to 11:22:00");
 }
 
@@ -206,7 +206,7 @@ fn a_page_record_after_the_last_timer_line_carries_the_window_with_it() {
         s.ended_at, "2026-08-14T11:34:00",
         "the last page record, not the 11:32:40 timer line before it"
     );
-    assert_eq!(s.measure, Measure::Dwell);
+    assert_eq!(s.measure, Measure::Paged);
     assert_eq!(s.seconds, 60, "11:33:00 to 11:34:00");
 }
 

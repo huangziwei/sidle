@@ -1,9 +1,11 @@
-//! On-device search: canonicalize the typed query the same way the server
-//! canonicalized each book's [`Book::search_key`], then substring-match.
+//! On-device search. [`canon`] matches a query against [`Book::search_key`];
+//! [`spelled`] matches it against [`Book::title`] and [`Book::author`] as
+//! written.
 
 use crate::api::Book;
 
-/// Canonical match form: lowercase, keep only `[a-z0-9]`, drop everything else
+/// Canonical match form: lowercase, keep only `[a-z0-9]`. A query holding none
+/// answers empty, which [`matches`] tests for.
 pub fn canon(s: &str) -> String {
     s.chars()
         .flat_map(|c| c.to_lowercase())
@@ -11,18 +13,37 @@ pub fn canon(s: &str) -> String {
         .collect()
 }
 
-/// Does `book` match the already-[`canon`]'d `query`? An empty query matches
-/// everything (no search active).
+/// `s` lowercased with its whitespace dropped.
+pub fn spelled(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| c.to_lowercase())
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// Does `book` match the raw `query`? [`canon`] against [`Book::search_key`],
+/// then [`spelled`] against title and author. An empty `query` matches every
+/// book.
 pub fn matches(book: &Book, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
+    let canon_q = canon(query);
+    if !canon_q.is_empty() {
+        let keyed = match book.search_key.is_empty() {
+            false => book.search_key.contains(&canon_q),
+            true => {
+                let mut fallback = canon(&book.title);
+                fallback.push_str(&canon(&book.author));
+                fallback.contains(&canon_q)
+            }
+        };
+        if keyed {
+            return true;
+        }
     }
-    if !book.search_key.is_empty() {
-        return book.search_key.contains(query);
+    let spelled_q = spelled(query);
+    if spelled_q.is_empty() {
+        return canon_q.is_empty();
     }
-    let mut fallback = canon(&book.title);
-    fallback.push_str(&canon(&book.author));
-    fallback.contains(query)
+    spelled(&book.title).contains(&spelled_q) || spelled(&book.author).contains(&spelled_q)
 }
 
 #[cfg(test)]
@@ -61,10 +82,45 @@ mod tests {
     #[test]
     fn matches_against_search_key() {
         let b = book("sekainoowarimurakamiharuki", "世界の終り", "村上春樹");
-        assert!(matches(&b, &canon("murakami")));
-        assert!(matches(&b, &canon("sekai")));
-        assert!(matches(&b, &canon("murakamiharuki")));
-        assert!(!matches(&b, &canon("agatha")));
+        assert!(matches(&b, "murakami"));
+        assert!(matches(&b, "sekai"));
+        assert!(matches(&b, "murakamiharuki"));
+        assert!(!matches(&b, "agatha"));
+    }
+
+    /// [`matches`] finds a book by its own script through [`spelled`].
+    #[test]
+    fn a_committed_run_matches_the_title_as_written() {
+        let b = book("sekainoowarimurakamiharuki", "世界の終り", "村上春樹");
+        assert!(matches(&b, "世界"));
+        assert!(matches(&b, "終り"));
+        assert!(matches(&b, "村上"));
+        assert!(matches(&b, "村上春樹"));
+        assert!(!matches(&b, "夏目"));
+    }
+
+    /// [`matches`] tries both forms over one book.
+    #[test]
+    fn a_book_is_found_by_romaji_or_by_script() {
+        let b = book("sekainoowarimurakamiharuki", "世界の終り", "村上春樹");
+        assert!(matches(&b, "murakami"), "romaji");
+        assert!(matches(&b, "村上"), "as written");
+    }
+
+    /// [`matches`] reaches a book whose `search_key` is empty.
+    #[test]
+    fn a_book_without_a_key_matches_its_own_script() {
+        let b = book("", "夢遊病者の手記", "安部公房");
+        assert!(matches(&b, "夢遊"));
+        assert!(matches(&b, "公房"));
+    }
+
+    /// [`spelled`] drops whitespace from both sides of the test.
+    #[test]
+    fn spacing_does_not_decide_a_match() {
+        let b = book("", "The Roman Hat Mystery", "Ellery Queen");
+        assert!(matches(&b, "roman hat"));
+        assert_eq!(spelled("Roman  Hat"), "romanhat");
     }
 
     #[test]
@@ -75,12 +131,14 @@ mod tests {
 
     #[test]
     fn falls_back_to_raw_when_key_empty() {
-        // Old server: no search_key → Latin substring of title/author still works.
+        // An empty `search_key` falls back to title and author.
         let b = book("", "The Roman Hat Mystery", "Ellery Queen");
-        assert!(matches(&b, &canon("romanhat")));
-        assert!(matches(&b, &canon("queen")));
-        // CJK can't match in the fallback (no romaji on-device) — documented limit.
+        assert!(matches(&b, "romanhat"));
+        assert!(matches(&b, "queen"));
+        // A romaji query reaches no romaji key; the book answers to its own
+        // script through [`spelled`].
         let jp = book("", "世界", "村上");
-        assert!(!matches(&jp, &canon("sekai")));
+        assert!(!matches(&jp, "sekai"));
+        assert!(matches(&jp, "世界"));
     }
 }

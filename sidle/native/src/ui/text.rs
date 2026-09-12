@@ -35,8 +35,17 @@ impl TextRenderer {
         })
     }
 
-    /// The fallback chain this device ended up with, primary first, for the
-    /// startup log — see [`FontChain::paths`].
+    /// Set the type size in device pixels. Rasters cached at the old `px` are
+    /// dropped.
+    pub fn set_px(&mut self, px: f32) {
+        if px == self.px {
+            return;
+        }
+        self.px = px;
+        self.cache.clear();
+    }
+
+    /// [`FontChain::paths`] joined, primary first.
     pub fn chain_description(&self) -> String {
         self.chain
             .paths()
@@ -46,21 +55,18 @@ impl TextRenderer {
     }
 
     pub fn line_height(&self) -> u32 {
-        // The face's own vertical metrics; round up so adjacent rows don't
-        // tear into each other. Always the primary face's, so a row keeps its
-        // height whichever face draws the text.
+        // `primary`'s metrics, rounded up: one row height whichever face
+        // draws the text.
         let face = self.chain.primary().as_scaled(self.px);
         (face.height() + face.line_gap()).ceil().max(1.0) as u32
     }
 
-    /// Total advance width of `s` at the current px. Used by the overlay
-    /// to center text inside the banner.
+    /// Total advance width of `s` at `px`.
     pub fn measure_width(&mut self, s: &str) -> u32 {
         self.measure_width_in(font::Script::Unknown, s)
     }
 
-    /// [`TextRenderer::measure_width`] for text whose language is known — see
-    /// [`TextRenderer::draw_in`].
+    /// [`TextRenderer::measure_width`] for text whose `script` is known.
     pub fn measure_width_in(&mut self, script: font::Script, s: &str) -> u32 {
         let selection = self.chain.select(s, script);
         let px = self.px;
@@ -90,8 +96,7 @@ impl TextRenderer {
         self.wrap_and_clamp_in(font::Script::Unknown, text, max_width, max_lines)
     }
 
-    /// [`TextRenderer::wrap_and_clamp`] for text whose language is known — see
-    /// [`TextRenderer::draw_in`].
+    /// [`TextRenderer::wrap_and_clamp`] for text whose `script` is known.
     pub fn wrap_and_clamp_in(
         &mut self,
         script: font::Script,
@@ -118,8 +123,7 @@ impl TextRenderer {
         self.draw_in(font::Script::Unknown, fb, x, y_baseline, s, inverted)
     }
 
-    /// [`TextRenderer::draw`] for text whose language is known — a book title
-    /// from a tagged book, rather than the picker's own chrome.
+    /// [`TextRenderer::draw`] for text whose `script` is known.
     pub fn draw_in(
         &mut self,
         script: font::Script,
@@ -139,7 +143,7 @@ impl TextRenderer {
                 continue;
             }
             match self.chain.glyph_source(selection, ch) {
-                // Cache key uses bit pattern of f32 — same px always keys the same.
+                // `px_key` is the f32's bit pattern: one `px`, one key.
                 Some((face, font)) => {
                     let glyph = self
                         .cache
@@ -180,9 +184,8 @@ fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
             coverage: Vec::new(),
         };
     };
-    // Bounds are already whole pixels (floored/ceiled), and the rasterizer
-    // sizes its grid with this same expression — matching it keeps the buffer
-    // exactly the extent `draw` emits into.
+    // `px_bounds` is whole pixels, and `outline.draw` sizes its grid the same
+    // way: `coverage` is the extent it emits into.
     let bounds = outline.px_bounds();
     let (width, height) = (bounds.width() as usize, bounds.height() as usize);
     let mut coverage = vec![0u8; width * height];
@@ -202,15 +205,13 @@ fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
     }
 }
 
-/// Advance of the missing-glyph mark: an ideograph's share of the line, so a run
-/// of unmappable characters keeps the text's rhythm.
+/// Advance of the mark [`draw_missing`] draws: an ideograph's share of `px`.
 fn missing_advance(px: f32) -> u32 {
     (px * 0.72).round().max(6.0) as u32
 }
 
-/// A hollow box standing on the baseline, for a character no face in the
-/// chain has. Stroked 2px on purpose: a hairline outline is exactly what
-/// makes a font's own `.notdef` fall apart under [`COVERAGE_THRESHOLD`].
+/// A hollow box on the baseline, for a character no face in the chain has.
+/// `STROKE` clears [`COVERAGE_THRESHOLD`], which a hairline does not.
 fn draw_missing(fb: &mut Framebuffer, x: i32, y_baseline: i32, px: f32, fg: u8) {
     const STROKE: i32 = 2;
     let (left, right) = (x + STROKE, x + missing_advance(px) as i32 - STROKE * 2);
@@ -242,7 +243,7 @@ fn blit_threshold(
         return;
     }
     // put_pixel applies the orientation transform + bounds check. Glyphs
-    // are small (≤32x32 typically), so per-pixel call overhead is fine.
+    // are small (≤32x32 typically); per-pixel call overhead is fine.
     for row in 0..h {
         let cov_row = &coverage[row * w..row * w + w];
         for (col, &cov) in cov_row.iter().enumerate() {

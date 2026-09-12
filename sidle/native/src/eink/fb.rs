@@ -1,4 +1,6 @@
-//! Display surface — a real WM-managed X11 window (was raw `/dev/fb0`).
+//! Display surface: a WM-managed fullscreen X11 window. `backing` holds packed
+//! RGB ([`CH`] bytes/pixel, white=255) and reaches the server through
+//! [`Framebuffer::send_update`].
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -11,33 +13,30 @@ use x11rb::connection::RequestConnection as _;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, Gcontext, ImageFormat,
-    ImageOrder, PropMode, Screen, Visibility, Window, WindowClass,
+    ImageOrder, KeyButMask, PropMode, Screen, Visibility, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 // `change_property8` lives in the wrapper `ConnectionExt`.
 use x11rb::wrapper::ConnectionExt as _;
 
-// Waveform constants kept for call-site compatibility — the X server now picks
-// the eink waveform, so `send_update` accepts and ignores these.
+// [`Framebuffer::send_update`] accepts and ignores these.
 #[allow(dead_code)]
 pub const WAVEFORM_MODE_INIT: u32 = 0;
 pub const WAVEFORM_MODE_DU: u32 = 1;
 pub const WAVEFORM_MODE_GC16: u32 = 2;
 
-/// Bytes per pixel in the backing store: packed RGB (no alpha). The wire format
-/// is derived per-depth in `send_update` (luma for depth-8, masked RGBX for
-/// depth-24/32), so the backing stays a compact device-independent RGB.
+/// Bytes per pixel in the backing store: packed RGB, no alpha.
 pub const CH: usize = 3;
 
-/// Rec. 601 luma of an RGB pixel (the depth-8 wire collapse). A gray UI pixel
-/// (R=G=B) maps to itself exactly; a color cover desaturates. `>> 8` with these
-/// weights summing to 256 keeps it an integer multiply-shift.
+/// Rec. 601 luma, the depth-8 wire collapse. 77, 150 and 29 sum to 256, and
+/// `>> 8` divides by it.
 #[inline]
 fn luma(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29) >> 8) as u8
 }
 
-/// Resolve the R/G/B byte offsets within a `bpp`-wide wire pixel from the root
+/// R/G/B byte offsets within a `bpp`-wide wire pixel, from the root visual's
+/// colour masks under the server image byte order. `None` on depth-8.
 fn wire_channels(conn: &RustConnection, screen: &Screen, bpp: usize) -> Option<[usize; 3]> {
     if bpp < 3 {
         return None;
@@ -51,9 +50,8 @@ fn wire_channels(conn: &RustConnection, screen: &Screen, bpp: usize) -> Option<[
         return None;
     }
     let msb = conn.setup().image_byte_order == ImageOrder::MSB_FIRST;
-    // A channel's mask sits in one byte of the native-endian pixel; its byte
-    // index is the mask's trailing-zero count / 8. MSBFirst wire order mirrors
-    // that index across the pixel width.
+    // `mask` sits in one byte of the native-endian pixel, at
+    // `trailing_zeros / 8`; `msb` mirrors that index across `bpp`.
     let offset = |mask: u32| -> usize {
         let idx = (mask.trailing_zeros() / 8) as usize;
         if msb { bpp - 1 - idx } else { idx }
@@ -86,10 +84,8 @@ fn fold(events: &[Event], screensaver: Atom, covered: bool, size: (u32, u32)) ->
                 folded |= ev.data.as_data8()[0] != 0;
             }
             Event::Error(e) => {
-                // A dropped update leaves the panel stale, so treat it as damage
-                // too — retrying costs one repaint and may well succeed, where
-                // doing nothing certainly stays wrong.
-                eprintln!("x11: WARNING request failed: {e:?}");
+                // A `put_image` the server rejects arrives here.
+                eprintln!("x11: request failed: {e:?}");
                 pump.repaint = true;
             }
             _ => {}
@@ -101,10 +97,22 @@ fn fold(events: &[Event], screensaver: Atom, covered: bool, size: (u32, u32)) ->
     pump
 }
 
+/// The keysym `keycode` carries under `state`. `get_keyboard_mapping` runs once
+/// per press: keycodes 220 to 254 are rewritten between them.
+fn keysym_of(conn: &RustConnection, keycode: u8, state: u16) -> Option<u32> {
+    let reply = conn.get_keyboard_mapping(keycode, 1).ok()?.reply().ok()?;
+    // A keycode with one keysym has no shifted column.
+    let shifted = usize::from(state & u16::from(KeyButMask::SHIFT) != 0);
+    let at = shifted.min(reply.keysyms.len().saturating_sub(1));
+    let keysym = match reply.keysyms.get(at).copied().unwrap_or(0) {
+        0 => reply.keysyms.first().copied().unwrap_or(0),
+        keysym => keysym,
+    };
+    (keysym != 0).then_some(keysym)
+}
+
 /// `pixel_bytes` rounded up to a multiple of `pad`: the bytes `put_image` takes
-/// per ZPixmap scanline. A row whose pixels do not fill a whole multiple is
-/// padded out, and a server reading an unpadded row shears every row after the
-/// first.
+/// per ZPixmap scanline. An unpadded row shears every row after the first.
 fn wire_stride(pixel_bytes: usize, pad: usize) -> usize {
     let pad = pad.max(1);
     pixel_bytes.div_ceil(pad) * pad
@@ -161,8 +169,7 @@ pub struct MxcfbRect {
     pub height: u32,
 }
 
-/// Minimal geometry, exposed as `fb.var.xres` / `fb.var.yres` like the old
-/// fbdev `var`, so the renderer is unchanged.
+/// Geometry, reached as `fb.var.xres` / `fb.var.yres`.
 pub struct Var {
     pub xres: u32,
     pub yres: u32,
@@ -177,6 +184,8 @@ pub struct Pump {
     pub covered: Option<bool>,
     /// A `ConfigureNotify` size differing from the one being drawn.
     pub resized: Option<(u32, u32)>,
+    /// The keysym of every `KeyPress` drained, in order.
+    pub typed: Vec<u32>,
 }
 
 /// How long [`Framebuffer::open`] waits for `MapNotify`.
@@ -227,19 +236,15 @@ impl Framebuffer {
             .pixmap_formats
             .iter()
             .find(|f| f.depth == depth);
-        // Wire bytes per pixel the server expects for this depth. Depth 8 → 1;
-        // depth 24/32 → 4 (X pads 24-bit pixels to 32). Looked up rather than
-        // assumed so `send_update` adapts to whatever the panel's X exposes.
+        // Depth 8 → 1; depth 24 and 32 → 4.
         let bytes_per_pixel = format
             .map(|f| (f.bits_per_pixel as usize / 8).max(1))
             .unwrap_or(1);
         // `scanline_pad` is 32 bits on every standard format.
         let scanline_pad = format.map(|f| f.scanline_pad as usize / 8).unwrap_or(4);
-        // Channel byte offsets for the color wire format, from the root visual's
-        // RGB masks (so we honour BGRX vs RGBX rather than guessing). Falls back
-        // to BGRX little-endian, the usual lab126 depth-24 layout.
+        // `[2, 1, 0]` is BGRX little-endian, the depth-24 layout here.
         let chan = wire_channels(&conn, &screen, bytes_per_pixel).unwrap_or([2, 1, 0]);
-        // stderr → sidle.sh's log: confirms geometry + the format we picked.
+        // One line naming what the surface resolved to.
         eprintln!(
             "fb: xres={xres} yres={yres} depth={depth} bytes_per_pixel={bytes_per_pixel} \
              scanline_pad={scanline_pad} chan=[{},{},{}] root_visual=0x{:x}",
@@ -258,22 +263,23 @@ impl Framebuffer {
             0,
             WindowClass::INPUT_OUTPUT,
             screen.root_visual,
-            // No `backing_store`. Asking for it costs panel updates on this
-            // `STRUCTURE_NOTIFY` carries `MapNotify` and `ConfigureNotify`, and
-            // `VISIBILITY_CHANGE` a window put over this one.
+            // No `backing_store`. `STRUCTURE_NOTIFY` carries `MapNotify` and
+            // `ConfigureNotify`, `VISIBILITY_CHANGE` a window put over this
+            // one, `KEY_PRESS` a key sent to the focused window.
             &CreateWindowAux::new()
                 .background_pixel(screen.white_pixel)
                 .event_mask(
                     EventMask::EXPOSURE
                         | EventMask::VISIBILITY_CHANGE
-                        | EventMask::STRUCTURE_NOTIFY,
+                        | EventMask::STRUCTURE_NOTIFY
+                        | EventMask::KEY_PRESS
+                        | EventMask::KEY_RELEASE,
                 ),
         )
         .context("create_window")?;
 
-        // The lab126 WM reads the window name as a layout spec: Application
-        // layer, no chrome, fullscreen (the booklet/KUAL shape). `CMS~E:ss`
-        // subscribes to [`SCREENSAVER_MESSAGE`].
+        // `WM_NAME` carries the WM's layout spec. `CMS~E:ss` subscribes to
+        // [`SCREENSAVER_MESSAGE`].
         let name = b"L:A_N:application_ID:com.sidle.picker_PC:N_O:U_CMS~E:ss";
         conn.change_property8(
             PropMode::REPLACE,
@@ -291,8 +297,7 @@ impl Framebuffer {
             .context("create_gc")?;
         conn.flush().context("flush after map")?;
 
-        // `MapNotify` marks the layout done. Ahead of it `get_geometry` answers
-        // with the size that was asked for, not the one the WM laid out.
+        // `MapNotify` marks the layout done.
         let deadline = Instant::now() + LAYOUT_WAIT;
         let mut mapped = false;
         while !mapped && Instant::now() < deadline {
@@ -304,9 +309,7 @@ impl Framebuffer {
             }
         }
 
-        // What the WM gave us. `get_geometry` outranks the root read above:
-        // drawing at a size the window does not have clips every edge-anchored
-        // thing on the screen.
+        // `get_geometry` outranks the root read above.
         match conn
             .get_geometry(win)
             .map_err(|e| e.to_string())
@@ -326,7 +329,8 @@ impl Framebuffer {
         // `wire_stride` follows `xres`, which `get_geometry` above sets.
         let wire_stride = wire_stride(xres as usize * bytes_per_pixel, scanline_pad);
 
-        // Ask the connection, not the setup block. `setup().maximum_request_length`
+        // `maximum_request_bytes` is the post-BIG-REQUESTS limit, past
+        // `setup().maximum_request_length`.
         let max_req_bytes = conn.maximum_request_bytes().max(4096);
         eprintln!(
             "fb: mapped={mapped} drawing {xres}x{yres} stride={wire_stride} \
@@ -365,15 +369,14 @@ impl Framebuffer {
         })
     }
 
-    /// Single gray-pixel write in screen coords (0=black, 255=white), stored as
-    /// `(v,v,v)`. Out-of-range silently no-ops.
+    /// A gray pixel (0=black, 255=white) stored as `(v,v,v)`, no-op out of
+    /// range.
     #[inline]
     pub fn put_pixel(&mut self, x: i32, y: i32, value: u8) {
         self.put_pixel_rgb(x, y, [value, value, value]);
     }
 
-    /// Single color-pixel write in screen coords, `[r, g, b]`. Used for cover
-    /// art; the chrome uses [`put_pixel`](Self::put_pixel). Out-of-range no-ops.
+    /// One `[r, g, b]` pixel, no-op out of range.
     #[inline]
     pub fn put_pixel_rgb(&mut self, x: i32, y: i32, rgb: [u8; 3]) {
         if x < 0 || y < 0 || x >= self.var.xres as i32 || y >= self.var.yres as i32 {
@@ -385,9 +388,8 @@ impl Framebuffer {
         }
     }
 
-    /// Fill a rectangle with gray `value` (0=black, 255=white). A gray fill is
-    /// `(v,v,v)`, so every backing byte in the span is `value` — a single memset
-    /// over the `CH`-wide range stays correct and fast.
+    /// Fill a rectangle with gray `value`: every backing byte in the span is
+    /// `value`, which one `fill` writes.
     pub fn fill_rect(&mut self, top: u32, left: u32, width: u32, height: u32, value: u8) {
         if left >= self.var.xres {
             return;
@@ -406,15 +408,21 @@ impl Framebuffer {
     }
 
     /// Drain the X event queue, through [`fold`]. A reported resize is applied
-    /// before it is answered, so `var` and `backing` match the screen the
-    /// caller is about to draw.
+    /// before it is answered.
     pub fn pump_events(&mut self) -> Pump {
         let size = (self.var.xres, self.var.yres);
         let mut events = Vec::new();
         while let Ok(Some(event)) = self.conn.poll_for_event() {
             events.push(event);
         }
-        let pump = fold(&events, self.screensaver, self.covered, size);
+        let mut pump = fold(&events, self.screensaver, self.covered, size);
+        for event in &events {
+            if let Event::KeyPress(ev) = event
+                && let Some(keysym) = keysym_of(&self.conn, ev.detail, ev.state.into())
+            {
+                pump.typed.push(keysym);
+            }
+        }
         if let Some(covered) = pump.covered {
             self.covered = covered;
         }
@@ -448,7 +456,8 @@ impl Framebuffer {
         self.conn.stream().as_raw_fd()
     }
 
-    /// Present the dirty rows, converting the RGB backing to the wire pixel
+    /// Presents the rows of `rect`, converting `backing` to the wire pixel
+    /// format per band. `_waveform` is ignored.
     pub fn send_update(&mut self, rect: MxcfbRect, _waveform: u32) -> Result<u32> {
         let bpp = self.bytes_per_pixel;
         let xres = self.var.xres as usize;
@@ -459,8 +468,7 @@ impl Framebuffer {
         let bottom = rect.top.saturating_add(rect.height).min(self.var.yres);
         let max_rows = (self.max_req_bytes.saturating_sub(64) / wire_stride.max(1)).max(1);
 
-        // Scratch reused across bands: the backing RGB converted to the wire
-        // pixel format. Pad bytes (depth-24/32) stay at the 0xFF fill.
+        // `wire` is reused across bands.
         let mut wire: Vec<u8> = Vec::new();
 
         let mut y = top;
@@ -493,7 +501,8 @@ impl Framebuffer {
                 .context("put_image")?;
             y += h as u32;
         }
-        // Round-trip, not a bare flush. `flush` only guarantees the bytes left
+        // `get_input_focus` round-trips past `flush`; its `reply` marks the
+        // batch processed and delivers any error it raised.
         self.conn
             .get_input_focus()
             .context("sync round-trip")?
@@ -502,23 +511,20 @@ impl Framebuffer {
         Ok(0)
     }
 
-    /// Clone the backing buffer — the exact packed-RGB image currently on
-    /// screen. Used to save a screenshot and to restore the screen after the
-    /// capture flash overwrites it.
+    /// `backing`, cloned.
     pub fn backing_snapshot(&self) -> Vec<u8> {
         self.backing.clone()
     }
 
-    /// Restore a previously snapshotted backing buffer. No-op on a size
-    /// mismatch (a rotation between snapshot and restore would change `xres`).
-    /// The caller still has to `send_update` to present it.
+    /// `snap` into `backing`, where the two are the same length.
+    /// [`Framebuffer::send_update`] presents it.
     pub fn restore_backing(&mut self, snap: Vec<u8>) {
         if snap.len() == self.backing.len() {
             self.backing = snap;
         }
     }
 
-    /// Encode the current backing (packed RGB, white=255) as a PNG at `path`.
+    /// `backing` encoded as a PNG at `path`, unrotated.
     pub fn capture_png(&self, path: &Path) -> Result<()> {
         let img = image::RgbImage::from_raw(self.var.xres, self.var.yres, self.backing.clone())
             .context("backing buffer size != xres*yres*CH")?;
@@ -530,8 +536,7 @@ impl Framebuffer {
 
 impl Drop for Framebuffer {
     fn drop(&mut self) {
-        // Destroy the window so the WM recomposites the screen underneath (home
-        // library + status bar repaint). Best effort — Drop can't propagate.
+        // `destroy_window` hands the screen back to the WM.
         let _ = self.conn.destroy_window(self.win);
         let _ = self.conn.flush();
     }
@@ -668,8 +673,7 @@ mod tests {
 
     #[test]
     fn a_scanline_reaches_the_pad() {
-        // 758 px at one byte each is the Paperwhite's depth-8 row: 758 bytes of
-        // pixels in a 760-byte scanline.
+        // 758 bytes of pixels in a 760-byte scanline.
         assert_eq!(wire_stride(758, 4), 760);
         assert_eq!(wire_stride(760, 4), 760);
         assert_eq!(wire_stride(1860, 4), 1860);

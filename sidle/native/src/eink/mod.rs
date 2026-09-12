@@ -5,6 +5,7 @@
 pub mod buttons;
 pub mod fb;
 pub mod input;
+pub mod keysym;
 pub mod screenshot;
 pub mod touch;
 pub mod x11poc;

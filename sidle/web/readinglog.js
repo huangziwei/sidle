@@ -50,16 +50,16 @@
     return `${m}m`;
   }
 
-  // A "~" on a figure `dwell_seconds` or `awake_seconds` contributed to.
-  // `dwell_seconds` is a measurement, `awake_seconds` a bound.
+  // A "~" on a figure `paged_seconds` or `awake_seconds` contributed to.
+  // `paged_seconds` is a measurement, `awake_seconds` a bound.
   function estimateMark(e) {
-    const dwell = e.dwell_seconds || 0;
+    const paged = e.paged_seconds || 0;
     const awake = e.awake_seconds || 0;
-    if (!dwell && !awake) return "";
-    const part = dwell + awake;
+    if (!paged && !awake) return "";
+    const part = paged + awake;
     const all = part >= e.seconds;
     const how =
-      awake > dwell
+      awake > paged
         ? "measured as time awake with the book open"
         : "timed page by page from the reader's own page records";
     const title = all
@@ -73,7 +73,8 @@
   // `library::reading_log::Measure`.
   function measureVerb(measure) {
     if (measure === "awake") return "awake with the book open";
-    if (measure === "dwell") return "read, timed page by page";
+    if (measure === "timed") return "read, the counter with its refused pages";
+    if (measure === "paged") return "read, timed page by page";
     return "read";
   }
 

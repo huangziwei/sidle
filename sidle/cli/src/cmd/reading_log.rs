@@ -46,6 +46,16 @@ pub enum ReadingLogCmd {
         #[arg(long, value_name = "ID")]
         book_id: i64,
     },
+    /// Re-measure stored sittings from the archived lines, under the current
+    /// parser. Reports what would change unless `--apply` is given.
+    Heal {
+        /// The Kindle whose sittings to re-measure. Every device with archived
+        /// lines when absent.
+        #[arg(long, value_name = "SERIAL")]
+        serial: Option<String>,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Forget every stored session. The device will not send them again.
     Clear {
         #[arg(long)]
@@ -60,7 +70,69 @@ pub fn run(ctx: &Ctx, cmd: ReadingLogCmd) -> Result<()> {
         ReadingLogCmd::Import { folders, serial } => import(ctx, &folders, serial.as_deref()),
         ReadingLogCmd::Unmatched => unmatched(ctx),
         ReadingLogCmd::Attribute { position, book_id } => attribute(ctx, position, book_id),
+        ReadingLogCmd::Heal { serial, apply } => heal(ctx, serial.as_deref(), apply),
         ReadingLogCmd::Clear { apply } => clear(ctx, apply),
+    }
+}
+
+#[derive(Serialize)]
+struct HealReport {
+    device_serial: String,
+    #[serde(flatten)]
+    healed: reading_log::Healed,
+}
+
+/// Re-measure what the archive can reach. A row it cannot reach keeps what it
+/// holds: the archive begins where the device first pushed, and nothing can
+/// recompute a sitting whose lines are gone.
+fn heal(ctx: &Ctx, serial: Option<&str>, apply: bool) -> Result<()> {
+    let conn = ctx.conn();
+    let serials: Vec<String> = match serial {
+        Some(s) => vec![s.to_string()],
+        None => db::known_device_serials(&conn)?,
+    };
+    let mut reports = Vec::new();
+    for device_serial in serials {
+        let healed = reading_log::heal(
+            &conn,
+            &ctx.paths.root,
+            &device_serial,
+            apply,
+            &mut sidle_core::library::job::ignore,
+        )?;
+        reports.push(HealReport {
+            device_serial,
+            healed,
+        });
+    }
+    ctx.report(&reports, || {
+        for r in &reports {
+            let h = &r.healed;
+            println!(
+                "{}: {} file(s), {} sitting(s) parsed, {} matched, {} would move ({}), \
+                 {} left alone as newly split, {} unbacked",
+                r.device_serial,
+                h.files,
+                h.sessions,
+                h.matched,
+                h.moved,
+                signed_hours(h.delta_seconds),
+                h.split,
+                h.unbacked,
+            );
+        }
+        if !apply {
+            println!("\nNothing written. Re-run with --apply.");
+        }
+    })
+}
+
+/// A signed span, for a delta that can go either way.
+fn signed_hours(seconds: i64) -> String {
+    match seconds {
+        0 => "no change".to_string(),
+        s if s < 0 => format!("-{}", hours(-s)),
+        s => format!("+{}", hours(s)),
     }
 }
 

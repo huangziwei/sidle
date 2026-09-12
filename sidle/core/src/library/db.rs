@@ -644,14 +644,33 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             )?;
         }
     }
-    // Which of three regimes produced `seconds`: `counted` from the device's
-    // `TotalTime`, `dwell` from the reader shell's page records, `awake` from
-    // the power records. The row names it, and they sum apart.
+    // Which of four regimes produced `seconds`: `counted` from the device's
+    // `TotalTime`, `timed` from that counter with its refused pages added back,
+    // `paged` from the reader shell's page records, `awake` from the power
+    // records. The row names it, and they sum apart. A row written before the
+    // fourth existed says `dwell` for `paged`.
     if !has_column(conn, "reading_sessions", "measure")? {
         conn.execute(
             "ALTER TABLE reading_sessions ADD COLUMN measure TEXT NOT NULL DEFAULT 'counted'",
             [],
         )?;
+    }
+    // Each regime's own figure, kept beside the winner so a view can state the
+    // device's accounting or the log's without re-reading the log. Null on every
+    // row stored before the columns; see `Session`.
+    for column in [
+        "timed_seconds",
+        "timed_words",
+        "paged_seconds",
+        "paged_words",
+        "awake_seconds",
+    ] {
+        if !has_column(conn, "reading_sessions", column)? {
+            conn.execute(
+                &format!("ALTER TABLE reading_sessions ADD COLUMN {column} INTEGER"),
+                [],
+            )?;
+        }
     }
     // v24: seconds the reader's clock stood ahead of UTC, where a reader-shell
     // record stated an instant the syslog prefix also stated. Null on every row
@@ -1401,6 +1420,13 @@ pub struct ReadingSession {
     /// Seconds the reader's own clock stood ahead of UTC. `started_at` and
     /// `ended_at` stay local wall clock; this is what places them.
     pub tz_offset_s: Option<i64>,
+    /// What each regime made of this sitting, kept beside the winner so a view
+    /// states the device's accounting or the log's without re-reading the log.
+    pub timed_seconds: i64,
+    pub timed_words: i64,
+    pub paged_seconds: i64,
+    pub paged_words: i64,
+    pub awake_seconds: i64,
 }
 
 /// What storing one session did to the table.
@@ -1428,8 +1454,10 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             (device_serial, started_at, ended_at, day, end_position, book_id,
              seconds, page_turns, words,
              start_counter_ms, end_counter_ms, start_words, end_words, measure,
-             tz_offset_s)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"#,
+             tz_offset_s,
+             timed_seconds, timed_words, paged_seconds, paged_words, awake_seconds)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                    ?16, ?17, ?18, ?19, ?20)"#,
         params![
             s.device_serial,
             s.started_at,
@@ -1446,6 +1474,11 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.end_words,
             s.measure.as_str(),
             s.tz_offset_s,
+            s.timed_seconds,
+            s.timed_words,
+            s.paged_seconds,
+            s.paged_words,
+            s.awake_seconds,
         ],
     )?;
     if n > 0 {
@@ -1459,11 +1492,14 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
               SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
                   start_counter_ms = ?8, end_counter_ms = ?9,
                   start_words = ?10, end_words = ?11, measure = ?12,
-                  tz_offset_s = COALESCE(?14, tz_offset_s)
+                  tz_offset_s = COALESCE(?14, tz_offset_s),
+                  timed_seconds = ?15, timed_words = ?16,
+                  paged_seconds = ?17, paged_words = ?18, awake_seconds = ?19
             WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3
               AND (
-                    (CASE measure WHEN 'counted' THEN 0 WHEN 'dwell' THEN 1
-                                  ELSE 2 END) > ?13
+                    (CASE measure WHEN 'counted' THEN 0 WHEN 'timed' THEN 1
+                                  WHEN 'paged' THEN 2 WHEN 'dwell' THEN 2
+                                  ELSE 3 END) > ?13
                  OR (measure = ?12
                      AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4))
               )"#,
@@ -1482,6 +1518,11 @@ pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite
             s.measure.as_str(),
             s.measure.rank(),
             s.tz_offset_s,
+            s.timed_seconds,
+            s.timed_words,
+            s.paged_seconds,
+            s.paged_words,
+            s.awake_seconds,
         ],
     )?;
     Ok(if extended > 0 {
@@ -1543,6 +1584,95 @@ pub fn session_hours(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<
     rows.collect()
 }
 
+/// Every stored sitting for one device as `(started_at, end_position) ->
+/// (seconds, ended_at)`, the key the unique index holds. What
+/// [`super::reading_log::heal`] measures its fresh figures against; `ended_at`
+/// is what tells it whether a fresh parse split the row.
+pub fn reading_session_figures(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<std::collections::HashMap<(String, i64), (i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT started_at, end_position, seconds, ended_at FROM reading_sessions
+          WHERE device_serial = ?1",
+    )?;
+    let rows = stmt.query_map(params![device_serial], |r| {
+        Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?)))
+    })?;
+    rows.collect()
+}
+
+/// Write a re-measured sitting's figures over the row it matches, leaving its
+/// identity, its book and every field the parser does not state alone. Answers
+/// whether a row moved.
+pub fn remeasure_reading_session(
+    conn: &Connection,
+    device_serial: &str,
+    end_position: i64,
+    s: &super::reading_log::Session,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        r#"UPDATE reading_sessions
+              SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
+                  measure = ?8,
+                  timed_seconds = ?9, timed_words = ?10,
+                  paged_seconds = ?11, paged_words = ?12, awake_seconds = ?13,
+                  start_counter_ms = COALESCE(?14, start_counter_ms),
+                  end_counter_ms = COALESCE(?15, end_counter_ms),
+                  start_words = COALESCE(?16, start_words),
+                  end_words = COALESCE(?17, end_words),
+                  tz_offset_s = COALESCE(?18, tz_offset_s)
+            WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3"#,
+        params![
+            device_serial,
+            s.started_at,
+            end_position,
+            s.ended_at,
+            s.seconds,
+            s.page_turns,
+            s.words,
+            s.measure.as_str(),
+            s.timed_seconds,
+            s.timed_words,
+            s.paged_seconds,
+            s.paged_words,
+            s.awake_seconds,
+            s.start_counter_ms,
+            s.end_counter_ms,
+            s.start_words,
+            s.end_words,
+            s.tz_offset_s,
+        ],
+    )?;
+    if n > 0 {
+        // The hours are one measurement with the seconds; a re-measure replaces
+        // the whole distribution rather than leaving the old one beside a new
+        // total.
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM reading_sessions
+                  WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
+                params![device_serial, s.started_at, end_position],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "DELETE FROM reading_session_hours WHERE session_id = ?1",
+                params![id],
+            )?;
+            for (hour, seconds) in &s.hours {
+                conn.execute(
+                    "INSERT OR REPLACE INTO reading_session_hours (session_id, hour, seconds)
+                     VALUES (?1, ?2, ?3)",
+                    params![id, *hour as i64, seconds],
+                )?;
+            }
+        }
+    }
+    Ok(n > 0)
+}
+
 /// The newest session stored for one device, naming the row a continuation
 /// lands on. [`super::reading_log::parse_sessions`] weighs the events that
 /// decide whether the reader is in it.
@@ -1554,7 +1684,10 @@ pub fn newest_reading_session(
         r#"SELECT device_serial, started_at, ended_at, day, end_position, book_id,
                   seconds, page_turns, words,
                   start_counter_ms, end_counter_ms, start_words, end_words, measure,
-                  tz_offset_s
+                  tz_offset_s,
+                  COALESCE(timed_seconds, 0), COALESCE(timed_words, 0),
+                  COALESCE(paged_seconds, 0), COALESCE(paged_words, 0),
+                  COALESCE(awake_seconds, 0)
              FROM reading_sessions
             WHERE device_serial = ?1
             ORDER BY started_at DESC LIMIT 1"#,
@@ -1576,6 +1709,11 @@ pub fn newest_reading_session(
                 end_words: r.get(12)?,
                 measure: super::reading_log::Measure::from_stored(&r.get::<_, String>(13)?),
                 tz_offset_s: r.get(14)?,
+                timed_seconds: r.get(15)?,
+                timed_words: r.get(16)?,
+                paged_seconds: r.get(17)?,
+                paged_words: r.get(18)?,
+                awake_seconds: r.get(19)?,
             })
         },
     )
@@ -1994,8 +2132,23 @@ pub fn mark_dump_read(conn: &Connection, device_serial: &str, name: &str) -> rus
     Ok(())
 }
 
-/// Least `reading_sessions.seconds` the queries below select.
+/// Least seconds a sitting must state for the queries below to select it.
 pub const MIN_SITTING_SECS: i64 = 60;
+
+/// The seconds one `reading_sessions` row states, best measure first:
+/// `timed_seconds`, else `paged_seconds`, else the device counter's `seconds`.
+/// A row stored before those columns carries null in both and falls through.
+///
+/// Every query below totals and filters through this, so no figure on screen
+/// sums one column and floors on another.
+const SECS: &str = "(CASE WHEN COALESCE(timed_seconds, 0) > 0 THEN timed_seconds \
+                     WHEN COALESCE(paged_seconds, 0) > 0 THEN paged_seconds \
+                     ELSE seconds END)";
+
+/// [`SECS`] for a query aliasing `reading_sessions` as `s`.
+const S_SECS: &str = "(CASE WHEN COALESCE(s.timed_seconds, 0) > 0 THEN s.timed_seconds \
+                       WHEN COALESCE(s.paged_seconds, 0) > 0 THEN s.paged_seconds \
+                       ELSE s.seconds END)";
 
 /// `SUM(seconds)` per `day` over `[from, to]` (inclusive, `YYYY-MM-DD`), for
 /// rows with a `book_id` reaching [`MIN_SITTING_SECS`]. A `day` with no such
@@ -2006,9 +2159,9 @@ pub fn reading_days(
     to: &str,
 ) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT day, SUM(seconds) FROM reading_sessions
+        "SELECT day, SUM({SECS}) FROM reading_sessions
           WHERE day BETWEEN ?1 AND ?2 AND book_id IS NOT NULL
-            AND seconds >= {MIN_SITTING_SECS}
+            AND {SECS} >= {MIN_SITTING_SECS}
           GROUP BY day ORDER BY day",
     ))?;
     let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -2058,7 +2211,7 @@ fn walk_clock_hours(
         "SELECT s.day, h.hour, h.seconds
            FROM reading_session_hours h
            JOIN reading_sessions s ON s.id = h.session_id
-          WHERE s.book_id IS NOT NULL AND s.seconds >= {MIN_SITTING_SECS}",
+          WHERE s.book_id IS NOT NULL AND {S_SECS} >= {MIN_SITTING_SECS}",
     ))?;
     for row in measured.query_map([], |r| {
         Ok((
@@ -2075,7 +2228,7 @@ fn walk_clock_hours(
 
     let mut stmt = conn.prepare(&format!(
         "SELECT day, started_at, ended_at, seconds FROM reading_sessions
-          WHERE book_id IS NOT NULL AND seconds >= {MIN_SITTING_SECS}
+          WHERE book_id IS NOT NULL AND {SECS} >= {MIN_SITTING_SECS}
             AND id NOT IN (SELECT session_id FROM reading_session_hours)",
     ))?;
     let rows = stmt.query_map([], |r| {
@@ -2217,7 +2370,8 @@ pub struct SessionRow {
     pub title: String,
     pub page_turns: i64,
     pub words: i64,
-    /// `counted` | `dwell` | `awake` — see [`super::reading_log::Measure`].
+    /// `counted` | `timed` | `paged` | `awake` — see
+    /// [`super::reading_log::Measure`].
     pub measure: String,
     pub device_serial: String,
 }
@@ -2231,10 +2385,10 @@ pub fn reading_sessions_on(
     to: &str,
 ) -> rusqlite::Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT s.id, s.day, s.started_at, s.ended_at, s.seconds, s.book_id, b.title,
+        "SELECT s.id, s.day, s.started_at, s.ended_at, {S_SECS}, s.book_id, b.title,
                 s.page_turns, s.words, s.measure, s.device_serial
            FROM reading_sessions s JOIN books b ON b.id = s.book_id
-          WHERE s.day BETWEEN ?1 AND ?2 AND s.seconds >= {MIN_SITTING_SECS}
+          WHERE s.day BETWEEN ?1 AND ?2 AND {S_SECS} >= {MIN_SITTING_SECS}
           ORDER BY s.started_at",
     ))?;
     let rows = stmt.query_map(params![from, to], |r| {
@@ -2348,8 +2502,8 @@ pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option
 /// `seconds` reach [`MIN_SITTING_SECS`].
 pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT day, SUM(seconds) FROM reading_sessions
-          WHERE book_id = ?1 AND seconds >= {MIN_SITTING_SECS}
+        "SELECT day, SUM({SECS}) FROM reading_sessions
+          WHERE book_id = ?1 AND {SECS} >= {MIN_SITTING_SECS}
           GROUP BY day ORDER BY day",
     ))?;
     let rows = stmt.query_map(params![book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -2376,12 +2530,14 @@ impl ReadingSort {
         }
     }
 
-    fn expr(self) -> &'static str {
+    /// What [`reading_books`] orders by. Time sorts on the same figure the row
+    /// shows, through [`S_SECS`].
+    fn expr(self) -> String {
         match self {
-            Self::LastRead => "MAX(s.ended_at)",
-            Self::Seconds => "SUM(s.seconds)",
-            Self::Sessions => "COUNT(*)",
-            Self::Words => "SUM(s.words)",
+            Self::LastRead => "MAX(s.ended_at)".to_string(),
+            Self::Seconds => format!("SUM({S_SECS})"),
+            Self::Sessions => "COUNT(*)".to_string(),
+            Self::Words => "SUM(s.words)".to_string(),
         }
     }
 }
@@ -2435,17 +2591,17 @@ pub fn reading_books(
     let bucket = bucket.expr();
     let mut stmt = conn.prepare(&format!(
         r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
-                  SUM(s.seconds), SUM(s.page_turns), SUM(s.words), COUNT(*),
+                  SUM({S_SECS}), SUM(s.page_turns), SUM(s.words), COUNT(*),
                   MIN(s.started_at), MAX(s.ended_at),
                   GROUP_CONCAT(DISTINCT s.device_serial), {bucket},
-                  SUM(CASE WHEN s.measure = 'dwell' THEN s.seconds ELSE 0 END),
-                  SUM(CASE WHEN s.measure = 'awake' THEN s.seconds ELSE 0 END),
+                  SUM(CASE WHEN s.measure IN ('paged', 'dwell') THEN {S_SECS} ELSE 0 END),
+                  SUM(CASE WHEN s.measure = 'awake' THEN {S_SECS} ELSE 0 END),
                   b.max_position,
                   (SELECT MAX(rp.linear_pos) FROM reading_position rp
                     WHERE rp.book_id = s.book_id),
                   b.finished_at
              FROM reading_sessions s JOIN books b ON b.id = s.book_id
-            WHERE s.day BETWEEN ?1 AND ?2 AND s.seconds >= {MIN_SITTING_SECS}
+            WHERE s.day BETWEEN ?1 AND ?2 AND {S_SECS} >= {MIN_SITTING_SECS}
             GROUP BY {bucket}, s.book_id
             ORDER BY {bucket} {dir}, {} {dir}, MAX(s.ended_at) DESC"#,
         sort.expr()
@@ -2464,7 +2620,7 @@ pub fn reading_finished_count(conn: &Connection) -> rusqlite::Result<i64> {
              FROM books b
             WHERE b.id IN (SELECT DISTINCT book_id FROM reading_sessions
                             WHERE book_id IS NOT NULL
-                              AND seconds >= {MIN_SITTING_SECS})"#,
+                              AND {SECS} >= {MIN_SITTING_SECS})"#,
     ))?;
     let rows = stmt.query_map([], |r| {
         let max_position: Option<i64> = r.get(0)?;
@@ -2513,10 +2669,10 @@ pub struct ReadingEntry {
     pub cover_thumb_path: Option<String>,
     pub cover_rev: i64,
     pub seconds: i64,
-    /// How much of [`Self::seconds`] came from the page dwell, apart from the
-    /// device's own counter — see [`super::reading_log::Measure::Dwell`]. A
+    /// How much of [`Self::seconds`] came from the pages themselves, apart from the
+    /// device's own counter — see [`super::reading_log::Measure::Paged`]. A
     /// measurement of the same kind, over content the counter refuses.
-    pub dwell_seconds: i64,
+    pub paged_seconds: i64,
     /// How much of [`Self::seconds`] is the awake bound — see
     /// [`super::reading_log::Measure::Awake`]. A bound, not a measurement.
     pub awake_seconds: i64,
@@ -2559,7 +2715,7 @@ fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<
         cover_thumb_path,
         cover_rev,
         seconds: r.get(5)?,
-        dwell_seconds: r.get(13)?,
+        paged_seconds: r.get(13)?,
         awake_seconds: r.get(14)?,
         page_turns: r.get(6)?,
         words: r.get(7)?,
@@ -2659,10 +2815,10 @@ pub struct UnmatchedReading {
 /// and whose `seconds` reach [`MIN_SITTING_SECS`], newest `ended_at` first.
 pub fn unmatched_reading(conn: &Connection) -> rusqlite::Result<Vec<UnmatchedReading>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT end_position, COUNT(*), SUM(seconds), SUM(page_turns), SUM(words),
+        "SELECT end_position, COUNT(*), SUM({SECS}), SUM(page_turns), SUM(words),
                 MIN(started_at), MAX(ended_at), GROUP_CONCAT(DISTINCT device_serial)
            FROM reading_sessions
-          WHERE book_id IS NULL AND seconds >= {MIN_SITTING_SECS}
+          WHERE book_id IS NULL AND {SECS} >= {MIN_SITTING_SECS}
           GROUP BY end_position
           ORDER BY MAX(ended_at) DESC",
     ))?;
@@ -6689,6 +6845,11 @@ mod tests {
             end_words: Some(9000),
             measure: Default::default(),
             tz_offset_s: None,
+            timed_seconds: 0,
+            timed_words: 0,
+            paged_seconds: 0,
+            paged_words: 0,
+            awake_seconds: 0,
         }
     }
 
@@ -6996,7 +7157,7 @@ mod tests {
                 ended_at: "2026-08-29T20:05:12".into(),
                 book_id: Some(book),
                 seconds: 1562,
-                measure: crate::library::reading_log::Measure::Dwell,
+                measure: crate::library::reading_log::Measure::Paged,
                 ..session("2026-08-29", 1, 1562)
             },
         )
@@ -7055,7 +7216,7 @@ mod tests {
                 ended_at: "2026-08-29T23:50:04".into(),
                 book_id: Some(book),
                 seconds: 1200,
-                measure: crate::library::reading_log::Measure::Dwell,
+                measure: crate::library::reading_log::Measure::Paged,
                 ..session("2026-08-29", 1, 1200)
             },
         )

@@ -1,8 +1,11 @@
 //! Modal status overlay.
 
 use crate::eink::fb::{Framebuffer, MxcfbRect};
+use crate::ui::scale::Scale;
 use crate::ui::text::TextRenderer;
 
+/// Every length here is a design pixel at `scale::DESIGN_DPI`; each drawing
+/// function puts them on its own panel through [`Scale`].
 const BANNER_HEIGHT: u32 = 140;
 const BANNER_MARGIN_X: u32 = 80;
 /// Breathing room above and below the text block, and the least height a banner
@@ -30,11 +33,14 @@ const CANCEL_W: u32 = 320;
 const CANCEL_H: u32 = 84;
 
 pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) -> MxcfbRect {
+    let s = Scale::of_width(fb.var.xres);
     // At least the one-line footprint, so the ordinary toast still overwrites
     // the overlay it replaces exactly; taller only when the text needs it,
     // which beats spilling white rows outside the black box.
-    let banner_h = BANNER_HEIGHT.max(block_height(renderer, message) + BANNER_PAD_Y * 2);
-    let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
+    let banner_h = s
+        .u(BANNER_HEIGHT)
+        .max(block_height(renderer, message) + s.u(BANNER_PAD_Y) * 2);
+    let banner_w = fb.var.xres.saturating_sub(s.u(BANNER_MARGIN_X) * 2);
     let banner_x = (fb.var.xres - banner_w) / 2;
     let banner_y = fb.var.yres.saturating_sub(banner_h) / 2;
 
@@ -86,43 +92,44 @@ pub fn draw_download(
     title: &str,
     progress: &str,
 ) -> (MxcfbRect, MxcfbRect) {
-    let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
+    let s = Scale::of_width(fb.var.xres);
+    let banner_w = fb.var.xres.saturating_sub(s.u(BANNER_MARGIN_X) * 2);
     let banner_x = (fb.var.xres - banner_w) / 2;
-    let banner_y = (fb.var.yres.saturating_sub(DL_BANNER_HEIGHT)) / 2;
+    let banner_y = (fb.var.yres.saturating_sub(s.u(DL_BANNER_HEIGHT))) / 2;
 
-    fb.fill_rect(banner_y, banner_x, banner_w, DL_BANNER_HEIGHT, 0x00);
+    fb.fill_rect(banner_y, banner_x, banner_w, s.u(DL_BANNER_HEIGHT), 0x00);
 
     // Title + progress, white-on-black, stacked in the upper half.
-    let centered = |renderer: &mut TextRenderer, s: &str| -> i32 {
-        let w = renderer.measure_width(s);
+    let centered = |renderer: &mut TextRenderer, text: &str| -> i32 {
+        let w = renderer.measure_width(text);
         banner_x as i32 + ((banner_w as i32 - w as i32) / 2).max(0)
     };
     let tx = centered(renderer, title);
-    renderer.draw(fb, tx, (banner_y + 74) as i32, title, true);
+    renderer.draw(fb, tx, (banner_y + s.u(74)) as i32, title, true);
     let px = centered(renderer, progress);
-    renderer.draw(fb, px, (banner_y + 150) as i32, progress, true);
+    renderer.draw(fb, px, (banner_y + s.u(150)) as i32, progress, true);
 
     // Cancel button: filled white box with black label, near the bottom.
-    let cancel_x = banner_x + (banner_w.saturating_sub(CANCEL_W)) / 2;
-    let cancel_y = banner_y + DL_BANNER_HEIGHT - CANCEL_H - 34;
-    fb.fill_rect(cancel_y, cancel_x, CANCEL_W, CANCEL_H, 0xFF);
+    let cancel_x = banner_x + (banner_w.saturating_sub(s.u(CANCEL_W))) / 2;
+    let cancel_y = banner_y + s.u(DL_BANNER_HEIGHT) - s.u(CANCEL_H) - s.u(34);
+    fb.fill_rect(cancel_y, cancel_x, s.u(CANCEL_W), s.u(CANCEL_H), 0xFF);
     let label = "Cancel";
     let lw = renderer.measure_width(label);
-    let lx = cancel_x as i32 + ((CANCEL_W as i32 - lw as i32) / 2).max(0);
-    let lbaseline = (cancel_y + CANCEL_H * 66 / 100) as i32;
+    let lx = cancel_x as i32 + ((s.u(CANCEL_W) as i32 - lw as i32) / 2).max(0);
+    let lbaseline = (cancel_y + s.u(CANCEL_H) * 66 / 100) as i32;
     renderer.draw(fb, lx, lbaseline, label, false);
 
     let banner_rect = MxcfbRect {
         top: banner_y,
         left: banner_x,
         width: banner_w,
-        height: DL_BANNER_HEIGHT,
+        height: s.u(DL_BANNER_HEIGHT),
     };
     let cancel_rect = MxcfbRect {
         top: cancel_y,
         left: cancel_x,
-        width: CANCEL_W,
-        height: CANCEL_H,
+        width: s.u(CANCEL_W),
+        height: s.u(CANCEL_H),
     };
     (banner_rect, cancel_rect)
 }
@@ -133,18 +140,19 @@ pub fn draw_download_done(
     renderer: &mut TextRenderer,
     message: &str,
 ) -> MxcfbRect {
-    let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
+    let s = Scale::of_width(fb.var.xres);
+    let banner_w = fb.var.xres.saturating_sub(s.u(BANNER_MARGIN_X) * 2);
     let banner_x = (fb.var.xres - banner_w) / 2;
-    let banner_y = (fb.var.yres.saturating_sub(DL_BANNER_HEIGHT)) / 2;
+    let banner_y = (fb.var.yres.saturating_sub(s.u(DL_BANNER_HEIGHT))) / 2;
 
-    fb.fill_rect(banner_y, banner_x, banner_w, DL_BANNER_HEIGHT, 0x00);
+    fb.fill_rect(banner_y, banner_x, banner_w, s.u(DL_BANNER_HEIGHT), 0x00);
     draw_message_block(
         fb,
         renderer,
         banner_x,
         banner_y,
         banner_w,
-        DL_BANNER_HEIGHT,
+        s.u(DL_BANNER_HEIGHT),
         message,
     );
 
@@ -152,7 +160,7 @@ pub fn draw_download_done(
         top: banner_y,
         left: banner_x,
         width: banner_w,
-        height: DL_BANNER_HEIGHT,
+        height: s.u(DL_BANNER_HEIGHT),
     }
 }
 
@@ -177,23 +185,30 @@ pub fn draw_progress_stop(
     done: usize,
     total: usize,
 ) -> (MxcfbRect, MxcfbRect) {
+    let s = Scale::of_width(fb.var.xres);
     let banner = progress_body(fb, renderer, title, done, total);
 
     // Filled white box with a black label, mirroring the download Cancel.
-    let stop_x = banner.left + (banner.width.saturating_sub(STOP_W)) / 2;
-    let stop_y = banner.top + PROGRESS_BANNER_HEIGHT - STOP_H - 12;
-    fb.fill_rect(stop_y, stop_x, STOP_W, STOP_H, 0xFF);
+    let stop_x = banner.left + (banner.width.saturating_sub(s.u(STOP_W))) / 2;
+    let stop_y = banner.top + s.u(PROGRESS_BANNER_HEIGHT) - s.u(STOP_H) - s.u(12);
+    fb.fill_rect(stop_y, stop_x, s.u(STOP_W), s.u(STOP_H), 0xFF);
 
     let label = "Stop after this book";
     let lw = renderer.measure_width(label);
-    let lx = stop_x as i32 + ((STOP_W as i32 - lw as i32) / 2).max(0);
-    renderer.draw(fb, lx, (stop_y + STOP_H * 66 / 100) as i32, label, false);
+    let lx = stop_x as i32 + ((s.u(STOP_W) as i32 - lw as i32) / 2).max(0);
+    renderer.draw(
+        fb,
+        lx,
+        (stop_y + s.u(STOP_H) * 66 / 100) as i32,
+        label,
+        false,
+    );
 
     let stop_rect = MxcfbRect {
         top: stop_y,
         left: stop_x,
-        width: STOP_W,
-        height: STOP_H,
+        width: s.u(STOP_W),
+        height: s.u(STOP_H),
     };
     (banner, stop_rect)
 }
@@ -206,39 +221,54 @@ fn progress_body(
     done: usize,
     total: usize,
 ) -> MxcfbRect {
-    let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
+    let s = Scale::of_width(fb.var.xres);
+    let banner_w = fb.var.xres.saturating_sub(s.u(BANNER_MARGIN_X) * 2);
     let banner_x = (fb.var.xres - banner_w) / 2;
-    let banner_y = (fb.var.yres.saturating_sub(PROGRESS_BANNER_HEIGHT)) / 2;
+    let banner_y = (fb.var.yres.saturating_sub(s.u(PROGRESS_BANNER_HEIGHT))) / 2;
 
-    fb.fill_rect(banner_y, banner_x, banner_w, PROGRESS_BANNER_HEIGHT, 0x00);
+    fb.fill_rect(
+        banner_y,
+        banner_x,
+        banner_w,
+        s.u(PROGRESS_BANNER_HEIGHT),
+        0x00,
+    );
 
-    let centered = |renderer: &mut TextRenderer, s: &str| -> i32 {
-        let w = renderer.measure_width(s);
+    let centered = |renderer: &mut TextRenderer, text: &str| -> i32 {
+        let w = renderer.measure_width(text);
         banner_x as i32 + ((banner_w as i32 - w as i32) / 2).max(0)
     };
 
     // Title + count, white-on-black, stacked in the upper half.
     let tx = centered(renderer, title);
-    renderer.draw(fb, tx, (banner_y + 66) as i32, title, true);
+    renderer.draw(fb, tx, (banner_y + s.u(66)) as i32, title, true);
     let count = format!("{done} / {total}");
     let cx = centered(renderer, &count);
-    renderer.draw(fb, cx, (banner_y + 126) as i32, &count, true);
+    renderer.draw(fb, cx, (banner_y + s.u(126)) as i32, &count, true);
 
     // Progress track: a white outline, filled white to `done / total`.
-    let bar_x = banner_x + PROGRESS_BAR_INSET;
-    let bar_w = banner_w.saturating_sub(PROGRESS_BAR_INSET * 2);
-    let bar_y = banner_y + 156;
-    const T: u32 = 3;
-    fb.fill_rect(bar_y, bar_x, bar_w, T, 0xFF); // top
-    fb.fill_rect(bar_y + PROGRESS_BAR_H - T, bar_x, bar_w, T, 0xFF); // bottom
-    fb.fill_rect(bar_y, bar_x, T, PROGRESS_BAR_H, 0xFF); // left
-    fb.fill_rect(bar_y, bar_x + bar_w - T, T, PROGRESS_BAR_H, 0xFF); // right
+    let bar_x = banner_x + s.u(PROGRESS_BAR_INSET);
+    let bar_w = banner_w.saturating_sub(s.u(PROGRESS_BAR_INSET) * 2);
+    let bar_y = banner_y + s.u(156);
+    /// Progress-track stroke, in design pixels.
+    const T_DESIGN: u32 = 3;
+    let t = s.u(T_DESIGN);
+    fb.fill_rect(bar_y, bar_x, bar_w, t, 0xFF); // top
+    fb.fill_rect(bar_y + s.u(PROGRESS_BAR_H) - t, bar_x, bar_w, t, 0xFF); // bottom
+    fb.fill_rect(bar_y, bar_x, t, s.u(PROGRESS_BAR_H), 0xFF); // left
+    fb.fill_rect(bar_y, bar_x + bar_w - t, t, s.u(PROGRESS_BAR_H), 0xFF); // right
     if total > 0 {
-        let inner_w = bar_w.saturating_sub(T * 2);
+        let inner_w = bar_w.saturating_sub(t * 2);
         // u64 math: inner_w·done can overflow u32 on a wide panel / many books.
         let fill_w = (inner_w as u64 * done as u64 / total as u64) as u32;
         if fill_w > 0 {
-            fb.fill_rect(bar_y + T, bar_x + T, fill_w, PROGRESS_BAR_H - T * 2, 0xFF);
+            fb.fill_rect(
+                bar_y + t,
+                bar_x + t,
+                fill_w,
+                s.u(PROGRESS_BAR_H) - t * 2,
+                0xFF,
+            );
         }
     }
 
@@ -246,6 +276,6 @@ fn progress_body(
         top: banner_y,
         left: banner_x,
         width: banner_w,
-        height: PROGRESS_BANNER_HEIGHT,
+        height: s.u(PROGRESS_BANNER_HEIGHT),
     }
 }

@@ -3,45 +3,84 @@
 
 use crate::eink::fb::Framebuffer;
 use crate::ui::grid;
+use crate::ui::scale::Scale;
 use crate::ui::text::TextRenderer;
 
-/// Geometry — the single source of truth for the bar in every view.
-pub const TOP: u32 = 16;
-pub const HEIGHT: u32 = 88;
-pub const MARGIN_X: u32 = 40;
+/// Geometry — the single source of truth for the bar in every view, in design
+/// pixels at `scale::DESIGN_DPI`. [`metrics`] puts them on the panel.
+const TOP: u32 = 16;
+const HEIGHT: u32 = 88;
+const MARGIN_X: u32 = 40;
 /// Right-hand zone that clears the query (only active when a query is set).
-pub const CLEAR_W: u32 = 150;
+const CLEAR_W: u32 = 150;
 /// Diameter of each round action button — a circle inscribed in the bar height,
 /// so Sync and Update sit as two discs flush to the right margin (search field
 /// left, action buttons right — the stock Kindle layout).
-pub const BTN_D: u32 = HEIGHT;
+const BTN_D: u32 = HEIGHT;
 /// Gap before the first button and between the two buttons.
-pub const BUTTON_GAP: u32 = 24;
+const BUTTON_GAP: u32 = 24;
+
+/// The bar's geometry on an `xres`-wide panel.
+#[derive(Debug, Clone, Copy)]
+pub struct Metrics {
+    pub top: u32,
+    pub height: u32,
+    pub margin_x: u32,
+    pub clear_w: u32,
+    pub btn_d: u32,
+    pub button_gap: u32,
+}
+
+pub fn metrics(xres: u32) -> Metrics {
+    let s = Scale::of_width(xres);
+    Metrics {
+        top: s.u(TOP),
+        height: s.u(HEIGHT),
+        margin_x: s.u(MARGIN_X),
+        clear_w: s.u(CLEAR_W),
+        btn_d: s.u(BTN_D),
+        button_gap: s.u(BUTTON_GAP),
+    }
+}
+
+/// The first row below the bar — where a view's own content starts.
+pub fn below(xres: u32) -> u32 {
+    let m = metrics(xres);
+    m.top + m.height
+}
 
 /// Search-field pill width for a given view. Grid view (`with_button`): the row
 /// between the side margins minus the two round buttons and the two gaps (field↔
 /// Sync, Sync↔right), so field + gaps + buttons together span `xres - 2·MARGIN_X`.
 pub fn field_w(xres: u32, with_button: bool) -> u32 {
+    let m = metrics(xres);
     if with_button {
-        xres.saturating_sub(MARGIN_X * 2 + 2 * BUTTON_GAP + 2 * BTN_D)
+        xres.saturating_sub(m.margin_x * 2 + 2 * m.button_gap + 2 * m.btn_d)
     } else {
-        xres.saturating_sub(MARGIN_X * 2)
+        xres.saturating_sub(m.margin_x * 2)
     }
 }
 
 /// The **Update** button's rectangle `(x, y, w, h)` — the rightmost disc, flush to
 /// the right margin.
 pub fn update_button_rect(xres: u32) -> (u32, u32, u32, u32) {
-    (xres.saturating_sub(MARGIN_X + BTN_D), TOP, BTN_D, BTN_D)
+    let m = metrics(xres);
+    (
+        xres.saturating_sub(m.margin_x + m.btn_d),
+        m.top,
+        m.btn_d,
+        m.btn_d,
+    )
 }
 
 /// The **Sync** button's rectangle `(x, y, w, h)` — the disc left of Update.
 pub fn sync_button_rect(xres: u32) -> (u32, u32, u32, u32) {
+    let m = metrics(xres);
     (
-        xres.saturating_sub(MARGIN_X + 2 * BTN_D + BUTTON_GAP),
-        TOP,
-        BTN_D,
-        BTN_D,
+        xres.saturating_sub(m.margin_x + 2 * m.btn_d + m.button_gap),
+        m.top,
+        m.btn_d,
+        m.btn_d,
     )
 }
 
@@ -71,7 +110,8 @@ pub fn hit(
     with_button: bool,
     drm: bool,
 ) -> Option<Tap> {
-    if !(TOP..TOP + HEIGHT).contains(&ty) {
+    let m = metrics(xres);
+    if !(m.top..m.top + m.height).contains(&ty) {
         return None;
     }
     // Action buttons — the two right-hand discs, checked first (they sit outside
@@ -87,12 +127,12 @@ pub fn hit(
         }
     }
     // Search field pill (left of the buttons in the grid; full width otherwise).
-    let x = MARGIN_X;
+    let x = m.margin_x;
     let w = field_w(xres, with_button);
     if !(x..x + w).contains(&tx) {
         return None;
     }
-    if query_active && tx >= x + w - CLEAR_W {
+    if query_active && tx >= x + w - m.clear_w {
         return Some(Tap::Clear);
     }
     Some(Tap::Open)
@@ -102,47 +142,66 @@ pub fn hit(
 /// `✕` when a query is set. `with_button` sets the width; the left edge is fixed.
 pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str, with_button: bool) {
     let xres = fb.var.xres;
-    let x = MARGIN_X;
+    let sc = Scale::of_width(xres);
+    let m = metrics(xres);
+    let x = m.margin_x;
     let w = field_w(xres, with_button);
-    let cy = (TOP + HEIGHT / 2) as i32;
-    let baseline = (TOP + HEIGHT * 62 / 100) as i32;
+    let cy = (m.top + m.height / 2) as i32;
+    let baseline = (m.top + m.height * 62 / 100) as i32;
 
     // Pill frame + magnifier just inside the left rounded end.
-    grid::stroke_round_rect(fb, x as i32, TOP as i32, w, HEIGHT, HEIGHT / 2, 3, 0x00);
-    let mr = 18u32;
-    let mcx = (x + HEIGHT / 2 + 6) as i32;
+    grid::stroke_round_rect(
+        fb,
+        x as i32,
+        m.top as i32,
+        w,
+        m.height,
+        m.height / 2,
+        sc.u(3),
+        0x00,
+    );
+    let mr = sc.u(18);
+    let mcx = (x + m.height / 2 + sc.u(6)) as i32;
     grid::draw_magnifier(fb, mcx, cy, mr, 0x00);
-    let text_x = mcx + mr as i32 + 24;
+    let text_x = mcx + mr as i32 + sc.px(24);
 
     if query.trim().is_empty() {
         renderer.draw(fb, text_x, baseline, "Search by romaji", false);
         return;
     }
     // Active: query text (tail shown when it overflows) + the clear button.
-    let right_limit = (x + w).saturating_sub(CLEAR_W) as i32;
+    let right_limit = (x + w).saturating_sub(m.clear_w) as i32;
     let avail = (right_limit - text_x).max(0) as u32;
     let shown = clamp_tail(renderer, query, avail);
     renderer.draw(fb, text_x, baseline, &shown, false);
-    let clear_cx = (x + w).saturating_sub(CLEAR_W / 2) as i32;
-    grid::draw_x(fb, clear_cx, cy, 15, 0x00);
+    let clear_cx = (x + w).saturating_sub(m.clear_w / 2) as i32;
+    grid::draw_x(fb, clear_cx, cy, sc.px(15), 0x00);
 }
 
 /// Draw the two round action buttons flush to the right margin — **Sync** (left)
 pub fn draw_buttons(fb: &mut Framebuffer, drm: bool) {
     let xres = fb.var.xres;
+    let sc = Scale::of_width(xres);
+    let rule = sc.u(3);
     // Left disc: Sync — same slot and glyph in both sources.
     let (sx, sy, sd, _) = sync_button_rect(xres);
-    grid::stroke_round_rect(fb, sx as i32, sy as i32, sd, sd, sd / 2, 3, 0x00);
-    grid::draw_sync_glyph(fb, (sx + sd / 2) as i32, (sy + sd / 2) as i32, 20, 0x00);
+    grid::stroke_round_rect(fb, sx as i32, sy as i32, sd, sd, sd / 2, rule, 0x00);
+    grid::draw_sync_glyph(
+        fb,
+        (sx + sd / 2) as i32,
+        (sy + sd / 2) as i32,
+        sc.px(20),
+        0x00,
+    );
 
     // Right disc: Update (library) or Decrypt-All (DRM).
     let (ux, uy, ud, _) = update_button_rect(xres);
-    grid::stroke_round_rect(fb, ux as i32, uy as i32, ud, ud, ud / 2, 3, 0x00);
+    grid::stroke_round_rect(fb, ux as i32, uy as i32, ud, ud, ud / 2, rule, 0x00);
     let (ucx, ucy) = ((ux + ud / 2) as i32, (uy + ud / 2) as i32);
     if drm {
-        grid::draw_key_glyph(fb, ucx, ucy, 20, 0x00);
+        grid::draw_key_glyph(fb, ucx, ucy, sc.px(20), 0x00);
     } else {
-        grid::draw_download_glyph(fb, ucx, ucy, 18, 0x00);
+        grid::draw_download_glyph(fb, ucx, ucy, sc.px(18), 0x00);
     }
 }
 

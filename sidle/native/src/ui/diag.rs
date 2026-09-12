@@ -5,6 +5,7 @@ use crate::config::ServerConfig;
 use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_GC16};
 use crate::eink::input::{Input, InputEvent};
 use crate::eink::touch::TouchEvent;
+use crate::ui::scale::Scale;
 use crate::ui::text::TextRenderer;
 
 /// What the user chose on the Diagnostics screen.
@@ -23,13 +24,13 @@ const BTN_H: u32 = 120;
 /// the wrapped Last/Hint rows.
 const MARGIN_X: u32 = 60;
 
-fn btn_top(yres: u32) -> u32 {
-    yres.saturating_sub(BTN_H)
+fn btn_top(xres: u32, yres: u32) -> u32 {
+    yres.saturating_sub(Scale::of_width(xres).u(BTN_H))
 }
 
 /// Map a tap to a button. Anything above the button row is dead space
 pub fn hit(tx: u32, ty: u32, xres: u32, yres: u32) -> Option<Action> {
-    if ty < btn_top(yres) {
+    if ty < btn_top(xres, yres) {
         return None;
     }
     if tx < xres / 2 {
@@ -93,8 +94,9 @@ fn draw(
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
     let lh = renderer.line_height().max(1);
-    let left = MARGIN_X as i32;
-    let max_w = fb.var.xres.saturating_sub(MARGIN_X * 2);
+    let margin_x = Scale::of_width(fb.var.xres).u(MARGIN_X);
+    let left = margin_x as i32;
+    let max_w = fb.var.xres.saturating_sub(margin_x * 2);
     let mut y = lh * 3; // a little headroom from the top edge
 
     draw_line(fb, renderer, left, &mut y, lh, "Can't reach sidle server");
@@ -134,14 +136,23 @@ fn draw(
 /// Two-zone button row at the bottom: `[ Exit ]` left half, `[ Retry ]`
 fn draw_buttons(fb: &mut Framebuffer, renderer: &mut TextRenderer) {
     let xres = fb.var.xres;
-    let top = btn_top(fb.var.yres);
+    let s = Scale::of_width(xres);
+    let (btn_h, rule, inset) = (s.u(BTN_H), s.u(2), s.u(12));
+    let top = btn_top(xres, fb.var.yres);
     let mid = xres / 2;
 
-    fb.fill_rect(top, 0, xres, 2, 0x00); // top divider
-    fb.fill_rect(top + 2, 0, xres, BTN_H - 2, 0xFF); // white body
-    fb.fill_rect(top + 12, mid.saturating_sub(1), 2, BTN_H - 24, 0x00); // mid divider
+    fb.fill_rect(top, 0, xres, rule, 0x00); // top divider
+    fb.fill_rect(top + rule, 0, xres, btn_h - rule, 0xFF); // white body
+    // mid divider
+    fb.fill_rect(
+        top + inset,
+        mid.saturating_sub(rule / 2),
+        rule,
+        btn_h - inset * 2,
+        0x00,
+    );
 
-    let baseline = (top + BTN_H * 60 / 100) as i32;
+    let baseline = (top + btn_h * 60 / 100) as i32;
     // Exit (leave) in the left half — leftmost, matching every other screen.
     let exit = "[ Exit ]";
     let ew = renderer.measure_width(exit);
