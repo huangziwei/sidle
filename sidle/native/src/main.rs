@@ -48,20 +48,15 @@ use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
 
-/// Where the apps on this device keep their logs, and
-/// what the desktop's default `logs` sync collection scans.
+/// Directory holding [`LOG_PATH`] and [`UPDATE_LOG_PATH`].
 const LOG_DIR: &str = "/mnt/us/logs";
 const LOG_PATH: &str = "/mnt/us/logs/sidle-native.log";
-/// The LAN self-update's own log, apart from
-/// the gallery's `LOG_PATH`. Written by `update_log` from both the in-app
-/// **Update** button (inline in `run`) and the `--update` recovery launch.
+/// Path [`update_log`] writes.
 const UPDATE_LOG_PATH: &str = "/mnt/us/logs/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
-/// A design pixel at `ui::scale::DESIGN_DPI`; [`font_px`] puts it on the panel.
+/// Body type size in design pixels at `ui::scale::DESIGN_DPI`, scaled by [`font_px`].
 const FONT_PX: f32 = 28.0;
-/// Top margin above the grid, in design pixels: the `ui::searchbar` row and the
-/// sort/results line under it. `grid::Layout::compute` takes it as its own
-/// `top_margin`.
+/// Design pixels above the grid, scaled by [`top_margin`] for `grid::Layout::compute`.
 const TOP_MARGIN: u32 = 190;
 
 /// The body type size on an `xres`-wide panel.
@@ -73,76 +68,60 @@ fn font_px(xres: u32) -> f32 {
 fn top_margin(xres: u32) -> u32 {
     ui::scale::Scale::of_width(xres).u(TOP_MARGIN)
 }
-/// The stock indexer walks `documents/` subfolders (seen in
-/// the existing `documents/Downloads/Items01/` indexed tree). Land here so
-/// a downloaded book lands grouped in the library.
+/// Directory holding every downloaded `.kfx` and its `.sdr`.
 const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
-/// USB-drive root — the base for the misc backup scan: screenshots live in
-/// `screenshots/`, and the root on some firmware; picker logs at the
-/// root. See [`api::push_misc`].
+/// Root [`api::push_misc`] scans.
 const MNT_US: &str = "/mnt/us";
-/// Where the firmware keeps everything the pen writes: ink drawn on sideloaded
+/// Directory holding pen ink, read by [`handwriting`].
 const NOTEBOOKS_DIR: &str = "/mnt/us/.notebooks";
-/// On-device cover thumbnail cache, under the extension dir (not documents/,
-/// so the stock indexer never sees it). See [`cover_cache`].
+/// Cover cache [`cover_cache`] reads and writes.
 const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
-/// Records the KFX revision (`Book::kfx_rev`) last written for each on-device
-/// file. The Sync tap re-pulls a book the desktop reconverted, in place,
-/// under its frozen filename. Under the extension dir, never in documents/.
+/// `updates::Revs` store: `Book::kfx_rev` per on-device filename.
 const SYNCED_REVS_PATH: &str = "/mnt/us/extensions/sidle/cache/synced_revs.json";
 const CLEANINDEX: &str = "/mnt/us/system/.cleanindex";
 const TOAST_LINGER: Duration = Duration::from_millis(1200);
-/// How long a finger must rest on a book cover — without drifting more than
-/// [`ARM_SLOP_PX`] — before the tile "arms" and its action (download / decrypt)
+/// Hold time within [`ARM_SLOP_PX`] that arms a tile.
 const ARM_THRESHOLD: Duration = Duration::from_millis(1000);
-/// Max drift (either axis, user-visible px) from the finger's landing point that
-/// counts as a hold. Past this the stroke is a drag or a page-flip swipe in
-/// progress; the arm is cancelled and the `Up` classifies the swipe.
+/// Drift on either axis, in user-visible px, that counts as a hold.
 const ARM_SLOP_PX: u32 = 40;
-/// Dwell between painting the armed cue and letting the action overlay paint over
+/// Dwell between the armed cue and the action overlay.
 const ARM_DWELL: Duration = Duration::from_millis(250);
 
-/// Per-read socket timeout for the session agent. Bounds a genuinely stalled
+/// Per-read socket timeout for the session agent.
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(60);
-/// Read-buffer size for streaming a book to disk. Large enough to keep syscall
-/// overhead negligible over a ~hundreds-of-MB transfer, small enough that the
-/// Cancel poll between reads stays responsive on a healthy connection.
+/// Read-buffer size for streaming a book to disk.
 const DL_CHUNK: usize = 256 * 1024;
-/// Minimum wall-clock between progress redraws. E-ink can't usefully repaint
-/// faster, and throttling keeps the transfer (not the panel) the bottleneck.
+/// Minimum wall-clock between progress redraws.
 const DL_REDRAW_INTERVAL: Duration = Duration::from_millis(700);
 /// How often the decrypt-all wait loop re-checks the engine child for exit.
 const DEDRM_WAIT_POLL: Duration = Duration::from_millis(50);
 
-/// Cell currently outlined and awaiting release. On a book cell, release
+/// Cell outlined and awaiting release.
 struct Armed {
-    /// Index into the current `cells` view (top-level entries when at the
-    /// grouped top level, or drilled-in members) of the outlined tile.
+    /// Index of the outlined tile into the current `cells` view.
     cell_idx: usize,
     down_at: Instant,
 }
 
-/// Which library the picker is showing.
+/// Selects between the LAN library and [`dedrm::DrmBook`] entries.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Library,
     Drm,
 }
 
-/// The DRM view-models when the DRM source is active, else `None` — the value
+/// `drm` when `source` is [`Source::Drm`], else `None`.
 fn drm_slice(source: Source, drm: &[dedrm::DrmBook]) -> Option<&[dedrm::DrmBook]> {
     matches!(source, Source::Drm).then_some(drm)
 }
 
 fn main() {
-    // `--version`/`-V`: print the compiled version and exit. Cheap — no device
+    // `--version`/`-V`: print `CARGO_PKG_VERSION` and exit.
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("sidle {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // X11-window proof-of-concept (see eink::x11poc): validates that a
-    // A created window is WM-managed and recomposited on teardown, ahead of
-    // port the renderer off raw /dev/fb0. Bypasses all fb/config setup.
+    // `--probe-x` and `--x11-poc` bypass the framebuffer and config setup below.
     if std::env::args().any(|a| a == "--probe-x") {
         let r = eink::xprobe::run_logged();
         log(format!("xprobe done: {r:?}"));
@@ -153,7 +132,7 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
-    // `--archive-daemon`: keep the reading-event archive current, forever.
+    // `--archive-daemon`: run [`archive_once`] every `ARCHIVE_INTERVAL`, forever.
     if std::env::args().any(|a| a == readinglog::DAEMON_FLAG) {
         readinglog::claim_archiver();
         log("archive daemon started");
@@ -162,20 +141,18 @@ fn main() {
             std::thread::sleep(readinglog::ARCHIVE_INTERVAL);
         }
     }
-    // `--archive`: a single pass, for running it by hand.
+    // `--archive`: one [`archive_once`] pass.
     if std::env::args().any(|a| a == "--archive") {
         archive_once(true);
         return;
     }
-    // `--update`: the LAN self-update as a standalone launch. The everyday path
+    // `--update`: [`run_update`] as a standalone launch.
     if std::env::args().any(|a| a == "--update") {
         let result = run_update();
         update_log(format!("--update done: {result:?}"));
         return;
     }
-    // Opening the picker is what (re)starts the archiver — after an update, after
-    // a reboot, or a first install. Detached: the gallery
-    // never waits on it: the first pass on a fresh device reads a month of dumps.
+    // `start_archiver` detaches: [`run`] below never waits on the first pass.
     let state = readinglog::archiver();
     if let readinglog::Archiver::Outdated(pid) = state {
         readinglog::stop_archiver(pid);
@@ -193,12 +170,10 @@ fn main() {
     log(format!("done: {result:?}"));
 }
 
-/// One archive pass: collect every reading event newer than what the archive
-/// holds, and add it.
+/// Collect every reading event past `readinglog::archive_watermark` and archive it.
 fn archive_once(verbose: bool) {
     let us = std::path::Path::new(MNT_US);
-    // `seen` is empty: that list is the desktop's record of dumps it has read, which
-    // says nothing about this archive; `archive_watermark` decides here.
+    // An empty `seen` leaves `archive_watermark` the only cutoff.
     let found = readinglog::collect(us, &readinglog::archive_watermark(us), &[]);
     match readinglog::archive(us, &found.lines) {
         Ok(Some(name)) => log(format!("archived {} lines → {name}", found.lines.len())),
@@ -208,8 +183,7 @@ fn archive_once(verbose: bool) {
     }
 }
 
-/// Paint a clean centered banner panel: white-fill, draw `message`, then one
-/// full-screen GC16 refresh so it lands without DU ghosting.
+/// White-fill, draw `message` centered, then one full-screen GC16 refresh.
 fn draw_panel(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -259,7 +233,7 @@ fn relocate_server(
 
     let host = found.to_string();
     match config::save_host(Path::new(CONFIG_PATH), &host) {
-        // `host` serves this run; the next launch searches again.
+        // `cfg.host` below serves this run.
         Err(e) => log(&format!("search: found {host} but {CONFIG_PATH}: {e:#}")),
         Ok(()) => log(&format!("search: {CONFIG_PATH} now points at {host}")),
     }
@@ -267,13 +241,12 @@ fn relocate_server(
     true
 }
 
-/// The one-line banner for a [`selfupdate::run_pull`] result, shared by the
-/// in-app **Update** button (inline in [`run`]) and [`run_update`]. One phrase
-/// per outcome the pull produced. A hard error reaches the update log whole.
+/// One banner line per outcome in a [`selfupdate::run_pull`] result.
+/// [`update_log`] takes a hard error whole.
 fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> String {
     let r = match result {
         Ok(r) => r,
-        // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
+        // The wording `diag` shows for the same error.
         Err(api::SidleError::TokenMismatch) => {
             return "Plug Kindle into sidle, click Update on Kindle".to_string();
         }
@@ -307,37 +280,32 @@ fn update_result_message(result: api::Result<selfupdate::UpdateReport>) -> Strin
     parts.join(" · ")
 }
 
-/// `--update` mode: the LAN self-update as a standalone launch (the break-glass
-/// twin of the in-app **Update** button — see the `--update` dispatch in `main`).
+/// Run [`selfupdate::run_pull`] on its own framebuffer, reporting to [`update_log`].
 fn run_update() -> anyhow::Result<()> {
     update_log("=== LAN self-update (--update): start ===");
     update_log(format!("argv: {:?}", std::env::args().collect::<Vec<_>>()));
     let mut cfg = config::load(Path::new(CONFIG_PATH))?;
     update_log(format!("server: https://{}:{}", cfg.host, cfg.port));
-    // A missing or unusable CA ends `--update` here, and the log names it.
+    // A missing or unusable `api::CA_PATH` ends `run_update` here.
     let agent = api::build_agent(|c| c).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut renderer = TextRenderer::load(FONT_PX)?;
     let orient = orientation::Orientation::detect();
     let mut fb = Framebuffer::open()?;
-    // `font_px` reads the width the panel states.
+    // `font_px` takes the width `fb.var` states.
     renderer.set_px(font_px(fb.var.xres));
     let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
     let buttons = Buttons::open().ok().flatten();
     let mut input = Input::new(touch, buttons);
     input.set_orientation(orient);
 
-    // Progress banner — the manifest fetch + ~1.8 MB download can take a beat on
-    // a sleepy radio.
     draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
 
-    // `selfupdate::run_pull` below needs `cfg.host`. One probe for a `cfg.host`
-    // that answers, on a connection `agent` keeps for the manifest fetch.
+    // `selfupdate::run_pull` below reads `cfg.host`.
     if relocate_server(&mut fb, &mut renderer, &agent, &mut cfg, &|m| update_log(m)) {
         draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
     }
 
-    // Step-level breadcrumbs go to the dedicated update log via the closure.
     let message = update_result_message(selfupdate::run_pull(
         &agent,
         &cfg,
@@ -347,9 +315,7 @@ fn run_update() -> anyhow::Result<()> {
     ));
     update_log(format!("result: {message}"));
 
-    // Result panel, then block until a tap or page button. On return the window
-    // tears down and the home screen is recomposited (every exit path's
-    // behavior).
+    // Result panel, then block until a tap or page button.
     draw_panel(&mut fb, &mut renderer, &message)?;
     loop {
         match input.next()? {
@@ -374,25 +340,20 @@ fn run() -> anyhow::Result<()> {
     let mut cfg = config::load(Path::new(CONFIG_PATH))?;
     log(format!("server: https://{}:{}", cfg.host, cfg.port));
 
-    // One agent for the whole session: keep-alive across list + covers +
+    // One agent for the whole session, keep-alive across list, covers and downloads.
     let agent = api::build_agent(|c| c.timeout_recv_body(Some(SOCKET_READ_TIMEOUT)))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cache_dir = Path::new(COVER_CACHE_DIR);
 
-    // Open the X11 window, input, and renderer *before* the first network
     let mut renderer = TextRenderer::load(FONT_PX)?;
-    // Which faces this firmware actually has. A device missing one drops
-    // it silently from the chain, and the only other symptom is a character
-    // that doesn't draw.
+    // The faces `TextRenderer::load` found on this device.
     log(format!("fonts: {}", renderer.chain_description()));
 
     let orient = orientation::Orientation::detect();
     log(format!("orientation: {orient:?}"));
 
-    // The X server rotates the window to what `Orientation::detect` reads;
-    // raw evdev coords are panel-fixed and `set_orientation` corrects them.
     let mut fb = Framebuffer::open()?;
-    // `font_px` reads the width the panel states.
+    // `font_px` takes the width `fb.var` states.
     renderer.set_px(font_px(fb.var.xres));
     log(format!(
         "scale: {} dpi, body {}px",
@@ -400,8 +361,7 @@ fn run() -> anyhow::Result<()> {
         font_px(fb.var.xres)
     ));
     let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
-    // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
-    // them, and map them to prev/next through `Input`.
+    // `Buttons::open` takes the `gpio-keys` evdev device, apart from `Touch`.
     let buttons = match Buttons::open() {
         Ok(Some(b)) => {
             log("buttons: grabbed gpio-keys");
@@ -417,20 +377,17 @@ fn run() -> anyhow::Result<()> {
         }
     };
     let mut input = Input::new(touch, buttons);
-    // Sync the initial orientation onto both devices (Buttons default to Up).
-    // `current_orient` tracks it so InputEvent::Tick can detect a later flip.
+    // `current_orient` below compares against this on every `InputEvent::Tick`.
     input.set_orientation(orient);
     let mut current_orient = orient;
 
-    // Fetch the library, retrying through the Diagnostics screen on failure —
-    // a toast and a return flashes the home screen back with no recourse.
+    // `diag::run` handles a failed fetch; its Retry re-enters the loop.
     let t0 = Instant::now();
     let books = loop {
         match api::list_books(&agent, &cfg) {
             Ok(b) => break b,
             Err(err) => {
                 log(format!("list_books failed: {err}"));
-                // Ahead of `diag::run`, whose Retry redials `cfg.host`.
                 if relocate_server(&mut fb, &mut renderer, &agent, &mut cfg, &|m| log(m)) {
                     continue;
                 }
@@ -443,12 +400,9 @@ fn run() -> anyhow::Result<()> {
     };
     let total_from_server = books.len();
 
-    // Hide books this device holds: the picker is a transfer queue.
-    // The sha8 in each on-device filename is the source of truth.
+    // `downloaded` holds the sha8 of each on-device filename.
     let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
-    // `mut`: a mid-session download removes its book from this master set so the
-    // tile hides immediately (see the long-press handler), matching the
-    // boot-time hide of books this device holds.
+    // `mut`: a mid-session download removes its book from this set.
     let mut all_books: Vec<api::Book> = books
         .iter()
         .filter(|b| match b.kfx_sha256.as_deref() {
@@ -458,22 +412,20 @@ fn run() -> anyhow::Result<()> {
         .cloned()
         .collect();
 
-    // Which source is showing (LAN library vs on-device DRM books) + the DRM
+    // `lib_stash` holds `all_books` while `source` is `Source::Drm`.
     let mut source = Source::Library;
     let mut drm_books: Vec<dedrm::DrmBook> = Vec::new();
     let mut lib_stash: Vec<api::Book> = Vec::new();
 
-    // `all_books` is the master (hide-downloaded) set. The picker is **grouped
     let mut sort = SortState::default();
     let mut filters = Filters::default();
-    // Romaji search query (top-level only). Typed on the on-screen keyboard
-    // (`ui::keyboard`), folded into `rebuild_view` alongside the facets.
+    // Romaji query from `ui::keyboard`, read by `rebuild_view`.
     let mut query = String::new();
     let mut entries = series::group_by_series(rebuild_view(&all_books, &filters, sort, &query));
     let mut series_view: Option<String> = None;
     let mut cells = series::cells_for_top(&entries);
 
-    // How many cells this panel fits, which sets the page size.
+    // `layout.page_size` counts the cells this panel fits.
     let mut layout = grid::Layout::compute(
         fb.var.xres,
         fb.var.yres,
@@ -500,8 +452,7 @@ fn run() -> anyhow::Result<()> {
         t0.elapsed()
     ));
 
-    // Lazy cover fetch: all `None` to start, filled per page.
-    // `covers` is parallel to `cells`; the first paint shows placeholders and titles.
+    // `covers` is parallel to `cells`, filled a page at a time.
     let mut covers: Vec<Option<DynamicImage>> = vec![None; cells.len()];
 
     let mut page: usize = 0;
@@ -525,33 +476,25 @@ fn run() -> anyhow::Result<()> {
     )?;
 
     let mut armed: Option<Armed> = None;
-    // Where the current touch landed (set on Down, cleared on Up) — lets the Up
-    // handler tell a tap from a horizontal page-flip swipe. Independent of
-    // `armed`, since a swipe can start anywhere, not just on a cover cell.
+    // Landing point of the current touch, set on Down and cleared on Up.
     let mut down_pos: Option<(u32, u32)> = None;
     loop {
-        // While a *book* cell is held, wake at the arm threshold so the tile can flip and
-        // auto-fire; finger jitter keeps `poll` busy past a plain `Tick`.
+        // A held `CellKind::Book` wakes `next_deadline` at `ARM_THRESHOLD`.
         let deadline = match armed.as_ref() {
             Some(a) if matches!(cells.get(a.cell_idx).map(|c| &c.kind), Some(CellKind::Book)) => {
                 Some(a.down_at + ARM_THRESHOLD)
             }
             _ => None,
         };
-        // An `Expose`, a cover and a resize all arrive on the X connection,
-        // which is no input device; without this they wait out the idle tick.
+        // `fb.raw_fd` carries `Expose`, cover and resize events.
         input.watch([Some(fb.raw_fd()), None]);
         let event = input.next_deadline(deadline)?;
 
         match event {
             InputEvent::Touch(TouchEvent::Down { x, y }) => {
                 log(format!("down: ({x},{y})"));
-                // Remember the landing point so the matching Up can tell a tap
-                // from a horizontal page-flip swipe (a panel with no bezel
                 down_pos = Some((x, y));
-                // Down on a cell arms it. Down on the strip or in margins
-                // is a no-op — strip actions fire on Up regardless of
-                // hold time, and never arm.
+                // `layout.cell_at_tap` misses the strip and the margins, which never arm.
                 let visible_count = cells
                     .len()
                     .saturating_sub(page * layout.page_size())
@@ -589,14 +532,12 @@ fn run() -> anyhow::Result<()> {
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
                 log(format!("up: ({x},{y})"));
 
-                // A horizontal swipe flips the page — the page-turn affordance
+                // `classify_swipe` turns a horizontal swipe into a page flip.
                 if let Some(dir) = down_pos
                     .take()
                     .and_then(|(x0, y0)| classify_swipe(x0, y0, x, y, fb.var.xres))
                 {
-                    // Cancel whatever the Down armed; the repaint clears its
-                    // outline. `had_armed` forces a repaint even at a page
-                    // boundary so a lingering outline doesn't stay on screen.
+                    // `had_armed` forces the repaint at a page boundary, clearing the outline.
                     let had_armed = armed.take().is_some();
                     let new_page = match dir {
                         SwipeDir::Next => (page + 1).min(total_pages.saturating_sub(1)),
@@ -627,15 +568,13 @@ fn run() -> anyhow::Result<()> {
                 }
 
                 if let Some(a) = armed.take() {
-                    // Resolve the armed tile to an owned decision *before* acting:
+                    // `drill_target` owns its name, freeing the borrow on `cells`.
                     let drill_target = match &cells[a.cell_idx].kind {
                         CellKind::Series { name, .. } => Some(name.clone()),
                         CellKind::Book => None,
                     };
                     if let Some(name) = drill_target {
                         log(format!("drill into series: {name}"));
-                        // The tapped series is in `entries` by construction,
-                        // so `members_of` is Some; the `if let` is defensive.
                         if let Some(members) = series::members_of(&entries, &name) {
                             cells = series::cells_for_series(members);
                             total_pages = pager::n_pages(cells.len(), layout.page_size());
@@ -662,7 +601,7 @@ fn run() -> anyhow::Result<()> {
                         }
                         continue;
                     }
-                    // Book cell released. A hold long enough to act has
+                    // `CellKind::Book` released short of `ARM_THRESHOLD`.
                     log(format!(
                         "short tap ({:?}), showing hint",
                         a.down_at.elapsed()
@@ -674,7 +613,7 @@ fn run() -> anyhow::Result<()> {
                     let dirty = toast::draw(&mut fb, &mut renderer, hint);
                     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                     thread::sleep(TOAST_LINGER);
-                    // Repaint to clear both the toast and the cell outline Down left.
+                    // Clear the toast and the cell outline.
                     repaint_page(
                         &mut fb,
                         &mut renderer,
@@ -695,7 +634,7 @@ fn run() -> anyhow::Result<()> {
                     continue;
                 }
 
-                // Search bar (top level only — the bar isn't drawn when drilled).
+                // `ui::searchbar` is drawn only when `series_view` is None.
                 if series_view.is_none()
                     && let Some(tap) = ui::searchbar::hit(
                         x,
@@ -706,9 +645,7 @@ fn run() -> anyhow::Result<()> {
                         matches!(source, Source::Drm),
                     )
                 {
-                    // Update and Sync are actions (LAN self-update / annotation
-                    // push), not query edits — run inline and loop, leaving the
-                    // query and view untouched.
+                    // `Tap::Update` and `Tap::Sync` run inline, leaving `query` and `cells` alone.
                     match tap {
                         ui::searchbar::Tap::Update => {
                             log("update-button tap");
@@ -746,8 +683,6 @@ fn run() -> anyhow::Result<()> {
                             continue;
                         }
                         ui::searchbar::Tap::DecryptAll => {
-                            // DRM view's right disc: decrypt every on-device purchase, push each to the
-                            // desktop behind an `n/total` bar, then re-scan so the synced tiles drop out.
                             log("decrypt-all button tap");
                             if drm_books.is_empty() {
                                 let dirty =
@@ -767,9 +702,7 @@ fn run() -> anyhow::Result<()> {
                                     log(format!("decrypt-all flow error: {err:#}"));
                                     format!("Decrypt-all failed: {err}")
                                 });
-                                // Full-panel summary: the progress banner is taller
-                                // than a plain toast; a full clear leaves no
-                                // its top/bottom edges around the result.
+                                // `draw_panel` clears the taller progress banner whole.
                                 draw_panel(&mut fb, &mut renderer, &summary)?;
                                 thread::sleep(TOAST_LINGER);
                                 drm_books = dedrm::scan();
@@ -807,9 +740,7 @@ fn run() -> anyhow::Result<()> {
                             continue;
                         }
                         ui::searchbar::Tap::Sync => {
-                            // The Sync button is context-aware: in the library it
-                            // pushes reading-state sidecars (annotations); in DRM
-                            // mode it re-pushes every decrypted book to the desktop.
+                            // `source` picks between an annotation push and a decrypted-book push.
                             log("sync-button tap");
                             let banner_msg = match source {
                                 Source::Drm => {
@@ -830,8 +761,7 @@ fn run() -> anyhow::Result<()> {
                                     let dirty = toast::draw(&mut fb, &mut renderer, "Syncing…");
                                     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                     let sync_t0 = Instant::now();
-                                    // One walk of `.notebooks/` feeds both halves of the handwriting sync: ink rides
-                                    // with the annotations (it needs their anchors), notebooks go afterwards.
+                                    // `pen` feeds both `push_annotations` and `push_notebooks`.
                                     let hw_t0 = Instant::now();
                                     let pen = handwriting::scan(
                                         std::path::Path::new(NOTEBOOKS_DIR),
@@ -862,7 +792,6 @@ fn run() -> anyhow::Result<()> {
                                                 "annotation sync ok in {:?}: {summary}",
                                                 sync_t0.elapsed()
                                             ));
-                                            // Same Sync tap also backs up screenshots + picker
                                             match api::push_misc(
                                                 &agent,
                                                 &cfg,
@@ -879,7 +808,6 @@ fn run() -> anyhow::Result<()> {
                                                     summary = format!("{summary}\n(backup failed)");
                                                 }
                                             }
-                                            // The standalone-notebook half of the pen sync.
                                             match api::push_notebooks(&agent, &cfg, &pen.notebooks)
                                             {
                                                 Ok(nb) => {
@@ -902,10 +830,8 @@ fn run() -> anyhow::Result<()> {
                                                     log(format!("notebook backup failed: {err}"));
                                                 }
                                             }
-                                            // The same Sync tap sends the reading sessions the firmware logged. The desktop
-                                            // says how far it has read; everything older is skipped unopened.
                                             let rl_t0 = Instant::now();
-                                            // Archive first, then push. The
+                                            // `archive_once` runs before `push_reading_log` reads the archive.
                                             archive_once(false);
                                             match api::push_reading_log(
                                                 &agent,
@@ -925,7 +851,6 @@ fn run() -> anyhow::Result<()> {
                                                         rl.attributed,
                                                         rl.skipped,
                                                         rl.from.live,
-                                                        // The live log is the only source carrying
                                                         if rl.from.live_read {
                                                             ""
                                                         } else {
@@ -943,11 +868,8 @@ fn run() -> anyhow::Result<()> {
                                                     log(format!("reading log failed: {err}"));
                                                 }
                                             }
-                                            // Same Sync tap pulls any book the desktop
                                             {
-                                                // Re-fetch the list so a reconvert done while the
-                                                // picker was open is seen; fall back
-                                                // to the boot snapshot if the refresh fails.
+                                                // `fresh` carries a reconvert made during this run; `books` is the fallback.
                                                 let fresh = api::list_books(&agent, &cfg).ok();
                                                 let for_update =
                                                     fresh.as_deref().unwrap_or(books.as_slice());
@@ -1037,8 +959,7 @@ fn run() -> anyhow::Result<()> {
                             log("search cleared");
                             query.clear();
                         }
-                        // Handled above (early `continue`); the field only yields
-                        // Open/Clear here.
+                        // `Tap::Open` and `Tap::Clear` are the only arms reaching here.
                         ui::searchbar::Tap::Update
                         | ui::searchbar::Tap::Sync
                         | ui::searchbar::Tap::DecryptAll => unreachable!(),
@@ -1073,9 +994,7 @@ fn run() -> anyhow::Result<()> {
                     continue;
                 }
 
-                // No armed cell — Up on the strip means a strip action.
-                // Off-cell-off-strip is ignored. `drilled` swaps the Filter slot
-                // for Back (see pager::hit).
+                // With `armed` empty, `pager::hit` resolves the Up to a strip action.
                 if let Some(hit) = pager::hit(
                     x,
                     y,
@@ -1091,7 +1010,7 @@ fn run() -> anyhow::Result<()> {
                         }
                         PagerHit::Filter => {
                             log("filter-button tap");
-                            // Blocking overlay (filter menu → value pickers / sort
+                            // `filtermenu::run` blocks until its overlay closes.
                             let before_filters = filters.clone();
                             let before_sort = sort;
                             filtermenu::run(
@@ -1104,7 +1023,6 @@ fn run() -> anyhow::Result<()> {
                                 &mut current_orient,
                             )?;
                             if filters != before_filters || sort != before_sort {
-                                // Re-filter+sort the master, re-fold into series
                                 entries = series::group_by_series(rebuild_view(
                                     &all_books, &filters, sort, &query,
                                 ));
@@ -1119,7 +1037,7 @@ fn run() -> anyhow::Result<()> {
                                     sort.header(),
                                 ));
                             }
-                            // Repaint regardless — the overlay painted over the grid.
+                            // `filtermenu::run` painted over the grid.
                             repaint_page(
                                 &mut fb,
                                 &mut renderer,
@@ -1139,8 +1057,6 @@ fn run() -> anyhow::Result<()> {
                             )?;
                         }
                         PagerHit::Back => {
-                            // Pop the drill-in back to the grouped top level. Same
-                            // strip slot as Filter, swapped in while drilled.
                             log("back to series top level");
                             series_view = None;
                             cells = series::cells_for_top(&entries);
@@ -1212,14 +1128,12 @@ fn run() -> anyhow::Result<()> {
                             }
                         }
                         PagerHit::Source => {
-                            // Library-switch button (former Sync slot): toggle the
-                            // LAN library ↔ on-device DRM books.
+                            // Toggle `source` between the LAN library and `dedrm` books.
                             log("source-button tap");
                             let before = source;
                             match source {
                                 Source::Library => {
-                                    // → DRM. Gate on the engine being installed, then on at least one purchase
-                                    // present. Any miss toasts and stays.
+                                    // `dedrm::available` and a non-empty `drm_books` both gate the switch.
                                     if !dedrm::available() {
                                         let dirty = toast::draw(
                                             &mut fb,
@@ -1239,8 +1153,7 @@ fn run() -> anyhow::Result<()> {
                                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                             thread::sleep(TOAST_LINGER);
                                         } else {
-                                            // Park the library master so the swap
-                                            // back restores it (with any hides).
+                                            // `lib_stash` holds `all_books` for the switch back.
                                             lib_stash = std::mem::take(&mut all_books);
                                             all_books =
                                                 drm_books.iter().map(|d| d.book.clone()).collect();
@@ -1250,14 +1163,12 @@ fn run() -> anyhow::Result<()> {
                                     }
                                 }
                                 Source::Drm => {
-                                    // → Library. Restore the parked master.
                                     all_books = std::mem::take(&mut lib_stash);
                                     source = Source::Library;
                                     log(format!("→ Library source: {} books", all_books.len()));
                                 }
                             }
-                            // Only rebuild when the source actually flipped: a failed switch leaves the view
-                            // untouched. Fresh query and facets for the new set; the sort key carries over.
+                            // `sort` carries across the switch; `query` and `filters` reset.
                             if source != before {
                                 query.clear();
                                 filters = Filters::default();
@@ -1270,8 +1181,7 @@ fn run() -> anyhow::Result<()> {
                                 covers = vec![None; cells.len()];
                                 page = 0;
                             }
-                            // Repaint regardless — a toast (or the swap) painted
-                            // over the grid.
+                            // A toast or the switch painted over the grid.
                             repaint_page(
                                 &mut fb,
                                 &mut renderer,
@@ -1294,9 +1204,7 @@ fn run() -> anyhow::Result<()> {
                 }
             }
             InputEvent::Touch(TouchEvent::Screenshot) => {
-                // Two-corner gesture. Cancel any cell the first finger armed so
-                // its lift can't fire a download, then capture + flash. Also drop
-                // the swipe landing point — the suppressed lift won't clear it.
+                // Clearing `armed` and `down_pos` makes the suppressed lift inert.
                 armed = None;
                 down_pos = None;
                 match eink::screenshot::capture(&mut fb) {
@@ -1311,8 +1219,6 @@ fn run() -> anyhow::Result<()> {
                     current_orient = input.orientation();
                     continue;
                 }
-                // A hardware page-turn cancels an in-progress long-press: the
-                // armed state and the landing point drop with it.
                 armed = None;
                 down_pos = None;
                 let new_page = match pb {
@@ -1341,12 +1247,9 @@ fn run() -> anyhow::Result<()> {
                 }
             }
             InputEvent::Tick => {
-                // Drained on every Tick, armed or not: the X descriptor is one
-                // of the things that wakes this poll, and a queue left full
-                // wakes it again at once.
+                // `fb.raw_fd` wakes this poll, and a full queue wakes it again at once.
                 let pump = fb.pump_events();
-                // A window over this one takes the input devices with it; the
-                // grab is retaken on every tick it is owed.
+                // `input.retake` reclaims the devices a covering window took.
                 if let Some(covered) = pump.covered {
                     log(format!("x11: covered={covered}"));
                     input.set_covered(covered);
@@ -1354,8 +1257,7 @@ fn run() -> anyhow::Result<()> {
                     armed = None;
                 }
                 input.retake();
-                // A new layout resizes the grid before anything is drawn into
-                // it: `fb.var` carries the size laid out.
+                // `fb.var` carries the size `pump.resized` reports.
                 if pump.resized.is_some() {
                     layout = grid::Layout::compute(
                         fb.var.xres,
@@ -1372,7 +1274,6 @@ fn run() -> anyhow::Result<()> {
                         layout.page_size()
                     ));
                 }
-                // A Tick means one of two things:
                 let arm_ready = match armed.as_ref() {
                     Some(a) => {
                         matches!(cells.get(a.cell_idx).map(|c| &c.kind), Some(CellKind::Book))
@@ -1382,7 +1283,7 @@ fn run() -> anyhow::Result<()> {
                 };
                 if arm_ready {
                     let a = armed.take().unwrap();
-                    // Slop guard: a finger that wandered off its landing point is
+                    // A touch past `ARM_SLOP_PX` from `down_pos` cancels the arm.
                     let (px, py) = input.touch_pos();
                     let (dx, dy) = down_pos.unwrap_or((px, py));
                     if px.abs_diff(dx) > ARM_SLOP_PX || py.abs_diff(dy) > ARM_SLOP_PX {
@@ -1407,9 +1308,7 @@ fn run() -> anyhow::Result<()> {
                             drm_slice(source, &drm_books),
                         )?;
                     } else {
-                        // Flip the tile to the armed cue and present it (partial
-                        // refresh + short dwell) before the action overlay paints
-                        // over it: the "held long enough" signal is seen.
+                        // `draw_arm_cue` gets `ARM_DWELL` on screen ahead of the action overlay.
                         let cell_pos = a.cell_idx.saturating_sub(page * layout.page_size());
                         let (cx, cy) = layout.cell_xy(cell_pos);
                         if cx >= 0 && cy >= 0 {
@@ -1425,11 +1324,8 @@ fn run() -> anyhow::Result<()> {
                             )?;
                             thread::sleep(ARM_DWELL);
                         }
-                        // Auto-fire: act on the book — download it (library) or decrypt it (DRM). The
-                        // finger is down, and its lift is inert.
                         let book = &cells[a.cell_idx].cover_book;
-                        // Take the identity here: `book` borrows `cells`, and the
-                        // hide-on-success rebuild below reassigns `cells`.
+                        // `dl_id` outlives the `cells` borrow the rebuild below reassigns.
                         let dl_id = book.id;
                         let held = a.down_at.elapsed();
                         log(format!(
@@ -1470,7 +1366,7 @@ fn run() -> anyhow::Result<()> {
                             "action for book {dl_id} finished in {:?}",
                             dl_t0.elapsed()
                         ));
-                        // Terminal banner. The DRM decrypt overlay is a plain 140px
+                        // `source` picks the banner `banner_msg` is drawn into.
                         let dirty = match source {
                             Source::Drm => toast::draw(&mut fb, &mut renderer, &banner_msg),
                             Source::Library => {
@@ -1479,8 +1375,7 @@ fn run() -> anyhow::Result<()> {
                         };
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
-                        // Hide the acted book. Drop it from the master
-                        // set and re-derive the current view. The page is kept, clamped if it emptied.
+                        // Drop `dl_id` from `all_books` and re-derive `entries` and `cells`.
                         if saved {
                             all_books.retain(|b| b.id != dl_id);
                             entries = series::group_by_series(rebuild_view(
@@ -1490,8 +1385,7 @@ fn run() -> anyhow::Result<()> {
                             cells = match drilled {
                                 Some(name) => match series::members_of(&entries, &name) {
                                     Some(members) => series::cells_for_series(members),
-                                    // The series' last undownloaded member was the
-                                    // the grabbed one — it's gone; pop to top level.
+                                    // `dl_id` was the series' last member.
                                     None => {
                                         series_view = None;
                                         series::cells_for_top(&entries)
@@ -1507,7 +1401,7 @@ fn run() -> anyhow::Result<()> {
                                 cells.len(),
                             ));
                         }
-                        // The holding finger's eventual lift must not read as a swipe.
+                        // An empty `down_pos` keeps the holding finger's lift out of `classify_swipe`.
                         down_pos = None;
                         repaint_page(
                             &mut fb,
@@ -1528,11 +1422,9 @@ fn run() -> anyhow::Result<()> {
                         )?;
                     }
                 } else if armed.is_none() {
-                    // Idle poll. Several things can leave the window stale, and
-                    // all are repaired the same way — repaint the current page.
                     let turned = input.follow_orientation();
                     current_orient = input.orientation();
-                    // Covered: nothing is drawn under the window in front.
+                    // `fb.covered` holds the repaint back while a window is in front.
                     let damaged =
                         pump.repaint || pump.resized.is_some() || pump.covered == Some(false);
                     if !fb.covered() && (turned || damaged) {
@@ -1558,26 +1450,21 @@ fn run() -> anyhow::Result<()> {
                         )?;
                     }
                 }
-                // else: armed but below threshold (the deadline gates this Tick;
-                // this shouldn't occur) — fall through and keep polling.
+                // `armed` below `ARM_THRESHOLD` falls through and keeps polling.
             }
         }
     }
     Ok(())
 }
 
-/// The filtered+sorted master view, ready to fold into series collections
-/// (`series::group_by_series`): `all_books` filtered by the active facets, then
-/// sorted. Cloning a few hundred small `Book` structs per rebuild is trivial.
+/// `all_books` narrowed by `query` and `filters`, ordered by `sort`.
 fn rebuild_view(
     all_books: &[api::Book],
     filters: &Filters,
     sort: SortState,
     query: &str,
 ) -> Vec<api::Book> {
-    // Search and facets are ANDed; survivors regroup into series tiles (a tile
-    // shows iff ≥1 member matches — members carry the series romaji in their
-    // search_key: searching a series name surfaces the collection).
+    // `query` and `filters` are ANDed; `search_key` carries the series romaji.
 
     let mut view: Vec<api::Book> = all_books
         .iter()
@@ -1588,9 +1475,7 @@ fn rebuild_view(
     view
 }
 
-/// Draw one page of `cells` with placeholders, the header, and the bottom
-/// strip, then one full GC16 refresh. Series cells get the collection art
-/// (`grid::draw_series_cell`); book cells the cover-or-title-placeholder.
+/// Draw one page of `cells`, the header and the strip, then one full GC16 refresh.
 #[allow(clippy::too_many_arguments)]
 fn draw_gallery_page(
     fb: &mut Framebuffer,
@@ -1608,9 +1493,7 @@ fn draw_gallery_page(
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
-    // Top chrome. At the top level: the search bar (the shared widget — same in
-    // the keyboard overlay), then the sort header just below it. Drilled into a
-    // series: no bar (search is a top-level action), just the series-name header.
+    // `drilled` drops the `searchbar` row, leaving the header alone.
     let hbaseline = if drilled {
         layout.top * 60 / 100
     } else {
@@ -1618,7 +1501,7 @@ fn draw_gallery_page(
         searchbar::draw_buttons(fb, drm_active);
         searchbar::below(fb.var.xres) as i32 + renderer.line_height() as i32
     };
-    // Header line, clamped to one line so a long series name can't overrun.
+    // `wrap_and_clamp` holds `header` to one line.
     let hlines = renderer.wrap_and_clamp(header, fb.var.xres.saturating_sub(80), 1);
     if let Some(h) = hlines.first() {
         let hw = renderer.measure_width(h);
@@ -1633,8 +1516,7 @@ fn draw_gallery_page(
         if cx < 0 || cy < 0 {
             continue;
         }
-        // A series tile carries its lead member's language: the collection
-        // name is that shelf's language too.
+        // `cover_book.language` picks the script for both cell kinds.
         let script = font::Script::of_language(&cells[idx].cover_book.language);
         match &cells[idx].kind {
             CellKind::Book => {
@@ -1667,9 +1549,7 @@ fn draw_gallery_page(
             }
         }
     }
-    // Strip is the only path to Exit — always draw, even on a single
-    // page. `pager::draw` internally returns early after Exit when
-    // total_pages <= 1 shows no prev/next labels.
+    // `pager::draw` carries Exit, and draws prev/next above one page.
     pager::draw(
         fb,
         renderer,
@@ -1691,7 +1571,7 @@ fn draw_gallery_page(
     Ok(())
 }
 
-/// Draw the current page and then lazily fill its covers — the draw+fetch pair
+/// Draw the current page of `cells`, then fill its `covers`.
 #[allow(clippy::too_many_arguments)]
 fn repaint_page(
     fb: &mut Framebuffer,
@@ -1735,9 +1615,7 @@ fn repaint_page(
     Ok(())
 }
 
-/// Populate `covers[start..end]` for this page, fetching any cell at `None`
-/// and painting each into its cell with a GC16 partial refresh as it arrives.
-/// A loaded cell is skipped: its cover is on screen.
+/// Fetch every `covers[start..end]` entry at `None` and paint it as it arrives.
 #[allow(clippy::too_many_arguments)]
 fn fetch_and_paint_page(
     fb: &mut Framebuffer,
@@ -1759,9 +1637,8 @@ fn fetch_and_paint_page(
         if covers[idx].is_some() {
             continue;
         }
-        // The cover source is the cell's own book (standalone) or its series'
-        // lead member — one fetch per collection, not one per member. In DRM mode
-        // it's the book's local device thumbnail (keyed by `book.id` = drm index);
+        // `cover_book` is the cell's own book or its series' lead member.
+        // Under `drm`, `book.id` indexes `drm_books`.
         let book = &cells[idx].cover_book;
         let img = match drm {
             Some(drm_books) => drm_books
@@ -1822,15 +1699,13 @@ fn fetch_and_paint_page(
     Ok(())
 }
 
-/// Decode a DRM book's local device thumbnail into a grid image, or `None` when
-/// missing or undecodable. The local twin of [`load_cover`]'s LAN fetch.
+/// Decode the device thumbnail at `path`, or `None` when missing or undecodable.
 fn dedrm_cover(path: &Path, xres: u32) -> Option<DynamicImage> {
     let bytes = std::fs::read(path).ok()?;
     grid::decode_resize(&bytes, xres).ok()
 }
 
-/// Load one book's cover into a decoded image: disk cache first, then the LAN with
-/// a write-through. `None` on a fetch or decode failure.
+/// Decode `book`'s cover from `cache_dir`, else fetch it and write it through.
 fn load_cover(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
@@ -1877,13 +1752,12 @@ fn load_cover(
     }
 }
 
-/// The content_ids of every book in the library, which tells the handwriting scan
-/// whose ink is whose: an ink notebook is named after its host book's content_id.
+/// The `asin` of every book in `books`, keying `handwriting::scan`.
 fn library_asins(books: &[api::Book]) -> std::collections::HashSet<String> {
     books.iter().filter_map(|b| b.asin.clone()).collect()
 }
 
-/// Push every decrypted book to the desktop over the LAN, returning a one-line
+/// `api::push_book` every path in `decrypted`, reported as one banner line.
 fn sync_decrypted(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
@@ -1897,7 +1771,7 @@ fn sync_decrypted(
                     api::BookPush::Imported => imported += 1,
                     api::BookPush::Duplicate => dup += 1,
                 }
-                // Confirmed on the desktop → remove this book's on-device
+                // `cleanup_synced` runs once the desktop confirms the push.
                 if let Some(book) = dedrm::source_book(out) {
                     for (path, err) in dedrm::cleanup_synced(&book) {
                         log(format!("sync cleanup {}: {err}", path.display()));
@@ -1917,7 +1791,7 @@ fn sync_decrypted(
     format!("Synced: {imported} new, {dup} already, {failed} failed")
 }
 
-/// Handle one input event that arrives while a decrypt flow owns the screen.
+/// Handle one `ev` arriving while [`decrypt_flow`] owns the screen.
 fn decrypt_input_event(fb: &mut Framebuffer, ev: InputEvent) {
     log(format!("decrypt input: {ev:?}"));
     if ev == InputEvent::Touch(TouchEvent::Screenshot) {
@@ -1928,7 +1802,7 @@ fn decrypt_input_event(fb: &mut Framebuffer, ev: InputEvent) {
     }
 }
 
-/// Drain every queued input event through [`decrypt_input_event`]. Called
+/// Drain every queued input event through [`decrypt_input_event`].
 fn drain_decrypt_input(input: &mut Input, fb: &mut Framebuffer) -> anyhow::Result<()> {
     while let Some(ev) = input.poll_now()? {
         decrypt_input_event(fb, ev);
@@ -1936,7 +1810,7 @@ fn drain_decrypt_input(input: &mut Input, fb: &mut Framebuffer) -> anyhow::Resul
     Ok(())
 }
 
-/// Decrypt one on-device DRM purchase in place via the kfxdedrm engine — the DRM
+/// Run the `dedrm` engine over one purchase, reported as one banner line.
 fn decrypt_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -1966,8 +1840,7 @@ fn decrypt_flow(
         }
     };
 
-    // Stream stdout → toast at e-ink cadence (stderr is inherited to the log).
-    // `read_line` blocks; the picker is dedicated to this decrypt.
+    // `read_line` blocks; `child` stderr is inherited by the log.
     if let Some(out) = child.stdout.take() {
         let mut reader = std::io::BufReader::new(out);
         let mut line = String::new();
@@ -2003,8 +1876,6 @@ fn decrypt_flow(
         return Ok(("Decrypt failed — see log".to_string(), false));
     }
 
-    // Decrypt done → auto-push the fresh output to the desktop over the LAN
-    // (best effort). The decrypt succeeded; the tile hides either way;
     if !out_path.exists() {
         return Ok(("Decrypted (tap Sync to send)".to_string(), true));
     }
@@ -2012,7 +1883,7 @@ fn decrypt_flow(
     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
     let msg = match api::push_book(agent, cfg, out_path) {
         Ok(outcome) => {
-            // Confirmed on the desktop → remove both on-device leftovers (this
+            // `cleanup_synced` runs once the desktop confirms the push.
             for (path, err) in dedrm::cleanup_synced(&book.path) {
                 log(format!("cleanup {}: {err}", path.display()));
             }
@@ -2026,14 +1897,12 @@ fn decrypt_flow(
             "Decrypted (tap Sync to send)".to_string()
         }
     };
-    // A gesture during the push queued behind the blocking send — capture it
-    // while the Syncing toast is the live screen.
+    // Take the gestures queued behind the blocking `push_book`.
     drain_decrypt_input(input, fb)?;
     Ok((msg, true))
 }
 
-/// Decrypt every DRM purchase in `books` and push each result to the desktop, the
-/// batch twin of [`decrypt_flow`]. Interruptible between books, not within one.
+/// Run [`decrypt_flow`] over every `books` entry, interruptible between books.
 fn decrypt_all_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -2049,18 +1918,16 @@ fn decrypt_all_flow(
     let t0 = Instant::now();
     let (mut decrypted, mut synced, mut failed) = (0u32, 0u32, 0u32);
     let mut token_bad = false;
-    // Set by a completed tap on the Stop button; `stop_armed` carries the
-    // Down half of that tap between events.
+    // `stop_armed` carries the Down half of a Stop tap between events.
     let (mut stopping, mut stop_armed) = (false, false);
     for (i, book) in books.iter().enumerate() {
-        // Draw progress before the book so the bar reflects completed work while
-        // the title names the one in flight.
+        // `i` counts books finished; `short` names the one in flight.
         let short = truncate_title(&book.book.title, 28);
         let (rect, stop_rect) =
             toast::draw_progress_stop(fb, renderer, &format!("Decrypting {short}…"), i, total);
         fb.send_update(rect, WAVEFORM_MODE_GC16)?;
 
-        // Spawn + wait-poll past a blocking `status()`, which keeps input
+        // `try_wait` keeps `input` polled through the child's run.
         let status = match Command::new(&exe).arg("dedrm").arg(&book.path).spawn() {
             Ok(mut child) => loop {
                 match child.try_wait() {
@@ -2070,15 +1937,12 @@ fn decrypt_all_flow(
                 }
                 match input.next_deadline(Some(Instant::now() + DEDRM_WAIT_POLL))? {
                     InputEvent::Tick => {}
-                    // Once stopped the banner is redrawn without the button;
-                    // there is nothing left on screen to arm.
+                    // With `stopping` set, `stop_rect` is off screen.
                     ev if stopping => decrypt_input_event(fb, ev),
                     ev => {
                         if decrypt_all_stop_tap(fb, ev, &stop_rect, &mut stop_armed) {
                             stopping = true;
                             log("decrypt-all: stop requested");
-                            // Dropping the button is what marks the tap as taken;
-                            // the label says what the batch is doing.
                             let rect = toast::draw_progress(
                                 fb,
                                 renderer,
@@ -2101,20 +1965,16 @@ fn decrypt_all_flow(
             book.book.title,
             out_path.exists()
         ));
-        // Counted either way, then one exit check for both — a failure must not
-        // duck out of the loop body early, or a stop requested during a book
-        // that then failed is dropped and the batch runs on.
+        // Both arms fall through to the one `stopping` check below.
         if matches!(status, Ok(ref s) if s.success()) {
             decrypted += 1;
 
-            // Push the fresh output (best effort; skipped once the token is known bad).
+            // `token_bad` skips every push past the first 401.
             if out_path.exists() && !token_bad {
                 match api::push_book(agent, cfg, out_path) {
                     Ok(api::BookPush::Imported | api::BookPush::Duplicate) => {
                         synced += 1;
-                        // Confirmed on the desktop → drop this book's leftovers (its
-                        // output plus the encrypted book and its `.sdr` under Items01),
-                        // scoped to this name. Best effort — failures are just logged.
+                        // `cleanup_synced` runs once the desktop confirms the push.
                         for (path, err) in dedrm::cleanup_synced(&book.path) {
                             log(format!("decrypt-all cleanup {}: {err}", path.display()));
                         }
@@ -2127,9 +1987,7 @@ fn decrypt_all_flow(
                         log(format!("decrypt-all push {}: {err:#}", out_path.display()));
                     }
                 }
-                // A gesture during the push queued behind the blocking send —
-                // capture it while this book's bar is the live screen. A Stop tap
-                // among them counts: the loop has not moved on.
+                // Take the gestures queued behind the blocking `push_book`, Stop included.
                 while let Some(ev) = input.poll_now()? {
                     if stopping {
                         decrypt_input_event(fb, ev);
@@ -2147,8 +2005,7 @@ fn decrypt_all_flow(
             break;
         }
     }
-    // Settle the bar where the batch got to — `total`, or short of it after a stop —
-    // so it visibly completes before the summary panel replaces it.
+    // `ran` settles the bar at what the batch covered.
     let ran = (decrypted + failed) as usize;
     let rect = toast::draw_progress(fb, renderer, "Done", ran, total);
     fb.send_update(rect, WAVEFORM_MODE_GC16)?;
@@ -2167,7 +2024,8 @@ fn decrypt_all_flow(
     ))
 }
 
-/// One input event arriving while a decrypt-all step owns the screen, answering
+/// `true` for a completed tap on `stop_rect`; every other event reaches
+/// [`decrypt_input_event`].
 fn decrypt_all_stop_tap(
     fb: &mut Framebuffer,
     ev: InputEvent,
@@ -2191,8 +2049,7 @@ fn decrypt_all_stop_tap(
     }
 }
 
-/// The summary toast [`decrypt_all_flow`] ends on. `left` counts the books a
-/// stop skipped, and what states that the batch ended early past its
+/// The summary [`decrypt_all_flow`] ends on. `left` counts the books a stop skipped.
 fn decrypt_all_summary(
     decrypted: u32,
     synced: u32,
@@ -2212,7 +2069,7 @@ fn decrypt_all_summary(
     }
 }
 
-/// Download a book to `/mnt/us/documents/Sidle/<filename>`, showing a live
+/// Stream `book` into [`DOWNLOAD_DIR`] behind a live progress overlay.
 fn download_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -2221,7 +2078,6 @@ fn download_flow(
     cfg: &config::ServerConfig,
     book: &api::Book,
 ) -> anyhow::Result<(String, bool)> {
-    // Paint the overlay before the GET so a long-press gets instant feedback:
     let title = format!("Downloading {}…", truncate_title(&book.title, 32));
     let (rect, _) = toast::draw_download(fb, renderer, &title, "Connecting…");
     fb.send_update(rect, WAVEFORM_MODE_GC16)?;
@@ -2245,8 +2101,7 @@ fn download_flow(
 
     let dir = Path::new(DOWNLOAD_DIR);
     std::fs::create_dir_all(dir)?;
-    // Strip any path components the server might have set in the filename —
-    // defense against `..` traversal even though the server controls it.
+    // `file_name` drops any path component in `dl.filename`.
     let safe_name = Path::new(&dl.filename)
         .file_name()
         .and_then(|s| s.to_str())
@@ -2264,7 +2119,7 @@ fn download_flow(
     let mut buf = vec![0u8; DL_CHUNK];
     let mut last_draw = Instant::now();
     let mut chunks: u64 = 0;
-    // Cancel needs a *full tap* (Down then Up in the button), not just an Up:
+    // `cancel_armed` carries the Down half of a Cancel tap between events.
     let mut cancel_armed = false;
     loop {
         let n = match reader.read(&mut buf) {
@@ -2294,8 +2149,7 @@ fn download_flow(
             last_draw = Instant::now();
         }
 
-        // Drain ALL pending input between chunks: a two-corner screenshot is two contacts
-        // and both may queue during one network read.
+        // One `reader.read` can queue both contacts of a `TouchEvent::Screenshot`.
         while let Some(ev) = input.poll_now()? {
             log(format!("dl input (chunk {chunks}): {ev:?}"));
             match ev {
@@ -2304,13 +2158,9 @@ fn download_flow(
                         Ok(p) => log(format!("screenshot saved: {}", p.display())),
                         Err(e) => log(format!("screenshot failed: {e:#}")),
                     }
-                    // capture() did a full GC16 restore of the toast;
-                    // don't stack a DU redraw straight on top of it.
+                    // `capture` restored the toast with a GC16 refresh.
                     last_draw = Instant::now();
                 }
-                // A Down inside Cancel arms it; the matching Up inside Cancel then
-                // aborts. A Down elsewhere (or the holding finger's Up, which had
-                // no Down here) leaves it disarmed.
                 InputEvent::Touch(TouchEvent::Down { x, y }) => {
                     cancel_armed = rect_hit(&cancel_rect, x, y);
                 }
@@ -2337,9 +2187,7 @@ fn download_flow(
     file.sync_all().ok();
     drop(file);
     log(format!("dl streamed {written} bytes over {chunks} chunks"));
-    // A short transfer that ended in a clean EOF (dropped connection, or the
-    // KFX_MAX_BYTES backstop) reads as success up to here — the Content-Length
-    // check is what turns it back into a visible failure.
+    // `expected` is what separates a clean EOF from a whole transfer.
     if let Some(exp) = expected
         && written != exp
     {
@@ -2356,12 +2204,10 @@ fn download_flow(
     }
     std::fs::rename(&part, &path)
         .with_context(|| format!("rename {} -> {}", part.display(), path.display()))?;
-    // Baseline the rev just written: the Sync tap's update pass skips a re-pull
-    // this book until the desktop actually reconverts it (bumping `kfx_rev`).
+    // `record_download` baselines `kfx_rev` for `updates::pull_updates`.
     updates::record_download(Path::new(SYNCED_REVS_PATH), safe_name, book.kfx_rev);
     log(format!("downloaded {written} bytes to {}", path.display()));
-    // Land what the library knows about this book — highlights, notes, position —
-    // while it is certain no reader has it open.
+    // `pull_sidecar` writes beside `path` ahead of any reader opening it.
     match api::pull_sidecar(agent, cfg, book.id, Path::new(DOWNLOAD_DIR), safe_name) {
         Ok(true) => log("sidecar written with the download"),
         Ok(false) => {}
@@ -2374,16 +2220,14 @@ fn download_flow(
     ))
 }
 
-/// Close and delete a partial `.part` sidecar after a failed/cancelled
-/// transfer: it never lingers as a finished download.
+/// Close `file` and delete `part`.
 fn cleanup_part(file: std::fs::File, part: &Path) {
     drop(file);
     let _ = std::fs::remove_file(part);
 }
 
-/// `transferred / total (pct)` for the download overlay, e.g.
-/// `"12.3 MB / 305.7 MB  (4%)"`. Falls back to just the transferred size when
-/// the server sent no `Content-Length`.
+/// `written` against `total`, e.g. `"12.3 MB / 305.7 MB  (4%)"`.
+/// `written` alone where `total` is `None`.
 fn progress_line(written: u64, total: Option<u64>) -> String {
     match total {
         Some(t) if t > 0 => {
@@ -2421,13 +2265,13 @@ fn log(line: impl AsRef<str>) {
     } else {
         "./sidle-native.log"
     };
-    // File only — NOT also stderr. `sidle.sh` runs the binary with `2>> "$LOG"`
+    // `log_path` takes `line`; stderr reaches the same file by redirect.
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(f, "{line}");
     }
 }
 
-/// Append a line to the LAN self-update log, apart from the picker's own
+/// Append `line` to [`UPDATE_LOG_PATH`].
 fn update_log(line: impl AsRef<str>) {
     let line = line.as_ref();
     let path = if std::path::Path::new("/mnt/us").is_dir() {
@@ -2447,17 +2291,17 @@ mod tests {
 
     #[test]
     fn decrypt_all_summary_reports_a_stop() {
-        // Ran to the end: no stop clause.
+        // `left` at 0 drops the stop clause.
         assert_eq!(
             decrypt_all_summary(3, 3, 0, 0, false),
             "Decrypted 3, synced 3, 0 failed"
         );
-        // Stopped: the skipped count is what says it ended early.
+        // A non-zero `left` adds it.
         assert_eq!(
             decrypt_all_summary(2, 2, 1, 5, false),
             "Decrypted 2, synced 2, 1 failed\nStopped, 5 left"
         );
-        // A bad token replaces the sync count, and reports the stop.
+        // `token_bad` replaces the sync count.
         assert_eq!(
             decrypt_all_summary(2, 0, 0, 4, true),
             "Decrypted 2; sync blocked — plug into sidle, Update on Kindle\nStopped, 4 left"
@@ -2471,7 +2315,6 @@ mod tests {
     fn human_mb_is_binary_megabytes_one_decimal() {
         assert_eq!(human_mb(0), "0.0 MB");
         assert_eq!(human_mb(1024 * 1024), "1.0 MB");
-        // 305.7 MB — the ballpark of the book that surfaced the 256 MB cap.
         assert_eq!(human_mb(320_593_920), "305.7 MB");
     }
 
@@ -2492,7 +2335,7 @@ mod tests {
     #[test]
     fn progress_line_falls_back_to_transferred_only_without_total() {
         assert_eq!(progress_line(5 * 1024 * 1024, None), "5.0 MB");
-        // A zero Content-Length can't be a denominator — same fallback.
+        // A zero `total` takes the same fallback.
         assert_eq!(progress_line(5 * 1024 * 1024, Some(0)), "5.0 MB");
     }
 
