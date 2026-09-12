@@ -23,7 +23,7 @@ pub use image_extract::{ExtractedImage, epub_extract_images};
 pub use metadata_edit::{MetadataPatch, edit_metadata};
 pub use parser::{
     OpfData, parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc,
-    parse_ncx, parse_opf, parse_opf_guide, strip_bom,
+    parse_ncx, parse_ncx_page_list, parse_opf, parse_opf_guide, strip_bom,
 };
 pub use unflatten_styles::{
     FlattenedStyles, Restored, StyleDiff, flattened_styles, restore_styles,

@@ -604,7 +604,7 @@ impl Book {
         self.backend.toc()
     }
 
-    /// Physical page-list (EPUB `<nav epub:type="page-list">`); empty if absent.
+    /// Physical page-list; empty if the source states none.
     pub fn page_list(&self) -> &[TocEntry] {
         self.backend.page_list()
     }

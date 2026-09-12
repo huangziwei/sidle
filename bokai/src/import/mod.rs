@@ -321,9 +321,9 @@ pub trait Importer: Send + Sync {
     /// Get mutable access to TOC entries for resolution.
     fn toc_mut(&mut self) -> &mut [TocEntry];
 
-    /// Physical page-break list (EPUB 3 `<nav epub:type="page-list">`), each
-    /// entry's `title` a printed page number and its `href` where that page
-    /// opens. Empty for a format that states none.
+    /// Physical page-break list, each entry's `title` a printed page number
+    /// and its `href` where that page opens. Empty for a format that states
+    /// none.
     fn page_list(&self) -> &[TocEntry] {
         &[]
     }

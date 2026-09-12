@@ -11,7 +11,7 @@ use zip::ZipArchive;
 
 use crate::formats::epub::{
     parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc, parse_ncx,
-    parse_opf, parse_opf_guide,
+    parse_ncx_page_list, parse_opf, parse_opf_guide,
     structure::{dir_of, resolve_href},
 };
 use crate::html::{Stylesheet, inline_css_imports};
@@ -36,8 +36,9 @@ pub struct EpubImporter {
     /// Table of contents.
     toc: Vec<TocEntry>,
 
-    /// Physical page-break list from `<nav epub:type="page-list">` (printed
-    /// page number → content location). Flat; empty when the EPUB has none.
+    /// Physical page-break list from `<nav epub:type="page-list">` or the NCX
+    /// `<pageList>`: each entry's title a printed page number, its href where
+    /// that page opens. Flat; empty when the EPUB states none.
     page_list: Vec<TocEntry>,
 
     /// Landmarks (structural navigation points).
@@ -181,12 +182,10 @@ impl Importer for EpubImporter {
         }
     }
 
-    /// Repair flat TOCs: calibre and some retail EPUBs collapse several headings
-    /// into one file and emit a `#fragment`-less href for each. Match every such
-    /// entry's label to a unique id-bearing element in its target file.
+    /// Repair flat TOCs: match each `#fragment`-less entry's label to a unique
+    /// id-bearing element in its target file.
     fn resolve_toc(&mut self) {
-        // Disjoint field borrows: the repair reads the heading index while
-        // mutating the TOC tree.
+        // Disjoint field borrows: `toc` and `toc_heading_ids`.
         let Self {
             toc,
             toc_heading_ids,
@@ -373,9 +372,8 @@ impl EpubImporter {
             });
         }
 
-        // 5. Parse the TOC from both the EPUB 3 nav doc and the EPUB 2 NCX —
-        // retail Japanese EPUBs (Kadokawa/EBPAJ) ship a full nav doc beside a
-        // stub NCX. The richer of the two wins, the nav doc taking a tie.
+        // 5. TOC from both the EPUB 3 nav doc and the EPUB 2 NCX. The richer
+        // of the two wins; `parse_nav_toc` takes a tie.
         let read_toc = |href: Option<&String>, parse: fn(&str) -> io::Result<Vec<TocEntry>>| {
             let href = href?;
             let path = resolve_href(&opf_base, href);
@@ -405,10 +403,12 @@ impl EpubImporter {
             }
         };
 
-        // 5b. Parse the physical page-list (`<nav epub:type="page-list">`) from
-        // the same EPUB 3 nav doc, base-prefixed exactly like the TOC. Amazon
-        // carries it as a `page_list` nav_container.
-        let page_list = read_toc(opf.nav_href.as_ref(), parse_nav_page_list).unwrap_or_default();
+        // 5b. Page-list: printed page numbers mapped to where each page opens,
+        // base-prefixed like the TOC. `parse_nav_page_list` first, then
+        // `parse_ncx_page_list`.
+        let page_list = read_toc(opf.nav_href.as_ref(), parse_nav_page_list)
+            .or_else(|| read_toc(opf.ncx_href.as_ref(), parse_ncx_page_list))
+            .unwrap_or_default();
 
         // 6. Parse landmarks from EPUB 3 nav document
         let mut landmarks = if let Some(nav_href) = &opf.nav_href {

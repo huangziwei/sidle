@@ -63,9 +63,7 @@ pub fn parse_container_xml(bytes: &[u8]) -> io::Result<String> {
 #[derive(Debug, Clone)]
 enum MetaElement {
     Title,
-    /// Index into `metadata.authors` — refinements address a specific
-    /// creator, and duplicate author names would make a name lookup
-    /// ambiguous.
+    /// Index into `metadata.authors`.
     Creator(usize),
     Contributor(String),
     Collection,
@@ -113,8 +111,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut current_element: Option<String> = None;
     let mut current_element_id: Option<String> = None;
     // `<package unique-identifier="…">` names which `<dc:identifier>` is the
-    // book's, and every identifier seen by its own `id`, so the two can be
-    // resolved against each other once the metadata block closes.
+    // book's; `identifiers_by_id` keys each identifier by its own `id`.
     let mut version = String::new();
     let mut unique_identifier_ref: Option<String> = None;
     let mut identifiers_by_id: HashMap<String, String> = HashMap::new();
@@ -373,7 +370,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             epub2_cover_id = Some(cover_id);
                         }
 
-                        // `<meta name>` Kindle hints: `primary-writing-mode`,
+                        // `<meta name>` hints: `primary-writing-mode`,
                         // `fixed-layout`, `book-type`, `original-resolution`,
                         // `orientation-lock`.
                         if let Some(name) = meta_name.as_deref() {
@@ -812,7 +809,7 @@ fn apply_refinements(
 pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
-    // mobiunpack-generated NCX/nav embed unescaped `<`/`>` in titles, e.g.
+    // `check_end_names` off: a title containing `<` parses.
     reader.config_mut().check_end_names = false;
 
     struct NavPointState {
@@ -920,6 +917,105 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     }
 
     Ok(stack.pop().map(|s| s.children).unwrap_or_default())
+}
+
+/// Parse the page-list from an NCX `<pageList>`. Each `<pageTarget>` gives one
+/// flat entry — `navLabel/text` its title, `content/@src` its href; a
+/// `navLabel` directly under `<pageList>` gives none.
+pub fn parse_ncx_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+    // `check_end_names` off: a label containing `<` parses.
+    reader.config_mut().check_end_names = false;
+
+    // Fields of the open `<pageTarget>`; `None` outside one.
+    struct PageTarget {
+        text: Option<String>,
+        src: Option<String>,
+    }
+
+    let mut entries: Vec<TocEntry> = Vec::new();
+    let mut target: Option<PageTarget> = None;
+    let mut in_page_list = false;
+    let mut in_text = false;
+    let mut play_order: usize = 0;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                match local_name(name.as_ref()) {
+                    b"pageList" => in_page_list = true,
+                    b"pageTarget" if in_page_list => {
+                        target = Some(PageTarget {
+                            text: None,
+                            src: None,
+                        });
+                    }
+                    b"text" => in_text = true,
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = e.name();
+                if local_name(name.as_ref()) == b"content"
+                    && let Some(state) = target.as_mut()
+                {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"src" {
+                            state.src = Some(
+                                String::from_utf8(attr.value.to_vec()).map_err(io::Error::other)?,
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if in_text && let Some(state) = target.as_mut() {
+                    let raw = String::from_utf8_lossy(e.as_ref());
+                    match &mut state.text {
+                        Some(existing) => existing.push_str(&raw),
+                        None => state.text = Some(raw.into_owned()),
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if in_text
+                    && let Some(state) = target.as_mut()
+                    && let Some(resolved) = resolve_entity(&String::from_utf8_lossy(e.as_ref()))
+                {
+                    match &mut state.text {
+                        Some(existing) => existing.push_str(&resolved),
+                        None => state.text = Some(resolved),
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                match local_name(name.as_ref()) {
+                    b"text" => in_text = false,
+                    b"pageTarget" => {
+                        if let Some(state) = target.take()
+                            && let (Some(text), Some(src)) = (state.text, state.src)
+                        {
+                            play_order += 1;
+                            let mut entry =
+                                TocEntry::new(crate::util::trim_markup_space(&text), src);
+                            entry.play_order = Some(play_order);
+                            entries.push(entry);
+                        }
+                    }
+                    b"pageList" => in_page_list = false,
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(io::Error::other(e)),
+            _ => {}
+        }
+    }
+
+    Ok(entries)
 }
 
 /// Parse the TOC from an EPUB 3 nav document.
@@ -1260,9 +1356,7 @@ fn guide_type_to_landmark(guide_type: &str) -> Option<LandmarkType> {
         "cover" => Some(LandmarkType::Cover),
         "title-page" | "titlepage" => Some(LandmarkType::TitlePage),
         "toc" => Some(LandmarkType::Toc),
-        // EPUB 2 "text" = start of body text = StartReading (matches
-        // calibre's `GUIDE_TYPE_OF_LANDMARK_TYPE` mapping `$396`/`$269`
-        // → "text").
+        // EPUB 2 "text" is the start of body text.
         "text" => Some(LandmarkType::StartReading),
         "bodymatter" => Some(LandmarkType::BodyMatter),
         "preface" => Some(LandmarkType::Preface),
@@ -1527,8 +1621,7 @@ mod tests {
 
     #[test]
     fn test_parse_opf_primary_writing_mode() {
-        // The Kindle/Kadokawa book-level hint must be captured so the KFX
-        // export can use it as the authoritative writing mode.
+        // `primary-writing-mode` sets `metadata.primary_writing_mode`.
         let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata>
@@ -1660,9 +1753,8 @@ mod tests {
 
     #[test]
     fn test_parse_ncx_tolerates_unescaped_angle_brackets() {
-        // mobiunpack-generated NCX embed unescaped `<`/`>` in the docTitle
-        // (here `業物語 <物語>`), which is invalid XML. The parser recovers
-        // and returns the navMap entries.
+        // An unescaped `<` in the docTitle (`業物語 <物語>`) leaves the navMap
+        // entries readable.
         let ncx = r#"<?xml version='1.0' encoding='utf-8'?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <docTitle><text>業物語 <物語> (講談社ＢＯＸ)</text></docTitle>
@@ -1762,6 +1854,87 @@ mod tests {
   <nav epub:type="toc"><ol><li><a href="c1.xhtml">Ch 1</a></li></ol></nav>
 </body></html>"#;
         assert!(parse_nav_page_list(nav).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_ncx_page_list_basic() {
+        // `parse_ncx_page_list` takes the pageTargets, `parse_ncx` the navMap.
+        let ncx = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>Chapter 1</text></navLabel>
+      <content src="c1.xhtml"/>
+    </navPoint>
+  </navMap>
+  <pageList>
+    <navLabel><text>List of Pages</text></navLabel>
+    <pageTarget id="p1" type="front" value="1" playOrder="23">
+      <navLabel><text>i</text></navLabel>
+      <content src="title.xhtml#page_i"/>
+    </pageTarget>
+    <pageTarget id="p2" type="normal" value="2" playOrder="2">
+      <navLabel><text>2</text></navLabel>
+      <content src="c1.xhtml#page_2"/>
+    </pageTarget>
+  </pageList>
+</ncx>"#;
+
+        let pages = parse_ncx_page_list(ncx).unwrap();
+        assert_eq!(pages.len(), 2, "the list's own navLabel is not an entry");
+        assert!(
+            pages.iter().all(|p| p.children.is_empty()),
+            "page list never nests"
+        );
+        assert_eq!(pages[0].title, "i");
+        assert_eq!(pages[0].href, "title.xhtml#page_i");
+        assert_eq!(pages[1].title, "2");
+        assert_eq!(pages[1].href, "c1.xhtml#page_2");
+        // `play_order` counts document order, not the `playOrder` attribute.
+        assert_eq!(pages[0].play_order, Some(1));
+        assert_eq!(pages[1].play_order, Some(2));
+
+        let toc = parse_ncx(ncx).unwrap();
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].title, "Chapter 1");
+    }
+
+    #[test]
+    fn test_parse_ncx_page_list_fragmentless_src() {
+        // A `content/@src` with no fragment keeps its href.
+        let ncx = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <pageList>
+    <pageTarget id="p1" type="normal" value="1">
+      <navLabel><text>1</text></navLabel>
+      <content src="c9.xhtml"/>
+    </pageTarget>
+    <pageTarget id="p2" type="normal" value="2">
+      <navLabel><text>2</text></navLabel>
+      <content src="c9.xhtml"/>
+    </pageTarget>
+  </pageList>
+</ncx>"#;
+
+        let pages = parse_ncx_page_list(ncx).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].href, "c9.xhtml");
+        assert_eq!(pages[1].href, "c9.xhtml");
+    }
+
+    #[test]
+    fn test_parse_ncx_page_list_absent() {
+        // A navMap alone yields no entries.
+        let ncx = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>Chapter 1</text></navLabel>
+      <content src="c1.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>"#;
+        assert!(parse_ncx_page_list(ncx).unwrap().is_empty());
     }
 
     #[test]
