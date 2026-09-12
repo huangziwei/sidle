@@ -457,7 +457,7 @@ fn run() -> anyhow::Result<()> {
 
     // How many cells this panel fits, which sets the page size — so it has to be
     // known before the first page count is taken.
-    let layout = grid::Layout::compute(fb.var.xres, fb.var.yres, TOP_MARGIN, pager::STRIP_H);
+    let mut layout = grid::Layout::compute(fb.var.xres, fb.var.yres, TOP_MARGIN, pager::STRIP_H);
     log(format!(
         "grid: {}x{} cells of {}x{} ({} per page)",
         layout.cols,
@@ -516,6 +516,9 @@ fn run() -> anyhow::Result<()> {
             }
             _ => None,
         };
+        // An `Expose`, a cover and a resize all arrive on the X connection,
+        // which is no input device; without this they wait out the idle tick.
+        input.watch([Some(fb.raw_fd()), None]);
         let event = input.next_deadline(deadline)?;
 
         match event {
@@ -1312,6 +1315,34 @@ fn run() -> anyhow::Result<()> {
                 }
             }
             InputEvent::Tick => {
+                // Drained on every Tick, armed or not: the X descriptor is one
+                // of the things that wakes this poll, and a queue left full
+                // would wake it again at once.
+                let pump = fb.pump_events();
+                // A window over this one takes the input devices with it; the
+                // framework does not always hand them back, so the grab is
+                // retaken on every tick it is owed.
+                if let Some(covered) = pump.covered {
+                    log(format!("x11: covered={covered}"));
+                    input.set_covered(covered);
+                    down_pos = None;
+                    armed = None;
+                }
+                input.retake();
+                // A new layout resizes the grid before anything is drawn into
+                // it: `fb.var` already carries the size laid out.
+                if pump.resized.is_some() {
+                    layout =
+                        grid::Layout::compute(fb.var.xres, fb.var.yres, TOP_MARGIN, pager::STRIP_H);
+                    total_pages = pager::n_pages(cells.len(), layout.page_size());
+                    page = page.min(total_pages.saturating_sub(1));
+                    log(format!(
+                        "grid: {}x{} cells ({} per page, {total_pages} pages)",
+                        layout.cols,
+                        layout.rows,
+                        layout.page_size()
+                    ));
+                }
                 // A Tick means one of two things now:
                 let arm_ready = match armed.as_ref() {
                     Some(a) => {
@@ -1468,11 +1499,13 @@ fn run() -> anyhow::Result<()> {
                         )?;
                     }
                 } else if armed.is_none() {
-                    // Idle poll. Two things can leave the window stale, and both
-                    // are repaired the same way — repaint the current page.
+                    // Idle poll. Several things can leave the window stale, and
+                    // all are repaired the same way — repaint the current page.
                     let o = orientation::Orientation::detect();
-                    let damaged = fb.pump_events();
-                    if o != current_orient || damaged {
+                    // Covered: nothing is drawn under the window in front.
+                    let damaged =
+                        pump.repaint || pump.resized.is_some() || pump.covered == Some(false);
+                    if !fb.covered() && (o != current_orient || damaged) {
                         if o != current_orient {
                             log(format!("orientation: {current_orient:?} -> {o:?}"));
                             current_orient = o;

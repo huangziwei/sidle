@@ -32,11 +32,30 @@ pub struct Input {
     /// `None` when no page-button device was found/openable — the picker runs
     /// touch-only and `poll` watches just the touchscreen.
     buttons: Option<Buttons>,
+    /// The descriptors to wake on beside the input devices, from
+    /// [`Input::watch`]. A slot holding -1 is skipped by `poll`.
+    watched: [RawFd; 2],
 }
 
 impl Input {
     pub fn new(touch: Touch, buttons: Option<Buttons>) -> Self {
-        Self { touch, buttons }
+        Self {
+            touch,
+            buttons,
+            watched: [-1; 2],
+        }
+    }
+
+    /// Wake on `fds` as well as on the input devices for the next wait,
+    /// answering an [`InputEvent::Tick`] where one is readable. The X
+    /// connection is one: without it an `Expose` or a cover waits out the idle
+    /// [`TICK_MS`].
+    ///
+    /// One wait only. A caller that does not drain the descriptor it armed
+    /// would otherwise spin on it, and a nested loop that never armed one would
+    /// inherit it.
+    pub fn watch(&mut self, fds: [Option<RawFd>; 2]) {
+        self.watched = fds.map(|fd| fd.unwrap_or(-1));
     }
 
     /// Re-orient both devices after a detected rotation (the display is rotated
@@ -45,6 +64,24 @@ impl Input {
         self.touch.set_orientation(orientation);
         if let Some(buttons) = self.buttons.as_mut() {
             buttons.set_orientation(orientation);
+        }
+    }
+
+    /// [`Touch::set_covered`] and [`Buttons::set_covered`] over both devices.
+    /// Neither holds `EVIOCGRAB` while another window covers this app's, so the
+    /// screensaver, the ads screen and the passcode prompt get their touches.
+    pub fn set_covered(&mut self, covered: bool) {
+        self.touch.set_covered(covered);
+        if let Some(buttons) = self.buttons.as_mut() {
+            buttons.set_covered(covered);
+        }
+    }
+
+    /// [`Touch::retake`] and [`Buttons::retake`] over both devices.
+    pub fn retake(&mut self) {
+        self.touch.retake();
+        if let Some(buttons) = self.buttons.as_mut() {
+            buttons.retake();
         }
     }
 
@@ -106,6 +143,9 @@ impl Input {
     /// touch fd stays busy.
     pub fn next_deadline(&mut self, deadline: Option<Instant>) -> Result<InputEvent> {
         let touch_fd: RawFd = self.touch.raw_fd();
+        // [`Input::watch`] arms one wait. Taken here so a nested loop that
+        // never armed a descriptor never waits on one.
+        let watched = std::mem::replace(&mut self.watched, [-1; 2]);
         loop {
             // At/past the deadline: surface the wake now, even if move-jitter kept
             // `poll` busy right up to it (a fixed TICK_MS reset can't guarantee this).
@@ -126,8 +166,19 @@ impl Input {
                     events: libc::POLLIN,
                     revents: 0,
                 },
+                libc::pollfd {
+                    fd: watched[0],
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: watched[1],
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
-            let nfds: libc::nfds_t = if self.buttons.is_some() { 2 } else { 1 };
+            // A slot holding -1 is skipped by `poll`.
+            let nfds: libc::nfds_t = fds.len() as libc::nfds_t;
 
             // Remaining time to the deadline (≥1ms so a sub-ms remainder can't
             // spin), else the idle TICK_MS. poll still wakes early on fd
@@ -178,6 +229,11 @@ impl Input {
                     return Ok(InputEvent::Touch(ev));
                 }
                 continue;
+            }
+
+            // A `watched` slot is readable; the caller drains it.
+            if fds[2..].iter().any(|fd| fd.revents & libc::POLLIN != 0) {
+                return Ok(InputEvent::Tick);
             }
 
             // Spurious wake with no POLLIN — poll again.

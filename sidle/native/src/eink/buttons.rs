@@ -31,6 +31,12 @@ pub struct Buttons {
     /// Whether the `EVIOCGRAB` succeeded. If it didn't, the framework still
     /// sees presses (UI may tear), but we still read + act on them.
     grabbed: bool,
+    /// Whether the grab was ever taken. A device that refused it once is never
+    /// asked again.
+    exclusive: bool,
+    /// Whether another window covers this app's. No grab is held while it does,
+    /// so the framework's own screens get the presses they are drawn to take.
+    covered: bool,
     /// Current framework orientation. On `Down` (180° flip) the physical top/
     /// bottom buttons swap sides, so we swap `Prev`/`Next` to keep "forward"
     /// under the same thumb. Updated at runtime by [`Buttons::set_orientation`].
@@ -53,6 +59,8 @@ impl Buttons {
         Ok(Some(Self {
             file,
             grabbed,
+            exclusive: grabbed,
+            covered: false,
             orientation: Orientation::Up,
         }))
     }
@@ -68,6 +76,30 @@ impl Buttons {
         self.orientation = orientation;
     }
 
+    /// Drops `EVIOCGRAB` and sets `covered` while another window covers this
+    /// app's; takes the grab back when that window goes.
+    pub fn set_covered(&mut self, covered: bool) {
+        if covered == self.covered || !self.exclusive {
+            return;
+        }
+        self.covered = covered;
+        let want = i32::from(!covered);
+        let ok = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, want) } == 0;
+        self.grabbed = ok && !covered;
+        eprintln!("buttons: covered={covered} grabbed={}", self.grabbed);
+    }
+
+    /// Retakes `EVIOCGRAB` where `exclusive` holds and `grabbed` does not.
+    pub fn retake(&mut self) {
+        if self.grabbed || self.covered || !self.exclusive {
+            return;
+        }
+        self.grabbed = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 1) } == 0;
+        if self.grabbed {
+            eprintln!("buttons: EVIOCGRAB retaken");
+        }
+    }
+
     /// Read one event record. The caller polls first, so a record is available
     /// and this won't block. Returns `Some` only on a key *press* (`value==1`)
     pub fn read_one(&mut self) -> Result<Option<PageButton>> {
@@ -78,6 +110,10 @@ impl Buttons {
         let type_ = u16::from_ne_bytes([buf[8], buf[9]]);
         let code = u16::from_ne_bytes([buf[10], buf[11]]);
         let value = i32::from_ne_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        // Covered: the record is read and dropped.
+        if self.covered {
+            return Ok(None);
+        }
         if type_ == EV_KEY && value == 1 {
             let btn = match code {
                 // Hardware-confirmed on KOA2: the *top* button emits

@@ -87,6 +87,13 @@ pub struct Touch {
     /// this device — which is *why* we recognize the screenshot gesture
     /// ourselves: the framework's recognizer is starved while we hold this.
     grabbed: bool,
+    /// Whether the grab was ever taken. A device that refused it once is never
+    /// asked again.
+    exclusive: bool,
+    /// Whether another window covers this app's. [`Touch::apply_grab`] holds no
+    /// grab while it does, so the screensaver, the ads screen and the passcode
+    /// prompt get the touches they are drawn to take.
+    covered: bool,
     /// Same orientation the framebuffer was opened with. We mirror the
     /// raw touch coords by the same amount so caller-visible coords match
     /// what's drawn on screen.
@@ -135,6 +142,8 @@ impl Touch {
             screenshot_latched: false,
             suppress_next_up: false,
             grabbed,
+            exclusive: grabbed,
+            covered: false,
             orientation,
             fb_xres,
             fb_yres,
@@ -153,12 +162,65 @@ impl Touch {
         self.orientation = orientation;
     }
 
+    /// Drops `EVIOCGRAB` and sets `covered` while another window covers this
+    /// one; takes the grab back when that window goes.
+    pub fn set_covered(&mut self, covered: bool) {
+        if covered == self.covered {
+            return;
+        }
+        self.covered = covered;
+        self.apply_grab();
+        self.forget_stroke();
+    }
+
+    /// Holds `EVIOCGRAB` while `exclusive` and not `covered`.
+    fn apply_grab(&mut self) {
+        let want = self.exclusive && !self.covered;
+        if want == self.grabbed {
+            return;
+        }
+        let ok =
+            unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, i32::from(want)) } == 0;
+        self.grabbed = ok && want;
+        eprintln!(
+            "touch: covered={} grabbed={} ioctl={ok}",
+            self.covered, self.grabbed
+        );
+    }
+
+    /// Retakes `EVIOCGRAB` where `exclusive` holds and `grabbed` does not. The
+    /// framework takes the device for itself over a screensaver and does not
+    /// always hand it back.
+    pub fn retake(&mut self) {
+        if self.grabbed || self.covered || !self.exclusive {
+            return;
+        }
+        self.grabbed = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 1) } == 0;
+        if self.grabbed {
+            eprintln!("touch: EVIOCGRAB retaken — exclusive");
+        }
+    }
+
+    /// Clears the pending `Down`/`Up` boundary and both slots, so a stroke
+    /// begun before a grab change never completes across it.
+    fn forget_stroke(&mut self) {
+        self.down_pending = false;
+        self.up_pending = false;
+        self.cur_slot = 0;
+        self.slot0_active = false;
+        self.slot1_active = false;
+        self.screenshot_latched = false;
+        self.suppress_next_up = false;
+    }
+
     /// Drain currently-available events, non-blocking. `Some` when a `Down`/`Up`
     /// boundary completes, in orientation-corrected framebuffer coords, else `None`.
     pub fn next_event(&mut self) -> Result<Option<TouchEvent>> {
         let mut buf = [0u8; EVENT_BYTES];
         loop {
             match self.file.read(&mut buf) {
+                // Covered: the record is read and dropped.
+                Ok(EVENT_BYTES) if self.covered => continue,
                 Ok(EVENT_BYTES) => {}
                 // evdev hands back whole 16-byte records; 0 or a short read
                 // means nothing more is buffered right now.
