@@ -1,6 +1,4 @@
-//! Sidle-server HTTPS client.
-//!
-//! Three endpoints, all token-gated, all sync via `ureq`:
+//! Sidle-server HTTPS client: token-gated, TLS-pinned, blocking `ureq`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,9 +16,7 @@ use crate::config::ServerConfig;
 /// Errors from talking to sidle-server.
 #[derive(Debug)]
 pub enum SidleError {
-    /// Server returned 401 or 403 — the bearer token in our
-    /// `etc/server.conf` no longer matches the one sidle-server is
-    /// validating against (rotated `.server-token`, fresh install).
+    /// 401 or 403: the token in `etc/server.conf` differs from sidle-server's.
     TokenMismatch,
     Other(anyhow::Error),
 }
@@ -53,10 +49,10 @@ impl From<anyhow::Error> for SidleError {
 
 pub type Result<T> = std::result::Result<T, SidleError>;
 
-/// The CA the picker pins, pushed by the desktop app's install alongside
+/// The one certificate authority [`build_agent`] trusts.
 pub const CA_PATH: &str = "/mnt/us/extensions/sidle/etc/ca.pem";
 
-/// Build the one shared agent: TLS, with our CA as the **sole** trust root.
+/// The shared agent, rooted on [`CA_PATH`] and no other trust anchor.
 pub fn build_agent(
     configure: impl FnOnce(
         ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
@@ -80,9 +76,8 @@ pub fn build_agent(
     Ok(ureq::Agent::new_with_config(config))
 }
 
-/// Issue a GET against sidle-server with the token header, translating
-/// `ureq::Error::Status(401|403)` to [`SidleError::TokenMismatch`].
-/// Every other transport/status error becomes `SidleError::Other`.
+/// GET `url` under the `X-Sidle-Token` header. 401 and 403 answer
+/// [`SidleError::TokenMismatch`], every other failure `SidleError::Other`.
 pub(crate) fn get_with_token(
     agent: &ureq::Agent,
     url: &str,
@@ -105,11 +100,10 @@ pub(crate) fn get_with_token(
     }
 }
 
-/// What ureq 3 hands back. Named once here so the dozen call sites below do not
-/// each spell out the generic — and so a future ureq change is one edit.
+/// The response type every request in this module answers with.
 pub(crate) type Response = ureq::http::Response<ureq::Body>;
 
-/// Read a whole response body as text, bounded.
+/// A whole response body as text, capped at `limit` bytes.
 pub(crate) fn read_text(res: &mut Response, limit: usize) -> anyhow::Result<String> {
     res.body_mut()
         .with_config()
@@ -118,17 +112,13 @@ pub(crate) fn read_text(res: &mut Response, limit: usize) -> anyhow::Result<Stri
         .map_err(|e| anyhow!("read response body: {e}"))
 }
 
-/// Cap for the JSON control responses (`/list.json`, the sync endpoints'
-/// receipts). Generous for a library listing of a few thousand books, and far
-/// below anything that would trouble the device.
+/// Cap on a JSON control response — `/list.json`, the sync receipts.
 pub(crate) const JSON_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// Global timeout for one [`is_sidle_server`] request.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Whether `host:port` presents a leaf issued by [`CA_PATH`]'s CA.
-///
-/// `agent` trusts that one root, making the handshake the identity check.
 pub fn is_sidle_server(agent: &ureq::Agent, host: &str, port: u16) -> bool {
     let url = format!("https://{host}:{port}/");
     agent
@@ -140,28 +130,26 @@ pub fn is_sidle_server(agent: &ureq::Agent, host: &str, port: u16) -> bool {
         .is_ok()
 }
 
-/// Timeout for the boot-time `list_books` request. Short so the boot
+/// Timeout for one [`list_books`] request.
 const LIST_TIMEOUT: Duration = Duration::from_secs(3);
-/// Timeout for cover fetches. Covers are now ~30–50KB color thumbnails
+/// Timeout for one [`fetch_cover`] request.
 const COVER_TIMEOUT: Duration = Duration::from_secs(15);
-/// Cap per-cover bytes so a corrupt server response can't OOM us. Real
-/// covers fit comfortably under 200KB; 8MB is wildly generous but still
-/// bounded.
+/// Cap on one cover's bytes.
 const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Length of the sha256 prefix sidle uses in on-device filenames
-/// (`<basename>.<sha8>.kfx`). Must match `sidle_core::library::paths::
+/// Length of the sha256 prefix in an on-device filename,
+/// `<basename>.<sha8>.kfx`.
 pub(crate) const SHA_INFIX_LEN: usize = 8;
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Book {
     pub id: i64,
     pub title: String,
-    /// Full sha256 of the KFX bytes (64 hex chars). Its first 8 match the sha8 infix
-    /// of files already on the device, which is how a held book is hidden.
+    /// Full sha256 of the KFX bytes (64 hex chars); its first [`SHA_INFIX_LEN`]
+    /// are the infix in `device_filename`.
     #[serde(default)]
     pub kfx_sha256: Option<String>,
-    /// Canonical on-device filename (`<basename>.<sha8>.kfx`), computed
+    /// Canonical on-device filename, `<basename>.<sha8>.kfx`.
     #[serde(default)]
     pub device_filename: Option<String>,
 
@@ -179,31 +167,27 @@ pub struct Book {
     pub series_index: Option<f64>,
     #[serde(default)]
     pub file_size: i64,
-    /// Conversion direction, `"<source>_to_<target>"` (`"pdf_to_kfx"`,
-    /// `"epub_to_kfx"`, `"kfx_to_epub"`) — the only record of which format a book
-    /// was imported *from*, which is what the Format facet groups by.
+    /// Conversion direction, `"<source>_to_<target>"` — `"pdf_to_kfx"`,
+    /// `"epub_to_kfx"`, `"kfx_to_epub"`. Read by [`Book::source_format`].
     #[serde(default)]
     pub kind: Option<String>,
-    /// The content_id baked into the KFX Sidle pushed. The device names this
+    /// The content_id in the KFX on the server.
     #[serde(default)]
     pub asin: Option<String>,
     #[serde(default)]
     pub imported_at: String,
-    /// User-defined tags. Server canonicalizes them (trimmed, lowercased,
-    /// deduped, in-order); the `tags` facet (`ui::filter`) reads them as-is.
+    /// User-defined tags, as `/list.json` sends them: trimmed, lowercased,
+    /// deduped, in order.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Cover revision (ms mtime) from the server, folded into the on-device
-    /// cover-cache filename (`cover_cache`) so a desktop recrawl that changes
-    /// the cover bumps the rev and self-invalidates the stale thumbnail.
+    /// Cover revision (ms mtime), part of the [`crate::cover_cache`] filename.
     #[serde(default)]
     pub cover_rev: i64,
-    /// Content revision of the KFX on the server: the file's ms mtime. Because
+    /// Content revision of the KFX on the server: its ms mtime.
     #[serde(default)]
     pub kfx_rev: i64,
-    /// Canonical (space/punctuation-free, ASCII-folded, lowercase) search key the
-    /// server derives from the book's editable romaji + auto-romanized
-    /// series/publisher/tags + raw fields (`sidle_core::library::romaji::search_key`).
+    /// Space- and punctuation-free, ASCII-folded, lowercase key over the book's
+    /// romaji, series, publisher, tags and raw fields.
     #[serde(default)]
     pub search_key: String,
 }
@@ -239,8 +223,7 @@ pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> 
     Ok(books)
 }
 
-/// Strip zero-width / format characters and trim the text fields the picker
-/// sorts and facets on.
+/// Apply [`clean`] to every text field of `book`.
 fn sanitize(book: &mut Book) {
     book.title = clean(&book.title);
     book.author = clean(&book.author);
@@ -252,7 +235,7 @@ fn sanitize(book: &mut Book) {
     }
 }
 
-/// Drop [`crate::font::is_invisible`] characters anywhere in `s`, then trim
+/// `s` without its [`crate::font::is_invisible`] characters, trimmed.
 fn clean(s: &str) -> String {
     s.chars()
         .filter(|c| !crate::font::is_invisible(*c))
@@ -262,8 +245,7 @@ fn clean(s: &str) -> String {
 }
 
 pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
-    // `?thumb=1` asks for the small colour thumbnail made at import, ~30–50 KB. The
-    // server falls back to full-res when it is not on disk yet.
+    // `?thumb=1` asks for the import-time thumbnail, full-res where none exists.
     let url = format!("https://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
     let mut res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();
@@ -275,24 +257,22 @@ pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<V
     Ok(bytes)
 }
 
-/// Sanity cap on a single book download. A real KFX — even an image-heavy
+/// Cap on one book download.
 const KFX_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub struct Download {
     pub filename: String,
-    /// The response body, left unread. The caller streams it straight to disk
+    /// The response body, unread; [`stream_download`] drains it.
     pub reader: Box<dyn Read + Send>,
-    /// The server's `Content-Length`, if present. The caller checks the bytes
+    /// The response's `Content-Length`, where the server sent one.
     pub expected_len: Option<u64>,
 }
 
 pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Result<Download> {
-    // Resolve the on-device name first, from data the list endpoint already
-    // gave us — so a row the server couldn't name fails before we spend the
-    // download instead of after.
+    // `filename` settles before any bytes move.
     let filename = device_filename(book)?;
     let url = format!("https://{}:{}/get/{}", cfg.host, cfg.port, book.id);
-    // No overall request timeout: a big book over a sleepy radio can take
+    // No `timeout_global`: a book transfer is unbounded in time.
     let res = match agent.get(&url).header("X-Sidle-Token", &cfg.token).call() {
         Ok(res) => res,
         Err(ureq::Error::StatusCode(code)) if code == 401 || code == 403 => {
@@ -305,9 +285,7 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
         .get("Content-Length")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    // `into_reader` consumes the response, so the length has to come off the
-    // headers first — reversing these silently drops the size check that makes
-    // `stream_download` able to tell a finished transfer from a truncated one.
+    // `into_reader` consumes the response: `Content-Length` comes off first.
     let reader: Box<dyn Read + Send> = Box::new(res.into_body().into_reader().take(KFX_MAX_BYTES));
     Ok(Download {
         filename,
@@ -316,8 +294,8 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
     })
 }
 
-/// Fetch the reading-state sidecar the library holds for one book and write it
-/// beside the freshly downloaded file.
+/// Write `GET /sidecar/<book_id>` into `<stem>.sdr/<stem>.yjr` under
+/// `sidle_dir`. `false` where the library holds nothing for the book.
 pub fn pull_sidecar(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -337,8 +315,7 @@ pub fn pull_sidecar(
         .header("X-Sidle-Token", &cfg.token)
         .call()
         .map_err(|e| anyhow!("GET {url}: {e}"))?;
-    // 204: the library holds no annotations for this book, which is the common
-    // case and not a failure.
+    // 204: no annotations for this book.
     if res.status() == 204 {
         return Ok(false);
     }
@@ -359,12 +336,11 @@ pub fn pull_sidecar(
     Ok(true)
 }
 
-/// A reading-state sidecar is records, not content — tens of KB for a heavily
-/// annotated book. The cap is generous and only there so a wrong route or a
-/// captive-portal page cannot be written into the `.sdr` as one.
+/// Cap on one sidecar's bytes.
 const SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Stream a [`download_book`] body to `target`, atomically: write a sibling
+/// Stream a [`download_book`] body into `target` through a `.part` sibling,
+/// renamed once `expected_len` bytes have landed.
 pub fn stream_download(dl: Download, target: &std::path::Path) -> Result<u64> {
     use std::io::Write as _;
     let fname = target
@@ -409,7 +385,7 @@ pub fn stream_download(dl: Download, target: &std::path::Path) -> Result<u64> {
     Ok(written)
 }
 
-/// The on-device filename, taken straight from `/list.json`'s
+/// `book.device_filename`, once it matches [`looks_like_sha8_kfx`].
 fn device_filename(book: &Book) -> Result<String> {
     match book.device_filename.as_deref() {
         Some(name) if looks_like_sha8_kfx(name) => Ok(name.to_string()),
@@ -442,10 +418,10 @@ fn looks_like_sha8_kfx(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Annotation push — POST /sync/annotations (the LAN twin of a USB sync)
+// Annotation push — GET/POST /sync/annotations
 // ---------------------------------------------------------------------------
 
-/// The push bundle: each `.sdr`'s reading-state sidecars (base64). Mirrors
+/// The `POST /sync/annotations` body.
 #[derive(Serialize)]
 struct SyncRequest {
     device_serial: String,
@@ -468,15 +444,15 @@ struct SyncSdr {
     yjr_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     yjf_b64: Option<String>,
-    /// The sidecars' own filenames, so the server can address a write-back
-    /// without inventing the device-specific infix they carry.
+    /// The sidecars' own filenames, carrying the device-specific infix an
+    /// [`OutgoingSdr`] is addressed by.
     #[serde(skip_serializing_if = "Option::is_none")]
     yjr_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     yjf_name: Option<String>,
 }
 
-/// A sidecar the desktop wants written here, from the sync response.
+/// One sidecar from a [`SyncReport`], bound for a `.sdr` on this device.
 #[derive(Debug, Deserialize)]
 pub struct OutgoingSdr {
     sdr_name: String,
@@ -484,33 +460,26 @@ pub struct OutgoingSdr {
     yjr_b64: String,
 }
 
-/// The server's import report, the subset the picker surfaces in a toast. serde
-/// ignores the report fields we don't read, so this stays compatible as the
-/// server's `DeviceImportReport` grows.
+/// The import report `POST /sync/annotations` answers with, in the fields
+/// [`SyncReport::summary`] names.
 #[derive(Debug, Default, Deserialize)]
 pub struct SyncReport {
     #[serde(default)]
     pub positions: usize,
-    /// `.sdr` dirs whose book isn't in the library (highlights archived as
-    /// orphans). Normally empty — everything under `documents/Sidle/` was
-    /// sideloaded from the library — so a non-zero count is worth surfacing.
+    /// `.sdr` dirs naming no book in the library; their highlights land in the
+    /// orphan inbox.
     #[serde(default)]
     pub unmatched: Vec<String>,
     #[serde(default)]
     pub annotations: SyncStats,
-    /// Orphaned `.sdr` dirs pruned off the device this sync. Set locally by
-    /// [`push_annotations`], not by the server, so it survives the early exit.
-    #[serde(default)]
-    pub pruned: usize,
-    /// Sidecars the desktop wants written onto this device — highlights made in
-    /// Sidle's reader coming the other way. Consumed by [`push_annotations`] and
-    /// replaced by [`Self::written`].
+    /// Sidecars bound for this device, drained by [`push_annotations`] into
+    /// [`Self::written`].
     #[serde(default)]
     pub write: Vec<OutgoingSdr>,
-    /// How many of those actually landed. Set locally, like `pruned`.
+    /// How many of [`Self::write`] landed on disk.
     #[serde(default)]
     pub written: usize,
-    /// Ink pages the library decoded out of the notebooks we just sent. The
+    /// Ink pages the library decoded out of the pushed notebooks.
     #[serde(default)]
     pub ink_pages: usize,
 }
@@ -522,9 +491,9 @@ pub struct SyncStats {
 }
 
 impl SyncReport {
-    /// One-line toast summary, e.g. `annotation sync: 3 new, 2 positions`.
-    /// `nothing new` when an idempotent re-sync changed nothing. A trailing
-    /// `(N unmatched)` flags orphaned highlights when any.
+    /// One-line toast summary, `annotation sync: 3 new, 2 positions`, falling
+    /// back to `annotation sync: nothing new`. A non-empty [`Self::unmatched`]
+    /// adds a trailing `(N unmatched)`.
     pub fn summary(&self) -> String {
         let new = self.annotations.inserted;
 
@@ -534,9 +503,6 @@ impl SyncReport {
         }
         if self.positions > 0 {
             parts.push(format!("{} positions", self.positions));
-        }
-        if self.pruned > 0 {
-            parts.push(format!("{} stale removed", self.pruned));
         }
         if self.written > 0 {
             parts.push(format!("{} sent here", self.written));
@@ -557,12 +523,11 @@ impl SyncReport {
     }
 }
 
-/// The import can rebuild a TextIndex per changed book server-side; give it
-/// generous headroom over the list/cover timeouts (still LAN-only).
+/// Timeout for one sync request, covering the server's per-book index rebuild.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `GET /sync/annotations` — the ink content shas the library already decoded
-/// off this device, `{asin: nbk_sha}`.
+/// `GET /sync/annotations` — `{asin: nbk_sha}` for the ink the library holds
+/// off this device.
 #[derive(Deserialize, Default)]
 struct InkManifest {
     #[serde(default)]
@@ -570,14 +535,15 @@ struct InkManifest {
 }
 
 /// `GET /sync/notebooks` — `{uuid: nbk_sha}` for every notebook the library
-/// holds. Not device-keyed: a notebook is one entity wherever it was written.
+/// holds, from any device.
 #[derive(Deserialize, Default)]
 struct NotebookManifest {
     #[serde(default)]
     notebooks: HashMap<String, String>,
 }
 
-/// Fetch a sync route's "what do you already have?" manifest.
+/// A sync route's manifest of what the library holds, `T::default()` on any
+/// failure or when `skip`.
 fn fetch_manifest<T: for<'de> Deserialize<'de> + Default>(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -614,7 +580,8 @@ fn fetch_manifest<T: for<'de> Deserialize<'de> + Default>(
     })
 }
 
-/// Scan the on-device reading-state sidecars and push them to sidle-server's
+/// POST this device's sidecars and unheld `ink` to `/sync/annotations`, then
+/// write back the [`SyncReport::write`] the answer carries.
 pub fn push_annotations(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -630,17 +597,14 @@ pub fn push_annotations(
     }
 
     let url = format!("https://{}:{}/sync/annotations", cfg.host, cfg.port);
-    let (sdrs, pruned) = collect_sidecars(sidle_dir)?;
-    // Ask before sending: the library reports the ink it has already decoded off
-    // this device, and anything matching is left where it is. An `nbk` runs tens
-    // of KB and a book's ink rarely changes again once it's drawn.
+    let sdrs = collect_sidecars(sidle_dir)?;
+    // `have` names the ink the library holds; a matching sha stays on the device.
     let have: InkManifest = fetch_manifest(agent, cfg, &url, ink.is_empty());
     let inks: Vec<SyncInk> = ink
         .iter()
         .filter(|n| have.ink.get(&n.id) != Some(&n.sha))
         .filter_map(|n| {
-            // Re-read now that we know it's going: the scan hashed and released
-            // the bytes so a no-op sync never holds a notebook in memory.
+            // The scan kept `n.sha` alone; the bytes are read at the send.
             match std::fs::read(&n.path) {
                 Ok(bytes) => Some(SyncInk {
                     asin: n.id.clone(),
@@ -655,12 +619,8 @@ pub fn push_annotations(
         .collect();
 
     if sdrs.is_empty() && inks.is_empty() {
-        // Nothing live to sync — skip the round-trip, but still report any
-        // orphaned copies we pruned off the device this pass.
-        return Ok(SyncReport {
-            pruned,
-            ..Default::default()
-        });
+        // Nothing to sync — skip the round-trip.
+        return Ok(SyncReport::default());
     }
 
     let req = SyncRequest {
@@ -689,20 +649,14 @@ pub fn push_annotations(
         read_text(&mut res, JSON_MAX_BYTES).with_context(|| format!("read body of {url}"))?;
     let mut report: SyncReport =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
-    // `pruned` is device-side hygiene, not in the server's report — fold it in
-    // so the sync toast can surface "N stale removed".
-    report.pruned = pruned;
-    // The other direction: write the sidecars the desktop composed for us. This
-    // device owns the filesystem, so it does the writing; the desktop only
-    // decided what should be in them.
+    // The other direction: `report.write` lands on this device's disk.
     report.written = write_incoming_sidecars(sidle_dir, &report.write);
     report.write = Vec::new();
     Ok(report)
 }
 
-/// Write the sidecars the desktop sent back, returning how many landed.
-/// Best-effort per file. Only ever writes into an existing `.sdr`: a directory
-/// that isn't there means the device has never opened that book.
+/// Write `outgoing` into the `.sdr` dirs it names, answering how many landed.
+/// An absent dir is skipped; a bad payload or a failed write is logged.
 fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize {
     let mut written = 0;
     for item in outgoing {
@@ -729,24 +683,14 @@ fn write_incoming_sidecars(sidle_dir: &Path, outgoing: &[OutgoingSdr]) -> usize 
     written
 }
 
-/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` that still has its book,
-/// base64 each. Returns them plus the count of orphaned `.sdr` pruned — an
-/// `.sdr` with no `<stem>.kfx` is a copy deleted on the device.
-fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
+/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir`, base64
+/// each. A `.sdr` is collected whether or not its `<stem>.kfx` sits beside it.
+fn collect_sidecars(sidle_dir: &Path) -> Result<Vec<SyncSdr>> {
     let mut sdrs = Vec::new();
-    let mut pruned = 0usize;
     if let Ok(entries) = std::fs::read_dir(sidle_dir) {
         for entry in entries.flatten() {
             let sdr = entry.path();
             if sdr.extension().and_then(|e| e.to_str()) != Some("sdr") {
-                continue;
-            }
-            // No live `.kfx` beside it → the user deleted this copy on the device.
-            // Prune the orphaned sidecar and skip it; don't sync a dead copy.
-            if !sdr.with_extension("kfx").exists() {
-                if std::fs::remove_dir_all(&sdr).is_ok() {
-                    pruned += 1;
-                }
                 continue;
             }
             let yjr = read_sidecar(&sdr, ".yjr")?;
@@ -769,12 +713,12 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
         }
     }
 
-    Ok((sdrs, pruned))
+    Ok(sdrs)
 }
 
-/// The first file in `sdr_dir` whose name ends with `suffix` (e.g. `.yjr`),
-/// read into bytes — matching `find_sidecar`'s `ends_with` rule in sidle-core.
-/// A sidecar's bytes *and* its filename. The name matters as much as the bytes:
+/// The name and bytes of the first file in `sdr_dir` ending with `suffix`
+/// (`.yjr`, `.yjf`), on the same `ends_with` rule as sidle-core's
+/// `find_sidecar`.
 fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)>> {
     let Ok(entries) = std::fs::read_dir(sdr_dir) else {
         return Ok(None);
@@ -798,8 +742,8 @@ fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)
 // Notebook push — GET/POST /sync/notebooks
 // ---------------------------------------------------------------------------
 
-/// The push bundle: the standalone notebooks whose bytes the library doesn't
-/// already hold. Mirrors `sidle-server`'s `NotebookSyncRequest`.
+/// The `POST /sync/notebooks` body: the standalone notebooks absent from the
+/// library's manifest. Mirrors sidle-server's `NotebookSyncRequest`.
 #[derive(Serialize)]
 struct NotebookRequest {
     notebooks: Vec<SyncNotebook>,
@@ -814,14 +758,14 @@ struct SyncNotebook {
     updated_at: String,
 }
 
-/// What the library stored, for the picker's toast.
+/// What `POST /sync/notebooks` stored, in the fields
+/// [`NotebookReport::summary`] names.
 #[derive(Debug, Default, Deserialize)]
 pub struct NotebookReport {
     #[serde(default)]
     pub imported: usize,
-    /// Notebooks the library refused to re-create because they were deleted in
-    /// Sidle. Not an error and not shown in the toast, but logged — it is the
-    /// answer to "why is my notebook not coming back?".
+    /// Notebooks the library declined to re-create, having had them deleted in
+    /// Sidle. Logged, never toasted.
     #[serde(default)]
     pub suppressed: usize,
     #[serde(default)]
@@ -829,8 +773,7 @@ pub struct NotebookReport {
 }
 
 impl NotebookReport {
-    /// A terse toast fragment, or `None` when nothing was stored — the normal
-    /// case once a notebook has been backed up, and not worth a line.
+    /// A toast fragment, `None` where `imported` is 0 and `failed` empty.
     pub fn summary(&self) -> Option<String> {
         if self.imported == 0 && self.failed.is_empty() {
             return None;
@@ -844,8 +787,8 @@ impl NotebookReport {
     }
 }
 
-/// Back the Scribe's standalone handwritten notebooks up to the library —
-/// `GET /sync/notebooks` for what it already holds, then `POST` the rest.
+/// Back `found` up to the library: `GET /sync/notebooks` for its manifest,
+/// then `POST` every notebook whose sha the manifest lacks.
 pub fn push_notebooks(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -864,9 +807,7 @@ pub fn push_notebooks(
         let notebooks: Vec<SyncNotebook> = batch
             .iter()
             .filter_map(|n| {
-                // Re-read only what's going, and only a batch at a time: a
-                // notebook runs to a couple of MB, this device has 512 MB shared
-                // with the framework, and base64 inflates by a third.
+                // One batch of bytes in memory at a time, base64 included.
                 let bytes = match std::fs::read(&n.nbk.path) {
                     Ok(b) => b,
                     Err(e) => {
@@ -880,7 +821,7 @@ pub fn push_notebooks(
                 Some(SyncNotebook {
                     uuid: n.nbk.id.clone(),
                     nbk_b64: BASE64.encode(bytes),
-                    // Best-effort: no cover just means the viewer renders page 0.
+                    // An unreadable cover sends as `None`.
                     cover_b64: n
                         .cover
                         .as_deref()
@@ -924,7 +865,8 @@ pub fn push_notebooks(
 /// How many `nbk` bytes one `POST /sync/notebooks` may carry.
 const NOTEBOOK_BATCH_BYTES: u64 = 12 * 1024 * 1024;
 
-/// Split notebooks into groups whose `nbk` bytes sum to at most `budget`.
+/// Split `items` into groups whose `nbk` bytes sum to at most `budget`. One
+/// notebook over `budget` forms a group of its own.
 fn batches<'a>(
     items: &[&'a crate::handwriting::Standalone],
     budget: u64,
@@ -948,14 +890,14 @@ fn batches<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Decrypted-book push — POST /sync/book (the WiFi twin of the USB /dedrm pull)
+// Decrypted-book push — POST /sync/book
 // ---------------------------------------------------------------------------
 
-/// What the server did with a pushed decrypted book.
+/// What `POST /sync/book` did with a pushed decrypted book.
 pub enum BookPush {
     /// New to the library.
     Imported,
-    /// Already present (matched by content hash) — a harmless re-push.
+    /// Matched a library book by content hash.
     Duplicate,
 }
 
@@ -964,8 +906,8 @@ struct BookPushReply {
     outcome: String,
 }
 
-/// Push one decrypted book to sidle-server's `POST /sync/book`, which imports it
-/// as the USB `/dedrm` pull does. Streamed from disk, never held in RAM.
+/// Stream the decrypted book at `path` to `POST /sync/book`, its extension in
+/// the `ext` query.
 pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result<BookPush> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let ext = path
@@ -1000,7 +942,7 @@ pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result
 // Misc backup — GET /sync/misc (which folders), POST /sync/misc (the files)
 // ---------------------------------------------------------------------------
 
-/// One folder the library asked this Kindle to back up. Mirrors `sidle-core`'s
+/// One set of folders `GET /sync/misc` asks this Kindle to back up.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Collection {
     pub id: String,
@@ -1011,11 +953,11 @@ pub struct Collection {
     pub include: Vec<String>,
     #[serde(default)]
     pub recursive: bool,
-    /// Delete the sent files off this Kindle once the push landed.
+    /// Unlink the sent files once the push lands.
     #[serde(default)]
     pub clear_device: bool,
-    /// Filenames deleted off this Kindle after the push but never sent — the
-    /// firmware's `wininfo_screenshot_*.txt` companions and the like.
+    /// Patterns for files unlinked with the push and never sent, such as
+    /// `wininfo_screenshot*`.
     #[serde(default)]
     pub purge: Vec<String>,
 }
@@ -1030,8 +972,8 @@ impl Collection {
     }
 }
 
-/// What the picker scans when the library can't be asked (see [`push_misc`]).
-/// Deliberately the same two the library seeds itself with.
+/// The collections [`fetch_collections`] falls back to, matching the two the
+/// library seeds itself with.
 fn default_collections() -> Vec<Collection> {
     vec![
         Collection {
@@ -1061,9 +1003,8 @@ struct CollectionsReply {
     collections: Vec<Collection>,
 }
 
-/// The push bundle: each file base64 in JSON, tagged with the collection it was
-/// scanned for. Mirrors `sidle-server`'s `MiscSyncRequest`. `device_serial`
-/// comes from `server.conf`.
+/// The `POST /sync/misc` body: each file base64, tagged with the collection it
+/// was scanned for. Mirrors sidle-server's `MiscSyncRequest`.
 #[derive(Serialize)]
 struct MiscRequest {
     device_serial: String,
@@ -1073,29 +1014,29 @@ struct MiscRequest {
 #[derive(Serialize)]
 struct MiscFile {
     collection: String,
-    /// The file's path relative to its collection's folder — `2026/draft.md`
-    /// for a recursive collection, a bare filename otherwise.
+    /// The file's path below its collection's folder: `2026/draft.md` under a
+    /// recursive collection, a bare filename elsewhere.
     path: String,
     data_b64: String,
 }
 
-/// The server's `MiscSyncResult`: files stored, per collection id.
+/// sidle-server's `MiscSyncResult`: files stored, per collection id.
 #[derive(Deserialize)]
 struct MiscReply {
     #[serde(default)]
     stored: std::collections::BTreeMap<String, usize>,
 }
 
-/// What the push backed up, labelled for the picker's toast.
+/// What [`push_misc`] backed up, labelled for a toast.
 #[derive(Debug, Default)]
 pub struct MiscReport {
-    /// `(label, count)` per collection that stored something, in config order.
+    /// `(label, count)` per collection that stored something, in `Collection`
+    /// order.
     pub stored: Vec<(String, usize)>,
 }
 
 impl MiscReport {
-    /// A terse toast fragment like `Screenshots 2, Logs 1`, or `None` when the
-    /// push backed nothing up (so the caller omits it entirely).
+    /// A toast fragment, `Screenshots 2, Logs 1`, `None` on an empty `stored`.
     pub fn summary(&self) -> Option<String> {
         if self.stored.is_empty() {
             return None;
@@ -1110,7 +1051,7 @@ impl MiscReport {
     }
 }
 
-/// Ask the desktop which folders it wants backed up.
+/// `GET /sync/misc`'s collection list, [`default_collections`] on a failure.
 fn fetch_collections(agent: &ureq::Agent, cfg: &ServerConfig) -> Vec<Collection> {
     let url = format!("https://{}:{}/sync/misc", cfg.host, cfg.port);
     let fetched = (|| -> Result<Vec<Collection>> {
@@ -1137,7 +1078,6 @@ fn fetch_collections(agent: &ureq::Agent, cfg: &ServerConfig) -> Vec<Collection>
     match fetched {
         Ok(c) => c,
         Err(e) => {
-            // eprintln lands in the picker log via sidle.sh's `2>>` redirect.
             eprintln!("[sidle/misc] collection list unavailable ({e}) — using defaults");
             default_collections()
         }
@@ -1147,8 +1087,8 @@ fn fetch_collections(agent: &ureq::Agent, cfg: &ServerConfig) -> Vec<Collection>
 /// How many file bytes one `POST /sync/misc` may carry.
 const MISC_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Back this Kindle's configured folders up to `POST /sync/misc` — the WiFi
-/// backup the desktop's Files tab views. `us_root` is `/mnt/us`.
+/// Back the [`fetch_collections`] folders beneath `us_root` (`/mnt/us`) up to
+/// `POST /sync/misc`, then unlink what the collections clear and purge.
 pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Result<MiscReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
@@ -1161,7 +1101,7 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
     let collections = fetch_collections(agent, cfg);
     let scan = collect_misc_files(us_root, &collections);
     if scan.entries.is_empty() && scan.purge.is_empty() {
-        // Nothing on the device to back up or tidy — skip the round-trip.
+        // Nothing to send or unlink — skip the round-trip.
         return Ok(MiscReport::default());
     }
 
@@ -1172,7 +1112,7 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         let mut files = Vec::with_capacity(batch.len());
         let mut batch_cleared = Vec::new();
         for e in batch {
-            // Read here, not during the scan: one batch in memory at a time. A
+            // One batch of bytes in memory at a time; the scan read none.
             let Some(bytes) = std::fs::read(&e.path).ok().filter(|b| !b.is_empty()) else {
                 continue;
             };
@@ -1219,7 +1159,7 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         cleared.extend(batch_cleared);
     }
 
-    // Every batch landed (a non-2xx would have returned above) — clear what this
+    // Reached only once every batch landed: unlink the sent and purged files.
     for path in cleared.into_iter().chain(scan.purge.iter()) {
         if let Err(e) = std::fs::remove_file(path) {
             eprintln!(
@@ -1242,7 +1182,8 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
     })
 }
 
-/// Split scanned files into groups whose bytes sum to at most `budget`. A single
+/// Split `entries` into groups whose bytes sum to at most `budget`. One entry
+/// over `budget` forms a group of its own.
 fn misc_batches(entries: &[MiscEntry], budget: u64) -> Vec<Vec<&MiscEntry>> {
     let mut out: Vec<Vec<&MiscEntry>> = Vec::new();
     let mut cur: Vec<&MiscEntry> = Vec::new();
@@ -1265,19 +1206,18 @@ fn misc_batches(entries: &[MiscEntry], budget: u64) -> Vec<Vec<&MiscEntry>> {
 // Reading log push — GET/POST /sync/reading-log
 // ---------------------------------------------------------------------------
 
-/// The push bundle: the reading-event lines this Kindle found past the desktop's
-/// watermark. Mirrors `sidle-server`'s `ReadingLogRequest`.
+/// The `POST /sync/reading-log` body: the event lines past the library's
+/// watermark. Mirrors sidle-server's `ReadingLogRequest`.
 #[derive(Serialize)]
 struct ReadingLogRequest<'a> {
     device_serial: &'a str,
     lines: &'a [String],
-    /// The snapshots those lines came from, so the desktop records them and this
-    /// Kindle never opens them again.
+    /// The snapshots `lines` came from; they come back in `ReadingWatermark`.
     dumps: &'a [String],
 }
 
-/// The server's answer to "what do you already have from me?" — the snapshots it
-/// has read, and how far into the live log it has got.
+/// `GET /sync/reading-log` — the snapshots the library has read, and how far
+/// into the live log it holds.
 #[derive(Deserialize, Default)]
 struct ReadingWatermark {
     #[serde(default)]
@@ -1286,38 +1226,36 @@ struct ReadingWatermark {
     seen: Vec<String>,
 }
 
-/// What the desktop stored, for the picker's toast.
+/// What `POST /sync/reading-log` stored, plus the locally filled counts.
 #[derive(Debug, Default, Deserialize)]
 pub struct ReadingLogReport {
     #[serde(default)]
     pub sessions: usize,
     #[serde(default)]
     pub added: usize,
-    /// Sittings the library already held and these events carried further — what
-    /// a Sync in the middle of a sitting produces, rather than a new session.
+    /// Stored sittings these events carried further, in place of opening a new
+    /// session.
     #[serde(default)]
     pub extended: usize,
     #[serde(default)]
     pub attributed: usize,
-    /// How far the library now holds this device's events, as `YYMMDD:HHMMSS`.
-    /// What the local archive is pruned against.
+    /// How far the library holds this device's events, as `YYMMDD:HHMMSS`. The
+    /// local archive is pruned against it.
     #[serde(default)]
     pub watermark: String,
-    /// Dumps skipped on their filename alone — not from the server, filled in
-    /// locally so the log can show that the watermark did its job.
+    /// Dumps skipped on their filename against the watermark, counted locally.
     #[serde(skip)]
     pub skipped: usize,
-    /// Which of this device's four log sources the lines came from.
+    /// Which of this device's log sources the lines came from.
     #[serde(skip)]
     pub from: crate::readinglog::Sources,
-    /// Archive files deleted because the library confirmed it holds them.
+    /// Archive files deleted under the returned `watermark`.
     #[serde(skip)]
     pub purged: usize,
 }
 
 impl ReadingLogReport {
-    /// A terse toast fragment, or `None` when nothing was read since the last
-    /// Sync — which is the normal case and does not deserve a line.
+    /// A toast fragment, `None` where `added` and `extended` are both 0.
     pub fn summary(&self) -> Option<String> {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         match (self.added, self.extended) {
@@ -1329,7 +1267,8 @@ impl ReadingLogReport {
     }
 }
 
-/// Push this Kindle's new reading events to the desktop.
+/// Push this Kindle's reading events past the library's watermark, then purge
+/// the archive the answer confirms.
 pub fn push_reading_log(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
@@ -1353,8 +1292,7 @@ pub fn push_reading_log(
         .build()
         .call()
     {
-        // Read + `serde_json`, not ureq's `into_json`: that needs the `json`
-        // feature, which pulls dependencies this crate keeps out.
+        // `read_text` + `serde_json`; ureq's `json` feature stays off.
         Ok(mut res) => {
             let text = read_text(&mut res, JSON_MAX_BYTES)
                 .with_context(|| format!("read body of GET {base}"))?;
@@ -1368,8 +1306,7 @@ pub fn push_reading_log(
 
     let found = crate::readinglog::collect(us_root, &mark.watermark, &mark.seen);
     if !crate::readinglog::has_reading(&found.lines) && found.read.is_empty() {
-        // The common case: nothing has been read since the last sync, so there
-        // is nothing to send and no reason to make the request.
+        // No reading past the watermark — skip the round-trip.
         return Ok(ReadingLogReport {
             skipped: found.skipped,
             from: found.from,
@@ -1404,28 +1341,24 @@ pub fn push_reading_log(
         serde_json::from_str(&text).with_context(|| format!("parse {base}"))?;
     report.skipped = found.skipped;
     report.from = found.from;
-    // Archive-then-purge, the same shape the misc sync uses: the local copy
-    // existed only to survive a gap between syncs, and the gap just closed.
+    // The archive is cut back to what `report.watermark` covers.
     report.purged = crate::readinglog::purge_archive(us_root, &report.watermark);
     Ok(report)
 }
 
-/// How deep a recursive collection descends. Mirrors core's `MAX_DEPTH`: a
-/// device folder is someone else's to organize, and five levels is more nesting
-/// than a notes or drafts folder ever has.
+/// How deep a recursive collection descends. Mirrors sidle-core's `MAX_DEPTH`.
 const MAX_DEPTH: usize = 5;
 
-/// One file the scan found: everything the push needs except its bytes, which
-/// are read a batch at a time.
+/// One file [`collect_misc_files`] found, without its bytes.
 struct MiscEntry {
     collection: String,
-    /// Path relative to the collection's scanned folder — what it is stored
+    /// Path below the collection's scanned folder, and the key it is stored
     /// under in the library.
     rel: String,
     path: std::path::PathBuf,
     size: u64,
-    /// This file's collection clears the device. Only ever acted on for a file
-    /// whose bytes actually went into a request that succeeded.
+    /// This file's collection sets `clear_device`. [`push_misc`] unlinks it
+    /// only after its bytes have landed.
     clear: bool,
 }
 
@@ -1433,11 +1366,11 @@ struct MiscEntry {
 #[derive(Default)]
 struct MiscScan {
     entries: Vec<MiscEntry>,
-    /// On-device paths matched by a collection's `purge`: unlinked once the push
+    /// Paths matching a collection's `purge`, unlinked with the push.
     purge: Vec<std::path::PathBuf>,
 }
 
-/// Find every file the `collections` ask for beneath `us_root`. Names and sizes
+/// Every file the `collections` ask for beneath `us_root`, by name and size.
 fn collect_misc_files(us_root: &Path, collections: &[Collection]) -> MiscScan {
     let mut scan = MiscScan::default();
     for collection in collections {
@@ -1454,8 +1387,8 @@ fn collect_misc_files(us_root: &Path, collections: &[Collection]) -> MiscScan {
     scan
 }
 
-/// Append one directory's matching files to `scan`, recursing when the collection
-/// asks. `rel` is the path the file is stored under, which `seen` keys on.
+/// Append `dir`'s matching files to `scan`, descending into subdirectories for
+/// a recursive `collection`. `rel` is each file's stored path, keying `seen`.
 fn gather_misc(
     dir: &Path,
     rel: &str,
@@ -1481,8 +1414,7 @@ fn gather_misc(
             }
             continue;
         }
-        // Purge matches are cleared without ever being read — the point of them
-        // is that they're worth removing and worth nothing in the library.
+        // A purge match is unlinked without its bytes ever being read.
         if collection.purges(&name) {
             scan.purge.push(entry.path());
             continue;
@@ -1501,15 +1433,14 @@ fn gather_misc(
     }
 }
 
-/// Names no collection ever sends, whatever its patterns say: an in-flight
-/// write, and the dotfiles a desktop OS leaves behind after someone opens the
-/// Kindle in a file browser. Mirrors core's `is_never_backed_up`.
+/// Names no collection sends, whatever its patterns: dotfiles and `.partial`
+/// writes. Mirrors sidle-core's `is_never_backed_up`.
 fn is_never_sent(name: &str) -> bool {
     name.starts_with('.') || name.to_ascii_lowercase().ends_with(".partial")
 }
 
-/// Case-insensitive glob over a bare filename, `*` the only metacharacter.
-/// Mirrors `sidle_core::library::device_backup::glob_match`; the two must agree.
+/// Case-insensitive glob over a bare filename, `*` and `?` its metacharacters.
+/// Mirrors `sidle_core::library::device_backup::glob_match`.
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = name.to_lowercase().chars().collect();
@@ -1543,14 +1474,10 @@ mod tests {
         Book {
             id: 7,
             title: "Sample Title".into(),
-            // Irrelevant to filename resolution now — used only by main.rs's
-            // on-device dedupe. Set to a plausible full sha for realism.
             kfx_sha256: Some(
                 "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef".into(),
             ),
             device_filename: device_filename.map(str::to_string),
-            // Filter/sort metadata is irrelevant to filename resolution — these
-            // tests predate it. Defaults keep the literal compiling.
             author: String::new(),
             language: String::new(),
             publisher: None,
@@ -1569,8 +1496,7 @@ mod tests {
 
     #[test]
     fn uses_server_device_filename_verbatim() {
-        // The non-ASCII name round-trips intact: it rides in the JSON body,
-        // not a header, so ureq's ASCII-only header filter never sees it.
+        // A non-ASCII name round-trips intact.
         let book = make_book(Some(
             "[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx",
         ));
@@ -1582,14 +1508,13 @@ mod tests {
 
     #[test]
     fn errors_when_device_filename_absent() {
-        // Older server that doesn't send the field → loud failure, never a
-        // guessed (and divergent) name.
+        // An absent `device_filename` is an error.
         assert!(device_filename(&make_book(None)).is_err());
     }
 
     #[test]
     fn errors_on_untagged_device_filename() {
-        // A name without the `.<sha8>.kfx` shape is rejected, not saved.
+        // A name off the `.<sha8>.kfx` shape is an error.
         assert!(device_filename(&make_book(Some("just-a-title.kfx"))).is_err());
         assert!(device_filename(&make_book(Some("foo.deadbeeZ.kfx"))).is_err());
     }
@@ -1605,14 +1530,13 @@ mod tests {
 
     #[test]
     fn clean_strips_bom_and_zero_width() {
-        // A leading BOM (U+FEFF) code-point-sorts a title to the end.
-        // Stripped → the digit leads → correct order.
+        // A leading U+FEFF goes, leaving the digit to lead.
         assert_eq!(clean("\u{FEFF}01 〝文学少女〟"), "01 〝文学少女〟");
-        // A BOM buried mid-title is removed too.
+        // A U+FEFF mid-title goes too.
         assert_eq!(clean("07 \u{FEFF}〝x"), "07 〝x");
-        // Other zero-width junk + surrounding whitespace.
+        // Zero-width characters and surrounding whitespace.
         assert_eq!(clean("  \u{200B}Hello\u{200D} "), "Hello");
-        // Only-ignorables collapses to empty (→ facet sentinel downstream).
+        // Ignorables alone collapse to empty.
         assert_eq!(clean("\u{FEFF}\u{200B}"), "");
         // Plain text is untouched.
         assert_eq!(clean("Normal Title 7"), "Normal Title 7");
@@ -1624,8 +1548,7 @@ mod tests {
         dir
     }
 
-    // Batching keeps a first sync from a well-used Scribe inside the device's RAM: a
-    // run splits at the budget, and one notebook bigger than the budget still goes.
+    /// A run splits at `budget`; one notebook over `budget` forms its own group.
     #[test]
     fn notebooks_batch_by_bytes_and_never_drop_an_oversized_one() {
         let base = scratch("batches");
@@ -1657,8 +1580,7 @@ mod tests {
         // Everything fits → one request.
         assert_eq!(batches(&refs, 10_000).len(), 1);
 
-        // A notebook larger than the whole budget is sent alone, not dropped:
-        // going alone is the only way it is ever backed up.
+        // A notebook larger than the budget forms its own group.
         let huge = [make("huge", 4000)];
         let huge_refs: Vec<&crate::handwriting::Standalone> = huge.iter().collect();
         let split = batches(&huge_refs, 1000);
@@ -1674,40 +1596,38 @@ mod tests {
         let docs = base.join("documents");
         let sidle = docs.join("Sidle");
 
-        // A live book: .sdr with both sidecars AND its .kfx present → synced.
+        // A .sdr with both sidecars and its .kfx beside it → collected.
         let sdr = sidle.join("book.deadbeef.sdr");
         std::fs::create_dir_all(&sdr).unwrap();
         std::fs::write(sdr.join("book.deadbeef0000.yjr"), b"yjr-bytes").unwrap();
         std::fs::write(sdr.join("book.deadbeef0000.yjf"), b"yjf-bytes").unwrap();
         std::fs::write(sidle.join("book.deadbeef.kfx"), b"kfx").unwrap();
-        // A pagination-cache .sdr (neither sidecar) whose .kfx lives → kept, not
-        // synced, not pruned.
+        // A pagination-cache .sdr, neither sidecar → left on disk, not collected.
         let cache = sidle.join("other.cafe0000.sdr");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("page.cache"), b"x").unwrap();
         std::fs::write(sidle.join("other.cafe0000.kfx"), b"kfx").unwrap();
-        // An orphaned .sdr with annotations but NO .kfx (the user deleted the
-        // book on the device) → pruned, not synced.
+        // A .sdr with a sidecar and no .kfx → left on disk and collected.
         let orphan = sidle.join("gone.beefcafe.sdr");
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("gone.beefcafe0.yjr"), b"stale").unwrap();
 
-        let (sdrs, pruned) = collect_sidecars(&sidle).unwrap();
-        assert_eq!(sdrs.len(), 1, "only the live book's .sdr is synced");
+        let mut sdrs = collect_sidecars(&sidle).unwrap();
+        sdrs.sort_by(|a, b| a.sdr_name.cmp(&b.sdr_name));
+        assert_eq!(sdrs.len(), 2, "the live book's .sdr and the orphan");
         assert_eq!(sdrs[0].sdr_name, "book.deadbeef.sdr");
         let yjr_expected = BASE64.encode(b"yjr-bytes");
         let yjf_expected = BASE64.encode(b"yjf-bytes");
         assert_eq!(sdrs[0].yjr_b64.as_deref(), Some(yjr_expected.as_str()));
         assert_eq!(sdrs[0].yjf_b64.as_deref(), Some(yjf_expected.as_str()));
-        assert_eq!(pruned, 1, "the orphaned .sdr (no .kfx) was pruned");
-        assert!(
-            !orphan.exists(),
-            "orphaned .sdr dir removed from the device"
+        assert_eq!(sdrs[1].sdr_name, "gone.beefcafe.sdr");
+        assert_eq!(
+            sdrs[1].yjr_b64.as_deref(),
+            Some(BASE64.encode(b"stale").as_str())
         );
-        assert!(
-            cache.exists(),
-            "pagination-cache .sdr kept — its .kfx is live"
-        );
+        assert!(sdrs[1].yjf_b64.is_none());
+        assert!(orphan.exists(), ".sdr kept though its book is gone");
+        assert!(cache.exists(), "pagination-cache .sdr kept");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1715,10 +1635,9 @@ mod tests {
     #[test]
     fn collect_sidecars_empty_when_no_tree() {
         let base = scratch("empty");
-        // documents/Sidle doesn't exist → empty bundle, no error.
-        let (sdrs, pruned) = collect_sidecars(&base.join("documents/Sidle")).unwrap();
+        // An absent `sidle_dir` answers an empty bundle, not an error.
+        let sdrs = collect_sidecars(&base.join("documents/Sidle")).unwrap();
         assert!(sdrs.is_empty());
-        assert_eq!(pruned, 0);
     }
 
     #[test]
@@ -1726,8 +1645,7 @@ mod tests {
         let us = scratch("misc");
         std::fs::create_dir_all(us.join("screenshots")).unwrap();
         std::fs::create_dir_all(us.join("logs")).unwrap();
-        // Newer-style screenshots under screenshots/, with the firmware's
-        // companion file beside one of them.
+        // Screenshots under screenshots/, with a `wininfo_` companion.
         std::fs::write(us.join("screenshots/screenshot_100.png"), b"A").unwrap();
         std::fs::write(us.join("screenshots/screenshot_200.png"), b"B").unwrap();
         std::fs::write(
@@ -1735,14 +1653,13 @@ mod tests {
             b"win",
         )
         .unwrap();
-        // KOA2 stock capture loose in the root, and one name that appears in
-        // BOTH screenshots/ and the root (must be sent only once).
+        // A capture loose in the root, and one name under both dirs.
         std::fs::write(us.join("Screenshot_root.png"), b"C").unwrap();
         std::fs::write(us.join("screenshot_100.png"), b"DUP").unwrap();
-        // Logs live in logs/ now — a stray root log is not scanned.
+        // The logs collection scans logs/ alone.
         std::fs::write(us.join("logs/sidle-native.log"), b"log\n").unwrap();
         std::fs::write(us.join("stray.log"), b"not scanned\n").unwrap();
-        // Unrelated root files that must be ignored.
+        // A root file no collection includes.
         std::fs::write(us.join("version.txt"), b"5.16").unwrap();
 
         let scan = collect_misc_files(&us, &default_collections());
@@ -1762,7 +1679,7 @@ mod tests {
             ],
             "both screenshot dirs scanned, dup collapsed, only logs/ for logs"
         );
-        // The screenshots/ copy wins the dedup — the first dir listed wins.
+        // The first dir in `dirs` wins the dedup.
         let hundred = scan
             .entries
             .iter()
@@ -1770,7 +1687,7 @@ mod tests {
             .unwrap();
         assert_eq!(hundred.path, us.join("screenshots/screenshot_100.png"));
 
-        // The wininfo companion is cleared without ever being sent.
+        // The `wininfo_` companion lands in `purge`, never in `entries`.
         let purge: Vec<_> = scan
             .purge
             .iter()
@@ -1781,8 +1698,7 @@ mod tests {
             vec!["wininfo_screenshot_2026_08_15T01_47_50+0200.txt"]
         );
 
-        // Screenshots are the collection that clears; the log is not — and a
-        // screenshot is only ever cleared after its bytes go out (see push_misc).
+        // `clear` follows the collection's `clear_device`.
         let mut clears: Vec<_> = scan
             .entries
             .iter()
@@ -1803,8 +1719,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&us);
     }
 
-    /// A collection the library added: its own folder, its own pattern, its own
-    /// subfolders — and nothing of it deleted from the device.
+    /// A recursive collection with `clear_device` off and no `purge`.
     #[test]
     fn collect_misc_files_walks_a_recursive_collection() {
         let us = scratch("misc-recursive");
@@ -1813,8 +1728,7 @@ mod tests {
         std::fs::write(us.join("writing/2026/draft.md"), b"nested").unwrap();
         std::fs::write(us.join("writing/2026/notes.txt"), b"other").unwrap();
 
-        // The id is the library's storage key, not the folder's name: the two
-        // are free to differ, and the folder is the one that gets renamed.
+        // `id` is the storage key and `dirs` the folder; the two differ here.
         let collections = vec![Collection {
             id: "drafts".into(),
             label: "Drafts".into(),
@@ -1834,7 +1748,7 @@ mod tests {
             "nothing cleared off the device"
         );
 
-        // A folder that isn't on this Kindle is simply nothing to send.
+        // A collection naming an absent folder scans to nothing.
         let missing = vec![Collection {
             id: "nowhere".into(),
             label: "Nowhere".into(),
@@ -1849,9 +1763,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&us);
     }
 
-    /// A haul bigger than one request is split, and a single file over the
-    /// budget still goes rather than being dropped — the Kindle's memory, not
-    /// the folder's size, is what bounds a push.
+    /// A scan over `budget` splits; one file over `budget` forms its own group.
     #[test]
     fn misc_batches_bound_one_request() {
         let entry = |rel: &str, size: u64| MiscEntry {
@@ -1888,7 +1800,7 @@ mod tests {
         assert!(glob_match("*", "anything at all"));
         assert!(glob_match("a*b*c", "axxbyyc"));
         assert!(!glob_match("a*b*c", "axxbyy"));
-        // Never sent, whatever the pattern says.
+        // `is_never_sent` names override an all-inclusive pattern.
         let all = Collection {
             id: "x".into(),
             label: "X".into(),
@@ -1916,7 +1828,7 @@ mod tests {
         assert_eq!(r.summary().as_deref(), Some("Screenshots 1"));
     }
 
-    /// Syncing in the middle of a sitting stores real reading and must say so.
+    /// `extended` alone, `added` alone, and the two together each get a line.
     #[test]
     fn reading_log_summary_speaks_for_a_sitting_carried_further() {
         assert_eq!(ReadingLogReport::default().summary(), None);
@@ -1955,12 +1867,12 @@ mod tests {
         r.positions = 2;
         assert_eq!(r.summary(), "annotation sync: 3 new, 2 positions");
 
-        // Orphaned highlights flagged with a trailing count.
+        // `unmatched` adds a trailing count.
         let mut r = SyncReport::default();
         r.annotations.inserted = 2;
         r.unmatched = vec!["a.sdr".into(), "b.sdr".into()];
         assert_eq!(r.summary(), "annotation sync: 2 new (2 unmatched)");
-        // Unmatched-only (nothing imported) still reads sensibly.
+        // `unmatched` with nothing imported.
         let r = SyncReport {
             unmatched: vec!["a.sdr".into()],
             ..Default::default()
