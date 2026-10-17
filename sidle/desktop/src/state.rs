@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use crate::device_monitor::DeviceState;
-use crate::library::{LibraryPaths, db, extent};
+use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
 use crate::server::ServerHandle;
 use sidle_core::library::apps;
@@ -20,9 +20,7 @@ use sidle_core::library::device::dist;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
-/// The app's one connection, lent out a moment at a time. Device sync borrows
-/// through a [`db::Access`]; `blocking_lock` puts every borrow on a blocking
-/// task.
+/// [`DbHandle`] lent through [`db::Access`], each borrow a `blocking_lock`.
 pub struct Borrowed<'a>(pub &'a DbHandle);
 
 impl db::Access for Borrowed<'_> {
@@ -31,34 +29,23 @@ impl db::Access for Borrowed<'_> {
     }
 }
 
-/// One `Arc<dyn Transport>` per device-connect, cleared on disconnect. An
-/// MTP-class Kindle exposes a single USB session, which a second
-/// `open_transport` enters for an `exclusive_access` error.
+/// One `Arc<dyn Transport>` per device connection, `None` once it drops.
 pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
-/// Single-entry cache for the reader's search index, keyed by `book_id`. The
-/// first search of a book pays the parse; the rest are HashMap walks. Opening
-/// another book replaces the entry, which is the whole eviction rule.
+/// The search index of one `book_id`, replaced by the next book's.
 pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<sidle_core::library::anchor::BookIndex>)>>>;
 
-/// What the open book's deferred fetches are served from: the parsed book that
-/// produces image bytes on request, the built section HTML, and the eid→section
-/// index that reaches an unstreamed section.
+/// What the open book's deferred fetches are served from.
 pub struct ReaderStoreEntry {
     pub images: sidle_core::reader::ImageStore,
-    /// Every section's `(href, html)` in spine order, built by the open;
-    /// `reader_fetch_sections` hands them out without recompute.
+    /// Every section's `(href, html)` in spine order.
     pub sections: Vec<(String, String)>,
     pub eid_to_section: std::collections::HashMap<i64, usize>,
 }
 
-/// Single-entry store behind `reader_fetch_resources`, `reader_fetch_sections`
-/// and `reader_eid_section`. `reader_open` fills it, `reader_release` drops it,
-/// and `book_id` keys it.
+/// One `(book_id, ReaderStoreEntry)`, filled by `reader_open`, dropped by `reader_release`.
 pub type ReaderStoreCache = Arc<Mutex<Option<(i64, Arc<ReaderStoreEntry>)>>>;
 
-/// Default to all available cores. Conversion is CPU-bound, and the OS
-/// scheduler holds contention with other processes.
 fn default_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -70,22 +57,16 @@ pub struct AppState {
     pub paths: LibraryPaths,
     pub queue: QueueHandle,
     pub device: DeviceState,
-    /// The shared device IO handle. See [`SharedTransport`].
     pub transport: SharedTransport,
     pub server: ServerHandle,
-    /// Source-of-truth paths for the on-device app push (binary +
-    /// `device/` mirror). Resolved once at startup by walking up from
-    /// `CARGO_MANIFEST_DIR` to the workspace Cargo.toml.
+    /// Where the on-device app's binary and `device/` tree are read from.
     pub device_app_source: DeploySource,
-    /// Reader search's per-session `TextIndex` cache (see [`ReaderSearchCache`]).
     pub reader_search_cache: ReaderSearchCache,
-    /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
     pub reader_store: ReaderStoreCache,
 }
 
-/// Walk up from `CARGO_MANIFEST_DIR` to the first `Cargo.toml` declaring
-/// `[workspace]`, the repo root. Outside the dev workspace this returns `Err`,
-/// and `DeploySource` paths report `SourceMissing` to the UI.
+/// The first ancestor of `CARGO_MANIFEST_DIR` whose `Cargo.toml` declares
+/// `[workspace]`; `Err` outside one.
 pub(crate) fn find_workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut p: &Path = start.as_path();
@@ -115,19 +96,16 @@ impl AppState {
         let paths = LibraryPaths::resolve()?;
         paths.ensure()?;
 
-        // `app` moves into the device monitor below, and `device_app_source`
-        // reads this. `None` in dev, and when Tauri cannot resolve it.
         let resource_dir = app.path().resource_dir().ok();
 
         let conn = db::open(&paths.db())?;
-        // Recover from crash: any job stuck mid-convert should re-pend.
+        // A `converting` job left by a crash goes back to `pending`.
         let _ = conn.execute(
             "UPDATE conversion_jobs SET status = 'pending', updated_at = ?1
              WHERE status = 'converting'",
             rusqlite::params![db::now_iso()],
         );
-        // Backfill `kfx_sha256`: a push derives the on-device filename infix
-        // from it, and a row without one reads as "kfx hash missing".
+        // `kfx_sha256` keys the on-device filename; a row lacking one gets it here.
         for (book_id, kfx_path) in db::books_missing_kfx_sha(&conn).unwrap_or_default() {
             match sidle_core::library::import::sha256_of_file(std::path::Path::new(&kfx_path)) {
                 Ok(sha) => {
@@ -141,13 +119,11 @@ impl AppState {
                 }
             }
         }
-        // Backfill `asin` for a row holding a KFX and no value. A device-delete
-        // reaches the `<title>_<ASIN>.sdr/` catalog sidecar through it.
+        // `asin` names the book's `<title>_<ASIN>.sdr/` on the device; a row
+        // lacking one reads it from its KFX.
         for (book_id, kfx_path) in db::books_missing_asin(&conn).unwrap_or_default() {
             match bokai::Book::open(std::path::Path::new(&kfx_path)) {
                 Ok(book) => {
-                    // The content_id bokai baked into this KFX — the device's
-                    // `.sdr` / `.notebooks` key, read back from the file.
                     if let Some(asin) = book.metadata().asin.clone() {
                         let _ = db::set_asin(&conn, book_id, &asin);
                     }
@@ -161,15 +137,12 @@ impl AppState {
             }
         }
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
-        // The registered app sources `dist::refresh` below composes, read while
-        // `conn` is in hand.
         let app_rows = db::list_app_sources(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));
         let queue = queue::spawn(app.clone(), db.clone(), paths.clone(), default_workers());
 
-        // Re-enqueue surviving jobs. Use Tauri's runtime — `bootstrap` is
-        // called from `setup`, which runs on the OS main thread.
+        // `bootstrap` runs from `setup` on the OS main thread, outside a tokio runtime.
         for id in pending {
             let q = queue.clone();
             tauri::async_runtime::spawn(async move {
@@ -177,46 +150,7 @@ impl AppState {
             });
         }
 
-        // The position axis of every book missing one, off `bootstrap`'s body:
-        // an unindexed library is minutes of container parsing. One book at a
-        // time, parsed off the lock, the connection taken per answer.
-        {
-            let db = db.clone();
-            tauri::async_runtime::spawn(async move {
-                let pending = {
-                    let conn = db.lock().await;
-                    db::books_missing_max_position(&conn).unwrap_or_default()
-                };
-                if pending.is_empty() {
-                    return;
-                }
-                eprintln!("[sidle/bootstrap] extent: indexing {} books", pending.len());
-                for (book_id, kfx_path) in pending {
-                    let extent =
-                        tauri::async_runtime::spawn_blocking(move || extent::of_file(&kfx_path))
-                            .await
-                            .unwrap_or(None);
-                    let conn = db.lock().await;
-                    if let Err(e) = db::set_max_position(&conn, book_id, extent) {
-                        eprintln!("[sidle/bootstrap] extent: book {book_id} not stored: {e}");
-                    }
-                }
-                // A freshly indexed book is a new answer to sessions stored
-                // against a position nothing matched.
-                let conn = db.lock().await;
-                match db::resolve_reading_sessions(&conn) {
-                    Ok(n) if n > 0 => {
-                        eprintln!("[sidle/bootstrap] extent: done, {n} reading sessions attributed")
-                    }
-                    Ok(_) => eprintln!("[sidle/bootstrap] extent: done"),
-                    Err(e) => eprintln!("[sidle/bootstrap] extent: done, attribution failed: {e}"),
-                }
-            });
-        }
-
-        // Watch the daemon's `.sync-pulse.json` to live-repaint an open reader after
-        // a LAN annotation sync (the detached server can't emit a Tauri event). Must
-        // clone `app` — `monitor::spawn` consumes it below.
+        // `sync_pulse` turns the server's pulse files into Tauri events.
         crate::sync_pulse::spawn(app.clone(), paths.clone(), queue.clone());
 
         let device = crate::device_monitor::new_state();
@@ -230,8 +164,6 @@ impl AppState {
             queue.clone(),
         );
 
-        // A dev build reads the deploy source from the checkout, where a fresh
-        // armv7 cross-build shows up; a packaged build reads `resource_dir`.
         let device_app_source = if cfg!(debug_assertions) {
             match find_workspace_root() {
                 Ok(root) => DeploySource::from_workspace_root(&root),
@@ -240,8 +172,6 @@ impl AppState {
                         "[sidle/bootstrap] device-app: workspace root not found ({e}); \
                          the deploy section will show SourceMissing for all files"
                     );
-                    // Synthesize a path that won't resolve — compute_status
-                    // handles missing source files gracefully.
                     DeploySource::from_workspace_root(Path::new("/__no_workspace__"))
                 }
             }
@@ -258,9 +188,8 @@ impl AppState {
             }
         };
 
-        // What a detached `sidle-server` serves over `/device/...`. Off the
-        // launch path: a first run hashes the whole fleet, and nothing here
-        // waits on the result.
+        // `dist::refresh` stages what `sidle-server` serves over `/device/...`,
+        // on a thread of its own.
         let staging_source = device_app_source.clone();
         let dist_dir = paths.device_dist();
         let digest_path = paths.source_digests();

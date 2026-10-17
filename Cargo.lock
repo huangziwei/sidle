@@ -5930,7 +5930,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidle"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5965,7 +5965,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-cli"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "bokai",
@@ -5982,7 +5982,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5990,7 +5990,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dirs",
- "flate2",
  "futures",
  "hex",
  "image",
@@ -6014,12 +6013,11 @@ dependencies = [
 
 [[package]]
 name = "sidle-native"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "ab_glyph",
  "anyhow",
  "base64 0.22.1",
- "flate2",
  "hex",
  "image",
  "libc",
@@ -6034,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-render"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "ab_glyph",
  "bokai",
@@ -6049,7 +6047,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-server"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "axum",

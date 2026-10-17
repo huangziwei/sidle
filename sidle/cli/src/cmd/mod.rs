@@ -9,6 +9,5 @@ pub mod library;
 pub mod manage;
 pub mod misc;
 pub mod notebook;
-pub mod reading_log;
 pub mod server;
 pub mod toc;

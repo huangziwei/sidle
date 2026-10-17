@@ -131,9 +131,6 @@ enum Command {
     /// Handwritten notebooks.
     #[command(subcommand)]
     Notebook(cmd::notebook::NotebookCmd),
-    /// Time read, as the Kindle's own logs recorded it.
-    #[command(subcommand)]
-    ReadingLog(cmd::reading_log::ReadingLogCmd),
     /// Files backed up off the device: screenshots, picker logs.
     #[command(subcommand)]
     Misc(cmd::misc::MiscCmd),
@@ -187,7 +184,6 @@ fn run(cli: Cli) -> Result<()> {
         Command::Device(sub) => cmd::device::run(&ctx, sub),
         Command::Apps(sub) => cmd::apps::run(&ctx, sub),
         Command::Notebook(sub) => cmd::notebook::run(&ctx, sub),
-        Command::ReadingLog(sub) => cmd::reading_log::run(&ctx, sub),
         Command::Misc(sub) => cmd::misc::run(&ctx, sub),
         Command::Library(sub) => cmd::manage::run(&ctx, sub),
         Command::Server(sub) => cmd::server::run(&ctx, sub),

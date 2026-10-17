@@ -18,22 +18,17 @@ use crate::state::AppState;
 pub struct ReaderSectionDto {
     pub href: String,
     pub html: Option<String>,
-    /// Serialized HTML byte length — the paginator's progress weight, valid
-    /// whether or not `html` shipped.
+    /// Serialized HTML byte length, set whether or not `html` shipped.
     pub size: i64,
     /// Fixed-layout page pixel size `[width, height]`, or `null` for reflowable.
     pub viewport: Option<[u32; 2]>,
-    /// `"page-spread-left"` / `"page-spread-right"` for a paired fixed-layout
-    /// page, else `null`.
+    /// `"page-spread-left"` / `"page-spread-right"` on a paired fixed-layout page.
     pub spread: Option<String>,
-    /// Base-text char count (ruby-free, whitespace-collapsed) — the reading
-    /// pace measure, precomputed so the webview never DOM-parses sections.
+    /// Base-text char count, ruby-free and whitespace-collapsed.
     pub chars: i64,
-    /// Full-page-image section (cover / full-bleed art) — drives the
-    /// zero-margin single-column layout without a webview text probe.
+    /// A full-page-image section (cover, full-bleed art).
     pub image_only: bool,
-    /// Image hrefs this section references, in document order — the deferred
-    /// image loader's priority input.
+    /// Image hrefs this section references, in document order.
     pub image_hrefs: Vec<String>,
 }
 
@@ -64,8 +59,8 @@ pub struct ReaderTocDto {
     pub children: Vec<ReaderTocDto>,
 }
 
-/// What `reader_open` returns: a reflowable HTML book or a fixed-layout PDF-backed
-/// one. Internally tagged, so the frontend branches on `mode`.
+/// What `reader_open` returns: a reflowable HTML book or a fixed-layout
+/// PDF-backed one, tagged by `mode`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReaderOpen {
@@ -73,9 +68,8 @@ pub enum ReaderOpen {
     Pdf(ReaderPdfDto),
 }
 
-/// A PDF-backed book for the reader's fixed-layout view. Pages are rendered
-/// on demand by [`reader_pdf_page`]; this carries only the structure the chrome
-/// needs (count, sizes, outline, page labels).
+/// A PDF-backed book's structure for the fixed-layout view; [`reader_pdf_page`]
+/// renders its pages.
 #[derive(Debug, Serialize)]
 pub struct ReaderPdfDto {
     pub page_count: usize,
@@ -85,12 +79,9 @@ pub struct ReaderPdfDto {
     pub toc: Vec<ReaderPdfTocDto>,
     /// Per-page point size (`width`/`height`) for the viewer's aspect ratio.
     pub pages: Vec<ReaderPdfPageDto>,
-    /// Per-page display label (`/PageLabels`: "Cover", "i", "1", …) for the
-    /// location readout. One per page.
+    /// Per-page display label (`/PageLabels`: "Cover", "i", "1", …).
     pub page_labels: Vec<String>,
-    /// `"rtl"` / `"ltr"` — page-turn direction, from the library row's `ppd`
-    /// (the same value baked into the KFX). Flips the spread order and the
-    /// physical next/prev mapping for Japanese/manga books.
+    /// `"rtl"` / `"ltr"` page-turn direction, from the row's `ppd`.
     pub page_progression_direction: String,
 }
 
@@ -104,9 +95,8 @@ pub struct ReaderPdfPageDto {
     pub eids: Vec<i64>,
 }
 
-/// One text run positioned over the page image. Geometry is a fraction of the
-/// page box (`left`/`top`/`width`/`height` in `[0, 1]`, top-left origin), so the
-/// frontend drops it onto the rendered image as a percentage-positioned span.
+/// One text run over the page image; `left`/`top`/`width`/`height` are
+/// fractions of the page box, top-left origin.
 #[derive(Debug, Serialize)]
 pub struct ReaderPdfWordDto {
     pub eid: i64,
@@ -152,14 +142,11 @@ pub struct ReaderBookDto {
     pub writing_mode: String,
     /// `"rtl"` / `"ltr"` — spine progression / page-turn direction.
     pub page_progression_direction: String,
-    /// `[eid, location]` pairs for the Location/% readout — `location` is the
-    /// device's human Loc number (position-map pid mapped through the book's
-    /// location_map), so it matches the Kindle. See `ReaderBook::locations`.
+    /// `[eid, location]` pairs, `location` being the device's Loc number.
     pub locations: Vec<(i64, i64)>,
     /// Location count — the denominator for whole-book % and "Loc N of M".
     pub max_location: i64,
-    /// Image-based fixed-layout book (manga / comic): the reader renders
-    /// pre-paginated pages (viewport-sized, two-up spreads) instead of reflowing.
+    /// Image-based fixed-layout book (manga, comic) with pre-paginated pages.
     pub fixed_layout: bool,
 }
 
@@ -174,8 +161,7 @@ fn map_toc(points: Vec<sidle_core::reader::ReaderTocEntry>) -> Vec<ReaderTocDto>
         .collect()
 }
 
-/// Total section-HTML bytes above which a reflowable book's open DTO is windowed
-/// to the resume neighbourhood, the rest streaming via [`reader_fetch_sections`].
+/// Section-HTML bytes above which a reflowable open is windowed.
 const SECTION_WINDOW_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// The open DTO plus the store-side pieces a lazy open leaves behind.
@@ -184,8 +170,7 @@ struct BuiltReaderOpen {
     /// All sections `(href, html)` for `reader_fetch_sections`.
     sections: Vec<(String, String)>,
     eid_to_section: std::collections::HashMap<i64, usize>,
-    /// True when the DTO withheld section HTML — i.e. the store must be cached
-    /// even if there are no images.
+    /// True when the DTO withheld section HTML.
     withheld: bool,
 }
 
@@ -296,10 +281,9 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
     };
 
     let (open, store) = tokio::task::spawn_blocking(move || {
-        // One KFX read serves whichever path this book takes.
         let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
 
-        // PDF-backed? Serve the fixed-layout view entirely from the KFX. A single
+        // A PDF-backed `kfx` serves the fixed-layout view.
         if pdf_path.is_some() || bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
             let rd = bokai::formats::kfx::pdf_pages::read_pages(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
@@ -360,9 +344,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
     .await
     .map_err(|e| format!("reader task join error: {e}"))??;
 
-    // Stash (or clear) the fetch store. A PDF book — or a small text-only
-    // book with nothing deferred — stores nothing but still evicts a previous
-    // book's store: its raw KFX media is dead weight once another book is open.
+    // `store` replaces the previous book's fetch store; `None` clears it.
     {
         let mut cache = state.reader_store.lock().await;
         *cache = store.map(|s| (book_id, std::sync::Arc::new(s)));
@@ -370,8 +352,8 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
     Ok(open)
 }
 
-/// Fetch a batch of deferred images for the open book: each manifest href → mime
-/// and base64 bytes. Hrefs that fail are omitted from the reply.
+/// Fetch a batch of deferred images for the open book: each manifest href →
+/// mime and base64 bytes, a failed href omitted.
 #[tauri::command]
 pub async fn reader_fetch_resources(
     state: State<'_, AppState>,
@@ -402,7 +384,7 @@ pub struct ReaderSectionChunkDto {
     pub html: String,
 }
 
-/// Stream built section HTML for a windowed open (large text book): the DTO
+/// Stream built section HTML for a windowed open.
 #[tauri::command]
 pub async fn reader_fetch_sections(
     state: State<'_, AppState>,
@@ -435,16 +417,14 @@ pub async fn reader_eid_section(
     Ok(entry.eid_to_section.get(&eid).map(|&i| i as i64))
 }
 
-/// Drop the open book's fetch store. Called by the frontend on reader close
-/// and once everything deferred has been delivered (the webview holds the
-/// data from then on; the parsed KFX raw media serves no further purpose).
+/// Drop the open book's fetch store.
 #[tauri::command]
 pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     evict_reader(&state, book_id).await;
     Ok(())
 }
 
-/// Drop the open book's cached reader state (fetch store + search index) if it's
+/// Drop the cached fetch store and search index held for `book_id`.
 pub(crate) async fn evict_reader(state: &AppState, book_id: i64) {
     {
         let mut store = state.reader_store.lock().await;
@@ -491,8 +471,6 @@ pub async fn reader_pdf_page(
             .ok_or_else(|| format!("no book with id {book_id}"))?;
         (row.kfx_path, row.pdf_path)
     };
-    // Clamp to a sane render width (the viewport rarely exceeds a few thousand
-    // device px; guard against a runaway request).
     let width = width.clamp(200, 4000);
 
     tokio::task::spawn_blocking(move || {
@@ -525,8 +503,7 @@ pub async fn reader_pdf_page(
 pub struct ReaderInkDto {
     pub container_id: String,
     pub host_page: i64,
-    /// Transparent, ink-only SVG (the cached overlay render). Empty if the cache
-    /// file is missing (it shouldn't be — import writes it beside the row).
+    /// Transparent ink-only SVG, the cached overlay render; empty without its cache file.
     pub svg: String,
 }
 
@@ -562,9 +539,8 @@ pub async fn reader_pdf_ink(
         .collect())
 }
 
-/// The 0-based PDF pages that carry anchored ink for a book — fetched once on
-/// open so the reader knows which pages to overlay (and can mark them in the
-/// scrubber). The per-page SVGs come from [`reader_pdf_ink`] as each page renders.
+/// The 0-based PDF pages carrying anchored ink for a book; [`reader_pdf_ink`]
+/// serves each page's SVGs.
 #[tauri::command]
 pub async fn reader_pdf_ink_pages(
     state: State<'_, AppState>,
@@ -605,9 +581,8 @@ pub async fn book_ink_for_book(
         .collect())
 }
 
-/// Delete one handwritten-ink page from the library — the row, its cached SVGs,
-/// and a deletion record so a re-sync won't re-add it (Restore from device clears
-/// it). The ink analogue of [`annotation_delete`].
+/// Delete one handwritten-ink page — the row and its cached SVGs — and record
+/// the deletion for device sync.
 #[tauri::command]
 pub async fn book_ink_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.lock().await;
@@ -656,9 +631,6 @@ pub struct AnnotationDto {
     pub color: Option<String>,
     /// `"yjr"` | `"clippings"` — provenance.
     pub source: String,
-    /// When the device says the annotation was made (ISO-8601), when it kept a stamp.
-    /// `None` on a row that carries none — never a guess from the import time.
-    pub added_at: Option<String>,
     /// Reversible "hidden from the reader" flag (kept in the backup).
     pub hidden: bool,
     /// For a `note`, the id of the highlight it annotates, when one encloses it.
@@ -680,7 +652,6 @@ impl From<AnnotationRow> for AnnotationDto {
             note_body: a.note_body,
             color: a.color,
             source: a.source,
-            added_at: a.added_at,
             hidden: a.hidden,
             attached_to: None,
         }
@@ -688,8 +659,7 @@ impl From<AnnotationRow> for AnnotationDto {
 }
 
 /// Annotation rows as the reader wants them: each note carrying the id of the
-/// highlight it annotates. Shared by every path that hands annotations to a UI,
-/// so the grouping is decided once.
+/// highlight it annotates.
 fn with_attachments(rows: Vec<db::AnnotationRow>) -> Vec<AnnotationDto> {
     let attached: std::collections::HashMap<i64, i64> =
         notes::attachments(&rows).into_iter().collect();
@@ -704,8 +674,7 @@ fn with_attachments(rows: Vec<db::AnnotationRow>) -> Vec<AnnotationDto> {
         .collect()
 }
 
-/// List a book's stored annotations, ordered by reading position. The reader
-/// paints highlights/notes and lists them in the sidebar.
+/// List a book's stored annotations, ordered by reading position.
 #[tauri::command]
 pub async fn annotations_for_book(
     state: State<'_, AppState>,
@@ -716,8 +685,8 @@ pub async fn annotations_for_book(
     Ok(with_attachments(rows))
 }
 
-/// One stored last-read position. `source` is `"sidle"` or `"device"`; the anchor
-/// is an `(eid, offset)` pair, and `linear_pos` the human "Location".
+/// One stored last-read position: `source` is `"sidle"` or `"device"`,
+/// `(eid, offset)` its anchor and `linear_pos` its Location.
 #[derive(Debug, Serialize)]
 pub struct ReadingPositionDto {
     pub eid: Option<i64>,
@@ -728,9 +697,8 @@ pub struct ReadingPositionDto {
     pub updated_at: String,
 }
 
-/// A book's saved positions — the reader's own ('sidle') plus one per Kindle
-/// that synced it ('device', keyed by serial). The reader auto-restores the
-/// 'sidle' one on open and offers all of them as Resume jump targets.
+/// A book's saved positions: the reader's own (`'sidle'`) plus one per Kindle
+/// that synced it (`'device'`, keyed by serial).
 #[tauri::command]
 pub async fn reading_position_get(
     state: State<'_, AppState>,
@@ -751,9 +719,7 @@ pub async fn reading_position_get(
         .collect())
 }
 
-/// Save the reader's OWN last-read position (`source='sidle'`). Called on close,
-/// so the Sidle position only moves between sessions. Device positions are
-/// written by the import path (keyed by serial), never through this command.
+/// Save the reader's own last-read position (`source='sidle'`).
 #[tauri::command]
 pub async fn reading_position_set(
     state: State<'_, AppState>,
@@ -767,9 +733,8 @@ pub async fn reading_position_set(
         .map_err(|e| e.to_string())
 }
 
-/// One search hit. `off_end` is the **inclusive** last-char index of the match
-/// (matches the annotation `(eid_start, off_start, eid_end, off_end)` convention,
-/// so JS `rangeFor`'s end-inclusive `+1` walk paints the correct characters).
+/// One search hit. `off_end` is the **inclusive** last-char index of the match,
+/// as in an annotation's `(eid_start, off_start, eid_end, off_end)`.
 #[derive(Debug, Serialize)]
 pub struct SearchMatchDto {
     pub eid: i64,
@@ -795,8 +760,8 @@ impl From<sidle_core::library::anchor::SearchMatch> for SearchMatchDto {
     }
 }
 
-/// In-book full-text search. v1 = strict char match, ASCII case-insensitive,
-/// intra-eid only — see [`BookIndex::search`](sidle_core::library::anchor::BookIndex::search).
+/// In-book full-text search: strict char match, ASCII case-insensitive,
+/// intra-eid — see [`BookIndex::search`](sidle_core::library::anchor::BookIndex::search).
 #[tauri::command]
 pub async fn book_search(
     state: State<'_, AppState>,
@@ -805,7 +770,6 @@ pub async fn book_search(
 ) -> Result<Vec<SearchMatchDto>, String> {
     use std::sync::Arc;
 
-    // Fast path: an index for this book already built this session?
     let cached: Option<Arc<sidle_core::library::anchor::BookIndex>> = {
         let guard = state.reader_search_cache.lock().await;
         match &*guard {
@@ -836,18 +800,14 @@ pub async fn book_search(
             .await
             .map_err(|e| format!("search task join error: {e}"))??;
             let arc = Arc::new(built);
-            // Store; replaces any other book's cached index (single-entry cache).
-            // A concurrent search for a different book may race us here — harmless,
-            // last writer wins and the loser just rebuilds next time.
+            // Single-entry: `book_id`'s index replaces any other book's.
             let mut guard = state.reader_search_cache.lock().await;
             *guard = Some((book_id, arc.clone()));
             arc
         }
     };
 
-    // search() is HashMap-bounded but on a large book scans the whole corpus
-    // (worst case: ~1M chars across thousands of eids); keep the async runtime
-    // unblocked by hopping to the blocking pool.
+    // `index.search` scans the whole corpus on a large book (~1M chars).
     let matches = tokio::task::spawn_blocking(move || index.search(&query))
         .await
         .map_err(|e| format!("search task join error: {e}"))?;
@@ -856,10 +816,10 @@ pub async fn book_search(
 }
 
 // ---------------------------------------------------------------------------
-// Native annotations (T0): create / edit / delete the reader's own annotations.
+// Native annotations: create, edit and delete the reader's own.
 
 /// Create a native annotation, salting the shared content dedup hash with the
-/// book's title key. Returns the stored row, or the one already present.
+/// book's title key. Returns the stored row, or the existing one.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn annotation_create(
@@ -902,7 +862,7 @@ pub async fn annotation_create(
         eid_end,
         off_end,
         loc_start,
-        loc_end: loc_start, // native annotations carry a single-point Location
+        loc_end: loc_start, // a single-point Location
         linear_pos,
         text: &text,
         note_body: note_body.as_deref(),
@@ -914,20 +874,18 @@ pub async fn annotation_create(
         imported_at: &now,
         source: ingest::SOURCE_SIDLE,
     };
-    // Manually (re)creating an annotation is explicit intent — clear any prior
-    // Sidle-side deletion record for this hash so the device sync won't suppress it.
+    // `clear_deletion` lets device sync carry the recreated `hash`.
     db::clear_deletion(&conn, db::DELETION_ANNOTATION, &hash).map_err(|e| e.to_string())?;
     db::insert_annotation(&conn, &row).map_err(|e| e.to_string())?;
-    // Fresh insert or pre-existing duplicate — the canonical row is the one with
-    // this hash.
+    // `hash` names the stored row, fresh or pre-existing.
     let stored = db::get_annotation_by_hash(&conn, &hash)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "annotation missing after insert".to_string())?;
     Ok(AnnotationDto::from(stored))
 }
 
-/// Edit a native annotation's `kind` / `note_body` / `color`. The content hash
-/// folds those in, so it is recomputed and moved with the edit.
+/// Edit a native annotation's `kind` / `note_body` / `color`, recomputing the
+/// content hash that folds them in.
 #[tauri::command]
 pub async fn annotation_update(
     state: State<'_, AppState>,
@@ -1011,8 +969,7 @@ pub async fn annotation_set_note(
             body,
         );
         let now = db::now_iso();
-        // Writing a note is explicit intent; clear any prior deletion of this
-        // exact note so a device sync won't suppress it.
+        // `clear_deletion` lets device sync carry this exact note again.
         db::clear_deletion(&conn, db::DELETION_ANNOTATION, &hash).map_err(|e| e.to_string())?;
         db::insert_annotation(
             &conn,
@@ -1053,7 +1010,7 @@ pub async fn annotation_delete(state: State<'_, AppState>, id: i64) -> Result<()
     Ok(())
 }
 
-/// Hand an external book link off to the OS default handler (browser / mail
+/// Hand an external book link off to the OS default handler.
 #[tauri::command]
 pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
     let lower = url.trim_start().to_ascii_lowercase();

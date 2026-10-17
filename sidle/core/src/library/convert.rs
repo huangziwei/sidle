@@ -11,18 +11,14 @@ use crate::library::import::{
     write_bytes_atomic,
 };
 use crate::library::paths::{LibraryPaths, format_basename};
-use crate::library::{cover_fetch, epub_cover, extent, kfx_cover, pdf_geom, thumbnail};
+use crate::library::{cover_fetch, epub_cover, kfx_cover, pdf_geom, thumbnail};
 
 /// Whether a conversion may write to the source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// First conversion after an import. Runs the cover-enrichment tail, which
-    /// re-fetches the colour cover from the catalogue, writes it into the
-    /// source KFX, and mints `kfx_sha256`.
+    /// First conversion after an import, running [`enrich_cover`].
     Import,
-    /// A forced re-run of the format conversion, source→target **only**. The
-    /// cover-enrichment tail is skipped, leaving the source KFX and
-    /// `kfx_sha256` as they stand.
+    /// A forced re-run of the conversion alone, skipping [`enrich_cover`].
     Reconvert,
 }
 
@@ -32,8 +28,7 @@ impl Mode {
     }
 }
 
-/// Conversion progress as bokai reports it: `(phase, current, total, human
-/// label)`. [`crate::library::progress::fraction`] maps it to a bar.
+/// `(phase, current, total, label)` as bokai reports conversion progress.
 pub type OnProgress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
 /// What one conversion changed.
@@ -43,14 +38,9 @@ pub struct Converted {
     pub kfx_path: Option<PathBuf>,
     pub pdf_path: Option<PathBuf>,
     pub cover_path: Option<PathBuf>,
-    /// The book's position axis as the produced file measures it. `None` for a
-    /// file that carries no position map.
-    pub max_position: Option<i64>,
-    /// Annotations whose anchors moved to follow their text through the
-    /// rebuild.
+    /// Annotations re-anchored onto their text in the rebuilt book.
     pub reanchored: usize,
-    /// Annotations whose text was found nowhere, or in several places, in the
-    /// rebuilt book. Their anchors are unchanged.
+    /// Annotations whose text the rebuilt book holds nowhere, or more than once.
     pub stranded: usize,
 }
 
@@ -86,8 +76,8 @@ pub fn convert_book(
 }
 
 /// The half of a conversion that touches no database: run bokai, write the
-/// produced file, fetch and embed the cover, parse the rebuilt book's position
-/// axis and text index. [`record`] takes the result.
+/// produced file, fetch and embed the cover, and parse the rebuilt book's text
+/// index. [`record`] takes the result.
 pub fn run(
     paths: &LibraryPaths,
     book: &BookRow,
@@ -97,50 +87,32 @@ pub fn run(
 ) -> anyhow::Result<Produced> {
     let mut produced = run_direction(paths, book, kind, on_progress)?;
 
-    // A KFX from Amazon's monochrome-device build carries a grayscale-baked
-    // cover, and the colour one comes from the product page keyed by the
-    // catalogue ASIN.
     if kind == "kfx_to_epub" && !mode.is_reconvert() {
         enrich_cover(paths, book, &mut produced);
     }
 
-    // The picker's thumbnail is derived from `produced.cover_path`.
-    // Best-effort; see `library::thumbnail`.
     if let Some(cover) = &produced.cover_path {
         let _ = thumbnail::ensure_thumbnail(paths, &book.sha256, cover);
     }
 
-    // The KFX the row points at: `produced.kfx_path` for epub→kfx, else the
-    // imported source `book.kfx_path`.
+    // `produced.kfx_path` for epub→kfx, else the imported `book.kfx_path`.
     let indexed = produced
         .kfx_path
         .clone()
         .or_else(|| book.kfx_path.as_deref().map(PathBuf::from));
     if let Some(kfx) = indexed {
-        // A Kindle session log names a position, not a book. `max_position` is
-        // the axis the Reading Log matches those positions against.
-        produced.max_position = extent::of_file(&kfx);
-        if produced.max_position.is_none() {
-            eprintln!(
-                "[sidle/convert] book {}: no position map in the produced KFX; \
-                 reading time on this book cannot be attributed",
-                book.id
-            );
-        }
-        // An annotation's element ids belong to the build it was made against;
-        // its text survives the rebuild. [`record`] re-finds that text here.
+        // [`record`] re-anchors the book's annotations onto `produced.index`.
         produced.index = std::fs::read(&kfx)
             .ok()
             .and_then(|bytes| crate::library::anchor::BookIndex::from_kfx(&bytes));
-        produced.indexed_kfx = Some(kfx);
     }
 
     Ok(produced)
 }
 
 /// The half of a conversion that touches only the database: record the
-/// produced paths on the book row, store the position axis, and move the
-/// book's annotations onto the rebuilt text. [`run`] owns every parse.
+/// produced paths on the book row and move the book's annotations onto the
+/// rebuilt text. [`run`] owns every parse.
 pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::Result<Converted> {
     let book_id = book.id;
     if let Some(epub) = &produced.epub_path {
@@ -149,11 +121,8 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
     if let Some(kfx) = &produced.kfx_path {
         let kfx_str = kfx.to_string_lossy();
         match book.kfx_sha256.as_deref() {
-            // `kfx_sha256` is a frozen identity: the on-device filename embeds
-            // its `<sha8>` and each `.sdr` is bound to that exact name. The
-            // existing value is passed back, which also skips the re-hash.
+            // `kfx_sha256` is frozen: the on-device filename embeds its `<sha8>`.
             Some(sha) => db::set_kfx_path_and_sha(conn, book_id, &kfx_str, sha)?,
-            // No identity yet: mint one from the fresh KFX bytes.
             None => {
                 let sha = sha256_of_file(kfx)?;
                 db::set_kfx_path_and_sha(conn, book_id, &kfx_str, &sha)?;
@@ -180,7 +149,6 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
         kfx_path: produced.kfx_path,
         pdf_path: produced.pdf_path,
         cover_path: produced.cover_path,
-        max_position: produced.max_position,
         ..Default::default()
     };
 
@@ -193,22 +161,11 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
             Err(e) => eprintln!("[sidle/convert] book {book_id}: re-anchor failed: {e}"),
         }
     }
-    if produced.indexed_kfx.is_some() {
-        // `None` stores as 0, "this file has no axis", overwriting any extent
-        // on the row.
-        db::set_max_position(conn, book_id, produced.max_position)?;
-        // Reading sessions stored against a position that matched no book get
-        // another pass against this axis.
-        if produced.max_position.is_some() {
-            db::resolve_reading_sessions(conn)?;
-        }
-    }
     Ok(converted)
 }
 
-/// Re-fetch the catalogue colour cover into everywhere this book keeps one:
-/// the sidecar, the produced EPUB and the source KFX. Every failure here
-/// leaves the conversion's result intact.
+/// Re-fetch the catalogue colour cover into the sidecar, the produced EPUB and
+/// the source KFX.
 fn enrich_cover(paths: &LibraryPaths, book: &BookRow, produced: &mut Produced) {
     let book_id = book.id;
     let Some(asin) = book.amazon_asin.as_deref() else {
@@ -228,8 +185,6 @@ fn enrich_cover(paths: &LibraryPaths, book: &BookRow, produced: &mut Produced) {
         eprintln!("[sidle/convert] book {book_id} colour cover write failed: {e}");
         return;
     }
-    // A cover the conversion wrote under a different extension is removed,
-    // leaving one cover file on disk.
     if let Some(old) = &produced.cover_path
         && old != &out
     {
@@ -237,8 +192,7 @@ fn enrich_cover(paths: &LibraryPaths, book: &BookRow, produced: &mut Produced) {
     }
     produced.cover_path = Some(out);
 
-    // The same colour cover goes into the produced EPUB. This tail runs for
-    // `kfx_to_epub` alone, where the EPUB is the derived side of the KFX.
+    // `epub_cover::ensure_cover` swaps the same cover into `produced.epub_path`.
     if let Some(epub) = &produced.epub_path {
         let kfx = book.kfx_path.as_deref().map(Path::new);
         if let Err(e) = epub_cover::ensure_cover(epub, kfx, &bytes, "jpg", true) {
@@ -246,9 +200,8 @@ fn enrich_cover(paths: &LibraryPaths, book: &BookRow, produced: &mut Produced) {
         }
     }
 
-    // And into the imported KFX, the copy pushed to the Kindle, whose embedded
-    // cover the home tile and sleep screen render. `enriched_kfx_sha` carries
-    // the rewritten file's hash to [`record`].
+    // `kfx_cover::replace_cover` swaps it into `book.kfx_path`, and
+    // `enriched_kfx_sha` carries the new hash to [`record`].
     if let Some(kfx) = book.kfx_path.as_deref() {
         match kfx_cover::replace_cover(Path::new(kfx), &bytes) {
             Ok(new_sha) => produced.enriched_kfx_sha = Some(new_sha),
@@ -265,16 +218,10 @@ pub struct Produced {
     pub kfx_path: Option<PathBuf>,
     pub pdf_path: Option<PathBuf>,
     pub cover_path: Option<PathBuf>,
-    /// ASIN bokai stamped into the produced KFX: the source EPUB's real value,
-    /// else a fabricated 32-char one. `None` for kfx→epub, which produces no
-    /// KFX. Device-delete keys `.sdr/` cleanup on it.
+    /// ASIN bokai stamped into the produced KFX; `None` for kfx→epub.
     pub asin: Option<String>,
     /// The source KFX's hash, as [`enrich_cover`] left it.
     pub enriched_kfx_sha: Option<String>,
-    pub max_position: Option<i64>,
-    /// The KFX `max_position` and `index` were read from. `None` for a book
-    /// with no KFX at all, separating that from a KFX with no position map.
-    pub indexed_kfx: Option<PathBuf>,
     /// The rebuilt book's text index, which annotations are re-anchored onto.
     pub index: Option<crate::library::anchor::BookIndex>,
 }
@@ -311,15 +258,10 @@ fn convert_epub_to_kfx(
     let out_path = dir.join(format!("{base}.kfx"));
     let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
-    // Every step names itself and the file it read, and the failure report
-    // shows that message.
     let mut handle = bokai::Book::open(source_path)
         .map_err(|e| anyhow::anyhow!("bokai epub→kfx (load {}): {e}", source_path.display()))?;
-    // The row's metadata reaches the KFX as an override the exporter reads,
-    // leaving the source EPUB untouched. See [`book_metadata_override`].
     handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
-    // Interior plates are full-colour JXR. A grayscale source page collapses to
-    // `8bppGray` inside the encoder. The cover is JPEG under either mode.
+    // `ColorMode::Color` encodes a grayscale page as `8bppGray`.
     handle.set_image_color_mode(bokai::jxr::ColorMode::Color);
     let mut writer = File::create(&tmp_path)
         .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
@@ -339,9 +281,7 @@ fn convert_epub_to_kfx(
         )
     })?;
 
-    // The ASIN the export stamped: the source's real value, else one fabricated
-    // from the publication identifier. Device-delete matches Kindle's
-    // `<title>_<ASIN>.sdr/` against the row's copy.
+    // `resolve_export_asin`: the source's ASIN, else one fabricated from its identifier.
     let asin = bokai::formats::kfx::metadata::resolve_export_asin(handle.metadata());
 
     Ok(Produced {
@@ -392,8 +332,7 @@ fn convert_kfx_to_epub(
         )
     })?;
 
-    // Cover sidecar: a plain copy out of the produced zip, whose manifest entry
-    // the exporter marked `cover-image` and whose JXR it transcoded to JPG.
+    // `extract_cover_from_epub_file` copies the produced EPUB's `cover-image` out.
     let cover_path = extract_cover_from_epub_file(&out_path).and_then(|(bytes, ext)| {
         let out = paths.cover(&book.sha256, ext);
         std::fs::write(&out, &bytes).ok().map(|_| out)
@@ -436,17 +375,13 @@ fn convert_pdf_to_kfx(
         } else {
             book.language.clone()
         },
-        // The row's year and publisher reach KFX `book_metadata`, alongside the
-        // filename derived from them.
         date: book.published_at.clone(),
         publisher: book.publisher.clone(),
-        // A PDF states no reading direction. `ppd` on the row is the only
-        // source of one; unset, the book reads ltr.
+        // `ppd` is the only reading direction a PDF book carries; unset, it reads ltr.
         page_progression_direction: book.ppd.clone(),
     };
-    // Cover precedence: the sidecar on the row wins over a page-1 render, and
-    // `sanitize_for_kfx` normalizes it to a sleep-screen-safe JFIF JPEG,
-    // transcoding a PNG or WebP one. A failed render leaves the KFX coverless.
+    // `book.cover_path` wins over a page-1 render; `sanitize_for_kfx` makes it a
+    // JFIF JPEG.
     on_progress("cover", 0, 1, "Rendering cover");
     let existing_cover = book
         .cover_path
@@ -474,8 +409,7 @@ fn convert_pdf_to_kfx(
         },
     };
 
-    // Selectable text layer, optional like the cover: a failure converts the
-    // book visual-only. The slowest step, and the widest progress band.
+    // `text` is optional: `None` converts the book without a selectable text layer.
     on_progress("text", 0, 1, "Extracting text");
     let text = bokai::formats::pdf::render::extract_pdf_text(&doc.bytes).ok();
     match &text {
@@ -494,9 +428,8 @@ fn convert_pdf_to_kfx(
     let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref())?;
     write_bytes_atomic(&out_path, &kfx)?;
 
-    // The ink-anchor geometry cache (eid→page map + page boxes), keyed by the
-    // `kfx_sha256` the row carries and computed from the in-memory bytes. An
-    // absent sidecar leaves ink sync on its lazy parse.
+    // `pdf_geom` caches the ink-anchor geometry (eid→page map, page boxes),
+    // keyed by `kfx_sha`.
     on_progress("geom", 0, 1, "Caching geometry");
     let kfx_sha = sha256_of_bytes(&kfx);
     let geom = pdf_geom::compute(&kfx);
@@ -513,16 +446,13 @@ fn convert_pdf_to_kfx(
         );
     }
 
-    // The content_id baked into `out_path`, read back from it. The device names
-    // its `.sdr` and `.notebooks/<id>!!PDOC!!` dirs after this value, and
-    // `books.asin` equals it. `None` defers to the bootstrap backfill.
+    // `asin` is the content_id baked into `out_path`; `None` defers to the
+    // bootstrap backfill.
     let asin = bokai::Book::open(&out_path)
         .ok()
         .and_then(|b| b.metadata().asin.clone());
 
-    // Sidecar for the library tile. An existing one is kept verbatim, png or
-    // webp included, alongside the KFX's JPEG-normalized copy. A fresh
-    // `cover.jpg` is written for a page-1 render alone.
+    // An existing `book.cover_path` stays; else the page-1 render is written.
     let cover_path = match book
         .cover_path
         .as_deref()
@@ -578,9 +508,7 @@ fn convert_kfx_to_pdf(
         .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
     write_bytes_atomic(&out_path, &pdf)?;
 
-    // Cover sidecar: the one on the row wins, and a row without one falls back
-    // to the cover embedded in `kfx_bytes`. A PDF-backed container embeds it
-    // the same way a reflowable one does. A coverless KFX yields no sidecar.
+    // `book.cover_path` wins, else the cover embedded in `kfx_bytes`.
     let cover_path = match book
         .cover_path
         .as_deref()
@@ -608,8 +536,7 @@ fn is_jpeg(bytes: &[u8]) -> bool {
 }
 
 /// The [`bokai::Metadata`] a KFX export writes: a clone of `source` with the
-/// fields `book` tracks overlaid onto it. Fields outside the row — identifier,
-/// ASIN, cover_image, description — keep the `source` value.
+/// fields `book` tracks overlaid onto it.
 pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
     let mut m = source.clone();
     m.title = book.title.clone();
@@ -621,9 +548,8 @@ pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai
     if let Some(ppd) = &book.ppd {
         m.page_progression_direction = Some(ppd.clone());
     }
-    // The KFX exporter takes its vertical/horizontal text axis from
-    // `primary_writing_mode`, and the page-turn from `ppd` above. `None` leaves
-    // the source's own writing mode.
+    // `primary_writing_mode` sets the KFX text axis and `ppd` above the
+    // page-turn. `None` leaves the source's own writing mode.
     if let Some(wm) = &book.writing_mode {
         m.primary_writing_mode = Some(wm.clone());
     }
@@ -640,8 +566,8 @@ pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai
     m
 }
 
-/// The import-time basename: the stem of `source`, which import wrote as
-/// `[Author] Title (Year)`. An empty stem is re-derived from `book`.
+/// The stem of `source` (`[Author] Title (Year)` at import); an empty one is
+/// re-derived from `book`.
 fn derived_basename(book: &BookRow, source: &Path) -> String {
     if let Some(stem) = source.file_stem().and_then(|s| s.to_str())
         && !stem.is_empty()
@@ -713,7 +639,6 @@ mod tests {
 
         let m = book_metadata_override(&src, &r);
 
-        // Tracked fields take the row's value.
         assert_eq!(m.title, "New Title");
         assert_eq!(
             m.authors,
@@ -724,7 +649,6 @@ mod tests {
         assert_eq!(m.date.as_deref(), Some("2021"));
         assert_eq!(m.collection.as_ref().map(|c| c.name.as_str()), Some("Saga"));
         assert_eq!(m.collection.as_ref().and_then(|c| c.position), Some(2.0));
-        // Identity fields outside the row hold their `source` value.
         assert_eq!(m.identifier, "urn:isbn:9999");
         assert_eq!(m.asin.as_deref(), Some("B00REALASIN"));
         assert_eq!(m.cover_image.as_deref(), Some("OEBPS/cover.xhtml"));

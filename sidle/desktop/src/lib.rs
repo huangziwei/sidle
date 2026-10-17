@@ -167,15 +167,6 @@ pub fn run() {
             commands::misc::misc_delete,
             commands::misc::misc_collections_get,
             commands::misc::misc_collections_set,
-            commands::reading_log::reading_log_overview,
-            commands::reading_log::reading_log_books,
-            commands::reading_log::reading_log_clear,
-            commands::reading_log::reading_log_book,
-            commands::reading_log::reading_log_ambiguous,
-            commands::reading_log::reading_log_attribute,
-            commands::reading_log::reading_log_sessions,
-            commands::reading_log::reading_log_day_hours,
-            commands::reading_log::reading_log_set_finished,
         ])
         .on_window_event(|window, event| {
             // `prevent_close` keeps the process alive with its window hidden.

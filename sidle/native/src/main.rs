@@ -22,7 +22,6 @@ mod handwriting;
 mod keyboard;
 mod lipc;
 mod orientation;
-mod readinglog;
 mod receipt;
 mod running;
 mod search;
@@ -132,55 +131,14 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
-    // `--archive-daemon`: run [`archive_once`] every `ARCHIVE_INTERVAL`, forever.
-    if std::env::args().any(|a| a == readinglog::DAEMON_FLAG) {
-        readinglog::claim_archiver();
-        log("archive daemon started");
-        loop {
-            archive_once(false);
-            std::thread::sleep(readinglog::ARCHIVE_INTERVAL);
-        }
-    }
-    // `--archive`: one [`archive_once`] pass.
-    if std::env::args().any(|a| a == "--archive") {
-        archive_once(true);
-        return;
-    }
     // `--update`: [`run_update`] as a standalone launch.
     if std::env::args().any(|a| a == "--update") {
         let result = run_update();
         update_log(format!("--update done: {result:?}"));
         return;
     }
-    // `start_archiver` detaches: [`run`] below never waits on the first pass.
-    let state = readinglog::archiver();
-    if let readinglog::Archiver::Outdated(pid) = state {
-        readinglog::stop_archiver(pid);
-        log(format!(
-            "stopped an archiver from an older build (pid {pid})"
-        ));
-    }
-    if state != readinglog::Archiver::Running {
-        match readinglog::start_archiver() {
-            Ok(pid) => log(format!("started archive daemon (pid {pid})")),
-            Err(e) => log(format!("could not start archive daemon: {e}")),
-        }
-    }
     let result = run();
     log(format!("done: {result:?}"));
-}
-
-/// Collect every reading event past `readinglog::archive_watermark` and archive it.
-fn archive_once(verbose: bool) {
-    let us = std::path::Path::new(MNT_US);
-    // An empty `seen` leaves `archive_watermark` the only cutoff.
-    let found = readinglog::collect(us, &readinglog::archive_watermark(us), &[]);
-    match readinglog::archive(us, &found.lines) {
-        Ok(Some(name)) => log(format!("archived {} lines → {name}", found.lines.len())),
-        Ok(None) if verbose => log("archive: nothing new"),
-        Ok(None) => {}
-        Err(e) => log(format!("archive failed: {e}")),
-    }
 }
 
 /// White-fill, draw `message` centered, then one full-screen GC16 refresh.
@@ -402,7 +360,7 @@ fn run() -> anyhow::Result<()> {
 
     // `downloaded` holds the sha8 of each on-device filename.
     let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
-    // `mut`: a mid-session download removes its book from this set.
+    // `mut`: `all_books` drops a book downloaded mid-session.
     let mut all_books: Vec<api::Book> = books
         .iter()
         .filter(|b| match b.kfx_sha256.as_deref() {
@@ -830,44 +788,6 @@ fn run() -> anyhow::Result<()> {
                                                     log(format!("notebook backup failed: {err}"));
                                                 }
                                             }
-                                            let rl_t0 = Instant::now();
-                                            // `archive_once` runs before `push_reading_log` reads the archive.
-                                            archive_once(false);
-                                            match api::push_reading_log(
-                                                &agent,
-                                                &cfg,
-                                                std::path::Path::new(MNT_US),
-                                            ) {
-                                                Ok(rl) => {
-                                                    log(format!(
-                                                        "reading log in {:?}: {} new of {} \
-                                                         sessions ({} extended), {} named, {} \
-                                                         skipped; lines from live={}{} chunks={} \
-                                                         dumps={} archive={}",
-                                                        rl_t0.elapsed(),
-                                                        rl.added,
-                                                        rl.sessions,
-                                                        rl.extended,
-                                                        rl.attributed,
-                                                        rl.skipped,
-                                                        rl.from.live,
-                                                        if rl.from.live_read {
-                                                            ""
-                                                        } else {
-                                                            " (NO LIVE LOG)"
-                                                        },
-                                                        rl.from.chunks,
-                                                        rl.from.dumps,
-                                                        rl.from.archive
-                                                    ));
-                                                    if let Some(s) = rl.summary() {
-                                                        summary = format!("{summary}\n{s}");
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    log(format!("reading log failed: {err}"));
-                                                }
-                                            }
                                             {
                                                 // `fresh` carries a reconvert made during this run; `books` is the fallback.
                                                 let fresh = api::list_books(&agent, &cfg).ok();
@@ -1181,7 +1101,7 @@ fn run() -> anyhow::Result<()> {
                                 covers = vec![None; cells.len()];
                                 page = 0;
                             }
-                            // A toast or the switch painted over the grid.
+                            // `repaint_page` covers the toast or the switch drawn over the grid.
                             repaint_page(
                                 &mut fb,
                                 &mut renderer,
@@ -1247,7 +1167,7 @@ fn run() -> anyhow::Result<()> {
                 }
             }
             InputEvent::Tick => {
-                // `fb.raw_fd` wakes this poll, and a full queue wakes it again at once.
+                // `fb.raw_fd` wakes this poll, again at once while its queue is full.
                 let pump = fb.pump_events();
                 // `input.retake` reclaims the devices a covering window took.
                 if let Some(covered) = pump.covered {
@@ -1283,7 +1203,7 @@ fn run() -> anyhow::Result<()> {
                 };
                 if arm_ready {
                     let a = armed.take().unwrap();
-                    // A touch past `ARM_SLOP_PX` from `down_pos` cancels the arm.
+                    // `ARM_SLOP_PX` of drift from `down_pos` cancels the arm.
                     let (px, py) = input.touch_pos();
                     let (dx, dy) = down_pos.unwrap_or((px, py));
                     if px.abs_diff(dx) > ARM_SLOP_PX || py.abs_diff(dy) > ARM_SLOP_PX {
@@ -2265,7 +2185,7 @@ fn log(line: impl AsRef<str>) {
     } else {
         "./sidle-native.log"
     };
-    // `log_path` takes `line`; stderr reaches the same file by redirect.
+    // `log_path` takes `line`, the same file stderr is redirected into.
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(f, "{line}");
     }

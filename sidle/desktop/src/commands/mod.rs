@@ -7,5 +7,4 @@ pub mod notebook;
 pub mod omnibus;
 pub mod queue;
 pub mod reader;
-pub mod reading_log;
 pub mod server;

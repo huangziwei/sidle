@@ -40,10 +40,6 @@ rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", r
 # driven, pure Rust at build time.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# flate2: gunzip the firmware's own `system/logbackup/*.txt.gz` reading logs.
-# `rust_backend` (miniz_oxide), not the default zlib: the static musl cross-link
-# admits no C dependency. Read-only.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # base64: encode `.yjr`/`.yjf` bytes for the `/sync/annotations` JSON body
 # (STANDARD alphabet, with padding — matching the server's decoder). Pure Rust,
 # no_std-capable. 0.22 matches the desktop.

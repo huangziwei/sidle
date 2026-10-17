@@ -1,8 +1,5 @@
-//! rusqlite-backed library database. `AppState` holds one `Connection` behind
-//! an `Arc<Mutex>`, and `sidle-server` opens its own per request; WAL and
-//! `busy_timeout` (see [`open`]) carry both.
+//! rusqlite-backed library database, in WAL mode with a `busy_timeout` (see [`open`]).
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
@@ -17,90 +14,56 @@ pub struct BookRow {
     pub author: String,
     pub language: String,
     pub ppd: Option<String>,
-    /// OPF `<meta name="primary-writing-mode">`: `horizontal-lr`,
-    /// `horizontal-rl`, `vertical-rl`, `vertical-lr`, or `None` for derive. It
-    /// bakes into `document_data.writing_mode`, with `ppd` its derived mirror.
+    /// `horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`, or `None` to derive.
     pub writing_mode: Option<String>,
-    /// Path to the EPUB on disk, `None` until a KFX-imported book's background
-    /// conversion lands.
+    /// Path to the EPUB on disk, `None` until a KFX import's conversion lands.
     pub epub_path: Option<String>,
     pub cover_path: Option<String>,
-    /// **Derived, not a column.** The thumbnail sidecar at
-    /// `books/<sha>/cover.thumb.jpg` (see [`super::thumbnail`]), which the
-    /// gallery prefers over `cover_path`. A `None` falls back to `cover_path`.
+    /// **Derived, not a column.** `books/<sha>/cover.thumb.jpg`, preferred over `cover_path`.
     pub cover_thumb_path: Option<String>,
-    /// **Derived, not a column.** Cache-bust token: the ms mtime of the image
-    /// served, or 0 with no cover. The gallery appends it as `?v=`, and the
-    /// picker folds it into its on-device cover-cache filename.
+    /// **Derived, not a column.** The served image's ms mtime, 0 with no cover.
     pub cover_rev: i64,
-    /// Path to the KFX on disk, `None` until an EPUB-imported book's background
-    /// conversion lands.
+    /// Path to the KFX on disk, `None` until an EPUB import's conversion lands.
     pub kfx_path: Option<String>,
-    /// SHA-256 of the KFX file's bytes, apart from `sha256`, which hashes the
-    /// imported source. The on-device filename infix derives from this one.
-    /// `Some(_)` iff `kfx_path` is `Some(_)`.
+    /// SHA-256 of the KFX bytes, keying the on-device filename; `Some` iff `kfx_path` is.
     pub kfx_sha256: Option<String>,
-    /// Path to the PDF on disk, for a PDF-backed (container) book. This is the
-    /// non-KFX side of a PDF↔KFX book (the EPUB↔KFX analogue of `epub_path`);
-    /// `None` for reflowable (EPUB↔KFX) books.
+    /// Path to the PDF of a PDF-backed (container) book, `None` for EPUB↔KFX books.
     pub pdf_path: Option<String>,
     pub file_size: i64,
     pub imported_at: String,
     pub status: String,
     pub error: Option<String>,
-    /// Direction of the background conversion job: `"epub_to_kfx"` or
-    /// `"kfx_to_epub"`. `None` on a row without a job, which `LEFT JOIN` makes
-    /// representable.
+    /// The conversion job's direction, `"epub_to_kfx"` or `"kfx_to_epub"`; `None` without one.
     pub kind: Option<String>,
-    /// The identifier baked into the exported KFX, keying the Kindle's catalog,
-    /// `.sdr` directory and `.notebooks/<id>!!PDOC!!` dir.
-    /// `resolve_export_asin` synthesizes it from the publication identifier.
+    /// The identifier baked into the exported KFX, keying its `.sdr` and `.notebooks` dirs.
     pub asin: Option<String>,
-    /// The real Amazon catalogue ASIN, fetching the colour cover from
-    /// `/images/P/<asin>` where the KFX ships a grayscale one. It reaches no
-    /// file this crate produces; see [`Self::asin`].
+    /// The real Amazon catalogue ASIN, keying the colour cover at `/images/P/<asin>`.
     pub amazon_asin: Option<String>,
     /// The format that arrived at import (`azw3`, `mobi`, `epub`, …).
-    /// `conversion_jobs.kind` names a reconvert's direction, not this.
     pub source_format: Option<String>,
-    /// Publisher imprint — pulled from EPUB `<dc:publisher>` or KFX
-    /// metadata field `publisher` (symbol 232). Optional; many self-pub or
-    /// indie books have no publisher. Editable via the metadata modal.
+    /// Publisher imprint, from EPUB `<dc:publisher>` or the KFX `publisher` field.
     pub publisher: Option<String>,
-    /// Publication date as the source states it (EPUB `<dc:date>` or the KFX
-    /// equivalent), stored verbatim. Sort runs on the string, which orders ISO
-    /// 8601 chronologically.
+    /// Publication date as the source states it, stored verbatim.
     pub published_at: Option<String>,
     pub series_name: Option<String>,
-    /// Position within the series. REAL so half-numbers (1.5, 2.5) common
-    /// in fiction series numbering work without coercion.
+    /// Position within the series; REAL for half-numbers (1.5, 2.5).
     pub series_index: Option<f64>,
-    /// User-defined tags. Stored as a JSON array TEXT in SQLite; canonicalized
-    /// (trimmed, lowercased, deduped in-order, empties dropped) at write time.
+    /// User-defined tags, a JSON array TEXT, canonicalized at write time.
     pub tags: Vec<String>,
-    /// Metadata last-edit time (ISO 8601), stamped at insert and bumped by the
-    /// curation mutators. Library merge takes it as the newest-wins tiebreak,
-    /// reading `COALESCE(updated_at, imported_at)`.
+    /// Metadata last-edit time (ISO 8601), the newest-wins tiebreak of a library merge.
     pub updated_at: String,
-    /// Human-readable romaji of the title, rendered yomigana-aware at import and
-    /// correctable by hand. [`Self::search_key`] folds it in, and
-    /// `COALESCE(…, '')` reads a NULL row as `""`.
+    /// Human-readable romaji of the title, yomigana-aware and correctable by hand.
     pub title_romaji: String,
     /// Human-readable romaji of the author line. See [`Self::title_romaji`].
     pub author_romaji: String,
-    /// **Derived, not a column.** The space-free, ASCII-folded match key the
-    /// picker substring-searches, assembled in [`row_to_book`] from the romaji
-    /// columns, the raw fields and [`super::romaji::search_key`].
+    /// **Derived, not a column.** The space-free, ASCII-folded key the picker searches.
     pub search_key: String,
 }
 
-/// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Backups
-/// record it, and restore refuses an archive stamped past the running app.
-pub const SCHEMA_VERSION: i64 = 25;
+/// Schema version [`migrate`] stamps into `PRAGMA user_version`.
+pub const SCHEMA_VERSION: i64 = 26;
 
-/// A borrowable handle to the library database. A device sync borrows it a
-/// moment at a time between USB transfers, leaving the window's share of the
-/// desktop's one connection free.
+/// A borrowable handle to the library database.
 pub trait Access {
     /// Borrow the connection for the duration of `f`.
     fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R;
@@ -125,9 +88,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    // WAL shares this file between the `sidle-server` daemon and the desktop
-    // app. `busy_timeout` holds a second writer at the lock past SQLITE_BUSY,
-    // and every write is idempotent under UNIQUE dedup_hash.
+    // `WAL` shares this file between `sidle-server` and the desktop app; `busy_timeout`
+    // holds a second writer at the lock past `SQLITE_BUSY`.
     conn.pragma_update(None, "busy_timeout", 5000)?;
     migrate(&conn)?;
     relativize_existing_paths(&conn, path)?;
@@ -136,9 +98,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 
 // ---------------------------------------------------------------------------
 
-/// Library root for `conn` — the directory holding `library.db`. `None` for an
-/// in-memory connection (its filename is empty / `:memory:`), where stored paths
-/// are taken verbatim (tests insert `None`/relative paths, so nothing converts).
+/// Library root for `conn`, the directory holding `library.db`; `None` for an
+/// in-memory connection, whose stored paths are taken verbatim.
 fn conn_root(conn: &Connection) -> Option<PathBuf> {
     let p = conn.path()?;
     if p.is_empty() || p == ":memory:" {
@@ -162,9 +123,8 @@ fn resolve_opt(root: Option<&Path>, stored: Option<String>) -> Option<String> {
     stored.map(|s| resolve_one(root, &s))
 }
 
-/// Relativize a managed path for storage: strip the `root` prefix, else slice
-/// from the last `books`/`notebooks` component, which every managed file
-/// carries. A foreign path and a `None` root store unchanged.
+/// Relativize `abs` for storage: strip the `root` prefix, else slice from the last
+/// `books`/`notebooks` component; a `None` root, or neither, stores `abs` unchanged.
 fn relativize_for_store(root: Option<&Path>, abs: &str) -> String {
     let Some(r) = root else {
         return abs.to_string();
@@ -198,8 +158,7 @@ type PathColumns = (
 );
 
 /// Rewrite absolute `*_path` columns to root-relative, gated on finding an
-/// absolute value. It lives in `open()`, which holds the db path and its root,
-/// where `migrate()` takes only the `Connection`.
+/// absolute value; [`open`] calls it with the db path.
 fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Result<()> {
     let Some(root) = db_path.parent() else {
         return Ok(());
@@ -235,12 +194,10 @@ fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Res
     Ok(())
 }
 
-/// Schema setup. An artefact of a prior schema (`source_epub_path`, the
-/// `device_history` table) drops the lot for a rebuild from the CREATE block
-/// below, the one source of truth.
+/// Schema setup. A `source_epub_path` column or a `device_history` table drops
+/// every table for a rebuild from the CREATE block below.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    // The version this DB arrives at. The steps below are idempotent, apart
-    // from the few rewriting rows in place, which gate on this.
+    // `from_version` gates the few steps below that rewrite rows in place.
     let from_version = user_version(conn)?;
     let needs_reset =
         has_column(conn, "books", "source_epub_path")? || has_table(conn, "device_history")?;
@@ -358,9 +315,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "books", "amazon_asin")? {
         conn.execute("ALTER TABLE books ADD COLUMN amazon_asin TEXT", [])?;
-        // A row whose `asin` carries a real Amazon shape — 10 uppercase
-        // alphanumerics — holds the library's one colour-cover key. The file
-        // carries it until a re-key, and `asin` stays untouched here.
+        // An `asin` of the Amazon shape (10 uppercase alphanumerics) seeds `amazon_asin`;
+        // `asin` stays untouched.
         conn.execute(
             "UPDATE books SET amazon_asin = asin
              WHERE amazon_asin IS NULL AND asin IS NOT NULL AND length(asin) = 10
@@ -392,24 +348,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "books", "pdf_path")? {
         conn.execute("ALTER TABLE books ADD COLUMN pdf_path TEXT", [])?;
     }
-    // `finished_at` is when a book was marked read. NULL is unmarked.
-    if !has_column(conn, "books", "finished_at")? {
-        conn.execute("ALTER TABLE books ADD COLUMN finished_at TEXT", [])?;
-    }
     // Reading layout / writing mode, the axis the generated KFX bakes into
     // `document_data.writing_mode`, with `ppd` mirroring its page-turn. NULL
     // derives it.
     if !has_column(conn, "books", "writing_mode")? {
         conn.execute("ALTER TABLE books ADD COLUMN writing_mode TEXT", [])?;
     }
-    // The exclusive end of the book's position axis, cached against a whole-KFX
-    // parse. NULL marks it uncomputed, for [`books_missing_max_position`] to
-    // fill. A device reports the last valid position, one less than this.
-    if !has_column(conn, "books", "max_position")? {
-        conn.execute("ALTER TABLE books ADD COLUMN max_position INTEGER", [])?;
-    }
-    // Metadata last-edit time, seeded from `imported_at`. Newest-wins reads
-    // COALESCE it, and `insert_book` stamps a new row.
+    // `updated_at`, seeded from `imported_at`; `insert_book` stamps a new row.
     if !has_column(conn, "books", "updated_at")? {
         conn.execute("ALTER TABLE books ADD COLUMN updated_at TEXT", [])?;
         conn.execute(
@@ -418,14 +363,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // The file that came in. `conversion_jobs.kind` names the direction a
-    // reconvert runs, which for an `.azw3` or `.mobi` import is `epub_to_kfx`
-    // over the EPUB the import exported — the arriving format survives here.
+    // `source_format` names the file that came in, apart from `conversion_jobs.kind`.
     if !has_column(conn, "books", "source_format")? {
         conn.execute("ALTER TABLE books ADD COLUMN source_format TEXT", [])?;
-        // The two directions whose arriving format the job kind states. An
-        // `epub_to_kfx` row stays NULL, its EPUB being the arriving file or an
-        // export of one.
+        // The `kfx_*` and `pdf_to_kfx` kinds state the arriving format; an `epub_to_kfx`
+        // row stays NULL.
         conn.execute(
             "UPDATE books SET source_format = 'kfx' WHERE id IN
                (SELECT book_id FROM conversion_jobs WHERE kind IN ('kfx_to_epub','kfx_to_pdf'))",
@@ -438,9 +380,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // `yjr_sync` keys the last imported `.yjr` by (device_serial, book_id),
-    // holding two devices' markers apart. A table keyed by book_id alone is a
-    // cache to drop and recreate.
+    // `yjr_sync` keys the last imported `.yjr` by (device_serial, book_id); one keyed
+    // by book_id alone is dropped and recreated.
     if !has_column(conn, "yjr_sync", "device_serial")? {
         conn.execute("DROP TABLE IF EXISTS yjr_sync", [])?;
     }
@@ -455,9 +396,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // `reading_position` is keyed `(book_id, source, device_serial)`, holding
-    // one `source='sidle'` position beside one per Kindle. Each is a Resume
-    // jump target, and the destructive reset leaves the table alone.
+    // `reading_position` is keyed `(book_id, source, device_serial)`: one
+    // `source='sidle'` position beside one per Kindle.
     if has_table(conn, "reading_position")?
         && !has_column(conn, "reading_position", "device_serial")?
     {
@@ -511,8 +451,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // v5: the notebook's on-device "Date Modified" (source `nbk` mtime, captured
-    // at import). Nullable — rows imported before v5 backfill on next re-import.
+    // The notebook's on-device "Date Modified" (source `nbk` mtime), nullable.
     if !has_column(conn, "notebooks", "updated_at")? {
         conn.execute("ALTER TABLE notebooks ADD COLUMN updated_at TEXT", [])?;
     }
@@ -540,9 +479,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Which devices assert each ink page — the ink analogue of
-    // `annotation_device`, provenance only. A page erased on the Scribe drops
-    // its presence row and keeps its `book_ink` backup row.
+    // Which devices assert each ink page, the ink analogue of `annotation_device`.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS book_ink_device (
             asin          TEXT NOT NULL,
@@ -555,9 +492,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Per-(device, asin) content checkpoint: the sha of the nbk last decoded,
-    // short-circuiting an unchanged decode and raster re-render. Row identity
-    // stays `(asin, container_id)`, whose upsert holds old pages stable.
+    // Per-(device, asin) checkpoint: the sha of the nbk last decoded, skipping an
+    // unchanged decode and re-render.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS ink_sync (
             device_serial TEXT NOT NULL,
@@ -569,9 +505,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // v9: reversible "hide from the reader" flag on annotations + ink (kept in the
-    // backup, just not painted / not listed by default). Additive columns, default
-    // 0. Both tables exist by here (created above), so the ALTERs are safe.
+    // `hidden`: a reversible "hide from the reader" flag on annotations and ink, default 0.
     if !has_column(conn, "annotations", "hidden")? {
         conn.execute(
             "ALTER TABLE annotations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
@@ -585,9 +519,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // Deletion records. The additive device sync skips a recorded key, holding a
-    // manual delete. `key` is the annotation `dedup_hash`, the ink
-    // `asin\x1fcontainer_id`, or the notebook `uuid`.
+    // Deletion records device sync skips: `key` is the annotation `dedup_hash`, the
+    // ink `asin\x1fcontainer_id`, or the notebook `uuid`.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS artifact_deletions (
             kind       TEXT NOT NULL,
@@ -598,177 +531,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Reading sessions recovered from a Kindle's own system logs.
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_sessions (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_serial TEXT NOT NULL DEFAULT '',
-            started_at    TEXT NOT NULL,
-            ended_at      TEXT NOT NULL,
-            day           TEXT NOT NULL,
-            end_position  INTEGER NOT NULL,
-            book_id       INTEGER REFERENCES books(id) ON DELETE SET NULL,
-            seconds       INTEGER NOT NULL,
-            page_turns    INTEGER NOT NULL DEFAULT 0,
-            words         INTEGER NOT NULL DEFAULT 0,
-            start_counter_ms INTEGER,
-            end_counter_ms   INTEGER,
-            start_words      INTEGER,
-            end_words        INTEGER,
-            measure          TEXT NOT NULL DEFAULT 'counted',
-            tz_offset_s      INTEGER
-        )"#,
-        [],
-    )?;
-    // The count of forward page events the device logged, a function of font
-    // size and screen.
-    if has_column(conn, "reading_sessions", "pages")? {
-        conn.execute(
-            "ALTER TABLE reading_sessions RENAME COLUMN pages TO page_turns",
-            [],
-        )?;
-    }
-    // Both ends of the counters the row's totals are the difference of,
-    // carrying a sitting across the sync that interrupted it. Null on a row
-    // stored before the columns.
-    for column in [
-        "start_counter_ms",
-        "end_counter_ms",
-        "start_words",
-        "end_words",
-    ] {
-        if !has_column(conn, "reading_sessions", column)? {
-            conn.execute(
-                &format!("ALTER TABLE reading_sessions ADD COLUMN {column} INTEGER"),
-                [],
-            )?;
-        }
-    }
-    // Which of four regimes produced `seconds`: `counted` from the device's
-    // `TotalTime`, `timed` from that counter with its refused pages added back,
-    // `paged` from the reader shell's page records, `awake` from the power
-    // records. The row names it, and they sum apart. A row written before the
-    // fourth existed says `dwell` for `paged`.
-    if !has_column(conn, "reading_sessions", "measure")? {
-        conn.execute(
-            "ALTER TABLE reading_sessions ADD COLUMN measure TEXT NOT NULL DEFAULT 'counted'",
-            [],
-        )?;
-    }
-    // Each regime's own figure, kept beside the winner so a view can state the
-    // device's accounting or the log's without re-reading the log. Null on every
-    // row stored before the columns; see `Session`.
-    for column in [
-        "timed_seconds",
-        "timed_words",
-        "paged_seconds",
-        "paged_words",
-        "awake_seconds",
-    ] {
-        if !has_column(conn, "reading_sessions", column)? {
-            conn.execute(
-                &format!("ALTER TABLE reading_sessions ADD COLUMN {column} INTEGER"),
-                [],
-            )?;
-        }
-    }
-    // v24: seconds the reader's clock stood ahead of UTC, where a reader-shell
-    // record stated an instant the syslog prefix also stated. Null on every row
-    // from a firmware writing no such record, and on every row stored before.
-    if !has_column(conn, "reading_sessions", "tz_offset_s")? {
-        conn.execute(
-            "ALTER TABLE reading_sessions ADD COLUMN tz_offset_s INTEGER",
-            [],
-        )?;
-    }
-    // The v22 boolean this replaces. An estimate was the awake bound; every
-    // other row was the counter, which is the column's default.
-    if has_column(conn, "reading_sessions", "estimated")? {
-        conn.execute(
-            "UPDATE reading_sessions SET measure = 'awake' WHERE estimated = 1",
-            [],
-        )?;
-        conn.execute("ALTER TABLE reading_sessions DROP COLUMN estimated", [])?;
-    }
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS reading_sessions_identity
-           ON reading_sessions (device_serial, started_at, end_position)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS reading_sessions_day ON reading_sessions (day)",
-        [],
-    )?;
-
-    // Which hours of its day a sitting's reading fell in. A session's window and
-    // total yield no distribution inside them; only the log's own intervals do,
-    // and the parser alone sees them, at parse time.
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_session_hours (
-            session_id INTEGER NOT NULL
-                       REFERENCES reading_sessions (id) ON DELETE CASCADE,
-            hour       INTEGER NOT NULL,
-            seconds    INTEGER NOT NULL,
-            PRIMARY KEY (session_id, hour)
-        )"#,
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS reading_sessions_book ON reading_sessions (book_id)",
-        [],
-    )?;
-
-    // The log snapshots read, per device. A
-    // `log_backup_<YYMMDDHHMMSS>.txt.gz` is immutable and names its own moment;
-    // one device's name means a different file on another.
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_log_dumps (
-            device_serial TEXT NOT NULL DEFAULT '',
-            name          TEXT NOT NULL,
-            read_at       TEXT NOT NULL,
-            PRIMARY KEY (device_serial, name)
-        )"#,
-        [],
-    )?;
-
-    // The two end-of-book constants a device states for one book, kept so the
-    // pairing outlives the archive it came from. A session must never be stored
-    // twice under them: the identity index counts the position, so it would double.
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_log_book_ends (
-            last_word_position INTEGER PRIMARY KEY,
-            from_book          INTEGER NOT NULL
-        )"#,
-        [],
-    )?;
-
-    // The catalog key a log fingerprint was named by, where the reader shell
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_log_asins (
-            end_position INTEGER NOT NULL,
-            asin         TEXT NOT NULL,
-            PRIMARY KEY (end_position, asin)
-        )"#,
-        [],
-    )?;
-
-    // The points a log fingerprint was seen at — the evidence for naming it. A
-    // session can arrive before the sidecar naming its book, and the device
-    // re-parses nothing it holds.
-    conn.execute(
-        r#"CREATE TABLE IF NOT EXISTS reading_log_points (
-            end_position INTEGER NOT NULL,
-            eid          INTEGER NOT NULL,
-            "offset"     INTEGER NOT NULL,
-            linear_pos   INTEGER NOT NULL,
-            PRIMARY KEY (end_position, eid, "offset", linear_pos)
-        )"#,
-        [],
-    )?;
-
-    // Where an on-device app's mount tree sits on this machine, a location
-    // alone. `root` is the mount root inside `source`, naming which of a repo's
-    // several apps a row is. The picker's own tree composes in unconditionally.
+    // Where an on-device app's mount tree sits on this machine: `root` is the mount
+    // root inside `source`.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS apps (
             id          TEXT PRIMARY KEY,
@@ -780,14 +544,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Scrub rows from the `My Clippings.txt` ingest path, which wrote orphans
-    // (`book_id IS NULL`) and touches no linked annotation. Unconditional and
-    // idempotent, reaching a stray fixture or a restored backup.
+    // `source = 'clippings'` rows are orphans (`book_id IS NULL`).
     conn.execute("DELETE FROM annotations WHERE source = 'clippings'", [])?;
 
-    // Handwritten ink belongs in `book_ink`, outside the text `annotations`
-    // table. This scrubs a `Kind::Other` text row carrying an nbk container id
-    // as its body, under both record names a device writes.
+    // `book_ink` holds handwritten ink; an `annotations` row of either handwritten kind is a stray.
     conn.execute(
         "DELETE FROM annotations
           WHERE kind IN ('handwritten_note', 'handwritten_on_content_note')",
@@ -842,12 +602,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
-    // Re-key annotation identity without the linear position. A `dedup_hash`
-    // salted with `loc_start` gives one passage two hashes, the two origins
-    // measuring on different scales;
+    // `rekey_annotation_hashes` drops `loc_start` from annotation identity.
     if from_version < 12 {
-        // Order matters: the colour repair rewrites `note_body`, which the hash
-        // is computed over, so it has to land before the re-key.
+        // `repair_colors_read_as_notes` rewrites the hashed `note_body`, ahead of the re-key.
         repair_colors_read_as_notes(conn)?;
         rekey_annotation_hashes(conn)?;
     }
@@ -857,38 +614,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         split_fused_notes(conn)?;
     }
 
-    // A bookmark's identity is its start alone: a device repeats the start as
+    // `rekey_annotation_hashes` keys a bookmark on its start alone.
     if from_version < 14 {
         rekey_annotation_hashes(conn)?;
 
-        // Ink drawn over book content records as
-        // `handwritten_on_content_note`. Dropping the checkpoints re-decodes an
-        // unchanged nbk, whose host-page anchors reach the ink join.
+        // Emptying `ink_sync` re-decodes each nbk for its `handwritten_on_content_note` anchors.
         conn.execute("DELETE FROM ink_sync", [])?;
 
-        // The same shape for the capture date. The sidecars hold
-        // `creationTime`, and import backfills a missing `added_at` from a
-        // sidecar it re-reads; dropping the checkpoints re-reads each `.yjr`.
+        // Emptying `yjr_sync` re-reads each `.yjr`, backfilling a missing `added_at`.
         conn.execute("DELETE FROM yjr_sync", [])?;
     }
 
-    // A snapshot recorded for a partly decoded file claims a name that is never
-    // re-read, the claim being the name. The whole table goes: which file was
-    // short is a fact about the filesystem, and re-reading costs one pass.
-    if from_version < 18 {
-        conn.execute("DELETE FROM reading_log_dumps", [])?;
-    }
-
-    // v19: `split_sessions_at_midnight` over rows whose `started_at` and
-    // `ended_at` fall on two days.
-    if from_version < 19 {
-        split_sessions_at_midnight(conn)?;
-    }
-
-    // v25: `widen_windows_to_their_reading` over rows whose `seconds` exceed
-    // `ended_at` minus `started_at`.
-    if from_version < 25 {
-        widen_windows_to_their_reading(conn)?;
+    if from_version < 26 {
+        drop_reading_log(conn)?;
     }
 
     // `user_version` carries `SCHEMA_VERSION`; `backup` gates a restore on it.
@@ -897,9 +635,30 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Split a Sidle-written `note` row into the highlight and the note fused into
-/// it. A Kindle keeps the two apart, a highlight record and a note record
-/// grouped by span, and a fused row matches neither.
+/// Drop the reading-log tables and the `books` columns only they read, and
+/// remove the `reading-log/` archive and `.reading-pulse.json` beside the file.
+fn drop_reading_log(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS reading_session_hours;
+         DROP TABLE IF EXISTS reading_sessions;
+         DROP TABLE IF EXISTS reading_log_dumps;
+         DROP TABLE IF EXISTS reading_log_book_ends;
+         DROP TABLE IF EXISTS reading_log_asins;
+         DROP TABLE IF EXISTS reading_log_points;",
+    )?;
+    for column in ["finished_at", "max_position"] {
+        if has_column(conn, "books", column)? {
+            conn.execute(&format!("ALTER TABLE books DROP COLUMN {column}"), [])?;
+        }
+    }
+    if let Some(root) = conn_root(conn) {
+        let _ = std::fs::remove_dir_all(root.join("reading-log"));
+        let _ = std::fs::remove_file(root.join(".reading-pulse.json"));
+    }
+    Ok(())
+}
+
+/// Split a Sidle-written `note` row into the highlight and the note fused into it.
 fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
     struct Fused {
         id: i64,
@@ -937,9 +696,7 @@ fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
             super::ingest::book_match_key(&fused.title)
         };
 
-        // The fused row is the note and is keyed as one, the hash folding in
-        // `kind` and the body. It keeps its id, its capture time, and anything
-        // referring to it; the highlight underneath is what goes missing.
+        // `hl_hash` keys the highlight under the fused row, which keeps its id as the note.
         let hl_hash = super::ingest::annotation_dedup_hash(
             &book_key,
             "highlight",
@@ -951,9 +708,7 @@ fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
             "",
         );
         match get_annotation_by_hash(&tx, &hl_hash)? {
-            // The device synced that highlight back as its own row, the
-            // duplicate this split resolves. It becomes the highlight the note
-            // hangs off, inheriting the note's colour where it has none.
+            // `existing` becomes the note's highlight, taking its colour where it has none.
             Some(existing) => {
                 if existing.color.as_deref().unwrap_or("").is_empty()
                     && !row.color.as_deref().unwrap_or("").is_empty()
@@ -964,8 +719,7 @@ fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
                     )?;
                 }
             }
-            // Nothing to attach to: the highlight mints from the note's own
-            // anchors, matching what a device holds for it.
+            // `None`: the highlight mints from the note's own anchors.
             None => {
                 tx.execute(
                     r#"INSERT INTO annotations
@@ -981,8 +735,7 @@ fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
             }
         }
 
-        // A colour describes the marked passage, so it lives on the highlight.
-        // Not part of the hash, so moving it off the note changes no identity.
+        // `color` lives on the highlight, outside the hash.
         tx.execute(
             "UPDATE annotations SET color = NULL WHERE id = ?1",
             params![fused.id],
@@ -992,9 +745,7 @@ fn split_fused_notes(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Move a highlight colour out of `note_body` into `color`. A colour-capable
-/// Kindle writes the colour as a bare string after the annotation's template,
-/// the shape a note body takes.
+/// Move a highlight colour out of `note_body` into `color`.
 fn repair_colors_read_as_notes(conn: &Connection) -> rusqlite::Result<()> {
     for color in bokai::formats::krds::COLORS {
         conn.execute(
@@ -1027,8 +778,7 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
         let mapped = stmt.query_map([], |r| {
             let text: String = r.get(7)?;
             let title: String = r.get(9)?;
-            // An orphan (no book yet) hashes against an empty key, exactly as
-            // the import path does for a device book not in the library.
+            // An orphan's `book_key` is empty, as on the import path.
             let book_key = if title.is_empty() {
                 String::new()
             } else {
@@ -1054,11 +804,10 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
     };
 
     if rows.iter().all(|r| r.old == r.new) {
-        return Ok(()); // already re-keyed; nothing to do
+        return Ok(());
     }
 
-    // One survivor per new hash — the earliest, since `rows` is ordered by id.
-    // Everything later sharing that hash is a duplicate of it.
+    // `winner` holds the earliest row per new hash, `rows` being ordered by id.
     let mut winner: std::collections::HashMap<&str, &Row> = std::collections::HashMap::new();
     for row in &rows {
         winner.entry(row.new.as_str()).or_insert(row);
@@ -1066,17 +815,13 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
 
     let tx = conn.unchecked_transaction()?;
 
-    // Duplicates go before any survivor is rewritten. The hash a survivor takes
-    // can be held by the row it absorbs, and `dedup_hash` is UNIQUE; a failure
-    // here fails `open()`, which migrates.
+    // `rows` duplicates are deleted ahead of the survivors' rewrite; `dedup_hash` is UNIQUE.
     for row in &rows {
         let survivor = winner[row.new.as_str()];
         if survivor.id == row.id {
             continue;
         }
-        // Hand device presence to the survivor before dropping the row. A
-        // duplicate carrying the final hash keys its presence records
-        // correctly, and the delete below takes any that move.
+        // `annotation_device` rows move to the survivor ahead of the delete.
         if row.old != survivor.new {
             tx.execute(
                 "UPDATE OR IGNORE annotation_device SET dedup_hash = ?1 WHERE dedup_hash = ?2",
@@ -1090,9 +835,7 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
         tx.execute("DELETE FROM annotations WHERE id = ?1", params![row.id])?;
     }
 
-    // Then the survivors, whose new hashes are unique among themselves by
-    // construction. A row holding one as a stored hash was a duplicate of the
-    // same passage.
+    // Then the survivors, whose new hashes are unique among themselves.
     for row in &rows {
         if winner[row.new.as_str()].id != row.id || row.old == row.new {
             continue;
@@ -1111,9 +854,7 @@ fn rekey_annotation_hashes(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // Tombstones are keyed by hash and outlive their row, so re-key every old
-    // hash we saw — including a duplicate's, whose deletion intent applies to
-    // the passage, not to whichever row happened to carry it.
+    // `artifact_deletions` keys outlive their row: every old hash re-keys, a duplicate's included.
     for row in &rows {
         if row.old == row.new {
             continue;
@@ -1153,22 +894,19 @@ fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
     Ok(count > 0)
 }
 
-/// Current schema version (`PRAGMA user_version`). Backups record it in the
-/// manifest; restore refuses an archive whose version exceeds [`SCHEMA_VERSION`].
+/// Current schema version (`PRAGMA user_version`), which a backup records and a
+/// restore checks against [`SCHEMA_VERSION`].
 pub fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
-/// Compact the database file, returning freed pages to the OS. A `DELETE` moves
-/// pages onto SQLite's free-list, and `VACUUM` reclaims the disk. Runs outside
-/// any transaction, over a metadata-only file.
+/// `VACUUM` the database file, returning freed pages to the OS.
 pub fn vacuum(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("VACUUM")
 }
 
-/// Look up the book whose KFX hash starts with `prefix`, linking an on-device
-/// `<basename>.<sha8>.kfx` to a library row. The sha8 comes from the KFX bytes
-/// (`kfx_sha256`), which an .epub-imported book's `sha256` differs from.
+/// Look up the book whose `kfx_sha256` starts with `prefix`, linking an on-device
+/// `<basename>.<sha8>.kfx` to its row.
 pub fn find_by_kfx_sha_prefix(
     conn: &Connection,
     prefix: &str,
@@ -1184,8 +922,7 @@ pub fn find_by_kfx_sha_prefix(
 }
 
 /// Escape SQL `LIKE` metacharacters (`\`, `%`, `_`) for a literal match under
-/// `LIKE ?1 ESCAPE '\'`. A title carrying `_` matches any single character
-/// unescaped, mis-linking two near-identical basenames.
+/// `LIKE ?1 ESCAPE '\'`.
 fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -1275,8 +1012,7 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
     let tags_json = serde_json::to_string(book.tags)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    // Store the three file paths root-relative so the library is movable;
-    // `row_to_book` resolves them back to absolute on read.
+    // The three file paths store root-relative; `row_to_book` resolves them on read.
     let root = conn_root(conn);
     let epub_rel = book
         .epub_path
@@ -1316,8 +1052,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             tags_json,
             book.kfx_sha256,
             pdf_rel,
-            // A fresh book's last-edit time is its import time; the curation
-            // mutators move it forward later.
+            // `updated_at` starts at `imported_at`.
             book.imported_at,
             book.title_romaji,
             book.author_romaji,
@@ -1328,1538 +1063,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
     Ok(conn.last_insert_rowid())
 }
 
-// ---------------------------------------------------------------------------
-// Position extent (`books.max_position`).
-
-/// Books that have a KFX but no cached extent yet, as `(id, absolute kfx path)`.
-/// The caller parses each and calls [`set_max_position`]; until then the row is
-/// simply unattributable, never wrong.
-pub fn books_missing_max_position(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
-    let root = conn_root(conn);
-    let mut stmt = conn.prepare(
-        "SELECT id, kfx_path FROM books
-          WHERE kfx_path IS NOT NULL AND max_position IS NULL
-          ORDER BY id",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    rows.map(|r| r.map(|(id, p)| (id, resolve_one(root.as_deref(), &p))))
-        .collect()
-}
-
-/// Cache one book's axis extent. `None` records "this file has no position map"
-/// so a book that cannot produce one is not retried on every pass; it is stored
-/// as 0, which no device can report as a last position.
-pub fn set_max_position(
-    conn: &Connection,
-    book_id: i64,
-    max_position: Option<i64>,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE books SET max_position = ?2 WHERE id = ?1",
-        params![book_id, max_position.unwrap_or(0)],
-    )?;
-    Ok(())
-}
-
-/// Book ids whose `max_position` is `last_position` plus one.
-pub fn books_with_last_position(
-    conn: &Connection,
-    last_position: i64,
-) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM books WHERE max_position = ?1 ORDER BY id")?;
-    let rows = stmt.query_map([last_position + 1], |r| r.get::<_, i64>(0))?;
-    rows.collect()
-}
-
-// ---------------------------------------------------------------------------
-// Reading sessions.
-
-/// Every device serial the library has recorded, from any sync surface — the
-/// list a host-side reading-log import picks provenance from, the logs naming
-/// no device.
-pub fn known_device_serials(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT device_serial FROM annotation_device
-         UNION SELECT device_serial FROM yjr_sync
-         UNION SELECT device_serial FROM ink_sync
-         UNION SELECT device_serial FROM book_ink_device
-         UNION SELECT device_serial FROM reading_sessions
-          WHERE device_serial <> ''",
-    )?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-    rows.filter(|s| s.as_ref().map(|v| !v.is_empty()).unwrap_or(true))
-        .collect()
-}
-
-/// One reading session as stored. `book_id` is `None` while the fingerprint
-/// matches no book in the library — such a session is reported nowhere; see
-/// [`resolve_reading_sessions`].
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ReadingSession {
-    pub device_serial: String,
-    pub started_at: String,
-    pub ended_at: String,
-    pub day: String,
-    pub end_position: i64,
-    pub book_id: Option<i64>,
-    pub seconds: i64,
-    /// Forward page events the device logged. Not a page count: it moves with
-    /// font size and screen, and a converted book has no pagination to count.
-    pub page_turns: i64,
-    pub words: i64,
-    /// Both ends of the device's running counters over this sitting, in
-    /// milliseconds and in words, whose differences are `seconds` and `words`.
-    pub start_counter_ms: Option<i64>,
-    pub end_counter_ms: Option<i64>,
-    pub start_words: Option<i64>,
-    pub end_words: Option<i64>,
-    /// Which regime produced `seconds`. The timer is words-and-WPM driven, and
-    /// content it counts no words in earns no time from it; the two regimes
-    /// below `counted` answer for that content, and stay apart.
-    pub measure: super::reading_log::Measure,
-    /// Seconds the reader's own clock stood ahead of UTC. `started_at` and
-    /// `ended_at` stay local wall clock; this is what places them.
-    pub tz_offset_s: Option<i64>,
-    /// What each regime made of this sitting, kept beside the winner so a view
-    /// states the device's accounting or the log's without re-reading the log.
-    pub timed_seconds: i64,
-    pub timed_words: i64,
-    pub paged_seconds: i64,
-    pub paged_words: i64,
-    pub awake_seconds: i64,
-}
-
-/// What storing one session did to the table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stored {
-    /// A sitting the library did not hold.
-    Added,
-    /// A sitting the library holds, measured past the last batch of events.
-    Extended,
-    /// Held, with nothing further to say about it.
-    Unchanged,
-}
-
-/// Store one session, keyed by (device, start, book).
-pub fn insert_reading_session(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Stored> {
-    if !s.device_serial.is_empty() {
-        conn.execute(
-            "UPDATE reading_sessions SET device_serial = ?1
-              WHERE device_serial = '' AND started_at = ?2 AND end_position = ?3",
-            params![s.device_serial, s.started_at, s.end_position],
-        )?;
-    }
-    let n = conn.execute(
-        r#"INSERT OR IGNORE INTO reading_sessions
-            (device_serial, started_at, ended_at, day, end_position, book_id,
-             seconds, page_turns, words,
-             start_counter_ms, end_counter_ms, start_words, end_words, measure,
-             tz_offset_s,
-             timed_seconds, timed_words, paged_seconds, paged_words, awake_seconds)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                    ?16, ?17, ?18, ?19, ?20)"#,
-        params![
-            s.device_serial,
-            s.started_at,
-            s.ended_at,
-            s.day,
-            s.end_position,
-            s.book_id,
-            s.seconds,
-            s.page_turns,
-            s.words,
-            s.start_counter_ms,
-            s.end_counter_ms,
-            s.start_words,
-            s.end_words,
-            s.measure.as_str(),
-            s.tz_offset_s,
-            s.timed_seconds,
-            s.timed_words,
-            s.paged_seconds,
-            s.paged_words,
-            s.awake_seconds,
-        ],
-    )?;
-    if n > 0 {
-        return Ok(Stored::Added);
-    }
-    // A better-ranked measure replaces a worse one at any value, answering the
-    // question the worse one stood in for. An awake bound leaves a counted
-    // figure alone. At equal rank the longer, later reading wins.
-    let extended = conn.execute(
-        r#"UPDATE reading_sessions
-              SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
-                  start_counter_ms = ?8, end_counter_ms = ?9,
-                  start_words = ?10, end_words = ?11, measure = ?12,
-                  tz_offset_s = COALESCE(?14, tz_offset_s),
-                  timed_seconds = ?15, timed_words = ?16,
-                  paged_seconds = ?17, paged_words = ?18, awake_seconds = ?19
-            WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3
-              AND (
-                    (CASE measure WHEN 'counted' THEN 0 WHEN 'timed' THEN 1
-                                  WHEN 'paged' THEN 2 WHEN 'dwell' THEN 2
-                                  ELSE 3 END) > ?13
-                 OR (measure = ?12
-                     AND seconds <= ?5 AND (seconds < ?5 OR ended_at < ?4))
-              )"#,
-        params![
-            s.device_serial,
-            s.started_at,
-            s.end_position,
-            s.ended_at,
-            s.seconds,
-            s.page_turns,
-            s.words,
-            s.start_counter_ms,
-            s.end_counter_ms,
-            s.start_words,
-            s.end_words,
-            s.measure.as_str(),
-            s.measure.rank(),
-            s.tz_offset_s,
-            s.timed_seconds,
-            s.timed_words,
-            s.paged_seconds,
-            s.paged_words,
-            s.awake_seconds,
-        ],
-    )?;
-    Ok(if extended > 0 {
-        Stored::Extended
-    } else {
-        Stored::Unchanged
-    })
-}
-
-/// Record which hours of its day a session's reading fell in, from the row the
-/// same parse produced and only where that row was stored: hours and totals are
-/// one measurement.
-pub fn record_session_hours(
-    conn: &Connection,
-    s: &ReadingSession,
-    hours: &[(u8, i64)],
-) -> rusqlite::Result<()> {
-    if hours.is_empty() {
-        return Ok(());
-    }
-    let Some(id) = session_id(conn, s)? else {
-        return Ok(());
-    };
-    conn.execute(
-        "DELETE FROM reading_session_hours WHERE session_id = ?1",
-        params![id],
-    )?;
-    for (hour, seconds) in hours {
-        conn.execute(
-            "INSERT OR REPLACE INTO reading_session_hours (session_id, hour, seconds)
-             VALUES (?1, ?2, ?3)",
-            params![id, hour, seconds],
-        )?;
-    }
-    Ok(())
-}
-
-/// The row id of a stored session, by the identity its callers hold.
-fn session_id(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM reading_sessions
-          WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
-        params![s.device_serial, s.started_at, s.end_position],
-        |r| r.get(0),
-    )
-    .optional()
-}
-
-/// The hours booked against a stored session, ascending.
-pub fn session_hours(conn: &Connection, s: &ReadingSession) -> rusqlite::Result<Vec<(u8, i64)>> {
-    let Some(id) = session_id(conn, s)? else {
-        return Ok(Vec::new());
-    };
-    let mut stmt = conn.prepare(
-        "SELECT hour, seconds FROM reading_session_hours
-          WHERE session_id = ?1 ORDER BY hour",
-    )?;
-    let rows = stmt.query_map(params![id], |r| Ok((r.get::<_, i64>(0)? as u8, r.get(1)?)))?;
-    rows.collect()
-}
-
-/// Every stored sitting for one device as `(started_at, end_position) ->
-/// (seconds, ended_at)`, the key the unique index holds. What
-/// [`super::reading_log::heal`] measures its fresh figures against; `ended_at`
-/// is what tells it whether a fresh parse split the row.
-pub fn reading_session_figures(
-    conn: &Connection,
-    device_serial: &str,
-) -> rusqlite::Result<std::collections::HashMap<(String, i64), (i64, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT started_at, end_position, seconds, ended_at FROM reading_sessions
-          WHERE device_serial = ?1",
-    )?;
-    let rows = stmt.query_map(params![device_serial], |r| {
-        Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?)))
-    })?;
-    rows.collect()
-}
-
-/// Write a re-measured sitting's figures over the row it matches, leaving its
-/// identity, its book and every field the parser does not state alone. Answers
-/// whether a row moved.
-pub fn remeasure_reading_session(
-    conn: &Connection,
-    device_serial: &str,
-    end_position: i64,
-    s: &super::reading_log::Session,
-) -> rusqlite::Result<bool> {
-    let n = conn.execute(
-        r#"UPDATE reading_sessions
-              SET ended_at = ?4, seconds = ?5, page_turns = ?6, words = ?7,
-                  measure = ?8,
-                  timed_seconds = ?9, timed_words = ?10,
-                  paged_seconds = ?11, paged_words = ?12, awake_seconds = ?13,
-                  start_counter_ms = COALESCE(?14, start_counter_ms),
-                  end_counter_ms = COALESCE(?15, end_counter_ms),
-                  start_words = COALESCE(?16, start_words),
-                  end_words = COALESCE(?17, end_words),
-                  tz_offset_s = COALESCE(?18, tz_offset_s)
-            WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3"#,
-        params![
-            device_serial,
-            s.started_at,
-            end_position,
-            s.ended_at,
-            s.seconds,
-            s.page_turns,
-            s.words,
-            s.measure.as_str(),
-            s.timed_seconds,
-            s.timed_words,
-            s.paged_seconds,
-            s.paged_words,
-            s.awake_seconds,
-            s.start_counter_ms,
-            s.end_counter_ms,
-            s.start_words,
-            s.end_words,
-            s.tz_offset_s,
-        ],
-    )?;
-    if n > 0 {
-        // The hours are one measurement with the seconds; a re-measure replaces
-        // the whole distribution rather than leaving the old one beside a new
-        // total.
-        if let Some(id) = conn
-            .query_row(
-                "SELECT id FROM reading_sessions
-                  WHERE device_serial = ?1 AND started_at = ?2 AND end_position = ?3",
-                params![device_serial, s.started_at, end_position],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            conn.execute(
-                "DELETE FROM reading_session_hours WHERE session_id = ?1",
-                params![id],
-            )?;
-            for (hour, seconds) in &s.hours {
-                conn.execute(
-                    "INSERT OR REPLACE INTO reading_session_hours (session_id, hour, seconds)
-                     VALUES (?1, ?2, ?3)",
-                    params![id, *hour as i64, seconds],
-                )?;
-            }
-        }
-    }
-    Ok(n > 0)
-}
-
-/// The newest session stored for one device, naming the row a continuation
-/// lands on. [`super::reading_log::parse_sessions`] weighs the events that
-/// decide whether the reader is in it.
-pub fn newest_reading_session(
-    conn: &Connection,
-    device_serial: &str,
-) -> rusqlite::Result<Option<ReadingSession>> {
-    conn.query_row(
-        r#"SELECT device_serial, started_at, ended_at, day, end_position, book_id,
-                  seconds, page_turns, words,
-                  start_counter_ms, end_counter_ms, start_words, end_words, measure,
-                  tz_offset_s,
-                  COALESCE(timed_seconds, 0), COALESCE(timed_words, 0),
-                  COALESCE(paged_seconds, 0), COALESCE(paged_words, 0),
-                  COALESCE(awake_seconds, 0)
-             FROM reading_sessions
-            WHERE device_serial = ?1
-            ORDER BY started_at DESC LIMIT 1"#,
-        params![device_serial],
-        |r| {
-            Ok(ReadingSession {
-                device_serial: r.get(0)?,
-                started_at: r.get(1)?,
-                ended_at: r.get(2)?,
-                day: r.get(3)?,
-                end_position: r.get(4)?,
-                book_id: r.get(5)?,
-                seconds: r.get(6)?,
-                page_turns: r.get(7)?,
-                words: r.get(8)?,
-                start_counter_ms: r.get(9)?,
-                end_counter_ms: r.get(10)?,
-                start_words: r.get(11)?,
-                end_words: r.get(12)?,
-                measure: super::reading_log::Measure::from_stored(&r.get::<_, String>(13)?),
-                tz_offset_s: r.get(14)?,
-                timed_seconds: r.get(15)?,
-                timed_words: r.get(16)?,
-                paged_seconds: r.get(17)?,
-                paged_words: r.get(18)?,
-                awake_seconds: r.get(19)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// One day's share of a session that ran across midnight.
-struct Piece {
-    started_at: String,
-    ended_at: String,
-    seconds: i64,
-    page_turns: i64,
-    words: i64,
-}
-
-impl Piece {
-    fn day(&self) -> &str {
-        &self.started_at[..10]
-    }
-}
-
-/// Cut a session's wall-clock window at every midnight inside it, dividing the
-/// three counters between the pieces in proportion to the time each holds. Empty
-/// for a window inside one day, and for an unreadable end.
-fn split_across_midnight(
-    started_at: &str,
-    ended_at: &str,
-    seconds: i64,
-    page_turns: i64,
-    words: i64,
-) -> Vec<Piece> {
-    let fmt = "%Y-%m-%dT%H:%M:%S";
-    let (Ok(from), Ok(to)) = (
-        chrono::NaiveDateTime::parse_from_str(started_at, fmt),
-        chrono::NaiveDateTime::parse_from_str(ended_at, fmt),
-    ) else {
-        return Vec::new();
-    };
-    let span = (to - from).num_seconds();
-    if span <= 0 || from.date() == to.date() {
-        return Vec::new();
-    }
-
-    let mut out: Vec<Piece> = Vec::new();
-    let mut cursor = from;
-    while cursor < to {
-        let Some(midnight) = cursor
-            .date()
-            .succ_opt()
-            .and_then(|d| d.and_hms_opt(0, 0, 0))
-        else {
-            return Vec::new();
-        };
-        let end = midnight.min(to);
-        let held = (end - cursor).num_seconds();
-        let share = |total: i64| total * held / span;
-        out.push(Piece {
-            started_at: cursor.format(fmt).to_string(),
-            // The last instant of the day, for every piece but the one that ends
-            // where the session did: reading recorded at `T00:00:00` is the next
-            // day's, and that is where the next piece starts.
-            ended_at: if end == to {
-                ended_at.to_string()
-            } else {
-                format!("{}T23:59:59", cursor.format("%Y-%m-%d"))
-            },
-            seconds: share(seconds),
-            page_turns: share(page_turns),
-            words: share(words),
-        });
-        cursor = end;
-    }
-
-    // Integer division loses up to a second per piece. The remainder goes to
-    // the day the session began, as in [`reading_clock`].
-    let placed = (
-        out.iter().map(|p| p.seconds).sum::<i64>(),
-        out.iter().map(|p| p.page_turns).sum::<i64>(),
-        out.iter().map(|p| p.words).sum::<i64>(),
-    );
-    if let Some(first) = out.first_mut() {
-        first.seconds += seconds - placed.0;
-        first.page_turns += page_turns - placed.1;
-        first.words += words - placed.2;
-    }
-    out
-}
-
-/// Cut every stored session spanning more than one day at the midnights it
-/// crosses. A row's seconds, page turns and words divide between the days its
-/// own clock covered, and all of them stay in the library.
-fn split_sessions_at_midnight(conn: &Connection) -> rusqlite::Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT id, device_serial, started_at, ended_at, end_position, book_id,
-                seconds, page_turns, words
-           FROM reading_sessions
-          WHERE substr(started_at, 1, 10) <> substr(ended_at, 1, 10)",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, i64>(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut split = 0;
-    for (id, device_serial, started_at, ended_at, end_position, book_id, seconds, turns, words) in
-        rows
-    {
-        let pieces = split_across_midnight(&started_at, &ended_at, seconds, turns, words);
-        let Some((first, rest)) = pieces.split_first() else {
-            continue;
-        };
-        for piece in rest {
-            conn.execute(
-                r#"INSERT OR IGNORE INTO reading_sessions
-                    (device_serial, started_at, ended_at, day, end_position, book_id,
-                     seconds, page_turns, words)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
-                params![
-                    device_serial,
-                    piece.started_at,
-                    piece.ended_at,
-                    piece.day(),
-                    end_position,
-                    book_id,
-                    piece.seconds,
-                    piece.page_turns,
-                    piece.words,
-                ],
-            )?;
-        }
-        conn.execute(
-            "UPDATE reading_sessions
-                SET ended_at = ?1, day = ?2, seconds = ?3, page_turns = ?4, words = ?5
-              WHERE id = ?6",
-            params![
-                first.ended_at,
-                first.day(),
-                first.seconds,
-                first.page_turns,
-                first.words,
-                id
-            ],
-        )?;
-        split += 1;
-    }
-    Ok(split)
-}
-
-/// Set `ended_at` to `started_at` plus `seconds` on every `reading_sessions`
-/// row whose `seconds` exceed `ended_at` minus `started_at`, capped at the last
-/// second of the row's `day`. Every other column keeps its value.
-fn widen_windows_to_their_reading(conn: &Connection) -> rusqlite::Result<usize> {
-    let fmt = "%Y-%m-%dT%H:%M:%S";
-    let mut stmt = conn.prepare(
-        "SELECT id, day, started_at, ended_at, seconds FROM reading_sessions WHERE seconds > 0",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut widened = 0;
-    for (id, day, started_at, ended_at, seconds) in rows {
-        let (Ok(from), Ok(to)) = (
-            chrono::NaiveDateTime::parse_from_str(&started_at, fmt),
-            chrono::NaiveDateTime::parse_from_str(&ended_at, fmt),
-        ) else {
-            continue;
-        };
-        if (to - from).num_seconds() >= seconds {
-            continue;
-        }
-        let end = (from + chrono::Duration::seconds(seconds))
-            .format(fmt)
-            .to_string()
-            .min(format!("{day}T23:59:59"));
-        if end <= ended_at {
-            continue;
-        }
-        conn.execute(
-            "UPDATE reading_sessions SET ended_at = ?1 WHERE id = ?2",
-            params![end, id],
-        )?;
-        widened += 1;
-    }
-    Ok(widened)
-}
-
-/// `book_id` per `Point`, over the `reading_position` rows whose `source` is
-/// `device` and whose `eid`, `offset` and `linear_pos` are all set. A `Point`
-/// two books claim is dropped.
-pub fn device_positions(
-    conn: &Connection,
-) -> rusqlite::Result<std::collections::HashMap<Point, i64>> {
-    let mut stmt = conn.prepare(
-        r#"SELECT eid, "offset", linear_pos, book_id FROM reading_position
-            WHERE source = 'device'
-              AND eid IS NOT NULL AND "offset" IS NOT NULL AND linear_pos IS NOT NULL"#,
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, i64>(3)?))
-    })?;
-    let mut out: std::collections::HashMap<Point, i64> = Default::default();
-    let mut ambiguous = Vec::new();
-    for row in rows {
-        let (key, book) = row?;
-        match out.get(&key) {
-            Some(held) if *held != book => ambiguous.push(key),
-            _ => {
-                out.insert(key, book);
-            }
-        }
-    }
-    for key in ambiguous {
-        out.remove(&key);
-    }
-    Ok(out)
-}
-
-/// A point in a book: its source element id, the offset into that element, and
-/// the same place on the linear axis. Every book shares a bare coordinate near
-/// its front.
-pub type Point = (i64, i64, i64);
-
-/// The single book every one of these points belongs to, or `None`. One
-/// agreement suffices, a point carrying the book's own element id. Two
-/// different books agreeing is a contradiction, and names nothing.
-fn sole_book_at(points: &[Point], anchors: &std::collections::HashMap<Point, i64>) -> Option<i64> {
-    let mut found: Option<i64> = None;
-    for point in points {
-        let Some(&book) = anchors.get(point) else {
-            continue;
-        };
-        match found {
-            Some(held) if held != book => return None,
-            _ => found = Some(book),
-        }
-    }
-    found
-}
-
-/// Remember where a fingerprint's reader was seen standing — evidence, the book
-/// being unnameable yet and the lines carrying it coming once.
-pub fn record_log_points(
-    conn: &Connection,
-    end_position: i64,
-    points: &[Point],
-) -> rusqlite::Result<()> {
-    for (eid, offset, linear_pos) in points {
-        conn.execute(
-            r#"INSERT OR IGNORE INTO reading_log_points (end_position, eid, "offset", linear_pos)
-                VALUES (?1, ?2, ?3, ?4)"#,
-            params![end_position, eid, offset, linear_pos],
-        )?;
-    }
-    Ok(())
-}
-
-/// Every point recorded against each fingerprint.
-fn log_points(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<i64, Vec<Point>>> {
-    let mut stmt =
-        conn.prepare(r#"SELECT end_position, eid, "offset", linear_pos FROM reading_log_points"#)?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
-    })?;
-    let mut out: std::collections::HashMap<i64, Vec<Point>> = Default::default();
-    for row in rows {
-        let (fingerprint, point) = row?;
-        out.entry(fingerprint).or_default().push(point);
-    }
-    Ok(out)
-}
-
-/// Remember which last position goes with which last-word position. First
-/// sighting wins, as in the parser: two builds of one title differ in both
-/// numbers together.
-pub fn record_book_ends(conn: &Connection, pairs: &[(i64, i64)]) -> rusqlite::Result<()> {
-    for (last_word_position, from_book) in pairs {
-        conn.execute(
-            "INSERT OR IGNORE INTO reading_log_book_ends (last_word_position, from_book)
-             VALUES (?1, ?2)",
-            params![last_word_position, from_book],
-        )?;
-    }
-    Ok(())
-}
-
-/// Record that a fingerprint was named by a catalog key — every key seen. A
-/// fingerprint naming two is a question a later pass answers by which the
-/// library holds.
-pub fn record_log_asin(conn: &Connection, end_position: i64, asin: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO reading_log_asins (end_position, asin) VALUES (?1, ?2)",
-        params![end_position, asin],
-    )?;
-    Ok(())
-}
-
-/// The sole `books` row matching `end_position`'s `reading_log_asins` keys on
-/// `asin` or `amazon_asin`. `None` for none and for more than one.
-fn book_named_by_log_asin(conn: &Connection, end_position: i64) -> rusqlite::Result<Option<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT b.id
-           FROM reading_log_asins a
-           JOIN books b ON b.asin = a.asin OR b.amazon_asin = a.asin
-          WHERE a.end_position = ?1",
-    )?;
-    let ids: Vec<i64> = stmt
-        .query_map(params![end_position], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(match ids[..] {
-        [only] => Some(only),
-        _ => None,
-    })
-}
-
-/// Every pairing learned so far.
-pub fn known_book_ends(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
-    let mut stmt =
-        conn.prepare("SELECT last_word_position, from_book FROM reading_log_book_ends")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    rows.collect()
-}
-
-/// The newest reading event this library holds for one device, the watermark it
-/// syncs against: the device skips whole log dumps by filename timestamp.
-/// Per-serial, two Kindles being read independently.
-pub fn reading_watermark(
-    conn: &Connection,
-    device_serial: &str,
-) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
-        "SELECT MAX(ended_at) FROM reading_sessions WHERE device_serial = ?1",
-        params![device_serial],
-        |r| r.get(0),
-    )
-}
-
-/// The log snapshots read from one device, by filename. A name in this set is a
-/// file whose every event is stored, skipped unopened, and a snapshot is
-/// immutable.
-pub fn seen_dumps(
-    conn: &Connection,
-    device_serial: &str,
-) -> rusqlite::Result<std::collections::HashSet<String>> {
-    let mut stmt = conn.prepare("SELECT name FROM reading_log_dumps WHERE device_serial = ?1")?;
-    let rows = stmt.query_map(params![device_serial], |r| r.get::<_, String>(0))?;
-    rows.collect()
-}
-
-/// Which device these log snapshots belong to. A snapshot's name encodes the
-/// second it was written, which two Kindles do not share. `Ok(None)` marks
-/// files never seen; `Err(names)` marks a folder mixing two Kindles' logs.
-pub fn dumps_owner(
-    conn: &Connection,
-    names: &[String],
-) -> rusqlite::Result<Result<Option<String>, Vec<String>>> {
-    let mut stmt =
-        conn.prepare("SELECT DISTINCT device_serial FROM reading_log_dumps WHERE name = ?1")?;
-    let mut owners: Vec<String> = Vec::new();
-    for name in names {
-        for owner in stmt.query_map(params![name], |r| r.get::<_, String>(0))? {
-            let owner = owner?;
-            if !owner.is_empty() && !owners.contains(&owner) {
-                owners.push(owner);
-            }
-        }
-    }
-    Ok(match owners.len() {
-        0 => Ok(None),
-        1 => Ok(Some(owners.remove(0))),
-        _ => Err(owners),
-    })
-}
-
-/// Erase the reading log completely — every session and every record of which
-/// snapshots have been read, together, leaving the archives re-importable.
-/// Returns how many sessions went.
-pub fn clear_reading_log(conn: &Connection) -> rusqlite::Result<usize> {
-    // Explicit, past the cascade: the foreign key fires under `PRAGMA
-    // foreign_keys`, and a connection opened without it leaves these rows for
-    // the next row id to adopt.
-    conn.execute("DELETE FROM reading_session_hours", [])?;
-    let sessions = conn.execute("DELETE FROM reading_sessions", [])?;
-    conn.execute("DELETE FROM reading_log_dumps", [])?;
-    Ok(sessions)
-}
-
-/// Record that a snapshot has been read in full.
-pub fn mark_dump_read(conn: &Connection, device_serial: &str, name: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO reading_log_dumps (device_serial, name, read_at)
-         VALUES (?1, ?2, ?3)",
-        params![device_serial, name, now_iso()],
-    )?;
-    Ok(())
-}
-
-/// Least seconds a sitting must state for the queries below to select it.
-pub const MIN_SITTING_SECS: i64 = 60;
-
-/// The seconds one `reading_sessions` row states, best measure first:
-/// `timed_seconds`, else `paged_seconds`, else the device counter's `seconds`.
-/// A row stored before those columns carries null in both and falls through.
-///
-/// Every query below totals and filters through this, so no figure on screen
-/// sums one column and floors on another.
-const SECS: &str = "(CASE WHEN COALESCE(timed_seconds, 0) > 0 THEN timed_seconds \
-                     WHEN COALESCE(paged_seconds, 0) > 0 THEN paged_seconds \
-                     ELSE seconds END)";
-
-/// [`SECS`] for a query aliasing `reading_sessions` as `s`.
-const S_SECS: &str = "(CASE WHEN COALESCE(s.timed_seconds, 0) > 0 THEN s.timed_seconds \
-                       WHEN COALESCE(s.paged_seconds, 0) > 0 THEN s.paged_seconds \
-                       ELSE s.seconds END)";
-
-/// `SUM(seconds)` per `day` over `[from, to]` (inclusive, `YYYY-MM-DD`), for
-/// rows with a `book_id` reaching [`MIN_SITTING_SECS`]. A `day` with no such
-/// row is absent.
-pub fn reading_days(
-    conn: &Connection,
-    from: &str,
-    to: &str,
-) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT day, SUM({SECS}) FROM reading_sessions
-          WHERE day BETWEEN ?1 AND ?2 AND book_id IS NOT NULL
-            AND {SECS} >= {MIN_SITTING_SECS}
-          GROUP BY day ORDER BY day",
-    ))?;
-    let rows = stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    rows.collect()
-}
-
-/// One cell of the reading clock: seconds read in a given hour of the day, on
-/// the days of one month falling on one weekday.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ClockCell {
-    /// `YYYY-MM`. A year is a prefix of it, which is how the page windows this
-    /// to whatever the heatmap is showing.
-    pub month: String,
-    /// Days since Sunday, 0–6 — matching the heatmap's own week, which starts
-    /// there.
-    pub dow: u8,
-    pub hour: u8,
-    pub seconds: i64,
-}
-
-/// Beyond this much wall clock, a session is no sitting to spread reading
-/// across. Sessions cut at a half-hour silence, and the widest the parser
-/// produced over a month of one device's archives was 6.2 h.
-const SPREADABLE_SPAN_SECS: i64 = 6 * 3600;
-
-/// When reading happened, by hour of the day.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Booked {
-    /// `reading_session_hours` stated the interval.
-    Measured,
-    /// Shared across the window in proportion to each hour's overlap.
-    Spread,
-    /// Placed whole on the starting hour, past [`SPREADABLE_SPAN_SECS`].
-    Whole,
-}
-
-/// Each session's `seconds` on the clock hours of its own `day`, past midnight
-/// included, for rows with a `book_id` reaching [`MIN_SITTING_SECS`]. `f` takes
-/// the day, the hour, the seconds and the [`Booked`] regime.
-fn walk_clock_hours(
-    conn: &Connection,
-    mut f: impl FnMut(&str, u8, i64, Booked),
-) -> rusqlite::Result<()> {
-    let parses = |day: &str| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok();
-
-    let mut measured = conn.prepare(&format!(
-        "SELECT s.day, h.hour, h.seconds
-           FROM reading_session_hours h
-           JOIN reading_sessions s ON s.id = h.session_id
-          WHERE s.book_id IS NOT NULL AND {S_SECS} >= {MIN_SITTING_SECS}",
-    ))?;
-    for row in measured.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, u8>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })? {
-        let (day, hour, seconds) = row?;
-        if parses(&day) {
-            f(&day, hour.min(23), seconds, Booked::Measured);
-        }
-    }
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT day, started_at, ended_at, seconds FROM reading_sessions
-          WHERE book_id IS NOT NULL AND {SECS} >= {MIN_SITTING_SECS}
-            AND id NOT IN (SELECT session_id FROM reading_session_hours)",
-    ))?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-        ))
-    })?;
-
-    for row in rows {
-        let (day, started_at, ended_at, seconds) = row?;
-        if !parses(&day) {
-            continue;
-        }
-        let (Some(from), Some(to)) = (clock_secs(&started_at), clock_secs(&ended_at)) else {
-            continue;
-        };
-        // `to` below `from` places the end past midnight.
-        let span = if to >= from {
-            to - from
-        } else {
-            to + 86400 - from
-        };
-        if span == 0 || span > SPREADABLE_SPAN_SECS {
-            f(&day, (from / 3600) as u8, seconds, Booked::Whole);
-            continue;
-        }
-        // The division's remainder goes to the starting hour; the shares sum
-        // to `seconds`.
-        let mut placed = 0;
-        for h in (from / 3600)..=((from + span) / 3600) {
-            let (lo, hi) = (h * 3600, (h + 1) * 3600);
-            let overlap = (from + span).min(hi) - from.max(lo);
-            if overlap <= 0 {
-                continue;
-            }
-            let share = seconds * overlap / span;
-            placed += share;
-            f(&day, ((h % 24) as u8).min(23), share, Booked::Spread);
-        }
-        f(&day, (from / 3600) as u8, seconds - placed, Booked::Spread);
-    }
-    Ok(())
-}
-
-pub fn reading_clock(conn: &Connection) -> rusqlite::Result<Vec<ClockCell>> {
-    let mut cells: BTreeMap<(String, u8, u8), i64> = BTreeMap::new();
-    walk_clock_hours(conn, |day, hour, seconds, _| {
-        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("walk parses the day");
-        let key = (
-            day[..7].to_string(),
-            chrono::Datelike::weekday(&date).num_days_from_sunday() as u8,
-            hour,
-        );
-        *cells.entry(key).or_default() += seconds;
-    })?;
-
-    Ok(cells
-        .into_iter()
-        .filter(|(_, seconds)| *seconds > 0)
-        .map(|((month, dow, hour), seconds)| ClockCell {
-            month,
-            dow,
-            hour,
-            seconds,
-        })
-        .collect())
-}
-
-/// The shape of one day: how its seconds fall across the 24 clock hours.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DayShape {
-    /// `YYYY-MM-DD`, device-local.
-    pub day: String,
-    /// 24 entries, seconds per clock hour, summing to the day's total.
-    pub hours: Vec<i64>,
-    /// Seconds placed whole on one hour ([`Booked::Whole`]). `hours` built from
-    /// such a row carries one saturated hour and 23 empty ones, and is drawn or
-    /// suppressed on this figure.
-    pub unplaced_seconds: i64,
-}
-
-/// The hours of each day over `[from, to]` (inclusive, `YYYY-MM-DD`). A
-/// marginal of [`walk_clock_hours`] keyed by day, matching [`reading_days`]
-/// over the same window.
-pub fn reading_day_hours(
-    conn: &Connection,
-    from: &str,
-    to: &str,
-) -> rusqlite::Result<Vec<DayShape>> {
-    let mut days: BTreeMap<String, (Vec<i64>, i64)> = BTreeMap::new();
-    walk_clock_hours(conn, |day, hour, seconds, how| {
-        if day < from || day > to {
-            return;
-        }
-        let entry = days
-            .entry(day.to_string())
-            .or_insert_with(|| (vec![0; 24], 0));
-        entry.0[hour as usize] += seconds;
-        if how == Booked::Whole {
-            entry.1 += seconds;
-        }
-    })?;
-    Ok(days
-        .into_iter()
-        .map(|(day, (hours, unplaced_seconds))| DayShape {
-            day,
-            hours,
-            unplaced_seconds,
-        })
-        .collect())
-}
-
-/// Seconds into the day of a `YYYY-MM-DDTHH:MM:SS` stamp.
-fn clock_secs(iso: &str) -> Option<i64> {
-    if iso.len() < 19 {
-        return None;
-    }
-    let h: i64 = iso[11..13].parse().ok()?;
-    let m: i64 = iso[14..16].parse().ok()?;
-    let s: i64 = iso[17..19].parse().ok()?;
-    Some(h * 3600 + m * 60 + s)
-}
-
-/// One stored sitting, with the book it is attributed to.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionRow {
-    pub id: i64,
-    pub day: String,
-    /// Device-local wall clock, `YYYY-MM-DDTHH:MM:SS`.
-    pub started_at: String,
-    pub ended_at: String,
-    /// Counted reading, which differs from the width of
-    /// `[started_at, ended_at]`.
-    pub seconds: i64,
-    pub book_id: i64,
-    pub title: String,
-    pub page_turns: i64,
-    pub words: i64,
-    /// `counted` | `timed` | `paged` | `awake` — see
-    /// [`super::reading_log::Measure`].
-    pub measure: String,
-    pub device_serial: String,
-}
-
-/// One [`SessionRow`] per session over `[from, to]` (inclusive, `YYYY-MM-DD`)
-/// with a `book_id` and `seconds` reaching [`MIN_SITTING_SECS`], earliest
-/// `started_at` first.
-pub fn reading_sessions_on(
-    conn: &Connection,
-    from: &str,
-    to: &str,
-) -> rusqlite::Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT s.id, s.day, s.started_at, s.ended_at, {S_SECS}, s.book_id, b.title,
-                s.page_turns, s.words, s.measure, s.device_serial
-           FROM reading_sessions s JOIN books b ON b.id = s.book_id
-          WHERE s.day BETWEEN ?1 AND ?2 AND {S_SECS} >= {MIN_SITTING_SECS}
-          ORDER BY s.started_at",
-    ))?;
-    let rows = stmt.query_map(params![from, to], |r| {
-        Ok(SessionRow {
-            id: r.get(0)?,
-            day: r.get(1)?,
-            started_at: r.get(2)?,
-            ended_at: r.get(3)?,
-            seconds: r.get(4)?,
-            book_id: r.get(5)?,
-            title: r.get(6)?,
-            page_turns: r.get(7)?,
-            words: r.get(8)?,
-            measure: r.get(9)?,
-            device_serial: r.get(10)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// How far into a book its last-read position sits.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BookProgress {
-    /// The furthest `reading_position.linear_pos` across every source.
-    pub linear_pos: i64,
-    /// `books.max_position` — the exclusive end of the same axis.
-    pub max_position: i64,
-    /// The `reading_position.source` holding that furthest position.
-    pub source: String,
-    pub updated_at: String,
-    /// [`progress_fraction`] of the two positions above.
-    pub fraction: f64,
-}
-
-/// True for a `finished_at` mark, and for a `fraction` rounding to 100% — the
-/// rounding the reading log's percentage prints.
-pub fn is_finished(fraction: Option<f64>, finished_at: Option<&str>) -> bool {
-    if finished_at.is_some_and(|s| !s.is_empty()) {
-        return true;
-    }
-    fraction.is_some_and(|f| (f * 100.0).round() >= 100.0)
-}
-
-/// `books.finished_at` for one book, `None` when unmarked or absent.
-pub fn book_finished_at(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
-        "SELECT finished_at FROM books WHERE id = ?1",
-        params![book_id],
-        |r| r.get(0),
-    )
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    })
-}
-
-/// Mark a book read, or take the mark off. Stores the moment it was marked.
-pub fn set_book_finished(conn: &Connection, book_id: i64, finished: bool) -> rusqlite::Result<()> {
-    let at = finished.then(now_iso);
-    conn.execute(
-        "UPDATE books SET finished_at = ?2 WHERE id = ?1",
-        params![book_id, at],
-    )?;
-    Ok(())
-}
-
-/// The share of a book's axis read, in `[0, 1]`, or `None` without an axis.
-/// `linear_pos` past `max_position` clamps.
-pub fn progress_fraction(linear_pos: i64, max_position: i64) -> Option<f64> {
-    if max_position <= 0 {
-        return None;
-    }
-    Some((linear_pos as f64 / max_position as f64).clamp(0.0, 1.0))
-}
-
-/// One book's place on its own position axis. `None` where `max_position` or
-/// `reading_position` is absent. `linear_pos` can exceed `max_position` where
-/// the stored KFX differs from the build read on the device, and clamps.
-pub fn book_progress(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookProgress>> {
-    let max: Option<i64> = conn.query_row(
-        "SELECT max_position FROM books WHERE id = ?1",
-        params![book_id],
-        |r| r.get(0),
-    )?;
-    let Some(max_position) = max.filter(|m| *m > 0) else {
-        return Ok(None);
-    };
-    conn.query_row(
-        r#"SELECT linear_pos, source, updated_at FROM reading_position
-            WHERE book_id = ?1 AND linear_pos IS NOT NULL
-            ORDER BY linear_pos DESC LIMIT 1"#,
-        params![book_id],
-        |r| {
-            let linear_pos: i64 = r.get(0)?;
-            Ok(Some(BookProgress {
-                linear_pos,
-                max_position,
-                source: r.get(1)?,
-                updated_at: r.get(2)?,
-                fraction: progress_fraction(linear_pos, max_position).unwrap_or(0.0),
-            }))
-        },
-    )
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    })
-}
-
-/// `SUM(seconds)` per `day` for `book_id`, oldest first, over rows whose
-/// `seconds` reach [`MIN_SITTING_SECS`].
-pub fn reading_book_days(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT day, SUM({SECS}) FROM reading_sessions
-          WHERE book_id = ?1 AND {SECS} >= {MIN_SITTING_SECS}
-          GROUP BY day ORDER BY day",
-    ))?;
-    let rows = stmt.query_map(params![book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    rows.collect()
-}
-
-/// How [`reading_books`] orders what it returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadingSort {
-    #[default]
-    LastRead,
-    Seconds,
-    Sessions,
-    Words,
-}
-
-impl ReadingSort {
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "seconds" => Self::Seconds,
-            "sessions" => Self::Sessions,
-            "words" => Self::Words,
-            _ => Self::LastRead,
-        }
-    }
-
-    /// What [`reading_books`] orders by. Time sorts on the same figure the row
-    /// shows, through [`S_SECS`].
-    fn expr(self) -> String {
-        match self {
-            Self::LastRead => "MAX(s.ended_at)".to_string(),
-            Self::Seconds => format!("SUM({S_SECS})"),
-            Self::Sessions => "COUNT(*)".to_string(),
-            Self::Words => "SUM(s.words)".to_string(),
-        }
-    }
-}
-
-/// How finely [`reading_books`] slices the window it sums over: one row per book
-/// per slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadingBucket {
-    #[default]
-    Total,
-    Year,
-    Month,
-    Day,
-}
-
-impl ReadingBucket {
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "year" => Self::Year,
-            "month" => Self::Month,
-            "day" => Self::Day,
-            _ => Self::Total,
-        }
-    }
-
-    /// The slice key, as SQL over a `YYYY-MM-DD` day. Prefixes of that key sort
-    /// chronologically as text, so ordering by it needs no date arithmetic.
-    fn expr(self) -> &'static str {
-        match self {
-            Self::Total => "''",
-            Self::Year => "substr(s.day, 1, 4)",
-            Self::Month => "substr(s.day, 1, 7)",
-            Self::Day => "s.day",
-        }
-    }
-}
-
-/// One [`ReadingEntry`] per book per `bucket` slice of `[from, to]` (inclusive,
-/// `YYYY-MM-DD`), every figure summed within the slice, over rows whose
-/// `seconds` reach [`MIN_SITTING_SECS`].
-pub fn reading_books(
-    conn: &Connection,
-    from: &str,
-    to: &str,
-    sort: ReadingSort,
-    asc: bool,
-    bucket: ReadingBucket,
-) -> rusqlite::Result<Vec<ReadingEntry>> {
-    let root = conn_root(conn);
-    let dir = if asc { "ASC" } else { "DESC" };
-    let bucket = bucket.expr();
-    let mut stmt = conn.prepare(&format!(
-        r#"SELECT s.book_id, b.title, b.author, b.sha256, b.cover_path,
-                  SUM({S_SECS}), SUM(s.page_turns), SUM(s.words), COUNT(*),
-                  MIN(s.started_at), MAX(s.ended_at),
-                  GROUP_CONCAT(DISTINCT s.device_serial), {bucket},
-                  SUM(CASE WHEN s.measure IN ('paged', 'dwell') THEN {S_SECS} ELSE 0 END),
-                  SUM(CASE WHEN s.measure = 'awake' THEN {S_SECS} ELSE 0 END),
-                  b.max_position,
-                  (SELECT MAX(rp.linear_pos) FROM reading_position rp
-                    WHERE rp.book_id = s.book_id),
-                  b.finished_at
-             FROM reading_sessions s JOIN books b ON b.id = s.book_id
-            WHERE s.day BETWEEN ?1 AND ?2 AND {S_SECS} >= {MIN_SITTING_SECS}
-            GROUP BY {bucket}, s.book_id
-            ORDER BY {bucket} {dir}, {} {dir}, MAX(s.ended_at) DESC"#,
-        sort.expr()
-    ))?;
-    let rows = stmt.query_map(params![from, to], |r| row_to_entry(r, root.as_deref()))?;
-    rows.collect()
-}
-
-/// How many books ever read [`is_finished`] holds for. The rows fold through
-/// it, keeping one rule for what finished means.
-pub fn reading_finished_count(conn: &Connection) -> rusqlite::Result<i64> {
-    let mut stmt = conn.prepare(&format!(
-        r#"SELECT b.max_position, b.finished_at,
-                  (SELECT MAX(rp.linear_pos) FROM reading_position rp
-                    WHERE rp.book_id = b.id)
-             FROM books b
-            WHERE b.id IN (SELECT DISTINCT book_id FROM reading_sessions
-                            WHERE book_id IS NOT NULL
-                              AND {SECS} >= {MIN_SITTING_SECS})"#,
-    ))?;
-    let rows = stmt.query_map([], |r| {
-        let max_position: Option<i64> = r.get(0)?;
-        let finished_at: Option<String> = r.get(1)?;
-        let linear_pos: Option<i64> = r.get(2)?;
-        let fraction = match (linear_pos, max_position) {
-            (Some(pos), Some(max)) => progress_fraction(pos, max),
-            _ => None,
-        };
-        Ok(is_finished(fraction, finished_at.as_deref()))
-    })?;
-    let mut n = 0;
-    for done in rows {
-        if done? {
-            n += 1;
-        }
-    }
-    Ok(n)
-}
-
-/// Distinct `book_id` over the rows whose `seconds` reach [`MIN_SITTING_SECS`].
-pub fn reading_book_count(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row(
-        &format!(
-            "SELECT COUNT(DISTINCT book_id) FROM reading_sessions
-              WHERE book_id IS NOT NULL AND seconds >= {MIN_SITTING_SECS}"
-        ),
-        [],
-        |r| r.get(0),
-    )
-}
-
-/// An aggregate over sessions — a book on one day, or a book across all time.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ReadingEntry {
-    /// Which slice of the window every figure below covers: `""` for the whole
-    /// of it, else `YYYY`, `YYYY-MM` or `YYYY-MM-DD` per the [`ReadingBucket`]
-    /// asked for.
-    pub bucket: String,
-    pub book_id: i64,
-    pub title: String,
-    pub author: String,
-    /// Cover fields carry the same meaning as on [`BookRow`], so the Reading
-    /// Log's cards render through the gallery's own cover path.
-    pub cover_path: Option<String>,
-    pub cover_thumb_path: Option<String>,
-    pub cover_rev: i64,
-    pub seconds: i64,
-    /// How much of [`Self::seconds`] came from the pages themselves, apart from the
-    /// device's own counter — see [`super::reading_log::Measure::Paged`]. A
-    /// measurement of the same kind, over content the counter refuses.
-    pub paged_seconds: i64,
-    /// How much of [`Self::seconds`] is the awake bound — see
-    /// [`super::reading_log::Measure::Awake`]. A bound, not a measurement.
-    pub awake_seconds: i64,
-    /// See [`ReadingSession::page_turns`] — device page events, not pagination.
-    pub page_turns: i64,
-    pub words: i64,
-    pub sessions: i64,
-    pub first_at: String,
-    pub last_at: String,
-    /// Which devices this reading happened on. Empty when the sessions predate
-    /// knowing — an archive imported without saying where it came from — never
-    /// a guess.
-    pub devices: Vec<String>,
-    /// [`progress_fraction`] over this book's furthest position, `None` where
-    /// either half is unstored. The same figure [`book_progress`] reports.
-    pub progress: Option<f64>,
-    /// [`is_finished`] of that fraction and `books.finished_at`.
-    pub finished: bool,
-}
-
-fn row_to_entry(r: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<ReadingEntry> {
-    let sha256: String = r.get(3)?;
-    let cover_path = resolve_opt(root, r.get(4)?);
-    let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
-    let devices: Option<String> = r.get(11)?;
-    let max_position: Option<i64> = r.get(15)?;
-    let linear_pos: Option<i64> = r.get(16)?;
-    let progress = match (linear_pos, max_position) {
-        (Some(pos), Some(max)) => progress_fraction(pos, max),
-        _ => None,
-    };
-    let finished_at: Option<String> = r.get(17)?;
-    let finished = is_finished(progress, finished_at.as_deref());
-    Ok(ReadingEntry {
-        bucket: r.get(12)?,
-        book_id: r.get(0)?,
-        title: r.get(1)?,
-        author: r.get(2)?,
-        cover_path,
-        cover_thumb_path,
-        cover_rev,
-        seconds: r.get(5)?,
-        paged_seconds: r.get(13)?,
-        awake_seconds: r.get(14)?,
-        page_turns: r.get(6)?,
-        words: r.get(7)?,
-        sessions: r.get(8)?,
-        first_at: r.get(9)?,
-        last_at: r.get(10)?,
-        // The `''` a provenance-less row carries is not a device; drop it rather
-        // than render it as one.
-        devices: devices
-            .unwrap_or_default()
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect(),
-        progress,
-        finished,
-    })
-}
-
-/// Attach `book_id` to every session whose fingerprint resolves to exactly one
-/// book, and return how many gained one.
-pub fn resolve_reading_sessions(conn: &Connection) -> rusqlite::Result<usize> {
-    let mut stmt =
-        conn.prepare("SELECT DISTINCT end_position FROM reading_sessions WHERE book_id IS NULL")?;
-    let pending: Vec<i64> = stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
-    // A session stored before its book's two end constants were paired is keyed
-    // by the last-word position, which matches no book. A known pairing re-keys
-    // it.
-    let ends = known_book_ends(conn)?;
-    for position in &pending {
-        if let Some(from_book) = ends.get(position) {
-            conn.execute(
-                "UPDATE OR IGNORE reading_sessions SET end_position = ?2
-                  WHERE book_id IS NULL AND end_position = ?1",
-                params![position, from_book],
-            )?;
-        }
-    }
-    let pending: Vec<i64> = pending
-        .into_iter()
-        .map(|p| ends.get(&p).copied().unwrap_or(p))
-        .collect();
-
-    // Where each Kindle says it left each book. The log never names a book, but
-    // a point it does name is one a sidecar can also name — see
-    // [`device_positions`].
-    let anchors = device_positions(conn)?;
-    let points = log_points(conn)?;
-
-    let mut resolved = 0;
-    for position in pending {
-        // The catalog key first. It is a name, where the two below are
-        // inferences from geometry, and it holds when the library's build of a
-        // title ends at a different position than the device's.
-        let book_id = match book_named_by_log_asin(conn, position)? {
-            Some(named) => Some(named),
-            None => match books_with_last_position(conn, position)?[..] {
-                [only] => Some(only),
-                // The axis decided nothing — no book ends there, or several do.
-                // Where the reader stood is a different question, and it
-                // answers some the axis cannot.
-                _ => sole_book_at(points.get(&position).map_or(&[], Vec::as_slice), &anchors),
-            },
-        };
-        if let Some(book_id) = book_id {
-            resolved += conn.execute(
-                "UPDATE reading_sessions SET book_id = ?2
-                  WHERE book_id IS NULL AND end_position = ?1",
-                params![position, book_id],
-            )?;
-        }
-    }
-    Ok(resolved)
-}
-
-/// Reading that resolved to no book, one row per position it stopped at.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct UnmatchedReading {
-    /// The device's last-valid position: this group's whole identity, and what
-    /// [`books_with_last_position`] is asked about.
-    pub end_position: i64,
-    pub sessions: i64,
-    pub seconds: i64,
-    pub page_turns: i64,
-    pub words: i64,
-    pub first_at: String,
-    pub last_at: String,
-    /// Which Kindles this was read on; empty for sessions imported without
-    /// provenance. Same meaning as on [`ReadingEntry`].
-    pub devices: Vec<String>,
-}
-
-/// One [`UnmatchedReading`] per `end_position` whose rows carry no `book_id`
-/// and whose `seconds` reach [`MIN_SITTING_SECS`], newest `ended_at` first.
-pub fn unmatched_reading(conn: &Connection) -> rusqlite::Result<Vec<UnmatchedReading>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT end_position, COUNT(*), SUM({SECS}), SUM(page_turns), SUM(words),
-                MIN(started_at), MAX(ended_at), GROUP_CONCAT(DISTINCT device_serial)
-           FROM reading_sessions
-          WHERE book_id IS NULL AND {SECS} >= {MIN_SITTING_SECS}
-          GROUP BY end_position
-          ORDER BY MAX(ended_at) DESC",
-    ))?;
-    let rows = stmt.query_map([], |r| {
-        let devices: Option<String> = r.get(7)?;
-        Ok(UnmatchedReading {
-            end_position: r.get(0)?,
-            sessions: r.get(1)?,
-            seconds: r.get(2)?,
-            page_turns: r.get(3)?,
-            words: r.get(4)?,
-            first_at: r.get(5)?,
-            last_at: r.get(6)?,
-            devices: devices
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-        })
-    })?;
-    rows.collect()
-}
-
-/// Settle a position by hand: attach `book_id` to every unattributed session
-/// that stopped there.
-pub fn attribute_reading_position(
-    conn: &Connection,
-    end_position: i64,
-    book_id: i64,
-) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE reading_sessions SET book_id = ?2
-          WHERE book_id IS NULL AND end_position = ?1",
-        params![end_position, book_id],
-    )
-}
-
-/// Create or replace the job row for a book. `kind` is set on first insert
-/// and preserved on subsequent status updates — the worker doesn't need to
-/// know which direction it ran when it reports back.
+/// Create or replace the job row for a book. `kind` is set on first insert and kept
+/// through later status updates.
 pub fn insert_job(
     conn: &Connection,
     book_id: i64,
@@ -3001,8 +1206,7 @@ pub fn set_amazon_asin(
     Ok(())
 }
 
-/// Record the format a book arrived in. Provenance, not metadata: it names no
-/// value a produced file carries, and a change reconverts nothing.
+/// Record the format a book arrived in: provenance no produced file carries.
 pub fn set_source_format(
     conn: &Connection,
     book_id: i64,
@@ -3067,8 +1271,8 @@ pub struct MetadataPatch {
     pub title: String,
     pub author: String,
     pub language: String,
-    /// Page progression direction: `"rtl"` | `"ltr"` | `None` (Auto). Baked into
-    /// the generated KFX's reading order; a change triggers a force-reconvert.
+    /// Page progression direction: `"rtl"` | `"ltr"` | `None` (Auto), baked into the
+    /// generated KFX's reading order.
     #[serde(default)]
     pub ppd: Option<String>,
     /// `horizontal-lr` | `horizontal-rl` | `vertical-rl` | `vertical-lr` |
@@ -3130,9 +1334,8 @@ pub fn update_metadata(
     Ok(())
 }
 
-/// Sparse patch for bulk metadata editing across many books. Unlike
-/// [`MetadataPatch`] (a full replacement), every scalar here means `None` =
-/// "leave unchanged on every book", `Some(v)` = "set to v on every book".
+/// Sparse patch for bulk metadata editing: `None` leaves a field unchanged on every
+/// book, `Some(v)` sets `v` on every book.
 #[derive(Debug, Default, Deserialize)]
 pub struct BulkMetadataPatch {
     #[serde(default)]
@@ -3157,9 +1360,8 @@ pub struct BulkMetadataPatch {
     pub remove_tags: Vec<String>,
 }
 
-/// Apply a sparse [`BulkMetadataPatch`] to one book. Only present scalars
-/// change; tags merge additively. Returns `Ok(false)` when the book id no
-/// longer exists (caller skips it), `Ok(true)` when a row was written.
+/// Apply a sparse [`BulkMetadataPatch`] to one book, merging tags additively. Returns
+/// `Ok(false)` for an absent book id, `Ok(true)` when a row was written.
 pub fn apply_bulk_patch(
     conn: &Connection,
     book_id: i64,
@@ -3254,8 +1456,7 @@ pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<S
         "DELETE FROM annotations WHERE book_id = ?1",
         params![book_id],
     )?;
-    // Handwritten ink + presence + checkpoint (asin-keyed). A book with no asin
-    // can have no ink, so skip these when it's absent/empty.
+    // Handwritten ink, presence and checkpoint, keyed by `asin`.
     if let Some(asin) = asin.as_deref().filter(|a| !a.is_empty()) {
         tx.execute("DELETE FROM book_ink_device WHERE asin = ?1", params![asin])?;
         tx.execute("DELETE FROM ink_sync WHERE asin = ?1", params![asin])?;
@@ -3292,8 +1493,7 @@ pub struct NewBook<'a> {
     pub epub_path: Option<&'a str>,
     pub cover_path: Option<&'a str>,
     pub kfx_path: Option<&'a str>,
-    /// Hash of the KFX bytes — required iff `kfx_path` is `Some`.
-    /// See `BookRow::kfx_sha256` for the reasoning.
+    /// Hash of the KFX bytes, required iff `kfx_path` is `Some`.
     pub kfx_sha256: Option<&'a str>,
     /// PDF side of a PDF↔KFX book; `None` for EPUB↔KFX books.
     pub pdf_path: Option<&'a str>,
@@ -3305,15 +1505,12 @@ pub struct NewBook<'a> {
     pub published_at: Option<&'a str>,
     pub series_name: Option<&'a str>,
     pub series_index: Option<f64>,
-    /// The caller passes the canonical tag list, trimmed, lowercased and
-    /// deduped. `insert_book` serializes it to a JSON array TEXT.
+    /// The canonical tag list; `insert_book` serializes it to a JSON array TEXT.
     pub tags: &'a [String],
-    /// Editable romaji of the title/author, rendered yomigana-aware at import
-    /// (see [`super::romaji`] and `import::extract_meta`). The picker searches it.
+    /// Editable romaji of the title and author, rendered yomigana-aware at import.
     pub title_romaji: &'a str,
     pub author_romaji: &'a str,
-    /// The format that arrived, as `SourceKind::as_str` names it. An `.azw3`
-    /// or `.mobi` import records its own extension, not the EPUB it exported.
+    /// The format that arrived, as `SourceKind::as_str` names it.
     pub source_format: Option<&'a str>,
 }
 
@@ -3400,9 +1597,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
     LIMIT 1
 "#;
 
-/// Match by the **basename** of `kfx_path` — used by `device_list_ours` to
-/// recognize on-device files pushed before the `.<sha8>.kfx` naming convention
-/// existed (their device filename is just the library row's kfx basename).
+/// Match by the **basename** of `kfx_path`: an on-device file named for the
+/// library row's kfx basename.
 const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
@@ -3419,8 +1615,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
     LIMIT 1
 "#;
 
-/// `(cover_thumb(sha), its mtime)` where that file exists, otherwise
-/// `(None, cover_path`'s mtime)`.
+/// `(cover_thumb(sha), its mtime)` where that file exists, else
+/// `(None, cover_path's mtime)`.
 fn served_cover(root: Option<&Path>, sha: &str, cover_path: Option<&str>) -> (Option<String>, i64) {
     if let Some(r) = root {
         let thumb = super::LibraryPaths {
@@ -3434,8 +1630,7 @@ fn served_cover(root: Option<&Path>, sha: &str, cover_path: Option<&str>) -> (Op
             );
         }
     }
-    // No thumb on disk: no gallery thumb, and the rev tracks the full cover,
-    // which a cover swap busts through `?v=`.
+    // No thumb on disk: `rev` tracks the full cover's mtime.
     let rev = cover_path
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| mtime_millis(&m))
@@ -3463,11 +1658,9 @@ pub fn path_mtime_millis(path: &str) -> i64 {
 
 fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<BookRow> {
     let tags_json: String = row.get(19)?;
-    // Defensive parse: we control writes and only emit canonical JSON
-    // arrays, but a corrupt column shouldn't take down the whole list.
+    // A corrupt `tags_json` parses to no tags.
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-    // Bind the fields the derived `search_key` reads up front, so it can borrow
-    // them before they're moved into the struct.
+    // `search_key` borrows these ahead of the struct taking them.
     let sha256: String = row.get(1)?;
     let title: String = row.get(2)?;
     let author: String = row.get(3)?;
@@ -3489,8 +1682,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         &title_romaji,
         &author_romaji,
     );
-    // Resolve the stored root-relative cover path up front — it feeds
-    // both the struct field and the served-image rev's fallback stat.
+    // `cover_path` feeds both the struct field and [`served_cover`].
     let cover_path = resolve_opt(root, row.get(7)?);
     // Derived, not columns: the thumbnail sidecar and the served-image cache token,
     // from one stat. A `None` root or a missing thumb yields `(None, ..)`.
@@ -3512,8 +1704,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
         asin: row.get(11)?,
-        // Appended after the original column list, past `asin`: every reader
-        // here indexes positionally.
+        // `row.get` reads positionally; these columns follow `asin`.
         amazon_asin: row.get(26)?,
         source_format: row.get(27)?,
         status: row.get(12)?,
@@ -3535,10 +1726,8 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
 
 // ---------------------------------------------------------------------------
 // Notebooks (Scribe handwriting).
-// The table lives in `migrate` outside the destructive reset.
 
-/// One stored Scribe notebook. Files live at `notebooks/<uuid>/` (derived from
-/// `uuid` via [`crate::library::LibraryPaths`], not stored here).
+/// One stored Scribe notebook; its files live at `notebooks/<uuid>/`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotebookRow {
     pub id: i64,
@@ -3548,8 +1737,7 @@ pub struct NotebookRow {
     /// SHA-256 of the backed-up `nbk` bytes — change-detects an edited notebook.
     pub nbk_sha256: Option<String>,
     pub imported_at: String,
-    /// On-device "Date Modified" of the source `nbk` (RFC 3339), captured at
-    /// import. `None` for notebooks imported before this column existed.
+    /// On-device "Date Modified" of the source `nbk` (RFC 3339), captured at import.
     pub updated_at: Option<String>,
 }
 
@@ -3645,9 +1833,7 @@ pub fn upsert_notebook(
     )
 }
 
-/// Backfill `updated_at` for a notebook carrying NULL, without re-extracting
-/// it. The import "unchanged" fast path calls it, handing the row its
-/// on-device Date Modified.
+/// Backfill `updated_at` for a notebook carrying NULL, without re-extracting it.
 pub fn backfill_notebook_updated_at(
     conn: &Connection,
     uuid: &str,
@@ -3683,7 +1869,7 @@ pub fn rename_notebook(conn: &Connection, id: i64, title: &str) -> rusqlite::Res
     Ok(())
 }
 
-/// Delete a notebook row, returning its uuid (so the caller removes the files).
+/// Delete a notebook row, returning its uuid for the caller's file removal.
 pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
     let uuid: Option<String> = conn
         .query_row(
@@ -3694,29 +1880,23 @@ pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<St
         .optional()?;
     if let Some(u) = &uuid {
         conn.execute("DELETE FROM notebooks WHERE id = ?1", params![id])?;
-        // Tombstone it so a device/folder re-import won't resurrect it (Restore
-        // from device clears this).
+        // `record_deletion` keeps a device or folder re-import from resurrecting it.
         record_deletion(conn, DELETION_NOTEBOOK, u)?;
     }
     Ok(uuid)
 }
 
 // ---------------------------------------------------------------------------
-// Handwritten ink on a sideloaded doc (`book_ink`). Tables live in `migrate`
-// outside the destructive reset.
+// Handwritten ink on a sideloaded doc (`book_ink`).
 
-/// One imported ink page — the user's handwriting on a single host PDF page.
-/// Cached SVGs live at `books/<sha>/ink/<asin>/<container>.{overlay,plain}.svg`
-/// (derived from `asin` + `container_id` via [`crate::library::LibraryPaths`]).
+/// One imported ink page: handwriting on a single host PDF page.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookInkRow {
     pub id: i64,
     pub book_id: Option<i64>,
     pub asin: String,
     pub container_id: String,
-    /// 0-based host PDF page the ink overlays. `None` where the `.yjr` anchor
-    /// eid resolves to no page — no KFX text layer, or a yjr/book mismatch. The
-    /// ink stores anyway, surfacing in the gallery until an anchor lands.
+    /// 0-based host PDF page the ink overlays; `None` where the anchor eid resolves to no page.
     pub host_page: Option<i64>,
     pub host_eid: Option<i64>,
     /// Device linear position of the host anchor — the display sort across pages.
@@ -3757,9 +1937,8 @@ pub struct NewBookInk<'a> {
     pub imported_at: &'a str,
 }
 
-/// Upsert one ink page, keyed by `(asin, container_id)` — the stable per-page
-/// identity. Re-importing the same page refreshes its host anchor / book link /
-/// content hash in place, never a duplicate, even as the device grows the nbk.
+/// Upsert one ink page, keyed by the stable `(asin, container_id)`; a re-import
+/// refreshes its anchor, book link and hash in place.
 pub fn upsert_book_ink(conn: &Connection, ink: &NewBookInk<'_>) -> rusqlite::Result<i64> {
     conn.execute(
         r#"INSERT INTO book_ink
@@ -3861,9 +2040,8 @@ pub fn set_book_ink_book_id(conn: &Connection, id: i64, book_id: i64) -> rusqlit
     Ok(())
 }
 
-/// The nbk content sha last decoded for `(device_serial, asin)`, if that device
-/// has ever synced this book's ink. The ink import compares it against the freshly
-/// pulled nbk to skip an unchanged decode+render. Mirrors [`get_yjr_sync_sha`].
+/// The nbk content sha last decoded for `(device_serial, asin)`, if that device has
+/// synced this book's ink. Mirrors [`get_yjr_sync_sha`].
 pub fn get_ink_sync_sha(
     conn: &Connection,
     device_serial: &str,
@@ -3934,8 +2112,7 @@ pub fn record_ink_device_presence(
             params![asin, cid, device_serial, book_id, now],
         )?;
     }
-    // Drop this (device, asin)'s presence rows untouched by the pass, which the
-    // device has dropped. Side-table only: the ink page it referenced stays.
+    // Drop this (device, asin)'s presence rows the pass left untouched.
     conn.execute(
         "DELETE FROM book_ink_device \
          WHERE device_serial = ?1 AND asin = ?2 AND last_seen <> ?3",
@@ -3945,11 +2122,9 @@ pub fn record_ink_device_presence(
 }
 
 // ---------------------------------------------------------------------------
-// Annotations + last-read position (imported off the Kindle). The tables live in `migrate` outside the
-// destructive reset.
+// Annotations and last-read positions imported off the Kindle.
 
-/// One stored annotation. `book_id == None` means unlinked — the book isn't in
-/// the library (an orphan-inbox entry).
+/// One stored annotation; `book_id == None` marks an orphan-inbox entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnnotationRow {
     pub id: i64,
@@ -3976,8 +2151,7 @@ pub struct AnnotationRow {
     pub hidden: bool,
 }
 
-/// Insert payload for one annotation; borrows so ingest can build these from
-/// parsed records without cloning.
+/// Insert payload for one annotation, borrowed from parsed records.
 pub struct NewAnnotation<'a> {
     pub dedup_hash: &'a str,
     pub book_id: Option<i64>,
@@ -4000,9 +2174,8 @@ pub struct NewAnnotation<'a> {
     pub source: &'a str,
 }
 
-/// Insert an annotation, ignoring exact duplicates (same `dedup_hash`). Returns
-/// `true` for a new row and `false` for one the library holds, which an import
-/// counts as a duplicate.
+/// Insert an annotation, ignoring exact duplicates (same `dedup_hash`): `true` for a
+/// new row, `false` for one the library holds.
 pub fn insert_annotation(conn: &Connection, a: &NewAnnotation<'_>) -> rusqlite::Result<bool> {
     let n = conn.execute(
         r#"INSERT INTO annotations
@@ -4085,7 +2258,7 @@ fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationRow>
     })
 }
 
-/// Whether a device has ever shown us a coloured highlight.
+/// Whether `device_serial` has synced a coloured highlight.
 pub fn device_uses_colors(conn: &Connection, device_serial: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS (
@@ -4130,8 +2303,7 @@ pub fn set_annotation_book_id(
     Ok(())
 }
 
-/// One annotation by id — the native edit/delete path loads it to recompute the
-/// dedup hash and to return the refreshed row.
+/// One annotation by id.
 pub fn get_annotation(conn: &Connection, id: i64) -> rusqlite::Result<Option<AnnotationRow>> {
     conn.query_row(
         &format!("{SELECT_ANNOTATION} WHERE id = ?1"),
@@ -4141,9 +2313,7 @@ pub fn get_annotation(conn: &Connection, id: i64) -> rusqlite::Result<Option<Ann
     .optional()
 }
 
-/// One annotation by its `dedup_hash`. The native create path inserts with
-/// `ON CONFLICT(dedup_hash) DO NOTHING`, and a created annotation can collide
-/// with a passage the library holds from a Kindle.
+/// One annotation by its `dedup_hash`.
 pub fn get_annotation_by_hash(
     conn: &Connection,
     dedup_hash: &str,
@@ -4176,7 +2346,7 @@ pub fn update_annotation(
 /// Delete the `annotations` row `id` and the `annotation_device` rows on its
 /// `dedup_hash`.
 pub fn delete_annotation(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
-    // Read the hash first so the presence side table can be cleaned to match.
+    // `hash` keys the presence rows cleaned below.
     let hash: Option<String> = conn
         .query_row(
             "SELECT dedup_hash FROM annotations WHERE id = ?1",
@@ -4190,16 +2360,14 @@ pub fn delete_annotation(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
             "DELETE FROM annotation_device WHERE dedup_hash = ?1",
             params![h],
         )?;
-        // Tombstone it so the additive device sync won't re-add it (Restore from
-        // device clears this).
+        // `record_deletion` keeps device sync from re-adding it.
         record_deletion(conn, DELETION_ANNOTATION, &h)?;
     }
     Ok(n > 0)
 }
 
-/// Last-read position for a book. `device_serial` is `""` for the Sidle-native
-/// row (`source='sidle'`) and the Kindle's USB/MTP serial for an imported one
-/// (`source='device'`) — so each device keeps its own last-read.
+/// Last-read position for a book. `device_serial` is `""` for the Sidle-native row
+/// (`source='sidle'`) and the Kindle's serial for an imported one (`source='device'`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadingPosition {
     pub book_id: i64,
@@ -4312,7 +2480,7 @@ pub fn ink_deletion_key(asin: &str, container_id: &str) -> String {
     format!("{asin}\u{1f}{container_id}")
 }
 
-/// Record a Sidle-side deletion so the additive sync won't re-add this artifact.
+/// Record a Sidle-side deletion, which the additive sync honours.
 pub fn record_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO artifact_deletions (kind, key, deleted_at) VALUES (?1, ?2, ?3) \
@@ -4322,7 +2490,7 @@ pub fn record_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Re
     Ok(())
 }
 
-/// Whether the user deleted this artifact in Sidle (so sync must not re-add it).
+/// Whether this artifact was deleted in Sidle.
 pub fn is_deleted(conn: &Connection, kind: &str, key: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT 1 FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
@@ -4342,15 +2510,12 @@ pub fn clear_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Res
     Ok(())
 }
 
-/// Clear every deletion record. "Restore from device" un-suppresses the
-/// Sidle-side deletions, and a device's remaining items re-import. Returns how
-/// many records cleared.
+/// Clear every deletion record, returning how many cleared.
 pub fn clear_all_deletions(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM artifact_deletions", [])
 }
 
-/// Set the reversible "hidden from the reader" flag on one annotation. Hidden
-/// rows stay in the backup; the reader just doesn't paint or default-list them.
+/// Set the reversible "hidden from the reader" flag on one annotation.
 pub fn set_annotation_hidden(conn: &Connection, id: i64, hidden: bool) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE annotations SET hidden = ?1 WHERE id = ?2",
@@ -4368,9 +2533,7 @@ pub fn set_book_ink_hidden(conn: &Connection, id: i64, hidden: bool) -> rusqlite
     Ok(())
 }
 
-/// Drop a device's import checkpoints (`yjr_sync` + `ink_sync`), and the next
-/// sync re-pulls everything. "Restore from device" calls it, bypassing the
-/// unchanged fast-path for a Sidle-deleted item the device holds.
+/// Drop a device's `yjr_sync` and `ink_sync` checkpoints; its next sync re-pulls everything.
 pub fn clear_device_sync_checkpoints(
     conn: &Connection,
     device_serial: &str,
@@ -4386,9 +2549,8 @@ pub fn clear_device_sync_checkpoints(
     Ok(())
 }
 
-/// Delete one ink page by id: removes the row, its device-presence rows, and
-/// tombstones it (so a re-sync won't re-add it; Restore clears it). Returns its
-/// `(asin, container_id)` so the caller can drop the cached SVGs.
+/// Delete one ink page by id with its device-presence rows, recording the deletion.
+/// Returns its `(asin, container_id)` for the caller's SVG cleanup.
 pub fn delete_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<(String, String)>> {
     let key: Option<(String, String)> = conn
         .query_row(
@@ -4428,8 +2590,7 @@ pub fn record_device_book_presence(
         )?;
     }
 
-    // Drop this (device, book)'s presence rows untouched by the pass, which the
-    // device has dropped. Side-table only: the annotation it referenced stays.
+    // Drop this (device, book)'s presence rows the pass left untouched.
     conn.execute(
         "DELETE FROM annotation_device \
          WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
@@ -4455,8 +2616,7 @@ pub struct AppSourceRow {
     pub source_kind: String,
     /// The repo path or `owner/repo` the user named.
     pub source: String,
-    /// The mount root inside `source` — the directory `extensions/` sits in.
-    /// One source holds several apps, and `source` alone names no tree.
+    /// The mount root inside `source`, the directory `extensions/` sits in.
     pub root: String,
     pub added_at: i64,
 }
@@ -4516,72 +2676,6 @@ pub fn remove_app_source(conn: &Connection, id: &str) -> rusqlite::Result<bool> 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn progress_fraction_clamps_a_position_past_the_end() {
-        // A stored KFX differing from the build the device read puts
-        // `linear_pos` beyond `max_position`.
-        assert_eq!(super::progress_fraction(147665, 147652), Some(1.0));
-        assert_eq!(super::progress_fraction(-5, 100), Some(0.0));
-    }
-
-    #[test]
-    fn the_finished_count_takes_both_routes() {
-        let conn = fresh_db();
-        // A distinct start per book: `reading_sessions` ignores a duplicate row.
-        let mut hour = 9;
-        let mut read = |sha: &str, title: &str| {
-            let id = insert_minimal(&conn, sha, title);
-            let from = format!("{hour:02}:00:00");
-            let to = format!("{hour:02}:30:00");
-            insert_reading_session(&conn, &sitting("2026-08-11", &from, &to, 1800, id)).unwrap();
-            hour += 1;
-            id
-        };
-        // `done` sits at the end of its axis.
-        let done = read("sha-c1", "Done");
-        set_max_position(&conn, done, Some(1000)).unwrap();
-        set_reading_position(&conn, done, Some(9), Some(0), Some(1000), "device", "G").unwrap();
-        // `marked` sits short of it, carrying a mark.
-        let marked = read("sha-c2", "Marked");
-        set_max_position(&conn, marked, Some(1000)).unwrap();
-        set_reading_position(&conn, marked, Some(9), Some(0), Some(620), "device", "G").unwrap();
-        set_book_finished(&conn, marked, true).unwrap();
-        // `open` sits short of it, carrying none.
-        let open = read("sha-c3", "Open");
-        set_max_position(&conn, open, Some(1000)).unwrap();
-        set_reading_position(&conn, open, Some(9), Some(0), Some(620), "device", "G").unwrap();
-
-        assert_eq!(reading_book_count(&conn).unwrap(), 3);
-        assert_eq!(reading_finished_count(&conn).unwrap(), 2);
-        // `set_book_finished` off drops `marked` back out.
-        set_book_finished(&conn, marked, false).unwrap();
-        assert_eq!(reading_finished_count(&conn).unwrap(), 1);
-    }
-
-    #[test]
-    fn a_mark_finishes_a_book_the_axis_does_not() {
-        // `finished_at` set on a book the axis leaves at 0.62.
-        assert!(!super::is_finished(Some(0.62), None));
-        assert!(super::is_finished(Some(0.62), Some("2026-08-30T00:00:00Z")));
-        // A book with no axis is markable.
-        assert!(super::is_finished(None, Some("2026-08-30T00:00:00Z")));
-        assert!(!super::is_finished(None, None));
-    }
-
-    #[test]
-    fn the_end_of_the_axis_finishes_a_book_unmarked() {
-        assert!(super::is_finished(Some(1.0), None));
-        // `is_finished` rounds as the reading log's percentage does.
-        assert!(super::is_finished(Some(0.9986), None));
-        assert!(!super::is_finished(Some(0.99), None));
-    }
-
-    #[test]
-    fn progress_fraction_needs_an_axis() {
-        assert_eq!(super::progress_fraction(500, 0), None);
-        assert_eq!(super::progress_fraction(500, 1000), Some(0.5));
-    }
-
     use super::*;
 
     fn fresh_db() -> Connection {
@@ -4625,15 +2719,13 @@ mod tests {
     fn set_kfx_path_and_sha_freezes_identity() {
         let conn = fresh_db();
         let id = insert_minimal(&conn, "src-sha", "Book");
-        // First call mints the identity from the fresh KFX bytes.
+        // `aaaa1111` mints the identity.
         set_kfx_path_and_sha(&conn, id, "books/src-sha/Book.kfx", "aaaa1111").unwrap();
         assert_eq!(
             get_book(&conn, id).unwrap().unwrap().kfx_sha256.as_deref(),
             Some("aaaa1111")
         );
-        // A reconvert (or cover swap) re-runs the setter with the NEW output hash.
-        // The path may be rewritten, but the identity is frozen — the on-device
-        // filename embeds it and the Kindle binds each `.sdr` to that exact name.
+        // A reconvert passes `bbbb2222`; `kfx_sha256` stays frozen.
         set_kfx_path_and_sha(&conn, id, "books/src-sha/Book.kfx", "bbbb2222").unwrap();
         assert_eq!(
             get_book(&conn, id).unwrap().unwrap().kfx_sha256.as_deref(),
@@ -4645,8 +2737,7 @@ mod tests {
     #[test]
     fn find_by_kfx_basename_matches_stem_and_escapes_metachars() {
         let conn = fresh_db();
-        // Two basenames differing only where one has `_`: without escaping, LIKE
-        // treats `_` as "any char" and could mis-link them.
+        // Two basenames differing only where one has `_`, a `LIKE` wildcard.
         let a = insert_minimal(&conn, "sha-a", "A");
         set_kfx_path_and_sha(&conn, a, "books/sha-a/Title_ Intro.kfx", "aaaa0000").unwrap();
         let b = insert_minimal(&conn, "sha-b", "B");
@@ -4702,9 +2793,7 @@ mod tests {
     #[test]
     fn migrate_harmonizes_existing_language_tags() {
         let conn = fresh_db();
-        // Stand-ins for pre-v10 rows: `insert_book` writes the language verbatim
-        // (harmonization lived only in the import layer), so these mimic old data
-        // stored before the canonicalization existed.
+        // `insert_book` writes the language verbatim, as a pre-v10 row holds it.
         let en = insert_with_language(&conn, "sha-en", "en-US");
         let zh = insert_with_language(&conn, "sha-zh", "zh-hant");
         let ja = insert_with_language(&conn, "sha-ja", "jpn");
@@ -4732,8 +2821,7 @@ mod tests {
         )
         .unwrap();
 
-        // Re-open: migrate() is idempotent and backfills NULL romaji from the raw
-        // title/author via the engine.
+        // `migrate` backfills NULL romaji from the raw title and author.
         migrate(&conn).expect("re-migrate");
 
         let book = get_book(&conn, id).unwrap().unwrap();
@@ -4741,7 +2829,7 @@ mod tests {
             book.title_romaji, "sekai",
             "kakasi backfilled the title romaji"
         );
-        // The derived search key folds the backfilled romaji in.
+        // `search_key` folds the backfilled romaji in.
         assert!(
             book.search_key.contains("sekai"),
             "search_key: {}",
@@ -4781,10 +2869,8 @@ mod tests {
         let row = get_notebook_by_uuid(&conn, "uuid-1")
             .expect("query")
             .expect("row");
-        // imported_at must NEVER change on re-import — it's the first-import
-        // bookkeeping time (and the list-sort tiebreaker).
+        // `imported_at` keeps the first-import time.
         assert_eq!(row.imported_at, "2026-06-01T10:00:00Z");
-        // Everything else reflects the re-import.
         assert_eq!(row.page_count, 5);
         assert_eq!(row.nbk_sha256.as_deref(), Some("sha-b"));
         assert_eq!(row.updated_at.as_deref(), Some("2026-06-09T19:30:00"));
@@ -4806,7 +2892,7 @@ mod tests {
         let row = get_notebook_by_uuid(&conn, "uuid-t").unwrap().unwrap();
         assert_eq!(row.title, "2026-06-01 09:05");
 
-        // An edit (new content + a newer mtime) must NOT rewrite the title.
+        // `upsert_notebook` with new content and a newer mtime keeps the title.
         upsert_notebook(
             &conn,
             "uuid-t",
@@ -4837,7 +2923,7 @@ mod tests {
         )
         .expect("import");
         rename_notebook(&conn, id, "Meeting notes").expect("rename");
-        // A later edit must leave the user's chosen title intact.
+        // `upsert_notebook` keeps a renamed title.
         upsert_notebook(
             &conn,
             "uuid-r",
@@ -4889,8 +2975,7 @@ mod tests {
 
     #[test]
     fn notebook_legacy_sentinel_title_backfills_on_unchanged_path() {
-        // The import "unchanged" fast path uses backfill_notebook_default_title
-        // directly (it never calls upsert_notebook), so cover it too.
+        // `backfill_notebook_default_title` alone, apart from `upsert_notebook`.
         let conn = fresh_db();
         conn.execute(
             "INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
@@ -4901,7 +2986,7 @@ mod tests {
         backfill_notebook_default_title(&conn, "uuid-u", "2026-06-03T07:00:00").unwrap();
         let row = get_notebook_by_uuid(&conn, "uuid-u").unwrap().unwrap();
         assert_eq!(row.title, "2026-06-03 07:00");
-        // A real title is left untouched by the backfill.
+        // `backfill_notebook_default_title` leaves a real title alone.
         rename_notebook(&conn, row.id, "Kept").unwrap();
         backfill_notebook_default_title(&conn, "uuid-u", "2026-06-09T19:30:00").unwrap();
         let row = get_notebook_by_uuid(&conn, "uuid-u").unwrap().unwrap();
@@ -4910,14 +2995,12 @@ mod tests {
 
     #[test]
     fn default_notebook_title_handles_naive_and_rfc3339() {
-        // Naive local wall-clock (the common import shape) reflects its digits,
-        // dropping seconds — deterministic regardless of the host timezone.
+        // `2026-06-01T09:05:45` (naive) keeps its digits, seconds dropped, in any timezone.
         assert_eq!(
             default_notebook_title("2026-06-01T09:05:45"),
             "2026-06-01 09:05"
         );
-        // RFC 3339 (the now_iso fallback) parses + converts to local without
-        // panicking; the exact minute depends on the host tz, so assert shape.
+        // RFC 3339 converts to local; the minute depends on the host tz, the shape does not.
         let got = default_notebook_title("2026-06-01T09:05:45Z");
         assert_eq!(got.len(), 16, "YYYY-MM-DD HH:MM");
         assert!(got.starts_with("2026-"));
@@ -5034,7 +3117,7 @@ mod tests {
             },
         )
         .expect("insert");
-        // A device asserts it → a row lands in `annotation_device`.
+        // `record_device_book_presence` lands a row in `annotation_device`.
         record_device_book_presence(
             &conn,
             "DEV",
@@ -5046,7 +3129,7 @@ mod tests {
 
         remove_book(&conn, book_id).expect("remove");
 
-        // The annotation is destroyed outright — not moved to the orphan inbox.
+        // `remove_book` destroys the annotation outright, leaving no orphan.
         assert!(
             list_annotations_for_book(&conn, book_id)
                 .expect("by book")
@@ -5057,7 +3140,7 @@ mod tests {
                 .expect("orphans")
                 .is_empty()
         );
-        // ...and its per-device presence row is gone with it.
+        // ...and its `annotation_device` row with it.
         let presence: i64 = conn
             .query_row("SELECT COUNT(*) FROM annotation_device", [], |r| r.get(0))
             .unwrap();
@@ -5142,8 +3225,8 @@ mod tests {
                 .is_empty()
         );
 
-        // Sidle's own row AND a separate row PER device all coexist — composite PK
-        // `(book_id, source, device_serial)`, so none clobbers another.
+        // One `'sidle'` row and one row per device coexist under the composite PK
+        // `(book_id, source, device_serial)`.
         set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle", "")
             .expect("s");
         set_reading_position(
@@ -5180,7 +3263,7 @@ mod tests {
             Some(2500)
         );
 
-        // A second write for the SAME (source, serial) overwrites just that row…
+        // `set_reading_position` on the same (source, serial) overwrites that row alone…
         set_reading_position(
             &conn,
             book_id,
@@ -5228,7 +3311,7 @@ mod tests {
             Some("def456")
         );
 
-        // A different device keeps its own checkpoint — no clobber.
+        // `DEV2` keeps its own checkpoint.
         assert!(
             get_yjr_sync_sha(&conn, "DEV2", book_id)
                 .expect("get")
@@ -5365,8 +3448,7 @@ mod tests {
         mk("gone", "yjr");
         mk("native", "sidle");
 
-        // The device's set holds `keep` alone. Sidle is a backup, and `gone`
-        // stays.
+        // The device's set holds `keep` alone; `gone` stays.
         record_device_book_presence(&conn, "DEV1", book_id, &["keep".to_string()], "t1").unwrap();
 
         let mut left: Vec<String> = list_annotations_for_book(&conn, book_id)
@@ -5382,15 +3464,12 @@ mod tests {
         );
     }
 
-    /// Migration scrubs any legacy `source='clippings'` rows on `open()` — the
-    /// `My Clippings.txt` ingest path was removed; this prevents stale orphans
-    /// from a pre-v2 DB lingering in the library.
+    /// `migrate` scrubs every `source='clippings'` row on `open()`.
     #[test]
     fn migrate_purges_legacy_clipping_rows() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-mig", "本");
-        // Backdoor in a v1-shaped clippings orphan (no ingest path produces these
-        // anymore, but a restored v1 backup or a stale test fixture might).
+        // A v1-shaped clippings orphan, inserted directly.
         insert_annotation(
             &conn,
             &NewAnnotation {
@@ -5631,7 +3710,6 @@ mod tests {
         let a = insert_minimal(&conn, "sha-asin-a", "A");
         let b = insert_minimal(&conn, "sha-asin-b", "B");
 
-        // Fresh books have no catalogue ASIN, so the column is free.
         assert_eq!(
             book_id_with_amazon_asin(&conn, "B07PXGQC1Q", a).expect("query"),
             None
@@ -5643,18 +3721,18 @@ mod tests {
             Some("B07PXGQC1Q")
         );
 
-        // Another book asking for the same ASIN finds the collision.
+        // `book_id_with_amazon_asin` finds the collision from book `b`.
         assert_eq!(
             book_id_with_amazon_asin(&conn, "B07PXGQC1Q", b).expect("query"),
             Some(a)
         );
-        // ...but the owner itself is excluded (re-saving the same ASIN is fine).
+        // ...and excludes `a`, the owner.
         assert_eq!(
             book_id_with_amazon_asin(&conn, "B07PXGQC1Q", a).expect("query"),
             None
         );
 
-        // The file's own key is a separate column and untouched by any of it.
+        // `asin`, the file's own key, stays untouched.
         assert_eq!(get_book(&conn, a).unwrap().unwrap().asin, None);
         set_amazon_asin(&conn, a, None).expect("clear");
         assert_eq!(get_book(&conn, a).unwrap().unwrap().amazon_asin, None);
@@ -5662,9 +3740,8 @@ mod tests {
 
     #[test]
     fn the_migration_lifts_a_catalogue_asin_out_of_the_file_key() {
-        // An install from before the split: `asin` held whatever the export
-        // stamped, which for a store-bought source was the catalogue ASIN.
-        // That value is the only colour-cover key the library has.
+        // A pre-split library: `asin` holds what the export stamped, for a store-bought
+        // source the catalogue ASIN.
         let conn = Connection::open_in_memory().expect("open");
         migrate(&conn).expect("migrate");
         conn.execute("ALTER TABLE books DROP COLUMN amazon_asin", [])
@@ -5750,7 +3827,7 @@ mod tests {
         let id = seed_full(&conn, "sha-bulk-b", vec!["sci-fi".into(), "to-read".into()]);
 
         let patch = BulkMetadataPatch {
-            add_tags: vec!["sci-fi".into(), "classic".into()], // sci-fi already present
+            add_tags: vec!["sci-fi".into(), "classic".into()], // sci-fi present
             remove_tags: vec!["to-read".into()],
             ..Default::default()
         };
@@ -5789,9 +3866,7 @@ mod tests {
     #[test]
     fn paths_stored_relative_resolved_absolute_and_migrated() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Canonicalize: a macOS tempdir resolves /var → /private/var, which
-        // SQLite reports through `conn.path()`. Matching it holds the test on a
-        // non-symlinked root.
+        // `canonicalize`: a macOS tempdir resolves /var → /private/var, as `conn.path()` does.
         let root = dir.path().canonicalize().expect("canonicalize tempdir");
         let db_path = root.join("library.db");
 
@@ -5862,9 +3937,7 @@ mod tests {
                 Some(kfx_abs.to_string_lossy().as_ref())
             );
 
-            // Read-modify-write invariant: feeding the resolved ABSOLUTE path back
-            // into the setter must NOT re-absolutize the column. set_cover,
-            // recrawl and the worker all do exactly this.
+            // `resolved_kfx` fed back into the setter keeps the column relative.
             let resolved_kfx = row.kfx_path.clone().unwrap();
             set_kfx_path_and_sha(&conn, id, &resolved_kfx, "cafe").expect("set kfx");
             assert_eq!(stored(&conn, "kfx_path").as_deref(), Some(rel_kfx));
@@ -5908,7 +3981,7 @@ mod tests {
             relativize_for_store(Some(live), "/Volumes/Ext/OldLib/books/def/cover.jpg"),
             "books/def/cover.jpg",
         );
-        // Notebooks are managed the same way.
+        // `notebooks/` paths cut the same way.
         assert_eq!(
             relativize_for_store(Some(live), "/old/root/notebooks/uuid-1/pages/p0.svg"),
             "notebooks/uuid-1/pages/p0.svg",
@@ -5932,16 +4005,15 @@ mod tests {
             ),
             "books/jkl/x.epub",
         );
-        // A foreign path with no managed component is left untouched.
+        // `relativize_for_store` leaves a path with no managed component untouched.
         assert_eq!(
             relativize_for_store(Some(live), "/Users/x/Pictures/my-cover.png"),
             "/Users/x/Pictures/my-cover.png",
         );
     }
 
-    /// End-to-end: a row whose paths are absolute under an old, case-mismatched
-    /// root (exactly the on-disk state after a relocate that predates this fix)
-    /// is healed on the next `open` so it resolves under the new live root.
+    /// End-to-end: a row whose paths are absolute under an old, case-mismatched root
+    /// resolves under the live root after the next `open`.
     #[test]
     fn legacy_absolute_paths_migrate_under_relocated_root() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5977,8 +4049,7 @@ mod tests {
             id
         };
 
-        // Reopen at the live root: migration relativizes, and a read resolves
-        // under this root, where the relocate put the files.
+        // `open` at the live root relativizes; `get_book` resolves under it.
         let conn = open(&db_path).expect("reopen");
         assert_eq!(
             stored(&conn, "epub_path").as_deref(),
@@ -6005,9 +4076,8 @@ mod tests {
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
-    /// A Colorsoft names a highlight's colour with a bare string in the slot a
-    /// note body also uses, so an earlier reader filed it as the note. The
-    /// repair must move it and leave a genuine note alone.
+    /// [`repair_colors_read_as_notes`] moves a bare colour string out of `note_body`
+    /// and leaves a genuine note alone.
     #[test]
     fn migrate_v12_moves_a_highlight_colour_out_of_the_note_body() {
         let conn = fresh_db();
@@ -6042,7 +4112,7 @@ mod tests {
         row("a", 1, Some("pink"), None); // colour mistaken for a note
         row("b", 2, Some("orange"), Some("")); // same, empty-string colour
         row("c", 3, Some("a real thought"), None); // a genuine note
-        row("d", 4, Some("blue"), Some("yellow")); // already coloured — hands off
+        row("d", 4, Some("blue"), Some("yellow")); // coloured: hands off
 
         conn.pragma_update(None, "user_version", 11).unwrap();
         migrate(&conn).unwrap();
@@ -6106,8 +4176,7 @@ mod tests {
                 source: "sidle",
             }
         }
-        // Same passage, same covered text — only the linear scale differs: the
-        // reader's synthesized axis vs the pid the device wrote.
+        // Same passage and text, `loc_start` on another scale.
         insert_annotation(
             &conn,
             &same_passage(book, "old-sidle", 25, "a pertinent question"),
@@ -6143,8 +4212,7 @@ mod tests {
         );
         assert_ne!(kept.dedup_hash, "old-sidle", "re-keyed under the new rule");
 
-        // The device's presence record followed the survivor, past the row it
-        // was attached to.
+        // `annotation_device` followed the survivor.
         let present: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM annotation_device WHERE dedup_hash = ?1",
@@ -6154,8 +4222,7 @@ mod tests {
             .unwrap();
         assert_eq!(present, 1, "presence re-keyed onto the survivor");
 
-        // The tombstone names the passage it was written for, and the next
-        // device sync leaves it deleted.
+        // `artifact_deletions` names the passage it was written for.
         let other_row = rows.iter().find(|r| r.eid_start == Some(1073)).unwrap();
         assert!(
             is_deleted(&conn, DELETION_ANNOTATION, &other_row.dedup_hash).unwrap(),
@@ -6175,8 +4242,8 @@ mod tests {
         assert_eq!(after, before);
     }
 
-    /// The state a sync leaves behind landing *before* the re-key: the new
-    /// rule's hash sits on a row newer than the one it collapses into.
+    /// A sync landing before the re-key: the new rule's hash on a row newer than the
+    /// one it collapses into.
     #[test]
     fn migrate_v12_rekeys_a_survivor_whose_hash_a_later_duplicate_already_holds() {
         let conn = fresh_db();
@@ -6204,7 +4271,7 @@ mod tests {
                 source: "sidle",
             }
         }
-        // What the import path computes today — the hash the re-key will land on.
+        // `canonical`: the hash the import path computes, which the re-key lands on.
         let canonical = crate::library::ingest::annotation_dedup_hash(
             &crate::library::ingest::book_match_key("Fragments"),
             "highlight",
@@ -6297,16 +4364,14 @@ mod tests {
                 source,
             }
         }
-        // The fused row the pre-split reader wrote, carrying the hash a v12 DB
-        // holds for it. This test measures the split.
+        // `fused`: the row a pre-split reader wrote, with the hash a v12 DB holds for it.
         let fused = hash("note", "test on sidle");
         insert_annotation(
             &conn,
             &span(book, &fused, "note", Some("test on sidle"), "sidle"),
         )
         .unwrap();
-        // ...and the device's highlight record for the same passage, which had
-        // nothing to collide with and so came back as its own row.
+        // ...and the device's highlight record for the same passage, as its own row.
         insert_annotation(
             &conn,
             &span(book, &hash("highlight", ""), "highlight", None, "yjr"),
@@ -6338,7 +4403,7 @@ mod tests {
             (hl.eid_start, hl.off_start, hl.eid_end, hl.off_end),
             "the note keeps the highlight's span, which is what a device accepts",
         );
-        // And they group, which is what the reader renders from.
+        // `notes::attachments` groups them.
         assert_eq!(
             crate::library::notes::attachments(&rows),
             vec![(note.id, hl.id)],
@@ -6349,8 +4414,7 @@ mod tests {
         assert_eq!(list_annotations_for_book(&conn, book).unwrap().len(), 2);
     }
 
-    /// The same split with no device `highlight` present mints one and keeps
-    /// the `note`.
+    /// `migrate` (v13) with no device `highlight` present mints one and keeps the `note`.
     #[test]
     fn migrate_v13_mints_the_missing_highlight_without_losing_the_note() {
         let conn = fresh_db();
@@ -6407,8 +4471,7 @@ mod tests {
     fn migrate_v13_leaves_device_written_notes_alone() {
         let conn = fresh_db();
         let book = insert_minimal(&conn, "sha-dev-note", "Perfect Insider");
-        // The hash a v12 DB holds for this record. The assertion below measures
-        // the split leaving it alone.
+        // `device_note`: the hash a v12 DB holds for this record.
         let device_note = crate::library::ingest::annotation_dedup_hash(
             &crate::library::ingest::book_match_key("Perfect Insider"),
             "note",
@@ -6565,7 +4628,7 @@ mod tests {
         upsert_book_ink(&conn, &mk("c0")).unwrap();
         upsert_book_ink(&conn, &mk("c1")).unwrap();
 
-        // First sync: the device asserts both pages.
+        // First sync: `DEV` asserts both pages.
         record_ink_device_presence(
             &conn,
             "DEV",
@@ -6577,8 +4640,7 @@ mod tests {
         .unwrap();
         assert_eq!(list_book_ink(&conn, book).unwrap().len(), 2);
 
-        // Next sync: c1 erased on the device. Its presence row goes, but the ink
-        // BACKUP page is kept (Sidle is the durable backup).
+        // Next sync: c1 erased on `DEV`; its presence row goes, its `book_ink` row stays.
         record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t2")
             .unwrap();
         assert_eq!(
@@ -6644,7 +4706,7 @@ mod tests {
         )
         .unwrap();
         let id = list_book_ink(&conn, book).unwrap()[0].id;
-        // Visible: the painter sees it (host_pages + on_page) and it's in the panel.
+        // `book_ink_host_pages` and `list_book_ink_on_page` both carry it.
         assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![2]);
         assert_eq!(list_book_ink_on_page(&conn, book, 2).unwrap().len(), 1);
 
@@ -6738,15 +4800,14 @@ mod tests {
             },
         )
         .unwrap();
-        // A device asserts the page + records a decode checkpoint.
+        // `DEV` asserts the page and records a decode checkpoint.
         record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1")
             .unwrap();
         set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t1").unwrap();
 
         remove_book(&conn, book).unwrap();
 
-        // Ink, its per-device presence, and its checkpoint are all destroyed —
-        // nothing is left orphaned.
+        // `remove_book` destroys the ink, its per-device presence and its checkpoint.
         assert!(list_book_ink(&conn, book).unwrap().is_empty());
         assert!(list_unlinked_book_ink(&conn).unwrap().is_empty());
         let presence: i64 = conn
@@ -6762,7 +4823,7 @@ mod tests {
         let book = insert_minimal(&conn, "sha-v", "本");
         remove_book(&conn, book).expect("remove");
         vacuum(&conn).expect("vacuum");
-        // The DB is queryable after compaction.
+        // `list_books` works after `vacuum`.
         assert!(list_books(&conn).expect("list").is_empty());
     }
 
@@ -6785,8 +4846,8 @@ mod tests {
 
     #[test]
     fn relink_ink_carries_every_table_to_the_new_key() {
-        // A re-key changes the identity the device names its `.notebooks/<asin>!!PDOC!!`
-        // dir after, so ink collected under the old one has to come along.
+        // A re-key changes the `<asin>` of the device's `.notebooks/<asin>!!PDOC!!` dir;
+        // `relink_ink` carries the ink across.
         let conn = fresh_db();
         let book = insert_with_asin(&conn, "sha-ink", "Has Ink", "B07PXGQC1Q");
         upsert_book_ink(
@@ -6823,1052 +4884,49 @@ mod tests {
             "and nothing is left under the old key"
         );
 
-        // A no-op key change leaves everything where it is.
+        // `relink_ink` with an empty old key leaves everything where it is.
         relink_ink(&conn, "", "IRRELEVANT").expect("empty old key");
         assert_eq!(list_book_ink(&conn, book).unwrap().len(), 1);
     }
 
-    fn session(day: &str, end_position: i64, seconds: i64) -> ReadingSession {
-        ReadingSession {
-            device_serial: "DEV".into(),
-            started_at: format!("{day}T20:00:00"),
-            ended_at: format!("{day}T21:00:00"),
-            day: day.into(),
-            end_position,
-            book_id: None,
-            seconds,
-            page_turns: 40,
-            words: 9000,
-            start_counter_ms: Some(0),
-            end_counter_ms: Some(seconds * 1000),
-            start_words: Some(0),
-            end_words: Some(9000),
-            measure: Default::default(),
-            tz_offset_s: None,
-            timed_seconds: 0,
-            timed_words: 0,
-            paged_seconds: 0,
-            paged_words: 0,
-            awake_seconds: 0,
+    #[test]
+    fn v26_removes_the_reading_log_tables_columns_and_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let tables = [
+            "reading_sessions",
+            "reading_session_hours",
+            "reading_log_dumps",
+            "reading_log_book_ends",
+            "reading_log_asins",
+            "reading_log_points",
+        ];
+        {
+            let conn = open(&db_path).unwrap();
+            for table in tables {
+                conn.execute(&format!("CREATE TABLE {table} (id INTEGER)"), [])
+                    .unwrap();
+            }
+            conn.execute_batch(
+                "ALTER TABLE books ADD COLUMN finished_at TEXT;
+                 ALTER TABLE books ADD COLUMN max_position INTEGER;
+                 PRAGMA user_version = 25;",
+            )
+            .unwrap();
         }
-    }
+        let archive = dir.path().join("reading-log").join("DEV");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("rl_20260801.txt.gz"), b"x").unwrap();
+        std::fs::write(dir.path().join(".reading-pulse.json"), b"{}").unwrap();
 
-    /// A session with an explicit clock window, for [`reading_clock`].
-    fn sitting(day: &str, from: &str, to: &str, seconds: i64, book: i64) -> ReadingSession {
-        ReadingSession {
-            started_at: format!("{day}T{from}"),
-            ended_at: format!("{day}T{to}"),
-            book_id: Some(book),
-            ..session(day, 1, seconds)
+        let conn = open(&db_path).unwrap();
+        for table in tables {
+            assert!(!has_table(&conn, table).unwrap(), "{table} dropped");
         }
-    }
-
-    #[test]
-    fn the_clock_reports_the_hours_the_log_recorded_not_the_ones_it_could_guess() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-hours", "A book");
-        // A sitting two hours wide whose reading was nearly all in the first
-        // hour. Nothing about the row says so — only the log's own intervals did,
-        // and this is where they were kept.
-        let row = ReadingSession {
-            started_at: "2026-08-11T20:00:00".into(),
-            ended_at: "2026-08-11T22:00:00".into(),
-            book_id: Some(book),
-            ..session("2026-08-11", 1, 3000)
-        };
-        insert_reading_session(&conn, &row).unwrap();
-        record_session_hours(&conn, &row, &[(20, 2900), (21, 100)]).unwrap();
-
-        let cells = reading_clock(&conn).unwrap();
-        let at = |h: u8| cells.iter().find(|c| c.hour == h).map_or(0, |c| c.seconds);
-        // Spreading the window reports 1500 s in each hour.
-        assert_eq!((at(20), at(21)), (2900, 100));
-        // Counted once: a session with recorded hours must not also be spread.
-        assert_eq!(cells.iter().map(|c| c.seconds).sum::<i64>(), 3000);
-        assert_eq!(
-            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap(),
-            vec![("2026-08-11".to_string(), 3000)],
-            "and the clock still agrees with the calendar beside it",
-        );
-
-        // Clearing takes the hours with the sessions, past the next row id to
-        // adopt them.
-        clear_reading_log(&conn).unwrap();
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM reading_session_hours", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn a_sitting_without_recorded_hours_is_spread_over_the_ones_it_covered() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-clock", "A book");
-        // The fallback, for rows stored before the parser kept its intervals.
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-11", "20:30:00", "22:30:00", 5400, book),
-        )
-        .unwrap();
-        let cells = reading_clock(&conn).unwrap();
-        let at = |h: u8| cells.iter().find(|c| c.hour == h).map_or(0, |c| c.seconds);
-        assert_eq!((at(20), at(21), at(22)), (1350, 2700, 1350));
-        // Nothing may be lost to the division: the hours of a day have to add
-        // back up to what the heatmap reports for it.
-        assert_eq!(cells.iter().map(|c| c.seconds).sum::<i64>(), 5400);
-        // 2026-08-11 is a Tuesday.
-        assert!(cells.iter().all(|c| c.dow == 2 && c.month == "2026-08"));
-    }
-
-    #[test]
-    fn a_row_too_wide_to_be_a_sitting_is_not_smeared_across_the_night() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-legacy", "A book");
-        // One stored session covering a whole day and a bit, several sittings
-        // glued together. Even spreading reports reading in every hour,
-        // including 04:00.
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-11T23:38:00".into(),
-                ended_at: "2026-08-12T23:16:28".into(),
-                book_id: Some(book),
-                ..session("2026-08-11", 1, 3600)
-            },
-        )
-        .unwrap();
-        let cells = reading_clock(&conn).unwrap();
-        assert_eq!(cells.len(), 1);
-        assert_eq!((cells[0].hour, cells[0].seconds), (23, 3600));
-    }
-
-    #[test]
-    fn a_sitting_past_midnight_keeps_its_own_hours_and_its_own_day() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-midnight", "A book");
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-11T23:30:00".into(),
-                ended_at: "2026-08-12T00:30:00".into(),
-                book_id: Some(book),
-                ..session("2026-08-11", 1, 3600)
-            },
-        )
-        .unwrap();
-        let cells = reading_clock(&conn).unwrap();
-        // The hours are the real clock hours, on both sides of midnight...
-        let hours: Vec<u8> = cells.iter().map(|c| c.hour).collect();
-        assert_eq!(hours, vec![0, 23]);
-        // Both belong to the day the session began, summing to what
-        // `reading_days` gives for that day, and landing in no day the heatmap
-        // draws empty.
-        assert!(cells.iter().all(|c| c.month == "2026-08" && c.dow == 2));
-    }
-
-    #[test]
-    fn a_day_shape_sums_to_what_the_calendar_reports_for_that_day() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-shape", "A book");
-        // One session with `reading_session_hours`, one without, same `day`.
-        let kept = ReadingSession {
-            started_at: "2026-08-11T20:00:00".into(),
-            ended_at: "2026-08-11T22:00:00".into(),
-            book_id: Some(book),
-            ..session("2026-08-11", 1, 3000)
-        };
-        insert_reading_session(&conn, &kept).unwrap();
-        record_session_hours(&conn, &kept, &[(20, 2900), (21, 100)]).unwrap();
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-11", "08:30:00", "09:30:00", 1800, book),
-        )
-        .unwrap();
-
-        let shapes = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
-        assert_eq!(shapes.len(), 1);
-        let day = &shapes[0];
-        assert_eq!(day.day, "2026-08-11");
-        assert_eq!(day.hours.len(), 24);
-        assert_eq!((day.hours[20], day.hours[21]), (2900, 100));
-        assert_eq!(day.hours[8] + day.hours[9], 1800);
-        // `hours` sums to what `reading_days` reports for the same day.
-        let total: i64 = day.hours.iter().sum();
-        assert_eq!(
-            total,
-            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap()[0].1
-        );
-        assert_eq!(day.unplaced_seconds, 0);
-    }
-
-    #[test]
-    fn a_row_too_wide_to_be_a_sitting_reports_its_seconds_as_unplaced() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-wide", "A book");
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-11T23:38:00".into(),
-                ended_at: "2026-08-12T23:16:28".into(),
-                book_id: Some(book),
-                ..session("2026-08-11", 1, 3600)
-            },
-        )
-        .unwrap();
-        let shapes = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
-        // `seconds` lands on one hour, and `unplaced_seconds` states it.
-        assert_eq!(shapes[0].hours[23], 3600);
-        assert_eq!(shapes[0].unplaced_seconds, 3600);
-    }
-
-    #[test]
-    fn progress_needs_both_an_extent_and_a_position() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-prog", "A book");
-        // No `max_position`, no `reading_position`.
-        assert!(book_progress(&conn, book).unwrap().is_none());
-        // `max_position` without `reading_position`.
-        set_max_position(&conn, book, Some(1000)).unwrap();
-        assert!(book_progress(&conn, book).unwrap().is_none());
-        set_reading_position(&conn, book, Some(2), Some(0), Some(250), "sidle", "").unwrap();
-        let p = book_progress(&conn, book).unwrap().unwrap();
-        assert_eq!((p.linear_pos, p.max_position), (250, 1000));
-    }
-
-    #[test]
-    fn a_position_past_the_axis_is_reported_as_stored() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-drift", "A book");
-        // `linear_pos` past `max_position`, as a differing build stores it.
-        set_max_position(&conn, book, Some(146_732)).unwrap();
-        set_reading_position(
-            &conn,
-            book,
-            Some(9),
-            Some(0),
-            Some(146_736),
-            "device",
-            "GN43",
-        )
-        .unwrap();
-        let p = book_progress(&conn, book).unwrap().unwrap();
-        assert!(p.linear_pos > p.max_position);
-        assert_eq!(p.source, "device");
-    }
-
-    #[test]
-    fn sittings_come_back_earliest_first_with_their_book() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-sit", "A book");
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-11", "21:00:00", "21:30:00", 1800, book),
-        )
-        .unwrap();
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-11", "08:00:00", "08:20:00", 1200, book),
-        )
-        .unwrap();
-        // A session with no `book_id` is absent from the result.
-        insert_reading_session(&conn, &session("2026-08-11", 99, 600)).unwrap();
-
-        let rows = reading_sessions_on(&conn, "2026-08-11", "2026-08-11").unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].started_at, "2026-08-11T08:00:00");
-        assert_eq!(rows[0].title, "A book");
-        assert_eq!(rows[1].seconds, 1800);
-    }
-
-    /// Every session in the library, oldest first, as
-    /// `(day, started_at, ended_at, seconds)`.
-    fn stored_sessions(conn: &Connection) -> Vec<(String, String, String, i64)> {
-        let mut stmt = conn
-            .prepare("SELECT day, started_at, ended_at, seconds FROM reading_sessions ORDER BY started_at")
-            .unwrap();
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap();
-        rows.map(Result::unwrap).collect()
-    }
-
-    #[test]
-    fn v19_cuts_a_stored_session_at_the_midnight_it_crossed() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-v19", "A book");
-        // A pre-v19 row: one sitting that ran from late evening into the small
-        // hours, counted wholly to the evening. Three quarters of its clock fell
-        // before midnight.
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-11T23:00:00".into(),
-                ended_at: "2026-08-12T00:20:00".into(),
-                book_id: Some(book),
-                seconds: 4000,
-                page_turns: 40,
-                words: 8000,
-                ..session("2026-08-11", 1, 4000)
-            },
-        )
-        .unwrap();
-
-        conn.pragma_update(None, "user_version", 18).unwrap();
-        migrate(&conn).unwrap();
-
-        assert_eq!(
-            stored_sessions(&conn),
-            vec![
-                (
-                    "2026-08-11".into(),
-                    "2026-08-11T23:00:00".into(),
-                    "2026-08-11T23:59:59".into(),
-                    3000
-                ),
-                (
-                    "2026-08-12".into(),
-                    "2026-08-12T00:00:00".into(),
-                    "2026-08-12T00:20:00".into(),
-                    1000
-                ),
-            ],
-        );
-        // The night sits on the night's own day, to the second.
-        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
-        assert_eq!(days.iter().map(|(_, s)| s).sum::<i64>(), 4000);
-
-        // Running again changes nothing: the rows cross no midnight.
-        conn.pragma_update(None, "user_version", 18).unwrap();
-        migrate(&conn).unwrap();
-        assert_eq!(stored_sessions(&conn).len(), 2);
-    }
-
-    #[test]
-    fn v25_widens_a_window_narrower_than_the_reading_it_counts() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-v25", "A book");
-        // `seconds` 1562 against an `ended_at` five seconds past `started_at`.
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-29T20:05:07".into(),
-                ended_at: "2026-08-29T20:05:12".into(),
-                book_id: Some(book),
-                seconds: 1562,
-                measure: crate::library::reading_log::Measure::Paged,
-                ..session("2026-08-29", 1, 1562)
-            },
-        )
-        .unwrap();
-        // `seconds` 1200 against an `ended_at` 2400 seconds past `started_at`.
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-29T21:00:00".into(),
-                ended_at: "2026-08-29T21:40:00".into(),
-                book_id: Some(book),
-                seconds: 1200,
-                ..session("2026-08-29", 2, 1200)
-            },
-        )
-        .unwrap();
-
-        conn.pragma_update(None, "user_version", 24).unwrap();
-        migrate(&conn).unwrap();
-
-        assert_eq!(
-            stored_sessions(&conn),
-            vec![
-                (
-                    "2026-08-29".into(),
-                    "2026-08-29T20:05:07".into(),
-                    "2026-08-29T20:31:09".into(),
-                    1562
-                ),
-                (
-                    "2026-08-29".into(),
-                    "2026-08-29T21:00:00".into(),
-                    "2026-08-29T21:40:00".into(),
-                    1200
-                ),
-            ],
-        );
-
-        // A second `migrate` leaves `ended_at` at 20:31:09.
-        conn.pragma_update(None, "user_version", 24).unwrap();
-        migrate(&conn).unwrap();
-        assert_eq!(
-            stored_sessions(&conn)[0].2,
-            "2026-08-29T20:31:09".to_string()
-        );
-    }
-
-    #[test]
-    fn v25_keeps_a_widened_window_inside_its_own_day() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-v25-midnight", "A book");
-        insert_reading_session(
-            &conn,
-            &ReadingSession {
-                started_at: "2026-08-29T23:50:00".into(),
-                ended_at: "2026-08-29T23:50:04".into(),
-                book_id: Some(book),
-                seconds: 1200,
-                measure: crate::library::reading_log::Measure::Paged,
-                ..session("2026-08-29", 1, 1200)
-            },
-        )
-        .unwrap();
-
-        conn.pragma_update(None, "user_version", 24).unwrap();
-        migrate(&conn).unwrap();
-
-        // `ended_at` stops at `day`'s last second, short of `started_at` plus
-        // `seconds`.
-        assert_eq!(
-            stored_sessions(&conn)[0].2,
-            "2026-08-29T23:59:59".to_string()
-        );
-    }
-
-    #[test]
-    fn a_row_spanning_two_midnights_becomes_three_days() {
-        // The widest kind a row can hold: several sittings glued into one. Divided by its
-        // own clock, the only thing the row still says.
-        let pieces =
-            split_across_midnight("2026-06-20T23:06:41", "2026-06-22T00:40:06", 360, 36, 7200);
-        assert_eq!(pieces.len(), 3);
-        assert_eq!(
-            pieces
-                .iter()
-                .map(|p| p.day().to_string())
-                .collect::<Vec<_>>(),
-            vec!["2026-06-20", "2026-06-21", "2026-06-22"],
-        );
-        assert_eq!(pieces[1].started_at, "2026-06-21T00:00:00");
-        assert_eq!(pieces[1].ended_at, "2026-06-21T23:59:59");
-        assert_eq!(pieces[2].ended_at, "2026-06-22T00:40:06");
-        // The middle day holds all 24 of its hours and takes the bulk of it.
-        assert!(pieces[1].seconds > pieces[0].seconds + pieces[2].seconds);
-        // Integer division loses nothing: the pieces add back up to the row.
-        assert_eq!(pieces.iter().map(|p| p.seconds).sum::<i64>(), 360);
-        assert_eq!(pieces.iter().map(|p| p.page_turns).sum::<i64>(), 36);
-        assert_eq!(pieces.iter().map(|p| p.words).sum::<i64>(), 7200);
-    }
-
-    #[test]
-    fn a_session_inside_one_day_is_not_cut() {
-        assert!(
-            split_across_midnight("2026-08-11T20:00:00", "2026-08-11T21:00:00", 3600, 1, 1)
-                .is_empty()
-        );
-        // Nor is one whose stamps cannot be read, past a midnight guessed from
-        // a string.
-        assert!(split_across_midnight("2026-08-11", "2026-08-12", 3600, 1, 1).is_empty());
-    }
-
-    #[test]
-    fn a_point_two_books_disagree_about_names_neither() {
-        let a = (1566_i64, 0_i64, 12_i64);
-        let b = (99_i64, 0_i64, 500_i64);
-        let mut anchors = std::collections::HashMap::new();
-        anchors.insert(a, 7_i64);
-        assert_eq!(sole_book_at(&[a, b], &anchors), Some(7));
-
-        // A second book claiming another of the same fingerprint's points is a
-        // contradiction, not a tie-break: one of them is a coincidence and
-        // nothing here can say which.
-        anchors.insert(b, 9_i64);
-        assert_eq!(sole_book_at(&[a, b], &anchors), None);
-        assert_eq!(sole_book_at(&[], &anchors), None);
-    }
-
-    #[test]
-    fn a_point_the_sidecars_know_names_a_book_the_axis_cannot() {
-        let conn = fresh_db();
-        // The library holds a *newer* build than the device read, so the axis
-        // the device logged ends nowhere near this book's.
-        let book = insert_minimal(&conn, "sha-pkd", "The Novels of Philip K. Dick");
-        set_max_position(&conn, book, Some(425_357)).unwrap();
-        set_reading_position(
-            &conn,
-            book,
-            Some(4728),
-            Some(0),
-            Some(246_466),
-            "device",
-            "DEV",
-        )
-        .unwrap();
-
-        insert_reading_session(&conn, &session("2026-08-11", 419_504, 60)).unwrap();
-        // Nothing ends at 419505, and no tolerance is going to reach 425357.
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-
-        // The reader stood at a point the book's own sidecar also records.
-        record_log_points(&conn, 419_504, &[(4728, 0, 246_466)]).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-        let named: i64 = conn
-            .query_row("SELECT book_id FROM reading_sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(named, book);
-    }
-
-    #[test]
-    fn a_session_is_named_once_its_two_end_constants_are_paired() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-ends", "聖書");
-        set_max_position(&conn, book, Some(9_464_649)).unwrap();
-
-        // The archive that held this sitting never stated the book's last
-        // position, so it is keyed by the last-*word* position every line
-        // carries. Nothing in the library ends there.
-        insert_reading_session(&conn, &session("2026-08-11", 9_464_647, 1800)).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-
-        // A later archive states both constants together.
-        record_book_ends(&conn, &[(9_464_647, 9_464_648)]).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-
-        // Re-keyed in place: the identity index counts the position, and a
-        // second insert under the other constant makes a second row counting the
-        // sitting twice.
-        let (rows, named): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), COUNT(book_id) FROM reading_sessions",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((rows, named), (1, 1));
-        assert_eq!(
-            reading_days(&conn, "0000-00-00", "9999-99-99")
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn time_on_a_book_the_library_lacks_is_counted_nowhere() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-read", "読んだ本");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-
-        // One session on a book that is here, one on a fingerprint that matches
-        // nothing — a book deleted since the device logged it.
-        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-02", 555_555, 7200)).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-
-        // The orphan sits on disk, nameable the day its book comes back.
-        let stored: i64 = conn
-            .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stored, 2);
-
-        // …but it is in no total, on no day, and in no list.
-        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
-        assert_eq!(days, vec![("2026-08-01".to_string(), 3600)]);
-        assert!(
-            reading_books(
-                &conn,
-                "2026-08-02",
-                "2026-08-02",
-                ReadingSort::default(),
-                false,
-                ReadingBucket::default()
-            )
-            .unwrap()
-            .is_empty()
-        );
-        let books = reading_books(
-            &conn,
-            "0000-00-00",
-            "9999-99-99",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(books.len(), 1);
-        assert_eq!(books[0].book_id, book);
-        assert_eq!(books[0].title, "読んだ本");
-        assert_eq!(reading_book_count(&conn).unwrap(), 1);
-    }
-
-    #[test]
-    fn a_sitting_under_a_minute_is_counted_nowhere() {
-        let conn = fresh_db();
-        let skimmed = insert_minimal(&conn, "sha-skim", "Skimmed");
-        let read = insert_minimal(&conn, "sha-read-on", "Read");
-        // `record_session_hours` feeds the measured branch of `walk_clock_hours`.
-        let glance = sitting("2026-08-01", "09:00:00", "09:00:40", 40, skimmed);
-        insert_reading_session(&conn, &glance).unwrap();
-        record_session_hours(&conn, &glance, &[(9, 40)]).unwrap();
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-02", "09:00:00", "09:30:00", 1800, read),
-        )
-        .unwrap();
-
-        // `2026-08-01` and `skimmed` are absent from every figure.
-        let days = reading_days(&conn, "0000-00-00", "9999-99-99").unwrap();
-        assert_eq!(days, vec![("2026-08-02".to_string(), 1800)]);
-        assert_eq!(reading_book_count(&conn).unwrap(), 1);
-        assert!(
-            reading_sessions_on(&conn, "2026-08-01", "2026-08-01")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(reading_book_days(&conn, skimmed).unwrap().is_empty());
-        let books = reading_books(
-            &conn,
-            "0000-00-00",
-            "9999-99-99",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(books.len(), 1);
-        assert_eq!(books[0].book_id, read);
-
-        // Neither branch of `walk_clock_hours` places its seconds.
-        let hours = reading_day_hours(&conn, "0000-00-00", "9999-99-99").unwrap();
-        assert_eq!(hours.len(), 1);
-        assert_eq!(hours[0].day, "2026-08-02");
-        assert!(
-            reading_clock(&conn)
-                .unwrap()
-                .iter()
-                .all(|c| c.month == "2026-08")
-        );
-        let clocked: i64 = reading_clock(&conn)
-            .unwrap()
-            .iter()
-            .map(|c| c.seconds)
-            .sum();
-        assert_eq!(clocked, 1800);
-    }
-
-    #[test]
-    fn a_minute_exactly_is_reading() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-minute", "A book");
-        insert_reading_session(
-            &conn,
-            &sitting("2026-08-01", "09:00:00", "09:01:00", MIN_SITTING_SECS, book),
-        )
-        .unwrap();
-        assert_eq!(
-            reading_days(&conn, "0000-00-00", "9999-99-99").unwrap(),
-            vec![("2026-08-01".to_string(), MIN_SITTING_SECS)]
-        );
-    }
-
-    #[test]
-    fn a_skimmed_sitting_keeps_everything_it_witnessed() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-glance", "A book");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-        // A 20-second session at `end_position` 999, which `book` ends at.
-        insert_reading_session(&conn, &session("2026-08-01", 999, 20)).unwrap();
-
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-        let (rows, named, position): (i64, Option<i64>, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), MAX(book_id), MAX(end_position) FROM reading_sessions",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((rows, named, position), (1, Some(book), 999));
-        // `reading_watermark` counts the row.
-        assert_eq!(
-            reading_watermark(&conn, "DEV").unwrap().as_deref(),
-            Some("2026-08-01T21:00:00")
-        );
-    }
-
-    #[test]
-    fn a_position_only_ever_skimmed_at_asks_no_question() {
-        let conn = fresh_db();
-        // A 20-second session at `end_position` 4242, carrying no `book_id`.
-        insert_reading_session(&conn, &session("2026-08-01", 4242, 20)).unwrap();
-        assert!(unmatched_reading(&conn).unwrap().is_empty());
-
-        // 1800 seconds at the same `end_position`.
-        insert_reading_session(&conn, &session("2026-08-02", 4242, 1800)).unwrap();
-        let pending = unmatched_reading(&conn).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!((pending[0].sessions, pending[0].seconds), (1, 1800));
-
-        let book = insert_minimal(&conn, "sha-settle", "A book");
-        assert_eq!(attribute_reading_position(&conn, 4242, book).unwrap(), 2);
-    }
-
-    #[test]
-    fn importing_the_missing_book_names_time_already_logged() {
-        let conn = fresh_db();
-        // The log arrives before the book does, which is what an unattributed
-        // row is kept for.
-        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-        assert!(
-            reading_books(
-                &conn,
-                "0000-00-00",
-                "9999-99-99",
-                ReadingSort::default(),
-                false,
-                ReadingBucket::default()
-            )
-            .unwrap()
-            .is_empty()
-        );
-
-        let book = insert_minimal(&conn, "sha-late", "後から来た本");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-
-        let books = reading_books(
-            &conn,
-            "0000-00-00",
-            "9999-99-99",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(books.len(), 1);
-        assert_eq!(books[0].seconds, 3600);
-    }
-
-    /// The tie the automatic pass refuses to break, and the way out of it: two
-    /// books of identical length end at the same position, so the reading could
-    /// be either and a person says which.
-    #[test]
-    fn reading_two_books_could_explain_is_named_by_hand_and_can_be_unnamed() {
-        let conn = fresh_db();
-        let a = insert_minimal(&conn, "sha-tie-a", "花束は毒");
-        let b = insert_minimal(&conn, "sha-tie-b", "恋物語");
-        set_max_position(&conn, a, Some(1000)).unwrap();
-        set_max_position(&conn, b, Some(1000)).unwrap();
-        insert_reading_session(&conn, &session("2026-06-22", 999, 300)).unwrap();
-        insert_reading_session(&conn, &session("2026-06-23", 999, 225)).unwrap();
-
-        // Two candidates, so nothing is attributed and nothing is counted.
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-        assert!(
-            reading_days(&conn, "0000-00-00", "9999-99-99")
-                .unwrap()
-                .is_empty()
-        );
-
-        // It surfaces as one group — the position is the fingerprint, so every
-        // session at it is the same book — carrying the whole of what was read.
-        let groups = unmatched_reading(&conn).unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].end_position, 999);
-        assert_eq!(groups[0].sessions, 2);
-        assert_eq!(groups[0].seconds, 525);
-        assert_eq!(groups[0].first_at, "2026-06-22T20:00:00");
-        assert_eq!(groups[0].last_at, "2026-06-23T21:00:00");
-        assert_eq!(groups[0].devices, vec!["DEV".to_string()]);
-        assert_eq!(books_with_last_position(&conn, 999).unwrap(), vec![a, b]);
-
-        // Settled: both sessions move, and the time appears where it never was.
-        assert_eq!(attribute_reading_position(&conn, 999, a).unwrap(), 2);
-        let named = reading_books(
-            &conn,
-            "0000-00-00",
-            "9999-99-99",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(named.len(), 1);
-        assert_eq!(named[0].book_id, a);
-        assert_eq!(named[0].seconds, 525);
-
-        // And the question is over: the position is not asked about again.
-        assert!(unmatched_reading(&conn).unwrap().is_empty());
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 0);
-    }
-
-    /// Naming takes no reading from the book holding it: the write touches
-    /// unattributed rows alone.
-    #[test]
-    fn naming_a_position_leaves_sessions_another_book_already_holds() {
-        let conn = fresh_db();
-        let held = insert_minimal(&conn, "sha-held", "先に名前がついた本");
-        let other = insert_minimal(&conn, "sha-other", "別の本");
-        set_max_position(&conn, held, Some(1000)).unwrap();
-        insert_reading_session(&conn, &session("2026-06-22", 999, 300)).unwrap();
-        assert_eq!(resolve_reading_sessions(&conn).unwrap(), 1);
-
-        // A later session at the same position, unattributed.
-        insert_reading_session(&conn, &session("2026-06-23", 999, 225)).unwrap();
-        conn.execute(
-            "UPDATE reading_sessions SET book_id = NULL WHERE day = '2026-06-23'",
-            [],
-        )
-        .unwrap();
-
-        assert_eq!(attribute_reading_position(&conn, 999, other).unwrap(), 1);
-        let rows: Vec<(String, Option<i64>)> = conn
-            .prepare("SELECT day, book_id FROM reading_sessions ORDER BY day")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![
-                ("2026-06-22".to_string(), Some(held)),
-                ("2026-06-23".to_string(), Some(other)),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_books_totals_are_summed_within_the_window_asked_for() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-window", "毎日読む本");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-        insert_reading_session(&conn, &session("2025-12-31", 999, 600)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-02", 999, 1800)).unwrap();
-        resolve_reading_sessions(&conn).unwrap();
-
-        // One book throughout, with the figure differing per window. A client
-        // filtering an all-time list gets a different answer.
-        let day = reading_books(
-            &conn,
-            "2026-08-01",
-            "2026-08-01",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!((day.len(), day[0].seconds, day[0].sessions), (1, 3600, 1));
-        let year = reading_books(
-            &conn,
-            "2026-01-01",
-            "2026-12-31",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            (year.len(), year[0].seconds, year[0].sessions),
-            (1, 5400, 2)
-        );
-        let ever = reading_books(
-            &conn,
-            "0000-00-00",
-            "9999-99-99",
-            ReadingSort::default(),
-            false,
-            ReadingBucket::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            (ever.len(), ever[0].seconds, ever[0].sessions),
-            (1, 6000, 3)
-        );
-    }
-
-    #[test]
-    fn a_window_asked_for_by_month_gives_each_month_its_own_figures() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-months", "何ヶ月も読む本");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-        insert_reading_session(&conn, &session("2026-07-30", 999, 600)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-01", 999, 3600)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-02", 999, 1800)).unwrap();
-        resolve_reading_sessions(&conn).unwrap();
-
-        // One book, two months, and neither row carries the other's hours,
-        // which is what the split happens here for.
-        let (f, t) = ("2026-01-01", "2026-12-31");
-        let months = reading_books(
-            &conn,
-            f,
-            t,
-            ReadingSort::default(),
-            false,
-            ReadingBucket::Month,
-        )
-        .unwrap();
-        let seen: Vec<(&str, i64, i64)> = months
-            .iter()
-            .map(|b| (b.bucket.as_str(), b.seconds, b.sessions))
-            .collect();
-        assert_eq!(seen, vec![("2026-08", 5400, 2), ("2026-07", 600, 1)]);
-
-        // The same window, undivided, is the sum of them.
-        let whole = reading_books(
-            &conn,
-            f,
-            t,
-            ReadingSort::default(),
-            false,
-            ReadingBucket::Total,
-        )
-        .unwrap();
-        assert_eq!((whole.len(), whole[0].seconds), (1, 6000));
-        assert_eq!(whole[0].bucket, "", "an undivided window names no slice");
-
-        // Days are the same idea one step finer, and the direction reverses the
-        // slices along with the books inside them.
-        let days = reading_books(
-            &conn,
-            f,
-            t,
-            ReadingSort::default(),
-            true,
-            ReadingBucket::Day,
-        )
-        .unwrap();
-        let keys: Vec<&str> = days.iter().map(|b| b.bucket.as_str()).collect();
-        assert_eq!(keys, vec!["2026-07-30", "2026-08-01", "2026-08-02"]);
-    }
-
-    #[test]
-    fn the_default_order_is_most_recently_read_first() {
-        let conn = fresh_db();
-        // The long read is months old; the short one is recent.
-        let old = insert_minimal(&conn, "sha-old", "先に読んだ本");
-        let new = insert_minimal(&conn, "sha-new", "後で読んだ本");
-        set_max_position(&conn, old, Some(1000)).unwrap();
-        set_max_position(&conn, new, Some(2000)).unwrap();
-        insert_reading_session(&conn, &session("2026-01-05", 999, 7200)).unwrap();
-        insert_reading_session(&conn, &session("2026-08-01", 1999, 600)).unwrap();
-        resolve_reading_sessions(&conn).unwrap();
-
-        let (f, t) = ("0000-00-00", "9999-99-99");
-        let all = ReadingBucket::default();
-        let recent = reading_books(&conn, f, t, ReadingSort::default(), false, all).unwrap();
-        assert_eq!(recent[0].book_id, new, "the newest read leads by default");
-
-        // Every other order is offered, and every one reverses.
-        let longest = reading_books(&conn, f, t, ReadingSort::Seconds, false, all).unwrap();
-        assert_eq!(longest[0].book_id, old);
-        let shortest = reading_books(&conn, f, t, ReadingSort::Seconds, true, all).unwrap();
-        assert_eq!(shortest[0].book_id, new);
-        let oldest = reading_books(&conn, f, t, ReadingSort::LastRead, true, all).unwrap();
-        assert_eq!(oldest[0].book_id, old);
-    }
-
-    #[test]
-    fn the_device_claims_a_session_imported_before_it_was_named() {
-        let conn = fresh_db();
-        let book = insert_minimal(&conn, "sha-claim", "本");
-        set_max_position(&conn, book, Some(1000)).unwrap();
-
-        // The archive was copied off the device by hand and imported without
-        // saying which device it came from.
-        let mut anon = session("2026-08-01", 999, 3600);
-        anon.device_serial = String::new();
-        assert_eq!(insert_reading_session(&conn, &anon).unwrap(), Stored::Added);
-
-        // The device later syncs the very same session, this time stating its
-        // serial. One session was read, so one row must remain.
-        let mut owned = session("2026-08-01", 999, 3600);
-        owned.device_serial = "GN43H2076045001X".into();
-        assert_eq!(
-            insert_reading_session(&conn, &owned).unwrap(),
-            Stored::Unchanged,
-            "the device's copy is the same session, not a new one"
-        );
-
-        let rows: Vec<(String, i64)> = conn
-            .prepare("SELECT device_serial, seconds FROM reading_sessions")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(rows, vec![("GN43H2076045001X".to_string(), 3600)]);
-    }
-
-    #[test]
-    fn one_device_never_claims_another_devices_session() {
-        let conn = fresh_db();
-        let mut a = session("2026-08-01", 999, 3600);
-        a.device_serial = "DEVICE-A".into();
-        let mut b = session("2026-08-01", 999, 3600);
-        b.device_serial = "DEVICE-B".into();
-        assert_eq!(insert_reading_session(&conn, &a).unwrap(), Stored::Added);
-        // Same instant, same book, different device: two devices, two sessions.
-        // Only a serial-less row is up for adoption.
-        assert_eq!(insert_reading_session(&conn, &b).unwrap(), Stored::Added);
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM reading_sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 2);
-    }
-
-    #[test]
-    fn an_unknown_sort_name_falls_back_instead_of_reaching_the_query() {
-        assert_eq!(ReadingSort::from_name("seconds"), ReadingSort::Seconds);
-        assert_eq!(
-            ReadingSort::from_name("; DROP TABLE books--"),
-            ReadingSort::LastRead
-        );
-    }
-
-    #[test]
-    fn an_unknown_bucket_name_falls_back_instead_of_reaching_the_query() {
-        assert_eq!(ReadingBucket::from_name("month"), ReadingBucket::Month);
-        assert_eq!(
-            ReadingBucket::from_name("s.day; DROP TABLE books--"),
-            ReadingBucket::Total
-        );
-    }
-
-    #[test]
-    fn the_v15_pages_column_is_renamed_without_losing_its_counts() {
-        // A v15 library, created before the column was called what it measures.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            r#"CREATE TABLE reading_sessions (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_serial TEXT NOT NULL DEFAULT '',
-                started_at    TEXT NOT NULL,
-                ended_at      TEXT NOT NULL,
-                day           TEXT NOT NULL,
-                end_position  INTEGER NOT NULL,
-                book_id       INTEGER,
-                seconds       INTEGER NOT NULL,
-                pages         INTEGER NOT NULL DEFAULT 0,
-                words         INTEGER NOT NULL DEFAULT 0
-            )"#,
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO reading_sessions
-               (started_at, ended_at, day, end_position, seconds, pages, words)
-             VALUES ('t0', 't1', '2026-08-01', 999, 3600, 41, 9000)",
-            [],
-        )
-        .unwrap();
-
-        migrate(&conn).unwrap();
-
-        let turns: i64 = conn
-            .query_row("SELECT page_turns FROM reading_sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(turns, 41);
-        assert!(!has_column(&conn, "reading_sessions", "pages").unwrap());
+        assert!(!has_column(&conn, "books", "finished_at").unwrap());
+        assert!(!has_column(&conn, "books", "max_position").unwrap());
+        assert!(!dir.path().join("reading-log").exists());
+        assert!(!dir.path().join(".reading-pulse.json").exists());
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 }

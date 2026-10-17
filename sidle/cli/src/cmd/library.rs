@@ -23,7 +23,6 @@ struct Status {
     errored: usize,
     with_catalogue_asin: usize,
     sharing_catalogue_id: usize,
-    unmeasured: usize,
     notebooks: i64,
     annotations: i64,
 }
@@ -42,7 +41,6 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         errored: books.iter().filter(|b| b.status == "error").count(),
         with_catalogue_asin: books.iter().filter(|b| b.amazon_asin.is_some()).count(),
         sharing_catalogue_id: books.iter().filter(|b| shares_a_catalogue_id(b)).count(),
-        unmeasured: db::books_missing_max_position(&conn)?.len(),
         notebooks: count(&conn, "notebooks")?,
         annotations: count(&conn, "annotations")?,
     };
@@ -61,13 +59,6 @@ pub fn status(ctx: &Ctx) -> Result<()> {
                 "{} still carry one *inside the file*, where a Kindle reads it as the \
                  catalogue item itself — `sidle-cli rekey` fixes that",
                 status.sharing_catalogue_id
-            );
-        }
-        if status.unmeasured > 0 {
-            println!(
-                "{} have no position axis, so reading time on them can't be attributed \
-                 — `sidle-cli convert --all --force` measures them",
-                status.unmeasured
             );
         }
         println!(

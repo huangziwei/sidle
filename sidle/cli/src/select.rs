@@ -28,7 +28,7 @@ pub struct Select {
     /// Series name (exact).
     #[arg(long, value_name = "NAME")]
     pub series: Option<String>,
-    /// Carries this tag. Repeatable; a book must carry all of them.
+    /// Carries this tag. Repeatable; each `--tag` must match.
     #[arg(long = "tag", value_name = "TAG")]
     pub tags: Vec<String>,
     /// Language code (exact, canonical form — `ja`, `en`, `zh-Hant`).
@@ -50,8 +50,8 @@ pub struct Select {
     /// Repeatable.
     #[arg(long = "has", value_name = "WHAT")]
     pub has: Vec<String>,
-    /// Only books MISSING this: `kfx`, `epub`, `pdf`, `cover`, `asin`,
-    /// `extent`. Repeatable.
+    /// Only books MISSING this: `kfx`, `epub`, `pdf`, `cover`, `asin`.
+    /// Repeatable.
     #[arg(long = "missing", value_name = "WHAT")]
     pub missing: Vec<String>,
     /// Stop after this many (after every other filter, in library order).
@@ -88,24 +88,10 @@ impl Select {
             );
         }
         for what in self.has.iter().chain(&self.missing) {
-            if !matches!(
-                what.as_str(),
-                "kfx" | "epub" | "pdf" | "cover" | "asin" | "extent"
-            ) {
-                anyhow::bail!("unknown file kind {what:?} (kfx, epub, pdf, cover, asin, extent)");
+            if !matches!(what.as_str(), "kfx" | "epub" | "pdf" | "cover" | "asin") {
+                anyhow::bail!("unknown file kind {what:?} (kfx, epub, pdf, cover, asin)");
             }
         }
-        // The position axis is a column, not a file, and the query for "which
-        // books lack one" exists — ask it once, not per row.
-        let unmeasured: std::collections::HashSet<i64> =
-            if self.has.iter().chain(&self.missing).any(|w| w == "extent") {
-                db::books_missing_max_position(conn)?
-                    .into_iter()
-                    .map(|(id, _)| id)
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
 
         let lower = |s: &Option<String>| s.as_ref().map(|v| v.to_lowercase());
         let title = lower(&self.title_like);
@@ -153,12 +139,10 @@ impl Select {
                 Some(f) => b.source_format.as_deref() == Some(f.as_str()),
                 None => true,
             })
-            .filter(|b| self.has.iter().all(|w| has(b, w, &unmeasured)))
-            .filter(|b| self.missing.iter().all(|w| !has(b, w, &unmeasured)))
+            .filter(|b| self.has.iter().all(|w| has(b, w)))
+            .filter(|b| self.missing.iter().all(|w| !has(b, w)))
             .collect();
 
-        // Every id the caller named must exist: a script that asks for book 412
-        // and silently gets nothing has been lied to.
         for id in &self.ids {
             if !out.iter().any(|b| b.id == *id) {
                 anyhow::bail!("no book with id {id}");
@@ -170,8 +154,7 @@ impl Select {
         Ok(out)
     }
 
-    /// Resolve, and refuse an empty result — for a command whose empty run
-    /// reads as a successful no-op.
+    /// [`Self::resolve`], refusing an empty result.
     pub fn resolve_nonempty(&self, conn: &Connection) -> Result<Vec<BookRow>> {
         let books = self.resolve(conn)?;
         if books.is_empty() {
@@ -181,10 +164,9 @@ impl Select {
     }
 }
 
-/// Whether a book has `what` — a file on disk, or a stored value. A path
-/// recorded in the row is not a file present, and the file kinds check the
-/// disk: a library restored from a partial copy holds rows naming neither.
-fn has(book: &BookRow, what: &str, unmeasured: &std::collections::HashSet<i64>) -> bool {
+/// Whether `book` has `what`: a file on disk for the file kinds, a stored
+/// value for `asin`.
+fn has(book: &BookRow, what: &str) -> bool {
     let on_disk = |p: &Option<String>| {
         p.as_deref()
             .is_some_and(|p| std::path::Path::new(p).exists())
@@ -195,9 +177,6 @@ fn has(book: &BookRow, what: &str, unmeasured: &std::collections::HashSet<i64>) 
         "pdf" => on_disk(&book.pdf_path),
         "cover" => on_disk(&book.cover_path),
         "asin" => book.amazon_asin.is_some(),
-        // The position axis is what lets the Reading Log recognise the book at
-        // all; without it, time read on this book is counted nowhere.
-        "extent" => !unmeasured.contains(&book.id),
         _ => false,
     }
 }
@@ -207,9 +186,7 @@ mod tests {
     use super::*;
     use sidle_core::library::db::NewBook;
 
-    /// A library holding three books that differ in every axis the flags can
-    /// filter on. The KFX path is a real file so the on-disk checks have
-    /// something to find.
+    /// A `Connection` over three books that differ on every axis [`Select`] filters.
     fn library(dir: &std::path::Path) -> Connection {
         let conn = db::open(&dir.join("library.db")).unwrap();
         let kfx = dir.join("present.kfx");
@@ -264,9 +241,6 @@ mod tests {
         assert_eq!(titles(&select, &conn).len(), 1);
         select.source_format = Some("epub".into());
         assert_eq!(titles(&select, &conn).len(), 2);
-        // `source_format` names the file that arrived, which
-        // `conversion_jobs.kind` does not: a `.azw3` import stores its EPUB and
-        // reconverts from that.
         select.source_format = Some("mobi".into());
         assert!(titles(&select, &conn).is_empty());
     }
@@ -286,8 +260,6 @@ mod tests {
     fn a_selection_with_no_flags_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = library(tmp.path());
-        // Silence is the one answer a sweep must never get: `convert` with a
-        // typo'd flag rebuilds the whole library.
         assert!(Select::default().resolve(&conn).is_err());
     }
 
@@ -332,7 +304,6 @@ mod tests {
         };
         assert_eq!(titles(&with_kfx, &conn).len(), 2);
 
-        // Delete the file behind one of them: the row names a KFX that is gone.
         std::fs::remove_file(tmp.path().join("present.kfx")).unwrap();
         assert!(titles(&with_kfx, &conn).is_empty());
     }
@@ -341,8 +312,6 @@ mod tests {
     fn a_named_id_that_does_not_exist_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = library(tmp.path());
-        // A script that asks for book 999 and silently gets nothing has been
-        // lied to about what it just did.
         let missing = Select {
             ids: vec![999],
             ..Default::default()

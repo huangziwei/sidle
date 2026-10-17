@@ -26,16 +26,13 @@ use sidle_core::library::{
     ink::{self, CollectedInk},
     notebook::{self, NotebookOutcome},
     paths::kfx_device_filename,
-    push, reading_log,
+    push,
 };
 
-// We call `db::open` per request (rather than holding a long-lived `Arc<
-
-/// Runtime configuration assembled by either the CLI or the embedded
+/// Runtime configuration for [`serve`].
 pub struct Config {
     pub paths: LibraryPaths,
-    /// `host:port` for the listener. Defaults to `0.0.0.0:8731` from the
-    /// CLI.
+    /// `host:port` for the listener.
     pub bind: String,
     pub token: String,
 }
@@ -46,20 +43,20 @@ pub(crate) struct AppState {
     pub(crate) token: Arc<str>,
 }
 
-/// Serve until the task is dropped/aborted (embedded mode) — no signal
+/// Serve until the task is dropped or aborted.
 pub async fn serve(config: Config) -> Result<()> {
     serve_with_shutdown(config, std::future::pending::<()>()).await
 }
 
-/// [`serve`] with a shutdown trigger threaded in, so axum drains in-flight
-/// requests when the future resolves instead of dropping the listener abruptly.
+/// [`serve`] with a shutdown trigger: in-flight requests drain once `shutdown`
+/// resolves.
 pub async fn serve_with_shutdown(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     config.paths.ensure().context("ensure library paths")?;
 
-    // Backfill cover thumbnails for books imported before thumbnails existed
+    // `backfill_thumbnails` runs in the background.
     let thumb_paths = config.paths.clone();
     tokio::spawn(async move {
         match tokio::task::spawn_blocking(move || {
@@ -82,11 +79,10 @@ pub async fn serve_with_shutdown(
 
     let app = build_router(state);
 
-    // rustls 0.23 needs a process-wide default provider before any config is
+    // `install_default` sets the process-wide rustls provider ahead of any config.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Fail loudly when the TLS material is missing rather than falling back to
-    // plaintext, which would put the token in the clear on every request.
+    // `from_pem_file` failing ends `serve`: the token never travels in plaintext.
     let tls = RustlsConfig::from_pem_file(paths.server_cert(), paths.server_key())
         .await
         .with_context(|| {
@@ -97,9 +93,8 @@ pub async fn serve_with_shutdown(
             )
         })?;
 
-    // std listener, not tokio's: `from_tcp_rustls` takes it, and binding here
-    // lets us log the port the OS actually chose (a `:0` bind in tests) before
-    // handing it over.
+    // A std listener: `from_tcp_rustls` takes it, and `local_addr` reports the port
+    // a `:0` bind chose.
     let listener = std::net::TcpListener::bind(&config.bind)
         .with_context(|| format!("bind {}", config.bind))?;
     listener
@@ -108,7 +103,7 @@ pub async fn serve_with_shutdown(
     let local = listener.local_addr()?;
     tracing::info!("sidle-server listening on https://{local}");
 
-    // axum-server drains via a `Handle` rather than a shutdown future, so bridge
+    // `drain.graceful_shutdown` runs once `shutdown` resolves.
     let handle = axum_server::Handle::new();
     let drain = handle.clone();
     tokio::spawn(async move {
@@ -122,8 +117,7 @@ pub async fn serve_with_shutdown(
         .handle(handle)
         .serve(app.into_make_service());
 
-    // `follow_lan_address` inside this future lives as long as `serving`: an
-    // aborted embedded task drops both.
+    // `follow_lan_address` lives exactly as long as `serving`.
     tokio::select! {
         served = serving => served.context("axum_server::serve")?,
         () = follow_lan_address(
@@ -188,26 +182,20 @@ async fn follow_lan_address(
     }
 }
 
-/// How long a drain waits for in-flight requests before the listener closes
-/// regardless. Generous enough for a book download to finish on a slow device
-/// link, short enough that a stop is still a stop.
+/// How long a drain waits for in-flight requests before the listener closes.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// 32 MB body cap on `POST /sync/annotations` and `POST /sync/reading-log`. A
+/// 32 MB body cap on `POST /sync/annotations`.
 const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
-/// Body cap on `POST /sync/notebooks`. A standalone notebook is a much larger
+/// Body cap on `POST /sync/notebooks`.
 const NOTEBOOK_BODY_LIMIT: usize = 64 * 1024 * 1024;
-/// Body cap on `POST /sync/book` — one decrypted book, buffered whole before
-/// it's handed to the importer. Generous for an image-heavy purchase;
-/// single-user LAN, and the transient RAM is fine.
+/// Body cap on `POST /sync/book`: one decrypted book, buffered whole.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
-/// Body cap on `POST /sync/misc` — one batch of the Kindle's configured folders,
-/// base64 in one JSON bundle. The headroom is for a single outsized file.
+/// Body cap on `POST /sync/misc`: one batch of the Kindle's folders, base64 in JSON.
 const MISC_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// The axum app: routes + per-route layers. Factored out of
-/// [`serve_with_shutdown`] so tests can drive it via `Router::oneshot` without
-/// binding a socket — exercising the real route table and the body-limit layer.
+/// The axum app: routes and per-route layers, driven by tests through
+/// `Router::oneshot`.
 pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(health))
@@ -215,9 +203,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/get/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
         .route("/sidecar/{id}", get(get_sidecar))
-        // Write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
-        // the LAN twin of the USB import. Token-gated like the reads; body-limited
-        // so an oversized POST can't exhaust memory.
+        // `/sync/annotations`: the Kindle's `.yjr`/`.yjf` push, the LAN twin of the USB import.
         .route(
             "/sync/annotations",
             get(ink_manifest)
@@ -235,34 +221,21 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/sync/book",
             post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
         )
-        // The Kindle pushes the folders this library asked for here on Sync, stored under
-        // `device-backup/<serial>/`. The GET is what it asks with. Token-gated.
+        // `/sync/misc`: the GET names the folders a Sync pushes into `device-backup/<serial>/`.
         .route(
             "/sync/misc",
             get(misc_collections)
                 .post(sync_misc)
                 .layer(DefaultBodyLimit::max(MISC_BODY_LIMIT)),
         )
-        // The Kindle asks how far this library has already read, then pushes only
-        // the events past that point. The GET is what keeps a sync cheap: it lets
-        // the device skip whole log dumps on their filename alone.
-        .route(
-            "/sync/reading-log",
-            get(reading_log_watermark)
-                .post(sync_reading_log)
-                .layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
-        )
-        // On-device app self-update pull: the picker fetches its own next binary
-        // from the staged `device-dist/` bundle (written by the desktop app).
-        // Reads only, token-gated like the rest — no new write surface.
+        // `/device/...`: the picker's self-update pull from the staged `device-dist/`.
         .route("/device/manifest.json", get(get_dist_manifest))
         .route("/device/file/{*name}", get(get_dist_file))
         .with_state(state)
 }
 
-/// Reads `data_dir/.server-token`, generating + persisting a fresh 32-byte
-/// hex token on first run. The on-device app's `etc/server.conf` will carry
-/// the same value after Phase 6 wires up the install flow.
+/// Reads `data_dir/.server-token`, generating and persisting a fresh 32-byte hex
+/// token on first run.
 pub fn load_or_generate_token(data_dir: &StdPath) -> Result<String> {
     let path = data_dir.join(".server-token");
     if let Ok(s) = std::fs::read_to_string(&path) {
@@ -279,7 +252,7 @@ pub fn load_or_generate_token(data_dir: &StdPath) -> Result<String> {
     let token = hex::encode(bytes);
 
     std::fs::write(&path, &token).context("write .server-token")?;
-    // 0600 — token is a bearer secret, no need for group/world to read.
+    // 0600: `token` is a bearer secret.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -293,16 +266,12 @@ pub(crate) fn check_token(
     query: &HashMap<String, String>,
     expected: &str,
 ) -> Result<(), StatusCode> {
-    // Header takes precedence — it is what every client sends. The `?token=`
-    // fallback covers a plain browser navigation or a pasted URL, where setting
-    // a custom header isn't possible.
+    // The `x-sidle-token` header wins over the `?token=` fallback a browser URL carries.
     let got = headers
         .get("x-sidle-token")
         .and_then(|v| v.to_str().ok())
         .or_else(|| query.get("token").map(|s| s.as_str()))
         .ok_or(StatusCode::FORBIDDEN)?;
-    // Constant-time compare — the token is short and the workload is single-
-    // user so the practical impact is nil, but it costs nothing to do right.
     if !constant_eq(got.as_bytes(), expected.as_bytes()) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -320,9 +289,7 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Unauthenticated liveness page. Browsers hitting `http://host:port/`
-/// otherwise see a blank 404 — this gives a clear "yes, it's up" without
-/// leaking any library content. The real endpoints stay token-gated.
+/// Unauthenticated liveness page; it shows no library content.
 async fn health() -> Response {
     let body = concat!(
         "sidle-server up.\n\n",
@@ -354,8 +321,7 @@ struct BookListEntry {
     #[serde(flatten)]
     row: db::BookRow,
     device_filename: Option<String>,
-    // The cover cache token (`cover_rev`) rides in on the flattened `row`; a
-    // sibling field here would collide with the flattened key.
+    // `cover_rev` rides in on the flattened `row`.
     kfx_rev: i64,
 }
 
@@ -407,7 +373,7 @@ async fn get_book(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
     let kfx_path = book.kfx_path.ok_or(StatusCode::NOT_FOUND)?;
-    // The on-device name has to match the `<basename>.<sha8>.kfx` shape
+    // `device_name` takes the `<basename>.<sha8>.kfx` shape.
     let device_name = book
         .kfx_sha256
         .as_deref()
@@ -481,7 +447,7 @@ async fn get_cover(
         .ok_or(StatusCode::NOT_FOUND)?;
     let cover_path = book.cover_path.ok_or(StatusCode::NOT_FOUND)?;
 
-    // The Kindle picker asks for `?thumb=1` — serve the small color thumbnail
+    // `?thumb=1` asks for the small colour thumbnail.
     let want_thumb = query.get("thumb").is_some_and(|v| v == "1" || v == "true");
     if want_thumb {
         let thumb = state.paths.cover_thumb(&book.sha256);
@@ -504,9 +470,7 @@ async fn get_cover(
 /// base64 in JSON. Standard alphabet, with padding.
 #[derive(serde::Deserialize)]
 struct SyncRequest {
-    /// The Kindle's own serial — annotations are keyed per device (delete
-    /// propagation, last-read position). Provisioned to the picker via
-    /// `server.conf` (the Mac reads the USB iSerial at mount time).
+    /// The Kindle's own serial; annotations are keyed per device.
     device_serial: String,
     sdrs: Vec<SyncSdr>,
     /// Handwritten ink drawn on sideloaded books, one entry per host book, as
@@ -515,19 +479,18 @@ struct SyncRequest {
     inks: Vec<SyncInk>,
 }
 
-/// One host book's ink notebook. Sent only when its content sha differs from
-/// what `GET /sync/annotations` reported, so a steady-state sync carries none.
+/// One host book's ink notebook, sent when its content sha differs from what
+/// `GET /sync/annotations` reported.
 #[derive(serde::Deserialize)]
 struct SyncInk {
-    /// The host book's baked content_id (`books.asin`) — the `<asin>` in the
-    /// device's `.notebooks/<asin>!!PDOC!!notebook` dir name.
+    /// The host book's baked content_id (`books.asin`), the `<asin>` of its `.notebooks` dir.
     asin: String,
     /// The `nbk` (a KDF SQLite file), base64.
     nbk_b64: String,
 }
 
-/// What `GET /sync/annotations` answers: the ink content shas this library has
-/// already decoded for the asking device, `{asin: nbk_sha}`.
+/// What `GET /sync/annotations` answers: the ink content shas this library holds
+/// decoded for the asking device, `{asin: nbk_sha}`.
 #[derive(serde::Serialize)]
 struct InkManifest {
     ink: HashMap<String, String>,
@@ -543,17 +506,14 @@ struct SyncSdr {
     /// `<book>.yjf` bytes (last-read position), base64.
     #[serde(default)]
     yjf_b64: Option<String>,
-    /// The sidecars' own filenames. A write-back has to reuse the exact name —
-    /// it carries a device-specific infix — so the device tells us what it is
-    /// rather than the server guessing.
+    /// The sidecars' own filenames, reused verbatim by a write-back.
     #[serde(default)]
     yjr_name: Option<String>,
     #[serde(default)]
     yjf_name: Option<String>,
 }
 
-/// A sidecar the device should write, returned alongside the import report so
-/// one round trip covers both directions.
+/// A sidecar the device should write, returned alongside the import report.
 #[derive(serde::Serialize)]
 struct OutgoingSdr {
     sdr_name: String,
@@ -570,9 +530,7 @@ struct SyncResponse {
     write: Vec<OutgoingSdr>,
 }
 
-/// The device serial a manifest request is asking about. Refused rather than
-/// defaulted: an empty serial would hand one Kindle another's checkpoint, and
-/// the device would then skip uploading ink this library has never seen.
+/// The device serial a manifest request asks about; an empty one is a 400.
 fn required_serial(query: &HashMap<String, String>) -> Result<String, StatusCode> {
     match query.get("device_serial") {
         Some(s) if !s.is_empty() => Ok(s.clone()),
@@ -580,8 +538,7 @@ fn required_serial(query: &HashMap<String, String>) -> Result<String, StatusCode
     }
 }
 
-/// `GET /sync/annotations?device_serial=…` — the ink shas already decoded for
-/// this device, so its next POST carries only notebooks that actually changed.
+/// `GET /sync/annotations?device_serial=…`: the ink shas decoded for this device.
 async fn ink_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -599,7 +556,7 @@ async fn ink_manifest(
     }))
 }
 
-/// Ingest pushed annotations — the LAN twin of the USB import. Token-gated, then
+/// Ingest pushed annotations, the LAN twin of the USB import.
 async fn sync_annotations(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -608,8 +565,7 @@ async fn sync_annotations(
 ) -> Result<Json<SyncResponse>, StatusCode> {
     check_token(&headers, &query, &state.token)?;
 
-    // Decode every base64 blob up front: a malformed one is a 400 (client bug),
-    // kept distinct from a 500 (our ingest failing) below.
+    // `decode_b64` runs on every blob up front: a malformed one is a 400.
     let mut collected = Vec::with_capacity(req.sdrs.len());
     for sdr in req.sdrs {
         collected.push(CollectedYjr {
@@ -631,26 +587,22 @@ async fn sync_annotations(
     let paths = state.paths.clone();
     let device_serial = req.device_serial;
 
-    // rusqlite is blocking; run the whole import (and the pulse write) off the
-    // async executor. Per-request `db::open` is the server's existing pattern;
-    // the `busy_timeout` it sets serializes this writer against the GUI's.
+    // `spawn_blocking`: the import and the pulse write run off the async executor.
     let response = tokio::task::spawn_blocking(move || -> Result<SyncResponse, StatusCode> {
         let conn = db::open(&paths.db()).map_err(|err| {
             tracing::error!(?err, "sync: open library.db failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        // Plan the write-back from the sidecars as they arrived, before the import folds
-        // them into the library. Cloned because the import consumes them.
+        // `for_push` keeps the sidecars as they arrived, for `push::plan`.
         let for_push = collected.clone();
-        // The ink anchors live in the very sidecars that just arrived — read
-        // them before the import consumes the collection.
+        // `handwritten_notes` reads the ink anchors ahead of the import.
         let notes = ink::handwritten_notes(&collected);
         let mut report = ingest::import_collected(&conn, collected, &device_serial, &db::now_iso())
             .map_err(|err| {
                 tracing::error!(?err, "sync: import_collected failed");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-        // Ink, through the same core function the USB pass calls — so a LAN sync
+        // `inks` go through the same core function as the USB pass.
         if !inks.is_empty()
             && let Err(err) = ink::import_collected_ink(
                 &conn,
@@ -667,17 +619,14 @@ async fn sync_annotations(
         }
         let report = report;
 
-        // The device writes these itself — it is the one holding the filesystem.
-        // Same planner as USB, so both routes agree on what a sidecar should
-        // contain and which book to leave alone.
+        // `push::plan` is the USB planner; the device writes what it returns.
         let write = match push::plan(&conn, &for_push, &|book| {
             ingest::book_index(book.kfx_path.as_deref())
         }) {
             Ok(plan) => {
                 let mut out = Vec::with_capacity(plan.len());
                 for item in plan {
-                    // Checkpoint the bytes we are handing over, so the next sync
-                    // can tell whether the device kept them.
+                    // `sha` checkpoints the bytes handed over, for the next sync to compare.
                     let sha = import::sha256_of_bytes(&item.bytes);
                     if let Err(err) = db::set_yjr_sync_sha(
                         &conn,
@@ -697,13 +646,12 @@ async fn sync_annotations(
                 out
             }
             Err(err) => {
-                // A push that can't be planned must never fail the import that
-                // already succeeded.
+                // A failed `push::plan` leaves the import's result standing.
                 tracing::error!(?err, "sync: annotation push planning failed");
                 Vec::new()
             }
         };
-        // Live-repaint signal — only when the import changed annotation state worth
+        // `write_sync_pulse` only for an import that changed what a reader shows.
         if import_changed_anything(&report) {
             write_sync_pulse(&paths, &device_serial, &report);
         }
@@ -729,8 +677,7 @@ struct NotebookManifest {
     notebooks: HashMap<String, String>,
 }
 
-/// The push bundle: the standalone notebooks whose bytes differ from the
-/// manifest (a device sends nothing when nothing changed).
+/// The push bundle: the standalone notebooks whose bytes differ from the manifest.
 #[derive(serde::Deserialize)]
 struct NotebookSyncRequest {
     notebooks: Vec<SyncNotebook>,
@@ -743,11 +690,9 @@ struct SyncNotebook {
     /// The `nbk` (a KDF SQLite file), base64.
     nbk_b64: String,
     /// `.notebooks/thumbnails/<uuid>.png`, base64, when the device has one.
-    /// Absent just means the viewer falls back to rendering page 0.
     #[serde(default)]
     cover_b64: Option<String>,
-    /// The `nbk`'s on-device "Date Modified" (naive ISO) — the notebook's
-    /// `updated_at`. Only the device knows it, so only the device can say.
+    /// The `nbk`'s on-device "Date Modified" (naive ISO), the notebook's `updated_at`.
     updated_at: String,
 }
 
@@ -758,12 +703,11 @@ struct NotebookSyncResult {
     unchanged: usize,
     /// Notebooks deleted in Sidle, which a re-push must not resurrect.
     suppressed: usize,
-    /// `<uuid>: <error>` for each notebook that failed to decode or store. The
-    /// rest of the bundle still lands — one corrupt `nbk` doesn't fail a sync.
+    /// `<uuid>: <error>` for each notebook that failed to decode or store.
     failed: Vec<String>,
 }
 
-/// `GET /sync/notebooks` — the notebook shas this library already holds.
+/// `GET /sync/notebooks`: the notebook shas this library holds.
 async fn notebook_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -792,8 +736,7 @@ async fn sync_notebooks(
     if req.notebooks.is_empty() {
         return Ok(Json(NotebookSyncResult::default()));
     }
-    // Decode up front: a malformed blob is a client bug (400), kept distinct
-    // from a decode/store failure below (which is per-notebook, not fatal).
+    // `decode_b64` failing is a 400; `failed` below collects per-notebook errors.
     let mut pushed = Vec::with_capacity(req.notebooks.len());
     for nb in req.notebooks {
         let nbk = decode_b64(&nb.nbk_b64)?;
@@ -802,7 +745,6 @@ async fn sync_notebooks(
     }
 
     let paths = state.paths.clone();
-    // Decode + SVG render + SQLite writes are all blocking.
     let out = tokio::task::spawn_blocking(move || -> Result<NotebookSyncResult, StatusCode> {
         let conn = db::open(&paths.db()).map_err(|err| {
             tracing::error!(?err, "sync/notebooks: open db");
@@ -838,12 +780,10 @@ async fn sync_notebooks(
     Ok(Json(out))
 }
 
-/// What `POST /sync/book` reports back, so the Kindle can toast imported-vs-
-/// already-there. `id` is the library book id in both cases.
+/// What `POST /sync/book` reports back; `id` is the library book id either way.
 #[derive(serde::Serialize)]
 struct BookSyncResult {
-    /// `"imported"` (new) or `"duplicate"` (already in the library by content
-    /// hash — a harmless re-push).
+    /// `"imported"`, or `"duplicate"` for a book the library holds by content hash.
     outcome: &'static str,
     id: i64,
 }
@@ -862,7 +802,7 @@ fn staged_ext(requested: Option<&str>) -> String {
         .to_string()
 }
 
-/// Ingest one decrypted book pushed over the LAN — the WiFi twin of the desktop's
+/// Ingest one decrypted book pushed over the LAN.
 async fn sync_book(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -874,8 +814,7 @@ async fn sync_book(
     let paths = state.paths.clone();
     let ext = staged_ext(query.get("ext").map(String::as_str));
     let result = tokio::task::spawn_blocking(move || -> Result<BookSyncResult, StatusCode> {
-        // import_file dispatches on the extension, so stage the bytes under the
-        // one the pusher named; the sha keeps concurrent uploads from colliding.
+        // `import_file` dispatches on `ext`; `sha` keeps concurrent uploads apart.
         let sha = import::sha256_of_bytes(&body);
         let tmp = std::env::temp_dir().join(format!("sidle-upload-{sha}.{ext}"));
         std::fs::write(&tmp, &body).map_err(|err| {
@@ -925,7 +864,7 @@ async fn sync_book(
 // GET /sync/misc (which folders to send), POST /sync/misc (the files)
 // ---------------------------------------------------------------------------
 
-/// Serve the library's sync-collection config, so the picker knows which device
+/// Serve the library's sync-collection config.
 async fn misc_collections(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -940,11 +879,10 @@ async fn misc_collections(
         })
 }
 
-/// The push bundle the Kindle picker sends on Sync: each file base64 in JSON
+/// The push bundle the Kindle picker sends on Sync: each file base64 in JSON.
 #[derive(serde::Deserialize)]
 struct MiscSyncRequest {
-    /// The Kindle's serial — keys the `device-backup/<serial>/` subtree, same
-    /// as annotations. Provisioned to the picker via `server.conf`.
+    /// The Kindle's serial, keying the `device-backup/<serial>/` subtree.
     device_serial: String,
     files: Vec<MiscSyncFile>,
 }
@@ -953,23 +891,21 @@ struct MiscSyncRequest {
 struct MiscSyncFile {
     /// Which collection this file was scanned for, as served by the GET above.
     collection: String,
-    /// The file's path relative to its collection's device folder, e.g.
-    /// `screenshot_1719430000.png` or `2026/draft.md`.
+    /// The file's path below its collection's device folder, e.g. `2026/draft.md`.
     path: String,
     /// File bytes, base64 (standard alphabet, with padding).
     data_b64: String,
 }
 
 /// What `POST /sync/misc` backed up, for the picker's toast: files stored per
-/// collection id. Collections that stored nothing are omitted.
+/// collection id, empty ones omitted.
 #[derive(serde::Serialize, Default)]
 struct MiscSyncResult {
     stored: BTreeMap<String, usize>,
 }
 
 /// Store the Kindle's pushed files under `device-backup/<serial>/<collection>/`
-/// — the WiFi backup the desktop Files tab views. Token-gated, then base64-decode
-/// and hand each file to the shared [`device_backup::store_collection_file`]
+/// through [`device_backup::store_collection_file`].
 async fn sync_misc(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -978,8 +914,7 @@ async fn sync_misc(
 ) -> Result<Json<MiscSyncResult>, StatusCode> {
     check_token(&headers, &query, &state.token)?;
 
-    // Decode every blob up front so a malformed one is a clean 400 (client bug),
-    // kept distinct from a 500 (our write failing) below.
+    // `decode_b64` runs on every blob up front: a malformed one is a 400.
     let mut decoded = Vec::with_capacity(req.files.len());
     for f in req.files {
         decoded.push((f.collection, f.path, decode_b64(&f.data_b64)?));
@@ -988,7 +923,6 @@ async fn sync_misc(
     let paths = state.paths.clone();
     let serial = req.device_serial;
 
-    // Filesystem writes are blocking; run them off the async executor.
     let result = tokio::task::spawn_blocking(move || -> Result<MiscSyncResult, StatusCode> {
         let config = SyncCollections::load(&paths).map_err(|err| {
             tracing::error!(?err, "sync/misc: config unreadable");
@@ -1021,165 +955,6 @@ async fn sync_misc(
     Ok(Json(result))
 }
 
-// ---------------------------------------------------------------------------
-// Reading log — GET /sync/reading-log (watermark), POST /sync/reading-log
-// ---------------------------------------------------------------------------
-
-/// What the library already holds from one Kindle.
-///
-/// Two different skips, because the device has two kinds of source:
-#[derive(serde::Serialize, Default)]
-struct ReadingWatermark {
-    watermark: String,
-    seen: Vec<String>,
-}
-
-/// The picker's push: the reading-event lines it found newer than the
-/// watermark, verbatim.
-#[derive(serde::Deserialize)]
-struct ReadingLogRequest {
-    device_serial: String,
-    lines: Vec<String>,
-    /// The snapshots the device read to produce those lines, so this library can
-    /// skip them next time exactly as a re-import does.
-    #[serde(default)]
-    dumps: Vec<String>,
-}
-
-/// What `POST /sync/reading-log` stored, for the picker's toast.
-#[derive(serde::Serialize, Default)]
-struct ReadingLogResult {
-    sessions: usize,
-    added: usize,
-    /// Sittings already stored that these events carried further — the reader
-    /// was in the middle of one when the last Sync happened.
-    extended: usize,
-    attributed: usize,
-    /// How far this library now holds events for the pushing device, in the
-    /// `YYMMDD:HHMMSS` a log line carries — the same value a subsequent `GET`
-    /// would return.
-    watermark: String,
-}
-
-/// `GET /sync/reading-log?serial=…` — how far this library has already read.
-async fn reading_log_watermark(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Result<Json<ReadingWatermark>, StatusCode> {
-    check_token(&headers, &query, &state.token)?;
-    let serial = query.get("serial").cloned().unwrap_or_default();
-    if serial.is_empty() {
-        // Without a serial there is no per-device answer, and guessing one would
-        // hand back another Kindle's progress.
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let conn = open_db(&state.paths)?;
-    let newest = db::reading_watermark(&conn, &serial).map_err(|err| {
-        tracing::error!(?err, "sync/reading-log: watermark query failed");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let seen = db::seen_dumps(&conn, &serial).map_err(|err| {
-        tracing::error!(?err, "sync/reading-log: seen-dumps query failed");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(ReadingWatermark {
-        watermark: newest
-            .as_deref()
-            .and_then(reading_log::log_stamp)
-            .unwrap_or_default(),
-        seen: seen.into_iter().collect(),
-    }))
-}
-
-/// `POST /sync/reading-log` — store the events the Kindle just found.
-async fn sync_reading_log(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    Json(req): Json<ReadingLogRequest>,
-) -> Result<Json<ReadingLogResult>, StatusCode> {
-    check_token(&headers, &query, &state.token)?;
-    if req.device_serial.is_empty() {
-        // A session with no device would be stored as provenance-unknown and
-        // then claimed by whichever Kindle syncs next. Refuse instead.
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    if req.lines.is_empty() && req.dumps.is_empty() {
-        return Ok(Json(ReadingLogResult::default()));
-    }
-
-    let paths = state.paths.clone();
-    // Parsing plus SQLite writes are blocking; keep them off the async executor.
-    let out = tokio::task::spawn_blocking(move || -> Result<ReadingLogResult, StatusCode> {
-        let conn = db::open(&paths.db()).map_err(|err| {
-            tracing::error!(?err, "sync/reading-log: open db");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        // A `BTreeSet` both de-duplicates and orders, which is what the parser
-        // requires — the device's own dumps overlap heavily by design.
-        let events: std::collections::BTreeSet<String> = req.lines.into_iter().collect();
-        // The sitting this Kindle was in when it last synced. These events are
-        let resume = reading_log::Resume::newest(&conn, &req.device_serial).map_err(|err| {
-            tracing::error!(?err, "sync/reading-log: open-sitting query failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let stored = reading_log::store_events(
-            &conn,
-            &events,
-            0,
-            &req.device_serial,
-            resume.as_ref(),
-            &mut sidle_core::library::job::ignore,
-        )
-        .map_err(|err| {
-            tracing::error!(?err, "sync/reading-log: store failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        // Recorded only after the events are stored, so a failure leaves the
-        // snapshot to be read again rather than skipped forever.
-        for name in &req.dumps {
-            db::mark_dump_read(&conn, &req.device_serial, name).map_err(|err| {
-                tracing::error!(?err, name, "sync/reading-log: mark dump read failed");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        }
-        // What the device is cleared to drop, which is exactly what this
-        // library now holds durably — the raw lines, not the sessions made of
-        // them.
-        let held = match reading_log::archive_pushed(&paths.root, &req.device_serial, &events) {
-            Ok(()) => events
-                .iter()
-                .filter_map(|l| reading_log::log_line_stamp(l))
-                .max()
-                .unwrap_or_default(),
-            Err(err) => {
-                tracing::error!(?err, "sync/reading-log: archiving the pushed lines failed");
-                String::new()
-            }
-        };
-        // Rows the Reading Log page draws from. A push that stored nothing
-        // writes none.
-        if stored.added > 0 || stored.extended > 0 || stored.attributed > 0 {
-            write_reading_pulse(&paths, &req.device_serial, &stored);
-        }
-        Ok(ReadingLogResult {
-            sessions: stored.sessions,
-            added: stored.added,
-            extended: stored.extended,
-            attributed: stored.attributed,
-            watermark: held,
-        })
-    })
-    .await
-    .map_err(|err| {
-        tracing::error!(?err, "sync/reading-log: store task panicked");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })??;
-
-    Ok(Json(out))
-}
-
 /// Base64-encode a blob for the wire (standard alphabet, with padding) — the
 /// same shape the device sends its sidecars in.
 fn encode_b64(bytes: &[u8]) -> String {
@@ -1202,14 +977,12 @@ fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
     s.map(decode_b64).transpose()
 }
 
-/// Did the import change anything an open reader would render? New or removed
-/// annotations, a moved last-read position, or fresh ink pages warrant a repaint
-/// pulse; a re-sync of unchanged `.yjr` (pure duplicates) does not.
+/// Whether `r` counts any inserted annotation, position, relink or ink page.
 fn import_changed_anything(r: &DeviceImportReport) -> bool {
     r.annotations.inserted > 0 || r.positions > 0 || r.relinked > 0 || r.ink_pages > 0
 }
 
-/// Atomically write `<root>/.sync-pulse.json` — the cross-process signal the GUI
+/// Atomically write `<root>/.sync-pulse.json`, the GUI's cross-process signal.
 fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceImportReport) {
     let pulse = serde_json::json!({
         "ts": db::now_iso(),
@@ -1231,34 +1004,8 @@ fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceIm
     }
 }
 
-/// Atomically write `<root>/.reading-pulse.json` — the reading-log twin of
-/// [`write_sync_pulse`]. `POST /sync/reading-log` lands sessions the desktop's
-/// Reading Log page holds in memory, and this is what tells it to refetch.
-fn write_reading_pulse(paths: &LibraryPaths, device_serial: &str, stored: &reading_log::Imported) {
-    let pulse = serde_json::json!({
-        "ts": db::now_iso(),
-        "device_serial": device_serial,
-        "added": stored.added,
-        "extended": stored.extended,
-        "attributed": stored.attributed,
-    });
-    let Ok(bytes) = serde_json::to_vec(&pulse) else {
-        return;
-    };
-    let final_path = paths.root.join(".reading-pulse.json");
-    let tmp_path = paths.root.join(".reading-pulse.json.tmp");
-    if let Err(err) = std::fs::write(&tmp_path, &bytes) {
-        tracing::warn!(?err, "reading pulse: write tmp failed");
-        return;
-    }
-    if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
-        tracing::warn!(?err, "reading pulse: rename failed");
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-}
-
 /// Atomically write `<root>/.book-pulse.json`, the book twin of
-/// [`write_sync_pulse`]. Only a new import writes one. Best-effort.
+/// [`write_sync_pulse`]. Best-effort.
 fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     let pulse = serde_json::json!({
         "ts": db::now_iso(),
@@ -1279,9 +1026,8 @@ fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
     }
 }
 
-/// `GET /device/manifest.json` → the offered fleet with every entry re-read
-/// through `device-dist/sources.json` (token-gated). 404 when nothing has been
-/// described; the picker reads that as "no update".
+/// `GET /device/manifest.json` → the offered fleet, every entry re-read through
+/// `device-dist/sources.json`; 404 when none is described.
 async fn get_dist_manifest(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1335,7 +1081,7 @@ async fn serve_file(
         HeaderValue::from_str(content_type).unwrap(),
     );
     if let Some(name) = download_filename {
-        // Quote-escape any embedded `"` in the filename. RFC 6266 says we
+        // `"` in `name` becomes `'` inside the quoted `filename=`.
         let safe = name.replace('"', "'");
         let val = format!("attachment; filename=\"{safe}\"");
         if let Ok(hv) = HeaderValue::from_str(&val) {
@@ -1379,9 +1125,8 @@ mod tests {
             .port()
     }
 
-    /// A client built exactly the way the Kindle picker will be: the pure-Rust
-    /// RustCrypto provider, and our own CA as the *sole* trust root — no public
-    /// roots at all, so a certificate from anywhere else cannot satisfy it.
+    /// A client built as the Kindle picker is: the RustCrypto provider, `ca_pem` its
+    /// sole trust root.
     fn device_shaped_agent(ca_pem: &str) -> ureq::Agent {
         use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
         let ca = Certificate::from_pem(ca_pem.as_bytes()).expect("parse CA pem");
@@ -1503,9 +1248,8 @@ mod tests {
         serving.abort();
     }
 
-    /// Graceful shutdown, over a real TLS handshake: the daemon serves `GET /`
-    /// (200) to a client that trusts only our CA, then when the shutdown future
-    /// resolves `serve_with_shutdown` returns `Ok(())` and frees the port.
+    /// Graceful shutdown over a real TLS handshake: `GET /` is a 200, and once `tx`
+    /// fires `serve_with_shutdown` returns `Ok(())` and frees the port.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn serves_tls_to_a_pinned_client_then_shuts_down_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1513,8 +1257,7 @@ mod tests {
             root: tmp.path().to_path_buf(),
         };
         paths.ensure().unwrap();
-        // The server refuses to start without material, so issue it the same way
-        // the desktop app will.
+        // `serve_with_shutdown` refuses to start without TLS material.
         sidle_core::library::tls::issue_server_cert(&paths, &["127.0.0.1".to_string()]).unwrap();
         let ca_pem = sidle_core::library::tls::ca_cert_pem(&paths).unwrap();
 
@@ -1531,8 +1274,7 @@ mod tests {
             let _ = rx.await;
         }));
 
-        // ureq is blocking, so drive it off the runtime. Retries until the
-        // spawned task has bound and is accepting.
+        // `spawn_blocking` drives `ureq`, retrying until the spawned server accepts.
         let served = tokio::task::spawn_blocking(move || {
             use std::time::{Duration, Instant};
             let agent = device_shaped_agent(&ca_pem);
@@ -1597,7 +1339,7 @@ mod tests {
     }
 
     /// A fresh library root + one book whose `kfx_sha256` the `book.deadbeef.sdr`
-    /// infix prefix-matches (so the bookmark resolves). Returns `(paths, book_id)`.
+    /// infix prefix-matches. Returns `(paths, book_id)`.
     fn library_with_matching_book(root: &Path) -> (LibraryPaths, i64) {
         let paths = LibraryPaths {
             root: root.to_path_buf(),
@@ -1614,7 +1356,7 @@ mod tests {
                 ppd: None,
                 epub_path: None,
                 cover_path: None,
-                kfx_path: None, // empty index; a bookmark imports on its anchor alone
+                kfx_path: None, // empty index
                 kfx_sha256: Some(
                     "deadbeef00000000000000000000000000000000000000000000000000000000",
                 ),
@@ -1637,9 +1379,7 @@ mod tests {
         (paths, book_id)
     }
 
-    /// A book arriving on a device for the first time has no `.sdr`, so it is in
-    /// no sync bundle and the push that answers a bundle can never reach it.
-    /// This route is how it gets its highlights anyway.
+    /// `GET /sidecar/{id}` serves a book's highlights before its first `.sdr` exists.
     #[tokio::test]
     async fn sidecar_route_composes_for_a_device_holding_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1658,22 +1398,18 @@ mod tests {
                 .unwrap()
         };
 
-        // Nothing in the library for it yet: not a failure, just nothing to write.
         let resp = build_router(state.clone())
             .oneshot(get(book_id))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-        // A book that isn't there is not the same as one with nothing to say.
         let resp = build_router(state.clone())
             .oneshot(get(book_id + 999))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        // Same gate as every other route — a sidecar carries the reader's own
-        // highlights and is not served to an unauthenticated caller.
         let resp = build_router(state)
             .oneshot(
                 Request::builder()
@@ -1700,8 +1436,8 @@ mod tests {
             .unwrap()
     }
 
-    /// A `POST /sync/book` request with raw body bytes and an optional token,
-    /// naming no `?ext=`: the server stages under `staged_ext`'s default.
+    /// A `POST /sync/book` request with raw body bytes and an optional token, naming
+    /// no `?ext=`.
     fn book_request(token: Option<&str>, body: Vec<u8>) -> Request<Body> {
         let mut b = Request::builder()
             .method("POST")
@@ -1726,7 +1462,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The decisive LAN==USB gate: a `.yjr` pushed through `POST /sync/annotations`
+    /// A `.yjr` pushed through `POST /sync/annotations` imports as the USB path does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_annotations_equals_usb_import() {
         let yjr = yjr_bookmark(1492, 0, 9);
@@ -1792,7 +1528,7 @@ mod tests {
         assert_eq!(rows_a[0].dedup_hash, rows_b[0].dedup_hash);
         assert_eq!(rows_a[0].text, rows_b[0].text);
 
-        // The live-repaint pulse landed (this import changed state).
+        // `.sync-pulse.json` landed: this import changed state.
         let pulse = paths_b.root.join(".sync-pulse.json");
         assert!(
             pulse.exists(),
@@ -1803,7 +1539,7 @@ mod tests {
         assert_eq!(pulse_json["device_serial"], device_serial);
     }
 
-    /// `POST /sync/misc` applies each collection's own policy — screenshots
+    /// `POST /sync/misc` applies each collection's own policy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_misc_stores_per_collection_policy() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1898,8 +1634,7 @@ mod tests {
     }
 
     /// A file pushed into a collection this library added lands under that
-    /// collection's own dir, subfolders intact — the whole point of the config
-    /// being the library's rather than the picker's.
+    /// collection's own dir, subfolders intact.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_misc_serves_the_config_it_applies() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1926,7 +1661,7 @@ mod tests {
             token: Arc::from(token.as_str()),
         };
 
-        // The picker asks first…
+        // `GET /sync/misc` first…
         let req = Request::builder()
             .method("GET")
             .uri("/sync/misc")
@@ -1939,7 +1674,7 @@ mod tests {
         let served: SyncCollections = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(served, config);
 
-        // …then sends what that config asked for.
+        // …then `POST /sync/misc` with what it asked for.
         let body = serde_json::json!({
             "device_serial": "S",
             "files": [
@@ -2038,9 +1773,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_book_with_token_reaches_importer() {
-        // A valid token but a body that isn't a real `.kfx-zip` passes the gate
-        // and fails inside `import_file` (500) — proving the endpoint stages the
-        // bytes and calls the importer, not that it rejects early.
+        // A valid token over a body that is no real `.kfx-zip`: `import_file` fails with a 500.
         let tmp = tempfile::tempdir().unwrap();
         let (paths, _) = library_with_matching_book(tmp.path());
         let token = load_or_generate_token(&paths.root).unwrap();
@@ -2062,11 +1795,9 @@ mod tests {
         for ext in ["azw3", "azw4", "mobi"] {
             assert_eq!(staged_ext(Some(ext)), ext, "{ext}");
         }
-        // A picker that names no extension is pushing a KFX.
         assert_eq!(staged_ext(None), "kfx-zip");
         assert_eq!(staged_ext(Some("")), "kfx-zip");
-        // Nothing that could leave the temp dir or hide a second extension
-        // survives.
+        // `bad` names escape the temp dir or hide a second extension.
         for bad in [
             "../../etc/passwd",
             "kfx-zip/../x",
@@ -2077,8 +1808,7 @@ mod tests {
         ] {
             assert_eq!(staged_ext(Some(bad)), "kfx-zip", "{bad}");
         }
-        // An extension the library cannot read passes through, and `import_file`
-        // names it in the error.
+        // `djvu` passes through; `import_file` names it in its error.
         assert_eq!(staged_ext(Some("djvu")), "djvu");
     }
 
@@ -2132,15 +1862,14 @@ mod tests {
         r.annotations.inserted = 1;
         assert!(import_changed_anything(&r), "a new annotation → pulse");
 
-        // Ink is rendered by the reader too, so a sync that brought only
-        // handwriting still has to repaint an open book.
+        // `ink_pages` alone warrants a repaint.
         let mut ink_only = DeviceImportReport {
             ink_books: 1,
             ink_pages: 2,
             ..Default::default()
         };
         assert!(import_changed_anything(&ink_only), "new ink pages → pulse");
-        // A re-sync whose nbk hadn't changed is the ink twin of a duplicate.
+        // `ink_pages` at 0 is the ink twin of a duplicate.
         ink_only.ink_pages = 0;
         ink_only.ink_books = 0;
         ink_only.ink_unchanged = 1;
@@ -2164,7 +1893,7 @@ mod tests {
     fn stage_fake_dist(paths: &LibraryPaths) -> Vec<u8> {
         let dist = paths.device_dist();
         let bytes = b"\x7fELF-fake-armv7-picker".to_vec();
-        // Where each app's own build left its files. Nothing copies them.
+        // `checkouts` holds each app's own build output.
         let checkouts = paths.root.join("checkouts");
         let write = |abs: &std::path::Path, body: &[u8]| {
             std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -2243,7 +1972,7 @@ mod tests {
         assert_eq!(manifest["version"], 2);
         assert_eq!(manifest["files"][0]["name"], "bin/sidle");
 
-        // The promised digest is the one the served bytes hash to.
+        // `promised` is the digest the served bytes hash to.
         let promised = manifest["files"][0]["sha256"].as_str().unwrap();
         assert_eq!(
             promised,
@@ -2320,8 +2049,7 @@ mod tests {
     async fn dist_file_404s_names_absent_from_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token, _) = staged_state(tmp.path());
-        // Names `sources.json` holds no entry for. The lookup is what keeps the
-        // token and every other file unreachable, traversal names included.
+        // Names `sources.json` holds no entry for, traversal names included.
         for uri in [
             "/device/file/extensions/sidle/etc/server.conf",
             "/device/file/sources.json",
@@ -2375,40 +2103,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    // --- /sync/reading-log (the device's own push) -------------------------
-
-    /// One reading event in the device's syslog shape. Same fixture the parser's
-    /// own tests use; here it only has to survive the wire and reach the parser.
-    fn reading_line(stamp: &str, kind: &str, total_ms: i64, words: i64) -> String {
-        format!(
-            "{stamp} cvm[6144]: I ReadingTimerController:Information::{kind},\
-             Title:<private>,Asin:<private>,IntervalTime:900,\
-             TotalTime:{total_ms},TotalWords:{words},Total%:0.5,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: BBB:148207,\
-             NextTOCEntryPosition:YJPosition: CCC:99,\
-             CurrentPos:YJPosition: AAA:12,EndPos:YJPosition: DDD:6612;"
-        )
-    }
-
-    /// A `POST /sync/reading-log` request with a JSON body and an optional token.
-    fn reading_log_request(token: Option<&str>, body: serde_json::Value) -> Request<Body> {
-        let mut b = Request::builder()
-            .method("POST")
-            .uri("/sync/reading-log")
-            .header("content-type", "application/json");
-        if let Some(t) = token {
-            b = b.header("x-sidle-token", t);
-        }
-        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap()
-    }
-
     async fn json_body(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// A library + a token, no books. Reading events store on their own.
+    /// A library + a token, no books.
     fn bare_state(root: &Path) -> (AppState, String) {
         let paths = LibraryPaths {
             root: root.to_path_buf(),
@@ -2420,160 +2120,6 @@ mod tests {
             token: Arc::from(token.as_str()),
         };
         (state, token)
-    }
-
-    /// The whole point of the pair of routes: what the device is told to fetch
-    /// shrinks after it pushes, and pushing the same window twice stores nothing
-    /// the second time.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_push_moves_the_watermark_and_a_repush_adds_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, token) = bare_state(tmp.path());
-        let serial = "G000TESTSERIAL";
-        let watermark_uri = format!("/sync/reading-log?serial={serial}");
-
-        // A Kindle that has never synced is told to read everything: no
-        // watermark to filter the live log by, no snapshot it may skip.
-        let resp = build_router(state.clone())
-            .oneshot(get_request(&watermark_uri, Some(&token)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let before = json_body(resp).await;
-        assert_eq!(before["watermark"], "");
-        assert!(before["seen"].as_array().unwrap().is_empty());
-
-        let dump = "log_backup_260803101500.txt.gz";
-        let body = serde_json::json!({
-            "device_serial": serial,
-            "lines": [
-                reading_line("260803:100000", "NextPage", 60_000, 100),
-                reading_line("260803:100500", "NextPage", 120_000, 220),
-                reading_line("260803:101000", "CloseBook", 180_000, 300),
-            ],
-            "dumps": [dump],
-        });
-        let resp = build_router(state.clone())
-            .oneshot(reading_log_request(Some(&token), body.clone()))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let report = json_body(resp).await;
-        assert_eq!(report["sessions"], 1);
-        assert_eq!(report["added"], 1);
-        assert_eq!(
-            report["attributed"], 0,
-            "no book in this library carries that end position"
-        );
-        // The device deletes its own archive against this, so it must state what
-        // was stored rather than what arrived.
-        assert_eq!(report["watermark"], "260803:101000");
-
-        // Now the device is told to skip the snapshot outright and to filter the
-        // live log to what came after the last event stored.
-        let resp = build_router(state.clone())
-            .oneshot(get_request(&watermark_uri, Some(&token)))
-            .await
-            .unwrap();
-        let after = json_body(resp).await;
-        assert_eq!(
-            after["watermark"], "260803:101000",
-            "the newest event, in the form a syslog line starts with"
-        );
-        assert_eq!(after["seen"], serde_json::json!([dump]));
-
-        // A device that pushes an overlapping window anyway — a sync that was
-        // interrupted after storing but before the toast, say — stores nothing
-        // twice.
-        let resp = build_router(state.clone())
-            .oneshot(reading_log_request(Some(&token), body))
-            .await
-            .unwrap();
-        let again = json_body(resp).await;
-        assert_eq!(again["sessions"], 1, "the same session was parsed again");
-        assert_eq!(again["added"], 0, "and recognised as already held");
-
-        // One Kindle's progress is never handed to another.
-        let resp = build_router(state)
-            .oneshot(get_request(
-                "/sync/reading-log?serial=G000OTHERDEVICE",
-                Some(&token),
-            ))
-            .await
-            .unwrap();
-        let other = json_body(resp).await;
-        assert_eq!(other["watermark"], "");
-        assert!(other["seen"].as_array().unwrap().is_empty());
-    }
-
-    /// Nothing about a device's reading is reachable without the token, in
-    /// either direction.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reading_log_endpoints_reject_missing_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, _) = bare_state(tmp.path());
-
-        let resp = build_router(state.clone())
-            .oneshot(get_request("/sync/reading-log?serial=S", None))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-        let body = serde_json::json!({ "device_serial": "S", "lines": [], "dumps": [] });
-        let resp = build_router(state)
-            .oneshot(reading_log_request(None, body))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    /// Both routes are per-device, so an unnamed device is refused rather than
-    /// answered with — or credited to — some other Kindle's progress.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unnamed_device_is_refused_rather_than_guessed_at() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, token) = bare_state(tmp.path());
-
-        let resp = build_router(state.clone())
-            .oneshot(get_request("/sync/reading-log", Some(&token)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        let body = serde_json::json!({
-            "device_serial": "",
-            "lines": [reading_line("260803:100000", "NextPage", 60_000, 100)],
-            "dumps": [],
-        });
-        let resp = build_router(state)
-            .oneshot(reading_log_request(Some(&token), body))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    /// A sync that found nothing new is the common case, and must cost the
-    /// library nothing: no parse, no write, an empty report.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_sync_with_nothing_new_stores_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, token) = bare_state(tmp.path());
-        let body = serde_json::json!({
-            "device_serial": "G000TESTSERIAL",
-            "lines": [],
-            "dumps": [],
-        });
-        let resp = build_router(state)
-            .oneshot(reading_log_request(Some(&token), body))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let report = json_body(resp).await;
-        assert_eq!(report["sessions"], 0);
-        assert_eq!(report["added"], 0);
-        // Nothing stored for this device, so nothing is confirmed — and the
-        // device must not read that as licence to delete its archive.
-        assert_eq!(report["watermark"], "");
     }
 
     // --- Handwriting: ink on /sync/annotations, notebooks on their own route ---
@@ -2590,9 +2136,8 @@ mod tests {
             .unwrap()
     }
 
-    /// The manifest is what makes a sync cheap, and it is keyed per device: the
-    /// same book inked on two Kindles is two separate facts, so one device's
-    /// checkpoint must never let another skip an upload.
+    /// The ink manifest is keyed per device: one device's checkpoint never lets
+    /// another skip an upload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_ink_manifest_reports_only_the_asking_devices_checkpoints() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2618,7 +2163,6 @@ mod tests {
             "another Kindle's checkpoint would make this one skip an upload"
         );
 
-        // A device that has never synced is told nothing, so it sends everything.
         let resp = build_router(state)
             .oneshot(get_request(
                 "/sync/annotations?device_serial=NEWDEVICE",
@@ -2629,9 +2173,7 @@ mod tests {
         assert_eq!(json_body(resp).await["ink"], serde_json::json!({}));
     }
 
-    /// Without a serial there is no per-device answer, and defaulting to one
-    /// would hand back a checkpoint that isn't this device's — which would make
-    /// it skip ink this library has never seen. Refuse instead.
+    /// A manifest request without a serial is a 400.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_ink_manifest_refuses_an_unnamed_device() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2643,8 +2185,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The notebook manifest is library-wide, not per device: a notebook is one
-    /// entity wherever it was written, so any Scribe asking gets the same answer.
+    /// The notebook manifest is library-wide: every Scribe asking gets the same answer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_notebook_manifest_lists_the_library_regardless_of_device() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2666,9 +2207,7 @@ mod tests {
         }
     }
 
-    /// One notebook that won't decode must not cost the sync the others: it is
-    /// named in `failed` and the request still succeeds. (All three are garbage
-    /// here — the point is the shape of the answer, not the decode.)
+    /// A notebook that won't decode is named in `failed`, and the request succeeds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_notebook_that_cannot_be_decoded_is_reported_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2702,8 +2241,8 @@ mod tests {
         );
     }
 
-    /// A malformed blob is the client's bug, and must read as one — distinct
-    /// from an `nbk` that arrived intact but wouldn't decode.
+    /// A malformed blob is a 400, apart from an `nbk` that arrived intact and fails
+    /// to decode.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_notebooks_rejects_bad_base64() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2746,9 +2285,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    /// Ink rides in the annotation bundle, so a notebook whose host book isn't
-    /// in the library must be skipped without costing the sidecars that arrived
-    /// with it — the highlights are the thing that must always land.
+    /// A notebook whose host book isn't in the library is skipped, and the sidecars
+    /// beside it land.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ink_for_an_unknown_book_does_not_cost_the_annotations() {
         let tmp = tempfile::tempdir().unwrap();

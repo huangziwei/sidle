@@ -9,12 +9,6 @@
   <body>
     <header class="toolbar">
       <div class="toolbar-group">
-        <!-- Reading Log is a page of its own, outside the Books/Notes/Files tablist
-             and carrying its own state — the mirror of the Kindle pill on the
-             right. -->
-        <button type="button" id="section-reading" class="section-pill"
-                title="What you read and for how long, recovered from your Kindle's own logs">Reading Log</button>
-        <div class="toolbar-sep" aria-hidden="true"></div>
         <div class="seg" role="tablist" aria-label="Section">
           <button id="section-books" class="seg-btn active" role="tab" aria-selected="true">Books</button>
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
@@ -105,16 +99,6 @@
 
     <div class="sort-popover" id="sort-popover" hidden>
       <ul class="sort-key-list" id="sort-key-list"></ul>
-      <div class="sort-dir-toggle" role="group" aria-label="Sort direction">
-        <button type="button" data-dir="asc">↑ Asc</button>
-        <button type="button" data-dir="desc">↓ Desc</button>
-      </div>
-    </div>
-
-    <!-- The Reading Log's own sort, over reading figures. Same markup as the
-         gallery's, at the same level. -->
-    <div class="sort-popover" id="rl-sort-popover" hidden>
-      <ul class="sort-key-list" id="rl-sort-keys"></ul>
       <div class="sort-dir-toggle" role="group" aria-label="Sort direction">
         <button type="button" data-dir="asc">↑ Asc</button>
         <button type="button" data-dir="desc">↓ Desc</button>
@@ -244,230 +228,6 @@
             unpacked bundle. <strong>Add from GitHub&hellip;</strong> takes a
             repo's published release instead.
           </p>
-        </div>
-      </section>
-
-      <!-- Reading Log: time read per day, from the Kindle's system logs
-           (library::reading_log). readinglog.js (window.ReadingLog) owns the
-           year heatmap and the per-book page a book click opens. -->
-      <section id="reading-log" class="view reading-log" aria-label="Reading Log" hidden>
-        <!-- Overview -->
-        <div id="rl-overview">
-          <header id="rl-stats" class="rl-stats"></header>
-
-          <div id="rl-empty" class="empty" hidden>
-            <p>No reading log yet.</p>
-            <p class="empty-hint">
-              Your Kindle keeps a dated record of every reading session in its own
-              system logs, under <code>system/logbackup/</code>. The Sidle app on
-              the device reads that folder and sends it here on its next sync —
-              roughly the last month or two of reading arrives at once.
-            </p>
-          </div>
-
-          <div id="rl-body" hidden>
-            <!-- One bar per day for the fortnight up to today. -->
-            <section id="rl-recent" class="rl-recent" hidden>
-              <header class="rl-recent-head">
-                <strong>Recently</strong>
-                <span id="rl-recent-note" class="rl-muted"></span>
-              </header>
-              <div id="rl-recent-bars" class="rl-recent-bars"></div>
-            </section>
-
-            <!-- Which days, beside which hours of them. The calendar is a fixed
-                 53 weeks wide and the clock fills the rest of the row. Both
-                 draw the same year. -->
-            <div class="rl-panels">
-              <div class="rl-heatmap-wrap">
-                <!-- One year at a time. The arrows step to the next year that has
-                     reading in it, and are hidden when there is only one. -->
-                <header id="rl-year-nav" class="rl-nav">
-                  <button id="rl-year-prev" class="btn btn-quiet rl-step"
-                          aria-label="Previous year" aria-keyshortcuts="ArrowLeft">‹</button>
-                  <strong id="rl-year-label"></strong>
-                  <button id="rl-year-next" class="btn btn-quiet rl-step"
-                          aria-label="Next year" aria-keyshortcuts="ArrowRight">›</button>
-                  <span id="rl-year-total" class="rl-muted"></span>
-                  <!-- Selects #rl-heatmap or #rl-monthcal. -->
-                  <div class="seg rl-cal-seg" id="rl-cal-seg" role="tablist"
-                       aria-label="Calendar view" aria-keyshortcuts="c">
-                    <button class="seg-btn active" data-cal="year" role="tab" aria-selected="true"
-                            title="Every day of the year, shaded by how long you read">Year</button>
-                    <button class="seg-btn" data-cal="month" role="tab" aria-selected="false"
-                            title="One month, with a bar per book across the days you read it">Month</button>
-                  </div>
-                  <!-- Re-reads what #rl-heatmap draws. -->
-                  <button id="rl-refresh" class="btn btn-quiet rl-refresh"
-                          title="Re-read the reading log from the library (R)"
-                          aria-label="Refresh" aria-keyshortcuts="r">↻</button>
-                </header>
-                <!-- Steps between the months of the year that have reading. -->
-                <header id="rl-cal-nav" class="rl-nav rl-cal-nav" hidden>
-                  <button id="rl-cal-prev" class="btn btn-quiet rl-step"
-                          aria-label="Previous month">‹</button>
-                  <strong id="rl-cal-label"></strong>
-                  <button id="rl-cal-next" class="btn btn-quiet rl-step"
-                          aria-label="Next month">›</button>
-                </header>
-                <!-- renderHeatmap fills this with focusable day cells, which
-                     `role="img"` hides from assistive technology. -->
-                <div id="rl-heatmap" class="rl-heatmap" role="group"
-                     aria-label="Reading time per day"></div>
-                <div id="rl-monthcal" class="rl-monthcal" hidden></div>
-                <div class="rl-legend" id="rl-legend">
-                  <span>Less</span>
-                  <i class="rl-cell rl-l0"></i><i class="rl-cell rl-l1"></i>
-                  <i class="rl-cell rl-l2"></i><i class="rl-cell rl-l3"></i>
-                  <i class="rl-cell rl-l4"></i>
-                  <span>More</span>
-                </div>
-              </div>
-
-              <!-- Hour of the day, on the device's own local clock. Three cuts
-                   of one cube (readinglog.js): the year's hours as bars, and
-                   the same hours against the weekday and against the month. -->
-              <section class="rl-clock-wrap">
-                <header class="rl-nav rl-clock-head">
-                  <strong>When you read</strong>
-                  <span id="rl-clock-note" class="rl-muted"></span>
-                  <div class="seg rl-clock-seg" id="rl-clock-seg" role="tablist"
-                       aria-label="Cut the day by">
-                    <button class="seg-btn active" data-clock="hour" role="tab" aria-selected="true"
-                            title="The year's reading by hour of the day">Hour</button>
-                    <button class="seg-btn" data-clock="week" role="tab" aria-selected="false"
-                            title="Hour of the day against the day of the week">Week</button>
-                    <button class="seg-btn" data-clock="month" role="tab" aria-selected="false"
-                            title="Hour of the day against the month — how the habit moved">Month</button>
-                  </div>
-                </header>
-                <div id="rl-clock" class="rl-clock" role="img"
-                     aria-label="Reading time by hour of the day"></div>
-              </section>
-            </div>
-
-            <!-- The sittings of the selected day, on a 24-hour axis. -->
-            <section id="rl-timeline" class="rl-timeline" hidden>
-              <header class="rl-group-head">
-                <strong id="rl-timeline-title"></strong>
-                <span id="rl-timeline-note" class="rl-muted"></span>
-              </header>
-              <div id="rl-timeline-body" class="rl-tl"></div>
-            </section>
-
-            <!-- The books of whatever the heatmap is showing: the whole year,
-                 or one day once a square is clicked. -->
-            <section class="rl-books">
-              <header class="rl-group-head">
-                <strong id="rl-books-title"></strong>
-                <span id="rl-books-total" class="rl-muted"></span>
-                <div class="rl-group-actions">
-                  <!-- `db::is_finished`: the axis reached its end, or the book page
-                       mark names the book finished. `.btn-quiet` like #rl-day-clear
-                       beside it. -->
-                  <button type="button" id="rl-finished" class="btn btn-quiet" aria-pressed="false"
-                          aria-keyshortcuts="f"
-                          title="Only books read to the end or marked finished (F)">Finished</button>
-                  <!-- How finely the year is cut up. The same books throughout,
-                       each band carrying its own figures. Hidden while a single
-                       day is selected. -->
-                  <div class="seg rl-bucket-seg" id="rl-bucket-seg" role="tablist"
-                       aria-label="Group the year by" aria-keyshortcuts="b">
-                    <button class="seg-btn active" data-bucket="year" role="tab" aria-selected="true"
-                            title="The whole year in one grid">Year</button>
-                    <button class="seg-btn" data-bucket="month" role="tab" aria-selected="false"
-                            title="A band per month">Month</button>
-                    <button class="seg-btn" data-bucket="day" role="tab" aria-selected="false"
-                            title="A band per day read">Day</button>
-                  </div>
-                  <button id="rl-day-clear" class="btn btn-quiet" hidden>Show the year</button>
-                  <button type="button" class="sort-button" id="rl-sort-button">
-                    <span class="sort-label">Sort: Last read</span>
-                    <span class="sort-dir">↓</span>
-                  </button>
-                </div>
-              </header>
-              <div id="rl-book-list" class="rl-cards"></div>
-            </section>
-
-            <!-- At the far end of the page, away from the toolbar. #rl-purge
-                 confirms, and exists only while there is something to
-                 delete. -->
-            <footer class="rl-danger">
-              <button id="rl-purge" class="btn btn-danger"
-                      title="Delete every reading session Sidle has stored">Delete the reading log…</button>
-              <span class="rl-muted">The logbackup files on disk are untouched.</span>
-            </footer>
-          </div>
-
-          <!-- Reading that two or more books explain equally well. Outside
-               #rl-body: a library whose reading is all unresolved draws no days
-               and shows the empty state. -->
-          <section id="rl-ambiguous" class="rl-ambiguous" hidden>
-            <header class="rl-group-head">
-              <strong>Which book was this?</strong>
-              <span id="rl-ambiguous-total" class="rl-muted"></span>
-            </header>
-            <p class="rl-ambiguous-hint">
-              A Kindle's log names no book. It states the position the reading stopped
-              at, and Sidle recognises the book by finding the one whose text ends
-              exactly there. These books are the same length, so the position fits
-              both — and rather than guess, Sidle counts the time nowhere until you
-              say which it was.
-            </p>
-            <ol id="rl-ambiguous-list" class="rl-ambiguous-list"></ol>
-          </section>
-        </div>
-
-        <!-- One book. The identity column holds cover, title and figures; the
-             calendar and the annotations take the rest of the width. -->
-        <div id="rl-book" hidden>
-          <button id="rl-back" class="rl-back">‹ Reading Log</button>
-          <div class="rl-book-layout">
-            <aside class="rl-book-side">
-              <div id="rl-book-cover" class="cover rl-book-cover"></div>
-              <strong id="rl-book-title" class="rl-book-name"></strong>
-              <span id="rl-book-author" class="rl-muted"></span>
-              <!-- Shown where books.max_position and reading_position both exist. -->
-              <div id="rl-book-progress" class="rl-progress-block" hidden>
-                <div class="rl-bar-track"><i id="rl-book-progress-fill"></i></div>
-                <span id="rl-book-progress-label" class="rl-muted"></span>
-              </div>
-              <!-- Outside #rl-book-progress, which hides without a stored axis. -->
-              <button type="button" id="rl-book-finished" class="pill rl-finish" hidden
-                      aria-pressed="false">Mark finished</button>
-              <dl id="rl-book-stats" class="rl-facts"></dl>
-            </aside>
-            <!-- When it was read, then what was marked while reading it. Both
-                 records of this book share the wide column, with the identity
-                 beside them. -->
-            <div class="rl-book-main">
-              <div class="rl-month">
-                <!-- Bounded by this book's own reading: no arrow leads to a month
-                     it was never opened in. -->
-                <header id="rl-month-nav" class="rl-month-head rl-nav">
-                  <button id="rl-prev" class="btn btn-quiet rl-step" aria-label="Previous month">‹</button>
-                  <strong id="rl-month-label"></strong>
-                  <button id="rl-next" class="btn btn-quiet rl-step" aria-label="Next month">›</button>
-                </header>
-                <div id="rl-month-grid" class="rl-month-grid"></div>
-              </div>
-
-              <!-- Every highlight and note this book carries, in reading order.
-                   The same set the reader's sidebar lists, laid out in full. -->
-              <section class="rl-notes">
-                <header class="rl-group-head">
-                  <strong>Highlights &amp; notes</strong>
-                  <span id="rl-notes-count" class="rl-muted"></span>
-                </header>
-                <ol id="rl-notes-list" class="rl-note-list"></ol>
-                <p id="rl-notes-empty" class="rl-notes-empty" hidden>
-                  Nothing marked in this book. Highlights and notes come off a Kindle
-                  when it is connected, and are kept here even after the device drops them.
-                </p>
-              </section>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -809,7 +569,7 @@
             <p class="settings-hint">
               A backup is one <code>.sidlebak</code> file holding your whole library: every book
               and cover, and everything sidle keeps beside them — metadata, highlights,
-              handwriting, your reading log, and the Kindle files under Files.
+              handwriting, and the Kindle files under Files.
               <strong>Restore</strong> replaces the current library and restarts; it asks first
               whether to delete the library it replaces or set it aside as an undo.
               <strong>Merge</strong> folds another library&rsquo;s books and notebooks into this
@@ -883,21 +643,6 @@
               <dt><kbd>[</kbd> <kbd>]</kbd> <kbd>\</kbd></dt><dd>Books / Notes / Kindle</dd>
               <dt><kbd>⌘</kbd><kbd>,</kbd></dt><dd>Settings</dd>
               <dt><kbd>?</kbd></dt><dd>This help</dd>
-            </dl>
-          </section>
-          <!-- readinglog.js `handleKey` owns these, and takes them before the
-               keys above. -->
-          <section>
-            <h3>Reading Log</h3>
-            <dl>
-              <dt><kbd>R</kbd></dt><dd>Refresh</dd>
-              <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Previous / next year</dd>
-              <dt><kbd>C</kbd></dt><dd>Heatmap / month calendar</dd>
-              <dt><kbd>B</kbd></dt><dd>Band by year / month / day</dd>
-              <dt><kbd>F</kbd></dt><dd>Finished books only</dd>
-              <dt><kbd>S</kbd></dt><dd>Sort</dd>
-              <dt><kbd>Esc</kbd></dt><dd>Clear the day, or leave a book</dd>
-              <dt><kbd>⌫</kbd></dt><dd>Back to the overview</dd>
             </dl>
           </section>
         </div>
@@ -1198,7 +943,6 @@
     <script src="notebooks.js"></script>
     <script src="misc.js"></script>
     <script src="apps.js"></script>
-    <script src="readinglog.js"></script>
     <script type="module" src="reader.js"></script>
     <script type="module" src="editor.js"></script>
   </body>
