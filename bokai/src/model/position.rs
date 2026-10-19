@@ -9,15 +9,11 @@ use std::collections::HashMap;
 pub struct PositionMap {
     /// Source element id → its coordinate on the linear axis.
     position_of: HashMap<i64, i64>,
-    /// Location boundaries, ascending. `boundaries[k]` is the coordinate at
-    /// which the `(k+1)`-th location starts.
+    /// Location boundaries, ascending; `boundaries[k]` opens the `(k+1)`-th location.
     boundaries: Vec<i64>,
-    /// Where the axis ends, one past its last coordinate. The last element's
-    /// coordinate is where it *starts*, and the extent sits past it by that
-    /// element's own length.
+    /// Where the axis ends, one past its last coordinate.
     extent: i64,
-    /// Per element, the `(offset, coordinate)` pairs a source states inside
-    /// it, ascending. Empty for a source that states none.
+    /// Per element, the `(offset, coordinate)` pairs a source states inside it, ascending.
     anchors: HashMap<i64, Vec<(i64, i64)>>,
 }
 
@@ -91,8 +87,7 @@ impl PositionMap {
         })
     }
 
-    /// Whether the source defined the numbered location scale on top of the
-    /// coordinate axis. False for a [`synthesized`](Self::synthesized) map.
+    /// Whether `boundaries` holds any location; false for a [`synthesized`](Self::synthesized) map.
     pub fn has_locations(&self) -> bool {
         !self.boundaries.is_empty()
     }
@@ -115,14 +110,12 @@ impl PositionMap {
         self.extent
     }
 
-    /// The location number a coordinate falls in: the count of boundaries at
-    /// or before it, floored at 1. A coordinate on `boundaries[k]` opens the
-    /// `(k+1)`-th location.
+    /// The location `position` falls in: the count of `boundaries` at or before it, floored at 1.
     pub fn location_for(&self, position: i64) -> i64 {
         self.boundaries.partition_point(|&b| b <= position).max(1) as i64
     }
 
-    /// How many locations the book has — the "Loc N of M" denominator.
+    /// How many locations the book has.
     pub fn location_count(&self) -> i64 {
         self.boundaries.len() as i64
     }
@@ -139,7 +132,7 @@ impl PositionMap {
         out
     }
 
-    /// Whether the source addressed no elements at all.
+    /// Whether `position_of` places no element.
     pub fn is_empty(&self) -> bool {
         self.position_of.is_empty()
     }
@@ -166,7 +159,7 @@ impl PositionMap {
 
     /// Every point the source states on the axis as `(position, element,
     /// offset)`, ascending: each `position_of` entry, plus each `anchors` one.
-    fn anchor_axis(&self) -> Vec<(i64, i64, i64)> {
+    pub(crate) fn anchor_axis(&self) -> Vec<(i64, i64, i64)> {
         let mut axis: Vec<(i64, i64, i64)> = self
             .position_of
             .iter()
@@ -185,9 +178,7 @@ impl PositionMap {
 pub struct Coordinate {
     /// The position on the source's own linear axis.
     pub position: i64,
-    /// The element id and character offset into that element's base text the
-    /// position resolves to, for a source that addresses its text by element.
-    /// `None` where the axis indexes the text directly.
+    /// The `(element, offset)` the position resolves to; `None` on an axis indexing text directly.
     pub element: Option<(i64, i64)>,
 }
 
@@ -201,8 +192,7 @@ pub struct PositionText {
     pub to: Coordinate,
     /// The source's own text between them.
     pub text: String,
-    /// Character index into `text` of the single position asked for. `None`
-    /// for a span, whose two ends are `from` and `to`.
+    /// Character index into `text` of the single position asked for; `None` for a span.
     pub mark: Option<usize>,
 }
 
@@ -222,15 +212,15 @@ pub struct AxisSlice {
     pub mark: Option<usize>,
 }
 
-/// Why a reading coordinate resolved to no text. Each variant names the stage
-/// that failed.
+/// Why a reading coordinate resolved to no text, one variant per stage that fails.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PositionError {
     /// The source defines no reading axis.
     NoAxis,
-    /// The end of a span precedes its start.
+    /// `end` precedes `start`.
     Inverted { start: i64, end: i64 },
-    /// The position lies past the end of the axis.
+    /// `position` lies outside the axis, which ends at `extent`.
     OutOfRange { position: i64, extent: i64 },
     /// The axis places no element at the position.
     Unplaced { position: i64 },
@@ -240,8 +230,7 @@ pub enum PositionError {
     NotElementAddressed { element: i64, offset: i64 },
     /// The source states no text for any element it places.
     NoSourceText,
-    /// The element the position names carries no text of its own — an image,
-    /// a rule, a page template.
+    /// `element` carries no text of its own.
     Untexted { element: i64 },
     /// Reading the source failed.
     Io(std::io::Error),
@@ -410,6 +399,11 @@ impl crate::model::Book {
                 extent: slice.extent,
             });
         }
+        if let Some(end) = end
+            && end < start
+        {
+            return Err(PositionError::Inverted { start, end });
+        }
         Ok(PositionText {
             from: Coordinate {
                 position: slice.from,
@@ -460,8 +454,8 @@ mod tests {
         assert_eq!(m.position(999, 0), None);
     }
 
-    /// An element whose text a nested element interrupts runs past its own
-    /// character count on the axis.
+    /// Element 9, interrupted by a nested element, runs past its own character
+    /// count on the axis.
     #[test]
     fn offsets_past_an_interruption_count_from_the_anchor() {
         let m = sample().with_anchors(HashMap::from([(9, vec![(6, 60), (4, 55)])]));
@@ -471,7 +465,7 @@ mod tests {
         assert_eq!(m.position(9, 5), Some(56));
         assert_eq!(m.position(9, 6), Some(60));
         assert_eq!(m.position(9, 8), Some(62));
-        // An element the source states no anchors for is unaffected.
+        // Element 7, stating no anchors, is unaffected.
         assert_eq!(m.position(7, 9), Some(9));
     }
 
@@ -533,8 +527,7 @@ mod tests {
         let lengths = HashMap::from([(10, 40), (11, 0), (12, 7)]);
         let m = PositionMap::synthesized(&[10, 11, 12], |e| lengths.get(&e).copied().unwrap_or(0));
         assert_eq!(m.element_positions(), vec![(10, 0), (11, 40), (12, 40)]);
-        // Past the last element's start by its own length: the axis ends where
-        // the text does.
+        // `max_position` sits past the last element's start by its length.
         assert_eq!(m.max_position(), 47);
     }
 
@@ -550,8 +543,8 @@ mod tests {
 
     #[test]
     fn a_repeated_element_keeps_its_first_position() {
-        // A reading order can name an element twice. The second sighting must
-        // not move it or advance the axis.
+        // `reading_order` names element 1 twice; the second sighting neither moves
+        // it nor advances the axis.
         let m = PositionMap::synthesized(&[1, 2, 1, 3], |_| 10);
         assert_eq!(m.element_positions(), vec![(1, 0), (2, 10), (3, 20)]);
         assert_eq!(m.max_position(), 30);
@@ -714,6 +707,10 @@ mod tests {
             book.text_at(at(20), Some(at(4))),
             Err(PositionError::Inverted { start: 20, end: 4 })
         ));
+        assert!(matches!(
+            book.text_at(at(14), Some(at(12))),
+            Err(PositionError::Inverted { start: 14, end: 12 })
+        ));
         // Before the first element the axis places nothing to land on.
         let mut gapped = Book::from_importer(Box::new(Source {
             positions: Some(PositionMap::new(HashMap::from([(7, 5)]), vec![0], Some(9))),
@@ -783,6 +780,27 @@ mod tests {
         assert!(matches!(
             Book::from_importer(Box::new(Source::default())).text_at(at(0), None),
             Err(PositionError::NoAxis)
+        ));
+    }
+
+    #[test]
+    fn a_direct_axis_rejects_a_span_ending_before_its_start() {
+        let mut book = Book::from_importer(Box::new(Source {
+            stream: Some(AxisSlice {
+                from: 100,
+                to: 140,
+                extent: 500,
+                text: String::new(),
+                mark: None,
+            }),
+            ..Source::default()
+        }));
+        assert!(matches!(
+            book.text_at(at(120), Some(at(110))),
+            Err(PositionError::Inverted {
+                start: 120,
+                end: 110
+            })
         ));
     }
 }

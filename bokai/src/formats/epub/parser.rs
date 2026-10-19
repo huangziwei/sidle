@@ -1,4 +1,4 @@
-//! EPUB parsing utilities (OPF, NCX, container.xml)
+//! EPUB parsing utilities (container.xml, OPF, NCX, nav document)
 
 use std::collections::HashMap;
 use std::io;
@@ -13,19 +13,17 @@ use crate::model::{
 /// Parsed OPF package data.
 pub struct OpfData {
     pub metadata: Metadata,
-    /// The `<package version>` string as declared (`"3.0"`, `"2.0"`, …); empty
+    /// The `<package version>` string as declared (`"3.0"`, `"2.0"`, …); empty when absent.
     pub version: String,
     /// Maps manifest id -> (href, media_type)
     pub manifest: HashMap<String, (String, String)>,
     pub spine_ids: Vec<String>,
-    /// Maps spine idref -> its `properties` attribute (e.g. `page-spread-left`,
-    /// `rendition:layout-pre-paginated`). Only ids that declared properties
-    /// appear. Drives per-page fixed-layout spread reconstruction.
+    /// Maps spine idref -> its `properties` attribute, for each idref declaring one.
     pub spine_properties: HashMap<String, String>,
     pub ncx_href: Option<String>,
     /// EPUB 3 nav document href (has properties="nav")
     pub nav_href: Option<String>,
-    /// The `<dc:identifier>` that `<package unique-identifier>` designates as
+    /// The `<dc:identifier>` that `<package unique-identifier>` names, else `metadata.identifier`.
     pub unique_identifier: Option<String>,
 }
 
@@ -80,7 +78,7 @@ struct Refinement {
     value: String,
 }
 
-/// Last-resort cover detection for OPFs that declare neither the EPUB 3
+/// The image item whose manifest id is `cover`, `cover-image` or `coverimage`, any case.
 fn fallback_cover_by_id(manifest: &HashMap<String, ManifestItem>) -> Option<&ManifestItem> {
     manifest.iter().find_map(|(id, item)| {
         let id = id.to_ascii_lowercase();
@@ -110,31 +108,211 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut in_metadata = false;
     let mut current_element: Option<String> = None;
     let mut current_element_id: Option<String> = None;
+    let mut version = String::new();
     // `<package unique-identifier="…">` names which `<dc:identifier>` is the
     // book's; `identifiers_by_id` keys each identifier by its own `id`.
-    let mut version = String::new();
     let mut unique_identifier_ref: Option<String> = None;
     let mut identifiers_by_id: HashMap<String, String> = HashMap::new();
-    // The `opf:scheme` attribute on the currently-open `<dc:identifier>`;
-    // `scheme="ASIN"` routes apart from the generic identifier.
+    // `scheme` of the open `<dc:identifier>`; `ASIN` and `MOBI-ASIN` route to `metadata.asin`.
     let mut current_identifier_scheme: Option<String> = None;
-    // EPUB-2 `opf:file-as` attribute captured on the currently-open
-    // `<dc:title>` / `<dc:creator>`, applied on element close.
+    // `file-as` of the open `<dc:title>` / `<dc:creator>`, applied at its close.
     let mut current_file_as: Option<String> = None;
-    // Per-creator sort-key slots, parallel to `metadata.authors` (both are
-    // pushed only on `<dc:creator>` close). Compacted into
-    // `metadata.author_sorts` after refinements.
+    // One sort-key slot per `<dc:creator>`, parallel to `metadata.authors`.
     let mut author_sort_slots: Vec<Option<String>> = Vec::new();
     let mut buf_text = String::new();
 
-    // For meta elements with content (non-empty tags)
+    // The open `<meta>` whose value is its text.
     let mut in_meta = false;
     let mut meta_property: Option<String> = None;
     let mut meta_refines: Option<String> = None;
     let mut meta_id: Option<String> = None;
 
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
+            let name = e.name();
+            let local = local_name(name.as_ref());
+
+            match local {
+                b"item" => {
+                    let mut id = String::new();
+                    let mut href = String::new();
+                    let mut media_type = String::new();
+                    let mut properties: Option<String> = None;
+
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"id" => {
+                                id = String::from_utf8(attr.value.to_vec())
+                                    .map_err(io::Error::other)?
+                            }
+                            b"href" => {
+                                href = String::from_utf8(attr.value.to_vec())
+                                    .map_err(io::Error::other)?
+                            }
+                            b"media-type" => {
+                                media_type = String::from_utf8(attr.value.to_vec())
+                                    .map_err(io::Error::other)?
+                            }
+                            b"properties" => {
+                                properties = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                )
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !id.is_empty() {
+                        manifest.insert(
+                            id,
+                            ManifestItem {
+                                href,
+                                media_type,
+                                properties,
+                            },
+                        );
+                    }
+                }
+                b"itemref" => {
+                    let mut idref: Option<String> = None;
+                    let mut props: Option<String> = None;
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"idref" => {
+                                idref = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                            b"properties" => {
+                                props = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(idref) = idref {
+                        if let Some(props) = props {
+                            spine_properties.insert(idref.clone(), props);
+                        }
+                        spine_ids.push(idref);
+                    }
+                }
+                b"meta" if in_metadata => {
+                    // Attribute-form meta: `name`/`content` and `property`/`content`.
+                    let mut is_cover = false;
+                    let mut cover_id = String::new();
+                    let mut property: Option<String> = None;
+                    let mut refines: Option<String> = None;
+                    let mut content: Option<String> = None;
+                    let mut elem_id: Option<String> = None;
+                    let mut meta_name: Option<String> = None;
+
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"name" => {
+                                let val = String::from_utf8(attr.value.to_vec())
+                                    .map_err(io::Error::other)?;
+                                if val == "cover" {
+                                    is_cover = true;
+                                }
+                                meta_name = Some(val);
+                            }
+                            b"content" => {
+                                let val = String::from_utf8(attr.value.to_vec())
+                                    .map_err(io::Error::other)?;
+                                cover_id = val.clone();
+                                content = Some(val);
+                            }
+                            b"property" => {
+                                property = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                            b"refines" => {
+                                refines = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                            b"id" => {
+                                elem_id = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if is_cover && !cover_id.is_empty() {
+                        epub2_cover_id = Some(cover_id);
+                    }
+
+                    // `<meta name>` hints: `primary-writing-mode`,
+                    // `fixed-layout`, `book-type`, `original-resolution`,
+                    // `orientation-lock`.
+                    if let Some(name) = meta_name.as_deref() {
+                        let val = content.as_deref().map(str::trim).filter(|v| !v.is_empty());
+                        match name {
+                            "primary-writing-mode" => {
+                                if let Some(v) = val {
+                                    metadata.primary_writing_mode = Some(v.to_string());
+                                }
+                            }
+                            "fixed-layout" => {
+                                if let Some(v) = val {
+                                    metadata.fixed_layout = v.eq_ignore_ascii_case("true");
+                                }
+                            }
+                            "book-type" => {
+                                metadata.book_type = val.map(str::to_string);
+                            }
+                            "original-resolution" => {
+                                if let Some(vp) = val.and_then(parse_viewport) {
+                                    metadata.default_viewport = Some(vp);
+                                }
+                            }
+                            "orientation-lock" => {
+                                if let Some(lock) = val.and_then(OrientationLock::parse) {
+                                    metadata.orientation_lock = Some(lock);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // A refinement where `refines` is set, else a top-level property.
+                    if let Some(ref prop) = property {
+                        if let Some(ref r) = refines {
+                            let refines_id = r.strip_prefix('#').unwrap_or(r).to_string();
+                            if let Some(val) = content {
+                                refinements.push(Refinement {
+                                    refines: refines_id,
+                                    property: prop.clone(),
+                                    value: val,
+                                });
+                            }
+                        } else if let Some(ref val) = content {
+                            handle_meta_property(
+                                prop,
+                                val,
+                                &mut metadata,
+                                &mut element_ids,
+                                elem_id.as_deref(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        match event {
             Ok(Event::Start(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
@@ -181,9 +359,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             } else if (local == b"title" || local == b"creator")
                                 && local_name(key) == b"file-as"
                             {
-                                // EPUB-2 sort-key form: `<dc:title opf:file-as="…">`.
-                                // EPUB-3 uses `<meta property="file-as" refines="#x">`
-                                // and is handled later via apply_refinements.
                                 current_file_as = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
@@ -192,7 +367,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         }
                     }
                     b"meta" if in_metadata => {
-                        // EPUB3 meta with property attribute
+                        // A `<meta>` valued by its text, read at its close.
                         in_meta = true;
                         buf_text.clear();
                         meta_property = None;
@@ -239,191 +414,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                                     );
                                 }
                                 _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                let local = local_name(name.as_ref());
-
-                match local {
-                    b"item" => {
-                        let mut id = String::new();
-                        let mut href = String::new();
-                        let mut media_type = String::new();
-                        let mut properties: Option<String> = None;
-
-                        for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"id" => {
-                                    id = String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?
-                                }
-                                b"href" => {
-                                    href = String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?
-                                }
-                                b"media-type" => {
-                                    media_type = String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?
-                                }
-                                b"properties" => {
-                                    properties = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    )
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if !id.is_empty() {
-                            manifest.insert(
-                                id,
-                                ManifestItem {
-                                    href,
-                                    media_type,
-                                    properties,
-                                },
-                            );
-                        }
-                    }
-                    b"itemref" => {
-                        let mut idref: Option<String> = None;
-                        let mut props: Option<String> = None;
-                        for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"idref" => {
-                                    idref = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    );
-                                }
-                                b"properties" => {
-                                    props = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(idref) = idref {
-                            if let Some(props) = props {
-                                spine_properties.insert(idref.clone(), props);
-                            }
-                            spine_ids.push(idref);
-                        }
-                    }
-                    b"meta" if in_metadata => {
-                        // Handle both EPUB2 style (name/content) and EPUB3 empty meta
-                        let mut is_cover = false;
-                        let mut cover_id = String::new();
-                        let mut property: Option<String> = None;
-                        let mut refines: Option<String> = None;
-                        let mut content: Option<String> = None;
-                        let mut elem_id: Option<String> = None;
-                        let mut meta_name: Option<String> = None;
-
-                        for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"name" => {
-                                    let val = String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?;
-                                    if val == "cover" {
-                                        is_cover = true;
-                                    }
-                                    meta_name = Some(val);
-                                }
-                                b"content" => {
-                                    let val = String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?;
-                                    cover_id = val.clone();
-                                    content = Some(val);
-                                }
-                                b"property" => {
-                                    property = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    );
-                                }
-                                b"refines" => {
-                                    refines = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    );
-                                }
-                                b"id" => {
-                                    elem_id = Some(
-                                        String::from_utf8(attr.value.to_vec())
-                                            .map_err(io::Error::other)?,
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if is_cover && !cover_id.is_empty() {
-                            epub2_cover_id = Some(cover_id);
-                        }
-
-                        // `<meta name>` hints: `primary-writing-mode`,
-                        // `fixed-layout`, `book-type`, `original-resolution`,
-                        // `orientation-lock`.
-                        if let Some(name) = meta_name.as_deref() {
-                            let val = content.as_deref().map(str::trim).filter(|v| !v.is_empty());
-                            match name {
-                                "primary-writing-mode" => {
-                                    if let Some(v) = val {
-                                        metadata.primary_writing_mode = Some(v.to_string());
-                                    }
-                                }
-                                "fixed-layout" => {
-                                    if let Some(v) = val {
-                                        metadata.fixed_layout = v.eq_ignore_ascii_case("true");
-                                    }
-                                }
-                                "book-type" => {
-                                    metadata.book_type = val.map(str::to_string);
-                                }
-                                "original-resolution" => {
-                                    if let Some(vp) = val.and_then(parse_viewport) {
-                                        metadata.default_viewport = Some(vp);
-                                    }
-                                }
-                                "orientation-lock" => {
-                                    if let Some(lock) = val.and_then(OrientationLock::parse) {
-                                        metadata.orientation_lock = Some(lock);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // EPUB3 meta with property but no content - value is in text
-                        if let Some(ref prop) = property {
-                            if let Some(ref r) = refines {
-                                // This is a refinement
-                                let refines_id = r.strip_prefix('#').unwrap_or(r).to_string();
-                                if let Some(val) = content {
-                                    refinements.push(Refinement {
-                                        refines: refines_id,
-                                        property: prop.clone(),
-                                        value: val,
-                                    });
-                                }
-                            } else if let Some(ref val) = content {
-                                // Top-level meta without refines
-                                handle_meta_property(
-                                    prop,
-                                    val,
-                                    &mut metadata,
-                                    &mut element_ids,
-                                    elem_id.as_deref(),
-                                );
                             }
                         }
                     }
@@ -499,9 +489,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             if let Some(ref id) = current_element_id {
                                 element_ids.insert(id.clone(), MetaElement::Creator(author_index));
                             }
-                            // EPUB-2 sort key sits on each `<dc:creator>` as an
-                            // `opf:file-as` attribute — one slot per creator.
-                            // EPUB-3 refinements overwrite these later.
                             author_sort_slots.push(current_file_as.take());
                         }
                         "contributor" => {
@@ -519,9 +506,8 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         }
                         "language" => metadata.language = text,
                         "identifier" => {
-                            // Route by scheme: ASIN / MOBI-ASIN go into the
-                            // dedicated field; everything else fills the
-                            // generic identifier (first one wins).
+                            // `is_asin` (scheme `ASIN` / `MOBI-ASIN`, or id `asin`) routes
+                            // to `metadata.asin`; `metadata.identifier` takes the first other.
                             let is_asin = current_identifier_scheme.as_deref().is_some_and(|s| {
                                 s.eq_ignore_ascii_case("ASIN")
                                     || s.eq_ignore_ascii_case("MOBI-ASIN")
@@ -566,7 +552,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
         &refinements,
     );
 
-    // Compact the per-creator slots: trailing creators without a sort key
+    // `author_sort_slots` drops its trailing `None`s; an inner `None` takes its author's name.
     while author_sort_slots.last().is_some_and(Option::is_none) {
         author_sort_slots.pop();
     }
@@ -590,7 +576,6 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     {
         metadata.cover_image = Some(item.href.clone());
     } else if let Some(item) = fallback_cover_by_id(&manifest) {
-        // Neither the EPUB 3 `cover-image` property nor the EPUB 2
         metadata.cover_image = Some(item.href.clone());
     }
 
@@ -613,8 +598,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     // Resolve NCX href
     let ncx_href = toc_id.and_then(|id| manifest_simple.get(&id).map(|(href, _)| href.clone()));
 
-    // The identifier `<package unique-identifier>` names. Falls back to the
-    // generic one when the reference dangles, which is malformed but common.
+    // The identifier `<package unique-identifier>` names, else `metadata.identifier`.
     let unique_identifier = unique_identifier_ref
         .and_then(|id| identifiers_by_id.get(&id).cloned())
         .or_else(|| Some(metadata.identifier.clone()).filter(|s| !s.is_empty()));
@@ -631,7 +615,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     })
 }
 
-/// Handle a top-level meta property (no refines attribute).
+/// Parse a viewport stated as `WxH` or `width=W, height=H`.
 fn parse_viewport(value: &str) -> Option<(u32, u32)> {
     let v = value.trim();
     if let Some((w, h)) = v.split_once('x').or_else(|| v.split_once('X'))
@@ -656,6 +640,7 @@ fn parse_viewport(value: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Handle a top-level meta property (no refines attribute).
 fn handle_meta_property(
     property: &str,
     value: &str,
@@ -663,11 +648,9 @@ fn handle_meta_property(
     element_ids: &mut HashMap<String, MetaElement>,
     elem_id: Option<&str>,
 ) {
-    // EPUB 3 Multiple-Rendition / EBPAJ properties match on the full
-    // namespaced name.
+    // `property` matches here on its full namespaced name.
     match property {
         "rendition:layout" => {
-            // "pre-paginated" = fixed layout; "reflowable" = the default.
             metadata.fixed_layout = value.trim() == "pre-paginated";
             return;
         }
@@ -681,7 +664,6 @@ fn handle_meta_property(
             }
             return;
         }
-        // EBPAJ Japanese FXL viewport: `width=1444, height=2048`.
         "fixed-layout-jp:viewport" | "viewport" => {
             if let Some(vp) = parse_viewport(value) {
                 metadata.default_viewport = Some(vp);
@@ -725,16 +707,6 @@ fn apply_refinements(
     element_ids: &HashMap<String, MetaElement>,
     refinements: &[Refinement],
 ) {
-    // Track collection refinements by collection element ID
-    let mut collection_id: Option<String> = None;
-
-    for (id, elem) in element_ids {
-        if matches!(elem, MetaElement::Collection) {
-            collection_id = Some(id.clone());
-            break;
-        }
-    }
-
     for refinement in refinements {
         let prop_local = refinement
             .property
@@ -783,24 +755,6 @@ fn apply_refinements(
                     }
                 }
             }
-        } else {
-            // Check if this is a refinement for a collection that wasn't tracked
-            // by belongs-to-collection (some EPUBs use meta property="belongs-to-collection"
-            // with an id, then refine that)
-            if let Some(ref coll_id) = collection_id
-                && &refinement.refines == coll_id
-                && let Some(ref mut coll) = metadata.collection
-            {
-                match prop_local {
-                    "collection-type" => {
-                        coll.collection_type = Some(refinement.value.clone());
-                    }
-                    "group-position" => {
-                        coll.position = refinement.value.parse().ok();
-                    }
-                    _ => {}
-                }
-            }
         }
     }
 }
@@ -828,7 +782,22 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     let mut in_text = false;
 
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
+            let name = e.name();
+            let local = local_name(name.as_ref());
+            if local == b"content" {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"src"
+                        && let Some(state) = stack.last_mut()
+                    {
+                        state.src =
+                            Some(String::from_utf8(attr.value.to_vec()).map_err(io::Error::other)?);
+                    }
+                }
+            }
+        }
+        match event {
             Ok(Event::Start(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
@@ -851,21 +820,6 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
                     }
                     b"text" => in_text = true,
                     _ => {}
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                let local = local_name(name.as_ref());
-                if local == b"content" {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"src"
-                            && let Some(state) = stack.last_mut()
-                        {
-                            state.src = Some(
-                                String::from_utf8(attr.value.to_vec()).map_err(io::Error::other)?,
-                            );
-                        }
-                    }
                 }
             }
             Ok(Event::Text(e)) => {
@@ -941,7 +895,21 @@ pub fn parse_ncx_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
     let mut play_order: usize = 0;
 
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
+            let name = e.name();
+            if local_name(name.as_ref()) == b"content"
+                && let Some(state) = target.as_mut()
+            {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"src" {
+                        state.src =
+                            Some(String::from_utf8(attr.value.to_vec()).map_err(io::Error::other)?);
+                    }
+                }
+            }
+        }
+        match event {
             Ok(Event::Start(e)) => {
                 let name = e.name();
                 match local_name(name.as_ref()) {
@@ -954,20 +922,6 @@ pub fn parse_ncx_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
                     }
                     b"text" => in_text = true,
                     _ => {}
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                if local_name(name.as_ref()) == b"content"
-                    && let Some(state) = target.as_mut()
-                {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"src" {
-                            state.src = Some(
-                                String::from_utf8(attr.value.to_vec()).map_err(io::Error::other)?,
-                            );
-                        }
-                    }
                 }
             }
             Ok(Event::Text(e)) => {
@@ -1028,23 +982,19 @@ pub fn parse_nav_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
     parse_nav_ol(content, "page-list")
 }
 
-/// Shared `<nav epub:type="…">` `<ol>` reader backing [`parse_nav_toc`] and
-/// [`parse_nav_page_list`]; `wanted_type` selects which sibling nav to read
-/// (a doc may carry `toc`, `landmarks`, `page-list`, `loi`, `lot` side by side).
+/// The `<ol>` tree of the `<nav>` whose `epub:type` holds `wanted_type`, for
+/// [`parse_nav_toc`] and [`parse_nav_page_list`].
 fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
-    // Tolerate unescaped `<`/`>` in link text (see `parse_ncx`) so one stray
-    // tag doesn't abort the parse and drop the whole nav.
+    // `check_end_names` off: link text containing `<` parses.
     reader.config_mut().check_end_names = false;
 
-    // Only content inside <nav epub:type="toc"> counts. Nesting depth keeps
-    // a stray `<ol>` outside that nav (landmarks, page-list) out of the TOC.
-    let mut in_toc_nav = false;
+    // `nav_depth` counts the `<nav>` elements open from the wanted one inward.
+    let mut in_wanted_nav = false;
     let mut nav_depth = 0u32;
 
-    // The TOC tree is built bottom-up: each `<li>` pushes a frame, its child `<ol>`
-    // fills that frame, and `</li>` folds it into the parent's children.
+    // One frame per open `<li>`; `</li>` folds it into its parent's `children`.
     struct ListItem {
         href: Option<String>,
         label: String,
@@ -1062,32 +1012,31 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
                 let local = local_name(name.as_ref());
                 match local {
                     b"nav" => {
-                        // Enter only the toc-typed nav; the doc may carry
-                        // landmarks / page-list / loi / lot sibling navs.
-                        let mut is_toc = false;
+                        // Enter the nav whose `epub:type` holds `wanted_type`.
+                        let mut is_wanted = false;
                         for attr in e.attributes().flatten() {
                             if local_name(attr.key.as_ref()) == b"type" {
                                 let value = String::from_utf8_lossy(&attr.value);
                                 if value.split_ascii_whitespace().any(|v| v == wanted_type) {
-                                    is_toc = true;
+                                    is_wanted = true;
                                 }
                             }
                         }
-                        if is_toc {
-                            in_toc_nav = true;
+                        if is_wanted {
+                            in_wanted_nav = true;
                             nav_depth = 1;
-                        } else if in_toc_nav {
+                        } else if in_wanted_nav {
                             nav_depth += 1;
                         }
                     }
-                    b"li" if in_toc_nav => {
+                    b"li" if in_wanted_nav => {
                         stack.push(ListItem {
                             href: None,
                             label: String::new(),
                             children: Vec::new(),
                         });
                     }
-                    b"a" if in_toc_nav && !stack.is_empty() => {
+                    b"a" if in_wanted_nav && !stack.is_empty() => {
                         in_anchor_at_depth = Some(stack.len() - 1);
                         for attr in e.attributes().flatten() {
                             if local_name(attr.key.as_ref()) == b"href"
@@ -1128,7 +1077,7 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
                     b"a" if in_anchor_at_depth.is_some() => {
                         in_anchor_at_depth = None;
                     }
-                    b"li" if in_toc_nav => {
+                    b"li" if in_wanted_nav => {
                         if let Some(item) = stack.pop()
                             && let Some(href) = item.href
                         {
@@ -1137,8 +1086,7 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
                                 TocEntry::new(crate::util::trim_markup_space(&item.label), href);
                             entry.children = item.children;
                             entry.play_order = Some(play_order);
-                            // Attach to parent <li>'s children, or to root
-                            // if this was a top-level item.
+                            // Attach to the parent `<li>`, or to `root_children` at top level.
                             if let Some(parent) = stack.last_mut() {
                                 parent.children.push(entry);
                             } else {
@@ -1146,10 +1094,10 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
                             }
                         }
                     }
-                    b"nav" if in_toc_nav => {
+                    b"nav" if in_wanted_nav => {
                         nav_depth = nav_depth.saturating_sub(1);
                         if nav_depth == 0 {
-                            in_toc_nav = false;
+                            in_wanted_nav = false;
                         }
                     }
                     _ => {}
@@ -1168,7 +1116,7 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
 pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
-    // Tolerate unescaped `<`/`>` in label text (see `parse_ncx`).
+    // `check_end_names` off: label text containing `<` parses.
     reader.config_mut().check_end_names = false;
 
     let mut landmarks = Vec::new();
@@ -1398,10 +1346,6 @@ pub(crate) fn epub_type_to_landmark(epub_type: &str) -> Option<LandmarkType> {
     None
 }
 
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
-
 struct ManifestItem {
     href: String,
     media_type: String,
@@ -1620,6 +1564,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_opf_elements_closed_by_end_tags() {
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata>
+    <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title>
+    <meta name="cover" content="i7"></meta>
+    <meta name="primary-writing-mode" content="vertical-rl"></meta>
+  </metadata>
+  <manifest>
+    <item id="i7" href="front.png" media-type="image/png"></item>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"></item>
+  </manifest>
+  <spine><itemref idref="ch1" properties="page-spread-left"></itemref></spine>
+</package>"#;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(result.manifest.len(), 2);
+        assert_eq!(result.spine_ids, ["ch1"]);
+        assert_eq!(result.spine_properties["ch1"], "page-spread-left");
+        assert_eq!(result.metadata.cover_image.as_deref(), Some("front.png"));
+        assert_eq!(
+            result.metadata.primary_writing_mode.as_deref(),
+            Some("vertical-rl")
+        );
+    }
+
+    #[test]
     fn test_parse_opf_primary_writing_mode() {
         // `primary-writing-mode` sets `metadata.primary_writing_mode`.
         let opf = r#"<?xml version="1.0"?>
@@ -1641,8 +1612,7 @@ mod tests {
 
     #[test]
     fn test_parse_opf_fixed_layout_manga() {
-        // A fixed-layout comic OPF (EBPAJ + EPUB3 rendition + Kindle hints)
-        // must populate the IR's fixed-layout model, incl. per-page spread.
+        // The `rendition:` and `fixed-layout-jp:` metas fill the fixed-layout fields.
         let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
   <metadata>
@@ -1702,9 +1672,8 @@ mod tests {
 
     #[test]
     fn test_parse_opf_cover_fallback_by_manifest_id() {
-        // ScribdMpubToEpubConverter shape: no `properties="cover-image"` and
-        // no `<meta name="cover">`, one manifest item with id `cover`. The
-        // XHTML cover *page* (`id="coverpage"`) is not the pick.
+        // With no `cover-image` and no `<meta name="cover">`, the image item
+        // `cover` is the pick over the page `coverpage`.
         let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title></metadata>
@@ -1812,9 +1781,8 @@ mod tests {
 
     #[test]
     fn test_parse_nav_page_list_basic() {
-        // A doc carrying BOTH a toc and a page-list nav: the page-list reader
-        // must pick out only the page-list entries (flat, in order), keep the
-        // `#page_N` fragments, and ignore the sibling toc.
+        // `parse_nav_page_list` takes the page-list nav's entries alone: flat, in
+        // order, `#page_N` fragments kept.
         let nav = r#"<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
   <body>
@@ -1840,7 +1808,7 @@ mod tests {
         assert_eq!(pages[2].title, "4");
         assert_eq!(pages[2].href, "cZ.xhtml#page_4", "fragment preserved");
 
-        // The toc reader on the same doc sees only the toc, never the pages.
+        // `parse_nav_toc` takes the toc nav's entries alone.
         let toc = parse_nav_toc(nav).unwrap();
         assert_eq!(toc.len(), 1);
         assert_eq!(toc[0].title, "Chapter 1");
@@ -1848,7 +1816,7 @@ mod tests {
 
     #[test]
     fn test_parse_nav_page_list_absent() {
-        // No page-list nav → empty (a book without physical page numbers).
+        // `parse_nav_page_list` of a doc with no page-list nav is empty.
         let nav = r#"<?xml version="1.0"?>
 <html xmlns:epub="http://www.idpf.org/2007/ops"><body>
   <nav epub:type="toc"><ol><li><a href="c1.xhtml">Ch 1</a></li></ol></nav>
@@ -1935,6 +1903,32 @@ mod tests {
   </navMap>
 </ncx>"#;
         assert!(parse_ncx_page_list(ncx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_ncx_content_closed_by_end_tag() {
+        let ncx = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>Chapter 1</text></navLabel>
+      <content src="c1.xhtml"></content>
+    </navPoint>
+  </navMap>
+  <pageList>
+    <pageTarget id="p1" type="normal" value="1">
+      <navLabel><text>1</text></navLabel>
+      <content src="c1.xhtml#page_1"></content>
+    </pageTarget>
+  </pageList>
+</ncx>"#;
+
+        let toc = parse_ncx(ncx).unwrap();
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].href, "c1.xhtml");
+        let pages = parse_ncx_page_list(ncx).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].href, "c1.xhtml#page_1");
     }
 
     #[test]
@@ -2027,7 +2021,7 @@ mod tests {
 
         let result = parse_nav_landmarks(nav).unwrap();
 
-        // Should only get the landmark, not the TOC entry
+        // `result` holds the landmark alone, no TOC entry.
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].landmark_type, LandmarkType::Cover);
     }
@@ -2049,7 +2043,7 @@ mod tests {
 
         let result = parse_nav_landmarks(nav).unwrap();
 
-        // All variants should map to Endnotes
+        // `footnotes`, `notes` and `rearnotes` each map to `LandmarkType::Endnotes`.
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].landmark_type, LandmarkType::Endnotes);
         assert_eq!(result[1].landmark_type, LandmarkType::Endnotes);
@@ -2073,7 +2067,7 @@ mod tests {
 
         let result = parse_nav_landmarks(nav).unwrap();
 
-        // Unknown types should be skipped
+        // `result` skips `custom-type`.
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].landmark_type, LandmarkType::Cover);
         assert_eq!(result[1].landmark_type, LandmarkType::BodyMatter);
@@ -2094,7 +2088,7 @@ mod tests {
 
         let result = parse_nav_landmarks(nav).unwrap();
 
-        // No landmarks nav, should return empty
+        // `result` of a doc with no landmarks nav is empty.
         assert!(result.is_empty());
     }
 
@@ -2253,8 +2247,7 @@ mod tests {
 
     #[test]
     fn test_parse_opf_author_file_as_per_creator() {
-        // One file-as per creator (EPUB-3 refinements), positional; the
-        // second creator's key must not clobber the first's.
+        // Each creator's `file-as` refinement fills its own `author_sorts` slot.
         let opf = r##"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -2284,8 +2277,7 @@ mod tests {
 
     #[test]
     fn test_parse_opf_author_file_as_first_only() {
-        // EPUB-2 attribute on the first creator only — a 1-entry vec, not a
-        // fabricated value for the second creator.
+        // `opf:file-as` on the first creator only yields a 1-entry vec.
         let opf = r##"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -2386,7 +2378,7 @@ mod tests {
 </package>"##;
 
         let result = parse_opf(opf).unwrap();
-        // Should only use the first title
+        // `metadata.title` takes the first `<dc:title>`.
         assert_eq!(result.metadata.title, "The First Title");
     }
 }

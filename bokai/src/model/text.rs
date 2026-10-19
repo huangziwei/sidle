@@ -11,23 +11,38 @@ pub struct SourceText {
     text_of: HashMap<i64, String>,
     /// Every element the scale places, in position order — text-bearing or not.
     order: Vec<i64>,
-    /// Element → its index in `order`.
-    rank: HashMap<i64, usize>,
+    /// `(element, first character, end)` of each run, in axis order.
+    runs: Vec<(i64, usize, Option<usize>)>,
+    /// Element → `(first character, index into runs)` of each of its runs, ascending.
+    runs_of: HashMap<i64, Vec<(usize, usize)>>,
 }
 
 impl SourceText {
-    /// Index the text against a position scale. Elements the scale does not
-    /// place are kept for direct lookup but stay out of the ordered walk —
-    /// nothing can be said about where they sit relative to the rest.
+    /// Index the text against a position scale; `order` and `runs` leave out an
+    /// element the scale does not place, which [`Self::text_of`] keeps.
     pub fn new(text_of: HashMap<i64, String>, positions: &PositionMap) -> Self {
         let mut order: Vec<i64> = positions.positions().keys().copied().collect();
-        // Keyed `(position, element)`: a HashMap's iteration order is not
+        // Keyed `(position, element)`: a tie orders by element id.
         order.sort_unstable_by_key(|&e| (positions.position(e, 0).unwrap_or(0), e));
-        let rank = order.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+
+        let mut runs: Vec<(i64, usize, Option<usize>)> = Vec::new();
+        let mut runs_of: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+        for (index, (_, element, offset)) in positions.anchor_axis().into_iter().enumerate() {
+            let from = offset.max(0) as usize;
+            runs.push((element, from, None));
+            runs_of.entry(element).or_default().push((from, index));
+        }
+        for starts in runs_of.values_mut() {
+            starts.sort_unstable();
+            for pair in starts.windows(2) {
+                runs[pair[0].1].2 = Some(pair[1].0);
+            }
+        }
         Self {
             text_of,
             order,
-            rank,
+            runs,
+            runs_of,
         }
     }
 
@@ -36,8 +51,7 @@ impl SourceText {
         self.text_of.get(&element).map(String::as_str)
     }
 
-    /// Every placed element in reading order. Callers wanting only the ones
-    /// with words filter on [`Self::text_of`].
+    /// Every placed element in reading order, text-bearing or not.
     pub fn reading_order(&self) -> &[i64] {
         &self.order
     }
@@ -47,14 +61,14 @@ impl SourceText {
         self.order.len()
     }
 
-    /// Whether no element carries text — an image-only book, or one whose
-    /// source text was unavailable. The ordered walk may still be populated:
-    /// positions exist independently of text.
+    /// Whether no element carries text; `reading_order` may hold elements all the same.
     pub fn is_empty(&self) -> bool {
         self.text_of.values().all(|t| t.is_empty())
     }
 
-    /// The text a range spans: a reading-order walk from `start` to `end`
+    /// The text from character `off_start` of `start` to character `off_end` of
+    /// `end`, in axis order. `None` where either element is unplaced or the end
+    /// precedes the start.
     pub fn extract(
         &self,
         start: i64,
@@ -62,26 +76,32 @@ impl SourceText {
         end: i64,
         off_end: usize,
     ) -> Option<String> {
-        let &i = self.rank.get(&start)?;
-        let &j = self.rank.get(&end)?;
-        if j < i {
+        let first = self.run_holding(start, off_start)?;
+        let last = self.run_holding(end, off_end)?;
+        if last < first || (last == first && off_end < off_start) {
             return None;
         }
         let mut out = String::new();
-        for k in i..=j {
-            let element = self.order[k];
+        for (index, &(element, from, to)) in self.runs.iter().enumerate().take(last + 1).skip(first)
+        {
             let chars: Vec<char> = self
                 .text_of
                 .get(&element)
                 .map(|t| t.chars().collect())
                 .unwrap_or_default();
-            let a = if k == i { off_start } else { 0 };
-            let b = if k == j { off_end } else { chars.len() };
-            let a = a.min(chars.len());
-            let b = b.min(chars.len()).max(a);
+            let to = to.unwrap_or(chars.len()).min(chars.len());
+            let a = if index == first { off_start } else { from }.min(to);
+            let b = if index == last { off_end } else { to }.min(to).max(a);
             out.extend(&chars[a..b]);
         }
         Some(out)
+    }
+
+    /// Index into `runs` of the run holding character `offset` of `element`.
+    fn run_holding(&self, element: i64, offset: usize) -> Option<usize> {
+        let starts = self.runs_of.get(&element)?;
+        let past = starts.partition_point(|&(from, _)| from <= offset);
+        starts.get(past.checked_sub(1)?).map(|&(_, index)| index)
     }
 }
 
@@ -89,8 +109,7 @@ impl SourceText {
 mod tests {
     use super::*;
 
-    /// Three elements whose ids run *against* reading order, so anything that
-    /// leans on id ordering instead of the position scale shows up.
+    /// Three elements whose ids run against reading order.
     fn sample() -> SourceText {
         let positions =
             PositionMap::new(HashMap::from([(30, 0), (20, 10), (10, 20)]), vec![0], None);
@@ -124,8 +143,7 @@ mod tests {
         assert_eq!(t.extract(30, 0, 10, 5).as_deref(), Some("alphabetagamma"));
     }
 
-    /// A Kindle anchors a highlight at whichever element holds the boundary, often a
-    /// structural one with no text; the range must still yield the words it spans.
+    /// `extract` from a placed element with no text yields the text the range reaches.
     #[test]
     fn a_range_starting_on_a_textless_element_still_yields_its_text() {
         let positions = PositionMap::new(
@@ -154,8 +172,7 @@ mod tests {
         );
     }
 
-    /// Equal positions must not leave reading order at the mercy of HashMap
-    /// iteration — a range's text would change between runs.
+    /// `reading_order` orders elements tied on position by element id.
     #[test]
     fn ties_on_position_order_by_element_id() {
         let positions = PositionMap::new(HashMap::from([(7, 5), (3, 5), (9, 5)]), vec![0], None);
@@ -171,10 +188,34 @@ mod tests {
         }
     }
 
+    /// Element 9 holds `abcdefgh`, and element 12 (`XY`) sits on the axis
+    /// between its `d` and `e`.
+    fn interrupted() -> SourceText {
+        let positions = PositionMap::new(HashMap::from([(9, 50), (12, 54)]), vec![0], None)
+            .with_anchors(HashMap::from([(9, vec![(4, 56)])]));
+        let text_of = HashMap::from([(9, "abcdefgh".to_string()), (12, "XY".to_string())]);
+        SourceText::new(text_of, &positions)
+    }
+
+    #[test]
+    fn a_range_takes_an_interrupting_element_in_axis_order() {
+        let t = interrupted();
+        assert_eq!(t.extract(9, 2, 9, 6).as_deref(), Some("cdXYef"));
+        assert_eq!(t.extract(9, 2, 12, 1).as_deref(), Some("cdX"));
+        assert_eq!(t.extract(12, 1, 9, 6).as_deref(), Some("Yef"));
+        assert_eq!(t.extract(9, 1, 9, 3).as_deref(), Some("bc"));
+        assert_eq!(t.extract(9, 6, 12, 0), None, "12 precedes the second run");
+    }
+
     #[test]
     fn a_backwards_range_is_rejected_and_bad_offsets_clamp() {
         let t = sample();
         assert_eq!(t.extract(10, 0, 30, 1), None, "end precedes start");
+        assert_eq!(
+            t.extract(30, 4, 30, 2),
+            None,
+            "end precedes start in one element"
+        );
         assert_eq!(
             t.extract(30, 99, 30, 999).as_deref(),
             Some(""),
