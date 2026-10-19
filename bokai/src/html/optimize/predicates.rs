@@ -2,29 +2,6 @@
 
 use crate::model::{Chapter, NodeId, Role};
 
-/// Check if a role is a structural container where inter-element whitespace is irrelevant.
-///
-/// These are containers that should only contain other block elements, not raw text.
-pub fn is_structural_container(role: Option<Role>) -> bool {
-    matches!(
-        role,
-        Some(
-            Role::Root
-                | Role::Container  // Now safe - <p> is Role::Paragraph
-                | Role::Figure
-                | Role::Sidebar
-                | Role::Footnote
-                | Role::Table
-                | Role::TableHead
-                | Role::TableBody
-                | Role::TableRow
-                | Role::OrderedList
-                | Role::UnorderedList
-                | Role::DefinitionList
-        )
-    )
-}
-
 /// Check if a role is a block container that can have mixed content.
 pub fn is_block_container(role: Option<Role>) -> bool {
     matches!(

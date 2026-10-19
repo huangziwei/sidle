@@ -1,13 +1,12 @@
-//! Pass 2: Span Merge (Adjacent Text Coalescing)
+//! Pass 1: Span Merge (Adjacent Text Coalescing)
 
 use crate::model::{Chapter, NodeId, Role};
 
 use super::pass::walk_bottom_up;
 use super::predicates::has_semantic_attrs;
 
-/// Merge adjacent inline/text nodes with identical styles.
-///
-/// This pass walks the tree using the first_child/next_sibling links.
+/// Merge adjacent inline/text nodes with identical styles, along the
+/// `first_child` / `next_sibling` links.
 pub fn merge_adjacent_spans(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         merge_siblings(chapter, parent_id);
@@ -35,7 +34,7 @@ fn merge_siblings(chapter: &mut Chapter, parent_id: NodeId) {
                 current_node.next_sibling = new_next;
             }
 
-            // Don't advance cursor - the new next might also be mergeable
+            // The cursor stays on `current` for the new next.
             continue;
         }
 

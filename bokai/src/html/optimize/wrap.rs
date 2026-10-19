@@ -1,13 +1,11 @@
-//! Pass 4: Wrap Mixed Content (Inline/Block Normalization)
+//! Pass 3: Wrap Mixed Content (Inline/Block Normalization)
 
 use crate::model::{Chapter, Node, NodeId, Role};
 
 use super::pass::walk_bottom_up;
 use super::predicates::{is_block_container, is_inline_role};
 
-/// Wrap consecutive inline children in a Container when they're siblings to block elements.
-///
-/// HTML allows mixed inline and block content in some containers:
+/// Wrap consecutive inline children in a Container where block siblings share their parent.
 pub fn wrap_mixed_content(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         wrap_mixed_children(chapter, parent_id);
@@ -53,7 +51,7 @@ fn analyze_children(chapter: &Chapter, parent_id: NodeId) -> (bool, bool) {
 
 /// Find and wrap consecutive runs of inline children.
 fn wrap_inline_runs(chapter: &mut Chapter, parent_id: NodeId) {
-    // Collect child info to avoid borrow issues
+    // Child roles, collected ahead of the relinking
     let mut children_info: Vec<(NodeId, bool)> = Vec::new();
     let mut child_opt = chapter.node(parent_id).and_then(|n| n.first_child);
     while let Some(child_id) = child_opt {
@@ -84,7 +82,7 @@ fn wrap_inline_runs(chapter: &mut Chapter, parent_id: NodeId) {
         runs.push((start, children_info.len() - 1));
     }
 
-    // Wrap runs in reverse order to preserve indices
+    // Runs are wrapped last first
     for (start_idx, end_idx) in runs.into_iter().rev() {
         wrap_run(chapter, parent_id, &children_info, start_idx, end_idx);
     }
@@ -202,8 +200,7 @@ mod tests {
         );
     }
 
-    /// A paragraph of `Ruby`, text, `Ruby`, text holds no block child, so
-    /// `wrap_mixed_content` leaves its order alone.
+    /// `wrap_mixed_content` leaves a paragraph of `Ruby`, text, `Ruby`, text in order.
     #[test]
     fn ruby_beside_bare_text_is_not_mixed_content() {
         let mut chapter = Chapter::new();

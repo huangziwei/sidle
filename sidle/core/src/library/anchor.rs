@@ -26,22 +26,20 @@ impl BookIndex {
         Some(Self { text, positions })
     }
 
-    /// Index from raw maps, for callers that already have them — unit tests,
-    /// and any future reader that captures text during its own walk.
+    /// Index from raw maps.
     pub fn from_parts(text_of: HashMap<i64, String>, pid_of: HashMap<i64, i64>) -> Self {
         let positions = PositionMap::new(pid_of, Vec::new(), None);
         let text = SourceText::new(text_of, &positions);
         Self { text, positions }
     }
 
-    /// An index over nothing — every lookup misses. Annotations still import
-    /// with their anchors intact; only the text is unavailable.
+    /// An index over nothing: every lookup misses.
     pub fn empty() -> Self {
         Self::from_parts(HashMap::new(), HashMap::new())
     }
 
-    /// Whether no element carries text — an absent or unreadable KFX, or an
-    /// image-only book. Positions may still resolve; check [`Self::position`].
+    /// Whether no element carries text: an absent or unreadable KFX, or an
+    /// image-only book. [`Self::position`] answers on its own.
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -56,6 +54,12 @@ impl BookIndex {
         self.positions.position(eid, offset)
     }
 
+    /// The Location `(eid, offset)` falls in.
+    pub fn location(&self, eid: i64, offset: i64) -> Option<i64> {
+        self.position(eid, offset)
+            .map(|p| self.positions.location_for(p))
+    }
+
     /// Text spanned by a half-open `[start, end)` range, in character indices.
     pub fn extract(
         &self,
@@ -67,13 +71,13 @@ impl BookIndex {
         self.text.extract(eid_start, off_start, eid_end, off_end)
     }
 
-    /// Every occurrence of `needle`, in reading order. v1 = strict char match,
-    /// ASCII case-insensitive only — no NFKC or kata→hira folding (`「ＡＢＣ」`
-    /// won't match `abc`; カタカナ won't match かたかな). v1 is also intra-element:
+    /// Element ids in reading order.
     pub fn reading_order(&self) -> &[i64] {
         self.text.reading_order()
     }
 
+    /// Every occurrence of `needle` inside one element, in reading order: an exact
+    /// match, ASCII case-insensitive.
     pub fn search(&self, needle: &str) -> Vec<SearchMatch> {
         if needle.is_empty() {
             return Vec::new();
@@ -95,8 +99,7 @@ impl BookIndex {
             }
             let lower_chars: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
             let pid = self.positions.position(eid, 0).unwrap_or(0);
-            // Non-overlapping scan: stepping by `nlen` after a hit avoids
-            // double-reporting `aaa` inside `aaaaa`.
+            // Non-overlapping scan: a hit advances the scan by `nlen`.
             let mut i = 0;
             while i + nlen <= lower_chars.len() {
                 if lower_chars[i..i + nlen] == needle_lower[..] {
@@ -142,8 +145,7 @@ pub struct SearchMatch {
 }
 
 /// An annotation resolved against its book's content: the covered text plus the
-/// anchor/position fields the DB stores. Book identity, the dedup hash, and the
-/// import timestamp are added by the ingest layer.
+/// anchor/position fields the DB stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub kind: Kind,
@@ -155,19 +157,18 @@ pub struct Resolved {
     /// the same coordinate system as the extracted text.
     pub loc_start: Option<i64>,
     pub loc_end: Option<i64>,
-    /// The device-reported linear position of the start anchor (Whispersync
-    /// "Location"); authoritative for ordering.
+    /// The start anchor's linear position as the annotation record states it, the
+    /// ordering key.
     pub linear_pos: Option<i64>,
     /// The text the annotation covers. Empty when a highlight/note couldn't be
     /// resolved (its eid is absent from this KFX — a yjr/book mismatch); for a
     /// bookmark it's the containing-element preview.
     pub text: String,
     pub note_body: Option<String>,
-    /// Highlight colour as the device named it (`yellow`/`blue`/`pink`/
-    /// `orange`), or `None` from a monochrome Kindle — which writes no colour
-    /// rather than meaning yellow.
+    /// Highlight colour as the record names it (`yellow`/`blue`/`pink`/`orange`);
+    /// `None` where it names none.
     pub color: Option<String>,
-    /// When the device says the annotation was made and last changed, epoch
+    /// When the annotation was made and last changed, epoch milliseconds.
     pub created_ms: Option<i64>,
     pub modified_ms: Option<i64>,
 }
@@ -196,8 +197,8 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
     let linear_pos = start.map(|h| h.position);
 
     let text = match &ann.kind {
-        // Span-bearing kinds: walk the range. The device end offset is
-        // inclusive, so pass `off_end + 1` to the half-open extractor.
+        // Span-bearing kinds: the inclusive `off_end` becomes `off_end + 1` for
+        // the half-open extractor.
         Kind::Highlight | Kind::Note | Kind::Other(_) => match (start, end) {
             (Some(s), Some(e)) if (s.eid, s.offset) == (e.eid, e.offset) => String::new(),
             (Some(s), Some(e)) => idx
@@ -210,9 +211,7 @@ pub fn resolve(ann: &Annotation, idx: &BookIndex) -> Resolved {
             .and_then(|h| idx.text_of(h.eid))
             .map(str::to_string)
             .unwrap_or_default(),
-        // Handwritten ink covers no text — it's routed to the ink path and never
-        // reaches the text `annotations` table (import_yjr filters it out before
-        // this), but the arm keeps the match exhaustive.
+        // Handwritten ink covers no text; `import_yjr` routes it to the ink path.
         Kind::Handwritten(_) => String::new(),
     };
 
@@ -259,8 +258,8 @@ mod tests {
     #[test]
     fn resolves_highlight_range_with_inclusive_end() {
         let idx = index();
-        // Highlight from (30, 3) to (10, 2): off_end is inclusive, so element 10
-        // contributes chars [0, 3) = "GGG" (2 inclusive → 3 exclusive).
+        // Highlight from (30, 3) to (10, 2): the inclusive off_end 2 takes element
+        // 10's [0, 3) = "GGG".
         let ann = Annotation {
             kind: Kind::Highlight,
             anchors: vec![handle(30, 3, 503), handle(10, 2, 512)],
@@ -283,9 +282,8 @@ mod tests {
         assert!(r.has_text());
     }
 
-    /// A note a Kindle attaches to an existing highlight is a zero-length point
-    /// on the highlight's end anchor. It quotes nothing — the words are the
-    /// highlight's, and this record only carries the body.
+    /// A note on an existing highlight is a zero-length point on the highlight's
+    /// end anchor and quotes nothing.
     #[test]
     fn a_point_note_quotes_no_text() {
         let idx = index();
@@ -359,12 +357,12 @@ mod tests {
         let r = resolve(&ann, &idx);
         assert_eq!(r.text, "");
         assert!(!r.has_text());
-        // Anchor fields still carry the (unresolved) handle data.
+        // Anchor fields carry the unresolved handle data.
         assert_eq!(r.eid_start, Some(999));
         assert_eq!(r.loc_start, None); // no pid for an unknown eid
     }
 
-    /// An image-only fixed-layout book carries element positions and no base
+    /// An index with positions and no base text places anchors it cannot quote.
     #[test]
     fn positions_survive_a_book_with_no_base_text() {
         let idx =

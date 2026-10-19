@@ -18,16 +18,15 @@ use crate::html::element_ref::{BokoSelectors, ElementRef};
 struct MatchedRule<'a> {
     declaration: &'a Declaration,
     origin: Origin,
-    /// From the element's `style=""` attribute rather than a selector rule.
+    /// From the element's `style=""` attribute.
     from_style_attr: bool,
     specificity: Specificity,
     order: usize,
     important: bool,
 }
 
-/// Cascade precedence bucket (css-cascade §6.1), lowest first. Declarations
-/// are applied in ascending order so later writes win; within a bucket the
-/// tie-breakers are specificity, then source order.
+/// Cascade precedence bucket, lowest first; within one bucket specificity and
+/// then source order decide.
 fn cascade_bucket(rule: &MatchedRule) -> u8 {
     match (rule.important, rule.origin, rule.from_style_attr) {
         (false, Origin::UserAgent, _) => 0,
@@ -39,9 +38,7 @@ fn cascade_bucket(rule: &MatchedRule) -> u8 {
     }
 }
 
-/// Create a new style with only CSS-inherited properties from parent.
-///
-/// CSS inherited properties include:
+/// A style holding only the CSS-inherited properties of `parent`.
 fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
         // Font properties (inherited)
@@ -60,13 +57,14 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         word_spacing: parent.word_spacing,
         text_transform: parent.text_transform,
         hyphens: parent.hyphens,
+        white_space: parent.white_space,
         // Text decoration (inherited in some contexts)
         text_decoration_underline: parent.text_decoration_underline,
         text_decoration_line_through: parent.text_decoration_line_through,
         underline_style: parent.underline_style,
         underline_color: parent.underline_color,
         overline: parent.overline,
-        // List properties (inherited, but only apply to display:list-item)
+        // List properties, which apply to `display: list-item`
         list_style_type: parent.list_style_type,
         list_style_position: parent.list_style_position,
         // Other inherited properties
@@ -76,18 +74,23 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         text_orientation: parent.text_orientation,
         line_break: parent.line_break,
         text_combine_upright: parent.text_combine_upright,
-        // Text emphasis marks (inherited per CSS spec)
+        // Text emphasis marks
         text_emphasis_style: parent.text_emphasis_style,
         text_emphasis_color: parent.text_emphasis_color,
         text_emphasis_position: parent.text_emphasis_position,
+        // Line breaking, pagination and table properties
+        word_break: parent.word_break,
+        overflow_wrap: parent.overflow_wrap,
+        orphans: parent.orphans,
+        widows: parent.widows,
+        border_collapse: parent.border_collapse,
+        border_spacing: parent.border_spacing,
         // Non-inherited properties use defaults
         ..ComputedStyle::default()
     }
 }
 
-/// A reference to a rule as `(stylesheet index, rule index)`. Ordering by this
-/// tuple reproduces CSS source order, which the cascade uses as its final
-/// tiebreak — so candidate rules must be visited in this order.
+/// A rule as `(stylesheet index, rule index)`; the tuple's order is CSS source order.
 type RuleRef = (u32, u32);
 
 /// The bucket a selector is filed under: the single most-selective *positive*
@@ -132,9 +135,8 @@ pub struct CascadeScratch {
     candidates: Vec<RuleRef>,
 }
 
-/// A selector-bucketed view of a set of stylesheets, so that computing styles
-/// for an element only tests rules whose rightmost compound could match it,
-/// instead of every rule of every stylesheet (O(elements × rules)).
+/// A selector-bucketed view of a set of stylesheets: an element tests only the
+/// rules whose rightmost compound can match it.
 pub struct CascadeIndex<'a> {
     stylesheets: &'a [(Stylesheet, Origin)],
     by_id: HashMap<String, Vec<RuleRef>>,
@@ -156,8 +158,7 @@ impl<'a> CascadeIndex<'a> {
         for (sheet_idx, (sheet, _origin)) in stylesheets.iter().enumerate() {
             for (rule_idx, rule) in sheet.rules.iter().enumerate() {
                 let rref = (sheet_idx as u32, rule_idx as u32);
-                // A rule matches if any of its selectors match, so file it under
-                // each selector's bucket.
+                // A rule is filed under the bucket of each of its selectors.
                 for selector in &rule.selectors {
                     match selector_bucket_key(selector) {
                         BucketKey::Id(k) => index.by_id.entry(k).or_default().push(rref),
@@ -171,14 +172,12 @@ impl<'a> CascadeIndex<'a> {
         index
     }
 
-    /// Fill `out` with the candidate rules for an element, in source order and
-    /// de-duplicated. Any rule not returned provably cannot match: matching a
-    /// bucketed selector requires the element to carry that id/class/tag.
+    /// Fill `out` with the rules that can match `elem`, in source order and
+    /// de-duplicated.
     fn candidate_rules(&self, elem: ElementRef<'_>, out: &mut Vec<RuleRef>) {
         out.clear();
         out.extend_from_slice(&self.universal);
-        // Look up by lowercased tag; the full matcher decides case. Lowercasing
-        // only widens the candidate set, so it can never drop a real match.
+        // Candidates by lowercased tag; the full matcher decides case.
         if let Some(name) = elem.dom.element_name(elem.id) {
             let name = name.as_ref();
             let bucket = if name.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -231,15 +230,14 @@ pub fn compute_styles_indexed(
     _style_pool: &mut StylePool,
     scratch: &mut CascadeScratch,
 ) -> ComputedStyle {
-    // Pre-allocate with typical capacity (most elements match 5-20 declarations)
+    // Capacity for a typical element's 5–20 matched declarations
     let mut matched: Vec<MatchedRule> = Vec::with_capacity(16);
     let mut order = 0;
 
     let CascadeScratch { caches, candidates } = scratch;
     index.candidate_rules(elem, candidates);
 
-    // Candidate rules are already in source order, so `order` reproduces the
-    // exhaustive-scan cascade exactly.
+    // `candidates` is in source order, the order `order` records.
     for &(sheet_idx, rule_idx) in candidates.iter() {
         let (stylesheet, origin) = &index.stylesheets[sheet_idx as usize];
         let rule = &stylesheet.rules[rule_idx as usize];
@@ -294,7 +292,6 @@ pub fn compute_styles_indexed(
 
     // Sort by cascade order (skip if 0-1 matches)
     if matched.len() > 1 {
-        // Use unstable sort - faster and order of equal elements doesn't matter
         matched.sort_unstable_by(|a, b| {
             // Precedence bucket (importance/origin/style-attr)
             let bucket_cmp = cascade_bucket(a).cmp(&cascade_bucket(b));
@@ -320,8 +317,8 @@ pub fn compute_styles_indexed(
         ComputedStyle::default()
     };
 
-    // Relative font-size declarations resolve against the parent's computed
-    // size (not against each other), so capture it before applying.
+    // Relative font sizes resolve against `parent_font_px`, taken ahead of the
+    // declarations.
     let parent_font_px = parent_style.map_or(ROOT_FONT_SIZE_PX, computed_font_px);
 
     // Apply matched declarations in cascade order
@@ -354,7 +351,7 @@ fn resolve_font_size(declared: Length, parent_px: f32) -> Length {
     }
 }
 
-/// Check if a rule matches an element (with shared caches for better performance).
+/// Check if a rule matches an element, through shared caches.
 fn rule_matches_with_caches(
     elem: ElementRef<'_>,
     rule: &CssRule,
@@ -404,7 +401,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::Hyphens(h) => style.hyphens = *h,
         Declaration::WhiteSpace(ws) => style.white_space = *ws,
         Declaration::VerticalAlign(v) => style.vertical_align = *v,
-        // CSS-wide keywords. For inherited properties the cascade has already
+        // CSS-wide keywords leave `style` as inheritance set it.
         Declaration::UniversalKeyword { .. } => {}
         Declaration::WritingMode(w) => style.writing_mode = *w,
         Declaration::TextOrientation(o) => style.text_orientation = *o,

@@ -1,4 +1,4 @@
-//! Move a book's annotations onto a rebuilt copy of that book.
+//! Move a book's annotations and reading positions onto a rebuilt copy of that book.
 
 use rusqlite::{Connection, params};
 
@@ -94,15 +94,155 @@ pub fn book(conn: &Connection, book_id: i64, index: &BookIndex) -> rusqlite::Res
     Ok(out)
 }
 
+/// One `reading_position` row, as far as re-anchoring cares.
+struct SavedPosition {
+    source: String,
+    device_serial: String,
+    eid: i64,
+    offset: i64,
+    linear_pos: Option<i64>,
+}
+
+/// Move `book_id`'s saved reading positions from `before`, the build they were
+/// taken on, onto its rebuild `after` by the text each opens on. A position whose
+/// text `after` holds nowhere or more than once stays as it was.
+pub fn reading_positions(
+    conn: &Connection,
+    book_id: i64,
+    before: &BookIndex,
+    after: &BookIndex,
+) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        r#"SELECT source, device_serial, eid, "offset", linear_pos FROM reading_position
+            WHERE book_id = ?1 AND eid IS NOT NULL"#,
+    )?;
+    let rows: Vec<SavedPosition> = stmt
+        .query_map(params![book_id], |r| {
+            Ok(SavedPosition {
+                source: r.get(0)?,
+                device_serial: r.get(1)?,
+                eid: r.get(2)?,
+                offset: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                linear_pos: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut moved = 0;
+    for row in rows {
+        let Some(span) = find_span(after, &text_from(before, row.eid, row.offset)) else {
+            continue;
+        };
+        let (eid, found) = span.start;
+        let lead = leading_whitespace(before, row.eid, row.offset);
+        let offset = if whitespace_before(after, eid, found, lead) {
+            found - lead
+        } else {
+            found
+        };
+        let linear_pos = rescaled(
+            row.linear_pos,
+            before,
+            (row.eid, row.offset),
+            after,
+            (eid, offset),
+        );
+        if (eid, offset, linear_pos) == (row.eid, row.offset, row.linear_pos) {
+            continue;
+        }
+        conn.execute(
+            r#"UPDATE reading_position SET eid = ?4, "offset" = ?5, linear_pos = ?6
+                WHERE book_id = ?1 AND source = ?2 AND device_serial = ?3"#,
+            params![
+                book_id,
+                row.source,
+                row.device_serial,
+                eid,
+                offset,
+                linear_pos
+            ],
+        )?;
+        moved += 1;
+    }
+    Ok(moved)
+}
+
+/// `stored` for a handle moved from `from` to `to`, on the scale it was written
+/// on: a Location or a raw position. A value on neither, a page index, is kept.
+fn rescaled(
+    stored: Option<i64>,
+    before: &BookIndex,
+    from: (i64, i64),
+    after: &BookIndex,
+    to: (i64, i64),
+) -> Option<i64> {
+    let stored = stored?;
+    let moved = if before.location(from.0, from.1) == Some(stored) {
+        after.location(to.0, to.1)
+    } else if before.position(from.0, from.1) == Some(stored) {
+        after.position(to.0, to.1)
+    } else {
+        None
+    };
+    Some(moved.unwrap_or(stored))
+}
+
+/// How many whitespace characters open element `eid` from `offset`, ahead of its
+/// next significant one; 0 when none follows.
+fn leading_whitespace(index: &BookIndex, eid: i64, offset: i64) -> i64 {
+    let skip = usize::try_from(offset).unwrap_or(0);
+    index
+        .text_of(eid)
+        .unwrap_or("")
+        .chars()
+        .skip(skip)
+        .position(|c| !c.is_whitespace())
+        .map_or(0, |lead| lead as i64)
+}
+
+/// Whether the `count` characters ahead of `(eid, offset)` are all whitespace.
+fn whitespace_before(index: &BookIndex, eid: i64, offset: i64, count: i64) -> bool {
+    let (Ok(end), Ok(count)) = (usize::try_from(offset), usize::try_from(count)) else {
+        return false;
+    };
+    count > 0
+        && end >= count
+        && index
+            .text_of(eid)
+            .unwrap_or("")
+            .chars()
+            .skip(end - count)
+            .take(count)
+            .all(char::is_whitespace)
+}
+
+/// The first [`HEAD_CHARS`] significant characters of `index` from `(eid, offset)` on.
+fn text_from(index: &BookIndex, eid: i64, offset: i64) -> String {
+    let order = index.reading_order();
+    let Some(at) = order.iter().position(|&e| e == eid) else {
+        return String::new();
+    };
+    let skip = usize::try_from(offset).unwrap_or(0);
+    order[at..]
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &e)| {
+            let text = index.text_of(e).unwrap_or("");
+            text.chars().skip(if i == 0 { skip } else { 0 })
+        })
+        .filter(|c| !c.is_whitespace())
+        .take(HEAD_CHARS)
+        .collect()
+}
+
 /// Put `loc_start`, `loc_end` and `linear_pos` back on `index`'s scale,
-/// reporting whether that changed anything. A rebuild renumbers the position
-/// map under handles that did not move.
+/// reporting whether that changed anything.
 fn refresh_positions(conn: &Connection, row: &Stored, index: &BookIndex) -> rusqlite::Result<bool> {
     let at = |eid: Option<i64>, off: Option<i64>| {
         eid.and_then(|eid| index.position(eid, off.unwrap_or(0)))
     };
-    // An element the map does not place leaves the stored positions alone: a
-    // stale coordinate is worth more than a null one.
+    // An element the map does not place leaves the stored positions alone.
     let Some(loc_start) = at(row.eid_start, row.off_start) else {
         return Ok(false);
     };
@@ -117,9 +257,8 @@ fn refresh_positions(conn: &Connection, row: &Stored, index: &BookIndex) -> rusq
     Ok(true)
 }
 
-/// How much of an annotation's text has to line up before a place is a
-/// candidate: long enough for ordinary prose to be unique, short enough for a
-/// fixed window.
+/// Significant characters of an annotation's text that have to line up for a
+/// place to be a candidate.
 const HEAD_CHARS: usize = 48;
 
 /// How much of an annotation's head is compared against the element its handle
@@ -127,7 +266,7 @@ const HEAD_CHARS: usize = 48;
 const HEAD_MATCH: usize = 16;
 
 /// The handles an annotation's text sits at: `(eid, offset)` for each end, the
-/// end inclusive as the device writes it.
+/// end inclusive.
 struct Span {
     start: (i64, i64),
     end: (i64, i64),
@@ -179,8 +318,8 @@ fn find_span(index: &BookIndex, text: &str) -> Option<Span> {
     }
     let (_, start_eid, start_off) = found?;
 
-    // Walk the stream again for the annotation's last character: `window` only
-    // ever held the head.
+    // A second walk finds the annotation's last character; `window` holds only
+    // the head.
     let mut seen = 0usize;
     let mut end = None;
     for (_, eid, off) in
@@ -266,9 +405,76 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_position_follows_its_text_into_the_rebuild() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            r#"CREATE TABLE reading_position (
+                   book_id INTEGER NOT NULL, eid INTEGER, "offset" INTEGER,
+                   linear_pos INTEGER, source TEXT NOT NULL,
+                   device_serial TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+                   PRIMARY KEY (book_id, source, device_serial));
+               INSERT INTO reading_position VALUES
+                   (7, 11, 0, 23, 'sidle', '', '2026-01-01T00:00:00Z'),
+                   (7, 11, 0, 5, 'device', 'G001', '2026-01-01T00:00:00Z'),
+                   (7, 10, 0, 0, 'device', 'G000', '2026-01-01T00:00:00Z');"#,
+        )
+        .expect("schema");
+        // Element 11 opens on an ideographic space, which matching skips; the
+        // moved handle keeps pointing at it.
+        let before = index(&[
+            (10, "chapter one ends here. "),
+            (
+                11,
+                "\u{3000}Afterword. I first heard the story in a lecture hall",
+            ),
+        ]);
+        let after = index(&[
+            (10, "chapter one ends here. "),
+            (12, "a page the rebuild added"),
+            (
+                13,
+                "\u{3000}Afterword. I first heard the story in a lecture hall",
+            ),
+        ]);
+        assert_eq!(
+            reading_positions(&conn, 7, &before, &after).expect("move"),
+            2
+        );
+
+        let got: Vec<(String, i64, i64, i64, String)> = conn
+            .prepare(
+                r#"SELECT device_serial, eid, "offset", linear_pos, updated_at
+                     FROM reading_position ORDER BY device_serial"#,
+            )
+            .expect("select")
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read");
+        let stamp = "2026-01-01T00:00:00Z".to_string();
+        // `linear_pos` keeps its scale: 23 was element 11's position, 5 was on
+        // neither. G000's head runs from element 10 into 11, which `after` splits.
+        assert_eq!(
+            got,
+            [
+                (
+                    String::new(),
+                    13,
+                    0,
+                    after.position(13, 0).unwrap(),
+                    stamp.clone()
+                ),
+                ("G000".to_string(), 10, 0, 0, stamp.clone()),
+                ("G001".to_string(), 13, 0, 5, stamp),
+            ]
+        );
+    }
+
+    #[test]
     fn text_in_two_places_is_left_alone() {
-        // Moving a highlight to the wrong occurrence reads as correct forever
-        // after; leaving it stale is visible.
+        // Text found twice moves nowhere.
         let idx = index(&[(10, "he said. "), (11, "he said. ")]);
         assert!(find_span(&idx, "he said").is_none());
     }
@@ -290,8 +496,7 @@ mod tests {
         assert!(still_lands_on_its_text(&row, &idx));
     }
 
-    /// A rebuild renumbers the position map under handles that did not move. A
-    /// row counted `intact` owes its cached positions.
+    /// An `intact` row gets its cached positions put back on the rebuilt scale.
     #[test]
     fn an_intact_handle_gets_its_positions_put_back_on_the_scale() {
         let conn = Connection::open_in_memory().expect("open");

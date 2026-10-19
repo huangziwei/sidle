@@ -2,7 +2,7 @@
 
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 use super::element_ref::ElementRef;
-use super::{is_html_whitespace, is_html_whitespace_only};
+use super::is_html_whitespace;
 use crate::model::role_map::element_to_role;
 use crate::model::{Chapter, Node, NodeId, Role};
 use crate::style::{
@@ -10,29 +10,46 @@ use crate::style::{
     compute_styles_indexed,
 };
 
-/// User agent stylesheet (browser defaults).
+/// User agent stylesheet.
 const UA_CSS: &str = include_str!("data/styles.css");
 
 pub fn user_agent_stylesheet() -> Stylesheet {
-    // The UA stylesheet is a constant, but `compile_html`/`compile_dom` runs
-    // once per chapter, so re-parsing UA_CSS every time is pure redundant work.
+    // `UA_CSS` is parsed once per thread and cloned for each call.
     thread_local! {
         static UA_STYLESHEET: Stylesheet = Stylesheet::parse(UA_CSS);
     }
     UA_STYLESHEET.with(|ua| ua.clone())
 }
 
+/// U+FFFC, the character an image or an inline-block counts as on its line.
+const OBJECT: char = '\u{FFFC}';
+
+/// The collapsible `' '` ending `node`'s text, kept or trimmed by what follows it.
+#[derive(Clone, Copy)]
+struct PendingSpace {
+    node: NodeId,
+    segment_break: bool,
+}
+
+/// White-space collapsing state across one inline formatting context.
+#[derive(Clone, Copy, Default)]
+struct InlineRun {
+    /// The last character laid on the current line; `None` at a line start.
+    last: Option<char>,
+    pending: Option<PendingSpace>,
+}
+
 /// Context for the transform operation.
 struct TransformContext<'a> {
     dom: &'a ArenaDom,
-    /// Rules bucketed by their rightmost selector, built once for the whole
-    /// chapter so each element only tests candidates that could match it.
+    /// Rules bucketed by their rightmost selector, built once per chapter.
     cascade_index: CascadeIndex<'a>,
     /// Reusable candidate list + selector caches, shared across every element.
     cascade_scratch: CascadeScratch,
     chapter: Chapter,
     /// Map from ArenaNodeId to Chapter NodeId
     node_map: std::collections::HashMap<ArenaNodeId, NodeId>,
+    run: InlineRun,
 }
 
 impl<'a> TransformContext<'a> {
@@ -43,6 +60,7 @@ impl<'a> TransformContext<'a> {
             cascade_scratch: CascadeScratch::default(),
             chapter: Chapter::new(),
             node_map: std::collections::HashMap::new(),
+            run: InlineRun::default(),
         }
     }
 
@@ -51,7 +69,7 @@ impl<'a> TransformContext<'a> {
         // Find the body element, or use document root
         let body = self.dom.find_by_tag("body").unwrap_or(self.dom.document());
 
-        // Get language from html element (if present) to propagate to all content
+        // The `lang` attribute of `<html>`, if any.
         let html_id_opt = self.dom.find_by_tag("html");
         let html_lang = html_id_opt.and_then(|html_id| {
             if let Some(node) = self.dom.get(html_id)
@@ -66,9 +84,7 @@ impl<'a> TransformContext<'a> {
             None
         });
 
-        // Compute the html element's style first so its inherited properties
-        // (writing-mode, lang, etc.) become the parent context for body. Many
-        // Japanese EPUBs put `class="vrtl"` on <html> with vertical-rl writing-mode;
+        // `html_style` is the parent context `body_style` inherits from.
         let html_style = html_id_opt.map(|html_id| {
             let elem_ref = ElementRef::new(self.dom, html_id);
             compute_styles_indexed(
@@ -80,7 +96,7 @@ impl<'a> TransformContext<'a> {
             )
         });
 
-        // Compute body's style so its properties (like hyphens: auto) are inherited
+        // `body_style` is the parent context of every child of `body`.
         let mut body_style = {
             let elem_ref = ElementRef::new(self.dom, body);
             compute_styles_indexed(
@@ -92,15 +108,14 @@ impl<'a> TransformContext<'a> {
             )
         };
 
-        // Add html lang to body style if present (so it's inherited by all content)
+        // `html_lang` applies where `body` states no language of its own.
         if let Some(lang) = html_lang
             && body_style.language.is_none()
         {
             body_style.language = Some(lang);
         }
 
-        // Promote body's `id` attribute to the chapter root so anchors that
-        // target it (e.g. NCX `<content src="ch.xhtml#bodyid"/>`) resolve.
+        // `body`'s `id` lands on `NodeId::ROOT`, where a link to the body resolves.
         if let Some(node) = self.dom.get(body)
             && let ArenaNodeData::Element { attrs, .. } = &node.data
         {
@@ -112,8 +127,8 @@ impl<'a> TransformContext<'a> {
             }
         }
 
-        // The IR root *is* `<body>`, so it carries body's own computed style, not just
-        // the inheritable part: `body { background: url(…) }` must survive.
+        // `NodeId::ROOT` carries all of `body_style`, `background` and other
+        // non-inherited properties included.
         let root_style = self.chapter.styles.intern(body_style.clone());
         if let Some(root) = self.chapter.node_mut(NodeId::ROOT) {
             root.style = root_style;
@@ -121,6 +136,7 @@ impl<'a> TransformContext<'a> {
 
         // Process body's children as children of IR root, inheriting body's style
         self.process_children(body, NodeId::ROOT, Some(&body_style));
+        self.break_line();
 
         self.chapter
     }
@@ -151,57 +167,32 @@ impl<'a> TransformContext<'a> {
 
         match &node.data {
             ArenaNodeData::Text(text) => {
-                if is_html_whitespace_only(text) {
-                    // Whitespace between inline elements should be preserved as a single space.
-                    // We preserve whitespace unless:
-                    // 1. We're at the root level (no parent style)
-                    let has_newlines = text.contains('\n');
-                    let is_block_parent = parent_style
-                        .map(|s| s.display != Display::Inline)
-                        .unwrap_or(true);
-
-                    // Skip pure-whitespace with newlines in block contexts (inter-element whitespace)
-                    // But preserve spaces without newlines (intra-line whitespace between inline elements)
-                    if has_newlines && is_block_parent {
-                        return;
-                    }
-
-                    // No parent means we're at root level - skip whitespace
-                    if parent_style.is_none() {
-                        return;
-                    }
-
-                    // Preserve as a single space
-                    let range = self.chapter.append_text(" ");
-                    let text_node = Node::text(range);
-                    let ir_id = self.chapter.alloc_node(text_node);
-                    self.chapter.append_child(ir_parent, ir_id);
-                    self.node_map.insert(dom_id, ir_id);
+                let Some(first) = text.chars().next() else {
+                    return;
+                };
+                let preserve_whitespace = parent_style.is_some_and(|s| {
+                    matches!(
+                        s.white_space,
+                        WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+                    )
+                });
+                if preserve_whitespace {
+                    self.settle(first);
+                    self.run.last = text.chars().last().filter(|&c| c != '\n');
+                    self.append_text_node(dom_id, ir_parent, text);
                     return;
                 }
-
-                // Check if whitespace should be preserved (pre, pre-wrap, pre-line)
-                let preserve_whitespace = parent_style
-                    .map(|s| {
-                        matches!(
-                            s.white_space,
-                            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
-                        )
-                    })
-                    .unwrap_or(false);
-
-                // Normalize whitespace unless we're in a pre-like context
-                let text_content = if preserve_whitespace {
-                    text.to_string()
-                } else {
-                    normalize_whitespace(text)
-                };
-                let range = self.chapter.append_text(&text_content);
-                // Text nodes don't have styles - they inherit from parent element
-                let text_node = Node::text(range);
-                let ir_id = self.chapter.alloc_node(text_node);
-                self.chapter.append_child(ir_parent, ir_id);
-                self.node_map.insert(dom_id, ir_id);
+                let (content, trailing) = self.collapse(text);
+                if content.is_empty() {
+                    return;
+                }
+                let node = self.append_text_node(dom_id, ir_parent, &content);
+                if let Some(segment_break) = trailing {
+                    self.run.pending = Some(PendingSpace {
+                        node,
+                        segment_break,
+                    });
+                }
             }
 
             ArenaNodeData::Element { name, attrs, .. } => {
@@ -215,7 +206,7 @@ impl<'a> TransformContext<'a> {
                     &mut self.cascade_scratch,
                 );
 
-                // Merge lang attribute into style (for KFX language property)
+                // A `lang` attribute sets `computed.language`.
                 for attr in attrs {
                     if attr.name.local.as_ref() == "lang" && !attr.value.is_empty() {
                         computed.language = Some(attr.value.to_string());
@@ -223,12 +214,24 @@ impl<'a> TransformContext<'a> {
                     }
                 }
 
-                // Map to role first (needed for Break check)
                 let role = element_to_role(&name.local);
 
-                // Skip hidden elements, but preserve Break nodes
+                // `display: none` drops an element, `Role::Break` excepted.
                 if computed.display == Display::None && role != Role::Break {
                     return;
+                }
+
+                let line_edge = role == Role::Break
+                    || matches!(
+                        computed.display,
+                        Display::Block | Display::ListItem | Display::TableCell | Display::TableRow
+                    );
+                let atomic = role == Role::Image || computed.display == Display::InlineBlock;
+                if line_edge {
+                    self.break_line();
+                }
+                if atomic {
+                    self.settle(OBJECT);
                 }
 
                 // Create IR node
@@ -244,8 +247,7 @@ impl<'a> TransformContext<'a> {
                     let attr_name = attr.name.local.as_ref();
                     let attr_ns = attr.name.ns.as_ref();
                     match attr_name {
-                        // Core layout attributes. SVG `<image>` uses `href`
-                        // (SVG2) or `xlink:href` (SVG1) for the image source;
+                        // `href` on `Role::Image` is an SVG `<image>`'s source, `xlink:href` included.
                         "href" if role == Role::Image => {
                             self.chapter.semantics.set_src(ir_id, &attr.value);
                         }
@@ -294,15 +296,13 @@ impl<'a> TransformContext<'a> {
                                 self.chapter.semantics.set_col_span(ir_id, span);
                             }
                         }
-                        // `<col span>` / `<colgroup span>` is the same count
-                        // in its own spelling: how many columns this entry
-                        // describes.
+                        // `span` on `col` / `colgroup`: the number of columns the entry describes.
                         "span" if matches!(name.local.as_ref(), "col" | "colgroup") => {
                             if let Ok(span) = attr.value.parse::<u32>() {
                                 self.chapter.semantics.set_col_span(ir_id, span);
                             }
                         }
-                        // Class attribute: store verbatim so EPUB → KFX → EPUB
+                        // `class` is stored verbatim.
                         "class" => {
                             self.chapter.semantics.set_class(ir_id, &attr.value);
                             if matches!(name.local.as_ref(), "code" | "pre") {
@@ -327,13 +327,109 @@ impl<'a> TransformContext<'a> {
                     self.chapter.semantics.set_header_cell(ir_id, true);
                 }
 
-                // Process children
+                let own_run =
+                    (atomic || role == Role::RubyText).then(|| std::mem::take(&mut self.run));
                 self.process_children(dom_id, ir_id, Some(&computed));
+                if let Some(outer) = own_run {
+                    self.break_line();
+                    self.run = outer;
+                }
+                if line_edge {
+                    self.break_line();
+                } else if atomic {
+                    self.run.last = Some(OBJECT);
+                }
             }
 
             // Skip other node types
             ArenaNodeData::Document | ArenaNodeData::Comment(_) | ArenaNodeData::Doctype { .. } => {
             }
+        }
+    }
+
+    fn append_text_node(&mut self, dom_id: ArenaNodeId, ir_parent: NodeId, text: &str) -> NodeId {
+        let range = self.chapter.append_text(text);
+        let ir_id = self.chapter.alloc_node(Node::text(range));
+        self.chapter.append_child(ir_parent, ir_id);
+        self.node_map.insert(dom_id, ir_id);
+        ir_id
+    }
+
+    /// Lay `text` under collapsible white space: the surviving text, and the
+    /// segment-break flag of the run it ends on, if it ends on a space.
+    fn collapse(&mut self, text: &str) -> (String, Option<bool>) {
+        let mut out = String::with_capacity(text.len());
+        let mut run: Option<bool> = None;
+        for c in text.chars() {
+            if is_html_whitespace(c) {
+                run = Some(run.unwrap_or(false) || matches!(c, '\n' | '\r'));
+                continue;
+            }
+            match run.take() {
+                Some(segment_break) => self.space_before(&mut out, segment_break, c),
+                None if out.is_empty() => self.settle(c),
+                None => {}
+            }
+            out.push(c);
+            self.run.last = Some(c);
+        }
+        let trailing = run.and_then(|segment_break| self.space_at_end(&mut out, segment_break));
+        (out, trailing)
+    }
+
+    fn space_before(&mut self, out: &mut String, segment_break: bool, next: char) {
+        if let Some(pending) = self.run.pending.as_mut() {
+            pending.segment_break |= segment_break;
+            self.settle(next);
+            return;
+        }
+        let Some(prev) = self.run.last else {
+            return;
+        };
+        if !(segment_break && removes_segment_break(prev, next)) {
+            out.push(' ');
+        }
+    }
+
+    fn space_at_end(&mut self, out: &mut String, segment_break: bool) -> Option<bool> {
+        if let Some(pending) = self.run.pending.as_mut() {
+            pending.segment_break |= segment_break;
+            return None;
+        }
+        self.run.last?;
+        out.push(' ');
+        Some(segment_break)
+    }
+
+    /// Keep or trim the pending space, given `next` follows it.
+    fn settle(&mut self, next: char) {
+        let Some(pending) = self.run.pending.take() else {
+            return;
+        };
+        if pending.segment_break
+            && self
+                .run
+                .last
+                .is_some_and(|prev| removes_segment_break(prev, next))
+        {
+            self.trim_pending(pending.node);
+        }
+    }
+
+    fn break_line(&mut self) {
+        if let Some(pending) = self.run.pending.take() {
+            self.trim_pending(pending.node);
+        }
+        self.run.last = None;
+    }
+
+    fn trim_pending(&mut self, node: NodeId) {
+        let Some(n) = self.chapter.node_mut(node) else {
+            return;
+        };
+        n.text.len -= 1;
+        if n.text.is_empty() {
+            self.chapter.detach(node);
         }
     }
 }
@@ -344,23 +440,41 @@ pub fn transform(dom: &ArenaDom, stylesheets: &[(Stylesheet, Origin)]) -> Chapte
     ctx.transform()
 }
 
-fn normalize_whitespace(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut prev_was_whitespace = false;
+/// Whether a segment break between `before` and `after` is removed: beside
+/// U+200B, or between two East Asian wide characters.
+fn removes_segment_break(before: char, after: char) -> bool {
+    before == '\u{200B}'
+        || after == '\u{200B}'
+        || (is_east_asian_wide(before) && is_east_asian_wide(after))
+}
 
-    for c in text.chars() {
-        if is_html_whitespace(c) {
-            if !prev_was_whitespace {
-                result.push(' ');
-                prev_was_whitespace = true;
-            }
-        } else {
-            result.push(c);
-            prev_was_whitespace = false;
-        }
-    }
-
-    result
+/// East Asian Width F, W or H in the CJK, kana, Bopomofo and Yi blocks and the
+/// full/halfwidth forms, Hangul excluded.
+fn is_east_asian_wide(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2E80}'..='\u{2FFF}'
+            | '\u{3000}'..='\u{303E}'
+            | '\u{3041}'..='\u{3096}'
+            | '\u{3099}'..='\u{30FF}'
+            | '\u{3105}'..='\u{312F}'
+            | '\u{3190}'..='\u{31FF}'
+            | '\u{3220}'..='\u{3247}'
+            | '\u{3250}'..='\u{325F}'
+            | '\u{327F}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{A000}'..='\u{A4CF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE10}'..='\u{FE19}'
+            | '\u{FE30}'..='\u{FE6F}'
+            | '\u{FF01}'..='\u{FF9F}'
+            | '\u{FFE0}'..='\u{FFE6}'
+            | '\u{FFE8}'..='\u{FFEE}'
+            | '\u{1AFF0}'..='\u{1B16F}'
+            | '\u{1F200}'..='\u{1F2FF}'
+            | '\u{20000}'..='\u{2FFFD}'
+            | '\u{30000}'..='\u{3FFFD}'
+    )
 }
 
 #[cfg(test)]
@@ -456,14 +570,13 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // The paragraph should inherit the red color from div
-        // (This is implicit in the cascade since we pass parent_style)
+        // The paragraph inherits `color: red` from the div.
         assert!(chapter.node_count() > 1);
     }
 
     #[test]
     fn test_font_size_computed_through_cascade() {
-        // Font sizes must come out of the cascade as computed px — the KFX
+        // Font sizes come out of the cascade as computed px.
         let dom = parse_html(
             r#"<html><body>
             <h1>Introduction:<span class="big">The Shadow</span></h1>
@@ -482,7 +595,7 @@ mod tests {
         assert_eq!(font_px_of(&chapter, "Introduction"), 32.0);
         // The 24px span overrides the inherited h1 size
         assert_eq!(font_px_of(&chapter, "The Shadow"), 24.0);
-        // Author 2em on h2 resolves against body, and the nested 50% span
+        // 2em on h2 resolves against body; the nested 50% span halves it.
         assert_eq!(font_px_of(&chapter, "Nested"), 32.0);
         assert_eq!(font_px_of(&chapter, "half"), 16.0);
     }
@@ -530,8 +643,7 @@ mod tests {
     fn test_important_beats_later_higher_specificity() {
         let dom = parse_html(r#"<html><body><p class="b">text</p></body></html>"#);
         let ua = user_agent_stylesheet();
-        // The normal rule comes later AND has higher specificity — the
-        // !important declaration must still win.
+        // `!important` wins over a later rule of higher specificity.
         let author =
             Stylesheet::parse(".b { font-size: 20px !important; } p.b { font-size: 10px; }");
         let stylesheets = vec![(ua, Origin::UserAgent), (author, Origin::Author)];
@@ -632,5 +744,167 @@ mod tests {
             }
         }
         assert!(found_break, "Break node not found in blockquote verse");
+    }
+
+    fn compile(body: &str) -> Chapter {
+        let dom = parse_html(&format!("<html><body>{body}</body></html>"));
+        transform(&dom, &[(user_agent_stylesheet(), Origin::UserAgent)])
+    }
+
+    /// Text of each top-level block, ruby annotations left out and breaks as `\n`.
+    fn block_texts(chapter: &Chapter) -> Vec<String> {
+        fn gather(chapter: &Chapter, id: NodeId, out: &mut String) {
+            let node = chapter.node(id).unwrap();
+            match node.role {
+                Role::Text => out.push_str(chapter.text(node.text)),
+                Role::RubyText => {}
+                Role::Break => out.push('\n'),
+                _ => {
+                    for child in chapter.children(id) {
+                        gather(chapter, child, out);
+                    }
+                }
+            }
+        }
+        chapter
+            .children(NodeId::ROOT)
+            .map(|block| {
+                let mut text = String::new();
+                gather(chapter, block, &mut text);
+                text
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collapsible_spaces_collapse_across_inlines_and_leave_line_edges() {
+        let chapter = compile(concat!(
+            "<p>a <span>\n  b</span></p>",
+            "<p>\n  Lead and trail  \n</p>",
+            "<p>\n<em>Hello</em>\n<em>world</em>\n</p>",
+            "<div><em>a</em> <em>b</em></div>",
+            "<p>a <br/>\n b</p>",
+            r#"<p><img src="x.png"/> text</p>"#,
+            r#"<div><img style="display: block" src="x.png"/>
+              text</div>"#,
+        ));
+        assert_eq!(
+            block_texts(&chapter),
+            [
+                "a b",
+                "Lead and trail",
+                "Hello world",
+                "a b",
+                "a\nb",
+                " text",
+                "text"
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_break_between_east_asian_characters_is_removed() {
+        let chapter = compile(concat!(
+            "<p>漢字\n漢字</p>",
+            "<p>漢字 漢字</p>",
+            "<p>word\nword</p>",
+            "<p>行\u{200B}\nword</p>",
+            "<p>先生に<ruby>\n    <rb>\n     訊\n    </rb><rt>\n き\n</rt></ruby>かれて</p>",
+        ));
+        assert_eq!(
+            block_texts(&chapter),
+            [
+                "漢字漢字",
+                "漢字 漢字",
+                "word word",
+                "行\u{200B}word",
+                "先生に訊かれて"
+            ]
+        );
+        let annotation = chapter
+            .iter_dfs()
+            .find(|&id| chapter.node(id).unwrap().role == Role::RubyText)
+            .unwrap();
+        let text: String = chapter
+            .children(annotation)
+            .map(|id| chapter.text(chapter.node(id).unwrap().text))
+            .collect();
+        assert_eq!(text, "き");
+    }
+
+    #[test]
+    fn white_space_between_blocks_leaves_no_text() {
+        let chapter = compile("<div>\n  <p>a</p>\n  <p>b</p>\n</div>\n<ul>\n  <li>c</li>\n</ul>\n");
+        let blank = chapter
+            .iter_dfs()
+            .map(|id| chapter.node(id).unwrap())
+            .filter(|n| n.role == Role::Text)
+            .filter(|n| {
+                chapter
+                    .text(n.text)
+                    .chars()
+                    .all(|c| c.is_ascii_whitespace())
+            })
+            .count();
+        assert_eq!(blank, 0);
+    }
+
+    #[test]
+    fn link_rules_apply_and_state_rules_keep_their_selector_list() {
+        let dom =
+            parse_html(r#"<html><body><p class="y"><a href="x.xhtml">to</a></p></body></html>"#);
+        let author = Stylesheet::parse("a:link { color: #0000ff } p:hover, .y { font-size: 20px }");
+        let chapter = transform(
+            &dom,
+            &[
+                (user_agent_stylesheet(), Origin::UserAgent),
+                (author, Origin::Author),
+            ],
+        );
+        assert_eq!(font_px_of(&chapter, "to"), 20.0);
+        let link = chapter
+            .iter_dfs()
+            .find(|&id| chapter.node(id).unwrap().role == Role::Link)
+            .unwrap();
+        let color = chapter
+            .styles
+            .get(chapter.node(link).unwrap().style)
+            .unwrap()
+            .color;
+        assert_eq!(color.map(|c| (c.r, c.g, c.b)), Some((0, 0, 255)));
+    }
+
+    #[test]
+    fn inherited_break_properties_reach_nested_elements() {
+        let dom = parse_html(
+            r#"<html><body><div class="w"><p><span>text</span></p></div></body></html>"#,
+        );
+        let author = Stylesheet::parse(
+            ".w { word-break: break-all; overflow-wrap: anywhere; orphans: 3; widows: 4 }",
+        );
+        let chapter = transform(
+            &dom,
+            &[
+                (user_agent_stylesheet(), Origin::UserAgent),
+                (author, Origin::Author),
+            ],
+        );
+        let span = chapter
+            .iter_dfs()
+            .find(|&id| chapter.node(id).unwrap().role == Role::Inline)
+            .unwrap();
+        let style = chapter
+            .styles
+            .get(chapter.node(span).unwrap().style)
+            .unwrap();
+        assert_eq!(style.word_break, crate::style::WordBreak::BreakAll);
+        assert_eq!(style.overflow_wrap, crate::style::OverflowWrap::Anywhere);
+        assert_eq!((style.orphans, style.widows), (3, 4));
+    }
+
+    #[test]
+    fn preserved_white_space_reaches_nested_elements() {
+        let chapter = compile("<pre><code>  x\n    y</code></pre>");
+        assert_eq!(block_texts(&chapter), ["  x\n    y"]);
     }
 }

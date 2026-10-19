@@ -1,10 +1,10 @@
-//! Pass 5: Normalize Table Structure
+//! Pass 4: Normalize Table Structure
 
 use crate::model::{Chapter, Node, NodeId, Role};
 
-/// Ensure tables have proper thead/tbody structure for KFX export.
+/// Give each table a `TableHead` / `TableBody` structure.
 pub fn normalize_table_structure(chapter: &mut Chapter) {
-    // Collect all table nodes first to avoid borrow issues
+    // Table nodes, collected ahead of the rewrite
     let tables: Vec<NodeId> = (0..chapter.node_count())
         .filter_map(|i| {
             let id = NodeId(i as u32);
@@ -29,7 +29,7 @@ fn hoist_column_group(chapter: &mut Chapter, table_id: NodeId) {
     let mut found = None;
     for section in chapter.children(table_id).collect::<Vec<_>>() {
         if chapter.node(section).map(|n| n.role) == Some(Role::ColumnGroup) {
-            // Already a direct child; ensure it is first, below.
+            // The group is a direct child of the table.
             found = Some((table_id, section));
             break;
         }
@@ -81,7 +81,7 @@ fn detach_child(chapter: &mut Chapter, parent: NodeId, child: NodeId) {
 
 /// Normalize a single table's structure.
 fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
-    // Check if table already has TableHead or TableBody children
+    // Check if table has TableHead or TableBody children
     let has_section_wrapper = chapter.children(table_id).any(|child_id| {
         chapter
             .node(child_id)
@@ -90,7 +90,7 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
     });
 
     if has_section_wrapper {
-        // Already has proper structure, nothing to do
+        // The table has its sections
         return;
     }
 
@@ -113,14 +113,14 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
         }
     }
 
-    // If we found header rows, wrap them in TableHead
+    // Header rows go under a TableHead
 
-    // Clear table's children - we'll re-add them under wrappers
+    // Table's children are re-added under the section wrappers
     if let Some(table) = chapter.node_mut(table_id) {
         table.first_child = None;
     }
 
-    // Create TableBody wrapper if we have body rows
+    // Create a TableBody wrapper for the body rows
     if !body_rows.is_empty() {
         let body_id = chapter.alloc_node(Node::new(Role::TableBody));
 
@@ -142,7 +142,7 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
         }
     }
 
-    // Create TableHead wrapper if we have header rows
+    // Create a TableHead wrapper for the header rows
     if !header_rows.is_empty() {
         let head_id = chapter.alloc_node(Node::new(Role::TableHead));
 
@@ -168,8 +168,7 @@ fn normalize_single_table(chapter: &mut Chapter, table_id: NodeId) {
         }
     }
 
-    // Edge case: table with no rows at all - create empty TableBody
-    // (This shouldn't happen in practice, but handle it for robustness)
+    // A table with no rows takes an empty TableBody
     if header_rows.is_empty() && body_rows.is_empty() {
         let body_id = chapter.alloc_node(Node::new(Role::TableBody));
         if let Some(table) = chapter.node_mut(table_id) {
@@ -215,8 +214,7 @@ mod tests {
     use super::*;
     use crate::model::NodeId;
 
-    // A parser that infers a `<tbody>` can sweep the `<colgroup>` in with the rows,
-    // which no reader accepts and the row-section walk would count as a row.
+    // A `<colgroup>` swept into an inferred `<tbody>` is hoisted back out.
     #[test]
     fn a_column_group_swept_into_a_section_returns_to_the_table() {
         let mut chapter = Chapter::new();
@@ -254,7 +252,7 @@ mod tests {
         );
     }
 
-    /// A group already in the right place is left alone.
+    /// A group in the right place is left alone.
     #[test]
     fn a_leading_column_group_is_untouched() {
         let mut chapter = Chapter::new();

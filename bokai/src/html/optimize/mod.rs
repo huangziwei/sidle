@@ -6,16 +6,12 @@ mod pass;
 mod predicates;
 mod prune;
 mod table;
-mod vacuum;
 mod wrap;
 
 use crate::model::Chapter;
 
 /// Run all optimization passes on a chapter.
-///
-/// Passes are ordered for maximum effectiveness:
 pub fn optimize(chapter: &mut Chapter) {
-    vacuum::vacuum(chapter);
     merge::merge_adjacent_spans(chapter);
     fuse::fuse_lists(chapter);
     wrap::wrap_mixed_content(chapter);

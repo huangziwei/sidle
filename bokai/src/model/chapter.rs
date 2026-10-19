@@ -108,12 +108,42 @@ impl Chapter {
                     last_node.next_sibling = Some(child);
                 }
             } else {
-                // No children yet, set as first child
+                // A parent without children takes `child` as its first.
                 if let Some(parent_node) = self.nodes.get_mut(parent.0 as usize) {
                     parent_node.first_child = Some(child);
                 }
             }
         }
+    }
+
+    /// Unlink `child` from its parent's children; the node stays allocated.
+    pub fn detach(&mut self, child: NodeId) {
+        let Some(node) = self.nodes.get(child.0 as usize) else {
+            return;
+        };
+        let (Some(parent), next) = (node.parent, node.next_sibling) else {
+            return;
+        };
+        let first = self
+            .nodes
+            .get(parent.0 as usize)
+            .and_then(|n| n.first_child);
+        if first == Some(child) {
+            self.nodes[parent.0 as usize].first_child = next;
+        } else {
+            let mut cursor = first;
+            while let Some(id) = cursor {
+                let after = self.nodes[id.0 as usize].next_sibling;
+                if after == Some(child) {
+                    self.nodes[id.0 as usize].next_sibling = next;
+                    break;
+                }
+                cursor = after;
+            }
+        }
+        let node = &mut self.nodes[child.0 as usize];
+        node.parent = None;
+        node.next_sibling = None;
     }
 
     /// Iterate over children of a node.
@@ -136,7 +166,7 @@ impl Chapter {
         }
     }
 
-    /// The source element ids this chapter's nodes carry, in **document
+    /// The source element ids this chapter's nodes carry, in document order.
     pub fn source_elements(&self) -> Vec<i64> {
         let mut out = Vec::new();
         for node in self.iter_dfs() {
@@ -150,7 +180,7 @@ impl Chapter {
     /// What this chapter holds, without rendering it — see [`ChapterSummary`].
     pub fn summary(&self) -> ChapterSummary {
         let mut out = ChapterSummary::default();
-        // Whitespace collapsing spans text nodes: two adjacent runs separated
+        // `pending_space` carries a whitespace run across text nodes.
         let mut text_seen = false;
         let mut pending_space = false;
         self.summarize(NodeId::ROOT, &mut out, &mut text_seen, &mut pending_space);
@@ -168,15 +198,11 @@ impl Chapter {
         for child in self.children(node) {
             let Some(n) = self.node(child) else { continue };
             match n.role {
-                // A ruby annotation is a pronunciation gloss above the base
-                // text, not part of it: counting it would inflate the reading
-                // measure of every CJK book.
+                // `Role::RubyText` glosses the base text and stays out of `text_chars`.
                 Role::RubyText => continue,
                 Role::Text => {
                     for c in self.text(n.text).chars() {
-                        // A line break renders as a break element, which
-                        // contributes nothing to text content — so it is
-                        // neither a character nor a word boundary here.
+                        // An `EOL` character is neither a character nor a word boundary.
                         if EOL.contains(&c) {
                             continue;
                         }
@@ -204,7 +230,7 @@ impl Chapter {
                 }
                 _ => {}
             }
-            // A picture the stylesheet paints (a section-break ornament, say)
+            // A `background_image` is an image the chapter references.
             if let Some(src) = self
                 .styles
                 .get(n.style)
@@ -218,21 +244,18 @@ impl Chapter {
     }
 }
 
-/// Characters that render as a line break rather than as text.
+/// Characters that render as a line break.
 const EOL: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
 
 /// What a chapter holds, answerable without rendering it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChapterSummary {
-    /// Base-text character count: ruby annotations excluded, whitespace runs
-    /// counted as one, leading and trailing whitespace not counted. Unicode
-    /// scalars, so this differs from a UTF-16 count on astral characters.
+    /// Base-text character count in Unicode scalars: ruby annotations excluded,
+    /// whitespace runs counted as one, leading and trailing whitespace not counted.
     pub text_chars: u64,
-    /// No base text at all and at least one image — a cover or full-bleed
-    /// illustration, which a reader paginates differently from prose.
+    /// No base text at all and at least one image: a cover or a full-bleed illustration.
     pub image_only: bool,
-    /// Image paths referenced, in document order, deduplicated. A reader
-    /// fetches them in this order.
+    /// Image paths referenced, in document order, deduplicated.
     pub images: Vec<String>,
     /// Whether any image was seen at all (`image_only` needs both halves).
     has_image: bool,
@@ -270,7 +293,7 @@ impl Iterator for DfsIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let current = self.stack.pop()?;
 
-        // Push children in reverse order so they're visited left-to-right
+        // Children are pushed in reverse and pop left to right.
         let mut children: Vec<NodeId> = self.chapter.children(current).collect();
         children.reverse();
         self.stack.extend(children);

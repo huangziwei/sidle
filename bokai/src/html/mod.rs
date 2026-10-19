@@ -7,14 +7,9 @@ pub mod panels;
 mod transform;
 mod tree_sink;
 
-// CSS Text 3 §3 collapsible whitespace; `char::is_whitespace` also matches
-// U+3000 IDEOGRAPHIC SPACE, the JP paragraph indent.
+// The collapsible white-space characters.
 pub(crate) fn is_html_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r')
-}
-
-pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
-    text.chars().all(is_html_whitespace)
 }
 
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
@@ -195,6 +190,8 @@ pub fn resolve_path(base: &str, rel: &str) -> String {
     stack.join("/")
 }
 
+/// Inline, through `load`, the `@import` rules heading `src`, behind any
+/// `@charset`, `@layer` statements and comments.
 pub fn inline_css_imports<F>(src: &str, base: &str, mut load: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
@@ -202,42 +199,85 @@ where
     let mut out = String::with_capacity(src.len());
     let bytes = src.as_bytes();
     let mut copied = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' && src[i..].to_ascii_lowercase().starts_with("@import") {
-            let mut j = i + "@import".len();
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            let parsed = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
-                quoted_url(src, j)
-            } else if j + 4 <= bytes.len() && src[j..j + 4].eq_ignore_ascii_case("url(") {
-                url_function(src, j)
-            } else {
-                None
-            };
-            if let Some((url, mut k)) = parsed {
-                while k < bytes.len() && bytes[k] != b';' && bytes[k] != b'}' {
-                    k += 1;
+    let mut i = if src.starts_with('\u{FEFF}') { 3 } else { 0 };
+    loop {
+        i = skip_css_trivia(src, i);
+        let head = &src[i..];
+        if starts_with_ignore_case(head, "@charset") || starts_with_ignore_case(head, "@layer") {
+            match (head.find(';'), head.find('{')) {
+                (Some(semi), brace) if brace.is_none_or(|b| semi < b) => {
+                    i += semi + 1;
+                    continue;
                 }
-                if k < bytes.len() && bytes[k] == b';' {
-                    k += 1;
-                }
-                out.push_str(&src[copied..i]);
-                let child = resolve_path(base, &percent_decode(url));
-                if let Some(child_css) = load(&child) {
-                    out.push_str(&child_css);
-                    out.push('\n');
-                }
-                copied = k;
-                i = k;
-                continue;
+                _ => break,
             }
         }
-        i += 1;
+        if !starts_with_ignore_case(head, "@import") {
+            break;
+        }
+        let mut j = i + "@import".len();
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let parsed = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+            quoted_url(src, j)
+        } else if j + 4 <= bytes.len() && src[j..j + 4].eq_ignore_ascii_case("url(") {
+            url_function(src, j)
+        } else {
+            None
+        };
+        let Some((url, mut k)) = parsed else {
+            match head.find(';') {
+                Some(semi) => {
+                    i += semi + 1;
+                    continue;
+                }
+                None => break,
+            }
+        };
+        while k < bytes.len() && bytes[k] != b';' && bytes[k] != b'}' {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b';' {
+            k += 1;
+        }
+        out.push_str(&src[copied..i]);
+        let child = resolve_path(base, &percent_decode(url));
+        if let Some(child_css) = load(&child) {
+            out.push_str(&child_css);
+            out.push('\n');
+        }
+        copied = k;
+        i = k;
     }
     out.push_str(&src[copied..]);
     out
+}
+
+/// The offset past the whitespace, comments and `<!--` / `-->` tokens at `i`.
+fn skip_css_trivia(src: &str, mut i: usize) -> usize {
+    loop {
+        let rest = &src[i..];
+        let trimmed = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        i += rest.len() - trimmed.len();
+        if let Some(body) = trimmed.strip_prefix("/*") {
+            i += match body.find("*/") {
+                Some(end) => 2 + end + 2,
+                None => trimmed.len(),
+            };
+        } else if trimmed.starts_with("<!--") {
+            i += 4;
+        } else if trimmed.starts_with("-->") {
+            i += 3;
+        } else {
+            return i;
+        }
+    }
+}
+
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len()
+        && text.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 pub fn css_import_targets(src: &str, base: &str) -> Vec<String> {
@@ -312,6 +352,20 @@ mod tests {
         assert_eq!(
             targets,
             vec!["OEBPS/Styles/flow0007.css", "OEBPS/Styles/flow0008.css"]
+        );
+    }
+
+    #[test]
+    fn imports_are_read_only_at_the_head_of_a_sheet() {
+        let css = concat!(
+            "\u{FEFF}@charset \"UTF-8\";\n/* note */\n@layer base;\n@import \"a.css\";\n",
+            "@import bare.css;\n@import url(b.css);\n",
+            "/*\n@import \"commented.css\";\n*/\n",
+            ".x { color: red; }\n@import \"late.css\";\n",
+        );
+        assert_eq!(
+            css_import_targets(css, "OEBPS/style/book.css"),
+            ["OEBPS/style/a.css", "OEBPS/style/b.css"]
         );
     }
 

@@ -1,12 +1,10 @@
-//! Pass 3: List Fuser (Fragmented List Repair)
+//! Pass 2: List Fuser (Fragmented List Repair)
 
 use crate::model::{Chapter, NodeId, Role};
 
 use super::pass::walk_bottom_up;
 
 /// Fuse adjacent lists of the same type.
-///
-/// Converters often emit a separate `<ul>` for every `<li>`:
 pub fn fuse_lists(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         fuse_list_siblings(chapter, parent_id);

@@ -1,13 +1,11 @@
-//! Pass 6: Pruner (Empty Container Removal)
+//! Pass 5: Pruner (Empty Container Removal)
 
 use crate::model::{Chapter, NodeId};
 
 use super::pass::walk_bottom_up;
 use super::predicates::is_prunable_role;
 
-/// Remove empty containers in post-order (cascading).
-///
-/// "Div soup" from old converters leaves empty containers:
+/// Remove empty containers in post-order, cascading upward.
 pub fn prune_empty(chapter: &mut Chapter) {
     walk_bottom_up(chapter, |chapter, parent_id| {
         prune_siblings(chapter, parent_id);
@@ -71,8 +69,7 @@ fn should_prune(chapter: &Chapter, node_id: NodeId) -> bool {
         return false;
     }
 
-    // An empty box still paints when it carries a style or a class, so only a
-    // default-styled, classless empty container is dead.
+    // A style or a class makes an empty box paint.
     if node.style != crate::style::StyleId::DEFAULT {
         return false;
     }

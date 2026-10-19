@@ -85,7 +85,13 @@ pub fn run(
     mode: Mode,
     on_progress: OnProgress<'_>,
 ) -> anyhow::Result<Produced> {
+    let previous_index = (mode.is_reconvert() && kind.ends_with("_to_kfx"))
+        .then_some(book.kfx_path.as_deref())
+        .flatten()
+        .and_then(|kfx| std::fs::read(kfx).ok())
+        .and_then(|bytes| crate::library::anchor::BookIndex::from_kfx(&bytes));
     let mut produced = run_direction(paths, book, kind, on_progress)?;
+    produced.previous_index = previous_index;
 
     if kind == "kfx_to_epub" && !mode.is_reconvert() {
         enrich_cover(paths, book, &mut produced);
@@ -111,8 +117,8 @@ pub fn run(
 }
 
 /// The half of a conversion that touches only the database: record the
-/// produced paths on the book row and move the book's annotations onto the
-/// rebuilt text. [`run`] owns every parse.
+/// produced paths on the book row and move the book's annotations and reading
+/// positions onto the rebuilt text. [`run`] owns every parse.
 pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::Result<Converted> {
     let book_id = book.id;
     if let Some(epub) = &produced.epub_path {
@@ -160,6 +166,11 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
             }
             Err(e) => eprintln!("[sidle/convert] book {book_id}: re-anchor failed: {e}"),
         }
+    }
+    if let (Some(before), Some(after)) = (&produced.previous_index, &produced.index)
+        && let Err(e) = crate::library::reanchor::reading_positions(conn, book_id, before, after)
+    {
+        eprintln!("[sidle/convert] book {book_id}: reading positions not moved: {e}");
     }
     Ok(converted)
 }
@@ -224,6 +235,9 @@ pub struct Produced {
     pub enriched_kfx_sha: Option<String>,
     /// The rebuilt book's text index, which annotations are re-anchored onto.
     pub index: Option<crate::library::anchor::BookIndex>,
+    /// The text index of the KFX a reconversion replaced, which saved reading
+    /// positions point into.
+    pub previous_index: Option<crate::library::anchor::BookIndex>,
 }
 
 fn run_direction(
@@ -345,8 +359,7 @@ fn convert_kfx_to_epub(
     })
 }
 
-/// PDF → KFX: the book's PDF wrapped verbatim into a fixed-layout PDOC KFX,
-/// the copy pushed to a Scribe.
+/// PDF → KFX: the book's PDF wrapped verbatim into a fixed-layout PDOC KFX.
 fn convert_pdf_to_kfx(
     paths: &LibraryPaths,
     book: &BookRow,

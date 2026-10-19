@@ -11,8 +11,6 @@ use selectors::{OpaqueElement, SelectorImpl};
 
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 
-// ============================================================================
-
 /// `SelectorImpl` for `ArenaDom` matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BokoSelectors;
@@ -177,6 +175,23 @@ impl cssparser::ToCss for NonTSPseudoClass {
 impl<'i> selectors::parser::Parser<'i> for BokoSelectors {
     type Impl = BokoSelectors;
     type Error = SelectorParseErrorKind<'i>;
+
+    fn parse_non_ts_pseudo_class(
+        &self,
+        location: cssparser::SourceLocation,
+        name: cssparser::CowRcStr<'i>,
+    ) -> Result<NonTSPseudoClass, cssparser::ParseError<'i, Self::Error>> {
+        cssparser::match_ignore_ascii_case! { &name,
+            "link" | "any-link" => Ok(NonTSPseudoClass::Link),
+            "visited" => Ok(NonTSPseudoClass::Visited),
+            "hover" => Ok(NonTSPseudoClass::Hover),
+            "active" => Ok(NonTSPseudoClass::Active),
+            "focus" => Ok(NonTSPseudoClass::Focus),
+            _ => Err(location.new_custom_error(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+            )),
+        }
+    }
 }
 
 impl SelectorImpl for BokoSelectors {
@@ -191,8 +206,6 @@ impl SelectorImpl for BokoSelectors {
     type NonTSPseudoClass = NonTSPseudoClass;
     type PseudoElement = PseudoElement;
 }
-
-// ============================================================================
 
 /// Reference to an element in the ArenaDom for selector matching.
 #[derive(Clone, Copy)]
@@ -220,7 +233,7 @@ impl<'a> selectors::Element for ElementRef<'a> {
     type Impl = BokoSelectors;
 
     fn opaque(&self) -> OpaqueElement {
-        // Keyed on the arena node, not on this transient `ElementRef`.
+        // Keyed on the arena node.
         match self.dom.get(self.id) {
             Some(node) => OpaqueElement::new(node),
             None => OpaqueElement::new(self),
@@ -613,5 +626,22 @@ mod tests {
             matches_selector(elem, &parse_selector(".TOCChapter a span").unwrap()),
             "span should match .TOCChapter a span selector"
         );
+    }
+
+    #[test]
+    fn link_matches_every_anchor_with_an_href_and_states_match_none() {
+        let dom = parse_html(r#"<p><a href="x.xhtml">to</a></p>"#);
+        let a = ElementRef::new(&dom, dom.find_by_tag("a").unwrap());
+        assert!(matches_selector(a, &parse_selector("a:link").unwrap()));
+        assert!(matches_selector(a, &parse_selector("a:ANY-LINK").unwrap()));
+        for state in ["a:visited", "a:hover", "a:active", "a:focus"] {
+            assert!(
+                !matches_selector(a, &parse_selector(state).unwrap()),
+                "{state}"
+            );
+        }
+        let p = ElementRef::new(&dom, dom.find_by_tag("p").unwrap());
+        assert!(!matches_selector(p, &parse_selector("p:link").unwrap()));
+        assert!(parse_selector("a:unknown-state").is_err());
     }
 }

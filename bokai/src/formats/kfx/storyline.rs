@@ -48,8 +48,6 @@ macro_rules! sym {
     };
 }
 
-// ============================================================================
-
 /// Tokenize a KFX storyline into a flat token stream for the stack builder.
 /// `anchors` resolves an external link's `anchor_name` → uri; `styles`
 /// passes through to the IR build.
@@ -231,7 +229,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         crate::formats::kfx::yj_properties::layout_hints_from_element_fields(fields);
 
     // `$696 word_boundary_list` — the source's own word segmentation, carried
-    // through as opaque provenance. Nothing in bokai can regenerate it.
+    // through as opaque provenance.
     let word_boundaries: Vec<i64> = get_field(fields, sym!(WordBoundaryList))
         .and_then(|v| v.as_list())
         .map(|items| items.iter().filter_map(|v| v.as_int()).collect())
@@ -300,9 +298,8 @@ fn tokenize_column_format(
     let Some(entries) = get_field(fields, sym!(ColumnFormat)).and_then(|v| v.as_list()) else {
         return;
     };
-    // Every entry becomes a `<col>`, the ones saying nothing included:
-    // columns are positional, and skipping a bare `{is_empty: false}` in the
-    // middle slides every stated width one column to the left.
+    // Every entry becomes a `<col>`, the ones saying nothing included: columns
+    // are positional.
     let columns: Vec<ElementStart> = entries
         .iter()
         .map(|entry| {
@@ -407,9 +404,8 @@ fn get_semantic_type_annotation(
     fields: &[(u64, IonValue)],
     symbols: &SymbolTable,
 ) -> Option<String> {
-    // Find the field ID for "yj.semantics.type" in local symbols. Local
-    // symbol ids start at the container's declared base, not at the static
-    // table's length — `local_symbol_id` owns that offset.
+    // The field ID of "yj.semantics.type" among the local symbols,
+    // `local_symbol_id` applying the container's declared base.
     let field_id = symbols.local_symbol_id("yj.semantics.type")?;
     get_field(fields, field_id).and_then(|v| resolve_symbol_or_string(v, symbols))
 }
@@ -602,7 +598,6 @@ where
     result
 }
 
-// ============================================================================
 // Token Stream → IR (Stack-based builder)
 
 /// Pending style_events of an open interleave element, whose text arrives as
@@ -809,9 +804,8 @@ where
                     apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
                 }
 
-                // Cell spans belong to the cell element, not to a link wrapper
-                // standing in front of it. Amazon states them in the cell's
-                // named style, and the element field is read too.
+                // Cell spans belong to the cell element, read from its named
+                // style and from the element field.
                 let (style_cols, style_rows) = elem
                     .style_name
                     .as_ref()
@@ -841,9 +835,8 @@ where
                 // `(eid, 0)`, never the raw eid.
                 if let Some(eid) = elem.id {
                     eid_nodes.push((eid, anchor_node));
-                    // The eid itself rides on the node as source identity,
-                    // separate from any emitted html id. A renderer needs it to
-                    // mark up the element a stored `(eid, offset)` handle names.
+                    // The eid rides on the node as source identity, separate
+                    // from any emitted html id.
                     chapter.semantics.set_source_element(anchor_node, eid);
                     if let Some(table) = anchor_table
                         && chapter.semantics.id(anchor_node).is_none()
@@ -1518,8 +1511,8 @@ fn push_structural_fields(fields: &mut Vec<(u64, IonValue)>, elem: &ElementStart
                 if let Some(n) = entry.span.filter(|n| *n > 1) {
                     entry_fields.push((sym!(ColumnSpan), IonValue::Int(n as i64)));
                 }
-                // A column that states nothing holds its place, and
-                // Amazon spells that placeholder `{is_empty: false}`.
+                // A column that states nothing holds its place as
+                // `{is_empty: false}`.
                 if entry_fields.is_empty() {
                     entry_fields.push((sym!(IsEmpty), IonValue::Bool(false)));
                 }
@@ -1550,10 +1543,9 @@ fn apply_semantics_to_node(
     }
 }
 
-/// Convert KFX style properties to an IR `ComputedStyle` over the schema
-/// rules carrying a KFX symbol mapping, applying each inverse transform.
-/// `writing_mode` is the axis `document_data` states, which a style inherits
-/// where it declares none.
+/// Convert KFX style properties to an IR `ComputedStyle` through the schema's KFX
+/// symbol mappings and inverse transforms; a style declaring no writing mode takes
+/// `writing_mode`, the axis `document_data` states.
 fn kfx_style_to_ir(
     props: &[(u64, IonValue)],
     symbols: &SymbolTable,
@@ -1706,8 +1698,7 @@ fn build_text_with_spans(
     let mut span_stack: Vec<(NodeId, usize, Option<String>)> = vec![(parent, usize::MAX, None)];
     let mut char_pos: usize = 0; // Current position in char offsets
 
-    // Closure to append a `<rt>` child holding the annotation. Called when a
-    // Ruby span is popped from the stack.
+    // Append a `<rt>` child holding the annotation, as a Ruby span pops.
     fn append_ruby_text(chapter: &mut Chapter, ruby_node: NodeId, annotation: &str) {
         let range = chapter.append_text(annotation);
         let text_node = chapter.alloc_node(Node::text(range));
@@ -1831,14 +1822,11 @@ fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-// ============================================================================
-
 /// Resolve a value that could be either a symbol or string.
 fn resolve_symbol_or_string(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     symbols.text_of_opt(value).map(str::to_string)
 }
 
-// ============================================================================
 // High-level API (used by KfxImporter)
 
 /// Parse a storyline and build its IR in one step. `anchors` resolves an
@@ -1860,8 +1848,6 @@ where
     build_ir_from_tokens_anchored(&tokens, symbols, styles, anchor_table, content_lookup)
 }
 
-// ============================================================================
-
 use crate::formats::kfx::context::ExportContext;
 use crate::style::{ComputedStyle, Length};
 
@@ -1879,16 +1865,29 @@ fn needs_container_wrapper(style: &ComputedStyle) -> bool {
     has_top || has_bottom || has_left || has_right
 }
 
+/// Whether text carrying `style` sets vertically, the axis tate-chu-yoko
+/// combines in.
+fn sets_vertically(chapter: &Chapter, style: crate::style::StyleId, ctx: &ExportContext) -> bool {
+    let authored = chapter
+        .styles
+        .get(style)
+        .map(|s| s.writing_mode)
+        .unwrap_or_default();
+    matches!(
+        ctx.rendered_writing_mode(authored),
+        crate::style::WritingMode::VerticalRl | crate::style::WritingMode::VerticalLr
+    )
+}
+
 /// True for a tate-chu-yoko candidate: a 1–2 character run of ASCII digits.
 /// A longer run such as `1999` rotates.
 fn is_short_ascii_digit_run(text: &str) -> bool {
     matches!(text.len(), 1 | 2) && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Emit a text run of a vertical document, each tate-chu-yoko (縦中横)
-/// candidate inside it as its own inline element carrying the combine style
-/// [`ExportContext::register_tatechuyoko_style`] registers. The text around
-/// them stays in the parent's own flow.
+/// Emit a vertically set text run, each tate-chu-yoko (縦中横) candidate inside it
+/// as its own inline element carrying the combine style
+/// [`ExportContext::register_tatechuyoko_style`] registers.
 fn emit_text_with_tatechuyoko(text: &str, ctx: &mut ExportContext, stream: &mut TokenStream) {
     let bytes = text.as_bytes();
     let mut plain_from = 0;
@@ -1986,7 +1985,11 @@ fn walk_node_for_export(
         if !node.text.is_empty() {
             let text = chapter.text(node.text);
             if !text.is_empty() {
-                if ctx.is_vertical_document() {
+                let style = node
+                    .parent
+                    .and_then(|p| chapter.node(p))
+                    .map_or(crate::style::StyleId::DEFAULT, |p| p.style);
+                if sets_vertically(chapter, style, ctx) {
                     emit_text_with_tatechuyoko(text, ctx, stream);
                 } else {
                     stream.push(KfxToken::Text(text.to_string()));
@@ -2023,16 +2026,13 @@ fn walk_node_for_export(
         return;
     }
 
-    // Get KFX type from schema (will be used in tokens_to_ion)
-    let _kfx_type = sch.kfx_type_for_role(node.role);
-
     // Build element start with semantics
     let mut elem = ElementStart::new(node.role);
     elem.node_id = Some(node_id);
     // The id the source gave this element, handed back out by `claim_id`.
     elem.source_element = chapter.semantics.source_element(node_id);
-    // Carry the source's word segmentation back out. `IonBuilder::build`
-    // re-emits it only if the element's span still matches what it describes.
+    // Carry the source's word segmentation back out; `IonBuilder::build`
+    // re-emits it where it sums to the element's span.
     if let Some(boundaries) = chapter.semantics.word_boundaries(node_id) {
         elem.word_boundaries = boundaries.to_vec();
     }
@@ -2041,16 +2041,14 @@ fn walk_node_for_export(
     // symbol. The source class attribute is a name hint, carrying an
     // identifier like "bold" / "vrtl" into the symbol table over an `s<N>`.
     let class_hint = chapter.semantics.class(node_id);
-    // A cell's span joins its style, not its element — that is where Amazon
-    // writes it.
+    // A cell's span joins its style, not its element.
     let spans = cell_span_properties(chapter, node_id);
     let style_symbol =
         ctx.register_style_id_with_extras(node.style, &chapter.styles, class_hint, &spans);
     elem.style_symbol = Some(style_symbol);
 
-    // A border renders on a `type: container` holding a nested `type: text`.
-    // A horizontal rule is exempt: its border *is* the rule, drawn from the
-    // bare `{style: linear, type: horizontal_rule}` element Amazon emits.
+    // A border renders on a `type: container` holding a nested `type: text`;
+    // a horizontal rule draws its border on its own bare element.
     elem.needs_container_wrapper = node.role != Role::Rule
         && chapter
             .styles
@@ -2058,9 +2056,9 @@ fn walk_node_for_export(
             .map(needs_container_wrapper)
             .unwrap_or(false);
 
-    // Does this element have block-level children (vs. only inline/text)? A
-    // bordered `<div>` of `<p>` lines (Aozora 罫囲み) becomes one bordered
-    // `type: container`; a bordered leaf `<p>` keeps the inner-text wrapper.
+    // Whether this element has block-level children: a bordered `<div>` of `<p>`
+    // lines becomes one bordered `type: container`; a bordered leaf `<p>` keeps
+    // the inner-text wrapper.
     elem.has_block_children = chapter.children(node_id).any(|c| {
         chapter
             .node(c)
@@ -2156,9 +2154,8 @@ fn walk_node_for_export(
         }
     }
 
-    // Walk children. A column group is consumed by its table's
-    // `column_format`; walking it too puts stray empty elements in the
-    // content list, where a renderer reads them as rows.
+    // Walk children, the column group excepted: its table's `column_format`
+    // consumes it.
     for child in chapter.children(node_id) {
         if chapter
             .node(child)
@@ -2200,9 +2197,8 @@ fn cell_span_properties(
     out
 }
 
-/// Find a table's column group. HTML puts it before the row sections, but a
-/// parser that infers a `<tbody>` can nest it one level down, and the walk
-/// looks through the section wrappers too.
+/// Find a table's column group: a direct child, or one level down inside a row
+/// section.
 fn find_column_group(chapter: &Chapter, table: NodeId) -> Option<NodeId> {
     let is_group = |id: NodeId| {
         chapter
@@ -2257,8 +2253,6 @@ fn collect_column_format(
         })
         .collect()
 }
-
-// ============================================================================
 
 // Nested inline elements (Link, Inline, Text) become flat KFX style_events,
 // each over a disjoint text range, carrying every attribute its ancestors
@@ -2454,9 +2448,7 @@ fn flatten_inline_content(
                     base_children.push(cid);
                     i += 1;
                 }
-                // Collect consecutive rt children as the annotation. Usually one,
-                // but EPUBs sometimes have multiple <rt>s in a row (e.g. two
-                // separate annotation lines); concatenate.
+                // Consecutive rt children concatenate into the annotation.
                 let mut annotation = String::new();
                 while i < children.len() {
                     let cid = children[i];
@@ -2495,17 +2487,41 @@ fn flatten_inline_content(
     }
 }
 
+/// A zero-length span registering `state`'s anchor at the current text offset;
+/// its length of 0 adds no style event.
+fn push_anchor_marker(state: &InlineState, stream: &mut TokenStream) {
+    let role = if state.link_to.is_some() {
+        Role::Link
+    } else {
+        Role::Inline
+    };
+    let mut span = SpanStart::new(role, 0, 0);
+    if let Some(ref id) = state.element_id {
+        span.set_semantic(SemanticTarget::Id, id.clone());
+    }
+    span.node_id = state.node_id;
+    stream.push(KfxToken::StartSpan(span));
+    stream.push(KfxToken::EndSpan);
+}
+
 /// Convert flattened segments into KfxTokens (Text + style info for style_events).
 ///
 /// This emits the text and creates SpanStart markers that will become style_events.
 fn emit_flattened_segments(
     segments: Vec<FlatSegment>,
+    block_style: crate::style::StyleId,
     chapter: &Chapter,
     sch: &crate::formats::kfx::schema::KfxSchema,
     ctx: &mut ExportContext,
     stream: &mut TokenStream,
 ) {
     for segment in segments {
+        let vertical = match &segment {
+            FlatSegment::Text { state, .. } => {
+                sets_vertically(chapter, state.style.unwrap_or(block_style), ctx)
+            }
+            _ => false,
+        };
         match segment {
             FlatSegment::Image { node_id } => {
                 // Inline image leaf (e.g. gaiji inside <ruby>). Re-entering
@@ -2513,37 +2529,21 @@ fn emit_flattened_segments(
                 // style/resource registration a block-level image takes.
                 walk_node_for_export(chapter, node_id, sch, ctx, stream);
             }
-            FlatSegment::Marker { state } => {
-                // A zero-length span: `StartSpan` registers the anchor at the
-                // element's current text offset, `EndSpan` measures length 0
-                // and so adds no style event.
-                let mut span = SpanStart::new(
-                    if state.link_to.is_some() {
-                        Role::Link
-                    } else {
-                        Role::Inline
-                    },
-                    0,
-                    0,
-                );
-                if let Some(ref id) = state.element_id {
-                    span.set_semantic(SemanticTarget::Id, id.clone());
-                }
-                span.node_id = state.node_id;
-                stream.push(KfxToken::StartSpan(span));
-                stream.push(KfxToken::EndSpan);
-            }
+            FlatSegment::Marker { state } => push_anchor_marker(&state, stream),
             FlatSegment::Text { text, state } => {
                 // A run whose own style turns its box (tate-chu-yoko) becomes
                 // an element in the parent's flow.
                 if state.link_to.is_none()
                     && state.ruby_annotation.is_none()
-                    && ctx.is_vertical_document()
+                    && vertical
                     && let Some(style_id) = state.style
                     && chapter.styles.get(style_id).is_some_and(|s| {
                         s.text_combine_upright == crate::style::TextCombineUpright::All
                     })
                 {
+                    if state.element_id.is_some() {
+                        push_anchor_marker(&state, stream);
+                    }
                     let style_symbol = ctx.register_style_id_with_hint(
                         style_id,
                         &chapter.styles,
@@ -2626,13 +2626,13 @@ fn emit_flattened_segments(
                     span.node_id = state.node_id;
 
                     stream.push(KfxToken::StartSpan(span));
-                    if ctx.is_vertical_document() {
+                    if vertical {
                         emit_text_with_tatechuyoko(&text, ctx, stream);
                     } else {
                         stream.push(KfxToken::Text(text));
                     }
                     stream.push(KfxToken::EndSpan);
-                } else if ctx.is_vertical_document() {
+                } else if vertical {
                     emit_text_with_tatechuyoko(&text, ctx, stream);
                 } else {
                     // Plain text.
@@ -2643,9 +2643,7 @@ fn emit_flattened_segments(
     }
 }
 
-/// Emit a definition list, each `<dt>`+`<dd>` pair inside a container. HTML
-/// holds the two as flat siblings, and `float: left` draws on the KFX side
-/// only inside the wrapper.
+/// Emit a definition list, each `<dt>`+`<dd>` pair inside a container.
 fn emit_definition_list(
     chapter: &Chapter,
     node_id: NodeId,
@@ -2658,7 +2656,7 @@ fn emit_definition_list(
         None => return,
     };
 
-    // Emit the outer dl container (becomes Paragraph like KPR)
+    // Emit the outer dl container as a Paragraph
     let mut dl_elem = ElementStart::new(Role::Paragraph);
     let dl_style = ctx.register_style_id_with_hint(
         node.style,
@@ -2723,7 +2721,7 @@ fn emit_definition_list(
             dt_elem.style_symbol = Some(dt_style);
             stream.push(KfxToken::start_element(dt_elem));
 
-            // Emit dt's children wrapped in a Paragraph (like KPR)
+            // Emit dt's children wrapped in a Paragraph
             let mut dt_inner = ElementStart::new(Role::Paragraph);
             dt_inner.style_symbol = Some(dt_style);
             stream.push(KfxToken::start_element(dt_inner));
@@ -2772,8 +2770,12 @@ fn emit_inline_content_flat(
     let mut segments = Vec::new();
     flatten_inline_content(chapter, node_id, InlineState::default(), &mut segments);
 
-    // Convert segments to tokens
-    emit_flattened_segments(segments, chapter, sch, ctx, stream);
+    let block_style = chapter
+        .node(node_id)
+        .and_then(|n| n.parent)
+        .and_then(|p| chapter.node(p))
+        .map_or(crate::style::StyleId::DEFAULT, |p| p.style);
+    emit_flattened_segments(segments, block_style, chapter, sch, ctx, stream);
 }
 
 /// Convert a `TokenStream` into the KFX Ion a storyline's `content_list`
@@ -2825,7 +2827,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     };
                     outer_fields.push((sym!(Style), IonValue::Symbol(style_sym)));
 
-                    // Type: container (not text) - this is key for borders to render
+                    // Type: container (not text), the box borders render on
                     outer_fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
 
                     // Layout: block-progression axis, keyed to the box's own
@@ -2944,12 +2946,12 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     let mut inner_builder = IonBuilder::with_fields(inner_fields, inner_id);
                     inner_builder.is_inner_wrapper_text = true;
                     inner_builder.outer_container_id = Some(outer_id);
-                    // The wrapper is a box; its text — and so its word
-                    // segmentation — belongs to the inner element.
+                    // The inner element holds the text, and with it the word
+                    // segmentation.
                     inner_builder.word_boundaries = elem.word_boundaries.clone();
                     stack.push(inner_builder);
                 } else {
-                    // === NORMAL ELEMENT PATH (unchanged) ===
+                    // Normal element path
                     let mut fields = Vec::new();
 
                     // The source's own id where it stated one, else a fresh one
@@ -3015,7 +3017,7 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     if let Role::Heading(level) = elem.role {
                         fields.push((sym!(YjSemanticsHeadingLevel), IonValue::Int(level as i64)));
 
-                        // Record heading position with ACTUAL content fragment ID (Fix for navigation)
+                        // Record heading position with the content fragment ID
                         ctx.record_heading_with_id(level, container_id);
                     }
 
@@ -3163,9 +3165,8 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     span_info.offset = start_offset;
                     span_info.length = length;
 
-                    // Add the span as a style_event (if non-empty)
-                    // Flattening leaves the spans non-overlapping.
-                    // and carry every accumulated attribute merged.
+                    // Add the span as a style_event (if non-empty); flattening leaves the
+                    // spans non-overlapping, each carrying every accumulated attribute.
                     if length > 0
                         && let Some(current) = stack.last_mut()
                     {
@@ -3229,9 +3230,8 @@ struct IonBuilder {
     accumulated_text: String,
     /// Character count of accumulated text (for style event offsets)
     accumulated_char_count: usize,
-    /// UTF-8 byte count of the same text, for the location stride. Unlike
-    /// `accumulated_char_count` this counts only real text: an absorbed inline
-    /// element takes a character slot but contributes no bytes of its own.
+    /// UTF-8 byte count of the real text, for the location stride; an absorbed
+    /// inline element takes a character slot and no bytes.
     accumulated_byte_count: usize,
     /// Collected style events for this element (inline spans)
     style_events: Vec<IonValue>,
@@ -3255,9 +3255,8 @@ struct IonBuilder {
     /// True when this element is a plain (non-wrapped) image — lets
     /// EndElement route it into a text-bearing parent's inline runs.
     is_image: bool,
-    /// The source's `$696 word_boundary_list`, carried through from the IR.
-    /// `build` re-emits it only when the element's span still matches the one
-    /// it describes; a list whose sum has drifted would segment the wrong text.
+    /// The source's `$696 word_boundary_list`, carried through from the IR; `build`
+    /// re-emits it where it sums to the element's span.
     word_boundaries: Vec<i64>,
 }
 
@@ -3328,10 +3327,9 @@ impl IonBuilder {
         !self.inline_runs.is_empty() || !self.accumulated_text.is_empty()
     }
 
-    /// Absorb a nested element into the inline interleave: flush the pending
-    /// text as a bare `content_list` string and append the element. It holds
-    /// one character position of the parent's style-event offset space
-    /// whatever its own content is.
+    /// Absorb a nested element into the inline interleave: flush the pending text
+    /// as a bare `content_list` string and append the element, one character
+    /// position of the parent's style-event offset space.
     fn absorb_inline_element(&mut self, element: IonValue) {
         if !self.accumulated_text.is_empty() {
             let run = std::mem::take(&mut self.accumulated_text);
@@ -3420,8 +3418,7 @@ impl IonBuilder {
                 );
             }
 
-            // Re-emit the source's word segmentation only where it still describes this
-            // element's text: it is right exactly when it sums to the span.
+            // Re-emit the source's word segmentation where it sums to the span.
             let span = self.accumulated_char_count as i64;
             if !self.word_boundaries.is_empty() && self.word_boundaries.iter().sum::<i64>() == span
             {
@@ -3568,6 +3565,35 @@ mod tests {
     }
 
     #[test]
+    fn digits_combine_only_where_the_line_is_set_vertically() {
+        use crate::style::{ComputedStyle, TextAlign, WritingMode};
+        let combined = |writing_mode: WritingMode| {
+            let mut chapter = Chapter::new();
+            let mut p = Node::new(Role::Paragraph);
+            p.style = chapter.styles.intern(ComputedStyle {
+                writing_mode,
+                text_align: TextAlign::Left,
+                ..Default::default()
+            });
+            let p = chapter.alloc_node(p);
+            chapter.append_child(chapter.root(), p);
+            let text = chapter.append_text("2026年6月10日　発行");
+            let text = chapter.alloc_node(Node::text(text));
+            chapter.append_child(p, text);
+
+            let mut ctx = ExportContext::new();
+            ctx.document_writing_mode = KfxSymbol::VerticalRl;
+            ctx.style_writing_mode_baseline = KfxSymbol::VerticalRl;
+            ir_to_tokens(&chapter, &mut ctx)
+                .iter()
+                .filter(|t| matches!(t, KfxToken::InlineElement(_)))
+                .count()
+        };
+        assert_eq!(combined(WritingMode::HorizontalTb), 0);
+        assert_eq!(combined(WritingMode::VerticalRl), 2);
+    }
+
+    #[test]
     fn a_run_too_long_to_combine_stays_in_the_line() {
         let mut ctx = ExportContext::new();
         ctx.document_writing_mode = KfxSymbol::VerticalRl;
@@ -3578,8 +3604,8 @@ mod tests {
         assert!(matches!(stream.iter().next(), Some(KfxToken::Text(t)) if t == "平成100年"));
     }
 
-    /// The source's word segmentation survives KFX → IR → KFX, but only while it
-    /// still sums to the element's span; a stale list segments the wrong characters.
+    /// The source's word segmentation survives KFX → IR → KFX where it sums to the
+    /// element's span.
     #[test]
     fn word_boundaries_are_carried_through_and_dropped_when_stale() {
         fn emit(boundaries: Vec<i64>) -> Option<Vec<i64>> {
@@ -3615,7 +3641,7 @@ mod tests {
 
         // Sums to the element's 5 characters — re-emitted verbatim.
         assert_eq!(emit(vec![0, 2, 1, 2]), Some(vec![0, 2, 1, 2]));
-        // Describes a longer or shorter run — dropped rather than misapplied.
+        // Describes a longer or shorter run — dropped.
         assert_eq!(emit(vec![0, 9]), None);
         assert_eq!(emit(vec![0, 1]), None);
         // No source list, nothing invented.
@@ -3884,8 +3910,8 @@ mod tests {
             list_start: None,
         }));
         stream.push(KfxToken::Text("「いや".to_string()));
-        // Nested tate-chu-yoko run — its own text is 2 chars long but it
-        // occupies one position in the parent's event space.
+        // Nested tate-chu-yoko run: 2 characters of its own, one position
+        // in the parent's event space.
         stream.push(KfxToken::start_element(ElementStart {
             role: Role::Paragraph,
             node_id: None,
@@ -4089,8 +4115,6 @@ mod tests {
         assert_eq!(chapter.semantics.alt(node_id), Some("An image"));
     }
 
-    // ========================================================================
-
     #[test]
     fn test_ir_to_tokens_basic() {
         let mut chapter = Chapter::new();
@@ -4149,9 +4173,8 @@ mod tests {
 
     #[test]
     fn test_inline_image_interleaves_in_content_list() {
-        // `<p>（河出<img/>文庫）</p>` — the mid-run image must land BETWEEN
-        // the two text runs as a `render: inline` struct (Amazon's shape),
-        // not be appended after externalized text.
+        // `<p>（河出<img/>文庫）</p>` — the mid-run image lands BETWEEN the two
+        // text runs as a `render: inline` struct.
         let mut chapter = Chapter::new();
 
         let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
@@ -4597,8 +4620,7 @@ mod tests {
 
     #[test]
     fn test_yj_classification_for_footnote_popup() {
-        // A note's body carries yj.classification ($615), which is what makes
-        // a note body a footnote popup.
+        // A note's body carries yj.classification ($615).
         let mut chapter = Chapter::new();
 
         // Create a list item that represents an endnote
@@ -4664,8 +4686,7 @@ mod tests {
 
     #[test]
     fn each_kind_of_note_keeps_its_own_classification() {
-        // Books use all three side by side, and neither direction may collapse
-        // them into one.
+        // The three classifications stay distinct in both directions.
         for (epub_type, classification) in [
             ("footnote", KfxSymbol::Footnote),
             ("endnote", KfxSymbol::YjChapternote),
@@ -5469,9 +5490,8 @@ mod tests {
 
     #[test]
     fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
-        // `<a id="map1"><img/></a>` as a nav target. A KFX image holds no anchor, so
-        // the flattener emits a zero-length marker segment carrying the id just before
-        // the image.
+        // `<a id="map1"><img/></a>` as a nav target: the flattener emits a zero-length
+        // marker segment carrying the id just before the image.
         let mut chapter = Chapter::new();
 
         let img_id = chapter.alloc_node(Node::new(Role::Image));
@@ -5569,9 +5589,8 @@ mod tests {
 
     #[test]
     fn test_anchor_inside_container_wrapper_uses_outer_id() {
-        // Test that anchors inside container-wrapped elements (like headings with borders)
-        // use the outer container's ID, not the inner text element's ID.
-        // This is critical for TOC navigation to work correctly.
+        // Anchors inside container-wrapped elements (like headings with borders) use
+        // the outer container's ID, not the inner text element's ID.
         use crate::model::ChapterId;
         use crate::style::{BorderStyle, ComputedStyle, Length};
 
@@ -5639,6 +5658,42 @@ mod tests {
             "Anchor should point to outer container ID ({}) not inner element ({})",
             content_ids[0], content_ids[1]
         );
+    }
+
+    #[test]
+    fn an_id_on_a_tate_chu_yoko_run_anchors_where_the_run_starts() {
+        let mut chapter = Chapter::new();
+        let p = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), p);
+        let before = chapter.append_text("からね");
+        let before = chapter.alloc_node(Node::text(before));
+        chapter.append_child(p, before);
+
+        let mut tcy = ComputedStyle::default();
+        tcy.text_combine_upright = crate::style::TextCombineUpright::All;
+        let mut span = Node::new(Role::Inline);
+        span.style = chapter.styles.intern(tcy);
+        let span = chapter.alloc_node(span);
+        chapter.append_child(p, span);
+        chapter.semantics.set_id(span, "page_176");
+        let run = chapter.append_text("!?");
+        let run = chapter.alloc_node(Node::text(run));
+        chapter.append_child(span, run);
+
+        let mut ctx = ExportContext::new();
+        ctx.document_writing_mode = KfxSymbol::VerticalRl;
+        let chapter_id = ChapterId(1);
+        ctx.begin_chapter_export(chapter_id);
+        let target = GlobalNodeId::new(chapter_id, span);
+        ctx.anchor_registry
+            .register_internal_target(target, "c76C.xhtml#page_176");
+        let _ion = build_storyline_ion(&chapter, &mut ctx);
+
+        let (_, offset) = ctx
+            .anchor_registry
+            .get_node_position(target)
+            .expect("the tate-chu-yoko run's id is an anchor");
+        assert_eq!(offset, "からね".chars().count());
     }
 
     /// §7.7 — `list_style` names the marker that decides the tag: the five

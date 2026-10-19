@@ -10,7 +10,7 @@ use super::style_registry::StyleRegistry;
 use super::symbols::{KFX_SYMBOL_TABLE_SIZE, KfxSymbol};
 use super::transforms::encode_base32;
 
-/// The `font_family` value deferring to the device font; any other value pins one.
+/// The `font_family` value naming no typeface of its own; any other value pins one.
 const READER_DEFAULT_FONT: &str = "default";
 
 /// `READER_DEFAULT_FONT` at the head of `stack`: `booksming, serif` becomes
@@ -102,8 +102,7 @@ impl Default for SymbolTable {
     }
 }
 
-/// Fragment ID generator, starting at 200. IDs 0-199 are reserved for system
-/// fragments.
+/// Fragment ID generator, starting at [`Self::FRAGMENT_MIN_ID`].
 pub struct IdGenerator {
     next_id: u64,
 }
@@ -131,9 +130,7 @@ impl IdGenerator {
         self.next_id
     }
 
-    /// Raise the floor so every id from here on is at least `floor`. Used once
-    /// the source's own element ids are known, so a freshly allocated id can
-    /// never land on one the export is about to preserve.
+    /// Raise the floor: every id from here on is at least `floor`.
     pub fn advance_to(&mut self, floor: u64) {
         self.next_id = self.next_id.max(floor);
     }
@@ -570,7 +567,7 @@ pub struct ExportContext {
     /// Global symbol table - strings → symbol IDs.
     pub symbols: SymbolTable,
 
-    /// Fragment ID generator (starts at 200).
+    /// Fragment ID generator.
     pub fragment_ids: IdGenerator,
 
     /// Resource tracking: href → resource symbol.
@@ -588,9 +585,8 @@ pub struct ExportContext {
     /// Chapter → fragment ID, filled in Pass 1 for section references
     pub chapter_fragments: HashMap<ChapterId, u64>,
 
-    /// Every element id this export has handed out, preserved or fresh. A
-    /// source id already taken falls back to a fresh one rather than
-    /// colliding.
+    /// Every element id this export has handed out, preserved or fresh; a taken
+    /// source id yields a fresh one.
     claimed_ids: HashSet<u64>,
 
     /// The highest element id the source stated, learned in the Pass 1 survey.
@@ -606,9 +602,8 @@ pub struct ExportContext {
     /// Source file path (`chapter1.xhtml`) → fragment ID
     pub path_to_fragment: HashMap<String, u64>,
 
-    /// Default style symbol ID, referenced by every storyline element
-    /// The symbol for `"s0"`. Read it through [`Self::cite_default_style`],
-    /// which is what puts the fragment in the container.
+    /// The symbol for `"s0"`, read through [`Self::cite_default_style`], which puts
+    /// the fragment in the container.
     pub default_style_symbol: u64,
 
     /// Style registry for deduplicating and tracking KFX styles.
@@ -652,7 +647,7 @@ pub struct ExportContext {
     /// Any section holds a facing pair — the `yj_double_page_spread` key.
     pub double_page_spread: bool,
 
-    /// The book states author-drawn comic panels — `yj_publisher_panels`.
+    /// Author-drawn comic panels in the book — `yj_publisher_panels`.
     pub publisher_panels: bool,
 
     /// Pixel box a spine page declares (`<meta name="viewport">`)
@@ -674,8 +669,8 @@ pub struct ExportContext {
     /// `location_map` offsets and `section_position_id_map` spans are stated in.
     pub content_id_lengths: HashMap<u64, usize>,
 
-    /// The same text in UTF-8 bytes. Only the ratio is used, to convert the format's
-    /// byte-per-location budget into the character stride the axis is measured in.
+    /// The same text in UTF-8 bytes; its ratio to `content_id_lengths` turns the
+    /// byte-per-location budget into a character stride.
     pub content_id_bytes: HashMap<u64, usize>,
 
     /// section_name → its resource short names, for `container_entity_map`
@@ -898,9 +893,8 @@ impl ExportContext {
         self.claim_id(None)
     }
 
-    /// The element id to emit for a node: the source's own when nothing has taken it
-    /// yet, else a fresh one past the source's highest. A device resolves `.sdr`
-    /// annotations through `(eid, offset)`, so no id may ever mean two things.
+    /// The element id to emit for a node: `preferred` when untaken, else a fresh one
+    /// past the source's highest.
     pub fn claim_id(&mut self, preferred: Option<i64>) -> u64 {
         if let Some(id) = preferred.and_then(|e| u64::try_from(e).ok())
             && self.claimed_ids.insert(id)
@@ -924,9 +918,8 @@ impl ExportContext {
         }
     }
 
-    /// Lift the id generator past every id the source stated. Called once the
-    /// survey has seen every chapter and before Pass 2 emits any element, so
-    /// a fresh id and a preserved one can never be the same number.
+    /// Lift the id generator past every id the source stated, between the survey and
+    /// Pass 2.
     pub fn reserve_beyond_source_ids(&mut self) {
         self.fragment_ids.advance_to(self.max_source_id + 1);
     }
@@ -950,16 +943,12 @@ impl ExportContext {
         kfx_symbol_to_ir_writing_mode(self.style_writing_mode_baseline)
     }
 
-    /// The document-effective (possibly user-forced) writing mode as an IR
-    /// enum. This is the axis text actually renders in, whereas
-    /// [`Self::ir_style_baseline_writing_mode`] is the source's own authored axis.
+    /// The document's writing mode as an IR enum, user-forced or the source's.
     pub fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
         kfx_symbol_to_ir_writing_mode(self.document_writing_mode)
     }
 
-    /// Whether text renders along a vertical axis (縦書き), i.e. the document
-    /// writing mode is `vertical-rl`/`vertical-lr`. Gates vertical-only
-    /// typography such as tate-chu-yoko.
+    /// Whether the document writing mode is `vertical-rl` or `vertical-lr`.
     pub fn is_vertical_document(&self) -> bool {
         matches!(
             self.document_writing_mode,
@@ -967,9 +956,7 @@ impl ExportContext {
         )
     }
 
-    /// Whether the book carries vertical text anywhere: the document default or
-    /// the source's authored axis. `primary-writing-mode` forcing a horizontal
-    /// document is what parts this from [`Self::is_vertical_document`].
+    /// Whether the document's axis or the source's authored axis is vertical.
     pub fn has_vertical_content(&self) -> bool {
         self.is_vertical_document()
             || matches!(
@@ -978,9 +965,22 @@ impl ExportContext {
             )
     }
 
-    /// Rotate a style's physical margins/padding into the document's writing
-    /// axis. A horizontal source forced to vertical-rl moves its block-flow
-    /// `margin-top`/`-bottom` onto `margin-right`/`-left`, Amazon's shape.
+    /// The axis a style authored in `authored` renders in: the document's for the
+    /// source's baseline axis, which a KFX style leaves unstated, else its own.
+    pub fn rendered_writing_mode(
+        &self,
+        authored: crate::style::WritingMode,
+    ) -> crate::style::WritingMode {
+        if authored == self.ir_style_baseline_writing_mode() {
+            self.ir_document_writing_mode()
+        } else {
+            authored
+        }
+    }
+
+    /// Rotate a style's physical margins/padding into the axis it renders in: the
+    /// document's for a style on the source's baseline axis (a horizontal source
+    /// forced to vertical-rl moves `margin-top`/`-bottom` onto `-right`/`-left`).
     fn box_transposed_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
@@ -989,7 +989,7 @@ impl ExportContext {
         let is_vertical =
             |m: WritingMode| matches!(m, WritingMode::VerticalRl | WritingMode::VerticalLr);
         let source = ir_style.writing_mode;
-        let target = self.ir_document_writing_mode();
+        let target = self.rendered_writing_mode(source);
         if is_vertical(source) == is_vertical(target) {
             return std::borrow::Cow::Borrowed(ir_style);
         }
@@ -1080,7 +1080,6 @@ impl ExportContext {
 
     /// Register a Link-element style: `register_ir_style_with_hint` plus an
     /// explicit `underline` (`solid` or `none`) where the cascade set none.
-    /// Kindle's renderer defaults `<a>` to underlined.
     pub fn register_link_ir_style_with_hint(
         &mut self,
         ir_style: &crate::style::ComputedStyle,
@@ -1091,9 +1090,8 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    /// Build the KFX computed style for a Link-element IR style — like
-    /// [`Self::build_ir_style`] but forcing an explicit `underline` field. Split
-    /// out for the same per-chapter memoization (see `register_link_style_id_with_hint`).
+    /// [`Self::build_ir_style`] for a Link-element IR style, with an explicit
+    /// `underline` field.
     fn build_link_ir_style(
         &self,
         ir_style: &crate::style::ComputedStyle,
@@ -1164,9 +1162,8 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
-    /// Register an IR style with extra KFX properties the IR style vocabulary
-    /// has no room for. Amazon writes a cell's `table_column_span` /
-    /// `table_row_span` into its `$157 style`, part of the style's identity.
+    /// Register an IR style with extra KFX properties, a cell's `table_column_span` /
+    /// `table_row_span`, as part of its identity.
     pub fn register_style_id_with_extras(
         &mut self,
         style_id: StyleId,
@@ -1199,8 +1196,8 @@ impl ExportContext {
         self.register_ir_style_with_hint(&s, None)
     }
 
-    /// Register a Link element's style by StyleId. See
-    /// `register_link_ir_style_with_hint` for the underline-forcing rationale.
+    /// Register a Link element's style by StyleId, through
+    /// `register_link_ir_style_with_hint`.
     pub fn register_link_style_id_with_hint(
         &mut self,
         style_id: StyleId,
@@ -1211,8 +1208,8 @@ impl ExportContext {
             return self.cite_default_style();
         }
 
-        // Same per-chapter memo as `register_style_id_with_hint`, keyed on the
-        // link variant (is_link = true) since the link path forces an underline.
+        // The per-chapter memo of `register_style_id_with_hint`, keyed on the link
+        // variant (is_link = true).
         let key = (style_id, class_hint.map(str::to_string), true);
         let kfx_style = if let Some(cached) = self.ir_style_memo.get(&key) {
             cached.clone()
@@ -1345,9 +1342,8 @@ impl ExportContext {
         self.content_id_bytes.insert(content_id, bytes);
     }
 
-    /// Record an element that carries no text of its own — an image, a wrapper
-    /// — and so occupies exactly one position on the axis (§10.2) and
-    /// contributes nothing to the location stride.
+    /// Record an element that carries no text of its own (an image, a wrapper): one
+    /// position on the axis, nothing to the location stride.
     pub fn record_content_slot(&mut self, content_id: u64) {
         self.record_content_length(content_id, 1, 0);
     }
@@ -1397,8 +1393,7 @@ impl ExportContext {
     /// Update landmark fragment IDs to use storyline content IDs.
     pub fn fix_landmark_content_ids(&mut self) {
         for (landmark_type, target) in self.landmark_fragments.iter_mut() {
-            // The cover landmark stays at the section's page-template id, the
-            // target a real Amazon KFX gives `cover_page`.
+            // The cover landmark stays at the section's page-template id.
             if *landmark_type == LandmarkType::Cover {
                 continue;
             }
@@ -1577,6 +1572,33 @@ mod tests {
         let fwd = rotate_sides(1, 2, 3, 4, HorizontalTb, VerticalRl);
         let back = rotate_sides(fwd.0, fwd.1, fwd.2, fwd.3, VerticalRl, HorizontalTb);
         assert_eq!(back, (1, 2, 3, 4));
+    }
+
+    #[test]
+    fn a_style_keeps_its_box_where_it_states_its_own_axis() {
+        use crate::style::{ComputedStyle, Length, WritingMode};
+        let colophon = ComputedStyle {
+            writing_mode: WritingMode::HorizontalTb,
+            margin_top: Length::Em(1.0),
+            ..Default::default()
+        };
+
+        let mut ctx = ExportContext::new();
+        ctx.document_writing_mode = KfxSymbol::VerticalRl;
+        ctx.style_writing_mode_baseline = KfxSymbol::VerticalRl;
+        let unset = ComputedStyle::default().margin_left;
+        let kept = ctx.box_transposed_ir_style(&colophon);
+        assert_eq!(
+            (kept.margin_top, kept.margin_right),
+            (Length::Em(1.0), unset)
+        );
+
+        ctx.style_writing_mode_baseline = KfxSymbol::HorizontalTb;
+        let forced = ctx.box_transposed_ir_style(&colophon);
+        assert_eq!(
+            (forced.margin_top, forced.margin_right),
+            (unset, Length::Em(1.0))
+        );
     }
 
     #[test]
