@@ -331,9 +331,12 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                 );
                 eprintln!("  Length: {}", entity_len);
 
-                // Parse the entity
                 let abs_offset = header_len + entity_offset;
-                if abs_offset + entity_len <= data.len() {
+                let raw = type_idnum == bokai::formats::kfx::symbols::KfxSymbol::Bcrawmedia as u32
+                    || type_idnum == bokai::formats::kfx::symbols::KfxSymbol::Bcrawfont as u32;
+                if raw {
+                    eprintln!("  Raw payload: {} bytes", entity_len);
+                } else if abs_offset + entity_len <= data.len() {
                     let entity_data = &data[abs_offset..abs_offset + entity_len];
                     dump_entity(entity_data, &catalog, &maps, resolve)?;
                 }
