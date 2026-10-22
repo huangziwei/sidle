@@ -7,16 +7,12 @@ use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::style::{self as ir_style, ToCss};
 
-// ============================================================================
-
 /// Default base font size in pixels, converting CSS `em`, `rem` and `%` to
 /// absolute values.
 pub const DEFAULT_BASE_FONT_SIZE: f64 = ir_style::ROOT_FONT_SIZE_PX as f64;
 
 /// KFX points per CSS pixel: `72 / 160`, both directions.
 pub const KFX_PT_PER_CSS_PX: f64 = 72.0 / 160.0;
-
-// ============================================================================
 
 /// Defines how a raw value from IR is converted into a KFX-native Ion Value.
 #[derive(Debug, Clone)]
@@ -73,7 +69,7 @@ pub enum ValueTransform {
     WrapInStruct {
         /// Field name symbol (e.g., First or Last)
         field: KfxSymbol,
-        /// Minimum value (KFX enforces min of 1 for orphans/widows)
+        /// Smallest value emitted
         min_value: Option<i64>,
     },
 
@@ -137,7 +133,7 @@ pub enum RoundingMode {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KfxUnitType {
-    /// Model pixels (1/260th inch, Kindle specific)
+    /// Model pixels, 1/260 inch
     ModelPixels,
     /// Percentage as integer (100% = 1000)
     Percentage1000,
@@ -157,8 +153,6 @@ pub enum ColorFormat {
     RgbStruct,
 }
 
-// ============================================================================
-
 /// Defines where a style property can be applied in KFX.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StyleContext {
@@ -169,8 +163,6 @@ pub enum StyleContext {
     /// Can apply anywhere
     Any,
 }
-
-// ============================================================================
 
 /// Identifies which IR struct field a property comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -192,8 +184,7 @@ pub enum IrField {
     PaddingRight,
     Color,
     BackgroundColor,
-    /// How a background image tiles. The resource registry resolves
-    /// `background-image`, whose KFX value is a symbol.
+    /// How a background image tiles.
     BackgroundRepeat,
     BackgroundPositionX,
     BackgroundPositionY,
@@ -202,17 +193,14 @@ pub enum IrField {
     VerticalAlign,
     TextDecorationUnderline,
     TextDecorationStrikethrough,
-    // Text properties
     LetterSpacing,
     WordSpacing,
     TextTransform,
     Hyphens,
     WhiteSpace,
-    // Text decoration extensions
     UnderlineStyle,
     Overline,
     UnderlineColor,
-    // Layout properties
     Width,
     Height,
     MaxWidth,
@@ -220,11 +208,9 @@ pub enum IrField {
     Float,
     /// Derived from margin-left: auto + margin-right: auto
     BoxAlign,
-    // Page break properties
     BreakBefore,
     BreakAfter,
     BreakInside,
-    // Border properties
     BorderStyleTop,
     BorderStyleRight,
     BorderStyleBottom,
@@ -241,35 +227,24 @@ pub enum IrField {
     BorderRadiusTopRight,
     BorderRadiusBottomLeft,
     BorderRadiusBottomRight,
-    // List properties
     ListStylePosition,
     ListStyleType,
-    // Font family (string value)
     FontFamily,
-    // Amazon properties
     Language,
     Visibility,
     /// Maps CSS box-sizing to KFX sizing_bounds
     SizingBounds,
-    // Additional layout properties
     Clear,
     MinWidth,
     MaxHeight,
-    // Pagination control
     Orphans,
     Widows,
-    // Text wrapping
     WordBreak,
-    // Table properties
     BorderCollapse,
     BorderSpacing,
-    // Writing mode (vertical-RTL Japanese, vertical-LR Mongolian, etc.)
     WritingMode,
-    // Text emphasis (圏点 / sesame-dot etc.)
     TextEmphasisStyle,
     TextEmphasisColor,
-    // text-combine-upright (縦中横 / tate-chu-yoko) — combine a run of chars
-    // (typically digits) into a single upright cell in vertical writing.
     TextCombineUpright,
 }
 
@@ -291,8 +266,6 @@ pub struct StylePropertyRule {
     /// Where this property can be applied
     pub context: StyleContext,
 }
-
-// ============================================================================
 
 /// The master schema for style property mappings.
 pub struct StyleSchema {
@@ -331,14 +304,12 @@ impl StyleSchema {
         self.rules.get(ir_key).and_then(|v| v.first())
     }
 
-    /// Every rule flattened, in `ir_key` order. Several callers scan for a
-    /// first match, and the walk order is part of the contract.
+    /// Every rule flattened, in `ir_key` order.
     pub fn rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules.values().flatten()
     }
 
     /// The rules carrying an IR field mapping, in `ir_key` order.
-    /// Application is last-write-wins per KFX symbol, and the winner is fixed.
     pub fn ir_mapped_rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules
             .values()
@@ -357,19 +328,15 @@ impl StyleSchema {
     fn build_standard() -> Self {
         let mut schema = Self::new();
 
-        // ====================================================================
-
         schema.register(StylePropertyRule {
             ir_key: "font-weight",
             ir_field: Some(IrField::FontWeight),
             kfx_symbol: KfxSymbol::FontWeight,
             transform: ValueTransform::Map(vec![
-                // Named values
                 ("bold".into(), KfxValue::Symbol(KfxSymbol::Bold)),
                 ("normal".into(), KfxValue::Symbol(KfxSymbol::Normal)),
                 ("lighter".into(), KfxValue::Symbol(KfxSymbol::Light)),
                 ("bolder".into(), KfxValue::Symbol(KfxSymbol::Bold)),
-                // Numeric values (100-900 scale per CSS spec)
                 ("100".into(), KfxValue::Symbol(KfxSymbol::Thin)),
                 ("200".into(), KfxValue::Symbol(KfxSymbol::UltraLight)),
                 ("300".into(), KfxValue::Symbol(KfxSymbol::Light)),
@@ -415,8 +382,6 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-
         schema.register(StylePropertyRule {
             ir_key: "text-align",
             ir_field: Some(IrField::TextAlign),
@@ -426,7 +391,6 @@ impl StyleSchema {
                 ("center".into(), KfxValue::Symbol(KfxSymbol::Center)),
                 ("right".into(), KfxValue::Symbol(KfxSymbol::Right)),
                 ("justify".into(), KfxValue::Symbol(KfxSymbol::Justify)),
-                // Start/End are distinct for RTL language support
                 ("start".into(), KfxValue::Symbol(KfxSymbol::Start)),
                 ("end".into(), KfxValue::Symbol(KfxSymbol::End)),
             ]),
@@ -449,7 +413,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // text-decoration: underline -> underline: solid (symbol, not bool)
+        // text-decoration: underline -> underline: solid
         schema.register(StylePropertyRule {
             ir_key: "text-decoration",
             ir_field: Some(IrField::TextDecorationUnderline),
@@ -463,7 +427,7 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // text-decoration: line-through -> strikethrough: solid (symbol, not bool)
+        // text-decoration: line-through -> strikethrough: solid
         schema.register(StylePropertyRule {
             ir_key: "text-decoration-strikethrough",
             ir_field: Some(IrField::TextDecorationStrikethrough),
@@ -477,7 +441,7 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // Margins take PreserveUnit, keeping the source CSS units (px, em, %).
+        // `PreserveUnit` keeps each margin's CSS unit.
 
         schema.register(StylePropertyRule {
             ir_key: "margin-top",
@@ -511,9 +475,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Spacing Properties (Padding)
-
         schema.register(StylePropertyRule {
             ir_key: "padding-top",
             ir_field: Some(IrField::PaddingTop),
@@ -546,8 +507,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-
         schema.register(StylePropertyRule {
             ir_key: "color",
             ir_field: Some(IrField::Color),
@@ -572,7 +531,7 @@ impl StyleSchema {
         // fill_color: for block container backgrounds
         schema.register(StylePropertyRule {
             ir_key: "background-color",
-            ir_field: None, // Don't extract twice from IR
+            ir_field: None,
             kfx_symbol: KfxSymbol::FillColor,
             transform: ValueTransform::ParseColor {
                 output_format: ColorFormat::PackedInt,
@@ -580,8 +539,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // `ExportContext::build_ir_style` mints `background_image`, a symbol
-        // naming an `external_resource`. These three rules place that picture.
+        // The three rules below place the `background_image` resource.
 
         // An absent `background_repeat` tiles both axes, CSS's initial value;
         // `space` and `round` map to that default.
@@ -629,9 +587,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Vertical Alignment (for superscript/subscript)
-
         // baseline_style: for inline super/sub positioning (text baseline shift)
         schema.register(StylePropertyRule {
             ir_key: "vertical-align",
@@ -648,7 +603,7 @@ impl StyleSchema {
         // vertical-align → yj.vertical_align, for table cell alignment.
         schema.register(StylePropertyRule {
             ir_key: "vertical-align",
-            ir_field: None, // Don't extract twice from IR
+            ir_field: None,
             kfx_symbol: KfxSymbol::YjVerticalAlign,
             transform: ValueTransform::Map(vec![
                 ("top".into(), KfxValue::Symbol(KfxSymbol::Top)),
@@ -738,8 +693,7 @@ impl StyleSchema {
             context: StyleContext::InlineSafe,
         });
 
-        // text-combine-upright → KFX text_combine (縦中横). Inline-safe; runs
-        // of digits in vertical text get combined into one upright cell.
+        // text-combine-upright → KFX text_combine (縦中横), inline-safe.
         schema.register(StylePropertyRule {
             ir_key: "text-combine-upright",
             ir_field: Some(IrField::TextCombineUpright),
@@ -750,8 +704,6 @@ impl StyleSchema {
             ]),
             context: StyleContext::InlineSafe,
         });
-
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "letter-spacing",
@@ -805,9 +757,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-
-        // Underline style (solid/dotted/dashed/double)
+        // text-decoration-style → underline
         schema.register(StylePropertyRule {
             ir_key: "text-decoration-style",
             ir_field: Some(IrField::UnderlineStyle),
@@ -844,8 +794,6 @@ impl StyleSchema {
             },
             context: StyleContext::InlineSafe,
         });
-
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "width",
@@ -919,8 +867,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-
         schema.register(StylePropertyRule {
             ir_key: "break-before",
             ir_field: Some(IrField::BreakBefore),
@@ -961,7 +907,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // Kindle-specific break properties (yj_break_before/after)
+        // yj_break_before / yj_break_after
         schema.register(StylePropertyRule {
             ir_key: "yj-break-before",
             ir_field: Some(IrField::BreakBefore),
@@ -985,8 +931,6 @@ impl StyleSchema {
             ]),
             context: StyleContext::BlockOnly,
         });
-
-        // ====================================================================
 
         // Border style transform (shared by all sides)
         let border_style_transform = ValueTransform::Map(vec![
@@ -1033,7 +977,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // Border widths - preserve original units (px, em, etc.)
+        // Border widths keep their CSS units.
         let border_width_transform = ValueTransform::PreserveUnit;
 
         schema.register(StylePropertyRule {
@@ -1105,7 +1049,7 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // Border radius - preserve original units
+        // Border radii keep their CSS units.
         let border_radius_transform = ValueTransform::PreserveUnit;
 
         schema.register(StylePropertyRule {
@@ -1139,8 +1083,6 @@ impl StyleSchema {
             transform: border_radius_transform,
             context: StyleContext::BlockOnly,
         });
-
-        // ====================================================================
 
         schema.register(StylePropertyRule {
             ir_key: "list-style-position",
@@ -1193,20 +1135,17 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Font Family (string value, not symbol)
+        // font-family → font_family, a string
 
         schema.register(StylePropertyRule {
             ir_key: "font-family",
             ir_field: Some(IrField::FontFamily),
             kfx_symbol: KfxSymbol::FontFamily,
-            transform: ValueTransform::Identity, // String passthrough
+            transform: ValueTransform::Identity,
             context: StyleContext::InlineSafe,
         });
 
-        // ====================================================================
-
-        // Language (maps to HTML lang attribute in CSS, stored as string in KFX)
+        // lang → language, a string
         schema.register(StylePropertyRule {
             ir_key: "language",
             ir_field: Some(IrField::Language),
@@ -1246,8 +1185,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-
         // clear → yj.float_clear
         schema.register(StylePropertyRule {
             ir_key: "clear",
@@ -1262,9 +1199,6 @@ impl StyleSchema {
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-        // Pagination Control (orphans/widows)
-
         // orphans → keep_lines_together: { first: N }
         schema.register(StylePropertyRule {
             ir_key: "orphans",
@@ -1272,7 +1206,7 @@ impl StyleSchema {
             kfx_symbol: KfxSymbol::KeepLinesTogether,
             transform: ValueTransform::WrapInStruct {
                 field: KfxSymbol::First,
-                min_value: Some(1), // KFX enforces minimum of 1
+                min_value: Some(1),
             },
             context: StyleContext::BlockOnly,
         });
@@ -1284,16 +1218,13 @@ impl StyleSchema {
             kfx_symbol: KfxSymbol::KeepLinesTogether,
             transform: ValueTransform::WrapInStruct {
                 field: KfxSymbol::Last,
-                min_value: Some(1), // KFX enforces minimum of 1
+                min_value: Some(1),
             },
             context: StyleContext::BlockOnly,
         });
 
-        // ====================================================================
-
         // word-break → word_break
-        // Note: Only normal and break-all are supported by KFX.
-        // keep-all and break-word are not in the KFX symbol table.
+        // KFX names `normal` and `break-all` only.
         schema.register(StylePropertyRule {
             ir_key: "word-break",
             ir_field: Some(IrField::WordBreak),
@@ -1304,8 +1235,6 @@ impl StyleSchema {
             ]),
             context: StyleContext::BlockOnly,
         });
-
-        // ====================================================================
 
         // border-collapse → table_border_collapse (boolean: true=collapse, false=separate)
         schema.register(StylePropertyRule {
@@ -1331,7 +1260,7 @@ impl StyleSchema {
         // border-spacing → border_spacing_horizontal (same value to both)
         schema.register(StylePropertyRule {
             ir_key: "border-spacing",
-            ir_field: None, // Don't extract twice from IR
+            ir_field: None,
             kfx_symbol: KfxSymbol::BorderSpacingHorizontal,
             transform: ValueTransform::PreserveUnit,
             context: StyleContext::BlockOnly,
@@ -1340,8 +1269,6 @@ impl StyleSchema {
         schema
     }
 }
-
-// ============================================================================
 
 impl ValueTransform {
     /// Apply this transform to a raw string value.
@@ -1366,7 +1293,6 @@ impl ValueTransform {
                 let num = parse_number(raw)?;
                 let mut scaled = num * factor;
 
-                // Guard against NaN from multiplication
                 if scaled.is_nan() {
                     return None;
                 }
@@ -1384,12 +1310,10 @@ impl ValueTransform {
                     RoundingMode::Round => scaled.round(),
                 };
 
-                // Infinity or NaN surviving the clamp.
                 if result.is_infinite() || result.is_nan() {
                     return None;
                 }
 
-                // Safe conversion: clamp to i64 range
                 let clamped = result.clamp(i64::MIN as f64, i64::MAX as f64);
                 Some(KfxValue::Integer(clamped as i64))
             }
@@ -1401,7 +1325,6 @@ impl ValueTransform {
                 let (num, unit) = parse_css_length(raw)?;
                 let pixels = convert_to_pixels(num, &unit, *base_pixels);
 
-                // Guard against division by zero
                 if *base_pixels == 0.0 {
                     return None;
                 }
@@ -1414,7 +1337,6 @@ impl ValueTransform {
                     KfxUnitType::Rem => pixels / base_pixels,
                 };
 
-                // Guard against NaN/Infinity
                 if result.is_nan() || result.is_infinite() {
                     return None;
                 }
@@ -1447,8 +1369,7 @@ impl ValueTransform {
                     "%" => (num, KfxSymbol::Percent),
                     _ => {
                         let pixels = convert_to_pixels(num, &css_unit, DEFAULT_BASE_FONT_SIZE);
-                        // Round away f32→string→f64 noise from the cascade's
-                        // computed pixel values (sub-0.001px is invisible).
+                        // Rounds to 1e-5 rem.
                         let rem = pixels / DEFAULT_BASE_FONT_SIZE;
                         ((rem * 1e5).round() / 1e5, KfxSymbol::Rem)
                     }
@@ -1462,7 +1383,7 @@ impl ValueTransform {
             } => {
                 let (num, css_unit) = parse_css_length(raw)?;
 
-                // Preserve percentage values as-is (don't convert to em)
+                // A percentage keeps its unit.
                 if css_unit == "%" {
                     return Some(KfxValue::Dimensioned {
                         value: num,
@@ -1470,25 +1391,21 @@ impl ValueTransform {
                     });
                 }
 
-                // Guard against zero base
                 if *base_pixels == 0.0 {
                     return None;
                 }
 
-                // Convert CSS value to pixels first
                 let pixels = convert_to_pixels(num, &css_unit, *base_pixels);
 
-                // Then convert pixels to target unit
                 let result = match target_unit {
-                    // Em/Rem: relative to base font size (most common for KFX)
+                    // Em and Rem: relative to the base font size
                     KfxSymbol::Em | KfxSymbol::Rem => pixels / base_pixels,
                     // Percentage: 100% = base_pixels
                     KfxSymbol::YjPercentage => pixels / base_pixels * 100.0,
-                    // Default: convert to em (safest for KFX compatibility)
+                    // Every other unit: em
                     _ => pixels / base_pixels,
                 };
 
-                // Guard against NaN/Infinity
                 if result.is_nan() || result.is_infinite() {
                     return None;
                 }
@@ -1503,7 +1420,7 @@ impl ValueTransform {
 
             ValueTransform::WrapInStruct { field, min_value } => {
                 let num = parse_number(raw)? as i64;
-                // Apply minimum value (KFX enforces min of 1 for orphans/widows)
+                // `min_value` floors the result.
                 let clamped = if let Some(min) = min_value {
                     num.max(*min)
                 } else {
@@ -1538,8 +1455,6 @@ impl ValueTransform {
     }
 }
 
-// ============================================================================
-
 /// Parse a number from a string.
 fn parse_number(s: &str) -> Option<f64> {
     let s = s.trim();
@@ -1566,7 +1481,7 @@ fn parse_css_length(s: &str) -> Option<(f64, String)> {
 
     let num: f64 = num_str.parse().ok()?;
     let unit = if unit_str.is_empty() {
-        "px".to_string() // Default to pixels
+        "px".to_string()
     } else {
         unit_str.to_lowercase()
     };
@@ -1755,17 +1670,11 @@ fn extract_shorthand_value(
     }
 }
 
-// ============================================================================
-// IR Field Extraction (Bidirectional Schema Bridge)
-
 /// The em-multiple `document_data` states as its `line_height`, and the
-/// baseline a per-paragraph `lh` value multiplies. `build_document_data_fragment`
-/// emits this same constant.
+/// baseline a per-paragraph `lh` value multiplies.
 pub const DOCUMENT_LINE_HEIGHT_EM: f32 = 1.2;
 
-/// True for a box-model length equal to `default` or `Px(0.0)`. An emitted
-/// `0px` pins the device to it and holds the Layout > Spacing slider's own
-/// scaled values out.
+/// True for a box-model length equal to `default` or `Px(0.0)`.
 fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool {
     value == default || matches!(value, ir_style::Length::Px(v) if v == 0.0)
 }
@@ -1787,7 +1696,7 @@ fn auto_centering_side_margin(ir_style: &ir_style::ComputedStyle) -> Option<Stri
 
 /// One axis of `background-size`, as KFX's `background_sizex` / `sizey`
 /// states it; `vertical` picks the y axis. `cover` becomes `100%` on both
-/// axes and `contain` is left off. The IR keeps the keyword either way.
+/// axes and `contain` is left off.
 fn background_size_axis(ir_style: &ir_style::ComputedStyle, vertical: bool) -> Option<String> {
     ir_style.background_image.as_ref()?;
     match ir_style.background_size {
@@ -1854,9 +1763,7 @@ pub fn extract_ir_field(
             }
         }
         IrField::LineHeight => {
-            // A plain em string. `normalize_line_heights_to_lh` divides each
-            // style's em value by the book's dominant line-height once every
-            // style is registered, landing body text on 1.0 lh.
+            // A plain em string.
             if ir_style.line_height != default.line_height {
                 Some(ir_style.line_height.to_css_string())
             } else {
@@ -1924,9 +1831,11 @@ pub fn extract_ir_field(
             }
         }
         IrField::Color => ir_style.color.map(|c| c.to_css_string()),
-        IrField::BackgroundColor => ir_style.background_color.map(|c| c.to_css_string()),
-        // The three below ride with `background-image`: without a picture to
-        // tile or place they say nothing, and Amazon never writes them alone.
+        IrField::BackgroundColor => ir_style
+            .background_color
+            .filter(|c| c.a != 0)
+            .map(|c| c.to_css_string()),
+        // The three below emit only beside a `background_image`.
         IrField::BackgroundRepeat => (ir_style.background_image.is_some()
             && ir_style.background_repeat != default.background_repeat)
             .then(|| ir_style.background_repeat.to_css_string()),
@@ -1965,7 +1874,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Text properties
         IrField::LetterSpacing => {
             if !is_default_length(ir_style.letter_spacing, default.letter_spacing) {
                 Some(ir_style.letter_spacing.to_css_string())
@@ -2001,7 +1909,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Text decoration extensions
         IrField::UnderlineStyle => {
             if ir_style.underline_style != default.underline_style {
                 Some(ir_style.underline_style.to_css_string())
@@ -2017,7 +1924,6 @@ pub fn extract_ir_field(
             }
         }
         IrField::UnderlineColor => ir_style.underline_color.map(|c| c.to_css_string()),
-        // Layout properties
         IrField::Width => {
             if ir_style.width != default.width {
                 Some(ir_style.width.to_css_string())
@@ -2067,7 +1973,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Page break properties
         IrField::BreakBefore => {
             if ir_style.break_before != default.break_before {
                 Some(ir_style.break_before.to_css_string())
@@ -2089,7 +1994,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Border properties
         IrField::BorderStyleTop => {
             if ir_style.border_style_top != default.border_style_top {
                 Some(ir_style.border_style_top.to_css_string())
@@ -2178,9 +2082,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // List properties
         IrField::ListStylePosition => {
-            // Only applies to display: list-item
             if ir_style.display == ir_style::Display::ListItem
                 && ir_style.list_style_position != default.list_style_position
             {
@@ -2190,7 +2092,6 @@ pub fn extract_ir_field(
             }
         }
         IrField::ListStyleType => {
-            // Only applies to display: list-item
             if ir_style.display == ir_style::Display::ListItem
                 && ir_style.list_style_type != default.list_style_type
             {
@@ -2199,12 +2100,10 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Font family
         IrField::FontFamily => ir_style
             .font_family
             .as_deref()
             .map(crate::style::compact_font_stack),
-        // Amazon properties
         IrField::Language => ir_style.language.clone(),
         IrField::Visibility => {
             if ir_style.visibility != default.visibility {
@@ -2213,14 +2112,10 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // `margin-left: auto` + `margin-right: auto` centers a block carrying
-        // a definite width. At `width: auto` CSS resolves both margins to 0
-        // and the block shrinks to its content.
+        // `center` needs both margins `Auto` and a `width` or `max_width`.
         IrField::BoxAlign => {
             let both_margins_auto = ir_style.margin_left == ir_style::Length::Auto
                 && ir_style.margin_right == ir_style::Length::Auto;
-            // A `width` or a `max-width` gives the block a size for the auto
-            // margins to center against.
             let has_definite_width = ir_style.width != ir_style::Length::Auto
                 || ir_style.max_width != ir_style::Length::Auto;
             if both_margins_auto && has_definite_width {
@@ -2229,19 +2124,16 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // SizingBounds: Amazon auto-adds content-box when width/height is present
+        // SizingBounds: `border-box` as stated, else `content-box` beside a width or height.
         IrField::SizingBounds => {
-            // If explicitly border-box, emit it
             if ir_style.box_sizing == ir_style::BoxSizing::BorderBox {
                 Some("border-box".to_string())
-            // A set width or height emits content-box, the CSS default.
             } else if ir_style.width != default.width || ir_style.height != default.height {
                 Some("content-box".to_string())
             } else {
                 None
             }
         }
-        // Additional layout properties
         IrField::Clear => {
             if ir_style.clear != default.clear {
                 Some(ir_style.clear.to_css_string())
@@ -2249,7 +2141,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Pagination control
         IrField::Orphans => {
             if ir_style.orphans != default.orphans {
                 Some(ir_style.orphans.to_string())
@@ -2264,7 +2155,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Text wrapping
         IrField::WordBreak => {
             if ir_style.word_break != default.word_break {
                 Some(ir_style.word_break.to_css_string())
@@ -2272,7 +2162,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Table properties
         IrField::BorderCollapse => {
             if ir_style.border_collapse != default.border_collapse {
                 Some(ir_style.border_collapse.to_css_string())
@@ -2287,9 +2176,7 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Compare against `doc_writing_mode`. In a vertical book an explicit
-        // `horizontal-tb` from the cascade is a real override, and KFX
-        // inheritance from `document_data.writing_mode` covers the rest.
+        // Emitted where it differs from `doc_writing_mode`.
         IrField::WritingMode => {
             if ir_style.writing_mode != doc_writing_mode {
                 Some(ir_style.writing_mode.to_css_string())
@@ -2297,7 +2184,6 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // Text emphasis
         IrField::TextEmphasisStyle => {
             if ir_style.text_emphasis_style != default.text_emphasis_style {
                 Some(ir_style.text_emphasis_style.to_css_string())
@@ -2322,9 +2208,6 @@ pub fn extract_ir_field(
     }
 }
 
-// ============================================================================
-// KFX Import (Inverse Direction)
-
 impl StyleSchema {
     /// Every schema rule carrying this KFX symbol, in `ir_key` order. One KFX
     /// property backs several CSS properties: `$underline` feeds both
@@ -2345,8 +2228,6 @@ impl StyleSchema {
 
 impl ValueTransform {
     /// Apply inverse transform: convert KFX value back to CSS string.
-    ///
-    /// This is the reverse of `apply()` - used during import.
     pub fn inverse(&self, value: &IonValue) -> Option<String> {
         match self {
             ValueTransform::Identity => {
@@ -2390,7 +2271,7 @@ impl ValueTransform {
             | ValueTransform::ConvertToDimensioned { .. }
             | ValueTransform::PreserveUnit => {
                 // Parse {value: N, unit: sym} struct
-                // Value may be Int (whole numbers), Float, or Decimal (Amazon uses all three)
+                // `value` is an Int, a Float or a Decimal.
                 let fields = value.as_struct()?;
                 let value_field = get_field_by_symbol(fields, KfxSymbol::Value)?;
                 let num = value_field
@@ -2415,14 +2296,12 @@ impl ValueTransform {
                     id if id == KfxSymbol::Pt as u32 => {
                         (((num / KFX_PT_PER_CSS_PX) * 1e5).round() / 1e5, "px")
                     }
-                    // `lh` counts line heights, one of them
-                    // `DOCUMENT_LINE_HEIGHT_EM` em — the baseline the export
-                    // direction divides by to reach `lh`.
+                    // `lh` counts line heights of `DOCUMENT_LINE_HEIGHT_EM` em each.
                     id if id == KfxSymbol::Lh as u32 => {
                         let em = num * DOCUMENT_LINE_HEIGHT_EM as f64;
                         ((em * 1e5).round() / 1e5, "em")
                     }
-                    _ => (num, "em"), // Default fallback
+                    _ => (num, "em"),
                 };
 
                 Some(format!("{}{}", num, unit_str))
@@ -2447,12 +2326,12 @@ impl ValueTransform {
                 Some(int_value.to_string())
             }
 
-            _ => None, // Other transforms not commonly used for styles
+            _ => None,
         }
     }
 }
 
-/// Helper to get a field from an Ion struct by KfxSymbol.
+/// A field of an Ion struct, by KfxSymbol.
 fn get_field_by_symbol(fields: &[(u64, IonValue)], sym: KfxSymbol) -> Option<&IonValue> {
     fields
         .iter()
@@ -2609,7 +2488,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
         IrField::TextDecorationStrikethrough => {
             ir_style.text_decoration_line_through = css_value == "line-through";
         }
-        // Text properties
         IrField::LetterSpacing => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 ir_style.letter_spacing = len;
@@ -2645,7 +2523,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WhiteSpace::Normal,
             };
         }
-        // Text decoration extensions
         IrField::UnderlineStyle => {
             ir_style.underline_style = match css_value {
                 "solid" => ir_style::DecorationStyle::Solid,
@@ -2663,7 +2540,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.underline_color = Some(ir_style::Color::rgba(r, g, b, a));
             }
         }
-        // Layout properties
         IrField::Width => {
             if let Some(len) = parse_css_length_to_ir(css_value) {
                 ir_style.width = len;
@@ -2701,7 +2577,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::Float::None,
             };
         }
-        // Page break properties
         IrField::BreakBefore => {
             ir_style.break_before = match css_value {
                 "always" | "page" => ir_style::BreakValue::Always,
@@ -2724,7 +2599,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::BreakValue::Auto,
             };
         }
-        // Border properties
         IrField::BorderStyleTop => {
             ir_style.border_style_top = parse_border_style(css_value);
         }
@@ -2797,7 +2671,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.border_radius_bottom_right = len;
             }
         }
-        // List properties
         IrField::ListStylePosition => {
             ir_style.list_style_position = match css_value {
                 "inside" => ir_style::ListStylePosition::Inside,
@@ -2811,11 +2684,9 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 other => ir_style::ListStyleType::from_css(other).unwrap_or_default(),
             };
         }
-        // Font family
         IrField::FontFamily => {
             ir_style.font_family = Some(css_value.to_string());
         }
-        // Amazon properties
         IrField::Language => {
             ir_style.language = Some(css_value.to_string());
         }
@@ -2841,7 +2712,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::BoxSizing::ContentBox,
             };
         }
-        // Additional layout properties
         IrField::Clear => {
             ir_style.clear = match css_value {
                 "left" => ir_style::Clear::Left,
@@ -2850,7 +2720,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::Clear::None,
             };
         }
-        // Pagination control
         IrField::Orphans => {
             if let Ok(n) = css_value.parse::<u32>() {
                 ir_style.orphans = n;
@@ -2861,7 +2730,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.widows = n;
             }
         }
-        // Text wrapping
         IrField::WordBreak => {
             ir_style.word_break = match css_value {
                 "break-all" => ir_style::WordBreak::BreakAll,
@@ -2870,7 +2738,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WordBreak::Normal,
             };
         }
-        // Table properties
         IrField::BorderCollapse => {
             ir_style.border_collapse = match css_value {
                 "collapse" => ir_style::BorderCollapse::Collapse,
@@ -2882,7 +2749,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 ir_style.border_spacing = len;
             }
         }
-        // Writing mode
         IrField::WritingMode => {
             ir_style.writing_mode = match css_value {
                 "vertical-rl" => ir_style::WritingMode::VerticalRl,
@@ -2890,7 +2756,6 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 _ => ir_style::WritingMode::HorizontalTb,
             };
         }
-        // Text emphasis
         IrField::TextEmphasisStyle => {
             ir_style.text_emphasis_style = match css_value {
                 "filled dot" => ir_style::TextEmphasisStyle::FilledDot,
@@ -2950,12 +2815,8 @@ fn parse_css_length_to_ir(s: &str) -> Option<ir_style::Length> {
     })
 }
 
-/// Import KFX style properties into an IR `ComputedStyle`: look up the schema
-/// rule by `kfx_symbol`, apply the inverse transform, set the IR field.
-///
-/// The style starts at `doc_writing_mode`, the axis a KFX style inherits from
-/// `document_data`. A style declaring `writing_mode` of its own — a horizontal
-/// title page inside a vertical book — states an axis apart from it.
+/// Import KFX style properties into an IR `ComputedStyle` starting at
+/// `doc_writing_mode`; a style's own `writing_mode` overrides it.
 pub fn import_kfx_style(
     schema: &StyleSchema,
     props: &[(u64, IonValue)],
@@ -2967,16 +2828,12 @@ pub fn import_kfx_style(
     };
 
     for (kfx_symbol, kfx_value) in props {
-        // Apply EVERY rule backed by this KFX symbol (e.g. `$underline`
-        // populates both the underline flag and the underline style), in the
-        // schema's stable order.
+        // Every rule backed by the KFX symbol applies, in schema order.
         for rule in schema.get_all_by_kfx_symbol(*kfx_symbol) {
-            // Apply inverse transform to get CSS value
-            if let Some(css_value) = rule.transform.inverse(kfx_value) {
-                // Apply to IR field (if the rule has an IR field mapping)
-                if let Some(ir_field) = rule.ir_field {
-                    apply_ir_field(&mut style, ir_field, &css_value);
-                }
+            if let Some(css_value) = rule.transform.inverse(kfx_value)
+                && let Some(ir_field) = rule.ir_field
+            {
+                apply_ir_field(&mut style, ir_field, &css_value);
             }
         }
     }
@@ -2984,16 +2841,13 @@ pub fn import_kfx_style(
     style
 }
 
-/// True for a style KFX export emits as a block container. KFX has no
-/// `display: inline-block`.
+/// True for a style KFX export emits as a block container.
 pub fn is_block_display(style: &ir_style::ComputedStyle) -> bool {
     matches!(
         style.display,
         ir_style::Display::Block | ir_style::Display::InlineBlock
     )
 }
-
-// ============================================================================
 
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
@@ -3051,16 +2905,16 @@ mod tests {
     fn test_extract_shorthand_four_values() {
         let parts = vec!["1px", "2px", "3px", "4px"];
         if let Some(KfxValue::String(s)) = extract_shorthand_value(&parts, 0, None) {
-            assert_eq!(s, "1px"); // top
+            assert_eq!(s, "1px");
         }
         if let Some(KfxValue::String(s)) = extract_shorthand_value(&parts, 1, None) {
-            assert_eq!(s, "2px"); // right
+            assert_eq!(s, "2px");
         }
         if let Some(KfxValue::String(s)) = extract_shorthand_value(&parts, 2, None) {
-            assert_eq!(s, "3px"); // bottom
+            assert_eq!(s, "3px");
         }
         if let Some(KfxValue::String(s)) = extract_shorthand_value(&parts, 3, None) {
-            assert_eq!(s, "4px"); // left
+            assert_eq!(s, "4px");
         }
     }
 
@@ -3178,6 +3032,32 @@ mod tests {
         );
     }
 
+    /// A `Color::TRANSPARENT` background extracts as `None`; an opaque one as hex.
+    #[test]
+    fn a_transparent_background_writes_no_colour() {
+        use crate::style::{Color, ComputedStyle};
+
+        let mut styled = ComputedStyle::default();
+        styled.background_color = Some(Color::TRANSPARENT);
+        assert_eq!(
+            extract_ir_field(
+                &styled,
+                IrField::BackgroundColor,
+                ir_style::WritingMode::default()
+            ),
+            None
+        );
+        styled.background_color = Some(Color::rgb(255, 255, 204));
+        assert_eq!(
+            extract_ir_field(
+                &styled,
+                IrField::BackgroundColor,
+                ir_style::WritingMode::default()
+            ),
+            Some("#ffffcc".to_string())
+        );
+    }
+
     #[test]
     fn test_extract_ir_field_margin() {
         use crate::style::{ComputedStyle, Length};
@@ -3208,7 +3088,6 @@ mod tests {
     fn test_schema_ir_mapped_rules() {
         let schema = StyleSchema::standard();
 
-        // Count rules with IR field mappings
         let mapped_count = schema.ir_mapped_rules().count();
         assert!(
             mapped_count > 10,
@@ -3224,8 +3103,6 @@ mod tests {
             );
         }
     }
-
-    // ========================================================================
 
     #[test]
     fn test_extract_shorthand_three_values() {
@@ -3437,8 +3314,7 @@ mod tests {
 
     #[test]
     fn test_unit_conversion_factors() {
-        // Verify unit conversion is correct
-        let base = 16.0; // Standard base font size
+        let base = 16.0;
 
         assert_eq!(convert_to_pixels(1.0, "px", base), 1.0);
         assert_eq!(convert_to_pixels(1.0, "em", base), 16.0);
@@ -3448,14 +3324,11 @@ mod tests {
         assert_eq!(convert_to_pixels(1.0, "in", base), 96.0);
     }
 
-    // ========================================================================
-
     #[test]
     fn test_font_weight_full_range_symbols() {
         let schema = StyleSchema::standard();
         let rule = schema.get_first("font-weight").unwrap();
 
-        // Verify all numeric weights map to correct symbols
         assert!(matches!(
             rule.transform.apply("100"),
             Some(KfxValue::Symbol(KfxSymbol::Thin))
@@ -3564,9 +3437,6 @@ mod tests {
         ));
     }
 
-    // ========================================================================
-    // Inverse Transform Tests (KFX → IR Import Direction)
-
     #[test]
     fn test_inverse_font_weight_symbol_to_css() {
         let schema = StyleSchema::standard();
@@ -3602,7 +3472,7 @@ mod tests {
             Some("1.5em".to_string())
         );
 
-        // {value: 2, unit: em} → "2em" (Int - Amazon may store whole numbers as Int)
+        // {value: 2, unit: em} → "2em" (Int)
         let kfx_value = IonValue::Struct(vec![
             (KfxSymbol::Value as u64, IonValue::Int(2)),
             (
@@ -3664,7 +3534,6 @@ mod tests {
 
         let schema = StyleSchema::standard();
 
-        // Build KFX style properties
         let props = vec![
             (
                 KfxSymbol::FontWeight as u64,
@@ -3686,10 +3555,8 @@ mod tests {
             ),
         ];
 
-        // Import using schema
         let ir_style = import_kfx_style(schema, &props, ir_style::WritingMode::default());
 
-        // Verify fields were set correctly
         assert_eq!(ir_style.font_weight, FontWeight::BOLD);
         assert_eq!(ir_style.text_align, TextAlign::Center);
         assert_eq!(ir_style.margin_top, crate::style::Length::Em(2.0));
@@ -3710,9 +3577,7 @@ mod tests {
 
     #[test]
     fn a_horizontal_style_in_a_vertical_book_keeps_its_own_axis() {
-        // A title page or a colophon set across a book that reads down the
-        // page: the KFX style says so, and the IR must not lose it to the CSS
-        // initial value.
+        // A `horizontal_tb` style in a vertical book keeps `HorizontalTb`.
         let schema = StyleSchema::standard();
         let props = vec![(
             KfxSymbol::WritingMode as u64,
@@ -3779,9 +3644,7 @@ mod tests {
     fn test_font_size_transform() {
         let transform = ValueTransform::FontSize;
 
-        // Absolute sizes must divide by the 16px root, not adopt the rem
-        // unit with their raw value (24px relabeled "24rem" renders a span
-        // at 24x the base font size).
+        // `24px` divides by the 16px root: 1.5rem.
         let result = transform.apply("24px").unwrap();
         assert_eq!(
             result,
@@ -3849,7 +3712,7 @@ mod tests {
         let css = transform.inverse(&kfx_value).unwrap();
         assert_eq!(css, "2em");
 
-        // Test with Int value (Amazon sometimes stores whole numbers as Int)
+        // Test with an Int value
         let kfx_value = IonValue::Struct(vec![
             (KfxSymbol::Value as u64, IonValue::Int(3)),
             (
@@ -3861,8 +3724,6 @@ mod tests {
         let css = transform.inverse(&kfx_value).unwrap();
         assert_eq!(css, "3em");
     }
-
-    // ========================================================================
 
     #[test]
     fn test_letter_spacing_transform() {
@@ -4253,8 +4114,7 @@ mod tests {
     fn test_box_align_from_margin_auto() {
         use crate::style::{ComputedStyle, Length};
 
-        // margin-left/right: auto + a definite width → box_align: center (CSS
-        // centers a block only when its width is definite).
+        // margin-left/right: auto + a definite width → box_align: center.
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
@@ -4268,9 +4128,7 @@ mod tests {
     fn test_box_align_not_emitted_without_width() {
         use crate::style::{ComputedStyle, Length};
 
-        // Auto margins with width:auto do NOT center (auto margins resolve to 0).
-        // This is the 罫囲み box case: a bordered <div> that never sets a width
-        // must hug its content, not span the page.
+        // Auto margins at `width: auto` emit no box_align.
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
@@ -4284,8 +4142,7 @@ mod tests {
     fn test_box_align_from_margin_auto_with_max_width() {
         use crate::style::{ComputedStyle, Length};
 
-        // A centered image — `img { max-width: 50%; margin: auto }` — has no
-        // `width` but a `max-width`, which is enough to center it.
+        // Auto margins with a `max_width` alone center.
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
@@ -4410,8 +4267,6 @@ mod tests {
             .expect("a point length reads back");
         assert_eq!(back, "1px");
     }
-
-    // ========================================================================
 
     #[test]
     fn test_border_collapse_mapping() {
@@ -4690,7 +4545,6 @@ mod tests {
     fn test_get_by_kfx_symbol_border_weight() {
         let schema = StyleSchema::standard();
 
-        // Verify the schema has a rule for BorderWeightTop
         let rule = schema.get_by_kfx_symbol(KfxSymbol::BorderWeightTop as u64);
         assert!(
             rule.is_some(),
