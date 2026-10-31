@@ -58,7 +58,29 @@ pub struct CollectionInfo {
     pub position: Option<f64>,
 }
 
-/// Which flavour of periodical a book is, as Amazon's catalogue names it.
+/// Whether an author's sort key for `old` holds for `new`: the same words in any
+/// order, case, commas and spacing aside (`Doe, Jane` → `Jane Doe`, `太宰治` →
+/// `太宰 治`).
+pub(crate) fn sort_key_survives(old: &str, new: &str) -> bool {
+    let squeezed = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && *c != ',')
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let words = |s: &str| -> Vec<String> {
+        let mut w: Vec<String> = s
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        w.sort_unstable();
+        w
+    };
+    squeezed(old) == squeezed(new) || words(old) == words(new)
+}
+
+/// Which flavour of periodical a book is, by its `cde_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeriodicalKind {
     /// MOBI header type 259, `cdetype = MAGZ`.
@@ -108,8 +130,7 @@ pub struct Metadata {
     pub authors: Vec<String>,
     pub language: String,
     pub identifier: String,
-    /// Amazon Standard Identification Number, separate from `identifier`.
-    /// An EPUB import reads it from `<dc:identifier opf:scheme="ASIN">`.
+    /// The ASIN, apart from `identifier`; EPUB `<dc:identifier opf:scheme="ASIN">`.
     pub asin: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
@@ -123,37 +144,25 @@ pub struct Metadata {
     pub contributors: Vec<Contributor>,
     /// file-as for title (sort key)
     pub title_sort: Option<String>,
-    /// Sort/pronunciation keys, positionally aligned with `authors`: EPUB
-    /// `file-as`, KFX `author_pronunciation`, MOBI EXTH 517. Empty when the
-    /// source declared none.
+    /// Sort keys aligned with `authors`: EPUB `file-as`, KFX `author_pronunciation`, EXTH 517.
     pub author_sorts: Vec<String>,
     /// belongs-to-collection (series info)
     pub collection: Option<CollectionInfo>,
-    /// OPF spine `page-progression-direction` attribute ("ltr" | "rtl" | "default").
-    /// Required for vertical-RTL Japanese books to bind/swipe correctly on Kindle.
+    /// OPF spine `page-progression-direction`: "ltr" | "rtl" | "default".
     pub page_progression_direction: Option<String>,
-    /// OPF `<meta name="primary-writing-mode">` value: "vertical-rl" for
-    /// Japanese, "vertical-lr" for Mongolian, both `rtl` in
-    /// `page_progression_direction`.
+    /// OPF `<meta name="primary-writing-mode">`: "vertical-rl" (Japanese), "vertical-lr".
     pub primary_writing_mode: Option<String>,
-    /// `rendition:layout = pre-paginated`. Selects the FXL OPF metadata on
-    /// EPUB export and the `yj_non_pdf_fixed_layout` skeleton on KFX export.
+    /// `rendition:layout = pre-paginated`, exported as FXL OPF metadata or a fixed-layout KFX.
     pub fixed_layout: bool,
-    /// `book-type` OPF hint — `"comic"` for double-page-spread manga,
-    /// `"children"` for picture books. Only meaningful when `fixed_layout`.
+    /// `book-type` OPF hint, `"comic"` or `"children"`, read with `fixed_layout`.
     pub book_type: Option<String>,
-    /// `rendition:spread` policy for a fixed-layout book, e.g. `"landscape"`
-    /// for facing pages as a two-page spread.
+    /// `rendition:spread` of a fixed-layout book, e.g. `"landscape"` for two-page spreads.
     pub rendition_spread: Option<String>,
     /// The `OrientationLock` the source declared. Read with `fixed_layout`.
     pub orientation_lock: Option<OrientationLock>,
-    /// Book-level default page viewport `(width, height)` in px — the
-    /// `fixed-layout-jp:viewport` / KF8 `original-resolution`. Every FXL page
-    /// is authored to this box unless it carries its own viewport.
+    /// Book-level FXL page viewport `(width, height)` in px (`original-resolution`).
     pub default_viewport: Option<(u32, u32)>,
-    /// `PeriodicalKind` for an issue of a periodical, `None` for a book. Its
-    /// issue date is `date`; `title` names the magazine, and a sideload with
-    /// no cdeGroup stacks on that shared title.
+    /// `PeriodicalKind` of a periodical issue, `None` for a book; its issue date is `date`.
     pub periodical: Option<PeriodicalKind>,
 }
 
@@ -280,8 +289,7 @@ impl crate::model::toc_shape::TocNode for TocEntry {
     fn set_children(&mut self, children: Vec<Self>) {
         self.children = children;
     }
-    /// Two entries land on the same place when they name the same href — the
-    /// fragment included, since two anchors in one document are two chapters.
+    /// The href, fragment included, that two entries landing on one place share.
     fn target_key(&self) -> String {
         self.href.clone()
     }
@@ -385,20 +393,13 @@ pub struct Landmark {
 /// reaches its metadata, table of contents and content through one surface.
 pub struct Book {
     backend: Box<dyn Importer>,
-    /// Cache of parsed IR chapters to avoid re-parsing during normalized export.
-    /// Uses RwLock for thread-safe access and Arc for cheap cloning.
+    /// Parsed IR chapters, cached for normalized export.
     ir_cache: Arc<RwLock<HashMap<ChapterId, Arc<Chapter>>>>,
-    /// Caller-supplied metadata that shadows the backend's parsed metadata.
-    /// When set, [`Book::metadata`] returns it. `None` = the backend's
-    /// metadata verbatim.
+    /// Metadata shadowing the backend's; `None` keeps the backend's verbatim.
     meta_override: Option<Metadata>,
-    /// How raster images are encoded into a KFX export: `Color` (default,
-    /// `24bppRGB` JXR, collapsed to `8bppGray` when the channels are
-    /// identical) or `Grayscale` (`8bppGray`).
+    /// How raster images encode into a KFX export; see [`Book::set_image_color_mode`].
     image_color_mode: crate::jxr::ColorMode,
-    /// Worker-thread cap for every parallel stage of an import or export off
-    /// this handle. `0` = the platform's reported parallelism. Set via
-    /// [`Book::set_max_workers`].
+    /// Worker-thread cap for parallel stages; `0` = the platform's parallelism.
     max_workers: usize,
 }
 
@@ -411,12 +412,9 @@ impl Format {
             .and_then(|ext| match ext.to_lowercase().as_str() {
                 "epub" => Some(Format::Epub),
                 "azw3" => Some(Format::Azw3),
-                // `.pobi` is a plain MOBI6 container, marked as a periodical
-                // by its MOBI header type, EXTH 501 `cdetype` and a
-                // hierarchical NCX.
+                // `.pobi` is a periodical MOBI6 container.
                 "mobi" | "pobi" => Some(Format::Mobi),
-                // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
-                // importer auto-detects and dispatches it via its `open()`.
+                // `.kfx-zip` is a multi-container KFX bundle.
                 "kfx" | "kfx-zip" => Some(Format::Kfx),
                 "md" | "txt" => Some(Format::Markdown),
                 _ => None,
@@ -635,9 +633,8 @@ impl Book {
         self.backend.load_raw(id)
     }
 
-    /// Load a chapter as normalized IR: its HTML content and any linked or
-    ///
-    /// inline CSS, parsed into a tree.
+    /// Load a chapter as normalized IR: its HTML and any linked or inline CSS,
+    /// parsed into a tree.
     pub fn load_chapter(&mut self, id: ChapterId) -> io::Result<Chapter> {
         self.backend.load_chapter(id)
     }
@@ -713,9 +710,7 @@ impl Book {
             .collect()
     }
 
-    /// Clear the IR cache.
-    ///
-    /// Call this to free memory after normalized export is complete.
+    /// Clear the IR cache, freeing the memory a normalized export held.
     pub fn clear_cache(&mut self) {
         if let Ok(mut cache) = self.ir_cache.write() {
             cache.clear();
@@ -965,6 +960,16 @@ impl TocEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sort_key_survives_a_reordering_of_the_same_name() {
+        assert!(sort_key_survives("Doe, Jane", "Jane Doe"));
+        assert!(sort_key_survives("JANE DOE", "Jane Doe"));
+        assert!(sort_key_survives("太宰治", "太宰 治"));
+        assert!(sort_key_survives("Le Guin, Ursula K.", "Ursula K. Le Guin"));
+        assert!(!sort_key_survives("Jane Doe", "Jane Roe"));
+        assert!(!sort_key_survives("太宰治", "夏目漱石"));
+    }
 
     #[test]
     fn metadata_override_shadows_backend_keeps_other_fields() {

@@ -1,58 +1,90 @@
 //! Surgical in-place metadata edit for a PDF's `/Info` dictionary.
 
-use lopdf::Object;
+use lopdf::{Document, Object};
 
-use super::doc::encode_pdf_string;
+use super::doc::{decode_pdf_string, deref, encode_pdf_string};
 use super::edit::PdfPackage;
 
 /// Which `/Info` fields to set. `None` leaves a field untouched.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataPatch {
     pub title: Option<String>,
-    /// Joined with `", "` into the single `/Author` string.
+    /// Joined with `" & "` into `/Author`; an empty list removes it.
     pub authors: Option<Vec<String>>,
-    /// Not representable in `/Info`; accepted for cross-format symmetry and
-    /// ignored.
+    /// Not representable in `/Info`; ignored.
     pub language: Option<String>,
-    /// Not representable in `/Info`; accepted for cross-format symmetry and
-    /// ignored.
+    /// Not representable in `/Info`; ignored.
     pub publisher: Option<String>,
     /// Publication date → `/CreationDate`, when it parses as `YYYY-MM-DD`.
     pub date: Option<String>,
 }
 
 impl MetadataPatch {
-    /// True if the patch sets no field that `/Info` can represent — then
+    /// True if the patch sets no field `/Info` can represent.
     pub fn is_empty(&self) -> bool {
         self.title.is_none() && self.authors.is_none() && self.date.is_none()
     }
 }
 
-/// Apply `patch` to a PDF's `/Info`, returning the edited bytes.
+/// Apply `patch` to `/Info` as an appended incremental update; returns
+/// `pdf_bytes` itself when `/Info` holds every value.
 pub fn edit_metadata(pdf_bytes: &[u8], patch: &MetadataPatch) -> std::io::Result<Vec<u8>> {
     if patch.is_empty() {
         return Ok(pdf_bytes.to_vec());
     }
     let mut pkg = PdfPackage::parse(pdf_bytes)?;
+    let current = |key: &[u8]| info_bytes(pkg.original(), key);
+
+    // (key, new value); `None` removes the key.
+    let mut sets: Vec<(&str, Option<Object>)> = Vec::new();
+    if let Some(t) = &patch.title
+        && current(b"Title").map(|b| decode_pdf_string(&b)).as_deref() != Some(t.as_str())
     {
-        let info = pkg.info_dict()?;
-        if let Some(t) = &patch.title {
-            info.set("Title", encode_pdf_string(t));
+        sets.push(("Title", Some(encode_pdf_string(t))));
+    }
+    if let Some(authors) = &patch.authors {
+        let joined = authors.join(" & ");
+        let now = current(b"Author").map(|b| decode_pdf_string(&b));
+        if joined.is_empty() {
+            if now.is_some() {
+                sets.push(("Author", None));
+            }
+        } else if now.as_deref() != Some(joined.as_str()) {
+            sets.push(("Author", Some(encode_pdf_string(&joined))));
         }
-        if let Some(authors) = &patch.authors {
-            info.set("Author", encode_pdf_string(&authors.join(", ")));
-        }
-        if let Some(d) = &patch.date
-            && let Some(pdf_date) = to_pdf_date(d)
-        {
-            info.set("CreationDate", Object::string_literal(pdf_date));
+    }
+    if let Some(pdf_date) = patch.date.as_deref().and_then(to_pdf_date)
+        && current(b"CreationDate").as_deref() != Some(pdf_date.as_bytes())
+    {
+        sets.push(("CreationDate", Some(Object::string_literal(pdf_date))));
+    }
+    if sets.is_empty() {
+        return Ok(pdf_bytes.to_vec());
+    }
+
+    let info = pkg.info_dict()?;
+    for (key, value) in sets {
+        match value {
+            Some(v) => info.set(key, v),
+            None => {
+                info.remove(key.as_bytes());
+            }
         }
     }
     pkg.into_bytes()
 }
 
-/// Convert an ISO-ish `YYYY-MM-DD` (optionally with a trailing time we ignore)
-/// into a PDF date string `D:YYYYMMDD000000Z` (PDF 32000-1 §7.9.4).
+/// The raw string bytes of `/Info`'s `key`, if it holds a string.
+fn info_bytes(doc: &Document, key: &[u8]) -> Option<Vec<u8>> {
+    let info = deref(doc, doc.trailer.get(b"Info").ok()?)?.as_dict().ok()?;
+    deref(doc, info.get(key).ok()?)?
+        .as_str()
+        .ok()
+        .map(<[u8]>::to_vec)
+}
+
+/// Convert an ISO `YYYY-MM-DD`, any trailing time dropped, into a PDF date string
+/// `D:YYYYMMDD000000Z` (PDF 32000-1 §7.9.4).
 fn to_pdf_date(s: &str) -> Option<String> {
     let date = s.trim().get(..10)?;
     let mut parts = date.split('-');
@@ -89,8 +121,7 @@ mod tests {
         std::fs::read(MINIMAL).expect("read minimal.pdf fixture")
     }
 
-    /// Read the edit back through `probe_pdf` — the actual downstream consumer
-    /// (it feeds `pdf_to_kfx`), not just our own writer's assumptions.
+    /// `(title, author)` as `probe_pdf` reads them back.
     fn probe(bytes: &[u8]) -> (Option<String>, Option<String>) {
         let d = probe_pdf(bytes.to_vec()).expect("probe edited PDF");
         (d.title, d.author)
@@ -112,10 +143,46 @@ mod tests {
         assert_eq!(title.as_deref(), Some("New Title"));
         assert_eq!(
             author.as_deref(),
-            Some("First Author, Second Author"),
+            Some("First Author & Second Author"),
             "multiple authors join into the single /Author string"
         );
         assert!(out.starts_with(&pdf), "still append-only");
+    }
+
+    #[test]
+    fn values_info_already_holds_append_nothing() {
+        let pdf = minimal();
+        let patch = MetadataPatch {
+            title: Some("Tiny Test PDF".into()),
+            authors: Some(vec!["A. Tester".into()]),
+            ..Default::default()
+        };
+        assert_eq!(edit_metadata(&pdf, &patch).expect("edit"), pdf);
+
+        let dated = edit_metadata(
+            &pdf,
+            &MetadataPatch {
+                date: Some("1948-06-13".into()),
+                ..Default::default()
+            },
+        )
+        .expect("edit");
+        let again = MetadataPatch {
+            date: Some("1948-06-13".into()),
+            ..Default::default()
+        };
+        assert_eq!(edit_metadata(&dated, &again).expect("edit"), dated);
+    }
+
+    #[test]
+    fn an_empty_author_list_removes_the_author() {
+        let pdf = minimal();
+        let patch = MetadataPatch {
+            authors: Some(Vec::new()),
+            ..Default::default()
+        };
+        let out = edit_metadata(&pdf, &patch).expect("edit");
+        assert_eq!(probe(&out).1, None);
     }
 
     #[test]
@@ -153,8 +220,7 @@ mod tests {
         assert_eq!(out, pdf, "an empty patch is a no-op");
     }
 
-    /// A patch of only fields `/Info` can't hold writes nothing rather than
-    /// inventing non-standard keys.
+    /// `language` and `publisher` alone write nothing.
     #[test]
     fn unrepresentable_only_patch_is_a_noop() {
         let pdf = minimal();
@@ -191,12 +257,12 @@ mod tests {
             to_pdf_date("1948-06-13").as_deref(),
             Some("D:19480613000000Z")
         );
-        // A trailing time component is tolerated; we keep the date part.
+        // A trailing time is dropped, the date part kept.
         assert_eq!(
             to_pdf_date("1948-06-13T10:30:00Z").as_deref(),
             Some("D:19480613000000Z")
         );
-        // Free-text values the library allows must not become bogus dates.
+        // Free text and malformed dates convert to `None`.
         assert_eq!(to_pdf_date("1948"), None);
         assert_eq!(to_pdf_date("Summer 1948"), None);
         assert_eq!(to_pdf_date("1948-13-01"), None, "month out of range");
@@ -205,8 +271,7 @@ mod tests {
         assert_eq!(to_pdf_date("19480613"), None);
     }
 
-    /// An unparseable date writes nothing at all rather than a broken
-    /// `/CreationDate` (but a title in the same patch still lands).
+    /// An unparseable date writes no `/CreationDate`, and a title beside it lands.
     #[test]
     fn unparseable_date_is_skipped_not_written() {
         let pdf = minimal();

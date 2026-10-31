@@ -90,8 +90,8 @@ fn fallback_cover_by_id(manifest: &HashMap<String, ManifestItem>) -> Option<&Man
 
 /// Parse OPF package document.
 pub fn parse_opf(content: &str) -> io::Result<OpfData> {
+    // Text is trimmed once per element, keeping the spaces beside an entity reference.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
 
     let mut metadata = Metadata::default();
     let mut manifest: HashMap<String, ManifestItem> = HashMap::new();
@@ -117,6 +117,9 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut current_identifier_scheme: Option<String> = None;
     // `file-as` of the open `<dc:title>` / `<dc:creator>`, applied at its close.
     let mut current_file_as: Option<String> = None;
+    // `opf:event` of the open `<dc:date>`, and the rank of `metadata.date`.
+    let mut current_date_event: Option<String> = None;
+    let mut date_rank: Option<u8> = None;
     // One sort-key slot per `<dc:creator>`, parallel to `metadata.authors`.
     let mut author_sort_slots: Vec<Option<String>> = Vec::new();
     let mut buf_text = String::new();
@@ -344,10 +347,16 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         current_element_id = None;
                         current_identifier_scheme = None;
                         current_file_as = None;
+                        current_date_event = None;
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
                             if key == b"id" {
                                 current_element_id = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            } else if local == b"date" && local_name(key) == b"event" {
+                                current_date_event = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
@@ -468,7 +477,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                 }
 
                 if let Some(ref elem) = current_element {
-                    let text = buf_text.clone();
+                    let text = crate::util::trim_markup_space(&buf_text).to_string();
                     match elem.as_str() {
                         "title" => {
                             if metadata.title.is_empty() {
@@ -528,7 +537,16 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         "publisher" => metadata.publisher = Some(text),
                         "description" => metadata.description = Some(text),
                         "subject" => metadata.subjects.push(text),
-                        "date" => metadata.date = Some(text),
+                        "date" => {
+                            let rank = publication_date_rank(current_date_event.take().as_deref());
+                            if let Some(rank) = rank
+                                && !text.is_empty()
+                                && date_rank.is_none_or(|kept| rank < kept)
+                            {
+                                metadata.date = Some(text);
+                                date_rank = Some(rank);
+                            }
+                        }
                         "rights" => metadata.rights = Some(text),
                         _ => {}
                     }
@@ -613,6 +631,18 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
         nav_href,
         unique_identifier,
     })
+}
+
+/// How strongly a `<dc:date>` with this `opf:event` names the publication date:
+/// `0` `publication`, `1` none or `original-publication`, `2` a creation date,
+/// `None` any other event (`modification`, …); the lowest wins, the first on ties.
+pub(crate) fn publication_date_rank(event: Option<&str>) -> Option<u8> {
+    match event.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+        Some("publication") => Some(0),
+        None | Some("original-publication") => Some(1),
+        Some("creation" | "epub-creation") => Some(2),
+        Some(_) => None,
+    }
 }
 
 /// Parse a viewport stated as `WxH` or `width=W, height=H`.
@@ -761,8 +791,8 @@ fn apply_refinements(
 
 /// Parse NCX table of contents.
 pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
+    // Labels are trimmed whole, keeping the spaces beside an entity reference.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
     // `check_end_names` off: a title containing `<` parses.
     reader.config_mut().check_end_names = false;
 
@@ -877,8 +907,8 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
 /// flat entry — `navLabel/text` its title, `content/@src` its href; a
 /// `navLabel` directly under `<pageList>` gives none.
 pub fn parse_ncx_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
+    // Labels are trimmed whole, keeping the spaces beside an entity reference.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
     // `check_end_names` off: a label containing `<` parses.
     reader.config_mut().check_end_names = false;
 
@@ -985,8 +1015,8 @@ pub fn parse_nav_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
 /// The `<ol>` tree of the `<nav>` whose `epub:type` holds `wanted_type`, for
 /// [`parse_nav_toc`] and [`parse_nav_page_list`].
 fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
+    // Labels are trimmed whole, keeping the spaces beside an entity or a child element.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
     // `check_end_names` off: link text containing `<` parses.
     reader.config_mut().check_end_names = false;
 
@@ -1114,8 +1144,8 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
 
 /// Parse EPUB 3 nav document landmarks.
 pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
+    // Labels are trimmed whole, keeping the spaces beside an entity reference.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
     // `check_end_names` off: label text containing `<` parses.
     reader.config_mut().check_end_names = false;
 
@@ -1202,7 +1232,7 @@ pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
                             landmarks.push(Landmark {
                                 landmark_type,
                                 href,
-                                label: current_label.clone(),
+                                label: crate::util::trim_markup_space(&current_label).to_string(),
                                 target: None,
                             });
                         }
@@ -1587,6 +1617,108 @@ mod tests {
         assert_eq!(
             result.metadata.primary_writing_mode.as_deref(),
             Some("vertical-rl")
+        );
+    }
+
+    fn date_of(dates: &str) -> Option<String> {
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Book</dc:title>
+    {dates}
+  </metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#
+        );
+        parse_opf(&opf).unwrap().metadata.date
+    }
+
+    #[test]
+    fn a_modification_stamp_is_not_the_publication_date() {
+        assert_eq!(
+            date_of(
+                r#"<dc:date>2020-02-01</dc:date>
+                <dc:date opf:event="modification">2020-01-07</dc:date>"#
+            )
+            .as_deref(),
+            Some("2020-02-01")
+        );
+        assert_eq!(
+            date_of(
+                r#"<dc:date opf:event="publication">1983-01-01</dc:date>
+                <dc:date opf:event="modification">2018-07-02</dc:date>"#
+            )
+            .as_deref(),
+            Some("1983-01-01")
+        );
+        assert_eq!(
+            date_of(
+                r#"<dc:date opf:event="epub-creation">2016</dc:date>
+                <dc:date opf:event="original-publication">2015</dc:date>"#
+            )
+            .as_deref(),
+            Some("2015")
+        );
+        assert_eq!(
+            date_of(
+                r#"<dc:date opf:event="creation">2011</dc:date>
+                <dc:date opf:event="modification">2018-07-02</dc:date>"#
+            )
+            .as_deref(),
+            Some("2011"),
+            "a creation date stands in when nothing names the publication"
+        );
+        assert_eq!(
+            date_of(r#"<dc:date opf:event="modification">2018-07-02</dc:date>"#),
+            None,
+            "a book stating only when it was modified states no publication date"
+        );
+    }
+
+    #[test]
+    fn the_spaces_beside_an_entity_reference_survive() {
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>
+      Pride &amp; Prejudice
+    </dc:title>
+    <dc:creator>Smith &amp; Jones</dc:creator>
+    <dc:publisher>Acme &amp; Sons</dc:publisher>
+  </metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+        let m = parse_opf(opf).unwrap().metadata;
+        assert_eq!(m.title, "Pride & Prejudice");
+        assert_eq!(m.authors, ["Smith & Jones"]);
+        assert_eq!(m.publisher.as_deref(), Some("Acme & Sons"));
+
+        let ncx = r#"<ncx><navMap><navPoint id="n1"><navLabel><text> Q &amp; A </text></navLabel><content src="a.xhtml"/></navPoint></navMap></ncx>"#;
+        assert_eq!(parse_ncx(ncx).unwrap()[0].title, "Q & A");
+
+        let nav = r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol>
+          <li><a href="a.xhtml"><span>1</span> <span>Q &amp; A</span></a></li>
+        </ol></nav><nav epub:type="landmarks"><ol>
+          <li><a epub:type="bodymatter" href="a.xhtml">
+            Start
+          </a></li>
+        </ol></nav></body></html>"#;
+        assert_eq!(parse_nav_toc(nav).unwrap()[0].title, "1 Q & A");
+        assert_eq!(parse_nav_landmarks(nav).unwrap()[0].label, "Start");
+    }
+
+    #[test]
+    fn a_publication_event_outranks_an_unlabelled_date() {
+        assert_eq!(
+            date_of(
+                r#"<dc:date>2011-08-31</dc:date>
+                <dc:date opf:event="publication">2011-09-08</dc:date>"#
+            )
+            .as_deref(),
+            Some("2011-09-08")
         );
     }
 

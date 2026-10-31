@@ -1,5 +1,5 @@
-//! Library merge — fold a `.sidlebak`'s contents into the live library,
-//! additively: only inserts, never a delete or an overwrite, so no relaunch.
+//! Library merge — fold a `.sidlebak`'s contents into the live library: new rows
+//! inserted, a duplicate book's metadata taken when newer, nothing deleted.
 //! Identity is content-derived; only the autoincrement `id` is remapped.
 
 use std::path::{Path, PathBuf};
@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::library::{backup, db, relocate};
+use crate::library::{backup, db, metadata, relocate};
 
-/// What a merge brought in — surfaced to the UI.
+/// What a merge brought in.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MergeOutcome {
     /// Books new to this library (inserted, files copied).
@@ -22,17 +22,18 @@ pub struct MergeOutcome {
     pub ink_added: i64,
     /// Notebooks new to this library (existing uuids are left untouched).
     pub notebooks_added: i64,
+    /// The local ids of the books added or updated, for their files to follow.
+    #[serde(skip)]
+    pub touched: Vec<i64>,
 }
 
-/// The source's per-book conversion state, carried so a merged book displays the
-/// right status. No job row COALESCEs to `pending`.
+/// The source's per-book conversion state; no job row COALESCEs to `pending`.
 struct SourceJob {
     status: String,
     kind: String,
 }
 
-/// One source book and everything tied to it, read from the staged DB while it
-/// was open. Owned (plain) data, so a [`Prepared`] crosses a `spawn_blocking`.
+/// One source book and everything tied to it, read from the staged DB as owned data.
 struct SourceBook {
     row: db::BookRow,
     job: Option<SourceJob>,
@@ -51,8 +52,7 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// Whether there's anything to commit — lets the command short-circuit a
-    /// no-op merge (e.g. re-merging the same backup) without taking the DB lock.
+    /// Whether there is anything to commit.
     pub fn is_empty(&self) -> bool {
         self.books.is_empty() && self.notebooks.is_empty()
     }
@@ -113,8 +113,7 @@ pub fn prepare_with_progress(
         }
     }
 
-    // Staging is fully consumed (inventory in memory, files copied) — drop it and
-    // the WAL sidecars `db::open` created.
+    // Staging is fully consumed; it goes with the WAL sidecars `db::open` created.
     let _ = std::fs::remove_dir_all(&staging);
 
     Ok(Prepared {
@@ -140,6 +139,7 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
                 if b.row.updated_at > local.updated_at {
                     overwrite_metadata(&tx, &b.row, &local).context("overwrite metadata")?;
                     out.books_updated += 1;
+                    out.touched.push(local.id);
                 }
                 local.id
             }
@@ -148,8 +148,7 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
                 let id = insert_source_book(&tx, dest_root, &b.row).context("insert book")?;
                 db::set_book_updated_at(&tx, id, &b.row.updated_at)?;
                 if let Some(job) = &b.job {
-                    // A backup taken mid-conversion records `converting`; the dest
-                    // isn't converting it, so re-pend so bootstrap re-enqueues.
+                    // A backup taken mid-conversion records `converting`, re-pended here.
                     let status = if job.status == "converting" {
                         "pending"
                     } else {
@@ -158,6 +157,7 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
                     db::insert_job(&tx, id, status, &job.kind)?;
                 }
                 out.books_added += 1;
+                out.touched.push(id);
                 id
             }
         };
@@ -212,7 +212,7 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
 // ---------------------------------------------------------------------------
 
 /// Read every source book plus its conversion job, annotations, `sidle` reading
-/// positions, and ink — grouped per book, so [`commit`] needs no id map.
+/// positions and ink, grouped per book.
 fn read_source_books(conn: &Connection) -> Result<Vec<SourceBook>> {
     let rows = db::list_books(conn).context("list source books")?;
     let mut out = Vec::with_capacity(rows.len());
@@ -303,6 +303,22 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
     .context("insert merged book")
 }
 
+/// The books a merge added or updated, as edits for their files to follow; a
+/// field the merged row lacks stays in the files.
+pub fn touched_books(conn: &Connection, outcome: &MergeOutcome) -> Result<Vec<metadata::Edited>> {
+    let mut out = Vec::with_capacity(outcome.touched.len());
+    for id in &outcome.touched {
+        if let Some(row) = db::get_book(conn, *id)? {
+            out.push(metadata::Edited {
+                row,
+                cleared: metadata::Cleared::default(),
+                reaches_files: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Overwrite a duplicate book's metadata with the newer source's, keeping its
 /// file paths and its `asin`. `amazon_asin` prefers a non-empty value from
 /// either side, and `updated_at` takes the source's.
@@ -343,8 +359,7 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
 /// Insert one of a book's annotations under its local id; returns whether a new
 /// row landed. `false` names a `dedup_hash` the destination holds.
 fn insert_annotation_for(conn: &Connection, book_id: i64, a: &db::AnnotationRow) -> Result<bool> {
-    // Don't resurrect an annotation the dest library deleted — its tombstone wins
-    // over a merged-in copy, so a Sidle-side deletion survives the merge.
+    // An annotation the destination deleted stays deleted: its tombstone wins.
     if db::is_deleted(conn, db::DELETION_ANNOTATION, &a.dedup_hash)
         .context("check annotation tombstone")?
     {

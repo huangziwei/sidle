@@ -76,7 +76,7 @@ enum Command {
     Asin {
         #[command(flatten)]
         select: Select,
-        /// The 10-character Amazon id.
+        /// The 10-character catalogue ASIN.
         asin: String,
     },
     /// Record the format a book arrived in, for rows imported before the
@@ -87,10 +87,18 @@ enum Command {
         /// `azw3`, `mobi`, `epub`, `kfx`, `kfx-zip`, `pdf`, `aozora`.
         format: String,
     },
-    /// Give every KFX an identity of its own, so a copy of a store-bought book
-    /// stops sharing the catalogue item's ASIN.
+    /// Give every KFX an identity of its own, apart from the catalogue item's ASIN.
     Rekey {
         /// Without this, the plan is printed and nothing is written.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Write each book's metadata into the files that disagree with it: title,
+    /// authors, language, publisher and date.
+    Bake {
+        #[command(flatten)]
+        select: Select,
+        /// Without this, the disagreements are printed and nothing is written.
         #[arg(long)]
         apply: bool,
     },
@@ -166,6 +174,7 @@ fn run(cli: Cli) -> Result<()> {
             cmd::library::source_format(&ctx, &select, &format)
         }
         Command::Rekey { apply } => cmd::library::rekey(&ctx, apply),
+        Command::Bake { select, apply } => cmd::library::bake(&ctx, &select, apply),
         Command::Romanize { text, language } => {
             println!(
                 "{}",

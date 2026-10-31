@@ -205,9 +205,8 @@ fn shares_a_catalogue_id(book: &BookRow) -> bool {
 
 #[derive(Args)]
 pub struct ImportArgs {
-    /// Files to add: `.epub`, `.kfx`, `.kfx-zip`, `.azw3`, `.mobi`, `.pobi`,
-    /// `.pdf`, or
-    /// an Aozora `.zip`. A directory is walked one level deep.
+    /// Files to add: `.epub`, `.kfx`, `.kfx-zip`, `.azw3`, `.mobi`, `.pobi`, `.pdf`,
+    /// or an Aozora `.zip`. A directory is walked one level deep.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// Land the files but leave the companion format to a later `convert`.
@@ -374,8 +373,8 @@ pub struct SetArgs {
     /// Remove a tag. Repeatable.
     #[arg(long = "remove-tag")]
     remove_tags: Vec<String>,
-    /// Re-derive the KFX afterwards, so the edit reaches the file the Kindle
-    /// reads and not just the library row.
+    /// Re-derive the KFX afterwards, which a page direction or reading layout
+    /// takes to reach it; the other fields are written into the files as is.
     #[arg(long)]
     reconvert: bool,
     /// Print the selection and change nothing.
@@ -433,13 +432,7 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
                 remove_tags: args.remove_tags.clone(),
             };
             let ids: Vec<i64> = books.iter().map(|b| b.id).collect();
-            let rows = metadata::apply_bulk(&conn, &ids, patch)?;
-            // A bulk patch writes the row; each file keeps the old
-            // `[Author] Title (Year)` name until they are renamed to match.
-            for id in &ids {
-                sidle_core::library::rename::rename_book_files(&conn, &ctx.paths, *id)?;
-            }
-            rows
+            metadata::apply_bulk(&conn, &ctx.paths, &ids, patch)?
         }
     };
 
@@ -624,9 +617,7 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     let kfx = bokai::Book::from_bytes(&bytes, bokai::Format::Kfx)
         .with_context(|| format!("parse {}", path.display()))?;
 
-    // A KFX Amazon produced names no publication identifier for the export
-    // rule to derive from. `sha256` stands in: per-book, the name of the
-    // directory the file lives in, and fixed for the life of the bytes.
+    // Without a publication identifier, the book's `sha256` keys the file.
     let new_key =
         resolve_export_asin(kfx.metadata()).unwrap_or_else(|| generate_content_id(&book.sha256));
     let old_key = book.asin.as_deref().unwrap_or_default().to_string();
@@ -634,8 +625,7 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
         return Ok(new_key);
     }
 
-    // Both fields, to one value: they are written equal at export, and a device
-    // that keys on either sees one identity.
+    // `ASIN` and `content_id` take one value, as an export writes them.
     let patched = metadata_edit::edit_metadata(
         &bytes,
         &MetadataPatch {
@@ -656,6 +646,70 @@ fn rekey_one(conn: &Connection, book: &BookRow) -> Result<String> {
     db::set_asin(conn, book.id, &new_key)?;
     db::relink_ink(conn, &old_key, &new_key)?;
     Ok(new_key)
+}
+
+/// Write each selected book's metadata into the files that disagree with it;
+/// without `apply`, print the disagreements and write nothing.
+pub fn bake(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
+    let books = {
+        let conn = ctx.conn();
+        select.resolve_nonempty(&conn)?
+    };
+
+    #[derive(Serialize)]
+    struct Baked {
+        book_id: i64,
+        title: String,
+        files: Vec<metadata::FileReport>,
+    }
+    let mut out = Vec::new();
+    for book in &books {
+        let want = metadata::FileMetadata::of(book);
+        let files = metadata::bake(book, &want, metadata::Cleared::default(), apply);
+        if files
+            .iter()
+            .all(|f| f.drift.is_empty() && f.error.is_none())
+        {
+            continue;
+        }
+        ctx.say(format!("[{}] {}", book.id, book.title));
+        for f in &files {
+            let format = f.format.as_str();
+            if let Some(e) = &f.error {
+                ctx.say(format!("  {format}: {e}"));
+            }
+            for d in &f.drift {
+                ctx.say(format!(
+                    "  {format} {}: {:?} -> {:?}",
+                    d.field, d.file, d.row
+                ));
+            }
+        }
+        out.push(Baked {
+            book_id: book.id,
+            title: book.title.clone(),
+            files,
+        });
+    }
+
+    let files = || out.iter().flat_map(|b| &b.files);
+    let written = files().filter(|f| f.written).count();
+    let failed = files().filter(|f| f.error.is_some()).count();
+    ctx.report(&out, || {
+        if apply {
+            println!(
+                "\n{} of {} book(s) disagreed with their files: {written} file(s) written, {failed} failed",
+                out.len(),
+                books.len()
+            );
+        } else {
+            println!(
+                "\n{} of {} book(s) disagree with their files ({failed} unreadable). Re-run with --apply.",
+                out.len(),
+                books.len()
+            );
+        }
+    })
 }
 
 #[derive(Args)]
@@ -776,8 +830,7 @@ pub fn remove(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
     }
     let mut done = Vec::new();
     for book in &books {
-        // Files first: a failure there leaves the row in place, so the book is
-        // visible, not an orphan folder nothing lists.
+        // Files first: a failure there leaves the row in place.
         let error = ctx
             .paths
             .remove_sha(&book.sha256)
@@ -818,8 +871,7 @@ pub struct SplitArgs {
     apply: bool,
 }
 
-/// Split an omnibus into its volumes — the same proposal the desktop shows,
-/// applied without the dialog.
+/// Split an omnibus into its volumes by the proposed cut.
 pub fn split(ctx: &Ctx, args: SplitArgs) -> Result<()> {
     let books = {
         let conn = ctx.conn();
@@ -859,9 +911,8 @@ pub fn split(ctx: &Ctx, args: SplitArgs) -> Result<()> {
             ctx.say(format!("  [{}/{}] {title}", n + 1, plan.volumes.len()));
         })?
     };
-    // Each fresh volume lands as an EPUB with a pending job; its KFX is this
-    // sweep's to produce, the same shape the desktop's queue takes. A
-    // volume whose place in the series is taken is left alone.
+    // Each fresh volume lands as an EPUB with a pending job the conversion below
+    // runs; a volume whose place in the series is taken is left alone.
     let ids: Vec<i64> = outcomes
         .iter()
         .filter(|o| o.needs_enqueue)

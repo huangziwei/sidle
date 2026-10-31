@@ -54,7 +54,7 @@ impl IonType {
 /// Parsed Ion value.
 ///
 /// Symbols are stored as raw u64 IDs - use the KFX symbol table to resolve them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IonValue {
     Null,
     Bool(bool),

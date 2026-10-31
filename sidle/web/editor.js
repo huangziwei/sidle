@@ -2042,7 +2042,7 @@ async function saveMetadata() {
     $("#editor-title").textContent = row.title || "Untitled";
     renderMetadataPanel();
     markDirty(false);
-    toast("Saved — regenerating the derived EPUB…");
+    toast("Saved into the book's files.");
   } catch (err) {
     toast(`Save failed: ${err}`, true);
   } finally {

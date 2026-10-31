@@ -6,8 +6,10 @@ use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, SymbolTable};
 use crate::formats::kfx::symbols::KfxSymbol;
+use crate::model::sort_key_survives;
+use crate::util::truncate_to_date;
 
-/// The `kindle_title_metadata` key names used in Amazon's $490 shape.
+/// The `kindle_title_metadata` key names of the $490 shape.
 const KEY_TITLE: &str = "title";
 const KEY_AUTHOR: &str = "author";
 const KEY_AUTHOR_PRON: &str = "author_pronunciation";
@@ -18,17 +20,16 @@ const KEY_ASIN: &str = "ASIN";
 const KEY_CONTENT_ID: &str = "content_id";
 
 /// Which metadata fields to set. `None` leaves a field untouched; `Some(_)`
-/// overwrites it in every metadata shape the container carries.
+/// overwrites it in every metadata shape the container carries, and an empty
+/// value removes it.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataPatch {
     pub title: Option<String>,
-    /// Replaces the full ordered author list. `Some(vec![])` clears authors.
-    /// Setting authors also drops any stale `author_pronunciation` entries,
-    /// since a pronunciation can't be trusted once the author changes.
+    /// Replaces the full ordered author list; `Some(vec![])` clears it.
     pub authors: Option<Vec<String>>,
     pub language: Option<String>,
     pub publisher: Option<String>,
-    /// Publication date (KFX stores `YYYY-MM-DD`). Carried in the $490 shape.
+    /// Publication date, stored as its `YYYY-MM-DD` date part.
     pub issue_date: Option<String>,
     pub asin: Option<String>,
     /// The device-internal key (`.sdr` directory, catalog entry).
@@ -74,16 +75,19 @@ impl MetadataPatch {
     }
 }
 
-/// Apply `patch` to `kfx_bytes`, returning the rewritten container. Edits the
-/// `book_metadata` ($490) and/or `metadata` ($258) fragments in place and passes
-/// every other entity through byte-for-byte.
+/// Apply `patch` to the `book_metadata` ($490) and `metadata` ($258) fragments,
+/// passing every other entity through byte for byte; beside a $490, $258 has only
+/// the fields it carries replaced. Returns `kfx_bytes` when neither fragment changes.
 pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>, KfxError> {
     if patch.is_empty() {
         return Ok(kfx_bytes.to_vec());
     }
+    let patch = MetadataPatch {
+        issue_date: patch.issue_date.as_deref().map(truncate_to_date),
+        ..patch.clone()
+    };
 
-    // Load once for the symbol table (category names may be symbols) and to
-    // confirm there is an editable metadata fragment.
+    // `book.symbols` resolves category names; a container with neither fragment errors.
     let book = loader::load(kfx_bytes)?;
     let has_490 = book.by_type.contains_key(&(KfxSymbol::BookMetadata as u64));
     let has_258 = book.by_type.contains_key(&(KfxSymbol::Metadata as u64));
@@ -93,19 +97,25 @@ pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>,
         ));
     }
 
-    edit_container(kfx_bytes, |e| {
-        if e.is_type(KfxSymbol::BookMetadata) {
-            Ok(EntityEdit::Ion(patch_book_metadata(
-                &e.parse_ion()?,
-                patch,
-                &book.symbols,
-            )))
-        } else if e.is_type(KfxSymbol::Metadata) {
-            Ok(EntityEdit::Ion(patch_flat_metadata(&e.parse_ion()?, patch)))
+    let mut changed = false;
+    let out = edit_container(kfx_bytes, |e| {
+        let parsed = if e.is_type(KfxSymbol::BookMetadata) || e.is_type(KfxSymbol::Metadata) {
+            e.parse_ion()?
         } else {
-            Ok(EntityEdit::Keep)
+            return Ok(EntityEdit::Keep);
+        };
+        let patched = if e.is_type(KfxSymbol::BookMetadata) {
+            patch_book_metadata(&parsed, &patch, &book.symbols)
+        } else {
+            patch_flat_metadata(&parsed, &patch, !has_490)
+        };
+        if patched == parsed {
+            return Ok(EntityEdit::Keep);
         }
-    })
+        changed = true;
+        Ok(EntityEdit::Ion(patched))
+    })?;
+    Ok(if changed { out } else { kfx_bytes.to_vec() })
 }
 
 // --- $490 categorised `book_metadata` ---------------------------------------
@@ -144,8 +154,8 @@ fn patch_book_metadata(
     IonValue::Struct(out)
 }
 
-/// If `cat` is the `kindle_title_metadata` category, patch its metadata ($258)
-/// key/value list; otherwise return it untouched.
+/// `cat` with its `metadata` ($258) key/value list patched when it is the
+/// `kindle_title_metadata` category, and as it was for any other.
 fn patch_category(cat: &IonValue, patch: &MetadataPatch, symbols: &SymbolTable) -> IonValue {
     let Some(fields) = cat.unwrap_annotated().as_struct() else {
         return cat.clone();
@@ -173,41 +183,70 @@ fn patch_category(cat: &IonValue, patch: &MetadataPatch, symbols: &SymbolTable) 
     }
 }
 
-/// Patch the `kindle_title_metadata` key/value item list: replace single-valued
+/// Patch the `kindle_title_metadata` item list: each single-valued key is set in
+/// place, appended when absent and dropped when empty. A changed author run takes
+/// the old one's place; `author_pronunciation` stays if every name it keys survives.
 fn patch_title_items(items: &[IonValue], patch: &MetadataPatch) -> Vec<IonValue> {
     let singles = patch.single_kv();
     let mut single_done = vec![false; singles.len()];
     let mut author_anchor: Option<usize> = None;
 
+    let old_authors: Vec<&str> = items
+        .iter()
+        .filter(|i| item_key(i) == Some(KEY_AUTHOR))
+        .filter_map(item_value)
+        .collect();
+    let pronunciations = items
+        .iter()
+        .filter(|i| item_key(i) == Some(KEY_AUTHOR_PRON))
+        .count();
+    let new_authors = patch.authors.as_deref().filter(|new| {
+        !old_authors
+            .iter()
+            .copied()
+            .eq(new.iter().map(String::as_str))
+    });
+    let keep_pronunciations = new_authors.is_none_or(|new| {
+        (0..pronunciations).all(|i| {
+            matches!((old_authors.get(i), new.get(i)), (Some(old), Some(new)) if sort_key_survives(old, new))
+        })
+    });
+
     let mut out: Vec<IonValue> = Vec::with_capacity(items.len() + singles.len());
     for item in items {
         let key = item_key(item);
-        // Drop existing author / author_pronunciation items when replacing authors.
-        if patch.authors.is_some() && matches!(key, Some(KEY_AUTHOR) | Some(KEY_AUTHOR_PRON)) {
+        if new_authors.is_some() && key == Some(KEY_AUTHOR) {
             author_anchor.get_or_insert(out.len());
             continue;
         }
-        // Replace a single-valued key in place.
+        if key == Some(KEY_AUTHOR_PRON) && !keep_pronunciations {
+            continue;
+        }
         if let Some(pos) = singles.iter().position(|(k, _)| key == Some(*k)) {
-            out.push(kv_item(singles[pos].0, singles[pos].1));
             single_done[pos] = true;
+            let (k, v) = singles[pos];
+            if v.is_empty() {
+                continue;
+            }
+            out.push(if item_value(item) == Some(v) {
+                item.clone()
+            } else {
+                kv_item(k, v)
+            });
             continue;
         }
         out.push(item.clone());
     }
 
-    // Append single-valued keys that weren't already present.
     for (i, (k, val)) in singles.iter().enumerate() {
-        if !single_done[i] {
+        if !single_done[i] && !val.is_empty() {
             out.push(kv_item(k, val));
         }
     }
 
-    // Splice the new author run in where the old authors were (or append).
-    if let Some(authors) = &patch.authors {
+    if let Some(authors) = new_authors {
         let at = author_anchor.unwrap_or(out.len());
-        let new_authors: Vec<IonValue> = authors.iter().map(|a| kv_item(KEY_AUTHOR, a)).collect();
-        out.splice(at..at, new_authors);
+        out.splice(at..at, authors.iter().map(|a| kv_item(KEY_AUTHOR, a)));
     }
 
     out
@@ -217,6 +256,13 @@ fn patch_title_items(items: &[IonValue], patch: &MetadataPatch) -> Vec<IonValue>
 fn item_key(item: &IonValue) -> Option<&str> {
     item.as_struct()
         .and_then(|f| get_field(f, KfxSymbol::Key as u64))
+        .and_then(IonValue::as_string)
+}
+
+/// The `value` string of a `{key, value}` item, if it is one.
+fn item_value(item: &IonValue) -> Option<&str> {
+    item.as_struct()
+        .and_then(|f| get_field(f, KfxSymbol::Value as u64))
         .and_then(IonValue::as_string)
 }
 
@@ -230,22 +276,28 @@ fn kv_item(key: &str, value: &str) -> IonValue {
 
 // --- $258 flat `metadata` ---------------------------------------------------
 
-/// Rewrite the flat `metadata` ($258) fragment, setting the patched fields by
-/// symbol id. Preserves the annotation wrapper and every other field (this
-/// fragment can also carry `reading_orders`, `cover_image`, etc.).
-fn patch_flat_metadata(parsed: &IonValue, patch: &MetadataPatch) -> IonValue {
+/// Rewrite the flat `metadata` ($258) fragment by symbol id, keeping its other
+/// fields and annotation wrapper: an empty value removes a field, and a field
+/// `parsed` lacks is added only with `append`.
+fn patch_flat_metadata(parsed: &IonValue, patch: &MetadataPatch, append: bool) -> IonValue {
     if let IonValue::Annotated(anns, inner) = parsed {
-        return IonValue::Annotated(anns.clone(), Box::new(patch_flat_metadata(inner, patch)));
+        return IonValue::Annotated(
+            anns.clone(),
+            Box::new(patch_flat_metadata(inner, patch, append)),
+        );
     }
     let Some(fields) = parsed.as_struct() else {
         return parsed.clone();
     };
 
-    // (symbol id, new value) pairs to set.
-    let mut sets: Vec<(u64, IonValue)> = Vec::new();
+    // (symbol id, new value) pairs to set; `None` removes the field.
+    let mut sets: Vec<(u64, Option<IonValue>)> = Vec::new();
     let mut str_field = |sym: KfxSymbol, v: &Option<String>| {
         if let Some(s) = v {
-            sets.push((sym as u64, IonValue::String(s.clone())));
+            sets.push((
+                sym as u64,
+                (!s.is_empty()).then(|| IonValue::String(s.clone())),
+            ));
         }
     };
     str_field(KfxSymbol::Title, &patch.title);
@@ -254,22 +306,32 @@ fn patch_flat_metadata(parsed: &IonValue, patch: &MetadataPatch) -> IonValue {
     str_field(KfxSymbol::IssueDate, &patch.issue_date);
     str_field(KfxSymbol::Asin, &patch.asin);
     if let Some(authors) = &patch.authors {
-        sets.push((KfxSymbol::Author as u64, authors_ion(authors)));
+        sets.push((
+            KfxSymbol::Author as u64,
+            (!authors.is_empty()).then(|| authors_ion(authors)),
+        ));
     }
 
     let mut done = vec![false; sets.len()];
     let mut out: Vec<(u64, IonValue)> = Vec::with_capacity(fields.len() + sets.len());
     for (k, v) in fields {
-        if let Some(pos) = sets.iter().position(|(sk, _)| sk == k) {
-            out.push((*k, sets[pos].1.clone()));
-            done[pos] = true;
-        } else {
-            out.push((*k, v.clone()));
+        match sets.iter().position(|(sk, _)| sk == k) {
+            Some(pos) => {
+                done[pos] = true;
+                if let Some(new) = &sets[pos].1 {
+                    out.push((*k, new.clone()));
+                }
+            }
+            None => out.push((*k, v.clone())),
         }
     }
-    for (i, (k, val)) in sets.iter().enumerate() {
-        if !done[i] {
-            out.push((*k, val.clone()));
+    if append {
+        for (i, (k, val)) in sets.iter().enumerate() {
+            if !done[i]
+                && let Some(val) = val
+            {
+                out.push((*k, val.clone()));
+            }
         }
     }
     IonValue::Struct(out)
@@ -290,9 +352,8 @@ mod tests {
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
-    /// End-to-end: patch title + authors on the real fixture, then prove the
-    /// rewritten container re-loads with the new values, leaves other metadata
-    /// and the cover intact, and still converts to EPUB.
+    /// `edit_metadata` with a title and authors: `after` holds them, keeps the
+    /// rest, and converts to EPUB.
     #[test]
     fn edit_title_and_authors_on_fixture() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -309,7 +370,7 @@ mod tests {
 
         assert_eq!(after.metadata.title, "新しいタイトル");
         assert_eq!(after.metadata.authors, vec!["著者 一", "著者 二"]);
-        // Untouched fields survive.
+        // `before` and `after` agree on everything the patch left alone.
         assert_eq!(
             before.metadata.language, after.metadata.language,
             "language untouched"
@@ -329,9 +390,8 @@ mod tests {
         );
     }
 
-    /// Re-keying a file already produced: ASIN and `content_id` set together
-    /// to one synthesized value, so a device that keys on either sees one
-    /// identity — and the book itself is untouched.
+    /// A re-key sets `asin` and `content_id` to one value and leaves the title and
+    /// media untouched.
     #[test]
     fn rekey_sets_asin_and_content_id_together() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -358,7 +418,7 @@ mod tests {
         assert!(crate::formats::kfx::converts_to_epub(&out));
     }
 
-    /// A single-field edit changes only that field.
+    /// `publisher` alone changes; title and authors are untouched.
     #[test]
     fn edit_single_field_leaves_rest() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
@@ -459,6 +519,182 @@ mod tests {
             Some("B"),
             "new author value"
         );
+    }
+
+    fn values_of(items: &[IonValue]) -> Vec<(&str, &str)> {
+        items
+            .iter()
+            .filter_map(|it| Some((item_key(it)?, item_value(it)?)))
+            .collect()
+    }
+
+    #[test]
+    fn a_reordered_author_keeps_its_pronunciation() {
+        let items = vec![
+            kv_item(KEY_AUTHOR, "Doe, Jane"),
+            kv_item(KEY_AUTHOR_PRON, "Doe, Jane"),
+            kv_item(KEY_TITLE, "T"),
+        ];
+        let patch = MetadataPatch {
+            authors: Some(vec!["Jane Doe".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            values_of(&patch_title_items(&items, &patch)),
+            [
+                ("author", "Jane Doe"),
+                ("author_pronunciation", "Doe, Jane"),
+                ("title", "T")
+            ]
+        );
+    }
+
+    #[test]
+    fn pronunciations_go_once_any_author_they_name_is_replaced() {
+        let items = vec![
+            kv_item(KEY_AUTHOR, "Doe, Jane"),
+            kv_item(KEY_AUTHOR, "Roe, John"),
+            kv_item(KEY_AUTHOR_PRON, "Doe, Jane"),
+            kv_item(KEY_AUTHOR_PRON, "Roe, John"),
+        ];
+        let patch = MetadataPatch {
+            authors: Some(vec!["Jane Doe".into(), "Ann Writer".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            values_of(&patch_title_items(&items, &patch)),
+            [("author", "Jane Doe"), ("author", "Ann Writer")],
+            "a positional list cannot keep the first key without misreading the second"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_item_list_is_returned_as_it_was() {
+        let items = vec![
+            kv_item(KEY_TITLE, "T"),
+            kv_item(KEY_AUTHOR, "A"),
+            kv_item(KEY_LANGUAGE, "en"),
+        ];
+        let patch = MetadataPatch {
+            title: Some("T".into()),
+            authors: Some(vec!["A".into()]),
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        assert_eq!(patch_title_items(&items, &patch), items);
+    }
+
+    #[test]
+    fn an_empty_value_removes_the_key() {
+        let items = vec![
+            kv_item(KEY_TITLE, "T"),
+            kv_item(KEY_PUBLISHER, "P"),
+            kv_item(KEY_ISSUE_DATE, "2001-02-03"),
+        ];
+        let patch = MetadataPatch {
+            publisher: Some(String::new()),
+            issue_date: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            values_of(&patch_title_items(&items, &patch)),
+            [("title", "T")]
+        );
+    }
+
+    #[test]
+    fn the_flat_fragment_beside_a_490_takes_only_fields_it_has() {
+        let flat = IonValue::Struct(vec![(
+            KfxSymbol::Title as u64,
+            IonValue::String("Old".into()),
+        )]);
+        let patch = MetadataPatch {
+            title: Some("New".into()),
+            publisher: Some("P".into()),
+            ..Default::default()
+        };
+        let beside = patch_flat_metadata(&flat, &patch, false);
+        assert_eq!(
+            beside,
+            IonValue::Struct(vec![(
+                KfxSymbol::Title as u64,
+                IonValue::String("New".into())
+            )])
+        );
+        let alone = patch_flat_metadata(&flat, &patch, true);
+        assert_eq!(alone.as_struct().map(<[_]>::len), Some(2));
+    }
+
+    fn synthetic_kfx() -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let mut put = |name: &str, body: &str, opts: SimpleFileOptions| {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        };
+        put("mimetype", "application/epub+zip", stored);
+        put(
+            "META-INF/container.xml",
+            r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            SimpleFileOptions::default(),
+        );
+        put(
+            "content.opf",
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:sprocket</dc:identifier>
+    <dc:title>Old Title</dc:title>
+    <dc:creator>Doe, Jane</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:publisher>Old Press</dc:publisher>
+    <dc:date>2001-02-03</dc:date>
+  </metadata>
+  <manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#,
+            SimpleFileOptions::default(),
+        );
+        put(
+            "c.xhtml",
+            r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head><body><p>Text.</p></body></html>"#,
+            SimpleFileOptions::default(),
+        );
+        let epub = zip.finish().unwrap().into_inner();
+        let mut book = crate::Book::from_bytes(&epub, crate::Format::Epub).unwrap();
+        let mut kfx = std::io::Cursor::new(Vec::new());
+        book.export(crate::Format::Kfx, &mut kfx).unwrap();
+        kfx.into_inner()
+    }
+
+    #[test]
+    fn a_patch_the_container_already_carries_returns_the_input() {
+        let kfx = synthetic_kfx();
+        let patch = MetadataPatch {
+            title: Some("Old Title".into()),
+            authors: Some(vec!["Doe, Jane".into()]),
+            publisher: Some("Old Press".into()),
+            ..Default::default()
+        };
+        assert_eq!(edit_metadata(&kfx, &patch).unwrap(), kfx);
+    }
+
+    #[test]
+    fn an_issue_date_is_stored_as_its_date_part() {
+        let kfx = synthetic_kfx();
+        let patch = MetadataPatch {
+            issue_date: Some("2009-05-19T00:00:00+00:00".into()),
+            authors: Some(vec!["Jane Doe".into()]),
+            publisher: Some(String::new()),
+            ..Default::default()
+        };
+        let after = loader::load(&edit_metadata(&kfx, &patch).unwrap()).unwrap();
+        assert_eq!(after.metadata.issue_date.as_deref(), Some("2009-05-19"));
+        assert_eq!(after.metadata.authors, ["Jane Doe"]);
+        assert_eq!(after.metadata.publisher, None);
     }
 
     #[test]

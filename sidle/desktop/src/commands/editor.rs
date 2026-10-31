@@ -10,14 +10,11 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
 use bokai::formats::epub::image_extract as epub_image;
-use bokai::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
 use bokai::formats::epub::spine_repair as epub_spine;
 use bokai::formats::epub::toc_repair as epub_toc;
 use bokai::formats::kfx::image_extract;
-use bokai::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
 use bokai::formats::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
 use bokai::formats::pdf::cover::{self as pdf_cover, CoverMode};
-use bokai::formats::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
 use bokai::formats::pdf::toc_repair as pdf_toc;
 use bokai::import::pdf::PdfOutlineItem;
 use bokai::model::TocEntry as EpubTocEntry;
@@ -29,7 +26,7 @@ use sidle_core::library::editor as text_editor;
 use sidle_core::library::source::{self, Source as SourceKind};
 
 use crate::commands::library::CoverResult;
-use crate::library::{authors, db, db::BookRow, metadata};
+use crate::library::{db, db::BookRow, metadata};
 use crate::state::AppState;
 
 /// Resolve a book's editable source: its format + on-disk path. Errors for an
@@ -64,14 +61,12 @@ async fn editor_source(
     require_editable_source(&row)
 }
 
-/// Source format a book was imported *from* — the string the frontend's
-/// `sourceFormat()` helper mirrors.
+/// Source format a book was imported *from*.
 fn source_format(kind: Option<&str>) -> String {
     source::format_of(kind).to_string()
 }
 
-/// TOC health from the source bytes — surfaced as the top-bar validate chip and
-/// (later) the TOC panel header. Mirrors `validate::source::toc::TocAudit`.
+/// TOC health from the source bytes, mirroring `validate::source::toc::TocAudit`.
 #[derive(Serialize)]
 pub struct EditorToc {
     /// `"OK"` | `"SUSPECT"` | `"FLATTENED"` | `"SPARSE"`.
@@ -81,9 +76,9 @@ pub struct EditorToc {
     pub contents_links: usize,
     pub headings: usize,
     pub section_heads: usize,
-    /// On a `"FLATTENED"` verdict: the volumes the TOC lists at one depth, and
-    /// how many entries belong under them; both 0 on any other verdict.
+    /// On a `"FLATTENED"` verdict, the volumes the TOC lists at one depth; else 0.
     pub flattened_volumes: usize,
+    /// On a `"FLATTENED"` verdict, the entries belonging under them; else 0.
     pub flattened_entries: usize,
 }
 
@@ -96,11 +91,9 @@ pub struct EditorMetadata {
     pub language: String,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
-    /// The Amazon catalogue id, editable. Its one use is fetching the colour
-    /// cover; it is never written into a file a device reads.
+    /// The catalogue ASIN, editable; it fetches the colour cover and stays in the row.
     pub amazon_asin: Option<String>,
-    /// The identity the file carries, stamped as both `ASIN` and `content_id`, and
-    /// what a Kindle keys its catalog, `.sdr` and notebook dirs on. Read-only.
+    /// The identity the file carries as both `ASIN` and `content_id`; read-only.
     pub content_id: Option<String>,
 }
 
@@ -110,11 +103,9 @@ pub struct EditorOpen {
     pub book_id: i64,
     /// Source format: `"kfx"` | `"epub"` | `"pdf"`.
     pub format: String,
-    /// True when the book's source file is on disk and its format has a write
-    /// path.
+    /// True when the source file is on disk and its format has a write path.
     pub editable: bool,
-    /// Which panels this source can back — the rail enables exactly these, and
-    /// nothing when the book isn't editable. See [`editor_panels`].
+    /// The panels this source can back, empty when not editable; see [`editor_panels`].
     pub panels: Vec<String>,
     pub metadata: EditorMetadata,
     pub has_cover: bool,
@@ -179,7 +170,8 @@ pub struct MetadataForm {
     pub amazon_asin: Option<String>,
 }
 
-/// Write edited metadata into the KFX source *and* the library row.
+/// Write edited metadata into the library row and every file of the book. The
+/// catalogue ASIN stays in the row.
 #[tauri::command]
 pub async fn editor_save_metadata(
     app: AppHandle,
@@ -193,114 +185,31 @@ pub async fn editor_save_metadata(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no book with id {book_id}"))?
     };
-    let (kind, path) = require_editable_source(&row)?;
-
-    // Canonical human fields, shared by the source artifact and the DB row
-    // (author list flip/split, language code harmonized, empty → cleared).
-    let title = form.title.trim().to_string();
-    if title.is_empty() {
+    if form.title.trim().is_empty() {
         return Err("title cannot be empty".into());
     }
-    let author_names = authors::parse_input(&form.author);
-    let language = crate::library::lang::normalize(&form.language);
-    let publisher = trim_opt(form.publisher);
-    let published_at = trim_opt(form.published_at);
-    // The catalogue id is validated before the source is written.
-    let amazon_asin = {
-        let conn = state.db.lock().await;
-        metadata::check_amazon_asin(&conn, book_id, form.amazon_asin.as_deref())
-            .map_err(|e| format!("{e:#}"))?
-    };
-
-    // 1) Surgical metadata write into the source (KFX Ion / EPUB OPF), committed
-    //    in place; the canonical fields are cloned into the blocking task and
-    //    reused for the DB-row sync.
-    let src = path.clone();
-    let (c_title, c_authors, c_lang, c_pub, c_date, c_asin) = (
-        title.clone(),
-        author_names.clone(),
-        language.clone(),
-        publisher.clone(),
-        published_at.clone(),
-        amazon_asin.clone(),
-    );
-    let new_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
-        match kind {
-            SourceKind::Kfx => {
-                // The form's ASIN is Amazon's catalogue value, kept for the cover fetch.
-                let patch = KfxMetadataPatch {
-                    title: Some(c_title),
-                    authors: Some(c_authors),
-                    language: Some(c_lang),
-                    publisher: c_pub,
-                    issue_date: c_date,
-                    asin: None,
-                    content_id: None,
-                };
-                metadata_edit::edit_metadata(&bytes, &patch).map_err(|e| e.to_string())
-            }
-            SourceKind::Epub => {
-                let patch = EpubMetadataPatch {
-                    title: Some(c_title),
-                    authors: Some(c_authors),
-                    language: Some(c_lang),
-                    publisher: c_pub,
-                    date: c_date,
-                    asin: c_asin,
-                };
-                epub_meta::edit_metadata(&bytes, &patch).map_err(|e| e.to_string())
-            }
-            // PDF `/Info` carries no language/publisher/ASIN key: those fields reach
-            // only the library row; `bokai::formats::pdf::metadata_edit` accepts and
-            // ignores them. Title/author/date are durable.
-            SourceKind::Pdf => {
-                let patch = PdfMetadataPatch {
-                    title: Some(c_title),
-                    authors: Some(c_authors),
-                    language: Some(c_lang),
-                    publisher: c_pub,
-                    date: c_date,
-                };
-                pdf_meta::edit_metadata(&bytes, &patch).map_err(|e| e.to_string())
-            }
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    commit_edited_source(&state, book_id, kind, &path, new_bytes).await?;
-
-    // 2) Sync the library row. The ASIN sits outside `db::MetadataPatch` and is
-    //    set separately into `amazon_asin`, the colour-cover key; `books.asin` is
-    //    the file's own identity.
     {
         let conn = state.db.lock().await;
+        let amazon_asin = metadata::check_amazon_asin(&conn, book_id, form.amazon_asin.as_deref())
+            .map_err(|e| format!("{e:#}"))?;
         metadata::set_amazon_asin(&conn, book_id, amazon_asin.as_deref())
             .map_err(|e| format!("{e:#}"))?;
     }
     let patch = db::MetadataPatch {
-        title,
-        author: authors::join_display(&author_names),
-        language,
+        title: form.title,
+        author: form.author,
+        language: form.language,
         ppd: row.ppd.clone(),
         writing_mode: row.writing_mode.clone(),
-        publisher,
-        published_at,
+        publisher: form.publisher,
+        published_at: form.published_at,
         series_name: row.series_name.clone(),
         series_index: row.series_index,
         tags: row.tags.clone(),
         title_romaji: String::new(),
         author_romaji: String::new(),
     };
-    let updated =
-        crate::commands::library::apply_metadata_patch(&app, &state, book_id, patch).await?;
-
-    // 3) Regenerate the derived EPUB from the edited KFX and drop the reader
-    //    cache.
-    let _ = state.queue.enqueue_reconvert(book_id).await;
-    crate::commands::reader::evict_reader(&state, book_id).await;
-
-    Ok(updated)
+    crate::commands::library::apply_metadata_patch(&app, &state, book_id, patch).await
 }
 
 // --- cover (PDF) ----------------------------------------------------------
@@ -394,15 +303,15 @@ pub async fn editor_set_pdf_cover(
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TocEntryDto {
     pub label: String,
-    /// KFX target — the `$155` element id. `0` for an EPUB entry (which targets
-    /// by `href`). The frontend passes this back opaquely; it only edits labels.
+    /// KFX target — the `$155` element id; `0` for an EPUB entry, which targets
+    /// by `href`.
     #[serde(default)]
     pub eid: i64,
-    /// EPUB target — an absolute zip-path href (e.g. `"OEBPS/c1.xhtml#ch1"`).
-    /// Empty for a KFX entry. Round-trips through the frontend untouched.
+    /// EPUB target — an absolute zip-path href (e.g. `"OEBPS/c1.xhtml#ch1"`);
+    /// empty for a KFX entry.
     #[serde(default)]
     pub href: String,
-    /// PDF target — a 1-based page number, the value the user types.
+    /// PDF target — a 1-based page number.
     #[serde(default)]
     pub page: usize,
     #[serde(default)]
@@ -511,30 +420,23 @@ pub struct EditorTocDetail {
     pub verdict: String,
     pub nav_count: usize,
     pub nav_chapters: usize,
-    /// On a `"FLATTENED"` verdict: the volumes listed at one depth, and how many
-    /// entries the rebuild nests under them; both 0 on any other verdict.
+    /// On a `"FLATTENED"` verdict, the volumes listed at one depth; else 0.
     pub flattened_volumes: usize,
+    /// On a `"FLATTENED"` verdict, the entries the rebuild nests under them; else 0.
     pub flattened_entries: usize,
-    /// The TOC the book declares, as a tree of labels; the targets belong to
-    /// `proposed`.
+    /// The TOC the book declares, as a tree of labels.
     pub current: Vec<TocEntryDto>,
-    /// The editable tree the panel starts from. For KFX/EPUB it's a *proposal*:
-    /// the declared TOC with whatever the book's in-book Contents page knows that
-    /// it doesn't, in document order, nested to the depth the book evidences.
+    /// The editable starting tree: for KFX/EPUB, the declared TOC merged with the Contents page.
     pub proposed: Vec<TocEntryDto>,
     /// Set when no proposal could be derived, explaining why.
     pub note: Option<String>,
-    /// `Some(n)` for a PDF source: entries target 1-based page numbers in `1..=n`,
-    /// and the panel switches to hand-authoring mode (page inputs + Add entry,
-    /// no auto-repair). `None` for KFX/EPUB, whose targets are opaque.
+    /// `Some(n)` for a PDF source, whose entries target pages `1..=n`; `None` for KFX/EPUB.
     pub page_count: Option<usize>,
     /// True when the format has an automatic proposer (`editor_repair_toc`).
-    /// False for PDF — a PDF lacking an outline usually has no links to mine.
     pub can_auto_repair: bool,
 }
 
-/// Read the TOC panel state (verdict + current + proposal). Lazy — the frontend
-/// calls it when the TOC panel is first opened, not on every editor open.
+/// Read the TOC panel state: verdict, current TOC and proposal.
 #[tauri::command]
 pub async fn editor_toc(
     state: State<'_, AppState>,
@@ -546,9 +448,8 @@ pub async fn editor_toc(
         .map_err(|e| e.to_string())?
 }
 
-/// Write a reviewed TOC (`entries`, in order) into the KFX and re-derive. The
-/// user-facing path: the panel shows the proposal, the user tweaks/removes rows,
-/// then applies. Returns the refreshed panel state (verdict should flip to OK).
+/// Write a reviewed TOC (`entries`, in order) into the source and re-derive;
+/// returns the refreshed panel state.
 #[tauri::command]
 pub async fn editor_set_toc(
     state: State<'_, AppState>,
@@ -599,8 +500,8 @@ pub async fn editor_set_toc(
         .map_err(|e| e.to_string())?
 }
 
-/// One-click repair: derive the chapter list and write it in a single pass
-/// (`propose + set`), for a user who trusts the proposal without reviewing.
+/// One-click repair: derive the chapter list and write it in one pass
+/// (`propose + set`).
 #[tauri::command]
 pub async fn editor_repair_toc(
     state: State<'_, AppState>,
@@ -641,15 +542,11 @@ pub async fn editor_repair_toc(
 /// One spine document as the reading-order panel lists it.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SpineDocDto {
-    /// The manifest id: the panel's handle and the only thing a write sends
-    /// back.
+    /// The manifest id: the panel's handle, and all a write sends back.
     pub idref: String,
-    /// What to call it: the declared TOC's label for this document, falling back
-    /// to its filename for the parts no TOC names (a plate, a blank, a colophon
-    /// the publisher left out).
+    /// The declared TOC's label for this document, else its filename.
     pub label: String,
-    /// True when the label came from the TOC; a filename-labelled row travels
-    /// with the document above it.
+    /// True when the label came from the TOC.
     pub named: bool,
 }
 
@@ -663,15 +560,13 @@ pub struct EditorSpineDetail {
     pub descents: usize,
     /// How many documents the proposal moves.
     pub moved: usize,
-    /// The spine is its own manifest sorted lexicographically: a packaging
-    /// artifact, and on its own evidence of which order is the broken one.
+    /// The spine is its own manifest sorted lexicographically, a packaging artifact.
     pub machine_sorted: bool,
     /// The first entry the spine reads late, for the panel's one-line summary.
     pub first_out_of_order: Option<String>,
-    /// The spine as the book declares it today.
+    /// The spine as the book declares it.
     pub current: Vec<SpineDocDto>,
-    /// The panel's starting point: the order the book's own navigation implies.
-    /// Identical to `current` on a book whose two orders agree.
+    /// The order the book's own navigation implies; equal to `current` when they agree.
     pub proposed: Vec<SpineDocDto>,
 }
 
@@ -777,9 +672,7 @@ fn read_spine_detail(source_path: &str, kind: SourceKind) -> Result<EditorSpineD
 /// panel offers extract/export only; an image cannot be *replaced* through it.
 #[derive(Serialize)]
 pub struct EditorImage {
-    /// Position in the source's image list — the stable key
-    /// [`editor_export_image`] re-resolves against (the list is read-only and
-    /// deterministically sorted by the extractor).
+    /// Position in the source's sorted image list, the key [`editor_export_image`] takes.
     pub index: usize,
     /// Display name, in the source format's own terms — see [`RawImage`].
     pub resource_name: String,
@@ -787,8 +680,7 @@ pub struct EditorImage {
     pub ext: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// True for the book's declared cover, matched by backing bytes. (PDF never
-    /// reaches this struct — see [`EditorPdfPage`].)
+    /// True for the book's declared cover, matched by backing bytes.
     pub is_cover: bool,
     pub byte_len: usize,
     /// Absolute path to a decoded preview copy on disk, for `convertFileSrc`.
@@ -814,8 +706,8 @@ pub async fn editor_images(
         .map_err(|e| e.to_string())?
 }
 
-/// Export one embedded image to a user-picked path (save dialog defaulting to
-/// `<resource_name>.<ext>`). Returns the saved path, or `None` if cancelled.
+/// Export one embedded image through a save dialog defaulting to
+/// `<resource_name>.<ext>`; returns the saved path, or `None` if cancelled.
 #[tauri::command]
 pub async fn editor_export_image(
     app: AppHandle,
@@ -910,8 +802,7 @@ struct RawImage {
 }
 
 /// Extract every embedded image from the source, normalized to [`RawImage`] and
-/// deterministically ordered: an index is a stable handle across calls. Sync;
-/// call inside `spawn_blocking`.
+/// deterministically ordered: an index is a stable handle across calls. Blocking.
 fn extract_images(source_path: &str, kind: SourceKind) -> Result<Vec<RawImage>, String> {
     let bytes = std::fs::read(source_path).map_err(|e| format!("read {source_path}: {e}"))?;
     let out = match kind {
@@ -958,8 +849,7 @@ fn image_stem(path: &str) -> String {
         .to_string()
 }
 
-/// Extract every image and materialize a preview copy on disk. Sync (reads +
-/// parses the source, writes files); call inside `spawn_blocking`.
+/// Extract every image and write a preview copy of each to disk. Blocking.
 fn extract_images_with_previews(
     source_path: &str,
     kind: SourceKind,
@@ -973,8 +863,7 @@ fn extract_images_with_previews(
 
     let mut out = Vec::with_capacity(images.len());
     for (index, img) in images.iter().enumerate() {
-        // Index-prefixed: two resources with the same sanitized name land on
-        // distinct preview files.
+        // Index-prefixed: same-named resources get distinct preview files.
         let fname = format!("{index}-{}.{}", sanitize_filename(&img.name), img.ext);
         let path = preview_dir.join(&fname);
         std::fs::write(&path, &img.bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -1030,7 +919,7 @@ pub async fn editor_pdf_pages(
     .map_err(|e| e.to_string())?
 }
 
-/// Read a PDF's page geometry. Sync — call inside `spawn_blocking`.
+/// Read a PDF's page geometry. Blocking.
 fn probe_pdf_pages(path: &str) -> Result<Vec<bokai::import::pdf::PdfPage>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     bokai::import::pdf::probe_pdf(bytes)
@@ -1068,8 +957,7 @@ fn export_width_px(width_pt: f32, dpi: u32) -> u32 {
     (px.round() as i64).clamp(1, 20_000) as u32
 }
 
-/// Render one page to image bytes at `dpi`. `page` is 1-based. Sync — call
-/// inside `spawn_blocking`.
+/// Render one page (`page` 1-based) to image bytes at `dpi`. Blocking.
 fn render_page(
     pdf: &[u8],
     pages: &[bokai::import::pdf::PdfPage],
@@ -1094,8 +982,8 @@ fn render_page(
     .map_err(|e| format!("render page {page}: {e}"))
 }
 
-/// Export one page to a user-picked path (save dialog defaulting to
-/// `page-042.jpg`). Returns the saved path, or `None` if cancelled.
+/// Export one page through a save dialog defaulting to `page-042.jpg`; returns
+/// the saved path, or `None` if cancelled.
 #[tauri::command]
 pub async fn editor_export_pdf_page(
     app: AppHandle,
@@ -1245,9 +1133,8 @@ fn count_outline(items: &[PdfOutlineItem]) -> usize {
     items.iter().map(|i| 1 + count_outline(&i.children)).sum()
 }
 
-/// Full TOC panel state — verdict + current labels + the proposal (nesting
-/// preserved). Format-sniffed (EPUB zip vs KFX container). Sync (reads + parses
-/// the source); call inside `spawn_blocking`.
+/// Full TOC panel state — verdict, current labels and the nested proposal — with
+/// the format sniffed from the bytes. Blocking.
 fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetail, String> {
     let bytes = std::fs::read(source_path).map_err(|e| format!("read {source_path}: {e}"))?;
 
@@ -1513,11 +1400,6 @@ async fn commit_edited_source(
     .map_err(|e| e.to_string())?
 }
 
-/// Trim a submitted optional string; an empty result clears the field (`None`).
-fn trim_opt(s: Option<String>) -> Option<String> {
-    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,7 +1412,7 @@ mod tests {
         assert_eq!(source_format(Some("kfx_to_epub")), "kfx");
         assert_eq!(source_format(Some("epub_to_kfx")), "epub");
         assert_eq!(source_format(Some("pdf_to_kfx")), "pdf");
-        // Missing kind falls back to the EPUB-source default (matches the frontend).
+        // A missing kind reads as the EPUB-source default.
         assert_eq!(source_format(None), "epub");
     }
 
@@ -1678,17 +1560,6 @@ mod tests {
         assert!(detail.proposed.is_empty());
         assert!(detail.note.is_some(), "explains that entries must be added");
         assert_eq!(detail.verdict, "SPARSE");
-    }
-
-    #[test]
-    fn trim_opt_clears_blank() {
-        assert_eq!(
-            trim_opt(Some("  Shinchosha ".into())),
-            Some("Shinchosha".into())
-        );
-        assert_eq!(trim_opt(Some("   ".into())), None);
-        assert_eq!(trim_opt(Some(String::new())), None);
-        assert_eq!(trim_opt(None), None);
     }
 
     #[test]

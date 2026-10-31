@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use serde::Serialize;
 use sidle_core::library::paths::LibraryPaths;
-use sidle_core::library::{backup, db, merge, relocate};
+use sidle_core::library::{backup, db, merge, metadata, relocate};
 
 use crate::ctx::Ctx;
 
@@ -194,6 +194,9 @@ fn run_merge(ctx: &Ctx, src: &std::path::Path, apply: bool) -> Result<()> {
         });
     }
     let outcome = merge::commit(&ctx.conn(), &prepared)?;
+    for edited in merge::touched_books(&ctx.conn(), &outcome)? {
+        metadata::log_failures(&edited.row, &edited.bake());
+    }
     ctx.report(&outcome, || {
         println!(
             "took in {} book(s) and {} notebook(s); {} book(s) already here were \

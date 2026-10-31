@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::library::authors;
 use crate::library::db::{self, BookRow, NewBook};
 use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
+use crate::library::{authors, metadata};
 
 pub fn import_file(
     conn: &rusqlite::Connection,
@@ -20,9 +20,8 @@ pub fn import_file(
     import_one(conn, paths, Source::File(src), src_kind, &no_progress)
 }
 
-/// The extension-detected format of a file the user is importing, or an error
-/// naming what this app accepts. Public for a caller running the phases apart
-/// (see [`stage_file`]): an unsupported drop is rejected before it is hashed.
+/// The extension-detected format of `src`, or an error naming the formats
+/// accepted; a caller of [`stage_file`] runs it ahead of hashing.
 pub fn detect_kind(src: &Path) -> Result<SourceKind> {
     let kind = SourceKind::detect(src);
     if matches!(kind, SourceKind::Unknown) {
@@ -34,7 +33,7 @@ pub fn detect_kind(src: &Path) -> Result<SourceKind> {
     Ok(kind)
 }
 
-/// A progress callback that reports nothing, for the callers that don't watch.
+/// A progress callback that reports nothing.
 fn no_progress(_: &str, _: usize, _: usize, _: &str) {}
 
 /// Import a book that exists only in memory. `name` stands in for a filename:
@@ -58,14 +57,14 @@ pub fn import_bytes(
     )
 }
 
-/// The dedupe identity of a file about to be imported: the hash of its bytes as
-/// they arrived (before any conversion) and their size. Tens of milliseconds
-/// even for a large book, and no database — cheap to run before taking a lock.
+/// The dedupe identity of `src`: the hash of its bytes as they arrived, and their
+/// size. Reads no database.
 pub fn identify_file(src: &Path) -> Result<(String, i64)> {
     Source::File(src).identity()
 }
 
-/// Everything an import does that does *not* touch the library database:
+/// Everything an import does short of the database, settling the row [`record`]
+/// inserts.
 pub fn stage_file(
     paths: &LibraryPaths,
     src: &Path,
@@ -76,9 +75,8 @@ pub fn stage_file(
     stage(paths, Source::File(src), src_kind, identity, on_progress)
 }
 
-/// Where an import's bytes come from: a file the user dropped, or bytes the
-/// app produced. Everything downstream of the normalize step works on bytes
-/// either way, so the two differ only in how the source is identified and read.
+/// Where an import's bytes come from: a file, or bytes in memory. Past the
+/// normalize step both are bytes.
 enum Source<'a> {
     File(&'a Path),
     Memory { name: &'a str, bytes: Vec<u8> },
@@ -134,13 +132,13 @@ pub enum SourceKind {
     Epub,
     Kfx,
     KfxZip,
-    /// `.azw3` — Kindle AZW3 (decrypted). Both library sides are exported
+    /// `.azw3` — Kindle AZW3 (decrypted), exported to both library sides.
     Azw3,
-    /// `.mobi` — older Mobipocket/KF8 hybrid (decrypted). Same shape as
+    /// `.mobi` — older Mobipocket/KF8 hybrid (decrypted), stored as EPUB.
     Mobi,
-    /// `.pdf` — wrapped verbatim into a fixed-layout PDOC KFX for the Scribe
+    /// `.pdf` — stored as is and wrapped into a fixed-layout PDOC KFX.
     Pdf,
-    /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
+    /// `.zip` — tentatively an Aozora Bunko archive.
     AozoraZip,
     Unknown,
 }
@@ -197,9 +195,8 @@ impl SourceKind {
 }
 
 impl Canonical {
-    /// `bokai::Format` for reading metadata from the canonical bytes. PDF has
-    /// none — its metadata comes from `probe_pdf` `/Info`, so this is never
-    /// called for `Pdf`.
+    /// `bokai::Format` for reading metadata from the canonical bytes; `Pdf` reads
+    /// `/Info` through `probe_pdf` and never reaches it.
     fn bokai_format(self) -> bokai::Format {
         match self {
             Self::Epub => bokai::Format::Epub,
@@ -207,6 +204,34 @@ impl Canonical {
             Self::Pdf => unreachable!("PDF metadata comes from probe_pdf, not bokai::Book"),
         }
     }
+
+    fn file_format(self) -> metadata::FileFormat {
+        match self {
+            Self::Epub => metadata::FileFormat::Epub,
+            Self::Kfx => metadata::FileFormat::Kfx,
+            Self::Pdf => metadata::FileFormat::Pdf,
+        }
+    }
+}
+
+/// What the row [`insert_row`] writes for `meta` states for its files.
+fn file_metadata(meta: &BookMeta) -> metadata::FileMetadata {
+    metadata::FileMetadata {
+        title: meta.title.clone(),
+        authors: authors::split_display(&authors::join_display(&meta.authors)),
+        language: meta.language.clone(),
+        publisher: meta.publisher.clone(),
+        date: stored_date(meta),
+    }
+}
+
+/// `meta.date` as `books.published_at` stores it: trimmed, and absent when empty.
+fn stored_date(meta: &BookMeta) -> Option<String> {
+    meta.date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// The background job that converts a book imported in `from` into its `to`
@@ -229,9 +254,7 @@ fn import_one(
     src_kind: SourceKind,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<ImportOutcome> {
-    // 1. Hash + dedupe before doing expensive normalization (a `.kfx-zip`
-    //    merge can be tens of ms; stream-hashing the source is microseconds).
-    //    `record` checks again; this one is what saves the conversion.
+    // 1. Hash and dedupe ahead of the conversion; `record` checks again.
     let identity = src.identity()?;
 
     if let Some(existing) = db::find_by_sha(conn, &identity.0)? {
@@ -259,9 +282,8 @@ fn stage(
     let mut direct_kfx: Option<DirectKfx> = None;
     let canonical_bytes: Vec<u8> = match src_kind {
         SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => src.read()?,
-        // The converting formats all read their source off disk, so an
-        // in-memory import of one has nothing to hand them. `import_bytes`
-        // rejects those kinds up front; this is the belt-and-braces arm.
+        // The converting formats read their source off disk; `import_bytes`
+        // rejects them up front.
         _ => {
             let Source::File(path) = src else {
                 bail!("{label}: this format can only be imported from a file");
@@ -289,7 +311,7 @@ fn stage(
     };
     on_progress("store", 0, 1, "Storing in the library");
 
-    // 2b. Repair EPUBs whose producer (e.g. ScribdMpubToEpubConverter) wrote
+    // 2b. Relabel an EPUB's spurious ZIP64 extended-information fields.
     let canonical_bytes = if canonical == Canonical::Epub {
         bokai::formats::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
     } else {
@@ -312,23 +334,19 @@ fn stage(
             extract_meta(book.metadata(), stem.as_deref())
         }
     };
-    // The row must carry the ASIN actually stamped inside the produced KFX, which is
-    // what device-delete keys the `.sdr` catalog cleanup on.
+    // `meta.asin` takes the ASIN stamped inside the produced KFX.
     if let Some(stamped) = direct_kfx.as_ref().and_then(|k| k.asin.as_deref()) {
         meta.asin = Some(stamped.to_string());
     }
 
-    // A directly imported KFX carries Amazon's catalogue ASIN, which a Kindle keys
-    // its catalog and `.sdr` on. Re-key it here; `meta.amazon_asin` keeps the original.
+    // A KFX carrying a catalogue ASIN is re-keyed; `meta.amazon_asin` keeps the original.
     let canonical_bytes = match key_to_mint(canonical, &meta, derived_key, &sha) {
         Some(key) => match rekey_kfx(&canonical_bytes, &key) {
             Ok(bytes) => {
                 meta.asin = Some(key);
                 bytes
             }
-            // A container that resists the edit is a book all the same. It lands
-            // under the catalogue key, where the library reports it and a re-key
-            // sweep can take another run at it.
+            // A container that resists the edit lands under its catalogue key.
             Err(e) => {
                 eprintln!("[sidle/import] {label}: re-key failed, storing as-is: {e:#}");
                 canonical_bytes
@@ -336,11 +354,25 @@ fn stage(
         },
         None => canonical_bytes,
     };
+
+    // 3b. The stored files state what the row will, a flipped author among them.
+    let want = file_metadata(&meta);
+    let mut canonical_bytes = canonical_bytes;
+    match metadata::baked_bytes(canonical.file_format(), &canonical_bytes, &want) {
+        Ok(Some(bytes)) => canonical_bytes = bytes,
+        Ok(None) => {}
+        Err(e) => eprintln!("[sidle/import] {label}: metadata not written into the file: {e:#}"),
+    }
+    if let Some(kfx) = direct_kfx.as_mut() {
+        match metadata::baked_bytes(metadata::FileFormat::Kfx, &kfx.bytes, &want) {
+            Ok(Some(bytes)) => kfx.bytes = bytes,
+            Ok(None) => {}
+            Err(e) => eprintln!("[sidle/import] {label}: metadata not written into the KFX: {e:#}"),
+        }
+    }
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
-    // The non-KFX partner of a KFX is EPUB for a reflowable book, but PDF for a
-    // PDF-backed (container) KFX — extracting that PDF, not mangling it into an
-    // EPUB. EPUB and PDF imports always pair with KFX.
+    // A KFX pairs with an EPUB, or a PDF when PDF-backed; EPUB and PDF pair with KFX.
     let partner = match canonical {
         Canonical::Epub | Canonical::Pdf => Canonical::Kfx,
         Canonical::Kfx => {
@@ -370,15 +402,14 @@ fn stage(
     if !own_dest.exists() {
         write_bytes_atomic(own_dest, &canonical_bytes)?;
     }
-    // The direct-derived KFX sibling (azw3 import), written before the `other_ready`
-    // probe so the row lands with a `done` job. An existing file wins.
+    // The azw3-derived KFX, written ahead of the `other_ready` probe; an existing file wins.
     if let Some(kfx) = &direct_kfx
         && !dest_kfx.exists()
     {
         write_bytes_atomic(&dest_kfx, &kfx.bytes)?;
     }
 
-    // 5. Cover sidecar. A KFX always carries its cover built-in (reflowable
+    // 5. Cover sidecar from the canonical bytes; a PDF's comes from its conversion.
     let cover_path: Option<PathBuf> = match canonical {
         Canonical::Epub => write_cover_from_epub_bytes(paths, &sha, &canonical_bytes),
         Canonical::Kfx => write_cover_from_kfx_bytes(paths, &sha, &canonical_bytes),
@@ -388,9 +419,7 @@ fn stage(
     // 6. Describe what the row will say. Every field is settled here; only the
     //    INSERT is left, and that is `record`'s job.
     let other_ready = other_dest.exists();
-    // Record the KFX byte-hash whenever a KFX is on disk (canonical or a partner
-    // an idempotent re-import found). That hash drives the on-device filename
-    // infix; without it a Kindle re-import links back to no row.
+    // The KFX byte-hash keying the on-device filename, whenever a KFX is on disk.
     let kfx_bytes_sha: Option<String> = match canonical {
         Canonical::Kfx => Some(sha256_of_bytes(&canonical_bytes)),
         // EPUB/PDF canonical → partner is KFX; hash whatever is on disk.
@@ -432,8 +461,7 @@ fn key_to_mint(
     .then(|| derived.unwrap_or_else(|| generate_content_id(sha)))
 }
 
-/// Rewrite a KFX to carry `key` as its identity. `ASIN` and `content_id` are set
-/// together, so a device keying on either sees one value.
+/// Rewrite a KFX to carry `key` as both its `ASIN` and its `content_id`.
 fn rekey_kfx(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
     use bokai::formats::kfx::metadata_edit::{MetadataPatch, edit_metadata};
     Ok(edit_metadata(
@@ -447,8 +475,7 @@ fn rekey_kfx(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
 }
 
 /// A finished import waiting for its row: the files sit in the library slot and
-/// every field the row carries is settled. Opaque to the caller — hand it
-/// straight to [`record`].
+/// every field the row carries is settled, for [`record`] to insert.
 pub struct StagedImport {
     sha: String,
     file_size: i64,
@@ -462,17 +489,14 @@ pub struct StagedImport {
     source_format: &'static str,
     /// The conversion that fills in the side this import didn't produce.
     job_kind: &'static str,
-    /// Whether that side is on disk — a direct-derived sibling, or an idempotent
-    /// re-import that found one. A true here lands the job `done`.
+    /// Whether that side is on disk; `true` lands the job `done`.
     other_ready: bool,
 }
 
-/// Insert the book row and its conversion job for a staged import. The only
-/// part of an import that needs the database, and it is a few milliseconds of
-/// it — see [`stage_file`] for why the two are separable.
+/// Insert the book row and its conversion job for a staged import: the only part
+/// of an import that needs the database.
 pub fn record(conn: &rusqlite::Connection, staged: StagedImport) -> Result<ImportOutcome> {
-    // The dedupe probe ran before the conversion, minutes ago for a large `.azw3`.
-    // Re-check inside the insert's window: `books.sha256` is UNIQUE.
+    // `books.sha256` is UNIQUE: a book filed since the dedupe probe is a duplicate.
     if let Some(existing) = db::find_by_sha(conn, &staged.sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
     }
@@ -521,9 +545,7 @@ fn write_cover_from_epub_bytes(
     let (bytes, ext) = extract_cover_from_epub(epub_bytes)?;
     let out = paths.cover(sha, ext);
     fs::write(&out, &bytes).ok()?;
-    // Derive the picker thumbnail at import. Best-effort: a thumbnail failure
-    // must not fail the import — `library::thumbnail` lets the server fall back
-    // to the full-res cover.
+    // The picker thumbnail, best-effort.
     let _ = super::thumbnail::ensure_thumbnail(paths, sha, &out);
     Some(out)
 }
@@ -600,22 +622,17 @@ struct BookMeta {
     language: String,
     ppd: Option<String>,
     date: Option<String>,
-    /// The identity the stored file carries. Comes from bokai's dedicated
+    /// The identity the stored file carries.
     asin: Option<String>,
-    /// The real Amazon catalogue id the source named, when it named one. Read
+    /// The catalogue ASIN the source named, if any.
     amazon_asin: Option<String>,
-    /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
-    /// many self-pub and indie books leave it blank.
+    /// EPUB `<dc:publisher>` or KFX `publisher`, when stated.
     publisher: Option<String>,
-    /// Yomigana for the title — bokai's `Metadata.title_sort`, from EPUB
-    /// `opf:file-as` or KFX `title_pronunciation`. Romanized into
-    /// `books.title_romaji` at [`insert_row`] when it's phonetic kana.
+    /// Yomigana for the title (`Metadata.title_sort`), romanized at [`insert_row`].
     title_reading: Option<String>,
-    /// Yomigana for the first author — the first entry of bokai's per-author
-    /// `Metadata.author_sorts`. Only used when the book has a single creator.
+    /// Yomigana for the first author (`Metadata.author_sorts[0]`), for a lone creator.
     author_reading: Option<String>,
-    /// The series the source declares it belongs to, and its position in it — bokai's
-    /// `Metadata.collection`. A split volume carries this and lands with its siblings.
+    /// The series the source declares, and its position (`Metadata.collection`).
     series: Option<(String, Option<f64>)>,
 }
 
@@ -629,12 +646,9 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     };
     BookMeta {
         title,
-        // Flip Western "Surname, Given" → "Given Surname" and unpack CJK
-        // 「、」-packed creators, so the stored list (and the filename derived
-        // from it) is the natural-order display form. See [`authors`].
+        // `Surname, Given` flipped and 「、」-packed creators unpacked; see [`authors`].
         authors: authors::from_metadata(&m.authors),
-        // Harmonize the source's language tag (en-US, eng, zh_cn, …) to one
-        // canonical code so the library facet doesn't fan out into variants.
+        // One canonical code per language tag (en-US, eng → en).
         language: super::lang::normalize(&m.language),
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
@@ -655,9 +669,8 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     }
 }
 
-/// Metadata for a `.pdf` import: title/author from the PDF `/Info` dict
-/// (title-cased if ALL CAPS, as Amazon's S2K does), falling back to the file
-/// stem for the title. No language/date/asin/publisher in PDF `/Info`.
+/// Metadata for a `.pdf` import: title and author from `/Info`, an ALL-CAPS title
+/// title-cased and a missing one taken from the file stem.
 fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str>) -> BookMeta {
     let title = doc
         .title
@@ -687,8 +700,7 @@ fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str
     }
 }
 
-/// Title-case a string only if it is "shouting" (has letters, no lowercase),
-/// matching what Amazon does to an ALL-CAPS PDF `/Info` title.
+/// Title-case `s` when it is "shouting": letters and no lowercase.
 fn title_case_if_shouting(s: &str) -> String {
     let has_lower = s.chars().any(|c| c.is_lowercase());
     let has_alpha = s.chars().any(|c| c.is_alphabetic());
@@ -710,8 +722,7 @@ fn title_case_if_shouting(s: &str) -> String {
 }
 
 /// The on-disk artifacts an import produced or found: the paths and KFX hash to
-/// persist on the book row. One struct, keeping `insert_row` under clippy's
-/// argument-count lint.
+/// persist on the book row.
 struct Persisted<'a> {
     epub_path: Option<&'a Path>,
     cover_path: Option<&'a Path>,
@@ -732,11 +743,9 @@ fn insert_row(
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
     let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
     let pdf_path_str = files.pdf_path.map(|p| p.to_string_lossy().to_string());
-    // `meta.authors` arrives canonical (flipped, 「、」-unpacked) from
-    // `extract_meta`. The join uses the unambiguous display separator: readers
-    // split on `[&、]`, never a comma. See [`authors`].
+    // `meta.authors` is canonical; the join takes the display separator (see [`authors`]).
     let authors_joined = authors::join_display(&meta.authors);
-    // Render the editable, searchable romaji yomigana-aware. The author reading
+    // Romaji rendered yomigana-aware, the author reading only for a lone author.
     let title_romaji =
         super::romaji::romanize_field(&meta.title, meta.title_reading.as_deref(), &meta.language);
     let author_reading = (meta.authors.len() == 1)
@@ -745,6 +754,7 @@ fn insert_row(
     let author_romaji =
         super::romaji::romanize_field(&authors_joined, author_reading, &meta.language);
     let now = db::now_iso();
+    let published_at = stored_date(meta);
     let id = db::insert_book(
         conn,
         &NewBook {
@@ -764,17 +774,11 @@ fn insert_row(
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
-            // What the source named, when it named a catalogue value: a KFX
+            // The catalogue ASIN the source named, if any.
             amazon_asin: meta.amazon_asin.as_deref(),
             publisher: meta.publisher.as_deref(),
-            // meta.date comes from bokai's EPUB `<dc:date>` / KFX equivalent.
-            // Stored verbatim — typically `2024-03-15` or `2024`. We filter
-            // empties so a missing OPF date doesn't land as `Some("")`.
-            published_at: meta
-                .date
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
+            // EPUB `<dc:date>` / KFX `issue_date`, as the source states it.
+            published_at: published_at.as_deref(),
             // The series the source declares, verbatim — grouping is by the exact string.
             // Tags are not populated from the source format; the metadata editor sets them.
             series_name: meta.series.as_ref().map(|(name, _)| name.as_str()),
@@ -820,7 +824,7 @@ struct Azw3Derived {
 }
 
 /// Convert a decrypted `.azw3` into both library sides, EPUB and KFX, each exported
-/// from its parsed IR. Validity is not gated: an import must still produce a book.
+/// from its parsed IR; validity is not gated.
 fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Azw3Derived> {
     on_progress("epub/parse", 0, 1, "Reading AZW3");
     let mut book = bokai::Book::open_format(src, bokai::Format::Azw3)
@@ -848,7 +852,7 @@ fn convert_azw3(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> R
     })
 }
 
-/// Convert a decrypted `.mobi` to EPUB bytes via bokai's MOBI importer +
+/// Convert a decrypted `.mobi` to EPUB bytes through bokai's MOBI importer.
 fn convert_mobi(src: &Path, on_progress: &dyn Fn(&str, usize, usize, &str)) -> Result<Vec<u8>> {
     on_progress("epub/parse", 0, 1, "Reading MOBI");
     let mut book = bokai::Book::open_format(src, bokai::Format::Mobi)
@@ -870,9 +874,8 @@ fn leg<'a>(
     move |phase, cur, total, label| on_progress(&format!("{prefix}{phase}"), cur, total, label)
 }
 
-/// Open an Aozora Bunko `.zip`, sniff the markers, and return EPUB bytes. Any
-/// zip that does not look like Aozora bails. Mirrors `aozora_dispatch`, so the
-/// CLI and the GUI produce byte-identical EPUBs.
+/// Open an Aozora Bunko `.zip`, sniff the markers, and return EPUB bytes; a zip
+/// without Aozora content errors.
 fn convert_aozora_zip(
     src: &Path,
     on_progress: &dyn Fn(&str, usize, usize, &str),
@@ -924,9 +927,7 @@ fn convert_aozora_zip(
     let cover = bokai::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
         .context("aozora cover render")?;
     on_progress("epub/finalize", 1, 1, "Packaging");
-    // EPUB validity is not gated here (see `convert_azw3`): the import always
-    // produces a book; an invalid one is a converter bug or a source defect to
-    // repair, not a reason to drop the import.
+    // EPUB validity is not gated, as in `convert_azw3`.
     let epub_bytes = bokai::formats::aozora::build_epub(bokai::formats::aozora::EpubInput {
         document: &doc,
         images: &images,
@@ -941,7 +942,7 @@ pub(crate) mod tests {
     use super::*;
     use std::path::Path;
 
-    /// The cheapest input `import_file` will accept: a structurally valid PDF
+    /// The smallest structurally valid PDF `import_file` accepts.
     const MINIMAL_INPUT: &[u8] = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n4 0 obj\n<< /Title (Tiny Test PDF) /Author (A. Tester) >>\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000015 00000 n \n0000000064 00000 n \n0000000121 00000 n \n0000000192 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\nstartxref\n256\n%%EOF\n";
 
     /// Drop [`MINIMAL_INPUT`] into `dir` and hand back the path to import from.
@@ -967,7 +968,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pdf_info_title_is_title_cased_else_filename() {
-        // ALL-CAPS /Info title gets title-cased (Amazon's S2K behavior).
+        // An ALL-CAPS /Info title is title-cased.
         let doc = bokai::import::PdfDoc {
             bytes: b"%PDF-1.4\n".to_vec(),
             pages: vec![bokai::import::PdfPage {
@@ -1027,8 +1028,7 @@ pub(crate) mod tests {
 
         let store = meta_with_asin(Some("B0CZ99HZ18"));
 
-        // What the export rule makes of this content is the key, so a re-key and
-        // a conversion of the same book agree on one identity.
+        // The key is what the export rule makes of this content.
         assert_eq!(
             key_to_mint(
                 Canonical::Kfx,
@@ -1039,15 +1039,13 @@ pub(crate) mod tests {
             Some("DERIVED".to_string())
         );
 
-        // A KFX Amazon produced can name no publication identifier, leaving the
-        // rule nothing to derive from; the library's content hash stands in.
+        // With no publication identifier, the content hash keys the file.
         assert_eq!(
             key_to_mint(Canonical::Kfx, &store, None, "content-hash"),
             Some(generate_content_id("content-hash"))
         );
 
-        // Whatever it is re-keyed to, the catalogue value stays reachable — it
-        // is the only thing that can fetch the colour cover.
+        // `amazon_asin` keeps the catalogue value.
         assert_eq!(store.amazon_asin.as_deref(), Some("B0CZ99HZ18"));
     }
 
@@ -1068,9 +1066,7 @@ pub(crate) mod tests {
             None
         );
 
-        // An EPUB naming a catalogue ASIN is provenance, not identity: it
-        // reaches no device, and the KFX derived from it is stamped by the
-        // export rule, which synthesizes.
+        // An EPUB's catalogue ASIN is provenance; the export rule synthesizes the key.
         assert_eq!(
             key_to_mint(
                 Canonical::Epub,
@@ -1162,9 +1158,7 @@ pub(crate) mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        // Two importers clear the dedupe check on the same file, then convert.
-        // Whoever finishes second must report the book as one the library holds;
-        // the alternative is a UNIQUE violation surfacing as an import failure.
+        // Two imports of one file both pass the dedupe check; the second files a duplicate.
         let src = minimal_input_in(tmp.path());
         let first = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();
         let second = stage_file(&paths, &src, identify_file(&src).unwrap(), &no_progress).unwrap();
