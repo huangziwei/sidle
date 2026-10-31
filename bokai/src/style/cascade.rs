@@ -8,12 +8,12 @@ use selectors::parser::{Component, Selector};
 
 use super::declaration::Declaration;
 use super::parse::{CssRule, Origin, Specificity, Stylesheet, parse_declaration_list};
-use super::properties::{Length, ROOT_FONT_SIZE_PX};
+use super::properties::{Display, Length, ROOT_FONT_SIZE_PX};
 use super::style_pool::StylePool;
 use super::types::ComputedStyle;
 use crate::html::element_ref::{BokoSelectors, ElementRef};
 
-/// A matched rule with ordering information for the cascade.
+/// A `Declaration` with its cascade ordering.
 #[derive(Debug)]
 struct MatchedRule<'a> {
     declaration: &'a Declaration,
@@ -25,8 +25,7 @@ struct MatchedRule<'a> {
     important: bool,
 }
 
-/// Cascade precedence bucket, lowest first; within one bucket specificity and
-/// then source order decide.
+/// `rule`'s cascade precedence bucket, lowest first.
 fn cascade_bucket(rule: &MatchedRule) -> u8 {
     match (rule.important, rule.origin, rule.from_style_attr) {
         (false, Origin::UserAgent, _) => 0,
@@ -38,16 +37,14 @@ fn cascade_bucket(rule: &MatchedRule) -> u8 {
     }
 }
 
-/// A style holding only the CSS-inherited properties of `parent`.
+/// Copy the CSS-inherited properties of `parent` onto `ComputedStyle::default()`.
 fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
-        // Font properties (inherited)
         font_size: parent.font_size,
         font_weight: parent.font_weight,
         font_style: parent.font_style,
         font_variant: parent.font_variant,
         font_family: parent.font_family.clone(),
-        // Text properties (inherited)
         color: parent.color,
         text_align: parent.text_align,
         text_align_last: parent.text_align_last,
@@ -58,43 +55,37 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         text_transform: parent.text_transform,
         hyphens: parent.hyphens,
         white_space: parent.white_space,
-        // Text decoration (inherited in some contexts)
         text_decoration_underline: parent.text_decoration_underline,
         text_decoration_line_through: parent.text_decoration_line_through,
         underline_style: parent.underline_style,
         underline_color: parent.underline_color,
         overline: parent.overline,
-        // List properties, which apply to `display: list-item`
         list_style_type: parent.list_style_type,
         list_style_position: parent.list_style_position,
-        // Other inherited properties
         visibility: parent.visibility,
         language: parent.language.clone(),
         writing_mode: parent.writing_mode,
         text_orientation: parent.text_orientation,
         line_break: parent.line_break,
         text_combine_upright: parent.text_combine_upright,
-        // Text emphasis marks
         text_emphasis_style: parent.text_emphasis_style,
         text_emphasis_color: parent.text_emphasis_color,
         text_emphasis_position: parent.text_emphasis_position,
-        // Line breaking, pagination and table properties
         word_break: parent.word_break,
         overflow_wrap: parent.overflow_wrap,
         orphans: parent.orphans,
         widows: parent.widows,
         border_collapse: parent.border_collapse,
         border_spacing: parent.border_spacing,
-        // Non-inherited properties use defaults
         ..ComputedStyle::default()
     }
 }
 
-/// A rule as `(stylesheet index, rule index)`; the tuple's order is CSS source order.
+/// `(stylesheet index, rule index)`, ordered as CSS source order.
 type RuleRef = (u32, u32);
 
-/// The bucket a selector is filed under: the single most-selective *positive*
-/// requirement (id > class > local name) in its rightmost compound selector.
+/// `selector_bucket_key`'s pick from a selector's rightmost compound: `Id`,
+/// then `Class`, then `Local`, else `Universal`.
 enum BucketKey {
     Id(String),
     Class(String),
@@ -128,15 +119,15 @@ fn selector_bucket_key(selector: &Selector<BokoSelectors>) -> BucketKey {
     }
 }
 
-/// Reusable per-element scratch state for [`compute_styles_indexed`].
+/// [`compute_styles_indexed`]'s reusable per-element scratch state.
 #[derive(Default)]
 pub struct CascadeScratch {
     caches: SelectorCaches,
     candidates: Vec<RuleRef>,
 }
 
-/// A selector-bucketed view of a set of stylesheets: an element tests only the
-/// rules whose rightmost compound can match it.
+/// `stylesheets` bucketed by selector, which `candidate_rules` narrows to the
+/// rules whose rightmost compound can match an element.
 pub struct CascadeIndex<'a> {
     stylesheets: &'a [(Stylesheet, Origin)],
     by_id: HashMap<String, Vec<RuleRef>>,
@@ -158,7 +149,7 @@ impl<'a> CascadeIndex<'a> {
         for (sheet_idx, (sheet, _origin)) in stylesheets.iter().enumerate() {
             for (rule_idx, rule) in sheet.rules.iter().enumerate() {
                 let rref = (sheet_idx as u32, rule_idx as u32);
-                // A rule is filed under the bucket of each of its selectors.
+                // `rref` is filed under the bucket of each of `rule`'s selectors.
                 for selector in &rule.selectors {
                     match selector_bucket_key(selector) {
                         BucketKey::Id(k) => index.by_id.entry(k).or_default().push(rref),
@@ -177,7 +168,7 @@ impl<'a> CascadeIndex<'a> {
     fn candidate_rules(&self, elem: ElementRef<'_>, out: &mut Vec<RuleRef>) {
         out.clear();
         out.extend_from_slice(&self.universal);
-        // Candidates by lowercased tag; the full matcher decides case.
+        // `by_local` keys are lowercase.
         if let Some(name) = elem.dom.element_name(elem.id) {
             let name = name.as_ref();
             let bucket = if name.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -209,6 +200,7 @@ pub fn compute_styles(
     elem: ElementRef<'_>,
     stylesheets: &[(Stylesheet, Origin)],
     parent_style: Option<&ComputedStyle>,
+    initial_display: Display,
     style_pool: &mut StylePool,
 ) -> ComputedStyle {
     let index = CascadeIndex::build(stylesheets);
@@ -216,21 +208,24 @@ pub fn compute_styles(
         elem,
         &index,
         parent_style,
+        initial_display,
         style_pool,
         &mut CascadeScratch::default(),
     )
 }
 
 /// Compute styles for an element using a prebuilt [`CascadeIndex`] and reusable
-/// [`CascadeScratch`].
+/// [`CascadeScratch`]. `initial_display` is the element's `display` where no
+/// declaration sets one.
 pub fn compute_styles_indexed(
     elem: ElementRef<'_>,
     index: &CascadeIndex<'_>,
     parent_style: Option<&ComputedStyle>,
+    initial_display: Display,
     _style_pool: &mut StylePool,
     scratch: &mut CascadeScratch,
 ) -> ComputedStyle {
-    // Capacity for a typical element's 5–20 matched declarations
+    // `16` covers a typical element's 5–20 matched declarations.
     let mut matched: Vec<MatchedRule> = Vec::with_capacity(16);
     let mut order = 0;
 
@@ -269,8 +264,7 @@ pub fn compute_styles_indexed(
         }
     }
 
-    // The element's own style="" attribute participates as author-origin
-    // declarations that outrank any selector rule.
+    // `style=""` declarations take author origin and outrank every selector rule.
     let (attr_decls, attr_important_decls) = elem
         .dom
         .get_attr(elem.id, "style")
@@ -293,19 +287,16 @@ pub fn compute_styles_indexed(
     // Sort by cascade order (skip if 0-1 matches)
     if matched.len() > 1 {
         matched.sort_unstable_by(|a, b| {
-            // Precedence bucket (importance/origin/style-attr)
             let bucket_cmp = cascade_bucket(a).cmp(&cascade_bucket(b));
             if bucket_cmp != Ordering::Equal {
                 return bucket_cmp;
             }
 
-            // Then by specificity
             let spec_cmp = a.specificity.cmp(&b.specificity);
             if spec_cmp != Ordering::Equal {
                 return spec_cmp;
             }
 
-            // Finally by source order
             a.order.cmp(&b.order)
         });
     }
@@ -316,9 +307,9 @@ pub fn compute_styles_indexed(
     } else {
         ComputedStyle::default()
     };
+    style.display = initial_display;
 
-    // Relative font sizes resolve against `parent_font_px`, taken ahead of the
-    // declarations.
+    // `parent_font_px`, read ahead of the declarations, resolves relative font sizes.
     let parent_font_px = parent_style.map_or(ROOT_FONT_SIZE_PX, computed_font_px);
 
     // Apply matched declarations in cascade order
@@ -329,7 +320,7 @@ pub fn compute_styles_indexed(
     style
 }
 
-/// The computed font size of a style, in CSS pixels.
+/// `style`'s computed font size, in CSS pixels.
 fn computed_font_px(style: &ComputedStyle) -> f32 {
     match style.font_size {
         Length::Px(v) => v,
@@ -374,7 +365,6 @@ fn rule_matches_with_caches(
 /// Apply a declaration to a computed style.
 fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_px: f32) {
     match decl {
-        // Colors
         Declaration::Color(c) => style.color = Some(*c),
         Declaration::BackgroundColor(c) => style.background_color = Some(*c),
         Declaration::BackgroundImage(src) => style.background_image = Some(src.clone()),
@@ -383,14 +373,12 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::BackgroundPositionX(l) => style.background_position_x = *l,
         Declaration::BackgroundPositionY(l) => style.background_position_y = *l,
 
-        // Font properties
         Declaration::FontFamily(s) => style.font_family = Some(s.clone()),
         Declaration::FontSize(l) => style.font_size = resolve_font_size(*l, parent_font_px),
         Declaration::FontWeight(w) => style.font_weight = *w,
         Declaration::FontStyle(s) => style.font_style = *s,
         Declaration::FontVariant(v) => style.font_variant = *v,
 
-        // Text properties
         Declaration::TextAlign(a) => style.text_align = *a,
         Declaration::TextAlignLast(a) => style.text_align_last = *a,
         Declaration::TextIndent(l) => style.text_indent = *l,
@@ -401,7 +389,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::Hyphens(h) => style.hyphens = *h,
         Declaration::WhiteSpace(ws) => style.white_space = *ws,
         Declaration::VerticalAlign(v) => style.vertical_align = *v,
-        // CSS-wide keywords leave `style` as inheritance set it.
+        // `UniversalKeyword` leaves `style` as inheritance set it.
         Declaration::UniversalKeyword { .. } => {}
         Declaration::WritingMode(w) => style.writing_mode = *w,
         Declaration::TextOrientation(o) => style.text_orientation = *o,
@@ -411,7 +399,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::TextEmphasisColor(c) => style.text_emphasis_color = Some(*c),
         Declaration::TextEmphasisPosition(p) => style.text_emphasis_position = *p,
 
-        // Text decoration
         Declaration::TextDecoration(d) => {
             style.text_decoration_underline = d.underline;
             style.text_decoration_line_through = d.line_through;
@@ -420,7 +407,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::TextDecorationStyle(s) => style.underline_style = *s,
         Declaration::TextDecorationColor(c) => style.underline_color = Some(*c),
 
-        // Margins
         Declaration::Margin(l) => {
             style.margin_top = *l;
             style.margin_right = *l;
@@ -432,7 +418,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::MarginBottom(l) => style.margin_bottom = *l,
         Declaration::MarginLeft(l) => style.margin_left = *l,
 
-        // Padding
         Declaration::Padding(l) => {
             style.padding_top = *l;
             style.padding_right = *l;
@@ -444,7 +429,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::PaddingBottom(l) => style.padding_bottom = *l,
         Declaration::PaddingLeft(l) => style.padding_left = *l,
 
-        // Dimensions
         Declaration::Width(l) => style.width = *l,
         Declaration::Height(l) => style.height = *l,
         Declaration::MaxWidth(l) => style.max_width = *l,
@@ -452,27 +436,22 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::MinWidth(l) => style.min_width = *l,
         Declaration::MinHeight(l) => style.min_height = *l,
 
-        // Display & positioning
         Declaration::Display(d) => style.display = *d,
         Declaration::Float(f) => style.float = *f,
         Declaration::Clear(c) => style.clear = *c,
         Declaration::Visibility(v) => style.visibility = *v,
         Declaration::BoxSizing(bs) => style.box_sizing = *bs,
 
-        // Pagination control
         Declaration::Orphans(n) => style.orphans = *n,
         Declaration::Widows(n) => style.widows = *n,
 
-        // Text wrapping
         Declaration::WordBreak(wb) => style.word_break = *wb,
         Declaration::OverflowWrap(ow) => style.overflow_wrap = *ow,
 
-        // Page breaks
         Declaration::BreakBefore(b) => style.break_before = *b,
         Declaration::BreakAfter(b) => style.break_after = *b,
         Declaration::BreakInside(b) => style.break_inside = *b,
 
-        // Border style
         Declaration::BorderStyle(s) => {
             style.border_style_top = *s;
             style.border_style_right = *s;
@@ -484,7 +463,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::BorderBottomStyle(s) => style.border_style_bottom = *s,
         Declaration::BorderLeftStyle(s) => style.border_style_left = *s,
 
-        // Border width
         Declaration::BorderWidth(l) => {
             style.border_width_top = *l;
             style.border_width_right = *l;
@@ -496,7 +474,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::BorderBottomWidth(l) => style.border_width_bottom = *l,
         Declaration::BorderLeftWidth(l) => style.border_width_left = *l,
 
-        // Border color
         Declaration::BorderColor(c) => {
             style.border_color_top = Some(*c);
             style.border_color_right = Some(*c);
@@ -508,7 +485,6 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::BorderBottomColor(c) => style.border_color_bottom = Some(*c),
         Declaration::BorderLeftColor(c) => style.border_color_left = Some(*c),
 
-        // Border radius
         Declaration::BorderRadius(l) => {
             style.border_radius_top_left = *l;
             style.border_radius_top_right = *l;
@@ -520,11 +496,9 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_
         Declaration::BorderBottomLeftRadius(l) => style.border_radius_bottom_left = *l,
         Declaration::BorderBottomRightRadius(l) => style.border_radius_bottom_right = *l,
 
-        // List properties
         Declaration::ListStyleType(lst) => style.list_style_type = *lst,
         Declaration::ListStylePosition(p) => style.list_style_position = *p,
 
-        // Table properties
         Declaration::BorderCollapse(bc) => style.border_collapse = *bc,
         Declaration::BorderSpacing(l) => style.border_spacing = *l,
     }

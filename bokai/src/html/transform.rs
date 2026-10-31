@@ -1,9 +1,11 @@
 //! Transform ArenaDom to Chapter.
 
+use html5ever::ns;
+
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 use super::element_ref::ElementRef;
 use super::is_html_whitespace;
-use crate::model::role_map::element_to_role;
+use crate::model::role_map::element_to_role_known;
 use crate::model::{Chapter, Node, NodeId, Role};
 use crate::style::{
     CascadeIndex, CascadeScratch, ComputedStyle, Display, Origin, Stylesheet, WhiteSpace,
@@ -91,6 +93,7 @@ impl<'a> TransformContext<'a> {
                 elem_ref,
                 &self.cascade_index,
                 None,
+                Display::Block,
                 &mut self.chapter.styles,
                 &mut self.cascade_scratch,
             )
@@ -103,6 +106,7 @@ impl<'a> TransformContext<'a> {
                 elem_ref,
                 &self.cascade_index,
                 html_style.as_ref(),
+                Display::Block,
                 &mut self.chapter.styles,
                 &mut self.cascade_scratch,
             )
@@ -196,12 +200,19 @@ impl<'a> TransformContext<'a> {
             }
 
             ArenaNodeData::Element { name, attrs, .. } => {
-                // Compute style for this element
+                let known = element_to_role_known(&name.local);
+                let initial_display =
+                    if known.is_none() && name.ns != ns!(svg) && name.ns != ns!(mathml) {
+                        Display::Inline
+                    } else {
+                        Display::Block
+                    };
                 let elem_ref = ElementRef::new(self.dom, dom_id);
                 let mut computed = compute_styles_indexed(
                     elem_ref,
                     &self.cascade_index,
                     parent_style,
+                    initial_display,
                     &mut self.chapter.styles,
                     &mut self.cascade_scratch,
                 );
@@ -214,7 +225,17 @@ impl<'a> TransformContext<'a> {
                     }
                 }
 
-                let role = element_to_role(&name.local);
+                let block_box = matches!(computed.display, Display::Block | Display::ListItem);
+                let role = match known {
+                    Some(Role::Container | Role::Paragraph) | None
+                        if computed.display == Display::Inline =>
+                    {
+                        Role::Inline
+                    }
+                    Some(Role::Inline | Role::Link) if block_box => Role::Container,
+                    Some(role) => role,
+                    None => Role::Container,
+                };
 
                 // `display: none` drops an element, `Role::Break` excepted.
                 if computed.display == Display::None && role != Role::Break {
@@ -241,6 +262,13 @@ impl<'a> TransformContext<'a> {
                 let ir_id = self.chapter.alloc_node(ir_node);
                 self.chapter.append_child(ir_parent, ir_id);
                 self.node_map.insert(dom_id, ir_id);
+                let content_id = if known == Some(Role::Link) && role == Role::Container {
+                    let link = self.chapter.alloc_node(Node::new(Role::Link));
+                    self.chapter.append_child(ir_id, link);
+                    link
+                } else {
+                    ir_id
+                };
 
                 // Store semantic attributes
                 for attr in attrs {
@@ -252,32 +280,33 @@ impl<'a> TransformContext<'a> {
                             self.chapter.semantics.set_src(ir_id, &attr.value);
                         }
                         "href" => {
-                            self.chapter.semantics.set_href(ir_id, &attr.value);
+                            self.chapter.semantics.set_href(content_id, &attr.value);
                         }
                         "src" => self.chapter.semantics.set_src(ir_id, &attr.value),
                         "alt" => self.chapter.semantics.set_alt(ir_id, &attr.value),
                         "id" => self.chapter.semantics.set_id(ir_id, &attr.value),
                         "title" => self.chapter.semantics.set_title(ir_id, &attr.value),
-                        // Language (both lang and xml:lang)
+                        // `lang` is also `xml:lang`'s local name.
                         "lang" => self.chapter.semantics.set_lang(ir_id, &attr.value),
-                        // List start attribute (ol@start)
                         "start" if name.local.as_ref() == "ol" => {
                             if let Ok(start) = attr.value.parse::<u32>() {
                                 self.chapter.semantics.set_list_start(ir_id, start);
                             }
                         }
-                        // An item's own ordinal (li@value)
                         "value" if name.local.as_ref() == "li" => {
                             if let Ok(value) = attr.value.parse::<u32>() {
                                 self.chapter.semantics.set_list_start(ir_id, value);
                             }
                         }
-                        // Semantic fidelity attributes
                         "type" if attr_ns == "http://www.idpf.org/2007/ops" => {
-                            self.chapter.semantics.set_epub_type(ir_id, &attr.value);
+                            self.chapter
+                                .semantics
+                                .set_epub_type(content_id, &attr.value);
                         }
                         "epub:type" => {
-                            self.chapter.semantics.set_epub_type(ir_id, &attr.value);
+                            self.chapter
+                                .semantics
+                                .set_epub_type(content_id, &attr.value);
                         }
                         "role" => {
                             self.chapter.semantics.set_aria_role(ir_id, &attr.value);
@@ -285,7 +314,6 @@ impl<'a> TransformContext<'a> {
                         "datetime" => {
                             self.chapter.semantics.set_datetime(ir_id, &attr.value);
                         }
-                        // Table cell attributes
                         "rowspan" if matches!(name.local.as_ref(), "td" | "th") => {
                             if let Ok(span) = attr.value.parse::<u32>() {
                                 self.chapter.semantics.set_row_span(ir_id, span);
@@ -329,7 +357,7 @@ impl<'a> TransformContext<'a> {
 
                 let own_run =
                     (atomic || role == Role::RubyText).then(|| std::mem::take(&mut self.run));
-                self.process_children(dom_id, ir_id, Some(&computed));
+                self.process_children(dom_id, content_id, Some(&computed));
                 if let Some(outer) = own_run {
                     self.break_line();
                     self.run = outer;
@@ -502,7 +530,6 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Should have root + paragraph (Text) + text content
         assert!(chapter.node_count() >= 3);
 
         // Find text nodes
@@ -570,13 +597,20 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // The paragraph inherits `color: red` from the div.
-        assert!(chapter.node_count() > 1);
+        let para = chapter
+            .iter_dfs()
+            .find(|&id| chapter.node(id).unwrap().role == Role::Paragraph)
+            .unwrap();
+        let color = chapter
+            .styles
+            .get(chapter.node(para).unwrap().style)
+            .unwrap()
+            .color;
+        assert_eq!(color.map(|c| (c.r, c.g, c.b)), Some((255, 0, 0)));
     }
 
     #[test]
     fn test_font_size_computed_through_cascade() {
-        // Font sizes come out of the cascade as computed px.
         let dom = parse_html(
             r#"<html><body>
             <h1>Introduction:<span class="big">The Shadow</span></h1>
@@ -591,18 +625,17 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // h1 text: UA 2em × 16px root
+        // `h1` is 2em of the 16px root.
         assert_eq!(font_px_of(&chapter, "Introduction"), 32.0);
-        // The 24px span overrides the inherited h1 size
+        // `.big`'s 24px overrides the inherited `h1` size.
         assert_eq!(font_px_of(&chapter, "The Shadow"), 24.0);
-        // 2em on h2 resolves against body; the nested 50% span halves it.
+        // `.scaled`'s 2em resolves against `body`; `.half`'s 50% halves it.
         assert_eq!(font_px_of(&chapter, "Nested"), 32.0);
         assert_eq!(font_px_of(&chapter, "half"), 16.0);
     }
 
-    /// Computed font size (px) of the element enclosing the text `needle`.
-    /// Text nodes carry the default style; the computed style lives on the
-    /// enclosing element node.
+    /// Computed font size (px) of the element enclosing the text `needle`, read
+    /// off the `Role::Text` node's `parent`.
     fn font_px_of(chapter: &Chapter, needle: &str) -> f32 {
         for id in chapter.iter_dfs() {
             let node = chapter.node(id).unwrap();
@@ -634,7 +667,7 @@ mod tests {
 
         // style="" outranks any selector specificity
         assert_eq!(font_px_of(&chapter, "attr beats selector"), 24.0);
-        // Relative units in style="" resolve through the cascade and inherit
+        // `1.5em` in `style=""` resolves to 24px, which the `span` inherits.
         assert_eq!(font_px_of(&chapter, "relative attr"), 24.0);
         assert_eq!(font_px_of(&chapter, "inherits"), 24.0);
     }
@@ -662,7 +695,7 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Should not contain title element (display: none)
+        // `title` is `display: none`.
         for id in chapter.iter_dfs() {
             let node = chapter.node(id).unwrap();
             if node.role == Role::Text {
@@ -680,7 +713,6 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Should have a Break node
         let mut found_break = false;
         for id in chapter.iter_dfs() {
             if chapter.node(id).unwrap().role == Role::Break {
@@ -704,7 +736,6 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Should have a Break node
         let mut found_break = false;
         for id in chapter.iter_dfs() {
             if chapter.node(id).unwrap().role == Role::Break {
@@ -735,7 +766,6 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Should have a Break node
         let mut found_break = false;
         for id in chapter.iter_dfs() {
             if chapter.node(id).unwrap().role == Role::Break {
@@ -906,5 +936,174 @@ mod tests {
     fn preserved_white_space_reaches_nested_elements() {
         let chapter = compile("<pre><code>  x\n    y</code></pre>");
         assert_eq!(block_texts(&chapter), ["  x\n    y"]);
+    }
+
+    #[test]
+    fn every_element_the_ua_lays_out_inline_takes_an_inline_role() {
+        use selectors::parser::Component;
+
+        let ua = user_agent_stylesheet();
+        let inline: Vec<String> = ua
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.declarations
+                    .iter()
+                    .any(|d| matches!(d, crate::style::Declaration::Display(Display::Inline)))
+            })
+            .flat_map(|rule| &rule.selectors)
+            .filter_map(|selector| {
+                selector.iter().find_map(|component| match component {
+                    Component::LocalName(name) => Some(name.lower_name.as_ref().to_string()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert!(inline.iter().any(|name| name == "big"));
+        for name in &inline {
+            let role = element_to_role_known(&html5ever::LocalName::from(name.as_str()));
+            assert!(
+                matches!(
+                    role,
+                    Some(Role::Inline | Role::Link | Role::Image | Role::Ruby | Role::RubyText)
+                ),
+                "<{name}> lays out inline but takes {role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_element_with_no_role_flows_inline_unless_a_rule_says_otherwise() {
+        let roles = |chapter: &Chapter| -> Vec<Role> {
+            chapter
+                .iter_dfs()
+                .map(|id| chapter.node(id).unwrap().role)
+                .collect()
+        };
+
+        let chapter = compile("<p>He lived in <place>Boston</place> for years.</p>");
+        assert_eq!(block_texts(&chapter), ["He lived in Boston for years."]);
+        assert_eq!(
+            roles(&chapter),
+            [
+                Role::Root,
+                Role::Paragraph,
+                Role::Text,
+                Role::Inline,
+                Role::Text,
+                Role::Text
+            ]
+        );
+
+        let dom = parse_html("<html><body><p>a <place>b</place> c</p></body></html>");
+        let author = Stylesheet::parse("place { display: block }");
+        let chapter = transform(
+            &dom,
+            &[
+                (user_agent_stylesheet(), Origin::UserAgent),
+                (author, Origin::Author),
+            ],
+        );
+        assert!(roles(&chapter).contains(&Role::Container));
+
+        let chapter = compile("<svg><g><text>t</text></g></svg>");
+        assert!(!roles(&chapter).contains(&Role::Inline));
+    }
+
+    #[test]
+    fn a_generic_element_takes_the_box_its_display_gives_it() {
+        let dom = crate::html::parse_dom(concat!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>"#,
+            r#"<h1>Title<span class="sub">Subtitle</span></h1>"#,
+            r##"<div><a class="toc" href="#a">One</a><a class="toc" href="#b">Two</a></div>"##,
+            r#"<p>a <div class="run">b</div> c</p>"#,
+            "</body></html>"
+        ));
+        let author = Stylesheet::parse(".sub, .toc { display: block } .run { display: inline }");
+        let chapter = transform(
+            &dom,
+            &[
+                (user_agent_stylesheet(), Origin::UserAgent),
+                (author, Origin::Author),
+            ],
+        );
+
+        let roles: Vec<Role> = chapter
+            .iter_dfs()
+            .map(|id| chapter.node(id).unwrap().role)
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Root,
+                Role::Heading(1),
+                Role::Text,
+                Role::Container,
+                Role::Text,
+                Role::Container,
+                Role::Container,
+                Role::Link,
+                Role::Text,
+                Role::Container,
+                Role::Link,
+                Role::Text,
+                Role::Paragraph,
+                Role::Text,
+                Role::Inline,
+                Role::Text,
+                Role::Text,
+            ]
+        );
+        let hrefs: Vec<(Role, Option<&str>, Option<&str>)> = chapter
+            .iter_dfs()
+            .filter(|&id| {
+                chapter.semantics.href(id).is_some() || chapter.semantics.class(id) == Some("toc")
+            })
+            .map(|id| {
+                (
+                    chapter.node(id).unwrap().role,
+                    chapter.semantics.class(id),
+                    chapter.semantics.href(id),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hrefs,
+            [
+                (Role::Container, Some("toc"), None),
+                (Role::Link, None, Some("#a")),
+                (Role::Container, Some("toc"), None),
+                (Role::Link, None, Some("#b")),
+            ]
+        );
+        assert_eq!(block_texts(&chapter)[2], "a b c");
+    }
+
+    #[test]
+    fn a_big_initial_stays_in_its_line_at_its_larger_size() {
+        let chapter = compile(
+            r#"<p><big><big><big>T</big></big></big><span class="small">HE</span> Shah</p>"#,
+        );
+        let roles: Vec<Role> = chapter
+            .iter_dfs()
+            .map(|id| chapter.node(id).unwrap().role)
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Root,
+                Role::Paragraph,
+                Role::Inline,
+                Role::Inline,
+                Role::Inline,
+                Role::Text,
+                Role::Inline,
+                Role::Text,
+                Role::Text,
+            ]
+        );
+        assert_eq!(block_texts(&chapter), ["THE Shah"]);
+        assert!((font_px_of(&chapter, "T") - 16.0 * 1.2f32.powi(3)).abs() < 1e-3);
+        assert!((font_px_of(&compile("<p><small>s</small></p>"), "s") - 16.0 * 0.833).abs() < 1e-3);
     }
 }

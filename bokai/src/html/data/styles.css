@@ -167,6 +167,14 @@ s, strike, del {
   text-decoration: line-through;
 }
 
+big {
+  font-size: larger;
+}
+
+small {
+  font-size: smaller;
+}
+
 /* Monospace */
 
 tt, code, kbd, samp {

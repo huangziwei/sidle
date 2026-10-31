@@ -1,4 +1,4 @@
-//! Pass 4: Normalize Table Structure
+//! Pass 5: Normalize Table Structure
 
 use crate::model::{Chapter, Node, NodeId, Role};
 

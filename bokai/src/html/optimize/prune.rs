@@ -1,4 +1,4 @@
-//! Pass 5: Pruner (Empty Container Removal)
+//! Pass 6: Pruner (Empty Container Removal)
 
 use crate::model::{Chapter, NodeId};
 

@@ -1,4 +1,4 @@
-//! Pass 3: Wrap Mixed Content (Inline/Block Normalization)
+//! Pass 4: Wrap Mixed Content (Inline/Block Normalization)
 
 use crate::model::{Chapter, Node, NodeId, Role};
 
@@ -239,6 +239,45 @@ mod tests {
             [Role::Ruby, Role::Text, Role::Ruby, Role::Text],
             "a wrapper here reorders the sentence"
         );
+    }
+
+    #[test]
+    fn a_block_inside_a_paragraph_keeps_its_place_between_the_runs() {
+        let mut chapter = Chapter::new();
+        let para = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(NodeId::ROOT, para);
+        let text = |chapter: &mut Chapter, parent: NodeId, s: &str| {
+            let range = chapter.append_text(s);
+            let node = chapter.alloc_node(Node::text(range));
+            chapter.append_child(parent, node);
+        };
+        text(&mut chapter, para, "alpha");
+        let block = chapter.alloc_node(Node::new(Role::Container));
+        chapter.append_child(para, block);
+        text(&mut chapter, block, "BLOCK");
+        text(&mut chapter, para, "omega");
+
+        wrap_mixed_content(&mut chapter);
+
+        let runs: Vec<(Role, String)> = chapter
+            .children(para)
+            .map(|id| {
+                let text = chapter
+                    .children(id)
+                    .map(|t| chapter.text(chapter.node(t).unwrap().text))
+                    .collect();
+                (chapter.node(id).unwrap().role, text)
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (Role::Container, "alpha".to_string()),
+                (Role::Container, "BLOCK".to_string()),
+                (Role::Container, "omega".to_string()),
+            ]
+        );
+        assert_eq!(chapter.children(para).nth(1), Some(block));
     }
 
     #[test]

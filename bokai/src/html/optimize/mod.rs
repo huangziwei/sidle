@@ -5,6 +5,7 @@ mod merge;
 mod pass;
 mod predicates;
 mod prune;
+mod split;
 mod table;
 mod wrap;
 
@@ -14,6 +15,7 @@ use crate::model::Chapter;
 pub fn optimize(chapter: &mut Chapter) {
     merge::merge_adjacent_spans(chapter);
     fuse::fuse_lists(chapter);
+    split::split_inlines_around_blocks(chapter);
     wrap::wrap_mixed_content(chapter);
     table::normalize_table_structure(chapter);
     prune::prune_empty(chapter);
@@ -28,8 +30,6 @@ mod tests {
     fn test_full_pipeline() {
         let mut chapter = Chapter::new();
 
-        // Create a structure with adjacent lists:
-        // Root > Container > [ul1, ul2]
         let container = chapter.alloc_node(Node::new(Role::Container));
         chapter.append_child(NodeId::ROOT, container);
 
@@ -43,18 +43,13 @@ mod tests {
         let li2 = chapter.alloc_node(Node::new(Role::ListItem));
         chapter.append_child(ul2, li2);
 
-        // Before: 2 lists under container
         assert_eq!(chapter.children(container).count(), 2);
 
         optimize(&mut chapter);
 
-        // After optimization:
-        // - Lists fused into 1
-        // = 1 child (the fused list)
         let children: Vec<_> = chapter.children(container).collect();
         assert_eq!(children.len(), 1);
 
-        // The fused list should have 2 items
         let list_items: Vec<_> = chapter.children(children[0]).collect();
         assert_eq!(list_items.len(), 2);
     }

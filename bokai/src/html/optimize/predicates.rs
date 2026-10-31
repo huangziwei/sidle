@@ -9,11 +9,17 @@ pub fn is_block_container(role: Option<Role>) -> bool {
         Some(
             Role::Root
                 | Role::Container
+                | Role::Paragraph
+                | Role::Heading(_)
                 | Role::BlockQuote
                 | Role::Figure
+                | Role::Caption
                 | Role::Sidebar
                 | Role::Footnote
                 | Role::ListItem
+                | Role::DefinitionTerm
+                | Role::DefinitionDescription
+                | Role::CodeBlock
                 | Role::TableCell
         )
     )
